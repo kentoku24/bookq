@@ -1,0 +1,72 @@
+# Smoke mirror of opencode-auto.yml's verification tail (checkout / uv / Playwright /
+# iOS gate / full suite). Keep these steps in the same shape as opencode-auto.yml --
+# if they diverge, the green relied on here is not the green the bot produces.
+#
+# Manual dispatch, plus any PR that can change a pytest outcome. Deploy-script-only
+# PRs (dev.sh, rebuild.sh, tailscale/) intentionally do not gate.
+name: workflow-smoke
+run-name: "oc-smoke #${{ github.event.pull_request.number || github.run_id }}"
+
+on:
+  workflow_dispatch:
+  # app/tests PRs are gated here (#230). A cheaper browser-free lane is not possible;
+  # read #230 before trying one again.
+  pull_request:
+    paths:
+      - ".github/workflows/*.yml"
+      - ".github/scripts/*.sh"
+      - "app/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "Dockerfile"
+      - "docker-compose*.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oc-smoke-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate workflow YAML
+        run: python3 -c "import glob,yaml; fs=sorted(glob.glob('.github/workflows/*.yml')); [yaml.safe_load(open(f)) for f in fs]; print('YAML OK', len(fs))"
+
+      - name: gate.sh regression tests
+        run: bash .github/scripts/test_gate.sh
+
+      - name: pool slot regression tests
+        run: bash .github/scripts/test_pool_slot.sh
+
+  # Mirrors the verification tail of opencode-auto.yml
+  # (implement / research / implement-direct / research-direct).
+  uv-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # chromium-only gate (mirrors opencode-auto.yml)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Playwright browsers (chromium + webkit)
+        run: uv run --with playwright playwright install --with-deps chromium webkit
+
+      - name: Run bookq test gate (iOS)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+
+      - name: Run bookq test gate (full suite)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q

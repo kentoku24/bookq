@@ -1,0 +1,9 @@
+# bookq — 本番 image override。prd build で作った prebuilt image を pin する。
+#
+# image: のみ。build: / volumes: / ports: の上書きは禁止（pin 欠落時の
+# dirty フォールバック防止。deploy は必ず up -d --no-build で行う）。
+services:
+  viewer:
+    image: ${PRD_VIEWER_IMAGE:?}
+  tailscale:
+    image: ${PRD_TAILSCALE_IMAGE:?}

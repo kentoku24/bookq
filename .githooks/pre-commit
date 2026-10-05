@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# pre-commit: アプリコードが staged なら、この worktree の開発環境を更新して
+# コミットを一旦止め、動作確認を促す。確認後に再度 git commit すると通る。
+#
+# 本番 (docker-compose.yml) には一切触らない。
+
+set -e
+
+# フックは全 worktree で共有される（.git/hooks は common dir）。
+# lib.sh を持たないブランチをチェックアウトした worktree でも壊れないようにする。
+LIB="$(git rev-parse --show-toplevel)/.githooks/lib.sh"
+[ -f "$LIB" ] || exit 0
+# shellcheck source=lib.sh
+. "$LIB"
+
+MARKER_FILE="$(marker_path)"
+# staged な内容そのもののハッシュ。確認待ちの間にさらに編集・add されたら
+# 一致しなくなる（unmerged index 等で取れない場合は空 = 常に再ビルド側に倒す）。
+STAGED_TREE="$(git write-tree 2>/dev/null || true)"
+
+# ビルド済みマーカーが「今 staged の内容」と一致する場合だけ素通しする。
+# 単なる有無で判定すると、確認中に直した内容が未検証のままコミットされる。
+if [ -f "$MARKER_FILE" ]; then
+    if [ -n "$STAGED_TREE" ] && [ "$(cat "$MARKER_FILE" 2>/dev/null)" = "$STAGED_TREE" ]; then
+        rm -f "$MARKER_FILE"
+        exit 0
+    fi
+    rm -f "$MARKER_FILE"
+fi
+
+# shellcheck disable=SC2046  # ファイル名の空白は元から未対応（既存挙動を維持）
+if ! needs_rebuild $(git diff --cached --name-only); then
+    exit 0
+fi
+
+echo ""
+echo "🔄 アプリコードが staged です。この worktree の開発環境を更新します..."
+echo ""
+# staged の内容をその場に表示する。他エージェント等が同じ worktree に書き込んで
+# いた場合、add 時の内容と今の staged がずれていることにここで気づける。
+# 表示のみでコミット可否には影響しない (失敗しても || true で握りつぶす)。
+# 300行が目安: 通常の差分は全文表示し、app.js級の巨大差分ではstatのみに倒す。
+echo "📦 今回コミットされる staged の内容 (未読の差分が混ざっていないか確認すること):"
+git diff --cached --stat || true
+echo ""
+CHANGED_LINES="$(git diff --cached --numstat 2>/dev/null | awk '{a+=$1; r+=$2} END {print a+r+0}')" || CHANGED_LINES=0
+if [ "${CHANGED_LINES:-0}" -lt 300 ]; then
+    git diff --cached || true
+else
+    echo "(差分が大きいため全文は省略: git diff --cached で確認すること)"
+fi
+echo ""
+
+if ! dev_available; then
+    # 開発環境を更新できない場合はコミットを妨げない。
+    exit 0
+fi
+
+if ! dev_up; then
+    echo ""
+    echo "❌ 開発環境の起動に失敗しました" >&2
+    exit 1
+fi
+
+printf '%s' "$STAGED_TREE" > "$MARKER_FILE"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "📝 動作確認をしてください"
+echo "   $(dev_url)"
+echo ""
+echo "✅ 確認後、再度 'git commit' を実行してください"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# コミットを一旦止める（確認を挟ませるため）
+exit 1

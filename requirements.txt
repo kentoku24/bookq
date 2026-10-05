@@ -1,0 +1,10 @@
+fastapi>=0.141.1
+starlette>=1.7.0
+hypercorn>=0.18.0
+authlib>=1.8.0
+itsdangerous>=2.2
+httpx>=0.28.1
+jinja2>=3.1.6
+pypdfium2>=5.13.0
+pillow>=12.3.0
+rarfile>=4.5

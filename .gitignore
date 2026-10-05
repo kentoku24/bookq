@@ -1,0 +1,22 @@
+downloads/
+.DS_Store
+.omo/
+.omc/
+.env
+__pycache__/
+.playwright-mcp/
+.worktrees/
+
+# 合成フィクスチャの永続化コピー（生成物 — uiux_tree.py で再生成可能）
+dev_fixture/
+
+# 検証用スクリーンショット（リポジトリ直下）
+/*.png
+.venv/
+.pytest_cache/
+.ruff_cache/
+.codegraph/
+.env.local
+.env.backup
+*.pem
+.claude/settings.local.json

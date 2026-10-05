@@ -1,0 +1,97 @@
+# bookq — 開発環境（固定 10 スロットプール、1 スロット = tailnet ノード 1 つ）
+#
+# 本番 (docker-compose.yml) と同じ構成パターン: viewer + tailscale サイドカー。
+# 到達経路は https://dev-XX.<tailnet>.ts.net（XX は 01..10、プールスロット）だけ。
+# ホストにポートを公開しない — ホストからのアクセスも HTTPS 経由
+# （ホストは tailnet に参加していることが前提）。
+#
+# イメージは dev.sh が事前にビルドして DEV_IMAGE で渡す。ここで build: を
+# 書かないのは、--ref 指定時に「作業ツリーではなく特定コミットの中身」を
+# git archive からビルドするため。タグ方式は ref の種別で 2 分岐:
+# シンボリック ref（ブランチ/タグ/HEAD）→ bookq-dev:ref-<slug> に常時
+# 再ビルドしてエイリアス上書き / hex SHA → bookq-dev:<短縮SHA> で
+# SHA 単位の再利用。
+#
+# 直接 docker compose を叩かないこと。必須変数 (:?) が未設定だと失敗する。
+
+services:
+  viewer:
+    image: "${DEV_IMAGE:?DEV_IMAGE is required — use ./dev.sh up}"
+    container_name: "bookq-dev-viewer-dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}"
+
+    # 本番と同じ画像ツリーを *読み取り専用* でマウント。
+    # cache volume は read-write のまま（downloads の :ro とは無関係）。
+    volumes:
+      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      # warmup disk cache の永続化 (issue #259、本番と同値): 既定 /tmp は
+      # コンテナ再作成で消えるため BOOKQ_CACHE_DIR を名前付き volume 上の
+      # /var/cache/bookq に向ける。名前の明示は不要 — compose が
+      # project  prefix を付けるので dev 環境ごとの分離は自動。
+      - warmup-cache:/var/cache/bookq
+      # thumb/sprite disk cache の永続化 (issue #276、本番と同値): 既定
+      # /tmp/bookq-thumbs はコンテナ再作成で消えるため
+      # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の
+      # /var/cache/bookq-thumbs に向ける。app/thumbs.py cache_root() は
+      # env を call time に読むので、この env + volume の組だけで有効になる
+      #（code 変更不要）。thumbs/ と sprites/ の両 namespace が同 root 配下。
+      - thumb-cache:/var/cache/bookq-thumbs
+
+    environment:
+      # OAuth を丸ごとバイパス（app/auth.py が import 時に一度だけ読む）。
+      - BOOKQ_TEST_MODE=true
+      - BOOKQ_CACHE_DIR=/var/cache/bookq
+      - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
+      - SECRET_KEY=dev-not-a-secret
+
+    # dev.sh はこのラベルだけを情報源にする（状態ファイルを持たない）。
+    labels:
+      com.bookq.role: dev
+      com.bookq.name: "${DEV_ENV_NAME:-${DEV_NAME}}"
+      com.bookq.pool_slot: "${DEV_POOL_SLOT}"
+      com.bookq.hostname: "${DEV_HOSTNAME:-dev-${DEV_POOL_SLOT}}"
+      com.bookq.ref: "${DEV_REF:-worktree}"
+      com.bookq.commit: "${DEV_COMMIT:-unknown}"
+      com.bookq.branch: "${DEV_BRANCH:-unknown}"
+      com.bookq.worktree: "${DEV_WORKTREE:-unknown}"
+      com.bookq.dev-image-tag: "${DEV_IMAGE}"
+
+    # イメージは python:3.13-slim で curl が無いため python で叩く。
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health')
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+
+    # Mac のスリープや Docker 再起動をまたいで生き残らせる。
+    restart: unless-stopped
+
+  # 本番と同じサイドカー。entrypoint の既定 serve（http://viewer:8080 → :443）を
+  # そのまま使い、ノード名 dev-XX（XX は 01..10）がそのまま HTTPS URL になる。
+  # スロットごとに state ボリュームを持つので、down（ボリューム保持）後は同じ
+  # hostname dev-XX で再 up し、同一 identity で再利用する（Free プランで API 削除不要）。
+  tailscale:
+    build: ./tailscale
+    container_name: "bookq-dev-tailscaleGateway-dev-${DEV_POOL_SLOT}"
+    hostname: "${DEV_HOSTNAME:-dev-${DEV_POOL_SLOT}}"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=${DEV_HOSTNAME:-dev-${DEV_POOL_SLOT}}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+    depends_on:
+      - viewer
+
+volumes:
+  tailscale-state:
+    name: bookq-dev-pool-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}_tailscale-state
+  warmup-cache:
+  thumb-cache:

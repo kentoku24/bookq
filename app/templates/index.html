@@ -1,0 +1,160 @@
+{% if not user %}
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bookq — ログイン</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon-32x32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="bookq">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login">
+<div class="login-box">
+  <img src="/static/logo.svg" alt="bookq" class="login-logo">
+  <a href="/auth/login" class="login-btn">
+    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%234285F4' d='M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z'/%3E%3Cpath fill='%2334A853' d='M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z'/%3E%3Cpath fill='%23FBBC05' d='M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z'/%3E%3Cpath fill='%23EA4335' d='M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z'/%3E%3C/svg%3E" alt="Google">
+    Google でサインイン
+  </a>
+</div>
+<script src="/static/login.js" defer></script>
+</body>
+</html>
+{% else %}
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bookq</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/favicon-32x32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="bookq">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="stylesheet" href="/static/style.css">
+<script>window.__BOOKQ_TEST_MODE__ = "{{ 'true' if test_mode else 'false' }}";</script>
+</head>
+<body>
+
+<aside id="sidebar" class="open">
+  <div id="sidebar-header">
+    <h1 id="browse-header">📁 フォルダ</h1>
+    <button id="filter-btn" title="絞り込み" aria-label="フィルタ">🔽</button>
+    <a id="offline-status" href="/static/offline-harness.html?harness=1">●オンライン</a>
+  </div>
+  <div id="sidebar-scroll">
+    <div id="search"><input type="text" id="search-input" placeholder="検索…" autocomplete="off"></div>
+    <div id="filter-chips" class="hidden"></div>
+    <div id="tile-grid">
+    </div>
+  </div>
+  <div id="sidebar-footer">
+    <button id="footer-refresh-btn" title="表示切替" aria-label="表示切替">📋</button>
+    <span class="footer-right" id="folder-count">0 件</span>
+    <span id="storage-text"></span>
+    <a id="harness-link" href="/static/offline-harness.html?harness=1">🧪 ハーネス</a>
+    <span id="app-version" class="mono hint" style="font-size:11px;color:#888;margin-left:8px"></span>
+    <a href="/auth/logout" id="logout-btn" title="ログアウト" aria-label="ログアウト">🚪</a>
+  </div>
+</aside>
+
+<div id="bottom-sheet-overlay" class="hidden"></div>
+<div id="bottom-sheet" class="hidden" inert role="dialog" aria-modal="true" aria-labelledby="bottom-sheet-title">
+  <div class="bottom-sheet-header">
+    <span id="bottom-sheet-title">絞り込み</span>
+    <button id="bottom-sheet-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="bottom-sheet-body">
+    <div class="bottom-sheet-section" id="facet-artists">
+      <h3>作者</h3>
+      <div class="facet-chips"></div>
+    </div>
+    <div class="bottom-sheet-section" id="facet-tags">
+      <h3>タグ</h3>
+      <div class="facet-chips"></div>
+    </div>
+    <div class="bottom-sheet-section" id="facet-sort">
+      <h3>並び順</h3>
+      <div class="sort-options">
+        <label><input type="radio" name="sort" value="relevance" checked> 関連度</label>
+      </div>
+    </div>
+  </div>
+  <div class="bottom-sheet-footer">
+    <button id="filter-reset-btn">リセット</button>
+    <button id="filter-apply-btn">適用</button>
+  </div>
+</div>
+
+<button id="resume-btn" class="hidden" inert><span id="resume-btn-text"></span></button>
+
+<div id="viewer" class="sidebar-open">
+  <div id="toolbar">
+    <button id="menu-btn" title="フォルダ一覧 (F)" aria-label="フォルダ一覧">☰</button>
+    <span id="folder-name"></span>
+    <div id="page-slider-wrap"><input type="range" id="page-slider" min="0" max="0" value="0" step="1" title="ページスライダー（右端が 1 ページ目）"></div>
+    <span id="counter"></span>
+    <button id="overview-btn" title="ページ一覧 (G)" aria-label="ページ一覧">⊞</button>
+  </div>
+  <div id="img-container">
+    <div id="spinner"></div>
+    <div id="zoom-layer"><div id="img-track"></div></div>
+    <div id="zone-prev" title="次のページ"></div>
+    <div id="zone-toggle" title="ツールバー表示切替"></div>
+    <div id="zone-next" title="前のページ"></div>
+  </div>
+  <div id="hint">スワイプ / ← → でページ送り &nbsp;|&nbsp; 中央タップでツールバー</div>
+  <div id="spread-controls">
+  <button id="spread-shift" title="見開きペアリング切替" aria-label="見開きペアリング切替">◀</button>
+  <button id="spread-toggle" title="ページモード切替" aria-label="ページモード切替">2P</button>
+  </div>
+  <div id="tapmode-controls">
+  <button id="tapmode-left" title="左タップで順めくり" aria-label="左タップで順めくり" disabled>◀</button>
+  <button id="tapmode-right" title="右タップで順めくり" aria-label="右タップで順めくり">▶</button>
+  </div>
+  <div id="overview" hidden>
+    <div class="ov-header"><span class="ov-folder"></span><span class="ov-chip"></span></div>
+    <div class="ov-body"></div>
+  </div>
+  <!-- Outside #overview on purpose: #overview is a `contain:layout paint`
+       scroller, which would make it the containing block for a fixed
+       descendant and scroll the button away with the grid.
+       `hidden` (toggled by overview.js show()/close()) is the belt to the CSS's
+       braces: a Service Worker can serve a stale style.css that has no
+       `#overview-close{display:none}` rule, and the ✕ must not then float over
+       a viewer with no overview behind it. -->
+  <button id="overview-close" aria-label="閉じる" hidden>✕</button>
+  <div id="empty"><p>📂 サイドバーからフォルダを選んでください</p></div>
+</div>
+
+<div id="toast" role="alert"></div>
+
+<script src="/static/offline-core.js" defer></script>
+<script src="/static/thumbs/resolveCover.js" defer></script>
+<script src="/static/browse/hash.js" defer></script>
+<script src="/static/browse/render.js" defer></script>
+<script src="/static/search/facets.js" defer></script>
+<script src="/static/offline/storeAdapter.js" defer></script>
+<script src="/static/thumbs/prefetch.js" defer></script>
+<script src="/static/viewer/spread.js" defer></script>
+<script src="/static/viewer/gesture.js" defer></script>
+<script src="/static/viewer/zoom.js" defer></script>
+<script src="/static/viewer/overview.js" defer></script>
+<script src="/static/app.js" defer></script>
+</body>
+</html>
+{% endif %}

@@ -1,0 +1,923 @@
+"""Application routes: viewer page, API, and image serving."""
+
+import asyncio
+import datetime
+import hashlib
+import inspect
+import json
+import logging
+import mimetypes
+import os
+import re
+import time
+from email import utils
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from starlette.concurrency import run_in_threadpool
+
+from app import auth as auth_module
+from app.archive import is_archive_file, list_archive_entries
+from app.auth import get_current_user, require_auth
+from app.metadata import MetadataIndex
+from app.scanner import _scan_archive_node, _scan_pdf_node, is_pdf_file, list_images, scan_tree
+
+logger = logging.getLogger(__name__)
+
+api_router = APIRouter()
+
+_TEMPLATE_DIR = str(Path(__file__).parent / "templates")
+INDEX_CACHE_TTL = 300  # 5 minutes in seconds
+
+_jinja_env = Environment(
+    loader=FileSystemLoader(_TEMPLATE_DIR),
+    autoescape=select_autoescape(["html", "xml"]),
+    auto_reload=True,
+    cache_size=0,
+)
+
+_index_lock = asyncio.Lock()
+
+# Shallow-warmup background fill pacing (plan shallow-warmup-fill T3): one
+# opaque archive node is materialized at a time, with this pause between
+# items, and the fill pauses entirely while a request arrived within
+# _FILL_IDLE_SECONDS (app.state.last_request_at, stamped by /api/folders,
+# /thumb/ and /api/thumb-sprite).
+_FILL_IDLE_SECONDS = 10.0
+_FILL_STEP_SECONDS = 0.2
+
+
+def _is_within(base: Path, target: Path) -> bool:
+    """Return True if *target* is inside *base* (resolves symlinks, guards prefix bypass)."""
+    try:
+        return target.resolve().is_relative_to(base.resolve())
+    except (OSError, RuntimeError, ValueError):
+        # Symlink loop, dangling symlink, or unreadable path — treat as outside, not 500.
+        return False
+
+
+def render_template(request: Request, template_name: str, context: dict) -> HTMLResponse:
+    """Render a Jinja2 template with the request in context."""
+    template = _jinja_env.get_template(template_name)
+    return HTMLResponse(template.render({"request": request, **context}))
+
+
+def _count_tree_nodes(tree: list[dict]) -> tuple[int, int, int, int, int, int]:
+    """Count folder/image nodes by their ``type`` key, plus archive breakdown.
+
+    Both the request path and startup warmup log these counts, so the walk
+    lives here rather than being hand-rolled twice. Archive-type folder
+    nodes (``archive`` flag from app/scanner.py) still count as folders;
+    the extra counters break them down: ``pdf`` flag set counts as pdfs,
+    otherwise the filename suffix decides — ``.epub`` counts as epubs,
+    ``.rar``/``.cbr`` as rars, anything else (zip/cbz) as archives.
+    """
+    folders = 0
+    images = 0
+    archives = 0
+    epubs = 0
+    rars = 0
+    pdfs = 0
+    stack = list(tree)
+    while stack:
+        node = stack.pop()
+        if node.get("type") == "folder":
+            folders += 1
+            if node.get("pdf"):
+                pdfs += 1
+            elif node.get("archive"):
+                suffix = Path(node.get("name") or "").suffix.lower()
+                if suffix == ".epub":
+                    epubs += 1
+                elif suffix in (".rar", ".cbr"):
+                    rars += 1
+                else:
+                    archives += 1
+            children = node.get("children") or []
+            stack.extend(children)
+        elif node.get("type") == "image":
+            images += 1
+    return folders, images, archives, epubs, rars, pdfs
+
+
+def _scan_accepts_phases(fn) -> bool:
+    """True when *fn* takes the ``scan_tree`` ``_phases`` accumulator.
+
+    ``scan_tree`` is monkeypatched by single-argument stubs in lifespan
+    abandonment tests, so the accumulator is only passed when the
+    (possibly patched) callable actually declares it — otherwise the
+    phase fields simply stay 0.0 for that rebuild.
+    """
+    try:
+        return "_phases" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+async def _scan_and_rebuild(
+    downloads_path: Path,
+    list_archives: bool = True,
+) -> tuple[list[dict], MetadataIndex, int, int, int, int, int, int]:
+    """Run one scan_tree + MetadataIndex rebuild pass, log it, return it.
+
+    Shared by the request path (_ensure_tree_and_index) and startup warmup
+    (warmup_metadata_index) so the node counts, the timings and the single
+    "metadata index rebuilt" log line cannot drift between the two callers.
+    Raises on failure — callers decide whether to cache. Only the warmup
+    passes ``list_archives=False`` (opaque archive nodes); the request path
+    keeps the default True.
+    """
+    started = time.perf_counter()
+    scan_start = time.perf_counter()
+    phases: dict[str, float] = {"walk_ms": 0.0, "archive_ms": 0.0, "pdf_ms": 0.0}
+    if _scan_accepts_phases(scan_tree):
+        tree = await run_in_threadpool(
+            scan_tree, downloads_path, None, phases, list_archives=list_archives
+        )
+    else:
+        tree = await run_in_threadpool(scan_tree, downloads_path)
+    scan_ms = (time.perf_counter() - scan_start) * 1000
+    index = MetadataIndex()
+    rebuild_start = time.perf_counter()
+    await run_in_threadpool(index.rebuild_from_tree, tree, downloads_path)
+    rebuild_ms = (time.perf_counter() - rebuild_start) * 1000
+    folders, images, archives, epubs, rars, pdfs = _count_tree_nodes(tree)
+    # One line per rebuild so `docker compose logs viewer | grep "index rebuilt"` counts
+    # how many workers rebuilt independently (#113: cache is per process).
+    logger.info(
+        "metadata index rebuilt pid=%s comics=%d elapsed_ms=%.0f scan_ms=%.0f rebuild_ms=%.0f folders=%d images=%d archives=%d epubs=%d rars=%d pdfs=%d walk_ms=%.0f archive_ms=%.0f pdf_ms=%.0f",
+        os.getpid(), len(index.comics), (time.perf_counter() - started) * 1000,
+        scan_ms, rebuild_ms, folders, images, archives, epubs, rars, pdfs,
+        phases["walk_ms"], phases["archive_ms"], phases["pdf_ms"],
+    )
+    return tree, index, folders, images, archives, epubs, rars, pdfs
+
+
+async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], MetadataIndex]:
+    """Return a fresh (tree, index) pair, reusing the shared cache when within TTL.
+
+    A single scan_tree walk feeds both the folders response and the index
+    rebuild, so one filesystem walk serves the whole /api/folders request.
+    The lock is check-and-swap only (double-checked, never held across the
+    build beyond run_in_threadpool dispatch). On rebuild failure nothing is
+    cached — a partial tree is never kept — and the error propagates.
+    """
+    cache_data = getattr(request.app.state, "metadata_index_cache", None)
+    if (
+        cache_data is not None
+        and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+        and "tree" in cache_data
+    ):
+        return cache_data["tree"], cache_data["index"]
+
+    async with _index_lock:
+        # Double-check after acquiring lock — another coroutine may have rebuilt.
+        cache_data = getattr(request.app.state, "metadata_index_cache", None)
+        if (
+            cache_data is not None
+            and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+            and "tree" in cache_data
+        ):
+            return cache_data["tree"], cache_data["index"]
+
+        downloads_path = request.app.state.settings.downloads_path
+        tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
+        # Cache only after both succeed (cache-nothing on failure). The
+        # generation is the *fill* progress counter (warmup = 1, +1 per
+        # filled node), so a rebuild preserves it: a TTL rebuild of an
+        # unchanged tree keeps the ETag (digest + suffix) stable, and a
+        # full scan needs no fill.
+        prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
+        cache_data = {"tree": tree, "index": index, "timestamp": time.time(),
+                      "generation": prev_gen}
+        request.app.state.metadata_index_cache = cache_data
+        return tree, index
+
+
+async def _ensure_index(request: Request) -> MetadataIndex:
+    """Return a ready MetadataIndex, rebuilding it if stale or missing."""
+    _, index = await _ensure_tree_and_index(request)
+    return index
+
+
+async def warmup_metadata_index(app_state) -> tuple[int, int, float]:
+    """Request-independent warmup for lifespan startup.
+
+    Runs the same cache-miss path as _ensure_tree_and_index via
+    _scan_and_rebuild and populates the exact same
+    ``app_state.metadata_index_cache`` structure ({tree, index,
+    timestamp, generation} — generation starts at 1 and the background
+    fill bumps it per materialized node), so the first real request hits cache. No lock: lifespan
+    completes before the server accepts requests, so nothing contends.
+    Eager imports (pypdfium2/rarfile/PIL) stay in the caller
+    (app/main.py lifespan), not here.
+
+    Raises on failure — the caller logs WARNING and continues startup.
+    Returns (folders, images, elapsed_ms).
+    """
+    started = time.perf_counter()
+    tree, index, folders, images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(
+        app_state.settings.downloads_path, list_archives=False
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    app_state.metadata_index_cache = {"tree": tree, "index": index, "timestamp": time.time(),
+                                      "generation": 1}
+    return folders, images, elapsed_ms
+
+
+def _find_first_opaque(nodes: list[dict], parent_path: str, skip: set[str]):
+    """Return the first fillable opaque node as (parent_list, idx, full_path, is_pdf).
+
+    Opaque = shallow-scan placeholder (``archive`` flag with ``children == []``).
+    *skip* holds already-filled full paths: a genuinely empty archive
+    materializes to the identical shape, so without *skip* the fill would
+    loop on it forever. Paths compose as parent/name (never split names —
+    flattened names contain "/").
+    """
+    for idx, node in enumerate(nodes):
+        if node.get("type") != "folder":
+            continue
+        full = f"{parent_path}/{node['name']}" if parent_path else node["name"]
+        if node.get("archive") and not node.get("children") and full not in skip:
+            return nodes, idx, full, bool(node.get("pdf"))
+        children = node.get("children")
+        if children:
+            found = _find_first_opaque(children, full, skip)
+            if found is not None:
+                return found
+    return None
+
+
+async def _background_fill(app_state) -> None:
+    """Materialize shallow opaque archive nodes one by one (plan T3, fail-open).
+
+    Spawned once by lifespan after 起動完了; lives past yield. Each opaque
+    node is rebuilt with the same listing code the full scan uses
+    (_scan_archive_node/_scan_pdf_node) under _index_lock, swapped in place,
+    and the cache generation bumps by 1. Between items the task sleeps
+    _FILL_STEP_SECONDS and pauses while requests are fresh (idle detection
+    via app_state.last_request_at). Per-item exceptions are logged and
+    skipped; index/facets are untouched (name-only registration already
+    covers archives). Never raises.
+    """
+    try:
+        cache = getattr(app_state, "metadata_index_cache", None)
+        if not isinstance(cache, dict) or "tree" not in cache:
+            return
+        downloads_path = app_state.settings.downloads_path
+        tree = cache["tree"]
+        done: set[str] = set()
+        while True:
+            last = getattr(app_state, "last_request_at", 0.0) or 0.0
+            while time.time() - float(last) < _FILL_IDLE_SECONDS:
+                await asyncio.sleep(1.0)
+                last = getattr(app_state, "last_request_at", 0.0) or 0.0
+            full: str | None = None
+            try:
+                async with _index_lock:
+                    cache = getattr(app_state, "metadata_index_cache", None)
+                    if not isinstance(cache, dict) or "tree" not in cache:
+                        return
+                    if cache["tree"] is not tree:
+                        tree, done = cache["tree"], set()
+                    found = _find_first_opaque(tree, "", done)
+                    if found is None:
+                        return
+                    parent_list, idx, full, is_pdf = found
+                    archive_file = downloads_path / full
+                    if is_pdf:
+                        filled = await run_in_threadpool(
+                            _scan_pdf_node, archive_file.parent, archive_file.name,
+                            downloads_path,
+                        )
+                    else:
+                        filled = await run_in_threadpool(
+                            _scan_archive_node, archive_file.parent, archive_file.name,
+                            downloads_path,
+                        )
+                    parent_list[idx] = filled
+                    done.add(full)
+                    cache["generation"] = int(cache.get("generation", 1) or 1) + 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "background fill skip %s error=%s: %s",
+                    full if full is not None else "?", type(exc).__name__, exc,
+                )
+                if full is not None:
+                    done.add(full)
+            await asyncio.sleep(_FILL_STEP_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "background fill abort error=%s: %s", type(exc).__name__, exc,
+        )
+
+
+def _attach_metadata(nodes: list[dict], lookup: dict, parent_path: str) -> None:
+    """Recursively attach ComicMetadata to folder nodes in the tree.
+
+    Nodes without metadata carry no ``metadata`` key at all (only
+    ``has_metadata: False``) — the client reads ``f.metadata||{}`` behind a
+    ``has_metadata`` check, so absence and an empty object behave the same.
+    """
+    for node in nodes:
+        if node["type"] == "folder":
+            path = f"{parent_path}/{node['name']}" if parent_path else node["name"]
+            comic = lookup.get(path)
+            if comic is not None and comic.has_metadata:
+                node["has_metadata"] = True
+                node["metadata"] = comic.to_dict()
+            else:
+                node["has_metadata"] = False
+
+            if node.get("children"):
+                _attach_metadata(node["children"], lookup, path)
+
+
+def _attach_subtree_facets(nodes: list[dict], subtree: dict, parent_path: str) -> None:
+    """Attach per-folder aggregate facets (artists/tags/parodies of every descendant comic).
+
+    Folders with no facets in their subtree carry no ``subtree_facets`` key —
+    the client checks ``node && node.subtree_facets`` before filtering, so
+    absence and an empty object behave the same.
+    """
+    for node in nodes:
+        if node["type"] == "folder":
+            path = f"{parent_path}/{node['name']}" if parent_path else node["name"]
+            facets = subtree.get(path)
+            if facets and any(facets.values()):
+                node["subtree_facets"] = facets
+            if node.get("children"):
+                _attach_subtree_facets(node["children"], subtree, path)
+
+
+@api_router.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """Viewer home page. Shows login prompt if unauthenticated, full viewer if authenticated."""
+    user = await get_current_user(request)
+    # The harness link and the SW-registration gate read this; take it from the
+    # authoritative flag, not from the mock user's email.
+    return render_template(
+        request, "index.html", {"user": user, "test_mode": auth_module._TEST_MODE}
+    )
+
+
+@api_router.api_route("/sw.js", methods=["GET", "HEAD"], include_in_schema=False)
+async def serve_sw():
+    """Serve Service Worker at scope root — required so scope '/' is allowed."""
+    sw_path = Path(__file__).parent / "static" / "sw.js"
+    if not sw_path.is_file():
+        raise HTTPException(status_code=404, detail="sw.js not found")
+    return FileResponse(
+        path=str(sw_path),
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
+
+
+@api_router.api_route("/favicon.ico", methods=["GET", "HEAD"], include_in_schema=False)
+async def serve_favicon_ico():
+    """Serve favicon at root — browsers probe /favicon.ico; alias to /static/favicon.ico.
+
+    Icons remain cacheFirst via SW fetch handler, not precached in SHELL_ASSETS —
+    lazy cacheFirst is sufficient and avoids bloating the shell precache.
+    """
+    ico_path = Path(__file__).parent / "static" / "favicon.ico"
+    if not ico_path.is_file():
+        raise HTTPException(status_code=404, detail="favicon.ico not found")
+    return FileResponse(
+        path=str(ico_path),
+        media_type="image/x-icon",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@api_router.get("/api/health")
+async def health():
+    """Health check — no auth required."""
+    return {"status": "ok"}
+
+
+@api_router.get("/api/version")
+async def version(request: Request):
+    """Version info — no auth required."""
+    settings = request.app.state.settings
+    return JSONResponse(
+        content={"version": settings.version, "sha": settings.git_sha, "build_date": settings.build_date},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _find_tree_node(nodes: list[dict], target: str, parent_path: str = "") -> dict | None:
+    """Find the folder node whose downloads-relative path equals *target*.
+
+    Tree walk mirroring findNodeByPath (app.js) — NEVER split names on "/":
+    flattened folder names like "wrap/inner/vol1" contain "/" and splitting
+    either side would miss them. Match on the composed full path instead.
+    """
+    for node in nodes:
+        full = f"{parent_path}/{node['name']}" if parent_path else node["name"]
+        if full == target:
+            return node
+        children = node.get("children")
+        if children and target.startswith(full + "/"):
+            found = _find_tree_node(children, target, full)
+            if found is not None:
+                return found
+    return None
+
+
+_FOLDERS_CACHE_CONTROL = "private, max-age=60"
+
+
+def _folders_response(
+    request: Request,
+    response: Response,  # unused — kept only so api_folders' FastAPI DI signature is unchanged
+    payload: list[dict],
+    path: str,
+    depth: int | None,
+    gen,
+    gen_int: int = 1,
+):
+    """Attach ETag + Cache-Control, or return 304 on If-None-Match hit.
+
+    The serialized body and its ETag are cached in
+    ``request.app.state.folders_body_cache``, keyed by *gen* (the index-cache
+    generation the caller fetched *payload* under — ``cache_data["timestamp"]``,
+    a float) plus (path, depth). *gen* is passed in by the caller, captured
+    right after the ``_ensure_tree_and_index`` await that produced *tree*,
+    rather than re-read from ``request.app.state`` here — a future ``await``
+    between the tree fetch and this call could otherwise race a concurrent
+    rebuild and desync the two. Using the timestamp (not ``id(tree)``) also
+    avoids a stale hit if a freed tree's list address gets reused by a later
+    allocation once ``metadata_index_cache`` has been cleared (e.g. test
+    teardown setting it to ``None``). A generation change discards the whole
+    cache so it never grows unbounded. Within a generation, ``json.dumps`` +
+    sha1 run at most once per (path, depth) — a 304 never re-serializes either.
+
+    ETag input = stable payload hash + path + depth only (no cache
+    timestamp), so it stays the same across an index-cache TTL refresh that
+    left the tree unchanged, and changes only when the tree itself changes.
+    The fill generation (*gen_int*) is appended as a suffix, so a
+    background-filled tree revalidates even when the digest prefix matches.
+    """
+    body_cache = getattr(request.app.state, "folders_body_cache", None)
+    if (
+        body_cache is None
+        or body_cache.get("gen") != gen
+        or body_cache.get("gen_int") != gen_int
+    ):
+        body_cache = {"gen": gen, "gen_int": gen_int, "entries": {}}
+        request.app.state.folders_body_cache = body_cache
+
+    cache_key = (path, depth)
+    entry = body_cache["entries"].get(cache_key)
+    if entry is None:
+        body_str = json.dumps(
+            payload, ensure_ascii=False, allow_nan=False, indent=None,
+            separators=(",", ":"), default=str,
+        )
+        body = body_str.encode("utf-8")
+        digest = hashlib.sha1(f"{path}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+        etag = f'"{digest[:24]}-g{gen_int}"'
+        entry = (body, etag)
+        body_cache["entries"][cache_key] = entry
+    body, etag = entry
+
+    headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
+    if getattr(request, "headers", None) is not None and request.headers.get(
+        "if-none-match"
+    ) == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+@api_router.get("/api/folders")
+async def api_folders(
+    request: Request,
+    response: Response = None,  # type: ignore[assignment] — injected per request; None on direct unit calls
+    path: str = Query("", description="Subtree path relative to downloads dir (empty = root)"),
+    depth: int | None = Query(None, description="1 = direct child folders only; omitted = full tree"),
+    since: int | None = Query(None, description="Tree generation last seen; match = 304, stale = tree+generation"),
+    _user: dict = Depends(require_auth),
+):
+    """List folders as a recursive tree with metadata. Requires authentication.
+
+    Shallow mode (``depth=1``) returns only the direct ``type == folder``
+    children of *path*, each with ``children == []`` (never None) and WITHOUT
+    ``metadata``/``subtree_facets`` keys — facet filters apply after a
+    full-tree fetch. The shallow shape is deliberately NOT a full tree, so the
+    frontend must only OfflineTree.putTree() full-tree snapshots. Flattened
+    names (containing "/") are returned verbatim.
+    """
+    # Direct unit calls pass the raw Query defaults; treat them as omitted.
+    if not isinstance(path, str):
+        path = ""
+    if not isinstance(depth, int):
+        depth = None
+    if not isinstance(since, int) or isinstance(since, bool):
+        since = None
+    if depth is not None and depth < 1:
+        raise HTTPException(status_code=400, detail="depth must be >= 1")
+    request.app.state.last_request_at = time.time()
+    if depth is None:
+        # Legacy full tree — byte-compatible default (search/offline/tests).
+        # Tree/index come from the shared TTL cache; Todo 6 (HTTP cache) can
+        # key its ETag off the same cache timestamp.
+        tree, index = await _ensure_tree_and_index(request)
+        # Captured immediately after the await, with no intervening await, so
+        # it cannot desync from the *tree* a concurrent rebuild may replace.
+        cache_data = request.app.state.metadata_index_cache
+        gen = cache_data["timestamp"]
+        gen_int = int(cache_data.get("generation", 1) or 1)
+        if since is not None and since == gen_int:
+            return Response(status_code=304, headers={"Cache-Control": _FOLDERS_CACHE_CONTROL})
+        lookup = {c.folder_path: c for c in index.comics}
+        _attach_metadata(tree, lookup, "")
+        subtree = index.subtree_facets()
+        _attach_subtree_facets(tree, subtree, "")
+        if since is not None:
+            return JSONResponse({"tree": tree, "generation": gen_int})
+        return _folders_response(request, response, tree, "", None, gen, gen_int)
+    norm = path.rstrip("/")
+    downloads_path = request.app.state.settings.downloads_path
+    target_fs = downloads_path if not norm else downloads_path / norm
+    if not _is_within(downloads_path, target_fs):
+        raise HTTPException(status_code=403, detail="path outside downloads dir")
+    tree, _ = await _ensure_tree_and_index(request)
+    cache_data = request.app.state.metadata_index_cache
+    gen = cache_data["timestamp"]
+    gen_int = int(cache_data.get("generation", 1) or 1)
+    if not norm:
+        target_children = tree
+    else:
+        node = _find_tree_node(tree, norm)
+        if node is None or node.get("type") != "folder":
+            raise HTTPException(status_code=404, detail="folder not found")
+        target_children = node.get("children") or []
+    # Copies, not views into the cached tree (children must stay intact there).
+    shallow = [{**c, "children": []} for c in target_children if c.get("type") == "folder"]
+    return _folders_response(request, response, shallow, norm, depth, gen, gen_int)
+
+
+@api_router.get("/api/search")
+async def search(
+    request: Request,
+    q: str = Query("", description="Free text search"),
+    artist: str = Query("", description="Artist filter"),
+    tag: str = Query("", description="Tags (comma-separated)"),
+    sort: str = Query("relevance", description="Sort: relevance"),
+    _user: dict = Depends(require_auth),
+):
+    """Search comics by text and facet filters. Requires authentication."""
+    index = await _ensure_index(request)
+
+    filters: dict[str, list[str]] = {}
+    if artist:
+        filters["artist"] = [artist]
+    if tag:
+        filters["tags"] = [t.strip() for t in tag.split(",") if t.strip()]
+
+    results = index.search(q=q, filters=filters, sort=sort)
+    return {"query": q, "total": len(results), "results": results}
+
+
+@api_router.get("/api/metadata/facets")
+async def get_facets(
+    request: Request,
+    path: str = Query("", description="Subtree path relative to downloads dir (empty = whole library)"),
+    _user: dict = Depends(require_auth),
+):
+    """Return available facet filter options. Requires authentication.
+
+    Contract: returns {artists, tags} only (no parodies key).
+    """
+    index = await _ensure_index(request)
+    return index.facets_for(path)
+
+
+@api_router.post("/api/refresh")
+async def refresh_index(request: Request, _user: dict = Depends(require_auth)):
+    """Manually rebuild the metadata index. Call after adding new content.
+
+    Synchronous rebuild under the shared index lock: the response is sent
+    only after the fresh tree+index are cached, so the very next
+    /api/folders read sees the new content. Stamps a fresh timestamp, so
+    the TTL auto-refresh path keeps working unchanged afterwards (the
+    folders ETag/body cache keys off the timestamp generation and rolls
+    over automatically).
+    """
+    async with _index_lock:
+        downloads_path = request.app.state.settings.downloads_path
+        tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
+        # Cache only after both succeed (cache-nothing on failure).
+        old = getattr(request.app.state, "metadata_index_cache", None)
+        prev_gen = old.get("generation", 1) if isinstance(old, dict) else 1
+        request.app.state.metadata_index_cache = {
+            "tree": tree,
+            "index": index,
+            "timestamp": time.time(),
+            "generation": prev_gen,
+        }
+    return {"status": "ok", "folders": len(index.comics)}
+
+
+@api_router.get("/api/images")
+async def api_images(
+    request: Request,
+    folder: str = Query(..., description="Folder path relative to downloads dir"),
+    _user: dict = Depends(require_auth),
+):
+    """List images in a folder — or inside a ZIP/CBZ/PDF archive. Requires authentication."""
+    downloads_dir = request.app.state.settings.downloads_path
+    folder_path = downloads_dir / folder
+
+    if not _is_within(downloads_dir, folder_path):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    folder_path = folder_path.resolve()
+    if is_archive_file(folder_path):
+        return await run_in_threadpool(list_archive_entries, folder_path)
+    if is_pdf_file(folder_path):
+        from app.archive_pdf import pdf_page_count, pdf_page_name
+
+        count = await run_in_threadpool(pdf_page_count, folder_path)
+        return [pdf_page_name(i) for i in range(count)]
+    resolved = _resolve_archive(downloads_dir, folder)
+    if resolved is not None:
+        archive, inner = resolved
+        if not _is_within(downloads_dir, archive):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        scoped = await run_in_threadpool(_list_archive_prefix, archive.resolve(), inner)
+        if not scoped:
+            raise HTTPException(status_code=404, detail=f"Folder not found: {folder}")
+        return scoped
+    if not folder_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Folder not found: {folder}")
+
+    images = await run_in_threadpool(list_images, folder_path)
+    return images
+
+
+def _resolve_archive(downloads_dir: Path, path: str) -> tuple[Path, str] | None:
+    """Split *path* into (archive_file, inner_entry) if a leading prefix is an archive/PDF.
+
+    Longest-prefix match so nested names (``sub/work.zip``) resolve before
+    shorter ones. Returns None when no prefix is an archive file.
+    """
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        return None
+    for i in range(len(parts) - 1, 0, -1):
+        candidate = downloads_dir.joinpath(*parts[:i])
+        try:
+            if is_archive_file(candidate) or is_pdf_file(candidate):
+                return candidate, "/".join(parts[i:])
+        except (OSError, ValueError):
+            # ValueError: embedded null byte makes stat() raise instead of
+            # returning False — treat like a missing candidate, never a 500.
+            continue
+    return None
+
+
+def _list_archive_prefix(archive: Path, inner: str) -> list[str]:
+    """Return archive entries under the inner-directory *prefix*, relative to it.
+
+    Names stay relative (``v01/a.png`` under prefix ``v01`` → ``a.png``) so
+    the viewer/offline ``/image/<folder>/<name>`` construction keeps working
+    with ``folder=<archive>/<prefix>``. A file entry or unknown prefix
+    yields ``[]`` (the caller turns that into 404).
+    """
+    prefix = inner.strip("/")
+    if not prefix or prefix in (".", "..") or ".." in prefix.split("/"):
+        return []
+    return [e[len(prefix) + 1:] for e in list_archive_entries(archive)
+            if e.startswith(prefix + "/")]
+
+
+def _parse_range(range_header: str, size: int) -> tuple[int, int] | None:
+    """Parse a simple ``bytes=start-end`` Range header. Returns (start, end) inclusive."""
+    m = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
+    if not m:
+        return None
+    s, e = m.group(1), m.group(2)
+    if s == "" and e == "":
+        return None
+    if s == "":
+        # Suffix range: last N bytes.
+        n = int(e)
+        if n <= 0:
+            return None
+        start = max(0, size - n)
+        return start, size - 1
+    start = int(s)
+    end = int(e) if e != "" else size - 1
+    if start >= size or end < start:
+        return None
+    return start, min(end, size - 1)
+
+
+def _not_modified(request: Request, etag: str, mtime: float) -> bool:
+    """Evaluate If-None-Match / If-Modified-Since preconditions."""
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return True
+    if_modified_since = request.headers.get("if-modified-since")
+    if if_modified_since:
+        try:
+            mod_since = utils.parsedate_to_datetime(if_modified_since)
+            if mod_since.tzinfo is None:
+                mod_since = mod_since.replace(tzinfo=datetime.timezone.utc)
+            # Last-Modified is second-precision: truncate mtime so a client
+            # echoing the exact header revalidates instead of refetching.
+            if mod_since.tzinfo is not None and int(mtime) <= mod_since.timestamp():
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _archive_bytes_response(
+    request: Request, data: bytes, media_type: str, etag: str, last_modified: str, mtime: float
+) -> Response:
+    """Return bytes with ETag/Last-Modified, conditional 304, and Range 206 support."""
+    if _not_modified(request, etag, mtime):
+        return Response(status_code=304)
+    headers = {
+        "Cache-Control": "public, max-age=3600",
+        "ETag": etag,
+        "Last-Modified": last_modified,
+        "Accept-Ranges": "bytes",
+    }
+    range_header = request.headers.get("range")
+    if range_header:
+        parsed = _parse_range(range_header, len(data))
+        if parsed is not None:
+            start, end = parsed
+            headers["Content-Range"] = f"bytes {start}-{end}/{len(data)}"
+            return Response(
+                content=data[start : end + 1],
+                status_code=206,
+                media_type=media_type,
+                headers=headers,
+            )
+    return Response(content=data, media_type=media_type, headers=headers)
+
+
+async def _serve_archive_entry(
+    archive: Path, inner: str, request: Request
+) -> Response:
+    """Serve one entry from a ZIP/CBZ archive or one rendered PDF page.
+
+    Entries carry ETag/Last-Modified with conditional (304) and Range (206)
+    support so the viewer and offline cache revalidate instead of refetching.
+    """
+    from app.archive import ArchiveToolMissing, _is_image_entry, read_archive_entry
+    from app.archive_pdf import parse_pdf_page_name, pdf_page_count, render_pdf_page
+
+    if not inner or inner.startswith("/") or ".." in inner.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid image path")
+
+    try:
+        stat = archive.stat()
+    except (OSError, ValueError):
+        # ValueError: embedded null byte makes stat() raise instead of
+        # failing with OSError — map to 404 like any other stat failure.
+        raise HTTPException(status_code=404, detail="File not found")
+    last_modified = utils.formatdate(stat.st_mtime, usegmt=True)
+
+    if is_pdf_file(archive):
+        count = await run_in_threadpool(pdf_page_count, archive)
+        idx = parse_pdf_page_name(inner, count)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="File not found")
+        etag = f'"{stat.st_mtime:.0f}-{stat.st_size}-pdf{idx}"'
+        if _not_modified(request, etag, stat.st_mtime):
+            return Response(status_code=304)
+        data = await run_in_threadpool(render_pdf_page, archive, idx)
+        if data is None:
+            raise HTTPException(
+                status_code=501,
+                detail="PDF rendering requires pypdfium2 (pip install pypdfium2)",
+            )
+        return _archive_bytes_response(
+            request, data, "image/png", etag, last_modified, stat.st_mtime
+        )
+
+    # ZIP/CBZ/RAR/EPUB: read the stored bytes on demand — DOWNLOADS_DIR is untouched.
+    if not _is_image_entry(inner):
+        raise HTTPException(status_code=404, detail="File not found")
+    # ETag must stay ASCII: Starlette encodes headers as latin-1 and a raw
+    # non-ASCII inner name (e.g. Japanese) 500s. Hash the inner name like the
+    # /api/folders ETag does; mtime+size+name-hash keeps the same semantics.
+    inner_digest = hashlib.sha1(inner.encode("utf-8")).hexdigest()[:16]
+    etag = f'"{stat.st_mtime:.0f}-{stat.st_size}-{inner_digest}"'
+    if _not_modified(request, etag, stat.st_mtime):
+        return Response(status_code=304)
+
+    try:
+        data = await run_in_threadpool(read_archive_entry, archive, inner)
+    except ArchiveToolMissing as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ctype, _ = mimetypes.guess_type(inner)
+    return _archive_bytes_response(
+        request, data, ctype or "application/octet-stream",
+        etag, last_modified, stat.st_mtime,
+    )
+
+
+@api_router.get("/image/{path:path}")
+async def serve_image(
+    path: str,
+    request: Request,
+    _user: dict = Depends(require_auth),
+):
+    """Serve an image file. Requires authentication. Path is folder/subfolder/.../filename."""
+    downloads_dir = request.app.state.settings.downloads_path
+
+    resolved = _resolve_archive(downloads_dir, path)
+    if resolved is not None:
+        archive, inner = resolved
+        if not _is_within(downloads_dir, archive):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return await _serve_archive_entry(archive.resolve(), inner, request)
+
+    # Root-level loose files arrive as a bare filename (no folder segment);
+    # let them flow into the guards below. Traversal stays blocked:
+    # ".." resolves outside downloads_dir (-> 403 via _is_within).
+    if path.startswith("/") or path.endswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid image path")
+
+    file_path = downloads_dir / path
+
+    if not _is_within(downloads_dir, file_path):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    file_path = file_path.resolve()
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    stat = file_path.stat()
+    ctype, _ = mimetypes.guess_type(str(file_path))
+    etag = f'"{stat.st_mtime:.0f}-{stat.st_size}"'
+    last_modified = utils.formatdate(stat.st_mtime, usegmt=True)
+
+    # Conditional request handling (If-None-Match / If-Modified-Since)
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304)
+
+    if_modified_since = request.headers.get("if-modified-since")
+    if if_modified_since:
+        try:
+            mod_since = utils.parsedate_to_datetime(if_modified_since)
+            if mod_since.tzinfo is None:
+                mod_since = mod_since.replace(tzinfo=datetime.timezone.utc)
+            if mod_since.tzinfo is not None and stat.st_mtime <= mod_since.timestamp():
+                return Response(status_code=304)
+        except (TypeError, ValueError):
+            pass  # Invalid date header — proceed normally
+
+    return FileResponse(
+        path=str(file_path),
+        stat_result=stat,
+        media_type=ctype or "application/octet-stream",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "ETag": etag,
+            "Last-Modified": last_modified,
+        },
+    )
+
+
+@api_router.get("/thumb/{path:path}")
+async def serve_thumb(
+    path: str,
+    request: Request,
+    w: str = Query(default="400"),
+    _user: dict = Depends(require_auth),
+):
+    """Serve a resized JPEG thumbnail. Requires authentication. Path mirrors /image/*."""
+    from app.thumbs import handle_thumb
+
+    request.app.state.last_request_at = time.time()
+    return await handle_thumb(request, path, w)
+
+
+@api_router.get("/api/thumb-sprite")
+async def serve_thumb_sprite(
+    request: Request,
+    _user: dict = Depends(require_auth),
+):
+    """Serve a contact-sheet sprite for same-archive multi-thumb grids. Requires authentication."""
+    from app.thumbs import handle_thumb_sprite
+
+    request.app.state.last_request_at = time.time()
+    return await handle_thumb_sprite(request)

@@ -1,0 +1,71 @@
+# bookq — 本番。tailscale サイドカー経由の HTTPS だけが唯一の到達経路。
+#
+# 未検証コードの動作確認にこのファイルを使ってはいけない。
+# worktree で `docker compose up` を打つと、ホスト名 bookq を要求する
+# 2 つ目の tailnet ノードが立ち上がって本番と名前を争う。
+# 開発には ./dev.sh（docker-compose.dev.yml）を使う。
+services:
+  viewer:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-}
+        BUILD_DATE: ${BUILD_DATE:-}
+    container_name: bookq-prd-viewer
+    volumes:
+      # 既定値は ./downloads（.env の DOWNLOADS_HOST_DIR で上書き）。
+      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads"
+      # warmup disk cache の永続化 (issue #259): 既定の /tmp 配下はコンテナ
+      # 再作成で消えるため、BOOKQ_CACHE_DIR を名前付き volume 上の
+      # /var/cache/bookq に向ける。app/warmup_cache.py は env を call time
+      # に読むので、この env + volume の組だけで有効になる（code 変更不要）。
+      - warmup-cache:/var/cache/bookq
+      # thumb/sprite disk cache の永続化 (issue #276、#259 と同型): 既定の
+      # /tmp/bookq-thumbs はコンテナ再作成で消えるため、
+      # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の
+      # /var/cache/bookq-thumbs に向ける。app/thumbs.py cache_root() は
+      # env を call time に読むので、この env + volume の組だけで有効になる
+      #（code 変更不要）。thumbs/ と sprites/ の両 namespace が同 root 配下。
+      - thumb-cache:/var/cache/bookq-thumbs
+    environment:
+      - BOOKQ_CACHE_DIR=/var/cache/bookq
+      - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - SECRET_KEY=${SECRET_KEY}
+      - BASE_URL=${BASE_URL}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS}
+    # ホストにポートを公開していないので、起動判定はコンテナ内から行うしかない。
+    # イメージに curl は無いので python で叩く（prd.sh がこれを待つ）。
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health')
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+    restart: unless-stopped
+
+  tailscale:
+    build: ./tailscale
+    container_name: bookq-prd-tailscaleGateway
+    hostname: bookq
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=bookq
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+    depends_on:
+      - viewer
+
+volumes:
+  tailscale-state:
+  warmup-cache:
+  thumb-cache:

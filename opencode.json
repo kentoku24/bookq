@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "permission": {
+    "bash": {
+      "rm -rf *": "deny",
+      "git push origin main": "deny",
+      "git push*main*": "deny",
+      "git push * --force*": "deny",
+      "git push * -f *": "deny",
+      "curl * POST *": "deny",
+      "wget *": "deny"
+    },
+    "external_directory": "deny"
+  }
+}

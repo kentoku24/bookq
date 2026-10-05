@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>bookq ダウンロード機能 アーキテクチャ</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-card: #151a21;
+    --bg-code: #1b212b;
+    --border: #2a3240;
+    --text: #dfe5ee;
+    --text-dim: #93a0b4;
+    --accent: #4a7ac4;
+    --accent-soft: rgba(74, 122, 196, 0.14);
+    --danger: #c05b5b;
+    --warn: #c9a24f;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.75;
+    font-size: 15px;
+  }
+
+  /* ── layout ── */
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 24px; display: grid; grid-template-columns: 220px 1fr; gap: 40px; }
+  @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } aside { position: static !important; height: auto !important; } }
+
+  aside {
+    position: sticky; top: 0; align-self: start;
+    height: 100vh; overflow-y: auto;
+    padding: 32px 0;
+    border-right: 1px solid var(--border);
+    padding-right: 20px;
+  }
+  aside .brand { font-weight: 700; font-size: 13px; letter-spacing: .08em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 18px; }
+  aside nav a {
+    display: block; padding: 6px 10px; border-radius: 6px;
+    color: var(--text-dim); text-decoration: none; font-size: 13px;
+    border-left: 2px solid transparent; transition: color .15s, background-color .15s;
+  }
+  aside nav a:hover { color: var(--text); background: var(--bg-card); }
+  aside nav a.active { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
+
+  main { padding: 48px 0 96px; min-width: 0; }
+
+  /* ── hero ── */
+  .hero h1 { font-size: 26px; letter-spacing: -.01em; line-height: 1.35; margin-bottom: 10px; }
+  .hero .sub { color: var(--text-dim); font-size: 14px; margin-bottom: 6px; }
+  .hero .meta { font-size: 12.5px; color: var(--text-dim); margin-bottom: 28px; }
+  .hero .meta code { color: var(--accent); }
+  .badge-open {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    background: var(--warn); color: #14100a; font-size: 11.5px; font-weight: 700;
+    vertical-align: middle; margin-left: 8px;
+  }
+
+  /* ── sections ── */
+  section { margin-bottom: 56px; scroll-margin-top: 24px; }
+  h2 {
+    font-size: 19px; letter-spacing: -.01em;
+    padding-bottom: 10px; margin-bottom: 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  h2 .num { color: var(--accent); font-family: var(--mono); font-size: 14px; }
+  h3 { font-size: 15px; margin: 22px 0 10px; color: var(--text); }
+  p.desc { color: var(--text-dim); font-size: 14px; margin-bottom: 16px; max-width: 760px; }
+  strong { color: var(--text); }
+
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 20px 20px; margin-bottom: 16px; overflow-x: auto; }
+  .card.mermaid-box svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+
+  /* ── tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 12px 0 20px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-dim); font-weight: 600; font-size: 12px; letter-spacing: .04em; white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--bg-code); padding: 1.5px 6px; border-radius: 5px; color: #a8c4ea; }
+  th code, td code { white-space: nowrap; }
+
+  .pill { display:inline-block; font-family: var(--mono); font-size: 11.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .pill.blue { color: #8fb4e8; border-color: rgba(143,180,232,.4); }
+  .pill.red { color: #e39a9a; border-color: rgba(227,154,154,.4); }
+  .pill.grey { color: #aab6c8; }
+  .note {
+    border-left: 3px solid var(--accent); background: var(--accent-soft);
+    padding: 12px 16px; border-radius: 0 8px 8px 0; font-size: 13.5px; margin: 14px 0;
+    color: var(--text);
+  }
+  .note b { color: var(--accent); }
+  ul.tight { padding-left: 20px; margin: 8px 0 16px; color: var(--text-dim); font-size: 13.5px; }
+  ul.tight li { margin-bottom: 5px; }
+  ul.tight li b { color: var(--text); }
+
+  footer { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 20px; color: var(--text-dim); font-size: 12.5px; }
+  footer a { color: var(--accent); text-decoration: none; }
+
+  @media print {
+    aside { display: none; }
+    .wrap { grid-template-columns: 1fr; }
+    body { background: #fff; color: #111; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<aside id="toc">
+  <div class="brand">bookq<br>Download Architecture</div>
+  <nav>
+    <a href="#overview">0. 概要と前提</a>
+    <a href="#arch">1. 全体アーキテクチャ</a>
+    <a href="#dl">2. DL パイプライン</a>
+    <a href="#delete">3. 削除パイプライン</a>
+    <a href="#storage">4. ストレージモデル</a>
+    <a href="#sw">5. Service Worker</a>
+    <a href="#pr59">6. PR #59 状態遷移</a>
+    <a href="#state-logic">7. オフライン判定ロジック</a>
+    <a href="#timeline">8. 変遷タイムライン</a>
+  </nav>
+</aside>
+
+<main>
+
+<div class="hero" id="overview">
+  <h1>ダウンロード機能の実装整理<span class="badge-open">PR #59 OPEN</span></h1>
+  <p class="sub">ローカル画像ビューア bookq のオフライン保存（自動キャッシュ＋明示的ダウンロード／削除）の全体像</p>
+  <p class="meta">参照: <code>app/static/offline-core.js</code> · <code>app/static/app.js</code> · <code>app/static/sw.js</code> · <a href="https://github.com/kentoku24/bookq/pull/59" style="color:var(--accent);text-decoration:none">PR #59</a></p>
+  <div class="note"><b>前提:</b> ブラウザ内で完結する 3 層構造（UI / 実行 / ストレージ）。サーバー側は画像配信 API を提供するだけで、ダウンロード処理には関与しない。§6 はマージ後の姿、それ以外は現行ベースラインで共通。</div>
+</div>
+
+<!-- ══════════════════════ 1 ══════════════════════ -->
+<section id="arch">
+  <h2><span class="num">01</span>全体アーキテクチャ</h2>
+  <p class="desc">UI 層（ボタン・状態表示）→ 実行層（downloadWork / deleteWork）→ ストレージ層（IndexedDB + Cache API）。Service Worker は閲覧時のキャッシュヒットを担い、自動キャッシュはここで自然に発生する。</p>
+
+  <div class="card mermaid-box">
+<pre class="mermaid">
+graph TB
+    subgraph UI["UI層 — app/static/app.js"]
+        RV["renderTiles / renderList / renderCards<br/>+ search系3種（計6表示モード）"]
+        OCH["offlineControlsHtml(path)<br/>ボタンHTML生成"]
+        SM["getOfflineBtnState(folder)<br/>状態判定"]
+        GP["getPartialProgress(folder)<br/>部分進捗算出"]
+    end
+    subgraph LOGIC["実行層 — app.js"]
+        DW["downloadWork(folder)"]
+        DELW["deleteWork(folder)"]
+        LEAF["getLeafPathsFor(folder)<br/>leaf列挙（memoized）"]
+        UP["updateProgress<br/>--progress CSS変数"]
+    end
+    subgraph STORE["ストレージ層 — offline-core.js（単一情報源）"]
+        IDB[("IndexedDB bookq-offline<br/>works store key=folder")]
+        CS[("Cache Storage<br/>bookq-work-*-v1")]
+    end
+    subgraph SWL["Service Worker — sw.js"]
+        CF["CacheFirst /image/*"]
+        NF["NetworkFirst /api/*"]
+    end
+    SRV["FastAPI サーバー<br/>/api/images · /image/*"]
+
+    RV --> OCH --> SM
+    SM -->|"isFolderOffline"| LEAF
+    SM --> GP --> IDB
+    OCH -->|"委譲リスナ on tileGrid"| DW
+    OCH --> DELW
+    DW --> LEAF
+    DW -->|"fetch + cache.put"| CS
+    DW -->|"レコード書き込み"| IDB
+    DELW -->|"caches.delete + delete"| CS
+    DELW --> IDB
+    DW --> UP
+    CF <-.-> CS
+    CF <-.-> SRV
+    NF <-.-> SRV
+</pre>
+  </div>
+
+  <table>
+    <tr><th>ファイル</th><th>役割</th><th>原則</th></tr>
+    <tr><td><code>offline-core.js</code></td><td>IndexedDB ラッパ <code>OfflineStore</code>、<code>encodePath</code>/<code>imageUrl</code>/<code>cacheNameFor</code>/<code>fmt</code>/<code>dedupedBytes</code> を <code>window.OfflineCore</code> として公開</td><td><strong>単一情報源</strong>。app.js と harness が両方消費。二重実装禁止</td></tr>
+    <tr><td><code>app.js</code></td><td>DL/削除実行、ボタン UI、状態機械、自動 persist、容量バー</td><td>URL 生成は offline-core 経由のみ（自前で組まない）</td></tr>
+    <tr><td><code>sw.js</code></td><td>画像 CacheFirst / API NetworkFirst / ナビゲート fallback</td><td>キャッシュ名は <code>cacheNameFor</code> と同一ロジック</td></tr>
+    <tr><td><code>offline-harness.html</code></td><td>QA 用可視化（caches / IDB / storage）</td><td>同じ <code>OfflineCore</code> を読むので報告が嘘をつかない</td></tr>
+  </table>
+</section>
+
+<!-- ══════════════════════ 2 ══════════════════════ -->
+<section id="dl">
+  <h2><span class="num">02</span>ダウンロードパイプライン（downloadWork）</h2>
+  <p class="desc">親フォルダを指定しても <strong>leaf 単位に分解して</strong> 1 レコードずつ保存する（<code>list_images</code> は再帰しないため）。ダウンロードは逐次実行（並列化は意図的に見送り）。</p>
+
+  <div class="card mermaid-box">
+<pre class="mermaid">
+flowchart TD
+    A["downloadWork(folder)"] --> B["ensurePersist()<br/>navigator.storage.persist 要求"]
+    B --> C["getLeafPathsFor(folder)<br/>(leafPathsCache memoized)"]
+    C --> D["各leaf: GET /api/images?folder=<br/>ファイル一覧を先に全取得"]
+    D --> E{"totalFiles === 0 ?"}
+    E -->|yes| F["toast『DL失敗:<br/>画像が見つかりません』"]
+    E -->|no| G["各 leaf を順次処理"]
+    G --> H["caches.open(cacheNameFor(lp))"]
+    H --> I["各ファイル順次:<br/>url = OfflineCore.imageUrl(lp, f)<br/>※per-segment percent-encoding"]
+    I --> J["fetch(url, signal)<br/>※PR#59: AbortController"]
+    J --> K["clone ×2 — 消費順が重要:<br/>① cacheClone → cache.put(url, cacheClone)<br/>② sizeClone → Content-Length欠損時<br/>blob().size で bytes 計算"]
+    K --> L["done++<br/>updateProgress → --progress = pct×360deg<br/>(conic-gradient リング)"]
+    L -->|次のファイル| I
+    L -->|leaf完了| M["OfflineStore.put({folder: lp,<br/>cacheName, pageCount, cachedCount,<br/>bytes, thumb, addedAt維持, lastReadAt})"]
+    M -->|次のleaf| H
+    M --> N["updateStorageBar → refreshOfflineMap<br/>→ renderView → toast『DL完了』"]
+    J -->|QuotaExceededError| Q{"明示DLか？"}
+    Q -->|はい| Q2["getOldest() → confirm<br/>『最も古い作品を削除して続行？』"]
+    Q2 -->|OK| Q3["caches.delete + OfflineStore.delete<br/>→ 1回だけ再試行"]
+    Q2 -->|cancel| Q4["toast『容量不足のため中断』"]
+    Q3 -->|再度超過| Q4
+    Q -->|"自動キャッシュ(SW内)"| Q5["静かにスキップ<br/>.catch(() =&gt; {})<br/>ダイアログなし"]
+
+    style F fill:#3a2226,stroke:#c05b5b,color:#e8c9c9
+    style Q4 fill:#3a2226,stroke:#c05b5b,color:#e8c9c9
+</pre>
+  </div>
+
+  <ul class="tight">
+    <li><b>URL 生成は <code>encodePath</code> 1 箇所のみ</b> — パスセグメントごとに <code>encodeURIComponent</code> し <code>/</code> は残す。ビューア・サムネ・DL のキャッシュキーが完全一致しないと <code>caches.match</code>（完全一致）でヒットしない。</li>
+    <li><b>clone の消費順</b> — <code>cacheClone</code> を先に put し、<code>sizeClone</code> でサイズ取得。逆だと iOS（Content-Length 欠損環境）で bytes が 0 になる。</li>
+    <li><b>addedAt は再 DL でも維持</b> — LRU 退避（Safari 7 日対策）の対象期間を保つため。</li>
+  </ul>
+</section>
+
+<!-- ══════════════════════ 3 ══════════════════════ -->
+<section id="delete">
+  <h2><span class="num">03</span>削除パイプライン（deleteWork）</h2>
+  <div class="card mermaid-box">
+<pre class="mermaid">
+flowchart LR
+    A["deleteWork(folder)"] --> B["targets =<br/>getLeafPathsFor(folder)<br/>∪ { folder 自身 }"]
+    B --> C{"各 target"}
+    C --> D["rec = OfflineStore.get(t)<br/>cn = rec?.cacheName ?? cacheNameFor(t)"]
+    D --> E["caches.delete(cn)"]
+    D --> F["OfflineStore.delete(t)"]
+    E --> G["updateStorageBar<br/>→ refreshOfflineMap<br/>→ renderView"]
+    F --> G
+    G --> H["toast『削除しました』"]
+
+    style H fill:#20303f,stroke:#4a7ac4,color:#cfe0f5
+</pre>
+  </div>
+  <p class="desc">Undo は無し（toast のみ即削除）。PR #59 では削除実行中に <code>pointer-events:none</code> ロック＋リング表示が入り、外側タップ/Esc も無効になる。</p>
+</section>
+
+<!-- ══════════════════════ 4 ══════════════════════ -->
+<section id="storage">
+  <h2><span class="num">04</span>ストレージモデル</h2>
+  <div class="card mermaid-box">
+<pre class="mermaid">
+erDiagram
+    IDB ||--o{ WORKS : "works store (keyPath=folder)"
+    WORKS {
+        string folder PK "leafパス"
+        string cacheName "bookq-work-(encoded)-v1"
+        number pageCount "総ページ数"
+        number cachedCount "PR59 部分DL対応"
+        number bytes "合計バイト"
+        string thumb "先頭ファイル名"
+        number addedAt "追加日時"
+        number lastReadAt "LRU退避の基準"
+    }
+    CS ||--o{ PERWORK : "作品ごとのキャッシュ"
+    CS ||--|| FALLBACK : "画像フォールバック"
+    CS ||--|| APICACHE : "API NetworkFirst"
+    CS ||--|| SHELL : "precache"
+    PERWORK {
+        string name "bookq-work-(encoded)-v1"
+        string entries "image/(encoded path) 完全一致URL"
+    }
+    FALLBACK {
+        string name "bookq-images-fallback"
+    }
+    APICACHE {
+        string name "bookq-api-v1"
+    }
+    SHELL {
+        string entries "/ · offline.html · manifest.json"
+    }
+    WORKS ||--o{ PERWORK : "cacheName で紐付け"
+</pre>
+  </div>
+  <ul class="tight">
+    <li><b>レコード粒度＝leaf ごと 1 件</b>（＋直下画像を持つフォルダ自身）。例：<code>group/episodes/ch-1〜ch-11</code> なら 4 件。</li>
+    <li><b>byte 合計の二重計上対策</b> — <code>dedupedBytes()</code> が「子孫レコードを持つ親レコード」を除外して合算。harness の raw sum vs dedup sum 比較で検証される。</li>
+    <li><b>Safari 7 日自動削除対策</b> — 起動時にキャッシュ 1 件 touch（LRU 対象外へ）、初回ジェスチャで <code>navigator.storage.persist()</code>（リスナは <code>{once:true}</code>）。</li>
+  </ul>
+</section>
+
+<!-- ══════════════════════ 5 ══════════════════════ -->
+<section id="sw">
+  <h2><span class="num">05</span>Service Worker のリクエストルーティング</h2>
+  <p class="desc">自動キャッシュは CacheFirst が担う — ビューアで開いたページ＋先読み窓（<code>PREFETCH_AHEAD=8</code>）が自然にキャッシュへ溜まる。<strong>明示的 DL との違いは quota 超過時の挙動だけ</strong>（自動＝黙って諦める／明示＝確認ダイアログ）。</p>
+  <div class="card mermaid-box">
+<pre class="mermaid">
+flowchart TD
+    REQ["fetch イベント"] --> H{"/api/health +<br/>online_check or X-Online-Check"}
+    H -->|yes| NET["network only（素通し）<br/>VPN 分断検出用"]
+    H -->|no| IMG{"/image/* or<br/>destination=image"}
+    IMG -->|yes| CF["CacheFirst"]
+    CF --> HIT{"caches.match"}
+    HIT -->|hit| RET["返す"]
+    HIT -->|miss| FETCH["fetch"]
+    FETCH -->|"!ok or 206<br/>(Range bypass)"| PASS["そのまま返す<br/>※キャッシュしない"]
+    FETCH -->|ok| PUT["clone → c.put → 返す<br/>失敗時も握りつぶし"]
+    IMG -->|no| API{"/api/*"}
+    API -->|yes| NF["NetworkFirst (api-v1)"]
+    API -->|no| NAV{"navigation"}
+    NAV -->|yes| NFN["NetworkFirst → 同一URL cache<br/>→ /static/offline.html<br/>→ precache済み /"]
+    NAV -->|no| ST["static 通常処理"]
+
+    style NET fill:#3a3022,stroke:#c9a24f,color:#eadfc9
+    style NFN fill:#20303f,stroke:#4a7ac4,color:#cfe0f5
+</pre>
+  </div>
+</section>
+
+<!-- ══════════════════════ 6 ══════════════════════ -->
+<section id="pr59">
+  <h2><span class="num">06</span>PR #59 — ダウンロードボタン再設計 <span class="badge-open">OPEN</span></h2>
+  <p class="desc"><code>feat(download): 右上1ボタン統合・確認モーダル・部分2択・Abort単一削除</code>（+1297 / −120）</p>
+
+  <table>
+    <tr><th style="width:50%">Before</th><th>After (PR #59)</th></tr>
+    <tr><td>バッジ <code>.offline-badge</code>(⬇︎/✓オフライン) ＋ 右下 <code>.offline-action</code>(DL/削除) の 2 要素</td><td>右上 <strong><code>.offline-btn</code> 1 要素</strong>（44px 円形）に統合</td></tr>
+    <tr><td>中央モーダルで確認（先行コミット）→ 撤去</td><td><strong>バッジ inline 確認</strong>: 通常グレー → 1 クリックで色が明るく（青/赤）→ 再タップで確定</td></tr>
+    <tr><td>確認は 3 秒自動キャンセル</td><td><strong>廃止</strong>。外側タップ / Esc で戻る</td></tr>
+    <tr><td>中断＝全部やり直し</td><td><strong>AbortController ＋ 当該 1 ファイルのみ cache.delete</strong>。済み分は保持（PARTIAL）</td></tr>
+    <tr><td>—</td><td>PARTIAL は細リング表示、タップで<strong>全画面オーバーレイ＋縦並び 2 択</strong>（左 青⬇ 続行 / 右 赤🗑 削除）<br/>※ <strong>UX refinements 後は popover 方式に置き換え</strong>（下の注記行参照）</td></tr>
+    <tr><td>—</td><td>DELETING はリング＋ロック（<code>pointer-events:none</code>）、キャンセル不可</td></tr>
+    <tr><td>—</td><td><strong>UX refinements 後（現行仕様）</strong>: 確認なし<strong>単タップ開始 / 単タップ停止</strong>、部分確認は全画面オーバーレイから<strong>ボタン直下のラベル付き popover</strong>（<code>.ux-pop</code>）へ、リングは<strong>穴あき</strong>でグリフ常時可視、一覧取得中は <code>is-listing</code> 回転弧、quota 確認はアプリ内モーダル化。以下の状態図・テーブルはこの最新仕様</td></tr>
+  </table>
+
+  <div class="card mermaid-box">
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> DOWNLOADING: 単タップ downloadWork()
+    DOWNLOADING --> STOPPING: 単タップ abort()
+    STOPPING --> PARTIAL: 確定（済み分保持）
+    STOPPING --> IDLE: 確定（0件）
+    DOWNLOADING --> COMPLETE: 全件完了
+
+    PARTIAL --> POPOVER: タップ .ux-pop 開く
+    POPOVER --> DOWNLOADING: 続きをダウンロード
+    POPOVER --> DELETING: 削除
+    POPOVER --> PARTIAL: 再タップ / 外側タップ / Esc
+
+    COMPLETE --> CONFIRM_DELETE: タップ（グレー✓→赤🗑）
+    CONFIRM_DELETE --> DELETING: 赤再タップ deleteWork()
+    CONFIRM_DELETE --> COMPLETE: 外側タップ / Esc
+
+    DELETING --> IDLE: 完了（ロック中は操作不可）
+</pre>
+  </div>
+
+  <table>
+    <tr><th>状態</th><th>表示</th><th>class / 要素</th></tr>
+    <tr><td>未DL</td><td>グレー 太⬇</td><td><code>.state-idle</code></td></tr>
+    <tr><td>DL中（一覧取得中）</td><td>回転弧スピナ（<code>prefers-reduced-motion</code> では静止弧）</td><td><code>.state-downloading.is-listing</code></td></tr>
+    <tr><td>DL中（保存中）</td><td>穴あき conic-gradient リング（<code>--progress</code>）、グリフ常時可視</td><td><code>.state-downloading</code></td></tr>
+    <tr><td>停止確定待ち</td><td>■ 表示＋ロック（タップ不可）</td><td><code>.state-stopping</code></td></tr>
+    <tr><td>部分</td><td>穴あき細リング＋⬇（0 &lt; cachedCount &lt; pageCount）</td><td><code>.state-partial</code></td></tr>
+    <tr><td>部分 popover</td><td>ボタン直下のラベル付き popover（「続きをダウンロード」＋残りページ数／「削除」＋保存済みページ数）。単一開放・トグル・最下部で上反転・Esc/外側タップで閉じる。z-56</td><td><code>.ux-pop</code></td></tr>
+    <tr><td>完了</td><td>グレー ✓ のみ（「オフライン」文字廃止）</td><td><code>.state-complete</code></td></tr>
+    <tr><td>確認削除</td><td>明赤 🗑</td><td><code>.state-confirm-delete</code></td></tr>
+    <tr><td>削除中</td><td>リング＋ロック、backdrop/Esc 無効</td><td><code>.state-deleting</code></td></tr>
+  </table>
+
+  <ul class="tight">
+    <li>状態は <code>getOfflineBtnState(folder)</code>（idle / downloading / stopping / complete / deleting / partial / confirm-delete）が <code>isFolderOffline</code> × <code>getPartialProgress</code> から導出。</li>
+    <li>6 表示モード（tile / list / card × 通常/検索）すべてで同一の委譲リスナ 1 本が振り分け。ボタンと popover は実 <code>&lt;button&gt;</code> なので Enter / Space のネイティブ活性化で操作できる。</li>
+    <li>quota 超過時の明示 DL はアプリ内モーダル <code>showQuotaConfirm()</code>（「削除して続行」/「キャンセル」）で再試行。<code>window.confirm</code> は廃止。成功トーストは中立色、エラーは赤、オフライン表示は琥珀色（<code>#c9a24f</code>）。</li>
+    <li>削除は従来どおり2タップ確認（<code>_confirmMap</code>）＋ DELETING ロック（<code>_deletingSet</code>）。Undo なし。</li>
+    <li><strong>sw.js と offline-core.js は無変更</strong>（ガードレール厳守）。</li>
+    <li>テスト: <code>test_download_button.py</code>（新規 6 件）＋ <code>test_offline.py</code>（文言移行）＋ <code>test_offline_harness.py</code>（10 件維持）。</li>
+  </ul>
+</section>
+
+<!-- ══════════════════════ 7 ══════════════════════ -->
+<section id="state-logic">
+  <h2><span class="num">07</span>オフライン判定ロジック（状態の源流）</h2>
+  <div class="card mermaid-box">
+<pre class="mermaid">
+flowchart LR
+    TREE["tree（フォルダツリー）"] --> CLP["computeLeafPathsFor(folder)"]
+    CLP --> MEMO[("leafPathsCache<br/>tree 再代入時に全消去")]
+    MEMO --> GLP["getLeafPathsFor(folder)"]
+
+    IDB2[("OfflineStore.getAll")] --> ROMAP["refreshOfflineMap()<br/>offlineMap 同期キャッシュ"]
+
+    GLP --> IFO{"isFolderOffline(folder)"}
+    ROMAP --> IFO
+    IFO -->|"自分が offlineMap にある"| T1["true = COMPLETE"]
+    IFO -->|"leaf ≥ 2 または 子leaf のみ"| ALLQ{"全 leaf が offline ?"}
+    ALLQ -->|yes| T2["true = COMPLETE"]
+    ALLQ -->|no| P["PARTIAL 判定へ<br/>cachedCount / pageCount"]
+
+    IFO --> STATE["getOfflineBtnState(folder)"]
+    P --> STATE
+
+    style STATE fill:#20303f,stroke:#4a7ac4,color:#cfe0f5
+</pre>
+  </div>
+  <ul class="tight">
+    <li>leaf 列挙ルール: 画像のみのフォルダ → 自身が leaf ／ 子フォルダあり → 子孫 leaf を集約 ／ 直下画像もあればそれも追加。</li>
+    <li>既知のギャップ: 画像と子フォルダの混在フォルダは直下画像が UI から到達不可（characterization test で担保）。</li>
+    <li>単一子 flatten でツリーから消えたノード向けに <code>_fullPath</code> 走査フォールバックあり。</li>
+  </ul>
+</section>
+
+<!-- ══════════════════════ 8 ══════════════════════ -->
+<section id="timeline">
+  <h2><span class="num">08</span>変遷タイムライン</h2>
+  <div class="card mermaid-box">
+<pre class="mermaid">
+timeline
+    title ダウンロード機能の変遷
+    基盤構築
+        offline-cache-download : 自動キャッシュ + 明示DL/削除 : IndexedDB + Cache Storage基盤 : Safari 7日対策
+        offline-qa-harness : QA ハーネス（10 失敗モード可視化）
+    PR #59（OPEN）
+        右上1ボタン統合 : 中央モーダル → バッジinline確認（青/□/赤）
+        : 3秒自動キャンセル廃止 → 外側タップ/Esc
+        : 部分確認 = 全画面不透明 + 縦2バッジ
+        : Abort単一ファイル削除 → PARTIAL 保持
+</pre>
+  </div>
+  <p class="desc">PR #59 内でもコミット履歴が試行錯誤を記録している（中央モーダル → inline バッジ確認 → 部分確認は全画面不透明＋縦 2 バッジ → 3 秒自動キャンセル廃止）。設計経緯は <code>.omo/plans/download-button-redesign.md</code> に全文がある。</p>
+</section>
+
+<footer>
+  Generated for bookq — 図は Mermaid 11（CDN）で描画。オフラインで見る場合は一度オンラインで開いてから保存。
+  Source: <a href="https://github.com/kentoku24/bookq/pull/59">PR #59</a> · <code>app/static/{app.js, sw.js, offline-core.js}</code> · <code>.omo/plans/*.md</code>
+</footer>
+
+</main>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    securityLevel: 'loose',
+    themeVariables: {
+      darkMode: true,
+      background: '#151a21',
+      primaryColor: '#20303f',
+      primaryTextColor: '#dfe5ee',
+      primaryBorderColor: '#4a7ac4',
+      secondaryColor: '#1b212b',
+      secondaryTextColor: '#dfe5ee',
+      tertiaryColor: '#1b212b',
+      lineColor: '#5a6a82',
+      textColor: '#dfe5ee',
+      mainBkg: '#1b2530',
+      nodeBorder: '#4a7ac4',
+      clusterBkg: '#10141a',
+      clusterBorder: '#2a3240',
+      titleColor: '#93a0b4',
+      edgeLabelBackground: '#151a21',
+      labelBoxBkgColor: '#1b2530',
+      noteBkgColor: '#2a3022',
+      // state diagram
+      compositeBackground: '#10141a',
+      altBackground: '#10141a',
+      // er diagram
+      attributeBackgroundColorOdd: '#1b212b',
+      attributeBackgroundColorEven: '#161c24'
+    },
+    fontFamily: '-apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif',
+    flowchart: { curve: 'basis', padding: 12 },
+    er: { fontSize: 13 }
+  });
+
+  // TOC active-state highlighting
+  const links = document.querySelectorAll('aside nav a');
+  const sections = [...links].map(a => document.querySelector(a.getAttribute('href')));
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + e.target.id));
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(s => s && io.observe(s));
+</script>
+</body>
+</html>

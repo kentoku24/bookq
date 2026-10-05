@@ -1,0 +1,14 @@
+downloads/
+.git/
+.omo/
+.omc/
+.codegraph/
+__pycache__/
+.DS_Store
+.env
+*.md
+# worktree は .claude/worktrees/ 以下に作られる。除外しないと、メインの
+# チェックアウトからビルドしたときに全 worktree が build context に入る。
+.claude/
+docs/
+tests/

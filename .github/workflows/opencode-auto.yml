@@ -1,0 +1,529 @@
+name: opencode-auto
+run-name: "oc-auto #${{ github.event.issue.number || github.event.client_payload.issue_number || github.event.client_payload.issue_number }}"
+
+on:
+  issues:
+    types: [opened, labeled]
+  repository_dispatch:
+    types: [openresearch-issue]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: oc-auto-${{ github.event.issue.number || github.event.client_payload.issue_number }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------
+  # gate — evaluate event, acquire the 🤖 processing lock BEFORE any
+  # cancellable region. 失効ロック (stale lock): if the sentinel label is
+  # already present it belongs to a cancelled/timed-out previous run —
+  # delete it and PROCEED normally (recovery is visible, never a silent exit).
+  # ------------------------------------------------------------------
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      route: ${{ steps.eval.outputs.route }}
+      allow: ${{ steps.eval.outputs.allow }}
+      mention: ${{ steps.eval.outputs.mention }}
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Evaluate event gate
+        id: eval
+        env:
+          EVENT_JSON: ${{ toJSON(github.event) }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          out=$(printf '%s' "$EVENT_JSON" | bash .github/scripts/gate.sh)
+          printf '%s\n' "$out"
+          route=$(printf '%s\n' "$out" | sed -n 's/^route=//p')
+          allow=$(printf '%s\n' "$out" | sed -n 's/^allow=//p')
+          mention=$(printf '%s\n' "$out" | sed -n 's/^mention=//p')
+          {
+            echo "route=$route"
+            echo "allow=$allow"
+            echo "mention=$mention"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify openresearch dispatch marker
+        if: github.event_name == 'repository_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.client_payload.issue_number }}
+        run: |
+          set -euo pipefail
+          body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body --jq '.body')
+          if ! printf '%s' "$body" | grep -qF 'Related: kentoku24/openresearch#'; then
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+              --body "⚠️ Unauthorized repository_dispatch (no openresearch Related marker) — ignoring."
+            echo "::error::dispatch issue #$ISSUE_NUMBER missing Related marker"
+            exit 1
+          fi
+
+      # Lock-acquisition point (BEFORE cancellable region). GITHUB_TOKEN only
+      # — App tokens are FORBIDDEN for label ops because they refire workflows.
+      - name: Acquire lock (add 🤖 processing)
+        if: steps.eval.outputs.allow == 'yes' && steps.eval.outputs.route != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          set -euo pipefail
+          labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join("\n")')
+          if printf '%s\n' "$labels" | grep -qxF '🤖 processing'; then
+            echo "::notice::sentinel already present — treating as 失効ロック (stale lock); deleting and proceeding normally"
+            gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing"
+          fi
+          # Clear the previous run's outcome so this run's result is the only one shown.
+          for l in "✅ done" "❌ failed"; do
+            if printf '%s\n' "$labels" | grep -qxF "$l"; then
+              gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "$l"
+            fi
+          done
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "🤖 processing"
+
+      - name: Guidance comment (no route label)
+        if: steps.eval.outputs.allow == 'yes' && steps.eval.outputs.route == 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body "この issue には AI ルートラベルがありません。 \`ai/implement\` または \`ai/research\` を付与すると自動実行されます（LLM 呼び出しは行っていません）。"
+
+      - name: Report gate error
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body "gate error — AI 実行に進みませんでした(run: ${RUN_URL})"
+
+  # ------------------------------------------------------------------
+  # implement — official anomalyco/opencode action path.
+  # ------------------------------------------------------------------
+  implement:
+    needs: gate
+    if: vars.USE_DIRECT_RUN != 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'implement'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
+    # No job-level concurrency: the workflow-level group already serializes per
+    # issue, and a job group equal to it deadlocks (job fails with 0 steps).
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run opencode (official action)
+        uses: anomalyco/opencode/github@3a103fe0aff726a4edc7492f03f7b88195d9e4c9
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+        with:
+          model: opencode-go/muse-spark-1.3-contributor
+          prompt: |
+            Implement the request described in issue #${{ github.event.issue.number || github.event.client_payload.issue_number }} of this repository.
+            Follow AGENTS.md strictly:
+            - Work on branch ai/<issue番号>-<slug> (slug: lowercase, spaces->hyphens, alnum only, <=50 chars).
+            - Small incremental commits with conventional-commit messages.
+            - Open a PR titled "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})" whose body references
+              #${{ github.event.issue.number || github.event.client_payload.issue_number }} and includes testing considerations.
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Playwright browsers (chromium + webkit)
+        run: uv run --with playwright playwright install --with-deps chromium webkit
+
+      - name: Run bookq test gate (iOS)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+
+      - name: Run bookq test gate (full suite)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+
+      - name: Swap label to ✅ done
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "✅ done"
+
+      - name: Swap label to ❌ failed + log comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "❌ failed"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Actions ログ: ${RUN_URL}"
+
+  # ------------------------------------------------------------------
+  # research — official action path; requires summary comment on the issue
+  # AND a report file docs/reports/YYYY-MM-DD-<slug>.md delivered via PR.
+  # ------------------------------------------------------------------
+  research:
+    needs: gate
+    if: vars.USE_DIRECT_RUN != 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'research'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
+    # No job-level concurrency: the workflow-level group already serializes per
+    # issue, and a job group equal to it deadlocks (job fails with 0 steps).
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run opencode (official action)
+        uses: anomalyco/opencode/github@3a103fe0aff726a4edc7492f03f7b88195d9e4c9
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+        with:
+          model: opencode-go/muse-spark-1.3-contributor
+          prompt: |
+            Research the topic of issue #${{ github.event.issue.number || github.event.client_payload.issue_number }} of this repository.
+            BOTH deliverables are REQUIRED:
+            1. Post a summary comment on issue #${{ github.event.issue.number || github.event.client_payload.issue_number }}.
+            2. Save a detailed report at docs/reports/YYYY-MM-DD-<slug>.md where <slug> follows the
+               AGENTS.md rule (lowercase, hyphens, alphanumeric only, <=50 chars) and open a PR
+               containing that file with title "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})"
+               referencing #${{ github.event.issue.number || github.event.client_payload.issue_number }} in the body.
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Playwright browsers (chromium + webkit)
+        run: uv run --with playwright playwright install --with-deps chromium webkit
+
+      - name: Run bookq test gate (iOS)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+
+      - name: Run bookq test gate (full suite)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+
+      - name: Swap label to ✅ done
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "✅ done"
+
+      - name: Swap label to ❌ failed + log comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "❌ failed"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Actions ログ: ${RUN_URL}"
+
+  # ------------------------------------------------------------------
+  # USE_DIRECT_RUN variant — direct `opencode run` CLI jobs replace the
+  # official-action jobs when vars.USE_DIRECT_RUN == 'true'.
+  # ------------------------------------------------------------------
+  implement-direct:
+    needs: gate
+    if: vars.USE_DIRECT_RUN == 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'implement'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
+    # No job-level concurrency: the workflow-level group already serializes per
+    # issue, and a job group equal to it deadlocks (job fails with 0 steps).
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Build prompt.txt (heredoc from env — NO shell expansion)
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          cat > prompt.txt <<'TEMPLATE'
+          Implement the GitHub issue below in this repository.
+          Follow AGENTS.md strictly: branch ai/<issue番号>-<slug> (slug: lowercase,
+          hyphens, alnum only, <=50 chars), small incremental conventional commits,
+          PR titled "<type>(ai): <要約> (#N)" referencing the issue, PR body must
+          include testing considerations.
+          TEMPLATE
+          printf '\nIssue number: %s\n\nIssue title:\n%s\n\nIssue body:\n%s\n' "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY" >> prompt.txt
+
+      - name: Configure git auth (GH_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "opencode-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install opencode CLI
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Run opencode CLI
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Playwright browsers (chromium + webkit)
+        run: uv run --with playwright playwright install --with-deps chromium webkit
+
+      - name: Run bookq test gate (iOS)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+
+      - name: Run bookq test gate (full suite)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+
+      - name: Branch, commit, push, open PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          # The prompt asks the agent to branch and open the PR itself. Reuse its
+          # branch instead of cutting a second one under our own slug (its slug
+          # rule differs, e.g. "fixsecurity" vs "fix-security"), which produced a
+          # duplicate PR of the same commit (#213 / #215).
+          cur=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$cur" != "HEAD" ] && [ "$cur" != "main" ]; then
+            branch="$cur"
+          else
+            slug=$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-50 | sed -E 's/-+$//')
+            branch="ai/${ISSUE_NUMBER}-${slug}"
+            git checkout -B "$branch"
+          fi
+          rm -f prompt.txt
+          git add -A
+          git commit -m "feat(ai): resolve issue #${ISSUE_NUMBER}" || echo "nothing to commit"
+          git push origin "$branch"
+          if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "PR for $branch already open (created by the agent)"
+          else
+            gh pr create --repo "$REPO" --base main --head "$branch" \
+              --title "feat(ai): resolve issue #${ISSUE_NUMBER}" \
+              --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
+          fi
+
+      - name: Success label transition
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "✅ done"
+
+      - name: Failure label transition + log comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "❌ failed"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Actions ログ: ${RUN_URL}"
+
+  research-direct:
+    needs: gate
+    if: vars.USE_DIRECT_RUN == 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'research'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
+    # No job-level concurrency: the workflow-level group already serializes per
+    # issue, and a job group equal to it deadlocks (job fails with 0 steps).
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Build prompt.txt (heredoc from env — NO shell expansion)
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          cat > prompt.txt <<'TEMPLATE'
+          Research the GitHub issue below in this repository.
+          BOTH deliverables are REQUIRED:
+          1. Post a summary comment on the issue using the gh CLI (GH_TOKEN is configured).
+          2. Save a detailed report at docs/reports/YYYY-MM-DD-<slug>.md (<slug>: lowercase,
+             hyphens, alnum only, <=50 chars per AGENTS.md) and open a PR containing that file,
+             titled "<type>(ai): <要約> (#N)" referencing the issue.
+          TEMPLATE
+          printf '\nIssue number: %s\n\nIssue title:\n%s\n\nIssue body:\n%s\n' "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY" >> prompt.txt
+
+      - name: Configure git auth (GH_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "opencode-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install opencode CLI
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Run opencode CLI
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Playwright browsers (chromium + webkit)
+        run: uv run --with playwright playwright install --with-deps chromium webkit
+
+      - name: Run bookq test gate (iOS)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+
+      - name: Run bookq test gate (full suite)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+
+      - name: Branch, commit, push, open PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          # Reuse the agent's branch/PR — see implement-direct.
+          cur=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$cur" != "HEAD" ] && [ "$cur" != "main" ]; then
+            branch="$cur"
+          else
+            slug=$(printf '%s' "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-50 | sed -E 's/-+$//')
+            branch="ai/${ISSUE_NUMBER}-${slug}"
+            git checkout -B "$branch"
+          fi
+          rm -f prompt.txt
+          git add -A
+          git commit -m "docs(ai): research report for issue #${ISSUE_NUMBER}" || echo "nothing to commit"
+          git push origin "$branch"
+          if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            echo "PR for $branch already open (created by the agent)"
+          else
+            gh pr create --repo "$REPO" --base main --head "$branch" \
+              --title "docs(ai): research report for issue #${ISSUE_NUMBER}" \
+              --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
+          fi
+
+      - name: Success label transition
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "✅ done"
+
+      - name: Failure label transition + log comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "❌ failed"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Actions ログ: ${RUN_URL}"
+
+  # ------------------------------------------------------------------
+  # cleanup — sweep the 🤖 processing sentinel whenever any runner job did
+  # not finish cleanly (idempotent with the ❌ failed swap above).
+  # Condition shape per dependency job B/C: needs.B.result != 'skipped'
+  # / needs.C.result != 'skipped' guards apply to every non-gate job.
+  # ------------------------------------------------------------------
+  cleanup:
+    needs: [implement, research, implement-direct, research-direct]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Sweep stale 🤖 processing label
+        if: >-
+          (needs.implement.result != 'success' && needs.implement.result != 'skipped') ||
+          (needs.research.result != 'success' && needs.research.result != 'skipped') ||
+          (needs.implement-direct.result != 'success' && needs.implement-direct.result != 'skipped') ||
+          (needs.research-direct.result != 'success' && needs.research-direct.result != 'skipped')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "🤖 processing" || true
+
+      # A job that fails before its first step (e.g. a concurrency deadlock or a
+      # workflow error) never reaches its own ❌ failed step. Mark it here unless
+      # the job already did. Cancellation is excluded: it means a newer run took over.
+      - name: Mark failure the runner job could not report
+        if: >-
+          needs.implement.result == 'failure' || needs.research.result == 'failure' ||
+          needs.implement-direct.result == 'failure' || needs.research-direct.result == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.client_payload.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join("\n")')
+          if printf '%s\n' "$labels" | grep -qxF '❌ failed'; then
+            echo "runner job already reported the failure"
+            exit 0
+          fi
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "❌ failed"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body "AI 実行ジョブが開始前に失敗しました。Actions ログ: ${RUN_URL}"

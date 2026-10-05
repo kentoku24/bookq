@@ -1,0 +1,441 @@
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body.login{width:100%;height:100%;background:radial-gradient(ellipse at 50% 30%,#1a1a2e 0%,#0d0d0d 70%);color:#ccc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+body.login{display:flex;align-items:center;justify-content:center}
+.login-box{text-align:center;background:rgba(30,30,30,0.5);border:1px solid rgba(255,255,255,0.06);border-radius:16px;padding:32px 40px;-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+.login-logo{width:180px;height:auto;margin:0 auto 24px;display:block}
+.login-box h1{font-size:26px;font-weight:200;color:#ccc;margin-bottom:24px;letter-spacing:-0.02em;line-height:1.1}
+.login-btn{display:inline-flex;align-items:center;gap:10px;padding:12px 28px;background:#1a1a1a;border:1px solid #333;border-radius:10px;color:#ccc;font-size:15px;cursor:pointer;text-decoration:none;transition:background .15s,border-color .15s;box-shadow:0 1px 3px rgba(0,0,0,0.3)}
+.login-btn:hover{background:#222;border-color:#555}
+.login-btn:active{transform:scale(0.97);background:#252525;transition:transform 80ms ease-out,background 80ms ease-out}
+.login-btn img{width:20px;height:20px}
+@supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+  .login-box{background:rgba(30,30,30,0.5);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+}
+@media (prefers-reduced-motion:reduce){
+  .login-btn{transition-duration:0.01ms !important}
+}
+@media (prefers-reduced-transparency:reduce){
+  .login-box{background:rgba(30,30,30,0.95) !important;-webkit-backdrop-filter:none !important;backdrop-filter:none !important}
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#0d0d0d;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+html{overscroll-behavior:auto}
+body{position:fixed;inset:0}
+
+	/* ── sidebar ── */
+	#sidebar{position:fixed;top:0;left:0;bottom:0;width:280px;background:#141414;border-right:1px solid #2a2a2a;z-index:10;display:flex;flex-direction:column;transform:translateX(-100%);transition:transform .35s cubic-bezier(0.25,0.1,0.25,1.0)}
+@supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+  #sidebar{background:rgba(20,20,20,0.75);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);border-right:1px solid rgba(255,255,255,0.08)}
+}
+	#sidebar.open{transform:translateX(0)}
+		#sidebar-header{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 12px;box-shadow:0 1px 0 rgba(255,255,255,0.04),0 4px 12px rgba(0,0,0,0.3)}
+		#sidebar-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:auto;touch-action:pan-y;display:flex;flex-direction:column}
+		#sidebar-header h1{font-size:16px;font-weight:600;color:#e0e0e0;white-space:nowrap;flex-shrink:0;letter-spacing:-0.01em;line-height:1.2}
+		#sidebar-header #filter-btn{margin-left:auto}
+		#offline-status{font-size:11px;color:#8ab4f8;white-space:nowrap;margin-left:0;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;min-height:44px;padding:0 8px;margin:-12px 0}
+		#offline-status:visited{color:#8ab4f8}
+		#offline-status:hover{color:#a8c4ff;text-decoration:underline}
+		#offline-status:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px;border-radius:2px}
+		#offline-status.offline{color:#c9a24f}
+		#offline-status.offline:visited{color:#c9a24f}
+		#offline-status.offline:hover{color:#dabb6a}
+		#search{min-width:0;padding:0 16px}
+		#search input{width:100%;padding:6px 10px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#ccc;font-size:13px;outline:none;min-height:44px}
+	#search input:focus{border-color:#555}
+	/* tile grid — flex-wrap with responsive column widths */
+	#tile-grid{flex:1;padding:8px;display:flex;flex-wrap:wrap;gap:8px;align-content:flex-start}
+	#tile-grid::-webkit-scrollbar{width:4px}
+	#tile-grid::-webkit-scrollbar-track{background:transparent}
+	#tile-grid::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
+	.tile{width:calc(50% - 4px);cursor:pointer;border-radius:6px;overflow:hidden;background:#1a1a1a;border:1px solid #2a2a2a;transition:border-color .15s,transform .1s}
+	@media(min-width:500px){.tile{width:calc(25% - 6px)}}
+	@media(min-width:750px){.tile{width:calc(16.666% - 6.67px)}}
+	@media(min-width:1000px){.tile{width:calc(12.5% - 7px)}}
+	@media(min-width:1400px){.tile{width:calc(10% - 7.2px)}}
+	.tile{cursor:pointer;border-radius:6px;overflow:hidden;background:#1a1a1a;border:1px solid #2a2a2a;transition:border-color .15s,transform .1s}
+	.tile:hover{border-color:#555;transform:scale(1.03)}
+	.tile.active{border-color:#4a7ac4;box-shadow:0 0 0 1px #4a7ac4}
+	.tile-img{width:100%;aspect-ratio:2/3;object-fit:cover;object-position:center;display:block;background:#0d0d0d}
+	.tile-placeholder{width:100%;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;background:#111;color:#8f8f8f;font-size:28px}
+	/* multi-thumbnail grid for folders with sub-folders */
+	.tile-multi{width:100%;aspect-ratio:2/3;display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:1px;background:#1a1a1a;overflow:hidden}
+	.tile-multi img{width:100%;height:100%;object-fit:cover;object-position:center;display:block;background:#0d0d0d}
+	.tile-name{position:relative;padding:6px 8px 4px;font-size:11px;color:#ccc;display:flex;flex-direction:column;gap:1px;min-width:0;text-align:center;letter-spacing:0.01em;line-height:1.3}
+	.tile-count{font-size:10px;color:#9a9a9a;text-align:center;padding:0 8px 6px;letter-spacing:0.02em}
+
+	/* transient toast (S-F2) — role=alert live region, auto-dismiss.
+	   Base is neutral; .err (red) and .ok (neutral-emphasis border) variants
+	   are applied by showErrorToast / showToastSuccess. */
+	#toast{position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-10px);background:#22262d;color:#dfe5ee;border:1px solid #2a2a2a;border-radius:10px;padding:10px 16px;font-size:13px;line-height:1.4;z-index:60;max-width:calc(100vw - 32px);text-align:center;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s}
+	#toast.visible{opacity:1;transform:translateX(-50%) translateY(0)}
+	#toast.err{background:#2a1f1f;color:#ffb4b4;border-color:#5c2a2a}
+	#toast.ok{border-color:#2f4a38}
+	/* sidebar footer — split: count | button */
+	#sidebar-footer{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;font-size:11px;color:#9a9a9a;box-shadow:0 -1px 0 rgba(255,255,255,0.04),0 -4px 12px rgba(0,0,0,0.2)}
+	#sidebar-footer .footer-right{flex:1;text-align:right}
+	#sidebar-footer #storage-text{font-size:11px;color:#9a9a9a;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:1;margin-left:8px}
+	#footer-refresh-btn{background:none;border:1px solid #333;color:#888;font-size:14px;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1;transition:background .15s,color .15s;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+	#footer-refresh-btn:hover{background:#1e1e1e;color:#ccc}
+	#footer-refresh-btn:active{background:#2a2a2a}
+	#logout-btn{background:none;border:1px solid #333;color:#888;font-size:14px;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1;text-decoration:none;transition:background .15s,color .15s;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+	#logout-btn:hover{background:#1e1e1e;color:#c44}
+	#harness-link{display:inline-flex;align-items:center;min-height:44px;padding:0 6px;white-space:nowrap}
+	#app-version{white-space:nowrap}
+	#menu-btn:active{background:rgba(255,255,255,0.15);transform:scale(0.95)}
+	.tile:active{transform:scale(0.97);border-color:#666;transition:transform 80ms ease-out}
+	/* badge-only press suppression in EVERY context. The ID-scoped selector is
+	   load-bearing: unscoped .card:has(...) loses specificity to
+	   #tile-grid.card-mode .card:active. List rows (.item) have no transform rule. */
+	.tile:has(.offline-btn:active),
+	.card:has(.offline-btn:active),
+	#tile-grid.card-mode .card:has(.offline-btn:active){transform:none;border-color:#2a2a2a}
+	#footer-refresh-btn:active{background:#2a2a2a;color:#ccc}
+	#logout-btn:active{background:#2a2a2a;color:#c44}
+	#page-slider::-webkit-slider-thumb:active{background:#ccc;transform:scale(1.15)}
+	#page-slider::-moz-range-thumb:active{background:#ccc;transform:scale(1.15)}
+	/* list-mode items (when #tile-grid.list-mode) */
+	#tile-grid.list-mode{display:block;padding:0}
+	#tile-grid.list-mode .item{padding:10px 16px;cursor:pointer;font-size:13px;border-bottom:1px solid #1a1a1a;transition:background .15s;line-height:1.4;word-break:break-all;display:flex;align-items:center;gap:6px}
+	#tile-grid.list-mode .item:hover{background:#1e1e1e}
+	#tile-grid.list-mode .item.active{background:#2a3a5c;color:#fff;font-weight:600}
+	#tile-grid.list-mode .item .icon{flex-shrink:0;font-size:14px;width:18px;text-align:center}
+	#tile-grid.list-mode .item .chevron{flex-shrink:0;font-size:10px;width:16px;text-align:center;transition:transform .15s;color:#666}
+	#tile-grid.list-mode .item.expanded>.chevron{transform:rotate(90deg)}
+	#tile-grid.list-mode .item.folder .name{color:#bbb}
+	#tile-grid.list-mode .item.image .name{color:#999;font-size:12px}
+	#tile-grid.list-mode .item .thumb{height:34px;max-width:48px;object-fit:cover;margin-left:auto;flex-shrink:0;border-radius:3px;opacity:.75;background:#1a1a1a}
+	#tile-grid.list-mode .item.children{display:none}
+	#tile-grid.list-mode .item.expanded>.children{display:block}
+	#tile-grid.list-mode .item[data-depth="0"]{padding-left:16px}
+	#tile-grid.list-mode .item[data-depth="1"]{padding-left:36px}
+	#tile-grid.list-mode .item[data-depth="2"]{padding-left:56px}
+	#tile-grid.list-mode .item[data-depth="3"]{padding-left:76px}
+	#tile-grid.list-mode .item[data-depth="4"]{padding-left:96px}
+#tile-grid.list-mode .item .thumb{margin-left:auto; order:11;}
+
+/* ── main viewer ── */
+#viewer{position:fixed;top:0;left:0;right:0;bottom:0;z-index:1}
+#viewer.sidebar-open{left:280px}
+
+/* toolbar */
+#toolbar{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;gap:10px;padding:calc(6px + env(safe-area-inset-top, 0px)) 12px 6px;min-height:56px;box-sizing:border-box;background:linear-gradient(to bottom,rgba(0,0,0,.6),rgba(0,0,0,.3));-webkit-backdrop-filter:blur(16px) saturate(150%);backdrop-filter:blur(16px) saturate(150%);border-bottom:1px solid rgba(255,255,255,0.06);pointer-events:none}
+@supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+  #toolbar{background:linear-gradient(to bottom,rgba(0,0,0,.5),rgba(0,0,0,.2));-webkit-backdrop-filter:blur(16px) saturate(150%);backdrop-filter:blur(16px) saturate(150%)}
+}
+#toolbar>*{pointer-events:auto}
+#menu-btn{background:none;border:none;color:#ccc;font-size:20px;cursor:pointer;padding:6px 8px;border-radius:4px;line-height:1;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+#menu-btn:hover{background:rgba(255,255,255,.1)}
+#folder-name{font-size:13px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;letter-spacing:0.005em;cursor:pointer}
+#page-slider-wrap{display:none;flex:1;min-width:0;align-items:center;padding:0 4px}
+#page-slider-wrap.visible{display:flex}
+#page-slider{flex:1;min-width:0;height:44px;-webkit-appearance:none;appearance:none;background:transparent;outline:none;direction:rtl;cursor:pointer}
+#page-slider::-webkit-slider-runnable-track{height:8px;border-radius:4px;background:#333}
+#page-slider::-moz-range-track{height:8px;border-radius:4px;background:#333}
+#page-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:24px;height:24px;border-radius:50%;background:#aaa;cursor:pointer;border:none;margin-top:-8px}
+#page-slider::-moz-range-thumb{width:24px;height:24px;border-radius:50%;background:#aaa;border:none;cursor:pointer}
+#counter{font-size:13px;color:#888;margin-left:auto;white-space:nowrap;letter-spacing:0.01em}
+
+/* image container */
+#img-container{width:100%;height:100%;position:relative;overflow:hidden}
+
+/* Horizontal page strip — finger-follow drag.
+   Each <img> keeps its native aspect ratio (height:100%, width:auto) so the
+   image content *is* the box (no letterboxing). Absolute positioning lets us
+    lay pages out right-to-left (manga order) with a 5px gap in single/portrait
+    mode. Landscape spread uses 0px gap within spread, 10px between spreads. */
+/* Zoom layer — viewer/zoom.js owns its transform (absolute zoom + pan).
+   It wraps #img-track only; the tap zones stay outside it so their geometry
+   never scales. transform-origin 0 0 keeps the anchor math a plain
+   translate+scale in this element's own (container-local) coordinates. */
+#zoom-layer{position:absolute;inset:0;transform-origin:0 0;transition:none}
+body.zoomed #zoom-layer{will-change:transform}
+body.zoomed #zone-prev,body.zoomed #zone-next{pointer-events:none}
+/* #zone-toggle's default left:40%/width:20% (below) already matches this;
+   the zoomed-only override was a redundant dead rule. */
+body.zoomed #hint{display:none}
+#img-container,#img-track,#img-track *,#zone-prev,#zone-next,#zone-toggle,#hint,#spread-controls,#spread-controls *,#empty{touch-action:none}
+#toolbar #menu-btn,#toolbar #folder-name,#toolbar #counter{touch-action:none}
+#page-slider-wrap,#page-slider{touch-action:pan-x}
+#img-track{position:absolute;top:0;left:0;height:100%;will-change:transform;transition:transform .25s ease}
+/* The layout unit is the SPREAD (1-2 pages), not the page. JS contain-fits each
+   spread against the viewport from its pages' real aspect ratios and writes the
+   width/height/left; CSS only anchors it. row-reverse puts the first child (the
+   lower page index) on the RIGHT, which is manga reading order. */
+#img-track .spread-container{position:absolute;bottom:0;display:flex;flex-direction:row-reverse;align-items:flex-end;pointer-events:none}
+/* Portrait keeps the pre-existing vertical centering; landscape is bottom-anchored
+   (画面下端を原点) so pages never ride under the toolbar. */
+body.portrait #img-track .spread-container{bottom:50%;transform:translateY(50%)}
+#img-track .page-cell{position:relative;flex:none;display:flex;align-items:flex-end;justify-content:center;pointer-events:none;background:#161616;box-shadow:inset 0 0 0 1px #262626}
+#img-track .page-cell img{display:block;width:100%;height:100%;pointer-events:none;-webkit-user-drag:none;user-select:none;opacity:0;transition:opacity .15s}
+#img-track .page-cell img.loaded{opacity:1}
+.chapter-divider{position:absolute;top:50%;transform:translateY(-50%);font-size:11px;color:rgba(255,255,255,0.25);white-space:nowrap;pointer-events:none;writing-mode:vertical-rl;text-orientation:mixed;letter-spacing:0.05em;z-index:3}
+
+/* hint overlay (shown briefly on load) */
+#hint{position:absolute;bottom:60px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.7);color:#888;font-size:12px;padding:6px 14px;border-radius:20px;pointer-events:none;opacity:0;transition:opacity .4s;letter-spacing:0.01em}
+#hint.show{opacity:1}
+
+/* touch zones — excluded from toolbar/slider area */
+#zone-prev,#zone-next,#zone-toggle{position:absolute;top:0;bottom:0;z-index:2;cursor:pointer}
+#zone-prev{left:0;width:40%}      /* tap → next page (advance) */
+#zone-toggle{left:40%;width:20%}  /* tap → toggle toolbar */
+#zone-next{right:0;width:40%}     /* tap → previous page (go back) */
+
+/* toolbar hide */
+#toolbar{transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0)}
+#toolbar.hidden{opacity:0;pointer-events:none}
+
+/* empty state */
+#empty{display:flex;align-items:center;justify-content:center;height:100%;color:#9a9a9a}
+#empty p{font-size:16px;text-align:center;line-height:2}
+
+/* loading spinner */
+#spinner{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:40px;height:40px;border:3px solid #333;border-top-color:#888;border-radius:50%;animation:spin .6s linear infinite}
+#img-container.loading #spinner{display:block}
+@keyframes spin{to{transform:translate(-50%,-50%) rotate(360deg)}}
+
+	/* tile mode: full-width sidebar */
+	#sidebar.tile-full{width:100%}
+	#viewer.sidebar-open.tile-full{left:0}
+
+	/* responsive */
+	@media(max-width:600px){
+  #sidebar{width:100%}
+  #viewer.sidebar-open{left:0}
+  /* 2-row toolbar: row1=menu+slider+counter, row2=folder-name.
+     #menu-btn's own min-height:44px pins row1 to 44px regardless of the
+     slider's hit-area, so row2 (folder-name) must fit in the remaining
+     budget: 64 - 44 - 14(folder-name line-height) - 1(border-bottom) = 5px,
+     split across top/bottom padding. The base #toolbar padding (6px, sized
+     for the single-row desktop layout) is too tall here — narrow it only
+     in this breakpoint. */
+  #toolbar{flex-wrap:wrap;row-gap:0;padding-top:calc(2px + env(safe-area-inset-top, 0px));padding-bottom:2px}
+  #menu-btn{order:1}
+  #page-slider-wrap{order:2}
+  #counter{order:3}
+  #folder-name{order:4;width:100%;max-width:none;font-size:11px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0}
+  /* same order as #counter — source order keeps ⊞ to its right */
+  #overview-btn{order:3}
+}
+
+/* ── overview: series-wide RTL page grid (viewer/overview.js) ── */
+#overview-btn{background:none;border:none;color:#ccc;font-size:18px;cursor:pointer;padding:0;border-radius:4px;line-height:1;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+#overview-btn:hover{background:rgba(255,255,255,.1)}
+/* overflow-x hidden + overscroll-behavior-x none: iOS maps overscroll-behavior to the
+   scroll view's alwaysBounce, so a bare `overflow-y:auto` (overflow-x → auto) still
+   rubber-bands sideways on a horizontal swipe even with nothing to scroll to. */
+#overview{position:absolute;inset:0;z-index:12;overflow-y:auto;overflow-x:hidden;overscroll-behavior-x:none;-webkit-overflow-scrolling:touch;background:#0b0e14;touch-action:pan-y;contain:layout paint}
+#overview[hidden]{display:none}
+/* prebuilt: laid out (so cell geometry is measurable) but invisible and inert */
+#overview.prebuilt{opacity:0;pointer-events:none}
+.ov-header{position:sticky;top:0;z-index:2;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;background:rgba(11,14,20,.92);color:#aaa;font-size:13px}
+.ov-folder{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ov-chip{color:#8ab4f8;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ov-chapter{padding:0 8px 8px}
+.ov-heading{position:sticky;top:40px;z-index:1;padding:6px 4px;color:#ccc;font-size:13px;background:rgba(11,14,20,.92)}
+.ov-grid{display:grid;direction:rtl;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.ov-cell{position:relative;display:block;padding:0;border:0;border-radius:6px;background:#161b24;overflow:hidden;content-visibility:auto;cursor:pointer}
+.ov-cell img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;-webkit-user-drag:none}
+.ov-cell .ov-num{position:absolute;right:4px;bottom:3px;font-size:11px;color:#ddd;background:rgba(0,0,0,.55);padding:1px 5px;border-radius:8px;direction:ltr}
+.ov-cell.cur{outline:2px solid #8ab4f8;outline-offset:-2px}
+#overview-close{display:none;position:fixed;left:50%;bottom:24px;transform:translateX(-50%);width:44px;height:44px;border-radius:22px;border:1px solid #333;background:rgba(20,24,32,.95);color:#ddd;font-size:18px;z-index:13;cursor:pointer;align-items:center;justify-content:center}
+body.overview-open #overview-close{display:inline-flex}
+body.overview-open #toolbar,body.overview-open #spread-controls,body.overview-open #tapmode-controls,body.overview-open #hint,body.overview-open #zone-prev,body.overview-open #zone-next,body.overview-open #zone-toggle{pointer-events:none!important;opacity:0}
+body.overview-open #toolbar>*,body.overview-open #spread-controls>*,body.overview-open #tapmode-controls>*{pointer-events:none!important}
+@media (min-width:768px){.ov-cell{min-width:150px}}
+
+/* landscape page-mode toggle button (top-right, below counter) */
+#spread-controls{display:none;position:fixed;top:48px;right:14px;z-index:10;gap:6px;pointer-events:none}
+#spread-controls>*{pointer-events:auto}
+#spread-toggle{display:inline-flex;align-items:center;justify-content:center;background:rgba(30,30,30,0.6);color:#aaa;border:1px solid #444;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;transition:opacity .25s;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);min-width:44px;min-height:44px}
+#spread-toggle:active{background:rgba(60,60,60,.9)}
+#spread-toggle.hidden{opacity:0;pointer-events:none}
+body.landscape #spread-controls,body.landscape-single #spread-controls{display:flex}
+/* spread-shift button: shifts page pairing in landscape 2P mode */
+#spread-shift{display:inline-flex;align-items:center;justify-content:center;background:rgba(30,30,30,0.6);color:#bbb;border:1px solid #555;border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;transition:opacity .25s,background .15s;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);min-width:44px;min-height:44px}
+#spread-shift:hover{background:rgba(40,40,40,.8);color:#ddd}
+#spread-shift:active{background:rgba(60,60,60,.9)}
+#spread-shift.active{background:rgba(74,122,196,.35);color:#8ab4f8;border-color:rgba(74,122,196,.6)}
+#spread-shift.hidden{opacity:0;pointer-events:none}
+body.landscape-single #spread-shift{display:none}
+/* tapmode controls (viewer bottom-left/right swap buttons) */
+#tapmode-controls{position:absolute;left:0;right:0;bottom:calc(12px + env(safe-area-inset-bottom,0px));display:flex;justify-content:space-between;padding:0 12px;z-index:6;pointer-events:none}
+#tapmode-controls button{pointer-events:auto;min-width:44px;min-height:44px;border-radius:22px;background:rgba(30,30,30,.6);border:1px solid #444;color:#aaa;cursor:pointer;font-size:14px;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);transition:opacity .25s}
+#tapmode-controls button:hover{background:rgba(40,40,40,.8);color:#ddd}
+#tapmode-controls button:active{background:rgba(60,60,60,.9)}
+#tapmode-controls.hidden{opacity:0;pointer-events:none}
+#tapmode-controls.hidden button{pointer-events:none}
+#tapmode-controls button{opacity:1}
+#tapmode-controls button[aria-pressed="true"]{background:rgba(74,122,196,.35);color:#8ab4f8;border-color:rgba(74,122,196,.6)}
+@media (prefers-reduced-motion:reduce){
+  #sidebar,#toolbar,#img-track,.tile,#hint,
+  #spread-toggle,#spread-shift,#tapmode-controls,#tapmode-controls button,#menu-btn,
+  .item,.item .chevron,#spread-shift,
+  #footer-refresh-btn,#logout-btn,#page-slider{
+    transition-duration:0.01ms !important;
+    animation-duration:0.01ms !important;
+  }
+  #img-track{transition-duration:0.01ms !important}
+  #zoom-layer{transition-duration:0.01ms !important}
+  #spinner{animation-duration:2s !important}
+  .offline-btn{transition:none !important}
+  .offline-btn.state-downloading.is-listing .progress-ring{animation:none !important}
+  .ux-pop{animation:none !important}
+  #tile-grid{will-change:auto !important}
+}
+@media (prefers-reduced-transparency:reduce){
+  #sidebar{background:#141414 !important;-webkit-backdrop-filter:none !important;backdrop-filter:none !important;border-right:1px solid #2a2a2a !important}
+  #toolbar{background:linear-gradient(to bottom,rgba(0,0,0,.85),rgba(0,0,0,.7)) !important;-webkit-backdrop-filter:none !important;backdrop-filter:none !important}
+  #spread-controls>*{background:rgba(40,40,40,0.9) !important;-webkit-backdrop-filter:none !important;backdrop-filter:none !important}
+  #tapmode-controls>*{background:rgba(40,40,40,0.9) !important;-webkit-backdrop-filter:none !important;backdrop-filter:none !important}
+}
+
+/* ── reading progress bar ── */
+.tile-progress-track{position:absolute;inset:0;background:#111;z-index:0;overflow:hidden}
+.tile-progress-fill{height:100%;background:#1e3a5f}
+.tile-progress-inline{display:inline-block;width:40px;height:4px;background:#111;border-radius:2px;overflow:hidden;vertical-align:middle;margin-left:4px;flex-shrink:0}
+.tile-progress-inline .tile-progress-fill{height:100%;background:#1e3a5f}
+.tile-name-text,.tile-name-parent{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative;z-index:1}
+.tile-name-parent{font-size:9px;color:#8a8a8a}
+.card-title-text{position:relative;z-index:1}
+#resume-btn{position:fixed;bottom:76px;left:50%;transform:translateX(-50%);z-index:20;background:rgba(30,30,30,0.85);color:#8ab4f8;border:1px solid rgba(74,122,196,0.4);border-radius:20px;padding:8px 16px;font-size:13px;cursor:pointer;-webkit-backdrop-filter:blur(12px) saturate(150%);backdrop-filter:blur(12px) saturate(150%);box-shadow:0 2px 8px rgba(0,0,0,0.4);transition:background .15s,border-color .15s;white-space:nowrap;max-width:calc(100vw - 32px);overflow:hidden;text-overflow:ellipsis;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+#resume-btn:hover{background:rgba(40,40,40,0.9);border-color:rgba(74,122,196,0.6)}
+#resume-btn:active{background:rgba(50,50,50,0.95);transform:translateX(-50%) scale(0.97)}
+#resume-btn.hidden{display:none !important}
+#sidebar.has-resume #tile-grid{padding-bottom:72px}
+
+	/* ── filter chips row ── */
+	#filter-chips{display:flex;gap:6px;padding:4px 12px 8px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+	#filter-chips::-webkit-scrollbar{display:none}
+	#filter-chips.hidden{display:none}
+	.chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px 3px 10px;border-radius:12px;font-size:11px;background:#2a2a2a;color:#aaa;border:1px solid #3a3a3a;white-space:nowrap;flex-shrink:0;line-height:1.4;cursor:default;min-height:44px}
+	.chip .chip-label{max-width:120px;overflow:hidden;text-overflow:ellipsis}
+	/* 44px hit area per H9; the visible 16px circle is drawn on ::before so the
+	   button itself can stay transparent and 44x44 */
+	.chip .chip-remove{position:relative;display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;background:transparent;color:#999;font-size:10px;line-height:1;cursor:pointer;border:none;padding:0;flex-shrink:0;transition:background .15s}
+	.chip .chip-remove::before{content:"";position:absolute;left:50%;top:50%;width:16px;height:16px;border-radius:50%;background:#444;transform:translate(-50%,-50%);pointer-events:none;transition:background .15s}
+	.chip .chip-remove:hover{color:#ccc}
+	.chip .chip-remove:hover::before{background:#666}
+	.chip .chip-remove:active::before{background:#888}
+
+	/* ── filter bottom sheet ── */
+	#bottom-sheet-overlay{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.5);opacity:0;transition:opacity .25s;pointer-events:none}
+	#bottom-sheet-overlay.visible{opacity:1;pointer-events:auto}
+	#bottom-sheet{position:fixed;left:0;right:0;bottom:0;z-index:51;background:#1a1a1a;border-radius:16px 16px 0 0;transform:translateY(100%);transition:transform .35s cubic-bezier(0.25,0.1,0.25,1.0);max-height:70vh;display:flex;flex-direction:column;box-shadow:0 -4px 24px rgba(0,0,0,.5)}
+	@supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+		#bottom-sheet{background:rgba(26,26,26,0.92);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);border-top:1px solid rgba(255,255,255,0.06)}
+	}
+	#bottom-sheet.open{transform:translateY(0)}
+	.bottom-sheet-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px;border-bottom:1px solid #2a2a2a;flex-shrink:0}
+	.bottom-sheet-header span{font-size:16px;font-weight:600;color:#e0e0e0}
+	#bottom-sheet-close{background:none;border:none;color:#888;font-size:18px;cursor:pointer;padding:4px;line-height:1;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center}
+	.bottom-sheet-body{overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px 20px 16px;flex:1}
+	.bottom-sheet-section{margin-bottom:16px}
+	.bottom-sheet-section h3{font-size:12px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px}
+	.facet-chips{display:flex;flex-wrap:wrap;gap:6px}
+	.facet-chips .chip{cursor:pointer;transition:background .15s,border-color .15s,color .15s}
+	.facet-chips .chip.active{background:rgba(74,122,196,.25);border-color:rgba(74,122,196,.5);color:#8ab4f8}
+	.sort-options{display:flex;flex-direction:column;gap:8px}
+	.sort-options label{display:flex;align-items:center;gap:8px;font-size:13px;color:#aaa;cursor:pointer;min-height:44px}
+	.sort-options input[type="radio"]{accent-color:#4a7ac4;width:16px;height:16px;cursor:pointer}
+	.bottom-sheet-footer{display:flex;gap:10px;padding:12px 20px 20px;border-top:1px solid #2a2a2a;flex-shrink:0}
+	.bottom-sheet-footer button{flex:1;padding:12px;border-radius:10px;font-size:14px;font-weight:500;cursor:pointer;border:1px solid #333;transition:background .15s,border-color .15s;min-height:44px}
+	#filter-reset-btn{background:#1a1a1a;color:#888}
+	#filter-reset-btn:hover{background:#222;border-color:#555}
+	#filter-reset-btn:active{background:#2a2a2a}
+	#filter-apply-btn{background:#4a7ac4;color:#fff;border-color:#4a7ac4}
+	#filter-apply-btn:hover{background:#5a8ad4}
+	#filter-apply-btn:active{background:#3a6ab4}
+
+	/* ── metadata badges on tiles ── */
+	.tile-metadata{padding:2px 8px 6px;font-size:10px;line-height:1.4}
+	.tile-metadata .metadata-badge{display:inline-block;padding:1px 5px;border-radius:3px;font-size:9px;margin:1px 2px;white-space:nowrap;max-width:80px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+	.metadata-badge.artist{background:rgba(74,122,196,0.15);color:#8ab4f8}
+	.metadata-badge.tag{background:rgba(255,255,255,0.06);color:#888}
+	.metadata-badge.rating{background:rgba(255,215,0,0.1);color:#e8c840}
+
+	/* ── card mode ── */
+	#tile-grid.card-mode{display:flex;flex-wrap:wrap;gap:12px;padding:12px}
+	#tile-grid.card-mode .card{width:100%;cursor:pointer;border-radius:10px;overflow:hidden;background:#1a1a1a;border:1px solid #2a2a2a;transition:border-color .15s,transform .1s;display:flex;flex-direction:column}
+	@media(min-width:500px){ #tile-grid.card-mode .card{width:calc(50% - 6px)}}
+	@media(min-width:750px){ #tile-grid.card-mode .card{width:calc(33.333% - 8px)}}
+	@media(min-width:1000px){ #tile-grid.card-mode .card{width:calc(25% - 9px)}}
+	/* 幅広（1400px〜）で 1 行に収まる件数のときだけ、行を中央に寄せてタイルを広げる（#199）。
+	   列数は既存の幅指定（タイル 10 列、カード 4 列）が決めるので、1 行に収まる = タイル 11 枚目、
+	   カード 5 枚目が無いこと。複数行のときは既存の左詰め表示をそのまま使う。 */
+	@media(min-width:1400px){
+	  #tile-grid:not(.list-mode):not(.card-mode):not(:has(> .tile:nth-child(11))){justify-content:center}
+	  #tile-grid:not(.list-mode):not(.card-mode):not(:has(> .tile:nth-child(11))) > .tile{flex:1 1 0;max-width:240px}
+	  #tile-grid.card-mode:not(:has(> .card:nth-child(5))){justify-content:center}
+	  #tile-grid.card-mode:not(:has(> .card:nth-child(5))) > .card{flex:1 1 0;max-width:480px}
+	}
+	#tile-grid.card-mode .card:hover{border-color:#555;transform:scale(1.02)}
+	#tile-grid.card-mode .card:active{transform:scale(0.98);border-color:#666;transition:transform 80ms ease-out}
+	#tile-grid.card-mode .card.active{border-color:#4a7ac4;box-shadow:0 0 0 1px #4a7ac4}
+	.card-img{width:100%;aspect-ratio:16/9;object-fit:cover;object-position:center;display:block;background:#0d0d0d}
+	.card-content{padding:10px 12px 12px;display:flex;flex-direction:column;gap:4px}
+	.card-title{position:relative;font-size:13px;font-weight:500;color:#eee;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+	.card-meta{font-size:11px;color:#888;line-height:1.4}
+	.card-meta .meta-row{display:flex;align-items:center;gap:4px;margin-top:2px}
+	.card-meta .meta-row .label{color:#a6a6a6;flex-shrink:0}
+	.card-badges{display:flex;flex-wrap:wrap;gap:3px;margin-top:2px}
+	.card-badges .metadata-badge{font-size:9px;padding:1px 5px;border-radius:3px;max-width:100px}
+
+	/* ── filter toggle button in header ── */
+	#filter-btn{background:none;border:none;color:#888;font-size:16px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;flex-shrink:0;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;transition:background .15s,color .15s}
+	#filter-btn:hover{background:rgba(255,255,255,0.08);color:#aaa}
+	#filter-btn:active{background:rgba(255,255,255,0.15);transform:scale(0.95)}
+	#filter-btn.active{color:#8ab4f8}
+
+	/* ── search result list mode ── */
+	#tile-grid.list-mode .search-result .name{color:#bbb}
+	#tile-grid.list-mode .search-result .meta{font-size:11px;color:#666;margin-top:2px;display:flex;flex-wrap:wrap;gap:4px}
+	#tile-grid.list-mode .search-result .meta .metadata-badge{font-size:9px;padding:1px 5px;border-radius:3px}
+.offline-btn{position:absolute;top:4px;right:4px;width:44px;height:44px;padding:0;border:none;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.65);color:#fff;cursor:pointer;font-size:14px;line-height:1;transition:background-color .18s ease,transform .12s ease}
+.offline-btn:hover{filter:brightness(1.18)}
+.offline-btn:active{transform:scale(0.95)}
+.offline-btn .progress-ring{position:absolute;inset:6px;border-radius:50%;background:conic-gradient(#4a7ac4 var(--progress,0deg), #e2e8f0 0deg);display:none;pointer-events:none;-webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 4.5px), #000 calc(100% - 4px));mask:radial-gradient(farthest-side, transparent calc(100% - 4.5px), #000 calc(100% - 4px))}
+.offline-btn .offline-icon{position:relative;z-index:1}
+.offline-btn.state-idle .offline-icon::before{content:"↓"}
+.offline-btn.state-downloading .progress-ring{display:block}
+.offline-btn.state-downloading .offline-icon::before{content:"↓"}
+.offline-btn.state-stopping .offline-icon::before{content:"■"}
+.offline-btn.state-complete .offline-icon::before{content:"✓"}
+.offline-btn.state-deleting{pointer-events:none;cursor:wait}
+.offline-btn.state-deleting .progress-ring{display:block}
+.offline-btn.state-partial .offline-icon::before{content:"↓"}
+.offline-btn.state-partial .progress-ring{display:block}
+.offline-btn.state-confirm-delete{background:#c44}
+.offline-btn.state-confirm-delete .offline-icon::before{content:"🗑"}
+.offline-btn.state-confirm-delete .offline-icon{filter:grayscale(1) brightness(1.8)}
+/* listing (indeterminate) spinner — specificity 0,4,0 so it beats the
+   state-downloading ring rules regardless of source order */
+.offline-btn.state-downloading.is-listing .progress-ring{background:conic-gradient(#4a7ac4 100deg, rgba(255,255,255,.25) 0deg);animation:spinArc .9s linear infinite}
+@keyframes spinArc{to{transform:rotate(360deg)}}
+.tile,.card,.item{position:relative}
+.tile:has(.ux-pop),.card:has(.ux-pop),.item:has(.ux-pop){overflow:visible;transform:none !important}
+/* anchored labeled popover for partially-downloaded works */
+.ux-pop{position:absolute;top:52px;right:6px;z-index:56;min-width:190px;background:#1b212b;border:1px solid #39414f;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.5);overflow:hidden;animation:popIn .15s ease}
+@keyframes popIn{from{opacity:0;transform:translateY(-4px)}}
+.ux-pop button{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;background:none;border:none;color:#dfe5ee;font-size:13.5px;cursor:pointer;text-align:left;font-family:inherit;line-height:1.35}
+.ux-pop button + button{border-top:1px solid #39414f}
+.ux-pop button:hover{background:rgba(255,255,255,.06)}
+.ux-pop .ic{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex:none;color:#fff}
+.ux-pop .resume .ic{background:#4a7ac4}
+.ux-pop .del .ic{background:#c44}
+.ux-pop .sub{display:block;color:#8892a0;font-size:11px;white-space:nowrap}
+/* quota-exceeded confirm modal — z-order: bottom-sheet 50/51 < ux-pop 56 < quota-modal 57 < toast 60 */
+.quota-modal-backdrop{position:fixed;inset:0;z-index:57;background:rgba(0,0,0,.6);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px;animation:quotaFadeIn .18s ease}
+.quota-modal{background:#151a21;border:1px solid #2a3240;border-radius:14px;max-width:340px;width:100%;padding:20px;box-shadow:0 12px 32px rgba(0,0,0,.55);animation:quotaPopIn .18s ease}
+@keyframes quotaFadeIn{from{opacity:0}}
+@keyframes quotaPopIn{from{opacity:0;transform:translateY(-6px)}}
+.quota-modal-title{font-size:15px;font-weight:600;color:#e8edf5;line-height:1.4;margin-bottom:10px}
+.quota-modal-body{font-size:13px;color:#aab3c2;line-height:1.6;margin-bottom:18px;word-break:break-word}
+.quota-modal-actions{display:flex;gap:10px}
+.quota-modal-actions button{flex:1;min-height:44px;border-radius:10px;font-size:13.5px;font-family:inherit;cursor:pointer;padding:10px 12px;transition:filter .15s ease,background .15s ease}
+.quota-ok{background:#c44;color:#fff;border:none}
+.quota-ok:hover{filter:brightness(1.12)}
+.quota-cancel{background:transparent;color:#dfe5ee;border:1px solid #39414f}
+.quota-cancel:hover{background:rgba(255,255,255,.06)}
+@media (prefers-reduced-motion:reduce){
+  .quota-modal-backdrop,.quota-modal{animation-duration:0.01ms !important}
+}

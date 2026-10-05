@@ -1,0 +1,17 @@
+# bookq — local test fragment (additional -f only, never standalone).
+#
+# Usage: docker compose -f docker-compose.dev.yml -f docker-compose.local.yml up -d viewer
+# Local deploy addresses ONLY the viewer service, so the sidecar is never
+# created. This fragment therefore declares no sidecar service, no entrypoint
+# override, and no scale flag.
+#
+# Port publish defaults to loopback only; opt in to LAN with LOCAL_BIND=0.0.0.0.
+# Both variables carry :- defaults so unset env still renders.
+services:
+  viewer:
+    ports:
+      - "${LOCAL_BIND:-127.0.0.1}:${LOCAL_PORT:-8080}:8080"
+    labels:
+      com.bookq.local: "true"
+      com.bookq.local_port: "${LOCAL_PORT:-8080}"
+      com.bookq.local_bind: "${LOCAL_BIND:-127.0.0.1}"

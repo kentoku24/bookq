@@ -1,0 +1,109 @@
+# Mention-triggered opencode channel: fires on /oc or /opencode mentions in
+# issue comments and PR review comments. Gate job evaluates the event via
+# .github/scripts/gate.sh; agent job runs only when gate allows + mention detected.
+name: opencode
+run-name: "oc #${{ github.event.issue.number || github.event.pull_request.number }}"
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: oc-${{ github.event.issue.number || github.event.pull_request.number }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    timeout-minutes: 30
+    outputs:
+      route: ${{ steps.gate.outputs.route }}
+      allow: ${{ steps.gate.outputs.allow }}
+      mention: ${{ steps.gate.outputs.mention }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - id: gate
+        name: Evaluate event gate
+        env:
+          EVENT_JSON: ${{ toJSON(github.event) }}
+        run: |
+          OUT=$(printf '%s' "$EVENT_JSON" | bash .github/scripts/gate.sh)
+          echo "route=$(printf '%s\n' "$OUT" | grep '^route=' | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
+          echo "allow=$(printf '%s\n' "$OUT" | grep '^allow=' | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
+          echo "mention=$(printf '%s\n' "$OUT" | grep '^mention=' | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
+
+  agent:
+    needs: gate
+    if: vars.USE_DIRECT_RUN != 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.mention == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # v1.18.21 (latest release tag at time of pinning)
+      - uses: anomalyco/opencode/github@3a103fe0aff726a4edc7492f03f7b88195d9e4c9
+        with:
+          mentions: "/oc,/opencode"
+          model: "opencode-go/muse-spark-1.3-contributor"
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+  agent-direct:
+    needs: gate
+    if: vars.USE_DIRECT_RUN == 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.mention == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Build prompt.txt (heredoc from env — NO shell expansion)
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          cat > prompt.txt <<'TEMPLATE'
+          You are responding to a mention comment in this repository.
+          Follow AGENTS.md strictly and address the user's request below.
+          If the request asks to modify code or docs, make the change on the appropriate branch (for PRs, check out the PR's head branch), commit, and push.
+          Also post a comment on the issue/PR confirming what you did.
+          TEMPLATE
+          printf '\nIssue/PR number: %s\n\nComment body:\n%s\n' "$ISSUE_NUMBER" "$COMMENT_BODY" >> prompt.txt
+
+      - name: Configure git auth (GH_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "opencode-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install opencode CLI (pinned)
+        run: |
+          curl -fsSL https://opencode.ai/install | bash -s -- --version 0.1.0
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          opencode --version || echo "::warning::opencode version check failed"
+
+      - name: Run opencode CLI
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+

@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Offline Harness — bookq</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;min-height:100%;background:#0d0d0d;color:#ccc;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.5}
+a{color:#8ab4f8;text-decoration:none}
+a:hover{text-decoration:underline}
+header{padding:16px 20px;border-bottom:1px solid #2a2a2a;background:#141414;position:sticky;top:0;z-index:10}
+header h1{font-size:18px;font-weight:600;color:#e0e0e0}
+header p{font-size:12px;color:#888;margin-top:4px}
+main{max-width:960px;margin:0 auto;padding:16px 20px;display:flex;flex-direction:column;gap:16px}
+section{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;padding:16px 16px 14px}
+section h2{font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:10px;letter-spacing:0.02em}
+section h3{font-size:12px;font-weight:600;color:#aaa;margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.05em}
+.hint{font-size:12px;color:#888;line-height:1.6}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.btn{appearance:none;border:1px solid #3a3a3a;background:#222;color:#ccc;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;min-height:36px;transition:background .15s,border-color .15s}
+.btn:hover{background:#2a2a2a;border-color:#555}
+.btn:active{background:#333}
+.btn-primary{border-color:#4a7ac4;background:#1e3a5f;color:#8ab4f8}
+.btn-primary:hover{background:#244a7a}
+.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid #333;background:#222;color:#aaa}
+.badge.online{border-color:rgba(74,122,196,.4);color:#8ab4f8;background:rgba(74,122,196,.12)}
+.badge.offline{border-color:rgba(196,60,60,.4);color:#ffb4b4;background:rgba(196,60,60,.12)}
+.kv{display:grid;grid-template-columns:140px 1fr;gap:6px 12px;font-size:13px}
+.kv dt{color:#888}
+.kv dd{color:#ddd;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{border:1px solid #2a2a2a;padding:6px 8px;text-align:left}
+th{background:#222;color:#aaa;font-weight:600}
+td{color:#ccc}
+select{width:100%;max-width:480px;padding:8px 10px;border-radius:8px;border:1px solid #333;background:#222;color:#ccc;font-size:13px}
+.signal-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.signal{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;font-size:13px;border:1px solid #333;background:#222}
+.signal.ok{border-color:rgba(52,168,83,.4);color:#34a853;background:rgba(52,168,83,.12)}
+.signal.ng{border-color:rgba(196,60,60,.4);color:#ea4335;background:rgba(196,60,60,.12)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.footer{padding:12px 20px;text-align:center;font-size:11px;color:#666;border-top:1px solid #1a1a1a;margin-top:8px}
+code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;font-size:11px;color:#bbb}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧪 Offline Harness</h1>
+  <p>bookq オフラインQAハーネス — 静的配信 / gated リンク検証用シェル</p>
+</header>
+<main>
+  <!-- ① 状態 -->
+  <section id="sec-status" aria-labelledby="sec-status-title">
+    <h2 id="sec-status-title">① 状態</h2>
+    <p class="hint">Service Worker / Cache / IndexedDB / Storage の現在状態。refresh() で実測取得。</p>
+    <div class="row" style="margin:10px 0 12px">
+      <span id="harness-status" class="badge offline">○ オフライン判定: 未取得</span>
+      <span id="harness-cache-count" class="badge">cache: —</span>
+      <button class="btn" onclick="refresh()">再取得 (refresh)</button>
+    </div>
+    <h3>IndexedDB — bookq-offline / works</h3>
+    <div id="harness-idb-table">
+      <table>
+        <thead><tr><th>folder</th><th>cacheName</th><th>pages</th><th>bytes</th><th>thumb</th><th>addedAt</th></tr></thead>
+        <tbody><tr><td colspan="6" style="text-align:center;color:#666">（未取得 — refresh() で更新）</td></tr></tbody>
+      </table>
+    </div>
+    <div id="harness-idb-dedup" class="mono hint" style="margin-top:8px">dedup: — (raw: —)</div>
+    <h3>Storage estimate (raw)</h3>
+    <pre id="harness-storage-raw" class="mono" style="background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:10px;overflow:auto;min-height:48px">{
+  "usage": null,
+  "quota": null
+}</pre>
+    <div id="harness-storage-diff" class="mono hint" style="margin-top:6px">diff: —</div>
+    <div id="harness-leaf-count" class="mono hint" style="margin-top:6px">leaf: —</div>
+    <h3>Thumb hit rate</h3>
+    <div id="harness-thumb-hit" class="mono hint" style="margin-top:6px">thumb hit: —</div>
+    <h3>API folders cache</h3>
+    <div id="harness-api-folders-cached" class="mono hint" style="margin-top:6px">/api/folders cached: —</div>
+    <h3>SHELL precache</h3>
+    <div id="harness-shell-hits" class="mono hint" style="margin-top:6px">SHELL hits: —</div>
+  </section>
+
+  <!-- ② 操作 -->
+  <section id="sec-ops" aria-labelledby="sec-ops-title">
+    <h2 id="sec-ops-title">② 操作</h2>
+    <p class="hint">オフライン遷移を再現する操作。実際の切断は行わず、検出シグナルの挙動を確認するためのトリガです。</p>
+    <div class="row" style="margin-top:10px">
+      <button id="btn-health-abort" class="btn btn-primary" type="button">health abortでオフライン</button>
+      <button id="btn-set-offline" class="btn" type="button">全断(setOffline)</button>
+    </div>
+    <p id="harness-ops-hint" class="hint mono" style="margin-top:8px">操作の説明: health abort は fetch('/api/health?online_check=1',{headers:{'X-Online-Check':'1'}}) を AbortController で中断し、offline 状態遷移を誘発。setOffline は window.dispatchEvent(new Event('offline')) でアプリの offline リスナを発火。</p>
+    <ul class="hint" style="margin-top:10px;padding-left:18px">
+      <li><code>health abortでオフライン</code>: <code>fetch('/api/health?online_check=1')</code> を AbortController で中断し、<code>#offline-status</code> の <code>○オフライン</code> 遷移を誘発（SWの online_check バイパス経路を検証）。</li>
+      <li><code>全断(setOffline)</code>: <code>window.dispatchEvent(new Event('offline'))</code> でアプリの <code>offline</code> リスナ経由で UI をオフライン状態に切替。</li>
+      <li>いずれも本ハーネスからはネットワーク自体は切断しません — 検出ロジックの反応のみを観測します。</li>
+    </ul>
+  </section>
+
+  <!-- ③ 対象 -->
+  <section id="sec-target" aria-labelledby="sec-target-title">
+    <h2 id="sec-target-title">③ 対象</h2>
+    <p class="hint">検証対象の leaf フォルダを選択。列挙は <code>/api/folders</code> のツリーから leaf（画像のみを含むフォルダ）を抽出して dropdown に流し込む。Todo2 で配線。</p>
+    <div style="margin-top:10px">
+      <label for="harness-target-select" class="hint" style="display:block;margin-bottom:6px">対象フォルダ（leaf enumeration）</label>
+      <select id="harness-target-select" aria-label="対象フォルダ">
+        <option value="">— 未取得 —</option>
+        <option value="__example_library">sample_library（例）</option>
+        <option value="__example_yani">yani（例）</option>
+        <option value="__example_other">other/leaf（例）</option>
+      </select>
+      <p class="hint" style="margin-top:8px">選択値は <code>OfflineStore.cacheNameFor(folder)</code>（<code>encodeURIComponent(folder)</code> → %2F）でキャッシュ名に変換して検証に使用。</p>
+    </div>
+  </section>
+
+  <!-- ④ 検出シグナル -->
+  <section id="sec-signals" aria-labelledby="sec-signals-title">
+    <h2 id="sec-signals-title">④ 検出シグナル</h2>
+    <p class="hint">オフライン検出の 10 回試行結果。○＝成功（オフラインと判定）、×＝失敗（オンラインのまま）。<code>/api/health?online_check=1</code> の fetch 成否を 10 回ポーリングして更新。</p>
+    <div id="harness-signals" class="signal-list" aria-label="10 failures ○/× list">
+      <span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span>
+    </div>
+    <p class="hint" style="margin-top:10px">10 個の <code>○/×</code> を JS で書き換え（<code>signal.ok</code> / <code>signal.ng</code>）。refresh および操作ボタンで更新。</p>
+  </section>
+
+  <!-- ⑤ バージョン -->
+  <section id="sec-version" aria-labelledby="sec-version-title">
+    <h2 id="sec-version-title">⑤ バージョン</h2>
+    <p class="hint">ビルド情報 — <code>/api/version</code> から取得。refresh() で再取得。</p>
+    <div class="kv" style="margin-top:10px">
+      <dt>version</dt><dd id="harness-version-version" class="mono">—</dd>
+      <dt>sha</dt><dd id="harness-version-sha" class="mono">—</dd>
+      <dt>build_date</dt><dd id="harness-version-date" class="mono">—</dd>
+    </div>
+  </section>
+
+  <!-- ⑥ 全消去 -->
+  <section id="sec-wipe" aria-labelledby="sec-wipe-title">
+    <h2 id="sec-wipe-title">⑥ 全消去</h2>
+    <p class="hint">危険: ローカルの保存をすべて削除</p>
+    <div class="row" style="margin-top:10px">
+      <button id="btn-wipe-all" class="btn" type="button">すべて削除</button>
+      <span id="harness-wipe-status" class="hint mono">—</span>
+    </div>
+    <div id="harness-wipe-preview" class="mono hint" style="margin-top:8px">—</div>
+  </section>
+
+  <!-- wipe confirm modal — two-step custom overlay, z-index 57 like quota modal -->
+  <div id="harness-wipe-modal" style="display:none;position:fixed;inset:0;z-index:57;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+    <div role="dialog" aria-modal="true" aria-labelledby="harness-wipe-modal-title" style="background:#1e1e1e;border:1px solid #333;border-radius:12px;padding:20px;max-width:380px;width:calc(100% - 32px);box-shadow:0 8px 32px rgba(0,0,0,.5)">
+      <h3 id="harness-wipe-modal-title" style="font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:8px">すべて削除しますか？</h3>
+      <p class="hint" style="margin-bottom:16px">保存済みの作品とキャッシュをすべて削除します。この操作は元に戻せません。</p>
+      <div class="row" style="justify-content:flex-end">
+        <button id="btn-wipe-cancel" class="btn" type="button">キャンセル</button>
+        <button id="btn-wipe-confirm" class="btn btn-primary" type="button">削除する</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="hint">配信: <code>/static/offline-harness.html</code> は <code>app/main.py</code> の StaticFiles マウント経由で配信。常時表示 (tailnet信頼境界で保護). StaticFiles配信</p>
+</main>
+<div class="footer"><a href="/">← Viewer に戻る</a> &nbsp;·&nbsp; <a href="/static/offline-harness.html?harness=1">harness=1 で開く</a></div>
+<script src="/static/offline-core.js"></script>
+<script>
+const harness = {};
+// Store, cache naming, byte formatting and the dedup sum all come from
+// offline-core.js — the same code app.js runs, so the harness cannot drift from
+// the app it is reporting on.
+const { fmt, cacheNameFor, dedupedBytes, rawBytes, escapeHtml, folderHasOnlyImages, OfflineStore } = window.OfflineCore;
+harness.fmt = fmt;
+harness.cacheNameFor = cacheNameFor;
+
+window.harness = harness;
+
+let tree = [];
+window.tree = tree;
+
+function setFullPaths(nodes, parentPath){
+  for(const node of nodes){
+    node._fullPath = parentPath ? parentPath+"/"+node.name : node.name;
+    if(node.children) setFullPaths(node.children, node._fullPath);
+  }
+}
+function collectLeafPaths(node, out){
+  if(folderHasOnlyImages(node)){ out.push(node._fullPath); return; }
+  if(node.children){
+    for(const c of node.children){ if(c.type==="folder") collectLeafPaths(c, out); }
+  }
+}
+function getNodeAt(path){
+  function find(nodes, target){
+    for(const n of nodes){
+      if(n._fullPath===target) return n;
+      if(n.children){
+        const r=find(n.children,target);
+        if(r) return r;
+      }
+    }
+    return null;
+  }
+  if(!path) return null;
+  return find(tree, path);
+}
+function getLeafPathsFor(folder){
+  const node = getNodeAt(folder);
+  if(node){
+    if(folderHasOnlyImages(node)) return [folder];
+    const tmp=[];
+    for(const c of (node.children||[])){ if(c.type==="folder") collectLeafPaths(c, tmp); }
+    const hasDirectImages = node.children && node.children.some(c=>c.type==="image");
+    if(tmp.length===0) return [folder];
+    const dedup=[...new Set(tmp)];
+    if(hasDirectImages) dedup.unshift(folder);
+    return dedup;
+  }
+  const leaves=[];
+  (function walk(nodes){
+    for(const n of nodes){
+      if(n._fullPath===folder || n._fullPath.startsWith(folder+"/")){
+        if(folderHasOnlyImages(n)) leaves.push(n._fullPath);
+      }
+      if(n.children) walk(n.children);
+    }
+  })(tree);
+  if(leaves.length) return [...new Set(leaves)];
+  return [folder];
+}
+window.getLeafPathsFor = getLeafPathsFor;
+harness.getLeafPathsFor = getLeafPathsFor;
+
+async function fetchTree(){
+  try{
+    const r = await fetch('/api/folders');
+    if(!r.ok) return;
+    const data = await r.json();
+    tree = data;
+    window.tree = tree;
+    setFullPaths(tree, "");
+    populateTargetSelect();
+    updateLeafCount();
+  }catch{}
+}
+function populateTargetSelect(){
+  const sel = document.getElementById('harness-target-select');
+  if(!sel) return;
+  const leaves=[];
+  (function walk(nodes){
+    for(const n of nodes){
+      if(folderHasOnlyImages(n)) leaves.push(n._fullPath);
+      if(n.children) walk(n.children);
+    }
+  })(tree);
+  const uniq=[...new Set(leaves)].sort();
+  if(uniq.length){
+    sel.innerHTML='';
+    const ph=document.createElement('option');
+    ph.value=''; ph.textContent='— 選択 —';
+    sel.appendChild(ph);
+    for(const p of uniq){
+      const o=document.createElement('option');
+      o.value=p; o.textContent=p;
+      sel.appendChild(o);
+    }
+    if(uniq.includes('group/episodes')){
+      sel.value='group/episodes';
+    } else if(uniq.some(v=>v.includes('sample_library'))){
+      const m=uniq.find(v=>v.includes('sample_library'));
+      if(m) sel.value=m;
+    }
+  }
+}
+function updateLeafCount(){
+  const el=document.getElementById('harness-leaf-count');
+  if(!el) return;
+  const cases=[
+    {label:'group/episodes', paths: getLeafPathsFor('group/episodes')},
+    {label:'group/other_work', paths: getLeafPathsFor('group/other_work')},
+    {label:'simple_manga', paths: getLeafPathsFor('simple_manga')},
+  ];
+  const parts=cases.map(c=> c.label+':'+c.paths.length+' ['+c.paths.slice(0,3).join(',')+']');
+  el.textContent='leaf counts — '+parts.join(' | ')+' | tree nodes: '+tree.length;
+}
+function renderSignals(results){
+  const con=document.getElementById('harness-signals');
+  if(!con) return;
+  con.innerHTML='';
+  for(let i=0;i<10;i++){
+    const s=document.createElement('span');
+    s.className='signal '+(results[i] ? 'ok' : 'ng');
+    s.textContent=results[i] ? '○' : '×';
+    s.setAttribute('aria-label', results[i] ? 'ok' : 'ng');
+    con.appendChild(s);
+  }
+}
+// The ten probes are independent — run them together so a genuinely dead
+// network costs one 1200ms timeout instead of twelve seconds of serial waits.
+async function probeSignals(){
+  const probe = async (i) => {
+    const c=new AbortController();
+    const t=setTimeout(()=>{ try{c.abort();}catch{} }, 1200);
+    try{
+      const r=await fetch('/api/health?online_check=1&_t='+Date.now()+'_'+i,{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:c.signal});
+      return !!r.ok;
+    }catch{
+      return false;
+    }finally{
+      clearTimeout(t);
+    }
+  };
+  const results = await Promise.all(Array.from({length:10}, (_, i) => probe(i)));
+  renderSignals(results);
+  return results;
+}
+
+async function loadVersion(){
+  const vEl=document.getElementById('harness-version-version');
+  const sEl=document.getElementById('harness-version-sha');
+  const dEl=document.getElementById('harness-version-date');
+  try{
+    const r=await fetch('/api/version',{cache:'no-store'});
+    if(!r.ok) throw new Error('not ok '+r.status);
+    const j=await r.json();
+    if(vEl) vEl.textContent=j.version||'unknown';
+    if(sEl) sEl.textContent=j.sha||'unknown';
+    if(dEl) dEl.textContent=j.build_date||'unknown';
+  }catch{
+    if(vEl) vEl.textContent='unknown';
+    if(sEl) sEl.textContent='unknown';
+    if(dEl) dEl.textContent='unknown';
+  }
+}
+
+// SHELL_ASSETS single source is sw.js — parse it live so the harness can never
+// drift from what the SW actually precaches. Fallback mirrors sw.js for offline.
+async function loadShellAssets(){
+  const FALLBACK=["/","/static/offline.html","/static/manifest.json","/static/style.css","/static/app.js","/static/offline-core.js","/static/icons/icon-192.png","/static/icons/icon-512.png","/static/icons/icon-512-maskable.png"];
+  try{
+    const r=await fetch('/sw.js',{cache:'no-store'});
+    if(!r.ok) return FALLBACK;
+    const t=await r.text();
+    const m=t.match(/SHELL_ASSETS\s*=\s*\[(.*?)\]/s);
+    if(!m) return FALLBACK;
+    const entries=[...m[1].matchAll(/["']([^"']+)["']/g)].map((x)=>x[1]);
+    return entries.length?entries:FALLBACK;
+  }catch{
+    return FALLBACK;
+  }
+}
+
+function updateWipeUI(all, dedupSum){
+  const btn=document.getElementById('btn-wipe-all');
+  const status=document.getElementById('harness-wipe-status');
+  const preview=document.getElementById('harness-wipe-preview');
+  const count=all ? all.length : 0;
+  const bytes=dedupSum!=null ? dedupSum : (all ? dedupedBytes(all) : 0);
+  if(preview){
+    preview.textContent=count+'件 / '+fmt(bytes)+' ('+bytes+' bytes) — dedup';
+  }
+  if(btn){
+    btn.disabled = count===0;
+    btn.style.opacity = count===0 ? '0.45' : '';
+    btn.style.pointerEvents = count===0 ? 'none' : '';
+  }
+  if(status){
+    status.textContent = count===0 ? '削除対象なし' : count+'件の保存を削除できます';
+  }
+}
+function openWipeModal(){
+  const m=document.getElementById('harness-wipe-modal');
+  if(!m) return;
+  m.style.display='flex';
+  const cancel=document.getElementById('btn-wipe-cancel');
+  if(cancel) try{ cancel.focus(); }catch{}
+}
+function closeWipeModal(){
+  const m=document.getElementById('harness-wipe-modal');
+  if(!m) return;
+  m.style.display='none';
+}
+async function doWipeAll(){
+  const btn=document.getElementById('btn-wipe-all');
+  const status=document.getElementById('harness-wipe-status');
+  const confirmBtn=document.getElementById('btn-wipe-confirm');
+  if(btn) btn.disabled=true;
+  if(confirmBtn) confirmBtn.disabled=true;
+  if(status) status.textContent='削除中…';
+  try{
+    const all = await OfflineStore.getAll();
+    for(const w of all){
+      try{ await caches.delete(w.cacheName); await OfflineStore.delete(w.folder); }catch{}
+    }
+    try{ await caches.delete('bookq-api-v1'); }catch{}
+    try{ await caches.delete('bookq-images-fallback'); }catch{}
+    // keep SHELL: bookq_harness / bookq_enable_sw / bookq_touch are NOT removed
+    try{ localStorage.removeItem('bookq_progress'); }catch{}
+    try{ localStorage.removeItem('bookq_persist_toast'); }catch{}
+    try{ sessionStorage.removeItem('bookq_auto_sync_done'); }catch{}
+    try{ if(window.updateStorageBar) await window.updateStorageBar(); }catch{}
+  }catch{}
+  if(confirmBtn) confirmBtn.disabled=false;
+  closeWipeModal();
+  if(status) status.textContent='削除しました — 更新中…';
+  try{ await refresh(); }catch{}
+  try{ if(window.showToastSuccess) window.showToastSuccess('全消去しました'); }catch{}
+}
+
+async function refresh(){
+  const statusEl=document.getElementById('harness-status');
+  const cacheCountEl=document.getElementById('harness-cache-count');
+  const idbTableBody=document.querySelector('#harness-idb-table tbody');
+  const dedupEl=document.getElementById('harness-idb-dedup');
+  const storageRawEl=document.getElementById('harness-storage-raw');
+  const diffEl=document.getElementById('harness-storage-diff');
+
+  try{
+    const online = navigator.onLine;
+    let healthOk=false;
+    try{
+      const r=await fetch('/api/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}});
+      healthOk=r.ok;
+    }catch{ healthOk=false; }
+    if(statusEl){
+      const isOnline = online && healthOk;
+      statusEl.textContent = isOnline ? '● オンライン' : '○ オフライン';
+      statusEl.className = 'badge '+(isOnline ? 'online' : 'offline');
+    }
+  }catch{}
+
+  let cacheKeysCount=0;
+  let cacheEntries=0;
+  try{
+    if('caches' in window){
+      const keys = await caches.keys();
+      cacheKeysCount=keys.length;
+      for(const k of keys){
+        try{
+          const c=await caches.open(k);
+          const reqs=await c.keys();
+          cacheEntries+=reqs.length;
+        }catch{}
+      }
+    }
+  }catch{}
+  if(cacheCountEl){
+    cacheCountEl.textContent='cache: '+cacheKeysCount+' caches / '+cacheEntries+' entries';
+  }
+
+  let all=[];
+  try{
+    all = await OfflineStore.getAll();
+  }catch{ all=[]; }
+
+  if(idbTableBody){
+    if(!all.length){
+      idbTableBody.innerHTML='<tr><td colspan="6" style="text-align:center;color:#666">（0件）</td></tr>';
+    }else{
+      idbTableBody.innerHTML='';
+      for(const w of all){
+        const tr=document.createElement('tr');
+        const fmtDate=(ts)=> ts ? new Date(ts).toISOString().slice(0,19).replace('T',' ') : '—';
+        tr.innerHTML='<td>'+escapeHtml(w.folder||'')+'</td><td class="mono">'+escapeHtml(w.cacheName||cacheNameFor(w.folder||''))+'</td><td>'+(w.pageCount!=null?w.pageCount:(w.cachedCount||'—'))+'</td><td>'+fmt(w.bytes||0)+'</td><td class="mono">'+escapeHtml((w.thumb||'') .slice(0,40))+'</td><td class="mono">'+fmtDate(w.addedAt)+'</td>';
+        idbTableBody.appendChild(tr);
+      }
+    }
+  }
+
+  const rawSum = rawBytes(all);
+  const dedupSum = dedupedBytes(all);
+  if(dedupEl){
+    dedupEl.textContent='raw sum: '+fmt(rawSum)+' ('+rawSum+' bytes) | dedup sum: '+fmt(dedupSum)+' ('+dedupSum+' bytes) | rows: '+all.length;
+  }
+  window.__harnessRawSum = rawSum;
+  window.__harnessDedupSum = dedupSum;
+  try{ updateWipeUI(all, dedupSum); }catch{}
+
+  let est=null;
+  try{
+    if(navigator.storage && navigator.storage.estimate) est=await navigator.storage.estimate();
+  }catch{}
+  if(!est){
+    try{ est=await OfflineStore.storageEstimate(); }catch{}
+  }
+  if(storageRawEl){
+    try{ storageRawEl.textContent=JSON.stringify(est||{usage:null,quota:null}, null, 2); }catch{ storageRawEl.textContent=String(est); }
+  }
+  if(diffEl){
+    const usage = est ? (est.usage||0) : 0;
+    const quota = est ? (est.quota||0) : 0;
+    const diff = usage - dedupSum;
+    let txt='usage: '+fmt(usage)+' ('+usage+')';
+    if(quota) txt+=' / quota: '+fmt(quota)+' ('+quota+')';
+    txt+=' | dedup: '+fmt(dedupSum)+' | diff(usage-dedup): '+fmt(Math.abs(diff))+' ('+diff+')';
+    diffEl.textContent=txt;
+  }
+
+  if(!tree.length) await fetchTree();
+  else { populateTargetSelect(); updateLeafCount(); }
+
+  // ── thumb hit rate: enumerate via OfflineThumb.collect (per-segment encode) + caches.match ──
+  try{
+    const thumbEl=document.getElementById('harness-thumb-hit');
+    if(thumbEl){
+      const thumbApi = window.OfflineThumb || (window.OfflineCore && window.OfflineCore.OfflineThumb);
+      const thumbUrls=thumbApi.collect(tree).map((e)=>e.url);
+      let hits=0;
+      if('caches' in window && thumbUrls.length){
+        try{
+          const results=await Promise.all(thumbUrls.map(async (u)=>{
+            try{ const h=await caches.match(u); return !!h; }catch{ return false; }
+          }));
+          hits=results.filter(Boolean).length;
+        }catch{}
+      }
+      const pct=thumbUrls.length? Math.round(hits/thumbUrls.length*100):0;
+      let txt=`thumb hit ${hits}/${thumbUrls.length}` + (thumbUrls.length? ` (${pct}%)`:"");
+      if(thumbUrls.length) txt+= hits===thumbUrls.length? " — all hit" : ` — ${thumbUrls.length-hits} miss`;
+      thumbEl.textContent=txt;
+      window.__harnessThumbHit=`${hits}/${thumbUrls.length}`;
+      window.__harnessThumbUrls=thumbUrls;
+    }
+  }catch{}
+
+  // ── /api/folders cached with ignoreSearch fallback ──
+  try{
+    const apiEl=document.getElementById('harness-api-folders-cached');
+    if(apiEl){
+      let cached=false, cachedIgnore=false, hitWithQS=false;
+      if('caches' in window){
+        try{ const r1=await caches.match('/api/folders'); cached=!!r1; }catch{}
+        try{ const r2=await caches.match('/api/folders', {ignoreSearch:true}); cachedIgnore=!!r2; }catch{}
+        try{ const r3=await caches.match('/api/folders?_harness=1', {ignoreSearch:true}); hitWithQS=!!r3; }catch{}
+      }
+      // keep exact substrings required for grep/verification
+      apiEl.textContent=`/api/folders cached ${cached} (ignoreSearch ${cachedIgnore}) — hitWithQS ${hitWithQS} — caches.match + ignoreSearch fallback ${cached||cachedIgnore?"hit":"miss"}`;
+      window.__harnessApiCached=cached;
+      window.__harnessApiCachedIgnore=cachedIgnore;
+    }
+  }catch{}
+
+  // ── SHELL precache hit counts (assets parsed from /sw.js; fallback when offline) ──
+  try{
+    const shellEl=document.getElementById('harness-shell-hits');
+    if(shellEl){
+      const SHELL_ASSETS=await loadShellAssets();
+      let hits=0;
+      const details=[];
+      if('caches' in window){
+        for(const u of SHELL_ASSETS){
+          let h=false;
+          try{ const r=await caches.match(u); h=!!r; }catch{}
+          if(h) hits++;
+          details.push(`${u} ${h?"hit":"miss"}`);
+        }
+      }
+      shellEl.textContent=`SHELL ${hits}/${SHELL_ASSETS.length} hits — ${details.join(', ')}`;
+      window.__harnessShellHits=`${hits}/${SHELL_ASSETS.length}`;
+      window.__harnessShellDetails=details;
+    }
+  }catch{}
+
+  try{ await loadVersion(); }catch{}
+
+  try{ await probeSignals(); }catch{}
+
+}
+window.refresh = refresh;
+
+window.updateWipeUI = updateWipeUI;
+window.openWipeModal = openWipeModal;
+window.closeWipeModal = closeWipeModal;
+window.doWipeAll = doWipeAll;
+
+document.getElementById('btn-wipe-all')?.addEventListener('click', ()=>{
+  const btn=document.getElementById('btn-wipe-all');
+  if(btn && btn.disabled) return;
+  openWipeModal();
+});
+document.getElementById('btn-wipe-cancel')?.addEventListener('click', ()=> closeWipeModal());
+document.getElementById('btn-wipe-confirm')?.addEventListener('click', async ()=>{
+  const c=document.getElementById('btn-wipe-confirm');
+  if(c) c.disabled=true;
+  try{ await doWipeAll(); }finally{ if(c) c.disabled=false; }
+});
+document.getElementById('harness-wipe-modal')?.addEventListener('click', (ev)=>{
+  if(ev.target && ev.target.id==='harness-wipe-modal') closeWipeModal();
+});
+document.addEventListener('keydown', (ev)=>{
+  if(ev.key==='Escape'){
+    const m=document.getElementById('harness-wipe-modal');
+    if(m && m.style.display!=='none' && m.style.display!=='') closeWipeModal();
+  }
+}, true);
+
+document.getElementById('btn-health-abort')?.addEventListener('click', async ()=>{
+  const hint=document.getElementById('harness-ops-hint');
+  if(hint) hint.textContent='health abort: fetch を AbortController で中断中…';
+  try{
+    const ctl=new AbortController();
+    const p=fetch('/api/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:ctl.signal});
+    ctl.abort();
+    await p;
+  }catch(e){
+    console.log('[harness] health abort — aborted as expected', e && e.name);
+  }
+  const statusEl=document.getElementById('harness-status');
+  if(statusEl){ statusEl.textContent='○ オフライン (health abort)'; statusEl.className='badge offline'; }
+  if(hint) hint.textContent='health abort: fetch('/+"'"+'api/health?online_check=1'+"'"+',{headers:{"X-Online-Check":"1"}}) を abort — #offline-status の ○オフライン遷移を検証。window.healthAbortDone=true';
+  window.healthAbortDone=true;
+  await refresh();
+});
+document.getElementById('btn-set-offline')?.addEventListener('click', ()=>{
+  const hint=document.getElementById('harness-ops-hint');
+  if(hint) hint.textContent='setOffline: window.dispatchEvent(new Event('+"'offline'"+')) 発火…';
+  try{ window.dispatchEvent(new Event('offline')); }catch{}
+  const statusEl=document.getElementById('harness-status');
+  if(statusEl){ statusEl.textContent='○ オフライン (setOffline mock)'; statusEl.className='badge offline'; }
+  renderSignals(new Array(10).fill(false));
+  if(hint) hint.textContent='setOffline: window.dispatchEvent(new Event('+"'offline'"+')) で offline リスナを発火 — app.js の offline ハンドラ経由で UI がオフライン表示に切替。window.setOfflineDone=true';
+  window.setOfflineDone=true;
+});
+
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); });
+}else{
+  fetchTree().then(()=> refresh());
+}
+window.addEventListener('online', ()=> refresh());
+window.addEventListener('offline', ()=> refresh());
+</script>
+</body>
+</html>

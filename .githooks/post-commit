@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# post-commit: コミットが確定した内容で、この worktree の開発環境を最新にしておく。
+#
+# 通常は pre-commit が既に同じ内容をビルドしているのでレイヤは全てキャッシュに当たる。
+# --no-verify や --amend で pre-commit を通らなかった場合の取りこぼしを拾うのが役目。
+#
+# 本番 (docker-compose.yml) には一切触らない。
+
+# フックは全 worktree で共有される（.git/hooks は common dir）。
+# lib.sh を持たないブランチをチェックアウトした worktree でも壊れないようにする。
+LIB="$(git rev-parse --show-toplevel)/.githooks/lib.sh"
+[ -f "$LIB" ] || exit 0
+# shellcheck source=lib.sh
+. "$LIB"
+
+# shellcheck disable=SC2046  # ファイル名の空白は元から未対応（既存挙動を維持）
+if ! needs_rebuild $(git diff-tree --no-commit-id --name-only -r HEAD); then
+    exit 0
+fi
+
+if ! dev_available; then
+    exit 0
+fi
+
+echo ""
+echo "🔄 開発環境を最新のコミットに揃えます..."
+# --ref HEAD: git archive でコミット確定分だけをビルドする。作業ツリーから
+# ビルドすると未ステージの編集が混ざり、「コミットが確定した内容」にならない。
+if dev_up --ref HEAD >/dev/null 2>&1; then
+    echo "✅ 開発環境を更新しました: $(dev_url)"
+else
+    echo "⚠️  開発環境の更新に失敗しました。手動で: ./dev.sh up"
+fi
