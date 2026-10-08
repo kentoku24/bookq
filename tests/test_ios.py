@@ -111,9 +111,9 @@ def test_ios_tap_zone(ios_page):
       const r = n => document.getElementById(n).getBoundingClientRect();
       return {w: innerWidth, prev: r('zone-prev').width, tog: r('zone-toggle').width, nxt: r('zone-next').width};
     }""")
-    assert abs(dims["prev"] / dims["w"] - 0.40) < 0.02, dims
-    assert abs(dims["tog"] / dims["w"] - 0.20) < 0.02, dims
-    assert abs(dims["nxt"] / dims["w"] - 0.40) < 0.02, dims
+    assert abs(dims["prev"] / dims["w"] - 0.30) < 0.02, dims
+    assert abs(dims["tog"] / dims["w"] - 0.40) < 0.02, dims
+    assert abs(dims["nxt"] / dims["w"] - 0.30) < 0.02, dims
     _open(page, "simple_manga", expect_pages=5)
     page.locator("#zone-prev").click()
     expect(page.locator("#counter")).to_have_text("2 / 5")

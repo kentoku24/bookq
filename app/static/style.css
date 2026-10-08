@@ -150,7 +150,7 @@ body{position:fixed;inset:0}
 #zoom-layer{position:absolute;inset:0;transform-origin:0 0;transition:none}
 body.zoomed #zoom-layer{will-change:transform}
 body.zoomed #zone-prev,body.zoomed #zone-next{pointer-events:none}
-/* #zone-toggle's default left:40%/width:20% (below) already matches this;
+/* #zone-toggle's default left:30%/width:40% (below) already matches this;
    the zoomed-only override was a redundant dead rule. */
 body.zoomed #hint{display:none}
 #img-container,#img-track,#img-track *,#zone-prev,#zone-next,#zone-toggle,#hint,#spread-controls,#spread-controls *,#empty{touch-action:none}
@@ -176,9 +176,9 @@ body.portrait #img-track .spread-container{bottom:50%;transform:translateY(50%)}
 
 /* touch zones — excluded from toolbar/slider area */
 #zone-prev,#zone-next,#zone-toggle{position:absolute;top:0;bottom:0;z-index:2;cursor:pointer}
-#zone-prev{left:0;width:40%}      /* tap → next page (advance) */
-#zone-toggle{left:40%;width:20%}  /* tap → toggle toolbar */
-#zone-next{right:0;width:40%}     /* tap → previous page (go back) */
+#zone-prev{left:0;width:30%}      /* tap → next page (advance) */
+#zone-toggle{left:30%;width:40%}  /* tap → toggle toolbar */
+#zone-next{right:0;width:30%}     /* tap → previous page (go back) */
 
 /* toolbar hide */
 #toolbar{transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0)}
