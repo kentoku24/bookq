@@ -754,6 +754,12 @@ def _archive_bytes_response(
         "Last-Modified": last_modified,
         "Accept-Ranges": "bytes",
     }
+    if media_type == "image/svg+xml":
+        # SVG は active document: 直接開くと同一オリジンで script が走るため
+        # `sandbox` で不透明オリジンに隔離する (app/thumbs.py と同一方針)。
+        # attachment は <img> 表示を壊すため使わない。
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        headers["X-Content-Type-Options"] = "nosniff"
     range_header = request.headers.get("range")
     if range_header:
         parsed = _parse_range(range_header, len(data))
@@ -885,15 +891,22 @@ async def serve_image(
         except (TypeError, ValueError):
             pass  # Invalid date header — proceed normally
 
+    headers: dict[str, str] = {
+        "Cache-Control": "public, max-age=3600",
+        "ETag": etag,
+        "Last-Modified": last_modified,
+    }
+    if ctype == "image/svg+xml":
+        # SVG は active document: 直接開くと同一オリジンで script が走るため
+        # `sandbox` で不透明オリジンに隔離する (app/thumbs.py と同一方針)。
+        # attachment は <img> 表示を壊すため使わない。
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        headers["X-Content-Type-Options"] = "nosniff"
     return FileResponse(
         path=str(file_path),
         stat_result=stat,
         media_type=ctype or "application/octet-stream",
-        headers={
-            "Cache-Control": "public, max-age=3600",
-            "ETag": etag,
-            "Last-Modified": last_modified,
-        },
+        headers=headers,
     )
 
 
