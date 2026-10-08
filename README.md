@@ -136,7 +136,35 @@ iPad Safari では7日間起動しないとオフライン保存が自動削除�
 
 ### アイコン
 
-アイコンは `app/static/icons/icon-192.png` / `icon-512.png` を正としつつ `favicon.svg` は `app/static/logo.svg` を参照して手描き（トレース生成はユーザー許可 2026-08-29 で可）、派生は Pillow で生成する。ファイル一覧: `app/static/favicon.svg` / `app/static/favicon-32x32.png` / `app/static/favicon.ico`（16/32/48） / `app/static/apple-touch-icon.png`（180x180 opaque RGB） / `app/static/icons/icon-512-maskable.png`（512x512）。`manifest.json` は `192 any` / `512 any` / `512 maskable` の3エントリに分離し `any maskable` の一括指定は使わない（maskable は `#0f172a` パディングで safe zone 80% を担保）。生成例: `python3 -c "from PIL import Image; im=Image.open('app/static/icons/icon-512.png'); im.resize((180,180), Image.LANCZOS).save('app/static/apple-touch-icon.png')"`、`python3 -c "from PIL import Image; i32=Image.open('app/static/favicon-32x32.png'); i16=i32.resize((16,16), Image.LANCZOS); i32.save('app/static/favicon.ico', sizes=[(16,16),(32,32),(48,48)])"`、maskable は `python3 -c "from PIL import Image; bg=Image.new('RGB',(512,512),'#0f172a'); fg=Image.open('app/static/icons/icon-512.png').resize((408,408), Image.LANCZOS); bg.paste(fg,(52,52)); bg.save('app/static/icons/icon-512-maskable.png')"`。
+2026-10-09 にブランドマークを「bq」リガチャ（濃紺グラデーションの squircle + クリーム→ピーチの字形）へ刷新。マスターはユーザー提供の 1254×1254 PNG（`bq-icon.png`、リポジトリ外）で、派生は Pillow で生成する。`favicon.svg` / `logo.svg` はマスター計測（タイル 1238px → 32 単位、÷38.7）に基づき手描き（トレース生成はユーザー許可 2026-08-29 で可）。
+
+- `icons/icon-192.png` / `icon-512.png` — squircle の角を透明 alpha にしたもの（任意マスクで破綻しない）
+- `icons/icon-512-maskable.png` — squircle 408px を `#0f172a` にペースト（safe zone 80%）
+- `apple-touch-icon.png` — 白コーナーを消すため中心を 1.30 倍ズームした full-bleed 180×180（opaque RGB、iOS マスクに継ぎ目なし）
+- `favicon-32x32.png` / `favicon.ico`（16/32/48） — squircle から縮小
+- `favicon.svg` / `logo.svg` — 手描きベクター。背景 = 縦 linear + 上部 radial glow、字形 = b ニアホワイト / q 縦グラデ（クリーム→ピーチ）、ボウルの編み込みは clipPath で上下の重なりを入れ替え
+
+`manifest.json` は `192 any` / `512 any` / `512 maskable` の3エントリに分離し `any maskable` の一括指定は使わない。生成例（マスターから）:
+
+```bash
+python3 - <<'PY'
+from PIL import Image, ImageDraw
+src = Image.open('bq-icon.png').convert('RGB').crop((6, 4, 1244, 1246))  # 白マージンを除去
+SS, erode, r = 4, 4, 300.8  # 角丸半径フィット値・エッジ残差ぶんの侵食
+m = Image.new('L', (src.width*SS, src.height*SS), 0)
+ImageDraw.Draw(m).rounded_rectangle((erode*SS, erode*SS, src.width*SS-1-erode*SS, src.height*SS-1-erode*SS), radius=(r-erode)*SS, fill=255)
+master = src.convert('RGBA'); master.putalpha(m.resize(src.size, Image.BOX))
+master.resize((512,512), Image.LANCZOS).save('app/static/icons/icon-512.png')
+master.resize((192,192), Image.LANCZOS).save('app/static/icons/icon-192.png')
+master.resize((32,32), Image.LANCZOS).save('app/static/favicon-32x32.png')
+master.resize((32,32), Image.LANCZOS).save('app/static/favicon.ico', sizes=[(16,16),(32,32),(48,48)])
+mk = Image.new('RGB', (512,512), '#0f172a'); fg = master.resize((408,408), Image.LANCZOS); mk.paste(fg, (52,52), fg)
+mk.save('app/static/icons/icon-512-maskable.png')
+big = src.resize((int(src.width*1.3), int(src.height*1.3)), Image.LANCZOS)
+x0, y0 = (big.width-src.width)//2, (big.height-src.height)//2
+big.crop((x0, y0, x0+src.width, y0+src.height)).resize((180,180), Image.LANCZOS).save('app/static/apple-touch-icon.png')
+PY
+```
 
 ### オフライン検証ハーネス
 
