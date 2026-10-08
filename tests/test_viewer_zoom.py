@@ -83,16 +83,19 @@ def test_lift_with_overview_open_does_not_leave_body_zoomed(ios_page, server, to
     # overview — so that branch has to clear the class itself. Without it
     # #zone-prev / #zone-next stay pointer-events:none after the overview closes.
     #
-    # The repeated 24 is load-bearing: the frame that arms the pinch returns
-    # before onMove, so the fire needs a second dispatch at the same ratio.
-    # Any intermediate frame above FIRE would apply() and clear the class,
-    # making the assertion below pass for the wrong reason.
+    # The 24→20 step is load-bearing: the frame that arms the pinch returns
+    # before onMove, so the fire needs a second dispatch — and it must actually
+    # MOVE the fingers. Chromium drops a touchmove whose positions equal the
+    # previous one, and delivers one DOM event per distinct TARGET: both
+    # fingers sit in the 40% center zone, so a same-position repeat fires
+    # nothing. An intermediate frame above FIRE would apply() and clear the
+    # class, making the assertion below pass for the wrong reason.
     ios_page.evaluate(
         "(() => { window.Zoom.onOverviewFire = () => {"
         " window.Overview = { isOpen: () => true, close(){}, prebuild(){} }; }; })()"
     )
     try:
-        pinch(touch, CX, CY, [60, 24, 24], hold=True)   # arms at 24, ratio 0.40 → fire
+        pinch(touch, CX, CY, [60, 24, 20], hold=True)   # arms at 24 (.40), fires on the 20 move (.33)
         ios_page.wait_for_function("(() => window.Overview && window.Overview.isOpen())()")
         touch_end(touch)
         assert ios_page.evaluate("document.body.classList.contains('zoomed')") is False

@@ -170,9 +170,9 @@ def test_unicode_folder_name_serves_image(page):
 
 def test_tap_zones_navigate_manga_direction(page):
     open_folder(page, "simple_manga", expect_pages=5)
-    page.locator("#zone-prev").click()  # left 40% = NEXT page (right-to-left)
+    page.locator("#zone-prev").click()  # left 30% = NEXT page (right-to-left)
     expect(page.locator("#counter")).to_have_text("2 / 5")
-    page.locator("#zone-next").click()  # right 40% = PREVIOUS page
+    page.locator("#zone-next").click()  # right 30% = PREVIOUS page
     expect(page.locator("#counter")).to_have_text("1 / 5")
     page.locator("#zone-next").click()  # at first page: stays
     expect(page.locator("#counter")).to_have_text("1 / 5")
@@ -184,6 +184,26 @@ def test_center_zone_toggles_toolbar(page):
     expect(page.locator("#toolbar")).to_have_class(re.compile(r"\bhidden\b"))
     page.locator("#zone-toggle").click()
     expect(page.locator("#toolbar")).not_to_have_class(re.compile(r"\bhidden\b"))
+
+
+def test_tap_zone_widths_are_30_40_30(page):
+    # JS zoneActionAt (frac < 0.30 / > 0.70) must match the CSS hit areas:
+    # left 30% / center 40% / right 30% of #img-container.
+    open_folder(page, "simple_manga", expect_pages=5)
+    expect(page.locator("#img-track .page-cell img").first).to_have_class(
+        re.compile(r"\bloaded\b")
+    )
+    sizes = page.evaluate(
+        "() => {"
+        " const cw = document.querySelector('#img-container').getBoundingClientRect().width;"
+        " const w = id => document.querySelector(id).getBoundingClientRect().width;"
+        " return {cw, prev: w('#zone-prev'), toggle: w('#zone-toggle'), next: w('#zone-next')};"
+        " }"
+    )
+    assert sizes["cw"] > 0
+    assert abs(sizes["prev"] - sizes["cw"] * 0.30) <= 2
+    assert abs(sizes["toggle"] - sizes["cw"] * 0.40) <= 2
+    assert abs(sizes["next"] - sizes["cw"] * 0.30) <= 2
 
 
 def test_keyboard_navigation(page):
