@@ -9,10 +9,11 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import Receive, Scope, Send
 
 from app.compression import ApiGZipMiddleware
 from app.config import load_settings
-from app.auth import router as auth_router, init_oauth
+from app.auth import _TEST_MODE, router as auth_router, init_oauth
 from app.routes import _background_fill, api_router, warmup_metadata_index
 from app.static_files import NoCacheStaticFiles
 
@@ -36,6 +37,29 @@ logger = logging.getLogger(__name__)
 # scan_ms/rebuild_ms + archives/epubs/rars/pdfs species counts, and compare
 # `内部ウォームアップ完了 ... import_ms=` against elapsed_ms for the import share.
 WARMUP_TIMEOUT_SECONDS = 20.0
+
+
+class TestModeHeaderMiddleware:
+    """Attach `X-Test-Mode: 1` to every response while BOOKQ_TEST_MODE is on.
+
+    Pure-ASGI shape mirroring ApiGZipMiddleware (app/compression.py): no-op
+    when the import-time ``_TEST_MODE`` flag is false.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not _TEST_MODE:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_header(message) -> None:
+            if message["type"] == "http.response.start":
+                message["headers"].append((b"x-test-mode", b"1"))
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
 
 
 def _configure_logging() -> None:
@@ -151,6 +175,11 @@ async def lifespan(app: FastAPI):
     # mean the server is about to serve, so tailing this line is a valid readiness
     # signal. Still before `yield`, so it precedes hypercorn/uvicorn accepting
     # connections and /api/health answering.
+    if _TEST_MODE:
+        logger.warning(
+            "TEST MODE: BOOKQ_TEST_MODE=true 認証は無効 test専用 本番では絶対に有効にしないこと pid=%s",
+            pid,
+        )
     logger.info("起動完了 pid=%s", pid)
     # Shallow-warmup fill (plan shallow-warmup-fill T3): materialize opaque
     # archive nodes in the background, one at a time, pausing under request
@@ -179,6 +208,9 @@ def create_app() -> FastAPI:
 
     # API JSON と JS/CSS だけ gzip。画像は素通し（app/compression.py 参照）。
     app.add_middleware(ApiGZipMiddleware, minimum_size=1024, compresslevel=6)
+
+    # テストモード可視化: 有効時は全レスポンスに X-Test-Mode: 1 を付与。
+    app.add_middleware(TestModeHeaderMiddleware)
 
     init_oauth(settings)
 
