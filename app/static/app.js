@@ -2362,7 +2362,7 @@
     if (!perfOn || !perfTapAt) return;
     const tapAt = perfTapAt; perfTapAt = 0;
     const sync = `snap@${Math.round(entry - tapAt)} win${Math.round(afterWindow - entry)} lay${Math.round(afterLayout - afterWindow)}`;
-    const dir = perfTapX < window.innerWidth * 0.45 ? "next(L)" : (perfTapX > window.innerWidth * 0.55 ? "prev(R)" : "center");
+    const dir = perfTapX < window.innerWidth * 0.30 ? "next(L)" : (perfTapX > window.innerWidth * 0.70 ? "prev(R)" : "center");
     const img = stripImgs[idx];
     const readyAtTap = isImgReady(img);
     const t0 = getComputedStyle(track).transform;
@@ -2402,13 +2402,13 @@
   // One resolver for "which zone is under x", shared by the touchend tap path
   // (instant) and the click handlers (mouse / keyboard activation, and the
   // fallback when a touch never produced a touchend we could act on). Zone
-  // widths mirror the CSS: left 45% next, right 45% previous, middle toggle.
+  // widths mirror the CSS: left 30% next, right 30% previous, middle toggle.
   function zoneActionAt(clientX){
     if (!images.length) return;
     const rect = imgContainer.getBoundingClientRect();
     const frac = (clientX - rect.left) / Math.max(1, rect.width);
-    if (frac < 0.45){ if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); }
-    else if (frac > 0.55){ if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); }
+    if (frac < 0.30){ if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); }
+    else if (frac > 0.70){ if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); }
     else toggleToolbarZone();
   }
   function toggleToolbarZone(){
