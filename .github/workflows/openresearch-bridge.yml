@@ -13,10 +13,9 @@ on:
   repository_dispatch:
     types: [openresearch-issue]
 
+# Workflow default is read-only; the mirror job escalates only what it needs below.
 permissions:
-  contents: write
-  issues: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: oc-bridge-${{ github.event.client_payload.issue_number || inputs.source_issue_number || github.run_id }}
@@ -25,6 +24,9 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
