@@ -19,10 +19,10 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.concurrency import run_in_threadpool
 
 from app import auth as auth_module
-from app.archive import is_archive_file, list_archive_entries
+from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
 from app.metadata import MetadataIndex
-from app.scanner import _scan_archive_node, _scan_pdf_node, is_pdf_file, list_images, scan_tree
+from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, is_pdf_file, list_images, natural_key, scan_tree
 
 logger = logging.getLogger(__name__)
 
@@ -549,20 +549,96 @@ async def api_folders(
     target_fs = downloads_path if not norm else downloads_path / norm
     if not _is_within(downloads_path, target_fs):
         raise HTTPException(status_code=403, detail="path outside downloads dir")
-    tree, _ = await _ensure_tree_and_index(request)
-    cache_data = request.app.state.metadata_index_cache
-    gen = cache_data["timestamp"]
-    gen_int = int(cache_data.get("generation", 1) or 1)
-    if not norm:
-        target_children = tree
-    else:
-        node = _find_tree_node(tree, norm)
-        if node is None or node.get("type") != "folder":
+    # Shallow mode NEVER waits on the full scan: a fresh index cache serves
+    # it from the tree, otherwise a single-level live-FS read serves it.
+    # Neither path calls _ensure_tree_and_index / _ensure_index /
+    # _scan_and_rebuild, and an expired cache is never served.
+    # Transient degradations while the full scan has not run yet: dirs carry
+    # no thumb (the client renders its placeholder — render.js / resolveCover.js
+    # already handle thumb == null, no client change needed), and drilling
+    # into an archive yields [] until a full scan materializes its children.
+    cache_data = getattr(request.app.state, "metadata_index_cache", None)
+    if (
+        cache_data is not None
+        and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+        and "tree" in cache_data
+    ):
+        tree = cache_data["tree"]
+        gen = cache_data["timestamp"]
+        gen_int = int(cache_data.get("generation", 1) or 1)
+        if not norm:
+            target_children = tree
+        else:
+            node = _find_tree_node(tree, norm)
+            if node is None or node.get("type") != "folder":
+                raise HTTPException(status_code=404, detail="folder not found")
+            target_children = node.get("children") or []
+        # Copies, not views into the cached tree (children must stay intact there).
+        shallow = [{**c, "children": []} for c in target_children if c.get("type") == "folder"]
+        return _folders_response(request, response, shallow, norm, depth, gen, gen_int)
+    # Live-FS fallback: list one directory level directly. Archives/PDFs are
+    # classified by suffix membership only — never opened, images never
+    # stat'ed. Deliberately bypasses folders_body_cache: that cache is keyed
+    # by the index-cache generation (a float timestamp), and storing this
+    # payload under a stale/None generation would let a later request hit a
+    # body built from a different tree.
+    try:
+        on_disk = target_fs.is_dir()
+    except OSError:
+        on_disk = False
+    if not on_disk:
+        if norm and not target_fs.exists():
+            # Same 404 rule as the tree path: a nested path that resolves to
+            # nothing has no listing. An existing non-directory (archive/pdf
+            # file) falls through to [] — nothing lives beneath it.
             raise HTTPException(status_code=404, detail="folder not found")
-        target_children = node.get("children") or []
-    # Copies, not views into the cached tree (children must stay intact there).
-    shallow = [{**c, "children": []} for c in target_children if c.get("type") == "folder"]
-    return _folders_response(request, response, shallow, norm, depth, gen, gen_int)
+        shallow = []
+    else:
+        try:
+            fs_children = list(target_fs.iterdir())
+        except OSError:
+            fs_children = None
+        if fs_children is None:
+            shallow = []
+        else:
+            archives: list[str] = []
+            pdfs: list[str] = []
+            dirs: list[str] = []
+            for entry in fs_children:
+                name = entry.name
+                if name.startswith("."):
+                    continue
+                if entry.is_dir():
+                    dirs.append(name)
+                elif entry.is_file():
+                    suffix = entry.suffix.lower()
+                    if suffix in ARCHIVE_EXTENSIONS:
+                        archives.append(name)
+                    elif suffix in PDF_EXTENSIONS:
+                        pdfs.append(name)
+            archives.sort(key=lambda n: (natural_key(n), n))
+            pdfs.sort(key=lambda n: (natural_key(n), n))
+            dirs.sort(key=lambda n: (natural_key(n), n))
+            shallow = (
+                [{"name": n, "type": "folder", "children": [], "thumb": None, "archive": True}
+                 for n in archives]
+                + [{"name": n, "type": "folder", "children": [], "thumb": None,
+                     "archive": True, "pdf": True} for n in pdfs]
+                + [{"name": n, "type": "folder", "children": []} for n in dirs]
+            )
+    body_str = json.dumps(
+        shallow, ensure_ascii=False, allow_nan=False, indent=None,
+        separators=(",", ":"), default=str,
+    )
+    body = body_str.encode("utf-8")
+    digest = hashlib.sha1(f"{norm}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+    etag = f'"{digest[:24]}"'
+    headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
+    if getattr(request, "headers", None) is not None and request.headers.get(
+        "if-none-match"
+    ) == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @api_router.get("/api/search")
