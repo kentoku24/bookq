@@ -69,17 +69,9 @@ ONLY=A uv run --with playwright --with-requirements requirements-dev.txt \
 - Settle definition: every `#tile-grid img` is `img.complete` (covers load AND error), stamped in-page the moment it holds (see caveat in Failure triage).
 - A run with no settle in 30 s is recorded `"settle_timeout"` with a state dump — never fabricated; all 3 failed → STOP as env failure.
 
-PERF_INIT_JS (use verbatim):
+PERF_INIT_JS: see `references/perf-init.js` (use verbatim).
 
-```js
-(() => { try { performance.setResourceTimingBufferSize(2000); } catch (e) {} window.__perf = {navStart: null, firstTile: null, settleAt: null, longtasks: []}; try { new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__perf.longtasks.push({start: e.startTime, dur: e.duration}); }).observe({type: 'longtask', buffered: true}); } catch (e) {} const nav = performance.getEntriesByType('navigation')[0]; window.__perf.navStart = nav ? nav.startTime : 0; const tick = () => { const g = document.getElementById('tile-grid'); if (!g) return false; const imgs = Array.from(g.querySelectorAll('img')); if (imgs.length === 0) return false; if (imgs.every((im) => im.complete) && window.__perf.settleAt === null) { window.__perf.settleAt = performance.now(); return true; } return false; }; const watch = () => { const g = document.getElementById('tile-grid'); if (!g) { document.addEventListener('DOMContentLoaded', watch); return; } if (g.children.length > 0 && window.__perf.firstTile === null) window.__perf.firstTile = performance.now(); new MutationObserver((m, obs) => { if (g.children.length > 0 && window.__perf.firstTile === null) { window.__perf.firstTile = performance.now(); obs.disconnect(); } }).observe(g, {childList: true}); }; watch(); const iv = setInterval(() => { if (tick()) clearInterval(iv); }, 100); setTimeout(() => clearInterval(iv), 60000); })();
-```
-
-COLLECT_JS (use verbatim):
-
-```js
-() => { const nav = performance.getEntriesByType('navigation')[0] || {}; const res = performance.getEntriesByType('resource').map((e) => ({name: e.name, start: e.startTime, dur: e.duration, transfer: e.transferSize, decoded: e.decodedBodySize})); const bucket = (n) => { const p = decodeURIComponent(new URL(n).pathname); if (p.endsWith('.js')) return 'js'; if (p.endsWith('.css')) return 'css'; if (p.startsWith('/thumb/')) return 'thumb'; if (p.startsWith('/image/')) return 'image'; if (p.startsWith('/api/')) return 'api'; return 'other'; }; const agg = {}; for (const r of res) { const b = bucket(r.name); const a = agg[b] || (agg[b] = {count: 0, transfer: 0, decoded: 0}); a.count += 1; a.transfer += r.transfer || 0; a.decoded += r.decoded || 0; } const folders = res.filter((r) => r.name.includes('/api/folders')); return {url: location.href, display_complete_ms: (window.__perf && window.__perf.settleAt !== null && window.__perf.navStart !== null) ? window.__perf.settleAt - window.__perf.navStart : null, first_tile_ms: (window.__perf && window.__perf.firstTile !== null && window.__perf.navStart !== null) ? window.__perf.firstTile - window.__perf.navStart : null, nav_ttfb_ms: nav.responseStart !== undefined ? nav.responseStart : null, nav_dcl_ms: nav.domContentLoadedEventEnd !== undefined ? nav.domContentLoadedEventEnd : null, nav_load_ms: nav.loadEventEnd !== undefined ? nav.loadEventEnd : null, longtasks: window.__perf ? window.__perf.longtasks : [], resource_agg: agg, folders: folders, tile_count: document.querySelectorAll('#tile-grid .tile, #tile-grid .item, #tile-grid .card').length, tile_img_count: document.querySelectorAll('#tile-grid img').length}; }
-```
+COLLECT_JS: see `references/collect-stats.js` (use verbatim).
 
 iPhone UA: `Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1`
 
