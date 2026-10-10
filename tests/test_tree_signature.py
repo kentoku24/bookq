@@ -321,3 +321,101 @@ def test_symlink_cycle_terminates(tmp_path: Path) -> None:
     first = compute_signature(tmp_path)
     assert first is not None and len(first) == 64
     assert compute_signature(tmp_path) == first
+
+
+def test_plain_images_not_statted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plain images must cost ZERO entry.stat() calls (d_type fast path).
+
+    Wraps os.scandir so every returned entry counts its own .stat() calls.
+    Tree has nested dirs, archives, PDFs, metadata.toml, MANY plain images,
+    a dangling symlink, and a dir symlink — all entry names unique so the
+    per-name counts are unambiguous. Only dirs + archives/PDFs/metadata.toml
+    + symlinks may be stat-ed; every plain image must stay at zero and the
+    grand total must equal exactly dirs + specials + symlinks.
+    """
+    (tmp_path / "sub_a" / "nested").mkdir(parents=True)
+    (tmp_path / "sub_b").mkdir(parents=True)
+    plain_images = [
+        "a1.png",
+        "a2.jpg",
+        "a3.webp",
+        "n1.png",
+        "n2.jpeg",
+    ]
+    for name in plain_images[:3]:
+        (tmp_path / "sub_a" / name).write_bytes(b"\x89PNG" + b"0" * 32)
+    for name in plain_images[3:]:
+        (tmp_path / "sub_a" / "nested" / name).write_bytes(b"\x89PNG" + b"1" * 32)
+    many_images = [f"bulk{i:02d}.png" for i in range(10)]
+    for name in many_images:
+        (tmp_path / "sub_b" / name).write_bytes(b"\x89PNG" + b"2" * 32)
+    plain_images.extend(many_images)
+    specials = ["data.zip", "doc.pdf", "metadata.toml", "inner.cbz", "notes.pdf"]
+    (tmp_path / "sub_a" / "data.zip").write_bytes(b"PK" + b"3" * 32)
+    (tmp_path / "sub_a" / "doc.pdf").write_bytes(b"%PDF" + b"4" * 32)
+    (tmp_path / "sub_a" / "metadata.toml").write_text('title = "a"\n')
+    (tmp_path / "sub_a" / "nested" / "inner.cbz").write_bytes(b"PK" + b"5" * 32)
+    (tmp_path / "sub_b" / "notes.pdf").write_bytes(b"%PDF" + b"6" * 32)
+    (tmp_path / "dangling").symlink_to(tmp_path / "no-such-target")
+    (tmp_path / "dirlink").symlink_to(tmp_path / "sub_a", target_is_directory=True)
+
+    real_scandir = os.scandir
+    stat_calls: dict[str, int] = {}
+
+    class _CountingEntry:
+        def __init__(self, inner: os.DirEntry[str]) -> None:
+            self._inner = inner
+
+        @property
+        def name(self) -> str:
+            return self._inner.name
+
+        @property
+        def path(self) -> str:
+            return self._inner.path
+
+        def is_symlink(self) -> bool:
+            return self._inner.is_symlink()
+
+        def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+            return self._inner.is_dir(follow_symlinks=follow_symlinks)
+
+        def is_file(self, *, follow_symlinks: bool = True) -> bool:
+            return self._inner.is_file(follow_symlinks=follow_symlinks)
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            stat_calls[self._inner.name] = stat_calls.get(self._inner.name, 0) + 1
+            return self._inner.stat(follow_symlinks=follow_symlinks)
+
+    class _CountingIterator:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner  # type: ignore[no-untyped-call]
+
+        def __iter__(self) -> "_CountingIterator":
+            return self
+
+        def __next__(self) -> _CountingEntry:
+            return _CountingEntry(next(self._inner))  # type: ignore[no-untyped-call]
+
+        def __enter__(self) -> "_CountingIterator":
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._inner.__exit__(*args)  # type: ignore[no-untyped-call, no-any-return]
+
+        def close(self) -> None:
+            self._inner.close()  # type: ignore[no-untyped-call]
+
+    def _counting_scandir(path: object, *args: object, **kwargs: object) -> _CountingIterator:
+        return _CountingIterator(real_scandir(path, *args, **kwargs))  # type: ignore[no-untyped-call]
+
+    monkeypatch.setattr(os, "scandir", _counting_scandir)
+    sig = compute_signature(tmp_path)
+    assert sig is not None and len(sig) == 64
+
+    for img in plain_images:
+        assert stat_calls.get(img, 0) == 0, f"plain image {img} was stat-ed"
+    # Expected: 3 subdirs (sub_a, sub_b, nested) + 5 specials
+    # (data.zip, doc.pdf, metadata.toml, inner.cbz, notes.pdf)
+    # + 2 symlinks (dangling, dirlink) = 10.
+    assert sum(stat_calls.values()) == 3 + 5 + 2
