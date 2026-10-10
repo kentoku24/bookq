@@ -25,8 +25,11 @@ The walk itself is level-synchronous parallel: ONE ``ThreadPoolExecutor``
 per call scans each BFS level's directories concurrently (no nested
 submissions — deadlock freedom), while the MAIN thread alone owns the
 ``(st_dev, st_ino)`` visited set (no locks) and expands the next level.
-Each entry is stat-ed exactly ONCE via ``entry.stat(follow_symlinks=True)``
-— even plain images, whose digest TERMS stay name-only.
+Each entry is classified via its cached ``d_type`` (``is_symlink`` first, then
+``is_dir``/``is_file`` — no syscall for known types) and ``entry.stat()``
+runs ONLY where its result feeds a term or an identity: symlinks (one
+follow-stat), subdirs (mtime/ino), archives/PDFs/metadata.toml (mtime+size).
+Plain images hash their NAME ONLY with zero stat calls.
 
 Dot-names are skipped. Directories are visited once by ``(st_dev, st_ino)``
 identity — ``stat()`` follows symlinks (never ``lstat``), mirroring
@@ -62,10 +65,14 @@ def _scan_dir_local(path: Path, dir_st: os.stat_result) -> tuple[bytes, list[tup
 
     ONE ``os.scandir`` per call — a failure here propagates to the caller
     (via the worker future) and fails the whole walk open. Entries are
-    sorted by name; each gets exactly ONE ``entry.stat(follow_symlinks=True)``
-    and a stat failure folds the NAME ONLY and continues. Survivors are
-    classified by ``statmod.S_ISDIR``/``S_ISREG``; subdirs are returned (not
-    recursed into) for the main thread to dedupe and enqueue.
+    sorted by name and classified via the cached ``d_type`` probes
+    (``is_symlink``/``is_dir``/``is_file`` cost no syscall for known types),
+    so ``entry.stat()`` runs ONLY where its result feeds a digest term or
+    an identity: symlinks (one follow-stat to resolve), subdirs (mtime/ino),
+    and archives/PDFs/metadata.toml (mtime+size). Plain images and exotic
+    types hash the NAME ONLY with zero stat calls. Any per-entry ``OSError``
+    folds the NAME ONLY and continues. Subdirs are returned (not recursed
+    into) for the main thread to dedupe and enqueue.
     """
     local = bytearray()
     local += b"\x00d" + dir_st.st_mtime_ns.to_bytes(8, "little", signed=True)
@@ -77,9 +84,39 @@ def _scan_dir_local(path: Path, dir_st: os.stat_result) -> tuple[bytes, list[tup
         name = entry.name
         local += b"\x00n" + name.encode("utf-8", "surrogateescape")
         try:
-            st = entry.stat(follow_symlinks=True)
+            if entry.is_symlink():
+                # DT_LNK: d_type alone cannot classify — one follow-stat.
+                try:
+                    st = entry.stat(follow_symlinks=True)
+                except OSError:
+                    continue  # dangling symlink — name already hashed.
+            elif entry.is_dir(follow_symlinks=False):
+                # Cached d_type, no syscall: stat once for mtime/ino identity.
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue  # name already hashed.
+                children.append((name, st))
+                continue
+            elif entry.is_file(follow_symlinks=False):
+                # Cached d_type, no syscall: stat ONLY term-bearing files.
+                if name == _TOML_NAME:
+                    tag = b"\x00t"
+                elif Path(name).suffix.lower() in ARCHIVE_EXTENSIONS or Path(name).suffix.lower() in PDF_EXTENSIONS:
+                    tag = b"\x00f"
+                else:
+                    continue  # plain image etc: name only, zero stat calls.
+                try:
+                    st = entry.stat()
+                except OSError:
+                    continue  # name already hashed.
+                local += tag + st.st_mtime_ns.to_bytes(8, "little", signed=True)
+                local += st.st_size.to_bytes(8, "little", signed=True)
+                continue
+            else:
+                continue  # exotic/DT_UNKNOWN-unresolvable — name already hashed.
         except OSError:
-            continue  # broken symlink / exotic type — name already hashed.
+            continue  # d_type probe itself failed — name only, keep walking.
         if statmod.S_ISDIR(st.st_mode):
             children.append((name, st))
         elif statmod.S_ISREG(st.st_mode):
@@ -88,7 +125,7 @@ def _scan_dir_local(path: Path, dir_st: os.stat_result) -> tuple[bytes, list[tup
             elif Path(name).suffix.lower() in ARCHIVE_EXTENSIONS or Path(name).suffix.lower() in PDF_EXTENSIONS:
                 tag = b"\x00f"
             else:
-                continue  # plain image etc: name only, no per-file stat terms.
+                continue  # symlink to a plain image: name only, as before.
             local += tag + st.st_mtime_ns.to_bytes(8, "little", signed=True)
             local += st.st_size.to_bytes(8, "little", signed=True)
         # else: exotic survivor type — name already hashed.
