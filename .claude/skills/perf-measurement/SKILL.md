@@ -1,6 +1,12 @@
 ---
 name: perf-measurement
 description: Use when measuring bookq top-page display-complete performance on a dev environment with real data — boots a --local dev env with the live-data mount, runs scripts/perf/measure.py (ONLY=A) plus a Playwright display-complete pass, and reports the numbers in chat (no docs/ writes). Trigger on "パフォーマンス計測して", "表示速度を測って", "measure top page performance", "display-complete を計測", or filling docs/performance.md TODO values.
+triggers:
+  - パフォーマンス計測して
+  - 表示速度を測って
+  - measure top page performance
+  - display-complete を計測
+  - docs/performance.md の実測値を埋める
 ---
 
 # bookq top-page performance measurement
