@@ -1,6 +1,6 @@
 ---
 name: perf-measurement
-description: Use when measuring bookq top-page display-complete performance on a dev environment with real data — boots a --local dev env with the live-data mount, runs scripts/perf/measure.py (ONLY=A) plus a Playwright display-complete pass, and records a docs/reports baseline. Trigger on "パフォーマンス計測して", "表示速度を測って", "measure top page performance", "display-complete を計測", or filling docs/performance.md TODO values.
+description: Use when measuring bookq top-page display-complete performance on a dev environment with real data — boots a --local dev env with the live-data mount, runs scripts/perf/measure.py (ONLY=A) plus a Playwright display-complete pass, and reports the numbers in chat (no docs/ writes). Trigger on "パフォーマンス計測して", "表示速度を測って", "measure top page performance", "display-complete を計測", or filling docs/performance.md TODO values.
 triggers:
   - パフォーマンス計測して
   - 表示速度を測って
@@ -23,7 +23,7 @@ Measure how long the top page takes to fully display (display-complete: navigati
 
 ## The flow
 
-Writes (`docs/`) belong in a task worktree per AGENTS.md §8. Measurement itself is read-only. Run the measurement steps strictly serially — the dev server is single-worker, and parallel runs contaminate each other's timings.
+Measurement itself is read-only and produces no repo files. Run the measurement from the feature branch's task worktree so the image contains the code under test, and record which commit was measured. Run the measurement steps strictly serially — the dev server is single-worker, and parallel runs contaminate each other's timings.
 
 ### 1. Boot a dev environment with real data
 
@@ -34,6 +34,7 @@ Writes (`docs/`) belong in a task worktree per AGENTS.md §8. Measurement itself
 - `--local` publishes `http://127.0.0.1:<port>` (default 8080; on collision retry once with `--port 8099` and use it everywhere below). No tailnet, no `TS_AUTHKEY` needed.
 - Auth is skipped via `BOOKQ_TEST_MODE=true` (dev default) — no login step.
 - Do NOT pass `--fixture` (synthetic tree) or `--lan-allow`.
+- Measure the branch under development (the task worktree you run dev.sh from); never main unless explicitly asked.
 
 ### 2. Verify the real-data mount (STOP if empty)
 
@@ -91,11 +92,6 @@ Default device iPhone 17. Real Safari has no timing instrumentation — screensh
 ```
 
 Verify with label-filtered `docker ps` (empty) + `./dev.sh list` (row gone). Never `--all` / `--full`, never hand-`docker rm`, never touch other envs.
-
-### 7. Report (delivery)
-
-- `docs/reports/YYYY-MM-DD-<slug>.md`: environment / method / results (per-run values + medians) / KPI comparison / findings (file:line-cited facts only) / evidence-path appendix. Every number cites its evidence file. Redact real-data names (counts/bytes/timings only); reference screenshots as text paths, never embed them.
-- `docs/performance.md` TODO block: fill with medians + a method note (Chromium iPhone profile over localhost; tailnet HTTPS and real-device Safari unmeasured — no instrumentation path).
 
 ## Failure triage
 
