@@ -8,11 +8,9 @@ on:
     types: [openresearch-issue]
   workflow_dispatch:
 
+# Workflow default is read-only; each job escalates only what it needs below.
 permissions:
-  id-token: write
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: oc-auto-${{ github.event.issue.number || github.event.client_payload.issue_number }}
@@ -27,6 +25,9 @@ jobs:
   # ------------------------------------------------------------------
   gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     timeout-minutes: 30
     outputs:
       route: ${{ steps.eval.outputs.route }}
@@ -123,6 +124,12 @@ jobs:
     needs: gate
     if: vars.USE_DIRECT_RUN != 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'implement'
     runs-on: ubuntu-latest
+    # Official pinned action — kept conservative (its internals cannot be verified).
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
     timeout-minutes: 30
     # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
     # No job-level concurrency: the workflow-level group already serializes per
@@ -189,6 +196,12 @@ jobs:
     needs: gate
     if: vars.USE_DIRECT_RUN != 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'research'
     runs-on: ubuntu-latest
+    # Official pinned action — kept conservative (its internals cannot be verified).
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
     timeout-minutes: 30
     # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
     # No job-level concurrency: the workflow-level group already serializes per
@@ -256,6 +269,10 @@ jobs:
     needs: gate
     if: vars.USE_DIRECT_RUN == 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'implement'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     timeout-minutes: 30
     # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
     # No job-level concurrency: the workflow-level group already serializes per
@@ -289,10 +306,11 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
-      - name: Install opencode CLI
+      - name: Install opencode CLI (pinned)
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          curl -fsSL https://opencode.ai/install | bash -s -- --version 0.1.0
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          opencode --version || echo "::warning::opencode version check failed"
 
       - name: Run opencode CLI
         env:
@@ -371,6 +389,10 @@ jobs:
     needs: gate
     if: vars.USE_DIRECT_RUN == 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'research'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     timeout-minutes: 30
     # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
     # No job-level concurrency: the workflow-level group already serializes per
@@ -405,10 +427,11 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
-      - name: Install opencode CLI
+      - name: Install opencode CLI (pinned)
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          curl -fsSL https://opencode.ai/install | bash -s -- --version 0.1.0
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+          opencode --version || echo "::warning::opencode version check failed"
 
       - name: Run opencode CLI
         env:
@@ -490,6 +513,9 @@ jobs:
     needs: [implement, research, implement-direct, research-direct]
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     timeout-minutes: 30
     steps:
       - name: Sweep stale 🤖 processing label

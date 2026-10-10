@@ -439,10 +439,10 @@ bot 経路はいずれも `AGENTS.md` の規約（ブランチ命名 `ai/<issue�
 
 ### セキュリティ
 
-- **認証** — ワークフローは `GITHUB_TOKEN` と `OPENCODE_ZEN_API_KEY` を使用する。`id-token: write` は付与されているが、OIDC を GitHub App トークンに交換する処理はデフォルトでは配線されていない（App トークン認証が必要な場合は `actions/create-github-app-token` を追加する）。チェックアウトは `persist-credentials: false`。
-- **最小権限 permissions** — `id-token: write` + `contents/issues/pull-requests: write` のみ。ブリッジは `contents: write` + `issues: write` + `id-token: write`。
+- **認証** — ワークフローは `GITHUB_TOKEN` と `OPENCODE_ZEN_API_KEY` を使用する。`id-token: write` は公式 pinned Action を実行するジョブ（`opencode.yml` の `agent`、`opencode-auto.yml` の `implement` / `research`）にのみ付与されており、OIDC を GitHub App トークンに交換する処理はデフォルトでは配線されていない（App トークン認証が必要な場合は `actions/create-github-app-token` を追加する）。チェックアウトは `persist-credentials: false`。
+- **最小権限 permissions** — ワークフローレベルは `contents: read` のみで、各ジョブが必要に応じて昇格する per-job モデル。公式 Action ジョブは `contents` / `issues` / `pull-requests: write` + `id-token: write`、direct-run ジョブは `contents` / `issues` / `pull-requests: write`（`id-token` なし）、`gate` / `cleanup` は `contents: read` + `issues: write`、ブリッジの `mirror` は `contents: read` + `issues: write`。
 - **deny ルール**（`opencode.json`）— `rm -rf *`、`git push*main*`、force push、`curl * POST *`、`wget *`、外部ディレクトリアクセスを拒否。ただし事故防止ガードであり、exfiltration 対策の境界ではないことに注意。
-- **ワークフロー権限** — `default_workflow_permissions=write` が必要（PR 作成のため）。詳細は [docs/openresearch-auto-impl.md](docs/openresearch-auto-impl.md) §3 を参照。
+- **ワークフロー権限** — リポジトリ既定の `default_workflow_permissions` は `read` のままでよい（PR 作成に必要な権限は各ワークフローが per-job `permissions` で宣言している）。詳細は [docs/openresearch-auto-impl.md](docs/openresearch-auto-impl.md) §3 を参照。
 
 ## ファイル構成
 

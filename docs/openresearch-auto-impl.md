@@ -73,13 +73,15 @@ gh api repos/kentoku24/bookq/actions/variables --jq '.variables[] | select(.name
 
 ### ワークフロー権限 `write`
 
-PR 作成に必要。`read` のままだと `pull request create failed` になる:
+PR 作成に必要な権限は `.github/workflows/opencode.yml` / `opencode-auto.yml` / `openresearch-bridge.yml` が per-job `permissions` で宣言しているため、リポジトリ既定の `default_workflow_permissions` は `read` のままで動作する。ワークフローレベルは `contents: read` のみで、各ジョブが必要な権限に昇格する（`id-token: write` は公式 pinned Action を実行するジョブのみ）。
 
 ```bash
 gh api repos/kentoku24/bookq/actions/permissions/workflow -X PUT -f default_workflow_permissions=write -F can_approve_pull_request_reviews=true
 ```
 
-Settings → Actions → General → Workflow permissions でも `Read and write permissions` が選択されていることを確認する。
+上記コマンドはレガシー／任意である（実行しても無害だが、もはや必須ではない）。
+
+Settings → Actions → General → Workflow permissions で `Read` 選択のままであることを確認する。
 
 ### 必須シークレット / Prerequisites
 
@@ -100,11 +102,11 @@ Settings → Actions → General → Workflow permissions でも `Read and write
 | `404 Not Found` on token endpoint / `403 Forbidden`（App 権限系） | **App 未インストール（App トークン交換を配線している場合のみ）** | デフォルトでは発生しない。App トークン交換を配線している場合のみ、手順 2 を再確認 |
 | 上記以外（YAML 構文エラー、スクリプト内バグ、タイムアウト等） | **バグ** | ワークフローファイル / スクリプトを修正 |
 | `Failed to parse JSON` / `p.rest` / `Unexpected error` (official action v1.18.21) | **Action 不具合 — direct-run 迂回で解消** | リポジトリ変数 `USE_DIRECT_RUN=true` が設定済みか確認。未設定なら `gh api repos/kentoku24/bookq/actions/variables -f name=USE_DIRECT_RUN -f value=true` で有効化 |
-| `pull request create failed: GitHub Actions is not permitted...` | **Workflow 権限不足** | `gh api repos/kentoku24/bookq/actions/permissions/workflow -X PUT -f default_workflow_permissions=write -F can_approve_pull_request_reviews=true` で read+write に切替（Settings → Actions → General） |
+| `pull request create failed: GitHub Actions is not permitted...` | **Workflow 権限不足** | 該当ワークフローファイルの per-job `permissions` を確認する（そのジョブに `contents: write` / `pull-requests: write` が付与されているか）。リポジトリ既定の `default_workflow_permissions` は `read` のままでよい |
 
 判定のコツ: エラーメッセージに **token exchange / OIDC / installation 関連の 4xx** が出ている場合はまず App インストール状況を疑う。`❌ failed` 単体では原因が分からないため、必ず紐づく Actions ログ URL コメントからログを確認する。
 
-> **補足:** `USE_DIRECT_RUN=true` と `default_workflow_permissions=write` (read+write) は上記手順で設定する。`opencode-auto.yml` / `opencode.yml` / `openresearch-bridge.yml` は `GITHUB_TOKEN` と `OPENCODE_ZEN_API_KEY` を使用して動作し、`id-token: write` は付与されているが OIDC を GitHub App トークンに交換する処理はデフォルトでは配線されていない（App トークン認証が必要な場合は `actions/create-github-app-token` を追加する）。
+> **補足:** `USE_DIRECT_RUN=true` は上記手順で設定する。リポジトリ既定の `default_workflow_permissions` は `read` のままでよい（各ワークフローが per-job `permissions` を宣言している）。`opencode-auto.yml` / `opencode.yml` / `openresearch-bridge.yml` は `GITHUB_TOKEN` と `OPENCODE_ZEN_API_KEY` を使用して動作し、`id-token: write` は公式 pinned Action を実行するジョブにのみ付与されている（`gate` / direct-run / `cleanup` / ブリッジには付与なし）。OIDC を GitHub App トークンに交換する処理はデフォルトでは配線されていない（App トークン認証が必要な場合は `actions/create-github-app-token` を追加する）。
 
 ## 5. Zen クレジット上限 / 自動チャージ設定の確認
 
@@ -126,6 +128,6 @@ worst case として、信頼著者が N 件のラベル付き issue を連投�
 - [ ] GitHub App `opencode-agent` を `kentoku24/bookq` リポジトリにインストール済み（手動、bookq に限定）
 - [ ] ラベル 5 種（`ai/implement`, `ai/research`, `🤖 processing`, `✅ done`, `❌ failed`）が作成済み
 - [ ] リポジトリ変数 `USE_DIRECT_RUN=true` が設定済み
-- [ ] Workflow permissions が `write`（read+write）になっている
+- [ ] 各ワークフローに per-job `permissions` が宣言されている（リポジトリ既定 Workflow permissions は `read` のままでよい）
 - [ ] 初回ワークフロー実行が成功（または失敗原因を上表で分類済み）
 - [ ] Zen billing の月次上限を設定済み

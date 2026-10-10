@@ -4,6 +4,8 @@ Uses starlette's SessionMiddleware for session storage (already configured in ma
 Auth state is stored in request.session, which uses its own signed cookie.
 
 Set BOOKQ_TEST_MODE=true to bypass auth in test environments.
+Test-only: never enable in production (認証は無効になる). Prod additionally rejects
+the placeholder SECRET_KEY (see app/config.py).
 """
 
 import os
