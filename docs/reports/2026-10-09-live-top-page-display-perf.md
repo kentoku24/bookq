@@ -178,7 +178,7 @@ shallow (`?depth=1`) が full (`/api/folders`) より先に開始しているこ
 
 - Nav TTFB 12.7 / DCL 63.2 / load 63.2 / first tile 80.1 ms は `variants.A_iphone.median` の `ttfb_ms`, `dcl_ms`, `load_ms`, `first_tile_ms` (`01-measure/baseline.json:1289-1293`).
 - Top リソース数 90 / 総転送 939932 B (918 KB) / longtask 2 は同 median の `top_resources_count`, `top_resources_transfer`, `top_longtasks` (`01-measure/baseline.json:1294-1296`). 総転送の内訳 (中央値 run): css 9623 + js 105001 + api 351495 + thumb 473813 B (`01-measure/baseline.json:447-468`).
-- `/api/folders` 1215 B (gzip 転送) / TTFB 7.4 ms / total 8.4 ms は同 median の `api_folders_bytes`, `api_folders_ttfb_ms`, `api_folders_total_ms` (`01-measure/baseline.json:1297-1299`). `?depth=1` の gzip 転送 1215 B に対し復号後は 2330 B であり (`01-measure/baseline.json:469-480`), `00-env.md` の 2330 B と一致する (同一の 4 トップフォルダ, 矛盾なし).
+- `/api/folders` 1215 B (gzip 転送) / TTFB 7.4 ms / total 8.4 ms は同 median の `api_folders_bytes`, `api_folders_ttfb_ms`, `api_folders_total_ms` (`01-measure/baseline.json:1297-1299`). `?depth=1` の gzip 転送 1215 B に対し復号後は 2330 B であり (`01-measure/baseline.json:469-480,505-513`), `00-env.md` の 2330 B と一致する (同一の 4 トップフォルダ, 矛盾なし).
 - Open leaf (click から初画像 167.9 ms, 画像 9 件, 7013 KB 相当, 初画像 874533 B を 135.1 ms) は同 median の `click_to_first_img_ms`, `open_image_requests`, `open_image_bytes`, `first_image_bytes`, `first_image_ms` (`01-measure/baseline.json:1300-1304`).
 - Page turn (中央値 3.1 ms, 最大 7.6 ms, longtask 0, rAF gap 0) は同 median の `turn_median_ms`, `turn_max_ms`, `turn_longtasks`, `turn_raf_gaps` (`01-measure/baseline.json:1305-1308`).
 - JS 復号合計 341203 B (333 KB) は同 median の `js_decoded_total` (`01-measure/baseline.json:1309`).
@@ -194,7 +194,7 @@ shallow (`?depth=1`) が full (`/api/folders`) より先に開始しているこ
 
 比較対象は `docs/performance.md` の現行目標値である (KPI 表: 初タイル `≤300ms`, トップ転送量 `≤1MB`; 実測値未記入欄: display-complete `<5000ms`).
 
-| 指標 | 目標 (`docs/performance.md:5-11,54-61`) | 実測 (中央値) | 合否 | 証跡 |
+| 指標 | 目標 (`docs/performance.md:5-11,54-62`) | 実測 (中央値) | 合否 | 証跡 |
 |---|---|---|---|---|
 | 初タイル描画 | ≤300 ms | 72.1 ms (display 計測 3 run の中央値; measure.py 中央値 80.1 ms も ≤300 ms) | 合格 | `02-display/iphone-summary.json:10-21`, `01-measure/baseline.json:1293` |
 | トップ転送量 | ≤1 MB | 939932 B (918 KB) | 合格 | `01-measure/baseline.json:1295` |
@@ -209,7 +209,7 @@ shallow (`?depth=1`) が full (`/api/folders`) より先に開始しているこ
 所見は既定の事実引用のみとし, 推測は書かない.
 
 - 全文 `/api/folders` JSON は TTL ミスごとに全量再取得される (`app/routes.py:32,158-196`). run1 の shallow 所要 6464.5 ms (`02-display/iphone-run1.json:44`) が cold 初回の支配項であり, display-complete 11738.7 ms の主因である.
-- タイルごとの画像 fan-out は 1 タイルあたり 1 から 9 の img である (`app/static/browse/render.js:202-223`). lazy 解決は `app/static/thumbs/resolveCover.js:45` による. T3 中央値 run の thumb は 71 件 / 473813 B (`01-measure/baseline.json:463-467`), T4 run2 の settle 時 thumb は 49 件 / 475135 B (`02-display/iphone-run2.json:34-38`) である.
+- タイルごとの画像 fan-out は 1 タイルあたり 1 から 9 の img である (`app/static/browse/render.js:202-223`). lazy 解決は `app/static/thumbs/resolveCover.js:13-37` による（`loading="lazy"` 属性は `:45`）. T3 中央値 run の thumb は 71 件 / 473813 B (`01-measure/baseline.json:463-467`), T4 run2 の settle 時 thumb は 49 件 / 475135 B (`02-display/iphone-run2.json:34-38`) である.
 - `/` の HTML は gzip 対象外である (`app/compression.py:15`). Nav TTFB の中央値は measure.py で 12.7 ms (`01-measure/baseline.json:1290`), display run2 で 11.8 ms (`02-display/iphone-run2.json:5`) である.
 - PIL リサイズは thumb キャッシュミスごとに発生する (`app/thumbs.py:260-280`). run1 の thumb 復号 1561773 B (`02-display/iphone-run1.json:38`) に対し run2 は 807965 B (`02-display/iphone-run2.json:38`) であり, ミス率の差が転送と復号に表れる.
 - run3 (115.0 ms) と desktop (370.2 ms) の早期 settle は, settle 時の img 数 (各 3 件, `02-display/iphone-run3.json:48`, `02-display/desktop-run1.json:41`) が最終描画より少ない形であり, 記録のまま残す. 中央値 503.8 ms はこの外れ値に頑健である.
@@ -217,6 +217,8 @@ shallow (`?depth=1`) が full (`/api/folders`) より先に開始しているこ
 ## 7. 次のアクション
 
 性能改善の実装は本計画の範囲外であり, 改善案は後続の計画で扱う (T9 が本レポートの中央値を `docs/performance.md` の実測値未記入欄に記入する).
+
+- D3 (`scripts/perf/collect_thumb_waterfall.py`) は未実施である. ハーネス自体が TEMPORARY 扱いであり, single-cover `?w=200` 先行は root 計画 Todo3 のまま製品未実装のため lightweight == final settle で記録できる差分がない（ハーネス冒頭の宣言と同じ理由）. 軽量/追従の分離観測が必要になった時点で Todo3 実装と合わせて実施する.
 
 ## 8. 証跡パス一覧
 
@@ -240,6 +242,8 @@ shallow (`?depth=1`) が full (`/api/folders`) より先に開始しているこ
 - `/Users/kentokumatsunami/Documents/GitHub/bookq/.omo/evidence/live-top-page-display-perf/02-display/fallback_measure.py` (T4 証跡用一時スクリプト)
 - `/Users/kentokumatsunami/Documents/GitHub/bookq/.omo/evidence/live-top-page-display-perf/02-display/fallback_measure_desktop.py` (T5 証跡用一時スクリプト)
 - `/Users/kentokumatsunami/Documents/GitHub/bookq/.omo/evidence/live-top-page-display-perf/03-simulator.png` (T6 Simulator スクリーンショット 3108595 B, テキスト参照のみ)
+- `/Users/kentokumatsunami/Documents/GitHub/bookq/.omo/evidence/live-top-page-display-perf/` 直下の final wave 監査: `F1-compliance.md`・`F2-quality.md`・`F3-numbers.md`・`F4-scope.md`・`F5-hygiene.md`・`task-10-pr.md`（本レポート執筆後に追加されたため上記の計測一覧には含めていなかった）
+- `/Users/kentokumatsunami/Documents/GitHub/bookq/.omo/evidence/live-top-page-display-perf/issue-11738-body.md` (run1 11738.7 ms を起点とする後続 cold 改善 issue のドラフト, PR #7 参照を含む)
 
 実データツリー由来のフォルダ名やファイル名は本レポートのいかなる箇所にも転記していない (件数・バイト数・時刻のみ). サンプル URL は `/thumb/<redacted>?w=200` の形に redact する.
 
