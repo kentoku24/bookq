@@ -19,10 +19,11 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.concurrency import run_in_threadpool
 
 from app import auth as auth_module
-from app.archive import is_archive_file, list_archive_entries
+from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
 from app.metadata import MetadataIndex
-from app.scanner import _scan_archive_node, _scan_pdf_node, is_pdf_file, list_images, scan_tree
+from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, is_pdf_file, list_images, natural_key, scan_tree
+from app.tree_signature import compute_signature
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,13 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
 
     A single scan_tree walk feeds both the folders response and the index
     rebuild, so one filesystem walk serves the whole /api/folders request.
-    The lock is check-and-swap only (double-checked, never held across the
+    Past the TTL, a cheap filesystem-signature check runs OUTSIDE the lock:
+    when the signature matches the cached entry the timestamp is refreshed
+    in place (never rebinding the dict) and the cached pair is returned with
+    zero rebuilds. Only a signature mismatch (or a failed walk) takes the
+    locked rebuild path, which stores the pre-lock signature so the next TTL
+    miss can gate on it — never a second walk under the lock. The lock
+    itself is check-and-swap only (double-checked, never held across the
     build beyond run_in_threadpool dispatch). On rebuild failure nothing is
     cached — a partial tree is never kept — and the error propagates.
     """
@@ -171,6 +178,24 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
         and "tree" in cache_data
     ):
         return cache_data["tree"], cache_data["index"]
+
+    # TTL miss with a cached tree: gate the rebuild on the filesystem
+    # signature, computed OUTSIDE _index_lock so concurrent requests never
+    # queue behind the walk.
+    sig: str | None = None
+    sig_checked = False
+    if cache_data is not None and "tree" in cache_data:
+        downloads_path = request.app.state.settings.downloads_path
+        sig = await run_in_threadpool(compute_signature, downloads_path)
+        sig_checked = True
+        if sig is not None and sig == cache_data.get("signature"):
+            # Re-read: a concurrent rebuild may have replaced the dict
+            # while the signature walked — serve the winner.
+            cur = request.app.state.metadata_index_cache
+            if cur is not cache_data:
+                return cur["tree"], cur["index"]
+            cache_data["timestamp"] = time.time()
+            return cache_data["tree"], cache_data["index"]
 
     async with _index_lock:
         # Double-check after acquiring lock — another coroutine may have rebuilt.
@@ -188,10 +213,11 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
         # generation is the *fill* progress counter (warmup = 1, +1 per
         # filled node), so a rebuild preserves it: a TTL rebuild of an
         # unchanged tree keeps the ETag (digest + suffix) stable, and a
-        # full scan needs no fill.
+        # full scan needs no fill. The signature stored is the pre-lock one
+        # (or None) — never a second walk under the lock.
         prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
         cache_data = {"tree": tree, "index": index, "timestamp": time.time(),
-                      "generation": prev_gen}
+                      "generation": prev_gen, "signature": sig if sig_checked else None}
         request.app.state.metadata_index_cache = cache_data
         return tree, index
 
@@ -208,8 +234,9 @@ async def warmup_metadata_index(app_state) -> tuple[int, int, float]:
     Runs the same cache-miss path as _ensure_tree_and_index via
     _scan_and_rebuild and populates the exact same
     ``app_state.metadata_index_cache`` structure ({tree, index,
-    timestamp, generation} — generation starts at 1 and the background
-    fill bumps it per materialized node), so the first real request hits cache. No lock: lifespan
+    timestamp, generation, signature} — generation starts at 1 and the background
+    fill bumps it per materialized node; signature is the post-scan
+    compute_signature so the first TTL miss gates without rebuilding), so the first real request hits cache. No lock: lifespan
     completes before the server accepts requests, so nothing contends.
     Eager imports (pypdfium2/rarfile/PIL) stay in the caller
     (app/main.py lifespan), not here.
@@ -222,8 +249,9 @@ async def warmup_metadata_index(app_state) -> tuple[int, int, float]:
         app_state.settings.downloads_path, list_archives=False
     )
     elapsed_ms = (time.perf_counter() - started) * 1000
+    sig = await run_in_threadpool(compute_signature, app_state.settings.downloads_path)
     app_state.metadata_index_cache = {"tree": tree, "index": index, "timestamp": time.time(),
-                                      "generation": 1}
+                                      "generation": 1, "signature": sig}
     return folders, images, elapsed_ms
 
 
@@ -549,20 +577,96 @@ async def api_folders(
     target_fs = downloads_path if not norm else downloads_path / norm
     if not _is_within(downloads_path, target_fs):
         raise HTTPException(status_code=403, detail="path outside downloads dir")
-    tree, _ = await _ensure_tree_and_index(request)
-    cache_data = request.app.state.metadata_index_cache
-    gen = cache_data["timestamp"]
-    gen_int = int(cache_data.get("generation", 1) or 1)
-    if not norm:
-        target_children = tree
-    else:
-        node = _find_tree_node(tree, norm)
-        if node is None or node.get("type") != "folder":
+    # Shallow mode NEVER waits on the full scan: a fresh index cache serves
+    # it from the tree, otherwise a single-level live-FS read serves it.
+    # Neither path calls _ensure_tree_and_index / _ensure_index /
+    # _scan_and_rebuild, and an expired cache is never served.
+    # Transient degradations while the full scan has not run yet: dirs carry
+    # no thumb (the client renders its placeholder — render.js / resolveCover.js
+    # already handle thumb == null, no client change needed), and drilling
+    # into an archive yields [] until a full scan materializes its children.
+    cache_data = getattr(request.app.state, "metadata_index_cache", None)
+    if (
+        cache_data is not None
+        and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+        and "tree" in cache_data
+    ):
+        tree = cache_data["tree"]
+        gen = cache_data["timestamp"]
+        gen_int = int(cache_data.get("generation", 1) or 1)
+        if not norm:
+            target_children = tree
+        else:
+            node = _find_tree_node(tree, norm)
+            if node is None or node.get("type") != "folder":
+                raise HTTPException(status_code=404, detail="folder not found")
+            target_children = node.get("children") or []
+        # Copies, not views into the cached tree (children must stay intact there).
+        shallow = [{**c, "children": []} for c in target_children if c.get("type") == "folder"]
+        return _folders_response(request, response, shallow, norm, depth, gen, gen_int)
+    # Live-FS fallback: list one directory level directly. Archives/PDFs are
+    # classified by suffix membership only — never opened, images never
+    # stat'ed. Deliberately bypasses folders_body_cache: that cache is keyed
+    # by the index-cache generation (a float timestamp), and storing this
+    # payload under a stale/None generation would let a later request hit a
+    # body built from a different tree.
+    try:
+        on_disk = target_fs.is_dir()
+    except OSError:
+        on_disk = False
+    if not on_disk:
+        if norm and not target_fs.exists():
+            # Same 404 rule as the tree path: a nested path that resolves to
+            # nothing has no listing. An existing non-directory (archive/pdf
+            # file) falls through to [] — nothing lives beneath it.
             raise HTTPException(status_code=404, detail="folder not found")
-        target_children = node.get("children") or []
-    # Copies, not views into the cached tree (children must stay intact there).
-    shallow = [{**c, "children": []} for c in target_children if c.get("type") == "folder"]
-    return _folders_response(request, response, shallow, norm, depth, gen, gen_int)
+        shallow = []
+    else:
+        try:
+            fs_children = list(target_fs.iterdir())
+        except OSError:
+            fs_children = None
+        if fs_children is None:
+            shallow = []
+        else:
+            archives: list[str] = []
+            pdfs: list[str] = []
+            dirs: list[str] = []
+            for entry in fs_children:
+                name = entry.name
+                if name.startswith("."):
+                    continue
+                if entry.is_dir():
+                    dirs.append(name)
+                elif entry.is_file():
+                    suffix = entry.suffix.lower()
+                    if suffix in ARCHIVE_EXTENSIONS:
+                        archives.append(name)
+                    elif suffix in PDF_EXTENSIONS:
+                        pdfs.append(name)
+            archives.sort(key=lambda n: (natural_key(n), n))
+            pdfs.sort(key=lambda n: (natural_key(n), n))
+            dirs.sort(key=lambda n: (natural_key(n), n))
+            shallow = (
+                [{"name": n, "type": "folder", "children": [], "thumb": None, "archive": True}
+                 for n in archives]
+                + [{"name": n, "type": "folder", "children": [], "thumb": None,
+                     "archive": True, "pdf": True} for n in pdfs]
+                + [{"name": n, "type": "folder", "children": []} for n in dirs]
+            )
+    body_str = json.dumps(
+        shallow, ensure_ascii=False, allow_nan=False, indent=None,
+        separators=(",", ":"), default=str,
+    )
+    body = body_str.encode("utf-8")
+    digest = hashlib.sha1(f"{norm}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+    etag = f'"{digest[:24]}"'
+    headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
+    if getattr(request, "headers", None) is not None and request.headers.get(
+        "if-none-match"
+    ) == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/json", headers=headers)
 
 
 @api_router.get("/api/search")
@@ -615,6 +719,7 @@ async def refresh_index(request: Request, _user: dict = Depends(require_auth)):
     async with _index_lock:
         downloads_path = request.app.state.settings.downloads_path
         tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
+        sig = await run_in_threadpool(compute_signature, downloads_path)
         # Cache only after both succeed (cache-nothing on failure).
         old = getattr(request.app.state, "metadata_index_cache", None)
         prev_gen = old.get("generation", 1) if isinstance(old, dict) else 1
@@ -623,6 +728,7 @@ async def refresh_index(request: Request, _user: dict = Depends(require_auth)):
             "index": index,
             "timestamp": time.time(),
             "generation": prev_gen,
+            "signature": sig,
         }
     return {"status": "ok", "folders": len(index.comics)}
 
