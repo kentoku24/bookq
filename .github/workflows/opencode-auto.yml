@@ -134,7 +134,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@527f0b931d1f9b3ebd34e106c51b31ce5db5b075
+        uses: anomalyco/opencode/github@9b4ec5714d481559990db0a816d5dec19541a814
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
         with:
@@ -200,7 +200,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@527f0b931d1f9b3ebd34e106c51b31ce5db5b075
+        uses: anomalyco/opencode/github@9b4ec5714d481559990db0a816d5dec19541a814
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
         with:
