@@ -66,16 +66,47 @@ def test_ensure_index_reuses_cached_object(tmp_path):
     assert second is first
 
 
-def test_ensure_index_rebuilds_after_ttl_expiry(tmp_path):
+def test_ensure_index_rebuilds_after_ttl_expiry(tmp_path, monkeypatch):
+    # Signature-gate contract: TTL-expired but filesystem-unchanged reuses the
+    # cached index object with zero rebuilds (in-place timestamp refresh);
+    # only a changed tree takes the locked rebuild path.
+    import app.routes as routes
+    calls = {"n": 0}
+    real = routes._scan_and_rebuild
+
+    async def counting(*a, **kw):
+        calls["n"] += 1
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(routes, "_scan_and_rebuild", counting)
+
     async def main():
         request = _stub_request(tmp_path)
         first = await _ensure_index(request)
+        assert calls["n"] == 1
+        # Prime: a cold cache carries no signature, so the first TTL miss
+        # rebuilds once and stores the pre-lock signature.
+        request.app.state.metadata_index_cache["timestamp"] = time.time() - INDEX_CACHE_TTL - 1
+        primed = await _ensure_index(request)
+        primed_calls = calls["n"]
+        # TTL-expired, tree unchanged → identical object, no rebuild.
+        request.app.state.metadata_index_cache["timestamp"] = time.time() - INDEX_CACHE_TTL - 1
+        same = await _ensure_index(request)
+        unchanged_calls = calls["n"]
+        # Filesystem change (new dir entry alters the signature) + TTL-expiry
+        # → locked rebuild, new object, exactly one more scan.
+        (tmp_path / "zz_new_folder_for_sig_gate").mkdir()
         request.app.state.metadata_index_cache["timestamp"] = time.time() - INDEX_CACHE_TTL - 1
         rebuilt = await _ensure_index(request)
-        return first, rebuilt
+        return primed, primed_calls, first, same, unchanged_calls, rebuilt, calls["n"]
 
-    first, rebuilt = _drive(main())
-    assert rebuilt is not first
+    primed, primed_calls, first, same, unchanged_calls, rebuilt, total = _drive(main())
+    assert primed is not first
+    assert primed_calls == 2
+    assert same is primed
+    assert unchanged_calls == 2
+    assert rebuilt is not same
+    assert total == 3
 
 
 def test_ensure_index_hit_just_inside_ttl(tmp_path):
