@@ -28,6 +28,7 @@ Not for: pure API/logic (`pytest`), Chromium motion (`video-verification`), 7-da
 | Next device (Android) | Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57 — real hardware |
 | Preflight | `./scripts/open-simulator.sh check` |
 | List devices | `./scripts/open-simulator.sh list` |
+| **Drive taps (agent)** | `idb ui tap x y --udid <udid>` / **`./scripts/sim-gesture-battery.sh <url>`** — details `references/tap-driving.md` |
 | Screenshot | `./scripts/open-simulator.sh screenshot /tmp/sim.png` |
 | Video (Simulator) | `xcrun simctl io booted recordVideo /tmp/sim.mp4` |
 | Full verify | `./scripts/open-simulator.sh verify` |
@@ -42,6 +43,8 @@ Details: `references/quickstart.md`, `references/devices.md`.
 3. **Open**: `./scripts/open-simulator.sh $(./dev.sh url demo)` (tailnet) or `./scripts/open-simulator.sh http://127.0.0.1:8080` (local) — helper polls `bootstatus -b` max 30s, warns on multiple `Booted`. Simulator shares the host network, so loopback and tailnet both reach it directly; the helper accepts `https://…` and loopback `http://` only (a bare `http://<lan-ip>` is not a Secure Context and is rejected). See `references/overview.md`.
    First paint may show **「0 folders」** — the first `/api/folders` scan is slow. Reload (`open_url` again) before suspecting the mount; confirm with `docker inspect <viewer> --format '{{json .Mounts}}'` only if it persists.
 4. **Drive feature**: Test offline / storage bar / spread / PWA in real Safari. Do not rely on `curl`.
+   タップ・ゆるドリフト・スワイプまでエージェントが叩くなら `./scripts/sim-gesture-battery.sh <url>`
+   (idb 必須, 方法論と罠は `references/tap-driving.md` — 座標はポイント, `?perf=1` は `#` の前, キャッシュ退避に shutdown→boot)。
 5. **Capture**: `./scripts/open-simulator.sh screenshot .omo/evidence/sim.png` (or `recordVideo`).
 6. **Cleanup (optional)**: `./scripts/open-simulator.sh shutdown` — avoids next `openurl booted` ambiguity.
 
@@ -52,7 +55,7 @@ Details: `references/quickstart.md`, `references/devices.md`.
 
 ## Related
 
-- Skill detail: `references/overview.md`, `references/quickstart.md`, `references/devices.md`, `references/troubleshooting.md`, `references/tier-strategy.md`
+- Skill detail: `references/overview.md`, `references/quickstart.md`, `references/devices.md`, `references/troubleshooting.md`, `references/tap-driving.md`, `references/tier-strategy.md`
 - Human guide (thin stub): `docs/ios-simulator.md` → this skill
 - Tier strategy: `references/tier-strategy.md` (and `tests/README.md` stub)
 - Deployment: `docs/deployment.md` (why `dev-*` nodes need no port)
