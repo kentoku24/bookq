@@ -66,16 +66,13 @@ img:ok = 移動先ページはタップ時点で手元にある / MISSING なら
 
 ## 4. ジェスチャ分類とビューア側の受け取り
 
-左タップは `app.js` touchend で 3 経路に分かれる:
+左タップは `app.js` touchend で 3 経路に分かれる (#19 マージ済み main の挙動):
 
 1. **静止タップ** (drag 判定に達しない) — 落地位置の zone で即時ターン
-2. **24px 未満の横ドリフト** — 「実質タップ」として即時ターン
- … 冗長注記: これは **ai/viewer-tap-turn-fix (#19)** マージ済みビルドでの挙動。
- 未マージの main Code では 8px 超 + 20px 未満 + 低速のドリフトは **バウンスバック**
- (ターンしない) なので、期待値の計算はビルドのベースに合わせること
-3. **24px 以上** — 速度 / 距離判定でコミット (スライドアニメ ~250ms)
+2. **20px 以下 (`TAP_MAX_TRAVEL`) の横ドリフト** — 「実質タップ」として**落地位置**の zone で即時ターン
+3. **20px 超** — 速度 / 距離判定でコミット (スライドアニメ ~250ms)
 
-`?perf=1` の snap 値はビルドに応じた期待値との照合に使う。
+`?perf=1` の snap 値はビルドに応じた期待値との照合に使う (main は #19 済み)。
 
 ## 5. よく踏む事故集
 
@@ -95,9 +92,7 @@ img:ok = 移動先ページはタップ時点で手元にある / MISSING なら
 ./scripts/open-simulator.sh check                    # Xcode / idb / Runtime 前提チェック
 ./scripts/open-simulator.sh tap 78 500 [--udid X]    # idb tap (udid 省略時 booted)
 ./scripts/open-simulator.sh swipe 78 500 90 502 --duration 0.15
-./scripts/sim-gesture-battery.sh "$URL" [–screenshot PATH] [–udid X] # 7 連バッテリー
+./scripts/sim-gesture-battery.sh "$URL" [--screenshot PATH] [--udid X] # 7 連バッテリー
 ```
 
-バッテリー (`sim-gesture-battery.sh`) の期待値は先の §4 の (3) の前提 (#19 マージ済)
-に沿って **counter は 1 + 7**。マージ前の main では 12px ドリフト 2 + 22px 2 が ノーターン
-になり、期待値は **1 + 3** (40px swipe のみ成立) に下がる。
+バッテリー (`sim-gesture-battery.sh`) の期待値は **counter は 1 + 7** (#19 マージ済み main 前提)。
