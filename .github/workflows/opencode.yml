@@ -57,7 +57,7 @@ jobs:
           fetch-depth: 0
 
       # v1.18.21 (latest release tag at time of pinning)
-      - uses: anomalyco/opencode/github@527f0b931d1f9b3ebd34e106c51b31ce5db5b075
+      - uses: anomalyco/opencode/github@9b4ec5714d481559990db0a816d5dec19541a814
         with:
           mentions: "/oc,/opencode"
           model: "opencode-go/muse-spark-1.3-contributor"
