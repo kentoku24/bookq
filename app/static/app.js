@@ -682,7 +682,11 @@
   // IIFE is in its temporal dead zone until that line runs, and any synchronous
   // snapTo before then would throw ReferenceError. The overlay itself is built
   // in the profiler section below.
-  const perfOn = /[?&]perf=1/.test(location.search);
+  // PWA (Home Screen Web App) has no URL bar, so ?perf=1 can never be entered
+  // there — localStorage bookq_perf=1 (toggled from the offline harness)
+  // enables the profiler the same way (takes effect on next document load,
+  // e.g. the harness's "back to Viewer" link which reloads the app).
+  const perfOn = /[?&]perf=1/.test(location.search) || (()=>{try{return localStorage.getItem('bookq_perf')==='1'}catch(e){return false}})();
   let perfTapAt = 0, perfTapX = 0;
   try {
     Object.defineProperty(window, 'spreads', {get(){return spreads;}, set(v){spreads=v;}, configurable:true});
