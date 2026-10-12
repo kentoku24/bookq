@@ -1738,14 +1738,14 @@
         images = allImages;
         chapterList = chapters;
         chapterBoundaries = boundaries;
-        // Create chapter divider labels (skip first chapter)
-        for (let i = 1; i < chapterBoundaries.length; i++) {
-          const label = document.createElement("div");
-          label.className = "chapter-divider";
-          label.textContent = chapterList[i].name;
-          track.appendChild(label);
-          chapterLabels.push(label);
-        }
+        // Chapter divider labels, windowed like strip cells: only chapters
+        // near the opened one get a label. All 130 labels of a huge book
+        // would span the full book width (~1.4M px here) inside #img-track,
+        // ballooning its composited layer and slowing every slide on a
+        // tile-GPU device (#27). Distant labels are hundreds of thousands of
+        // px off-viewport, so windowing is display-identical; the per-turn
+        // window job below re-syncs the window as chapters change. Created
+        // after ccIdx below (needs the clamped chapter index).
       } else {
         // Single-folder mode (backward compatible)
         const node = findNodeByPath(tree, fullPath);
@@ -1800,6 +1800,7 @@
         const urlState = parseViewerHash();
         const saved = (urlState && urlState.folder === fullPath) ? { page: urlState.page } : ReadingProgress.get(fullPath);
         const ccIdx = clickedChapterIdx >= 0 ? clickedChapterIdx : 0; // URL feature makes -1 reachable (deep link to a non-leaf sibling); clamp to first chapter
+        ensureChapterLabels(ccIdx);
         const chapterImgs = chapterList[ccIdx] ? chapterList[ccIdx].images : [];
         // saved.page is the chapter-local index measured from the chapter's
         // first REAL page — same semantics as ReadingProgress and as encoded by
@@ -1931,14 +1932,42 @@
     // spread that opens the chapter (manga RTL: the previous chapter is to
     // the right). The gap itself may be wider than CHAPTER_GAP_PX (監査 V3
     // — gapBefore() widens it so neither neighbour peeks), so centre on the
-    // actual computed gap, not the CHAPTER_GAP_PX floor.
-    for (let i = 0; i < chapterLabels.length; i++) {
-      const s = spreadOf(chapterBoundaries[i + 1]);
+    // actual computed gap, not the CHAPTER_GAP_PX floor. Labels are windowed
+    // (ensureChapterLabels), so iterate the live set via its chapter index.
+    for (const el of chapterLabels) {
+      const ci = Number(el.dataset.chapterIdx);
+      const s = spreadOf(chapterBoundaries[ci]);
       const m = spreadMetrics(s);
-      chapterLabels[i].style.left = (spreadLeft(s) + m.width + gapBefore(s) / 2) + "px";
+      el.style.left = (spreadLeft(s) + m.width + gapBefore(s) / 2) + "px";
     }
   }
 
+  // Chapter-label windowing (see loadImages): chapters far from the page
+  // being read have no visible label; keep the set in sync here, next to
+  // the other per-turn window maintenance (evict/markCurrent).
+  const LABEL_WINDOW = 2; // chapters each side of the current chapter
+  function ensureChapterLabels(centerChapterIdx){
+    if (chapterList.length <= 1) return;
+    const lo = Math.max(1, centerChapterIdx - LABEL_WINDOW);
+    const hi = Math.min(chapterList.length - 1, centerChapterIdx + LABEL_WINDOW);
+    const want = new Set();
+    for (let i = lo; i <= hi; i++) want.add(i);
+    for (let i = chapterLabels.length - 1; i >= 0; i--) {
+      const ci = Number(chapterLabels[i].dataset.chapterIdx);
+      if (!want.has(ci)) { chapterLabels[i].remove(); chapterLabels.splice(i, 1); }
+    }
+    const have = new Set(chapterLabels.map(el => Number(el.dataset.chapterIdx)));
+    for (let i = lo; i <= hi; i++) {
+      if (!have.has(i)) {
+        const label = document.createElement("div");
+        label.className = "chapter-divider";
+        label.textContent = chapterList[i].name;
+        label.dataset.chapterIdx = String(i);
+        track.appendChild(label);
+        chapterLabels.push(label);
+      }
+    }
+  }
   // Track transform that centers the spread containing page idx.
   // screenLeft(s) = translateX + spreadLeft(s), and we want that to equal
   // (viewW - width(s)) / 2.
@@ -2191,6 +2220,7 @@
       ensureWindow(idx);
       scheduleDeferredFetches(idx);
       evictStrip(idx);
+      ensureChapterLabels(getCurrentChapterInfo(idx).chapterIdx);
       updateStripPositions();
       // Keep the prebuilt overview's `.cur` cell on the page actually being
       // read: Zoom.driftTarget() is that cell's centre, so a stale one aims the
