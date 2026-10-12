@@ -28,29 +28,9 @@ if str(_repo_root) not in sys.path:
 
 from PIL import Image  # noqa: E402
 
+from tests.helpers import drive  # noqa: E402
+
 GRAY = (128, 128, 128)
-
-
-def _drive(coro):
-    """Run *coro* on a fresh loop in a helper thread (order-robust).
-
-    Playwright's sync API leaves a running loop behind in the main thread,
-    so bare asyncio.run() fails when this module runs after browser tests.
-    """
-    outcome: dict = {}
-
-    def target():
-        try:
-            outcome["value"] = asyncio.run(coro)
-        except BaseException as exc:  # propagate to caller (e.g. HTTPException 404)
-            outcome["error"] = exc
-
-    worker = threading.Thread(target=target)
-    worker.start()
-    worker.join()
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome["value"]
 
 
 def _solid_png(path: Path, rgb: tuple, w: int = 400, h: int = 300) -> None:
@@ -261,7 +241,7 @@ def test_stat_siblings_reject_null_byte_without_500(tmp_path: Path) -> None:
 
     # (2) loose-file load_source_bytes: same early guard -> 404 (not 500).
     try:
-        _drive(load_source_bytes(downloads, "a\x00b.png"))
+        drive(load_source_bytes(downloads, "a\x00b.png"))
     except HTTPException as exc:
         assert exc.status_code == 404
     else:  # pragma: no cover
@@ -269,7 +249,7 @@ def test_stat_siblings_reject_null_byte_without_500(tmp_path: Path) -> None:
 
     # (3) _load_archive_source archive stat() widening -> 404 (not 500).
     try:
-        _drive(_load_archive_source(downloads / "a\x00b.zip", "1.png"))
+        drive(_load_archive_source(downloads / "a\x00b.zip", "1.png"))
     except HTTPException as exc:
         assert exc.status_code == 404
     else:  # pragma: no cover
@@ -278,7 +258,7 @@ def test_stat_siblings_reject_null_byte_without_500(tmp_path: Path) -> None:
     # (4) _serve_archive_entry archive stat() widening -> 404 (not 500).
     # request is unused before the stat guard, so None suffices here.
     try:
-        _drive(_serve_archive_entry(downloads / "a\x00b.zip", "1.png", None))  # type: ignore[arg-type]
+        drive(_serve_archive_entry(downloads / "a\x00b.zip", "1.png", None))  # type: ignore[arg-type]
     except HTTPException as exc:
         assert exc.status_code == 404
     else:  # pragma: no cover

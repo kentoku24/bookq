@@ -26,19 +26,7 @@ import pytest
 
 from app.config import Settings
 from app.routes import INDEX_CACHE_TTL, _ensure_tree_and_index
-
-
-def _drive(coro):
-    """Run *coro* to completion on a fresh event loop in a helper thread."""
-    outcome = {}
-
-    def target():
-        outcome["value"] = asyncio.run(coro)
-
-    worker = threading.Thread(target=target)
-    worker.start()
-    worker.join()
-    return outcome["value"]
+from tests.helpers import drive
 
 
 def _stub_request(tmp_path):
@@ -113,10 +101,9 @@ def test_stale_returns_immediately_without_waiting_for_scan(tmp_path, monkeypatc
         got_tree, got_index = await _ensure_stale_now(request)
         # Immediate: the stale objects come back, scan still blocked.
         assert got_tree is stale_tree and got_index is stale_index
-        for _ in range(1000):
-            if started.is_set():
-                break
-            await asyncio.sleep(0)
+        deadline = time.monotonic() + 5
+        while not started.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         assert started.is_set(), "background refresh must have started the scan"
         assert not finished, "ensure must not wait for the scan"
         release.set()
@@ -128,7 +115,7 @@ def test_stale_returns_immediately_without_waiting_for_scan(tmp_path, monkeypatc
         assert cache["generation"] == 7
         return True
 
-    assert _drive(main())
+    assert drive(main())
 
 
 def test_concurrent_stale_requests_trigger_single_rebuild(tmp_path, monkeypatch):
@@ -157,12 +144,12 @@ def test_concurrent_stale_requests_trigger_single_rebuild(tmp_path, monkeypatch)
         finally:
             release.set()
         assert all(t is stale_tree and i is stale_index for t, i in results)
-        assert len(calls) == 1, f"single-flight violated: {len(calls)} scans"
         await _await_refresh(request.app.state)
+        assert len(calls) == 1, f"single-flight violated: {len(calls)} scans"
         assert request.app.state.metadata_index_cache["tree"] is new_tree
         return True
 
-    assert _drive(main())
+    assert drive(main())
 
 
 def test_background_failure_keeps_old_cache(tmp_path, monkeypatch):
@@ -188,7 +175,7 @@ def test_background_failure_keeps_old_cache(tmp_path, monkeypatch):
         assert cache["tree"] is stale_tree and cache["index"] is stale_index
         return True
 
-    assert _drive(main())
+    assert drive(main())
 
 
 def test_manual_refresh_wins_over_late_background(tmp_path, monkeypatch):
@@ -227,7 +214,7 @@ def test_manual_refresh_wins_over_late_background(tmp_path, monkeypatch):
         assert cache["generation"] == 7
         return True
 
-    assert _drive(main())
+    assert drive(main())
 
 
 def test_cold_cache_still_builds_synchronously(tmp_path, monkeypatch):
@@ -253,4 +240,58 @@ def test_cold_cache_still_builds_synchronously(tmp_path, monkeypatch):
         assert getattr(request.app.state, "index_refresh_task", None) is None
         return True
 
-    assert _drive(main())
+    assert drive(main())
+
+
+def test_background_gate_race_serves_winner(tmp_path, monkeypatch):
+    """(h) re-derived at unit level (from tests/test_index_gate.py, deleted at
+    HTTP level): the gate's post-walk re-read must serve the winner when a
+    concurrent rebuild replaced the cache dict while the signature walked —
+    no rebuild of its own, no clobber, winner tree intact."""
+    import app.routes as routes
+
+    rebuild_calls = []
+    real_scan = routes._scan_and_rebuild
+
+    async def counting_scan(downloads_path, list_archives=True):
+        rebuild_calls.append(1)
+        return await real_scan(downloads_path, list_archives=list_archives)
+
+    monkeypatch.setattr(routes, "_scan_and_rebuild", counting_scan)
+
+    async def main():
+        request = _stub_request(tmp_path)
+        await _ensure_tree_and_index(request)
+        old = request.app.state.metadata_index_cache
+        real_sig = "gatesig"
+        winner_tree = [{"name": "zz_race_winner", "type": "folder", "children": []}]
+
+        def fake_sig(path):
+            walk_calls["n"] += 1
+            winner = {
+                "tree": winner_tree,
+                "index": old["index"],
+                "timestamp": time.time(),
+                "generation": old.get("generation", 1),
+                "signature": real_sig,
+            }
+            request.app.state.metadata_index_cache = winner
+            return real_sig
+
+        walk_calls = {"n": 0}
+        monkeypatch.setattr(routes, "compute_signature", fake_sig)
+        # Age the cache so the ensure takes the stale path, and give the
+        # current cache the matching signature the fake walk will return.
+        old["signature"] = real_sig
+        _age_cache(request)
+        got_tree, _ = await _ensure_stale_now(request)
+        # The fake walk installed the winner before the re-read: the gate
+        # must re-check and leave the winner untouched.
+        await _await_refresh(request.app.state)
+        assert got_tree is old["tree"]
+        cache = request.app.state.metadata_index_cache
+        assert cache["tree"] is winner_tree, "must serve the racing winner"
+        assert len(rebuild_calls) == 1, "only the cold build may scan"
+        return True
+
+    assert drive(main())
