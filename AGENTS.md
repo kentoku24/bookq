@@ -48,6 +48,7 @@ issue タイトルからスラッグを生成する:
 - 小さなインクリメンタルコミットを積む (巨大な単発コミット禁止)
 - コミットメッセージは conventional commits 形式
 - PR 本文には**テストに関する考慮事項**を必ず記載する (実施したテスト、影響範囲、確認方法)
+- live 実データ回帰 (`BOOKQ_LIVE_ROOT=... ./scripts/live-regress.sh`) の実施有無も PR 本文に記載する。live のフォルダ名はコード・ログ・レポートに出さない (tests/live/README.md の漏洩防止ルール遵守)
 
 ## 5. research タスク
 
