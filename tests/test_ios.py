@@ -165,7 +165,11 @@ def test_ios_hash_malformed_browse(ios_page, server):
     # Root count includes the parent-level images-tile ("mixed").
     ios_page.goto(server + "/#/browse/%zz")
     expect(ios_page.locator("#folder-count")).to_have_text("17 件")
-    assert ios_page.evaluate("location.hash") == ""
+    # Hash clearing happens asynchronously after the full tree resolves
+    # (applyUrlState post-full in app.js); the shallow paint already satisfies
+    # the count above, so wait instead of asserting synchronously (flaky on
+    # slow CI — same async behavior test_ios_hash_malformed_view tolerates).
+    ios_page.wait_for_function("location.hash === ''", timeout=10000)
 
 
 def test_ios_hash_history_delta(ios_page):
