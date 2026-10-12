@@ -37,6 +37,18 @@ Tailscale の無い Mac（`.env` 無し）では step 2-3 をローカルモー�
 詳細: `references/quickstart.md`, `references/devices.md`, `references/troubleshooting.md`, `references/tier-strategy.md`  
 運用の棲み分け: `references/tier-strategy.md` / `tests/README.md` stub
 
+## タップ駆動テスト (エージェント)
+
+Simulator GUI 無しで `simctl`/`idb` が完結。エージェントが実タッチ級の操作を打てる:
+
+```bash
+./scripts/open-simulator.sh check                       # idb 有無
+./scripts/sim-gesture-battery.sh "$URL"                 # タップ/ゆるドリフト/スワイプ 7連 → スクショ
+./scripts/open-simulator.sh tap 78 500                  # 単発タップ (座標はポイント)
+```
+
+URL は `?perf=1#` の形 (`#` の前) — ビューア内蔵 HUD がタップ→ターン間の計測を見せる。詳細は `.claude/skills/ios-simulator/references/tap-driving.md`。
+
 ## 手動 QA（GitHub Actions では実行しない）
 
 GHA の macOS ランナーは tailnet に参加していないため dev-XX に到達できない。手元で次を実行する。
