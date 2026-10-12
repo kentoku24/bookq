@@ -1,20 +1,14 @@
-# Dependabot auto-merge — squash-merge a dependabot PR once workflow-smoke
-# (validate + uv-gate) completes green.
+# Dependabot auto-merge — merges dependabot PRs once CI is green.
 #
-# Why workflow_run instead of `gh pr merge --auto`:
-# this repo is private without branch protection, so there are no required
-# checks for --auto to wait on — it would merge immediately while CI is still
-# running. Waiting for the workflow_run event guarantees CI green before merge
-# (#16/#17 both failed uv-gate and must stay manual).
-#
-# Scope: only PRs authored by dependabot[bot] whose workflow-smoke run
-# succeeded. CI対象外の PR (e.g. tailscale-only bumps, no smoke run) stays manual.
+# `gh pr merge --auto` は使わない: branch protection がない本リポジトリでは
+# CI を待たず即時マージしてしまうため。代わりにこのアクションがチェック完了を
+# 待ってマージする。MERGE_READY_STATE=clean のみ許可 = 赤CIでは決してマージしない。
 name: dependabot-auto-merge
-run-name: "dep-auto-merge ${{ github.event.workflow_run.head_sha }}"
 
 on:
-  workflow_run:
-    workflows: ["workflow-smoke"]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  check_suite:
     types: [completed]
 
 permissions:
@@ -22,57 +16,16 @@ permissions:
   pull-requests: write
 
 jobs:
-  merge:
-    if: github.event.workflow_run.conclusion == 'success'
+  automerge:
+    if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Merge green dependabot PRs for this SHA
+      - uses: pascalgn/automerge-action@v0.16.4
         env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          set -euo pipefail
-          echo "workflow-smoke success for $SHA — looking for open dependabot PRs"
-          prs=$(gh pr list --search "$SHA" --state open \
-            --json number,author,headRefName \
-            --jq '.[] | select(.author.login == "app/dependabot" or .author.login == "dependabot[bot]") | .number')
-          if [ -z "$prs" ]; then
-            echo "no open dependabot PR for $SHA — nothing to do"
-            exit 0
-          fi
-          for n in $prs; do
-            # Guard against SHA appearing in unrelated PRs: head must match.
-            head_oid=$(gh pr view "$n" --json headRefOid --jq '.headRefOid')
-            if [ "$head_oid" != "$SHA" ]; then
-              echo "PR #$n head $head_oid != $SHA — skipping"
-              continue
-            fi
-            rollup=$(gh pr view "$n" --json statusCheckRollup \
-              --jq '[.statusCheckRollup[] | "\(.name):\(.status)/\(.conclusion // "-")"] | join(", ")')
-            echo "PR #$n checks: $rollup"
-            bad=$(gh pr view "$n" --json statusCheckRollup \
-              --jq '[.statusCheckRollup[] | select(.conclusion == "FAILURE" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED")] | length')
-            pending=$(gh pr view "$n" --json statusCheckRollup \
-              --jq '[.statusCheckRollup[] | select(.status != "COMPLETED")] | length')
-            if [ "$bad" != "0" ] || [ "$pending" != "0" ]; then
-              echo "PR #$n not fully green (bad=$bad pending=$pending) — skipping"
-              continue
-            fi
-            merged=false
-            for i in 1 2 3; do
-              if gh pr merge "$n" --squash --delete-branch; then
-                merged=true
-                break
-              fi
-              echo "merge attempt $i for #$n failed — retrying in 30s"
-              sleep 30
-            done
-            if [ "$merged" = true ]; then
-              echo "merged #$n"
-              gh pr comment "$n" --body "🤖 workflow-smoke が green のため自動マージしました。" || true
-            else
-              echo "::error::could not merge #$n after 3 attempts (possible conflict — needs manual merge)"
-              exit 1
-            fi
-          done
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_LABELS: ""
+          MERGE_FILTER_AUTHOR: dependabot[bot]
+          MERGE_METHOD: squash
+          MERGE_DELETE_BRANCH: "true"
+          MERGE_READY_STATE: clean
