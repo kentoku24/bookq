@@ -2405,6 +2405,11 @@
     window.viewerGoPrev = () => goPrev({crossChapter:true});
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__suppressClickActive = () => suppressClickNow();
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__tapForward = () => tapForward;
+    // classifyTouchEnd is a hoisted declaration below (tap-vs-swipe line) —
+    // available here at setup time. __lastTouchEndVia records the decided-
+    // touchend classification for tests (CDP timing cannot force dt<=1).
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__classifyTouchEnd = classifyTouchEnd;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = null;
   } catch(e) { console.warn(e); }
   // One resolver for "which zone is under x", shared by the touchend tap path
   // (instant) and the click handlers (mouse / keyboard activation, and the
@@ -2713,12 +2718,12 @@
   // its own `e.touches.length !== 1` check.
 
   // One home for the tap-vs-swipe line: a gesture whose whole travel stayed
-  // under TAP_MAX_TRAVEL is a tap, not a swipe. The same number now owns the
-  // drift-tap classification AND the distance fallback below (a fast flick
-  // can arrive with too few move samples for moveHistory to measure a
-  // velocity at all — with 2 events, first==last collapses dt), so the tap
-  // band can never swallow a flick that the velocity branch would fail to
-  // see. 20 matches the velocity branch's |dxFinal| > 20 cut.
+  // at or under TAP_MAX_TRAVEL is a tap, not a swipe. The same number now
+  // owns the drift-tap classification AND the distance fallback below (a fast
+  // flick can arrive with unmeasurable velocity — start+move dispatched
+  // within the same ms collapses dt — so the tap band must never swallow a
+  // flick that the velocity branch fails to see). 20 matches the velocity
+  // branch's |dxFinal| > 20 cut.
   const TAP_MAX_TRAVEL = 20;
   let dragActive = false, dragStartX = 0, dragStartY = 0, dragDecided = false, dragPx = 0;
   let dragTouchId = null;
@@ -2727,11 +2732,52 @@
   let dragMaxTravel = 0;   // horizontal travel so far, for the tap test above
   let moveHistory = [];
 
+  // Pure classifier for the decided-touchend gesture, extracted so tests can
+  // pin every branch deterministically (CDP cannot deliver sub-~16px moves
+  // and cannot force the dt<=1 same-ms case the branches exist for). Returns
+  // {advanced, via} with via in 'swipe-ready' | 'velocity' | 'distance' |
+  // 'drift-tap' | 'bounce'. Contract: TAP_MAX_TRAVEL owns the tap band
+  // (travel <= cut is a tap); velocity/distance require |dxFinal| > cut;
+  // `known` is sample-count based, so a multi-sample same-ms history
+  // (velocity 0, known true) after a long travel bounces instead of falling
+  // back — the hysteresis rule (test_viewer_swipe_hysteresis). The distance
+  // branch is defense-in-depth for genuinely single-sample histories, which
+  // the decided path cannot currently produce.
+  function classifyTouchEnd(g){
+    let advanced = 0, via = 'bounce';
+    if (g.swipeReady) {
+      if (g.dragPx > 0) advanced = 1;
+      else if (g.dragPx < 0) advanced = -1;
+      else if (g.dxFinal > 0) advanced = 1;
+      else if (g.dxFinal < 0) advanced = -1;
+      via = 'swipe-ready';
+    } else if (Math.abs(g.velocity) > 0.05 && Math.abs(g.dxFinal) > TAP_MAX_TRAVEL
+      && Math.sign(g.velocity) === Math.sign(g.dxFinal)) {
+      advanced = g.velocity > 0 ? 1 : -1;
+      via = 'velocity';
+    } else if (!g.known && g.travel >= TAP_MAX_TRAVEL && Math.abs(g.dxFinal) > TAP_MAX_TRAVEL) {
+      // Distance fallback: the flick was real (far enough) but the speedometer
+      // produced no measurement (single-sample history or same-ms dispatch).
+      // Direction by where the gesture ENDED, never by the starting zone.
+      advanced = Math.sign(g.dxFinal);
+      via = 'distance';
+    }
+    if (advanced === 0 && g.travel <= TAP_MAX_TRAVEL) via = 'drift-tap';
+    return {advanced, via};
+  }
+
   // preventDefault-ing touchend removes the browser's tap side effects along
   // with the synthesized click. The side effects other code depends on are
   // restored explicitly:
   const dropTapFocus = () => {
-    try { const a = document.activeElement; if (a && typeof a.blur === 'function') a.blur(); } catch(e) {}
+    // Scoped to focus already inside the gesture surface: a keyboard user
+    // tabbed to a toolbar control who then touches the screen must keep
+    // their focus — preventDefault() already stops the touch itself from
+    // moving focus, so there is nothing outside the viewer to clean up.
+    try {
+      const a = document.activeElement;
+      if (a && a !== document.body && typeof a.blur === 'function' && imgContainer.contains(a)) a.blur();
+    } catch(e) {}
   };
   // offline/storeAdapter keeps a document-level 'click' closer for its
   // popovers / delete confirms; a viewer tap used to reach it through the
@@ -2885,6 +2931,7 @@
       zoneActionAt(released.clientX);
       dismissOutsidePopovers();
       suppressClickFor(400);
+      if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = 'tap';
       return;
     }
     const dxFinal = released.clientX - dragStartX;
@@ -2895,11 +2942,18 @@
     // ── Calculate swipe velocity from recent move history ──
     // Skip the touchstart sample if we have enough move data (avoids
     // diluting velocity when the finger rests before swiping).
-    // velocityKnown remembers whether the speedometer had data at all: the
-    // distance fallback below (single-sample flicks) must not fire when it
-    // did, or a measured pull-back cancel would be re-read as a forward
-    // flick by dxFinal alone (hysteresis test regression).
     let swipeVelocity = 0; // px/ms
+    // velocityKnown means the speedometer HELD samples (length >= 2), NOT that
+    // it measured: same-ms dispatch collapses dt and leaves velocity 0. That
+    // must stay "known": a multi-sample same-ms history (e.g. the pull-back
+    // cancel in test_viewer_swipe_hysteresis) has PROVEN the gesture is not a
+    // flick and must bounce, never fall back to the distance branch below.
+    // Gating this on dt instead would re-read a measured pull-back as a
+    // forward flick by dxFinal alone. The distance fallback below stays gated
+    // on genuinely single-sample histories (length < 2) — defense-in-depth
+    // that the decided path cannot currently produce (armDrag seeds one
+    // sample and the deciding move pushes another), pinned by classifier
+    // unit tests rather than deleted.
     const velocityKnown = moveHistory.length >= 2;
     if (velocityKnown) {
       const startIdx = moveHistory.length > 3 ? 1 : 0;
@@ -2910,42 +2964,29 @@
     }
     moveHistory = [];
 
-    // A planar tap, by travel — the single tap test. dragMaxTravel guards the
-    // gesture as a whole, not just where the finger happened to stop: a fast
-    // 100px drag pulled back to 10px (the reader's cancel, confirmed by a
-    // production review case) must not re-classify as a tap just because the
-    // END of the journey is small. Flicks (velocity commit + 20px+ travel)
-    // stay excluded here so the zone of the LANDING spot cannot invert the
-    // flick's direction: a 22px fast flick from the right zone is a swipe,
-    // not a tap on the right zone.
-    const velocityCommit = Math.abs(swipeVelocity) > 0.05 && Math.abs(dxFinal) > 20
-      && Math.sign(swipeVelocity) === Math.sign(dxFinal);
+    // Decided-touchend classification lives in classifyTouchEnd (above), so
+    // the tap band, the velocity/distance cuts, and the pull-back rule have a
+    // single home that tests pin directly via window.__classifyTouchEnd.
+    const commit = classifyTouchEnd({
+      swipeReady: viewerSwipeReady, dragPx,
+      velocity: swipeVelocity, known: velocityKnown,
+      dxFinal, travel: dragMaxTravel,
+    });
+    const advanced = commit.advanced;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = commit.via;
     const idxBefore = currentIdx;
 
-    let advanced = 0;
-    if (viewerSwipeReady) {
-      if (dragPx > 0) advanced = 1;
-      else if (dragPx < 0) advanced = -1;
-      else if (dxFinal > 0) advanced = 1;
-      else if (dxFinal < 0) advanced = -1;
-    } else if (velocityCommit) {
-      advanced = swipeVelocity > 0 ? 1 : -1;
-    } else if (!velocityKnown && dragMaxTravel >= TAP_MAX_TRAVEL && Math.abs(dxFinal) > 20) {
-      // Distance fallback: the flick was real (far enough) but the speedometer
-      // has no data (single-sample history). Direction by where the gesture
-      // ENDED, never by the starting zone.
-      advanced = Math.sign(dxFinal);
-    }
-
-    if (advanced === 0 && dragMaxTravel < TAP_MAX_TRAVEL) {
+    if (commit.via === 'drift-tap') {
       // A planar tap, by travel — the single tap test. dragMaxTravel guards
       // the gesture as a whole, not just where the finger happened to stop: a
       // fast 100px drag pulled back to 10px must not re-classify as a tap
       // just because the END of the journey is small (a pull-back cancel).
+      // The zone resolves from the LANDING spot, consistent with the
+      // stationary-tap path above.
       e.preventDefault();
       dropTapFocus();
       dismissOutsidePopovers();
-      zoneActionAt(dragStartX);
+      zoneActionAt(released.clientX);
       // The strip was dragged up to TAP_MAX_TRAVEL px sideways by touchmove —
       // a turn re-anchors it, but a center-zone tap or a clamp-edge early
       // return turns nothing and would leave the offset behind.
