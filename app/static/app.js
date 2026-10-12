@@ -2386,7 +2386,7 @@
   }
 
   // ── touch/click zones ──
-  // suppressClick guards tap zones from firing immediately after a real drag.
+  // Tap-zone suppression guards the zones from firing when a synthesized click follows a touch.
   // WHY a deadline, not boolean+setTimeout: WebKit synthesizes the tap's click
   // up to ~400ms after touchend when the gesture looked drag-like, and a timer
   // that flips a boolean can expire before that queued click is dispatched
@@ -2420,9 +2420,9 @@
   }
   function toggleToolbarZone(){
     // Zoomed, the center zone is the way back to 1.0 (CSS narrows it to the
-    // middle 20%). It ignores suppressClick on purpose: the pan that preceded
-    // the tap is exactly what sets suppressClick, and the reader still needs
-    // one reliable way out of the zoom.
+    // middle 20%). It ignores suppression on purpose: the pan that preceded
+    // the tap is exactly what arms the suppression, and the reader still
+    // needs one reliable way out of the zoom.
     if (window.Zoom.isActive()) { window.Zoom.reset(true); return; }
     toolbar.classList.toggle("hidden"); spreadControls.classList.toggle("hidden"); tapmodeControls.classList.toggle("hidden");
   }
@@ -2453,7 +2453,7 @@
   zoneToggle.addEventListener("click", e => {
     e.stopPropagation();
     // toggleToolbarZone owns the zoomed branch (and the reason it must ignore
-    // suppressClick); this handler only adds the un-zoomed suppress guard.
+    // suppression); this handler only adds the un-zoomed suppress guard.
     if (suppressClickNow() && !window.Zoom.isActive()) return;
     toggleToolbarZone();
   });
@@ -2712,11 +2712,33 @@
   // pinch either: the drag-tracking touchstart below already bails out via
   // its own `e.touches.length !== 1` check.
 
+  // One home for the tap-vs-swipe line: a gesture whose whole travel stayed
+  // under TAP_MAX_TRAVEL is a tap, not a swipe. The same number now owns the
+  // drift-tap classification AND the distance fallback below (a fast flick
+  // can arrive with too few move samples for moveHistory to measure a
+  // velocity at all — with 2 events, first==last collapses dt), so the tap
+  // band can never swallow a flick that the velocity branch would fail to
+  // see. 20 matches the velocity branch's |dxFinal| > 20 cut.
+  const TAP_MAX_TRAVEL = 20;
   let dragActive = false, dragStartX = 0, dragStartY = 0, dragDecided = false, dragPx = 0;
   let dragTouchId = null;
   let viewerSwipeReady = false;
   let viewerHapticFired = false;
+  let dragMaxTravel = 0;   // horizontal travel so far, for the tap test above
   let moveHistory = [];
+
+  // preventDefault-ing touchend removes the browser's tap side effects along
+  // with the synthesized click. The side effects other code depends on are
+  // restored explicitly:
+  const dropTapFocus = () => {
+    try { const a = document.activeElement; if (a && typeof a.blur === 'function') a.blur(); } catch(e) {}
+  };
+  // offline/storeAdapter keeps a document-level 'click' closer for its
+  // popovers / delete confirms; a viewer tap used to reach it through the
+  // synthesized click, so keep delivering that dismissal.
+  const dismissOutsidePopovers = () => {
+    try { document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); } catch(e) {}
+  };
 
   // Give up on the current drag AND put the strip back at rest. Clearing the
   // flags alone is not enough: the offset written by the last touchmove stays
@@ -2724,7 +2746,7 @@
   // gesture the reader has already turned into something else.
   function abortDrag(){
     dragActive = false; dragTouchId = null;
-    dragDecided = false; dragPx = 0;
+    dragDecided = false; dragPx = 0; dragMaxTravel = 0;
     viewerSwipeReady = false; viewerHapticFired = false;
     moveHistory = [];
     setTrackOffset(currentIdx, 0);
@@ -2753,7 +2775,7 @@
     if (sliding) { sliding = false; rebaseAnchor(currentIdx); }
     dragStartX = startX;
     dragStartY = startY;
-    dragActive = true; dragDecided = false; dragPx = 0;
+    dragActive = true; dragDecided = false; dragPx = 0; dragMaxTravel = 0;
     viewerSwipeReady = false;
     viewerHapticFired = false;
     moveHistory = [{x: t0.clientX, t: performance.now()}];
@@ -2810,6 +2832,7 @@
     }
     e.preventDefault();
     dragPx = dx;
+    if (Math.abs(dx) > dragMaxTravel) dragMaxTravel = Math.abs(dx);
     let minIdx = 0, maxIdx = 0;
     if (spreads.length) {
       const cr = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx);
@@ -2855,10 +2878,12 @@
       // WebKit delivers `click` ~40ms after touchend (measured in the iOS
       // Simulator), and that gap is the whole "did it register?" feeling on a
       // burst. preventDefault kills the synthesized click outright (measured
-      // in WebKit); suppressClick is only a backstop after this.
+      // in WebKit); the suppression deadline is only a backstop after this.
       moveHistory = [];
       e.preventDefault();
+      dropTapFocus();
       zoneActionAt(released.clientX);
+      dismissOutsidePopovers();
       suppressClickFor(400);
       return;
     }
@@ -2870,8 +2895,13 @@
     // ── Calculate swipe velocity from recent move history ──
     // Skip the touchstart sample if we have enough move data (avoids
     // diluting velocity when the finger rests before swiping).
+    // velocityKnown remembers whether the speedometer had data at all: the
+    // distance fallback below (single-sample flicks) must not fire when it
+    // did, or a measured pull-back cancel would be re-read as a forward
+    // flick by dxFinal alone (hysteresis test regression).
     let swipeVelocity = 0; // px/ms
-    if (moveHistory.length >= 2) {
+    const velocityKnown = moveHistory.length >= 2;
+    if (velocityKnown) {
       const startIdx = moveHistory.length > 3 ? 1 : 0;
       const first = moveHistory[startIdx];
       const last = moveHistory[moveHistory.length - 1];
@@ -2879,20 +2909,18 @@
       if (dt > 1) swipeVelocity = (last.x - first.x) / dt;
     }
     moveHistory = [];
-    // A finger that crossed the 8px decision line but never reached swipe
-    // territory WAS a tap — a few px of roll while lifting. Falling through to
-    // the bounce branch turned it into: no turn now, no preventDefault, then
-    // WebKit's click turning the page 40–400ms later (measured iOS Simulator:
-    // a 12px drift read as "dead" or "late"), the *press feels late* symptom.
-    // 24px headroom stays clear of the >20px velocity flick, which turns in
-    // the committed swipe animation below.
-    if (Math.abs(dxFinal) < 24) {
-      moveHistory = [];
-      e.preventDefault();
-      zoneActionAt(dragStartX);
-      suppressClickFor(400);
-      return;
-    }
+
+    // A planar tap, by travel — the single tap test. dragMaxTravel guards the
+    // gesture as a whole, not just where the finger happened to stop: a fast
+    // 100px drag pulled back to 10px (the reader's cancel, confirmed by a
+    // production review case) must not re-classify as a tap just because the
+    // END of the journey is small. Flicks (velocity commit + 20px+ travel)
+    // stay excluded here so the zone of the LANDING spot cannot invert the
+    // flick's direction: a 22px fast flick from the right zone is a swipe,
+    // not a tap on the right zone.
+    const velocityCommit = Math.abs(swipeVelocity) > 0.05 && Math.abs(dxFinal) > 20
+      && Math.sign(swipeVelocity) === Math.sign(dxFinal);
+    const idxBefore = currentIdx;
 
     let advanced = 0;
     if (viewerSwipeReady) {
@@ -2900,9 +2928,30 @@
       else if (dragPx < 0) advanced = -1;
       else if (dxFinal > 0) advanced = 1;
       else if (dxFinal < 0) advanced = -1;
-    } else if (Math.abs(swipeVelocity) > 0.05 && Math.abs(dxFinal) > 20
-      && Math.sign(swipeVelocity) === Math.sign(dxFinal)) {
+    } else if (velocityCommit) {
       advanced = swipeVelocity > 0 ? 1 : -1;
+    } else if (!velocityKnown && dragMaxTravel >= TAP_MAX_TRAVEL && Math.abs(dxFinal) > 20) {
+      // Distance fallback: the flick was real (far enough) but the speedometer
+      // has no data (single-sample history). Direction by where the gesture
+      // ENDED, never by the starting zone.
+      advanced = Math.sign(dxFinal);
+    }
+
+    if (advanced === 0 && dragMaxTravel < TAP_MAX_TRAVEL) {
+      // A planar tap, by travel — the single tap test. dragMaxTravel guards
+      // the gesture as a whole, not just where the finger happened to stop: a
+      // fast 100px drag pulled back to 10px must not re-classify as a tap
+      // just because the END of the journey is small (a pull-back cancel).
+      e.preventDefault();
+      dropTapFocus();
+      dismissOutsidePopovers();
+      zoneActionAt(dragStartX);
+      // The strip was dragged up to TAP_MAX_TRAVEL px sideways by touchmove —
+      // a turn re-anchors it, but a center-zone tap or a clamp-edge early
+      // return turns nothing and would leave the offset behind.
+      if (currentIdx === idxBefore) snapTo(currentIdx);
+      suppressClickFor(400);
+      return;
     }
     let newSpread = Math.max(0, Math.min(curSpread + advanced, maxSpread));
     if (spreads.length) {
@@ -2931,11 +2980,14 @@
       track.addEventListener("transitionend", finalize);
       setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
       e.preventDefault();
+      dropTapFocus();
+      dismissOutsidePopovers();
       suppressClickFor(400);
     } else {
       // Cancelled drag: WebKit can still synthesize a click for this gesture
       // and turn the page after the reader cancelled — preventDefault ends that.
       e.preventDefault();
+      dismissOutsidePopovers();
       snapTo(newIdx);   // same page: bounce-back animation
     }
   });
