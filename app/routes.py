@@ -405,6 +405,119 @@ async def _background_fill(app_state) -> None:
         )
 
 
+def _enumerate_cover_jobs(tree: list[dict], parent: str = "") -> list[tuple[str, int]]:
+    """List ``(cover_path, width)`` warm jobs for every folder's single thumb.
+
+    Each folder node carrying a ``thumb`` (folder-relative first image)
+    yields the job at w=200 and w=400; ``thumb is None`` nodes are skipped.
+    Full paths compose as parent/name — flattened names contain "/", so
+    neither side is ever split (same rule as _find_tree_node). Multi-thumb
+    ``thumbs[]`` lists and sprites are deliberately out of scope: only the
+    single cover behind the first paint is warmed.
+    """
+    jobs: list[tuple[str, int]] = []
+    for node in tree:
+        if node.get("type") != "folder":
+            continue
+        full = f"{parent}/{node['name']}" if parent else node["name"]
+        thumb = node.get("thumb")
+        if thumb:
+            jobs.append((f"{full}/{thumb}", 200))
+            jobs.append((f"{full}/{thumb}", 400))
+        children = node.get("children") or []
+        if children:
+            jobs.extend(_enumerate_cover_jobs(children, full))
+    return jobs
+
+
+# Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3): the
+# first pass runs IMMEDIATELY once the tree exists (no idle gating — cold
+# covers would otherwise each pay a live archive open on first view).
+# Later passes only pick up trees the background fill materialized
+# (generation moved), stopping after quiet passes or the total cap.
+_WARM_COVERS_QUIET_PASSES = 2
+_WARM_COVERS_MAX_SECONDS = 20 * 60
+_WARM_COVERS_CONCURRENCY = 4
+_WARM_COVERS_POLL_SECONDS = 2.0
+_WARM_COVERS_WAIT_SECONDS = 120.0
+
+
+async def _warm_covers(app_state) -> None:
+    """Warm every folder's single cover into the thumb disk cache (fail-open).
+
+    Spawned once by lifespan after 起動完了; lives past yield. Waits for
+    the index cache to hold a tree (polls, gives up after the wait cap),
+    then warms each enumerated job with bounded concurrency — each job is
+    independently fail-open, so one corrupt source never aborts the pass.
+    A pass snapshots (tree, generation) up front, so a concurrent index
+    swap is safe (the next pass picks it up). Stops after consecutive
+    quiet (generation-unchanged) passes or the total time cap. Never
+    raises except on cancellation.
+    """
+    from app.thumbs import warm_thumb_cache
+
+    try:
+        waited = 0.0
+        while True:
+            cache = getattr(app_state, "metadata_index_cache", None)
+            if isinstance(cache, dict) and "tree" in cache:
+                break
+            if waited >= _WARM_COVERS_WAIT_SECONDS:
+                return
+            await asyncio.sleep(_WARM_COVERS_POLL_SECONDS)
+            waited += _WARM_COVERS_POLL_SECONDS
+        try:
+            downloads_path = app_state.settings.downloads_path
+        except Exception:
+            return
+        sem = asyncio.Semaphore(_WARM_COVERS_CONCURRENCY)
+        start = time.monotonic()
+        quiet = 0
+        while True:
+            if time.monotonic() - start > _WARM_COVERS_MAX_SECONDS:
+                return
+            cache = getattr(app_state, "metadata_index_cache", None)
+            if not isinstance(cache, dict) or "tree" not in cache:
+                return
+            tree, gen = cache["tree"], cache.get("generation", 1)
+            jobs = _enumerate_cover_jobs(tree)
+
+            async def _one(job_path: str, job_width: int) -> None:
+                async with sem:
+                    try:
+                        await warm_thumb_cache(downloads_path, job_path, job_width)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "cover warm skip %s w=%d error=%s: %s",
+                            job_path, job_width, type(exc).__name__, exc,
+                        )
+
+            try:
+                await asyncio.gather(*(_one(job_path, job_width) for job_path, job_width in jobs))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "cover warm pass skip error=%s: %s", type(exc).__name__, exc,
+                )
+            cur = getattr(app_state, "metadata_index_cache", None)
+            cur_gen = cur.get("generation", None) if isinstance(cur, dict) else None
+            if cur_gen == gen:
+                quiet += 1
+            else:
+                quiet = 0
+            if quiet >= _WARM_COVERS_QUIET_PASSES:
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "cover warm abort error=%s: %s", type(exc).__name__, exc,
+        )
+
+
 def _attach_metadata(nodes: list[dict], lookup: dict, parent_path: str) -> None:
     """Recursively attach ComicMetadata to folder nodes in the tree.
 
