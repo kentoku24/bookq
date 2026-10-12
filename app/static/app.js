@@ -2386,9 +2386,16 @@
   }
 
   // ── touch/click zones ──
-  // suppressClick guards tap zones from firing immediately after a real drag.
-  let suppressClick = false;
-  const suppressClickFor = ms => { suppressClick = true; setTimeout(() => { suppressClick = false; }, ms); };
+  // Tap-zone suppression guards the zones from firing when a synthesized click follows a touch.
+  // WHY a deadline, not boolean+setTimeout: WebKit synthesizes the tap's click
+  // up to ~400ms after touchend when the gesture looked drag-like, and a timer
+  // that flips a boolean can expire before that queued click is dispatched
+  // (the timer and the click race each other). Comparing the clock at dispatch
+  // time has no race — the deadline is acted on exactly once, whenever the
+  // click finally lands.
+  let suppressClickUntil = 0;
+  const suppressClickFor = ms => { suppressClickUntil = performance.now() + ms; };
+  const suppressClickNow = () => performance.now() < suppressClickUntil;
   // viewer/zoom.js drives the page turn at the pan clamp edge. It must go
   // through THESE functions, not window.goNext/goPrev — those are spread.js's
   // dormant twins and turn nothing.
@@ -2396,8 +2403,13 @@
     window.suppressClickFor = suppressClickFor;
     window.viewerGoNext = () => goNext({crossChapter:true});
     window.viewerGoPrev = () => goPrev({crossChapter:true});
-    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__suppressClickActive = () => suppressClick;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__suppressClickActive = () => suppressClickNow();
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__tapForward = () => tapForward;
+    // classifyTouchEnd is a hoisted declaration below (tap-vs-swipe line) —
+    // available here at setup time. __lastTouchEndVia records the decided-
+    // touchend classification for tests (CDP timing cannot force dt<=1).
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__classifyTouchEnd = classifyTouchEnd;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = null;
   } catch(e) { console.warn(e); }
   // One resolver for "which zone is under x", shared by the touchend tap path
   // (instant) and the click handlers (mouse / keyboard activation, and the
@@ -2413,9 +2425,9 @@
   }
   function toggleToolbarZone(){
     // Zoomed, the center zone is the way back to 1.0 (CSS narrows it to the
-    // middle 20%). It ignores suppressClick on purpose: the pan that preceded
-    // the tap is exactly what sets suppressClick, and the reader still needs
-    // one reliable way out of the zoom.
+    // middle 20%). It ignores suppression on purpose: the pan that preceded
+    // the tap is exactly what arms the suppression, and the reader still
+    // needs one reliable way out of the zoom.
     if (window.Zoom.isActive()) { window.Zoom.reset(true); return; }
     toolbar.classList.toggle("hidden"); spreadControls.classList.toggle("hidden"); tapmodeControls.classList.toggle("hidden");
   }
@@ -2439,18 +2451,18 @@
     zoneNext.setAttribute("aria-label", left ? "前のページ" : "次のページ");
     if (!opts || opts.notify !== false) showToast(left ? "タップ送り: 左" : "タップ送り: 右");
   }
-  tapmodeLeft.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); setTapForward('left'); });
-  tapmodeRight.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); setTapForward('right'); });
+  tapmodeLeft.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); setTapForward('left'); });
+  tapmodeRight.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); setTapForward('right'); });
   setTapForward('left', {notify:false});
-  zonePrev.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); });
+  zonePrev.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); });
   zoneToggle.addEventListener("click", e => {
     e.stopPropagation();
     // toggleToolbarZone owns the zoomed branch (and the reason it must ignore
-    // suppressClick); this handler only adds the un-zoomed suppress guard.
-    if (suppressClick && !window.Zoom.isActive()) return;
+    // suppression); this handler only adds the un-zoomed suppress guard.
+    if (suppressClickNow() && !window.Zoom.isActive()) return;
     toggleToolbarZone();
   });
-  zoneNext.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); });
+  zoneNext.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); });
 
   // ── keyboard ──
   document.addEventListener("keydown", e => {
@@ -2705,11 +2717,74 @@
   // pinch either: the drag-tracking touchstart below already bails out via
   // its own `e.touches.length !== 1` check.
 
+  // One home for the tap-vs-swipe line: a gesture whose whole travel stayed
+  // at or under TAP_MAX_TRAVEL is a tap, not a swipe. The same number now
+  // owns the drift-tap classification AND the distance fallback below (a fast
+  // flick can arrive with unmeasurable velocity — start+move dispatched
+  // within the same ms collapses dt — so the tap band must never swallow a
+  // flick that the velocity branch fails to see). 20 matches the velocity
+  // branch's |dxFinal| > 20 cut.
+  const TAP_MAX_TRAVEL = 20;
   let dragActive = false, dragStartX = 0, dragStartY = 0, dragDecided = false, dragPx = 0;
   let dragTouchId = null;
   let viewerSwipeReady = false;
   let viewerHapticFired = false;
+  let dragMaxTravel = 0;   // horizontal travel so far, for the tap test above
   let moveHistory = [];
+
+  // Pure classifier for the decided-touchend gesture, extracted so tests can
+  // pin every branch deterministically (CDP cannot deliver sub-~16px moves
+  // and cannot force the dt<=1 same-ms case the branches exist for). Returns
+  // {advanced, via} with via in 'swipe-ready' | 'velocity' | 'distance' |
+  // 'drift-tap' | 'bounce'. Contract: TAP_MAX_TRAVEL owns the tap band
+  // (travel <= cut is a tap); velocity/distance require |dxFinal| > cut;
+  // `known` is sample-count based, so a multi-sample same-ms history
+  // (velocity 0, known true) after a long travel bounces instead of falling
+  // back — the hysteresis rule (test_viewer_swipe_hysteresis). The distance
+  // branch is defense-in-depth for genuinely single-sample histories, which
+  // the decided path cannot currently produce.
+  function classifyTouchEnd(g){
+    let advanced = 0, via = 'bounce';
+    if (g.swipeReady) {
+      if (g.dragPx > 0) advanced = 1;
+      else if (g.dragPx < 0) advanced = -1;
+      else if (g.dxFinal > 0) advanced = 1;
+      else if (g.dxFinal < 0) advanced = -1;
+      via = 'swipe-ready';
+    } else if (Math.abs(g.velocity) > 0.05 && Math.abs(g.dxFinal) > TAP_MAX_TRAVEL
+      && Math.sign(g.velocity) === Math.sign(g.dxFinal)) {
+      advanced = g.velocity > 0 ? 1 : -1;
+      via = 'velocity';
+    } else if (!g.known && g.travel >= TAP_MAX_TRAVEL && Math.abs(g.dxFinal) > TAP_MAX_TRAVEL) {
+      // Distance fallback: the flick was real (far enough) but the speedometer
+      // produced no measurement (single-sample history or same-ms dispatch).
+      // Direction by where the gesture ENDED, never by the starting zone.
+      advanced = Math.sign(g.dxFinal);
+      via = 'distance';
+    }
+    if (advanced === 0 && g.travel <= TAP_MAX_TRAVEL) via = 'drift-tap';
+    return {advanced, via};
+  }
+
+  // preventDefault-ing touchend removes the browser's tap side effects along
+  // with the synthesized click. The side effects other code depends on are
+  // restored explicitly:
+  const dropTapFocus = () => {
+    // Scoped to focus already inside the gesture surface: a keyboard user
+    // tabbed to a toolbar control who then touches the screen must keep
+    // their focus — preventDefault() already stops the touch itself from
+    // moving focus, so there is nothing outside the viewer to clean up.
+    try {
+      const a = document.activeElement;
+      if (a && a !== document.body && typeof a.blur === 'function' && imgContainer.contains(a)) a.blur();
+    } catch(e) {}
+  };
+  // offline/storeAdapter keeps a document-level 'click' closer for its
+  // popovers / delete confirms; a viewer tap used to reach it through the
+  // synthesized click, so keep delivering that dismissal.
+  const dismissOutsidePopovers = () => {
+    try { document.body.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); } catch(e) {}
+  };
 
   // Give up on the current drag AND put the strip back at rest. Clearing the
   // flags alone is not enough: the offset written by the last touchmove stays
@@ -2717,7 +2792,7 @@
   // gesture the reader has already turned into something else.
   function abortDrag(){
     dragActive = false; dragTouchId = null;
-    dragDecided = false; dragPx = 0;
+    dragDecided = false; dragPx = 0; dragMaxTravel = 0;
     viewerSwipeReady = false; viewerHapticFired = false;
     moveHistory = [];
     setTrackOffset(currentIdx, 0);
@@ -2746,7 +2821,7 @@
     if (sliding) { sliding = false; rebaseAnchor(currentIdx); }
     dragStartX = startX;
     dragStartY = startY;
-    dragActive = true; dragDecided = false; dragPx = 0;
+    dragActive = true; dragDecided = false; dragPx = 0; dragMaxTravel = 0;
     viewerSwipeReady = false;
     viewerHapticFired = false;
     moveHistory = [{x: t0.clientX, t: performance.now()}];
@@ -2803,6 +2878,7 @@
     }
     e.preventDefault();
     dragPx = dx;
+    if (Math.abs(dx) > dragMaxTravel) dragMaxTravel = Math.abs(dx);
     let minIdx = 0, maxIdx = 0;
     if (spreads.length) {
       const cr = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx);
@@ -2847,10 +2923,15 @@
       // A tap. Act on it NOW instead of waiting for the synthesized click:
       // WebKit delivers `click` ~40ms after touchend (measured in the iOS
       // Simulator), and that gap is the whole "did it register?" feeling on a
-      // burst. The click that follows is swallowed by suppressClick.
+      // burst. preventDefault kills the synthesized click outright (measured
+      // in WebKit); the suppression deadline is only a backstop after this.
       moveHistory = [];
+      e.preventDefault();
+      dropTapFocus();
       zoneActionAt(released.clientX);
+      dismissOutsidePopovers();
       suppressClickFor(400);
+      if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = 'tap';
       return;
     }
     const dxFinal = released.clientX - dragStartX;
@@ -2862,7 +2943,19 @@
     // Skip the touchstart sample if we have enough move data (avoids
     // diluting velocity when the finger rests before swiping).
     let swipeVelocity = 0; // px/ms
-    if (moveHistory.length >= 2) {
+    // velocityKnown means the speedometer HELD samples (length >= 2), NOT that
+    // it measured: same-ms dispatch collapses dt and leaves velocity 0. That
+    // must stay "known": a multi-sample same-ms history (e.g. the pull-back
+    // cancel in test_viewer_swipe_hysteresis) has PROVEN the gesture is not a
+    // flick and must bounce, never fall back to the distance branch below.
+    // Gating this on dt instead would re-read a measured pull-back as a
+    // forward flick by dxFinal alone. The distance fallback below stays gated
+    // on genuinely single-sample histories (length < 2) — defense-in-depth
+    // that the decided path cannot currently produce (armDrag seeds one
+    // sample and the deciding move pushes another), pinned by classifier
+    // unit tests rather than deleted.
+    const velocityKnown = moveHistory.length >= 2;
+    if (velocityKnown) {
       const startIdx = moveHistory.length > 3 ? 1 : 0;
       const first = moveHistory[startIdx];
       const last = moveHistory[moveHistory.length - 1];
@@ -2871,15 +2964,35 @@
     }
     moveHistory = [];
 
-    let advanced = 0;
-    if (viewerSwipeReady) {
-      if (dragPx > 0) advanced = 1;
-      else if (dragPx < 0) advanced = -1;
-      else if (dxFinal > 0) advanced = 1;
-      else if (dxFinal < 0) advanced = -1;
-    } else if (Math.abs(swipeVelocity) > 0.05 && Math.abs(dxFinal) > 20
-      && Math.sign(swipeVelocity) === Math.sign(dxFinal)) {
-      advanced = swipeVelocity > 0 ? 1 : -1;
+    // Decided-touchend classification lives in classifyTouchEnd (above), so
+    // the tap band, the velocity/distance cuts, and the pull-back rule have a
+    // single home that tests pin directly via window.__classifyTouchEnd.
+    const commit = classifyTouchEnd({
+      swipeReady: viewerSwipeReady, dragPx,
+      velocity: swipeVelocity, known: velocityKnown,
+      dxFinal, travel: dragMaxTravel,
+    });
+    const advanced = commit.advanced;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = commit.via;
+    const idxBefore = currentIdx;
+
+    if (commit.via === 'drift-tap') {
+      // A planar tap, by travel — the single tap test. dragMaxTravel guards
+      // the gesture as a whole, not just where the finger happened to stop: a
+      // fast 100px drag pulled back to 10px must not re-classify as a tap
+      // just because the END of the journey is small (a pull-back cancel).
+      // The zone resolves from the LANDING spot, consistent with the
+      // stationary-tap path above.
+      e.preventDefault();
+      dropTapFocus();
+      dismissOutsidePopovers();
+      zoneActionAt(released.clientX);
+      // The strip was dragged up to TAP_MAX_TRAVEL px sideways by touchmove —
+      // a turn re-anchors it, but a center-zone tap or a clamp-edge early
+      // return turns nothing and would leave the offset behind.
+      if (currentIdx === idxBefore) snapTo(currentIdx);
+      suppressClickFor(400);
+      return;
     }
     let newSpread = Math.max(0, Math.min(curSpread + advanced, maxSpread));
     if (spreads.length) {
@@ -2907,8 +3020,15 @@
       };
       track.addEventListener("transitionend", finalize);
       setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
+      e.preventDefault();
+      dropTapFocus();
+      dismissOutsidePopovers();
       suppressClickFor(400);
     } else {
+      // Cancelled drag: WebKit can still synthesize a click for this gesture
+      // and turn the page after the reader cancelled — preventDefault ends that.
+      e.preventDefault();
+      dismissOutsidePopovers();
       snapTo(newIdx);   // same page: bounce-back animation
     }
   });

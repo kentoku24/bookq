@@ -33,25 +33,7 @@ from app import main as app_main
 from app import routes as app_routes
 from app.config import Settings
 from app.routes import _ensure_index, warmup_metadata_index
-
-
-def _drive(coro):
-    """Run *coro* on a fresh event loop in a helper thread.
-
-    Same constraint as test_ensure_index: Playwright's sync API leaves a
-    running loop in the main thread, so asyncio.run() there fails. The
-    module-level _index_lock is never contended (strictly sequential awaits),
-    so it never binds to these short-lived loops.
-    """
-    outcome = {}
-
-    def target():
-        outcome["value"] = asyncio.run(coro)
-
-    worker = threading.Thread(target=target)
-    worker.start()
-    worker.join()
-    return outcome["value"]
+from tests.helpers import drive
 
 
 def _state(downloads_path):
@@ -72,7 +54,7 @@ def test_warmup_fills_the_cache_the_first_request_reads(tmp_path):
         await warmup_metadata_index(state)
         return await _ensure_index(_stub_request(state))
 
-    assert _drive(main()) is state.metadata_index_cache["index"]
+    assert drive(main()) is state.metadata_index_cache["index"]
 
 
 def test_warmup_and_request_paths_emit_the_same_rebuild_log_line(tmp_path, caplog):
@@ -84,7 +66,7 @@ def test_warmup_and_request_paths_emit_the_same_rebuild_log_line(tmp_path, caplo
         await _ensure_index(_stub_request(state))
 
     with caplog.at_level(logging.INFO, logger="app.routes"):
-        _drive(main())
+        drive(main())
 
     templates = [r.msg for r in caplog.records if r.msg.startswith("metadata index rebuilt")]
     assert len(templates) == 2, templates
@@ -105,7 +87,7 @@ def test_slow_warmup_is_abandoned_but_startup_continues(tmp_path, monkeypatch, c
             return state.metadata_index_cache
 
     with caplog.at_level(logging.INFO, logger="app.main"):
-        cached = _drive(main())
+        cached = drive(main())
 
     assert cached is None
     assert any("内部ウォームアップタイムアウト" in r.getMessage() for r in caplog.records)
@@ -123,7 +105,7 @@ def test_failing_warmup_does_not_block_startup(tmp_path, monkeypatch, caplog):
             return state.metadata_index_cache
 
     with caplog.at_level(logging.INFO, logger="app.main"):
-        cached = _drive(main())
+        cached = drive(main())
 
     assert cached is None
     assert any("内部ウォームアップ失敗" in r.getMessage() for r in caplog.records)
@@ -139,7 +121,7 @@ def test_startup_completion_is_logged_after_the_warmup_attempt(tmp_path, caplog)
             return state.metadata_index_cache
 
     with caplog.at_level(logging.INFO, logger="app.main"):
-        cached = _drive(main())
+        cached = drive(main())
 
     assert cached is not None  # warmup actually ran, so the ordering below is real
     messages = [r.getMessage() for r in caplog.records if r.name == "app.main"]
@@ -163,7 +145,7 @@ def test_first_request_scans_normally_after_an_abandoned_warmup(tmp_path, monkey
         async with app_main.lifespan(SimpleNamespace(state=state)):
             return await _ensure_index(_stub_request(state))
 
-    assert _drive(main()) is state.metadata_index_cache["index"]
+    assert drive(main()) is state.metadata_index_cache["index"]
 
 
 def test_abandoned_threadpool_scan_never_populates_cache(tmp_path, monkeypatch, caplog):
@@ -190,7 +172,7 @@ def test_abandoned_threadpool_scan_never_populates_cache(tmp_path, monkeypatch, 
                 return state.metadata_index_cache
 
         with caplog.at_level(logging.INFO, logger="app.main"):
-            assert _drive(main()) is None
+            assert drive(main()) is None
         assert any("内部ウォームアップタイムアウト" in r.getMessage() for r in caplog.records)
     finally:
         # Never leak the worker: an early assert failure above must still let
@@ -206,4 +188,4 @@ def test_abandoned_threadpool_scan_never_populates_cache(tmp_path, monkeypatch, 
     assert state.metadata_index_cache is None
 
     # The lazy path still works after the abandon (unstuck scan returns []).
-    assert _drive(_ensure_index(_stub_request(state))) is state.metadata_index_cache["index"]
+    assert drive(_ensure_index(_stub_request(state))) is state.metadata_index_cache["index"]
