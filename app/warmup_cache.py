@@ -39,6 +39,17 @@ permanently lost, observed as 6/85 then 29/85 with a stored entry
 destroyed). Fail-open is preserved: the lock only serialises writers, and
 every helper still swallows its own exceptions.
 
+Memory mirror: lookups no longer re-parse the whole JSON file on every
+call. The module keeps ``_MEM_CACHE`` (the last parsed mapping) with
+``_MEM_SIG`` (that file's ``(st_mtime_ns, st_size)``), guarded by
+``_MEM_LOCK``. A read stats the file (cheap) and serves the memory copy
+when the sig still matches, so consecutive lookups parse at most once.
+Own writes are write-through (the mirror is updated from the just-written
+file's stat right after the atomic replace); a cross-process rewrite is
+detected by the sig mismatch on the next read and re-parsed. A stat
+failure, parse failure, or non-dict payload still falls back to ``{}``
+(fail-open exactly as before).
+
 Failure semantics: every public helper swallows all of its own exceptions
 and callers additionally guard with try/except, so the cache is strictly
 fail-open — a broken cache only costs I/O, never correctness.
@@ -61,6 +72,15 @@ _CACHE_FILENAME = "warmup-cache-v1.json"
 # Whole-file load-modify-saves must not interleave: scan_tree fans puts
 # across a ThreadPoolExecutor, so unlocked replaces lose entries.
 _STORE_LOCK = threading.Lock()
+
+# In-memory mirror of the cache file: _MEM_CACHE is the last parsed
+# mapping (or None when nothing has been parsed yet), _MEM_SIG is that
+# file's (st_mtime_ns, st_size) sig. Guarded by _MEM_LOCK; always taken
+# leaf-most (never hold _MEM_LOCK while acquiring _STORE_LOCK) so the
+# store path (_STORE_LOCK -> _MEM_LOCK) cannot deadlock with readers.
+_MEM_CACHE: dict | None = None
+_MEM_SIG: tuple[int, int] | None = None
+_MEM_LOCK = threading.Lock()
 
 # File-bloat guard: never keep more than this many entries; beyond it the
 # oldest ``saved_at`` entries are evicted first.
@@ -122,14 +142,39 @@ def _relative_posix(root, path):
         return None
 
 
-def _load_raw():
-    """Load the raw JSON mapping, or {} when missing/corrupt (fail-open)."""
+def _load_cached():
+    """Load the raw JSON mapping via the in-memory mirror (fail-open).
+
+    Stats the file (cheap) and returns the memory copy without parsing
+    when the ``(st_mtime_ns, st_size)`` sig still matches; otherwise
+    parses, validates, and refreshes the mirror. Stat failure, parse
+    failure, or a non-dict payload yields ``{}``.
+    """
+    global _MEM_CACHE, _MEM_SIG
     try:
-        with open(cache_file_path(), "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        st = Path(cache_file_path()).stat()
+        sig = (st.st_mtime_ns, st.st_size)
     except Exception:
         return {}
-    return data if isinstance(data, dict) else {}
+    try:
+        with _MEM_LOCK:
+            if _MEM_CACHE is not None and _MEM_SIG == sig:
+                return _MEM_CACHE
+        with open(cache_file_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return {}
+        with _MEM_LOCK:
+            _MEM_CACHE = data
+            _MEM_SIG = sig
+        return data
+    except Exception:
+        return {}
+
+
+def _load_raw():
+    """Load the raw JSON mapping, or {} when missing/corrupt (fail-open)."""
+    return _load_cached()
 
 
 def _store_raw(data):
@@ -178,12 +223,20 @@ def _store_entry(key, value):
     puts across a ThreadPoolExecutor and unlocked whole-file replaces lose
     entries (last-writer-wins). Fail-open: all errors are swallowed.
     """
+    global _MEM_CACHE, _MEM_SIG
     try:
         with _STORE_LOCK:
-            data = _load_raw()
+            data = _load_cached()
             data[key] = value
             _evict_oldest(data)
             _store_raw(data)
+            try:
+                st = Path(cache_file_path()).stat()
+                with _MEM_LOCK:
+                    _MEM_CACHE = data
+                    _MEM_SIG = (st.st_mtime_ns, st.st_size)
+            except Exception:
+                pass
     except Exception:
         pass
 

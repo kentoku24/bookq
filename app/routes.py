@@ -156,46 +156,184 @@ async def _scan_and_rebuild(
     return tree, index, folders, images, archives, epubs, rars, pdfs
 
 
+def _schedule_index_refresh(app) -> None:
+    """Schedule a single-flight background index rebuild on *app*.
+
+    A second caller arriving while a refresh is still running is a no-op —
+    the in-flight task's swap covers it. The handle lives on
+    ``app.state.index_refresh_task``; it is read with getattr and assigned
+    as a plain attribute so SimpleNamespace stub states work the same as
+    the real Starlette State. Never raises: the caller already served
+    stale, so a missed refresh only delays freshness, never breaks serving.
+    """
+    state = getattr(app, "state", app)
+    try:
+        existing = getattr(state, "index_refresh_task", None)
+    except Exception:
+        existing = None
+    if existing is not None and not existing.done():
+        return
+    try:
+        state.index_refresh_task = asyncio.create_task(_background_index_refresh(app))
+    except Exception:
+        # No running loop (or a read-only state): skip the refresh. Stale
+        # was already served, so this only delays freshness.
+        pass
+
+
+async def _background_index_refresh(app) -> None:
+    """Rebuild the index off the request path and atomically swap it in.
+
+    The stale-serve caller already served the old cache, so this task owns
+    freshness. First a cheap filesystem-signature gate runs OUTSIDE
+    _index_lock: a signature walk over an unchanged tree refreshes the
+    timestamp IN PLACE (never rebinding the dict — generation/ETag stay
+    stable) with zero scans; a replaced (concurrent rebuild / manual
+    refresh) or freshly re-stamped cache is left untouched, and a
+    mismatched, missing, or failed walk falls through to the full rebuild.
+
+    The full scan runs OUTSIDE _index_lock (a 5-10s walk must never hold
+    it); only the swap takes the lock. Inside the lock the cache is
+    re-read: a cache that turned fresh while the scan ran (manual
+    /api/refresh or another rebuild) is left untouched, and the swap
+    advances the generation when the gate's signature proved the tree
+    changed (so ``?since=`` pollers re-fetch) while keeping it when the
+    change could not be verified. The swap stores the pre-scan signature
+    the gate walked (None when no walk ran or it failed) — a rebuilt cache
+    still carries a gateable signature for the next expiry; a tree that
+    changes mid-scan self-heals at the next expiry via the mismatch. Failures keep the old cache and log a
+    warning — a partial tree is never kept. CancelledError is re-raised;
+    the task handle is always cleared.
+    """
+    state = getattr(app, "state", app)
+    sig: str | None = None
+    sig_walked = False
+    try:
+        try:
+            downloads_path = state.settings.downloads_path
+        except Exception:
+            return
+        cur = getattr(state, "metadata_index_cache", None)
+        if isinstance(cur, dict) and "tree" in cur:
+            try:
+                sig = await run_in_threadpool(compute_signature, downloads_path)
+                sig_walked = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "background index refresh signature walk skip error=%s: %s",
+                    type(exc).__name__, exc,
+                )
+                sig, sig_walked = None, False
+            if sig_walked:
+                try:
+                    # Re-read after the walk: a concurrent rebuild or manual
+                    # refresh may have replaced the dict while it ran — that
+                    # winner is fresher by construction, so leave it be.
+                    cur2 = getattr(state, "metadata_index_cache", None)
+                    if (
+                        not isinstance(cur2, dict)
+                        or cur2 is not cur
+                        or "tree" not in cur2
+                    ):
+                        return
+                    if (time.time() - cur2["timestamp"]) <= INDEX_CACHE_TTL:
+                        # Turned fresh while the walk ran — nothing to do.
+                        return
+                    if sig is not None and sig == cur2.get("signature"):
+                        # Unchanged tree: refresh the timestamp IN PLACE and
+                        # skip the scan entirely. The identity re-check under
+                        # the lock keeps a racing swap from losing the bump.
+                        async with _index_lock:
+                            if getattr(state, "metadata_index_cache", None) is cur:
+                                cur["timestamp"] = time.time()
+                        return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "background index refresh signature gate skip error=%s: %s",
+                        type(exc).__name__, exc,
+                    )
+        try:
+            tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "background index refresh skip error=%s: %s",
+                type(exc).__name__, exc,
+            )
+            return
+        try:
+            async with _index_lock:
+                cache_data = getattr(state, "metadata_index_cache", None)
+                if (
+                    cache_data is not None
+                    and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+                    and "tree" in cache_data
+                ):
+                    return
+                prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
+                prev_sig = cache_data.get("signature") if isinstance(cache_data, dict) else None
+                # The gate only falls through to a rebuild on a signature
+                # mismatch, so reaching this swap means the tree CHANGED:
+                # advance the generation, or ``/api/folders?since=<gen>``
+                # would answer 304 forever and the poller would never pick the
+                # new tree up. Two real signatures must be comparable to claim
+                # the change — a null previous signature (cold build, warmup
+                # failure) or an unverifiable walk keeps the generation.
+                changed = (
+                    sig_walked and sig is not None
+                    and prev_sig is not None and sig != prev_sig
+                )
+                state.metadata_index_cache = {
+                    "tree": tree, "index": index,
+                    "timestamp": time.time(),
+                    "generation": prev_gen + 1 if changed else prev_gen,
+                    "signature": sig if sig_walked else None,
+                }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "background index refresh swap skip error=%s: %s",
+                type(exc).__name__, exc,
+            )
+    finally:
+        try:
+            state.index_refresh_task = None
+        except Exception:
+            pass
+
+
 async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], MetadataIndex]:
-    """Return a fresh (tree, index) pair, reusing the shared cache when within TTL.
+    """Return a (tree, index) pair, never blocking the request on a scan.
 
     A single scan_tree walk feeds both the folders response and the index
     rebuild, so one filesystem walk serves the whole /api/folders request.
-    Past the TTL, a cheap filesystem-signature check runs OUTSIDE the lock:
-    when the signature matches the cached entry the timestamp is refreshed
-    in place (never rebinding the dict) and the cached pair is returned with
-    zero rebuilds. Only a signature mismatch (or a failed walk) takes the
-    locked rebuild path, which stores the pre-lock signature so the next TTL
-    miss can gate on it — never a second walk under the lock. The lock
-    itself is check-and-swap only (double-checked, never held across the
-    build beyond run_in_threadpool dispatch). On rebuild failure nothing is
-    cached — a partial tree is never kept — and the error propagates.
+    The lock itself is check-and-swap only (double-checked, never held
+    across the build beyond run_in_threadpool dispatch). On rebuild
+    failure nothing is cached — a partial tree is never kept — and the
+    error propagates.
+
+    Stale-serve: a TTL-expired cache is returned IMMEDIATELY and refresh
+    moves to a single-flight background task (_schedule_index_refresh —
+    see _background_index_refresh, which gates the rebuild on the
+    filesystem signature so an unchanged tree costs zero scans), so the
+    first request past expiry never blocks on a 5-10s full scan. Only a
+    missing cache (cold start, warmup failure) still builds synchronously
+    under the lock; that build stores a null signature, and the first
+    background refresh self-heals it to the walked one.
     """
     cache_data = getattr(request.app.state, "metadata_index_cache", None)
-    if (
-        cache_data is not None
-        and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
-        and "tree" in cache_data
-    ):
-        return cache_data["tree"], cache_data["index"]
-
-    # TTL miss with a cached tree: gate the rebuild on the filesystem
-    # signature, computed OUTSIDE _index_lock so concurrent requests never
-    # queue behind the walk.
-    sig: str | None = None
-    sig_checked = False
     if cache_data is not None and "tree" in cache_data:
-        downloads_path = request.app.state.settings.downloads_path
-        sig = await run_in_threadpool(compute_signature, downloads_path)
-        sig_checked = True
-        if sig is not None and sig == cache_data.get("signature"):
-            # Re-read: a concurrent rebuild may have replaced the dict
-            # while the signature walked — serve the winner.
-            cur = request.app.state.metadata_index_cache
-            if cur is not cache_data:
-                return cur["tree"], cur["index"]
-            cache_data["timestamp"] = time.time()
+        if (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL:
             return cache_data["tree"], cache_data["index"]
+        # Stale: serve now, refresh in the background (single-flight).
+        _schedule_index_refresh(request.app)
+        return cache_data["tree"], cache_data["index"]
 
     async with _index_lock:
         # Double-check after acquiring lock — another coroutine may have rebuilt.
@@ -211,13 +349,12 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
         tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
         # Cache only after both succeed (cache-nothing on failure). The
         # generation is the *fill* progress counter (warmup = 1, +1 per
-        # filled node), so a rebuild preserves it: a TTL rebuild of an
-        # unchanged tree keeps the ETag (digest + suffix) stable, and a
-        # full scan needs no fill. The signature stored is the pre-lock one
-        # (or None) — never a second walk under the lock.
+        # filled node), so a rebuild preserves it. The signature starts
+        # null (only lifespan warmup pre-populates a walked one); the next
+        # background refresh walks and stores it.
         prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
         cache_data = {"tree": tree, "index": index, "timestamp": time.time(),
-                      "generation": prev_gen, "signature": sig if sig_checked else None}
+                      "generation": prev_gen, "signature": None}
         request.app.state.metadata_index_cache = cache_data
         return tree, index
 
@@ -343,6 +480,169 @@ async def _background_fill(app_state) -> None:
     except Exception as exc:
         logger.warning(
             "background fill abort error=%s: %s", type(exc).__name__, exc,
+        )
+
+
+# Single-cover warm widths: 200 (tile first paint) and 400 (list/card).
+_COVER_WARM_WIDTHS = (200, 400)
+
+
+def _enumerate_cover_jobs(tree: list[dict], parent: str = "") -> list[tuple[str, int]]:
+    """List ``(cover_path, width)`` warm jobs for every folder's single thumb.
+
+    Each folder node carrying a ``thumb`` (folder-relative first image)
+    yields the job at w=200 and w=400; ``thumb is None`` nodes are skipped.
+    Full paths compose as parent/name — flattened names contain "/", so
+    neither side is ever split (same rule as _find_tree_node). Multi-thumb
+    ``thumbs[]`` lists and sprites are deliberately out of scope: only the
+    single cover behind the first paint is warmed.
+    """
+    jobs: list[tuple[str, int]] = []
+    for node in tree:
+        if node.get("type") != "folder":
+            continue
+        full = f"{parent}/{node['name']}" if parent else node["name"]
+        thumb = node.get("thumb")
+        if thumb:
+            for width in _COVER_WARM_WIDTHS:
+                jobs.append((f"{full}/{thumb}", width))
+        children = node.get("children") or []
+        if children:
+            jobs.extend(_enumerate_cover_jobs(children, full))
+    return jobs
+
+
+def _count_opaque_nodes(nodes: list[dict]) -> int:
+    """Count shallow-scan placeholders (archive/PDF folder nodes with no children).
+
+    The startup warm uses this to decide when to stop: a count of zero means
+    the background fill materialized every archive, and a count that stops
+    decreasing across passes means the fill is finished or stalled (a library
+    holding a genuinely empty archive keeps that archive opaque forever, so
+    the count can never reach zero there).
+    """
+    total = 0
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if node.get("type") != "folder":
+            continue
+        children = node.get("children") or []
+        if node.get("archive") and not children:
+            total += 1
+            continue
+        stack.extend(children)
+    return total
+
+
+# Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3): the
+# first pass runs IMMEDIATELY once the tree exists (no idle gating — cold
+# covers would otherwise each pay a live archive open on first view), but
+# the pass is deliberately gentle: ONE job at a time with a small yield
+# after each. A pillow decode/resize is CPU- and memory-heavy (a full
+# scanned page decodes to tens of MB), so several in flight at once starve
+# the serving event loop (observed ~10s /api/folders stalls at concurrency
+# 4 on a memory-pressured box) — the opposite of this plan's first-paint
+# goal. Later passes pick up trees the background fill materialized,
+# sleeping between passes so the fill can advance. Stops once no opaque
+# nodes remain, or once the generation AND the opaque count have been
+# stable for _WARM_COVERS_QUIET_PASSES.
+_WARM_COVERS_QUIET_PASSES = 3
+_WARM_COVERS_MAX_SECONDS = 20 * 60
+_WARM_COVERS_CONCURRENCY = 1
+_WARM_COVERS_JOB_SLEEP_SECONDS = 0.02
+_WARM_COVERS_POLL_SECONDS = 2.0
+_WARM_COVERS_PASS_SLEEP_SECONDS = 5.0
+_WARM_COVERS_WAIT_SECONDS = 120.0
+
+
+async def _warm_covers(app_state) -> None:
+    """Warm every folder's single cover into the thumb disk cache (fail-open).
+
+    Spawned once by lifespan after 起動完了; lives past yield. Waits for
+    the index cache to hold a tree (polls, gives up after the wait cap),
+    then warms each enumerated job with bounded concurrency — each job is
+    independently fail-open, so one corrupt source never aborts the pass.
+    A pass snapshots (tree, generation) up front, so a concurrent index
+    swap is safe (the next pass picks it up). Each pass then sleeps one
+    poll interval before re-enumerating, so the startup background fill can
+    materialize archives instead of racing a back-to-back tree re-walk, and
+    prunes each thumb namespace once per pass (stores pass ``prune=False``).
+    Stops once no opaque nodes remain, or once both the generation and the
+    opaque count have been stable for _WARM_COVERS_QUIET_PASSES, or at the
+    total time cap. Never raises except on cancellation.
+    """
+    from app.thumbs import prune_cache_dir, thumb_cache_namespace, warm_thumb_cache
+
+    try:
+        waited = 0.0
+        while True:
+            cache = getattr(app_state, "metadata_index_cache", None)
+            if isinstance(cache, dict) and "tree" in cache:
+                break
+            if waited >= _WARM_COVERS_WAIT_SECONDS:
+                return
+            await asyncio.sleep(_WARM_COVERS_POLL_SECONDS)
+            waited += _WARM_COVERS_POLL_SECONDS
+        try:
+            downloads_path = app_state.settings.downloads_path
+        except Exception:
+            return
+        sem = asyncio.Semaphore(_WARM_COVERS_CONCURRENCY)
+        start = time.monotonic()
+        quiet = 0
+        while True:
+            if time.monotonic() - start > _WARM_COVERS_MAX_SECONDS:
+                return
+            cache = getattr(app_state, "metadata_index_cache", None)
+            if not isinstance(cache, dict) or "tree" not in cache:
+                return
+            tree, gen = cache["tree"], cache.get("generation", 1)
+            opaque = _count_opaque_nodes(tree)
+            jobs = _enumerate_cover_jobs(tree)
+
+            async def _one(job_path: str, job_width: int) -> None:
+                async with sem:
+                    try:
+                        await warm_thumb_cache(downloads_path, job_path, job_width)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "cover warm skip %s w=%d error=%s: %s",
+                            job_path, job_width, type(exc).__name__, exc,
+                        )
+                    # Yield the loop after every job: the pillow work runs in
+                    # the threadpool but holds the GIL in chunks, so without a
+                    # breather a long pass starves request handling.
+                    await asyncio.sleep(_WARM_COVERS_JOB_SLEEP_SECONDS)
+
+            try:
+                await asyncio.gather(*(_one(job_path, job_width) for job_path, job_width in jobs))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "cover warm pass skip error=%s: %s", type(exc).__name__, exc,
+                )
+            for width in _COVER_WARM_WIDTHS:
+                await run_in_threadpool(prune_cache_dir, thumb_cache_namespace(width))
+            await asyncio.sleep(_WARM_COVERS_PASS_SLEEP_SECONDS)
+            cur = getattr(app_state, "metadata_index_cache", None)
+            cur_gen = cur.get("generation", None) if isinstance(cur, dict) else None
+            cur_tree = cur.get("tree") if isinstance(cur, dict) else None
+            cur_opaque = _count_opaque_nodes(cur_tree) if isinstance(cur_tree, list) else 0
+            if cur_gen == gen and cur_opaque == opaque:
+                quiet += 1
+            else:
+                quiet = 0
+            if cur_opaque == 0 or quiet >= _WARM_COVERS_QUIET_PASSES:
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "cover warm abort error=%s: %s", type(exc).__name__, exc,
         )
 
 
