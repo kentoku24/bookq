@@ -280,6 +280,62 @@ def make_thumbnail(data: bytes, width: int) -> bytes:
         raise HTTPException(status_code=404, detail="File not found")
 
 
+def _make_thumb_bytes(data: bytes, is_svg: bool, width: int) -> bytes:
+    """Render *data* to thumb bytes: SVG passes through, else resized JPEG.
+
+    SVG sources have no Pillow decoder and browsers scale them natively,
+    so the original bytes are returned unchanged; anything else goes
+    through make_thumbnail (non-image bytes raise 404 there).
+    """
+    return data if is_svg else make_thumbnail(data, width)
+
+
+def _store_thumb(dest: Path, thumb_bytes: bytes) -> None:
+    """Persist *thumb_bytes* at *dest* (atomic write, then prune the namespace).
+
+    Parents are created, the body lands via tmp-file + replace so
+    concurrent readers never see a partial file, and the namespace dir is
+    pruned back under cap. Fail-open like prune_cache_dir: callers decide
+    whether a store error matters.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_bytes(thumb_bytes)
+    tmp.replace(dest)  # atomic so concurrent readers never see partial body
+    prune_cache_dir(dest.parent)
+
+
+async def warm_thumb_cache(downloads_dir: Path, path: str, width: int) -> bool:
+    """Prepare the disk-cache thumb for *path* at *width*; True when cached.
+
+    Stat-only hit check first (no archive open on a hit), miss path loads
+    the source bytes and stores via the same _make_thumb_bytes/_store_thumb
+    helpers handle_thumb uses, so warmed files are byte-identical to served
+    ones. Fail-open: ANY exception (missing source, corrupt bytes, missing
+    extractor, unwritable cache) is swallowed and reported as False —
+    warming must never break serving or startup.
+    """
+    try:
+        mtime, size, key = _stat_source(downloads_dir, path)
+        is_svg = Path(path).suffix.lower() == ".svg"
+        dest = cache_path_for(cache_root(), width, key)
+        if is_svg:
+            dest = dest.with_suffix(".svg")
+        if dest.is_file():
+            return True
+        data, _mtime, _size, key = await load_source_bytes(downloads_dir, path)
+        dest = cache_path_for(cache_root(), width, key)
+        if is_svg:
+            dest = dest.with_suffix(".svg")
+        if dest.is_file():
+            return True
+        thumb = _make_thumb_bytes(data, is_svg, width)
+        await run_in_threadpool(_store_thumb, dest, thumb)
+        return True
+    except Exception:
+        return False
+
+
 async def handle_thumb(request: Request, path: str, w: str | int | None) -> Response:
     """Serve ``GET /thumb/{path}?w=`` (called by the thin route in routes.py).
 
@@ -326,12 +382,8 @@ async def handle_thumb(request: Request, path: str, w: str | int | None) -> Resp
         def _get_or_make() -> bytes:
             if dest.is_file():
                 return dest.read_bytes()
-            thumb = data if is_svg else make_thumbnail(data, width)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_suffix(".tmp")
-            tmp.write_bytes(thumb)
-            tmp.replace(dest)  # atomic so concurrent readers never see partial body
-            prune_cache_dir(dest.parent)
+            thumb = _make_thumb_bytes(data, is_svg, width)
+            _store_thumb(dest, thumb)
             return thumb
 
         body = await run_in_threadpool(_get_or_make)
