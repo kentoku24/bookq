@@ -13,6 +13,11 @@
 | `screenshot` が黒 | 描画未完了 | `openurl` 後 1-2秒待って再試行 |
 | `check` が Linux で exit 0 | 正常 | Linux CI に `xcrun` は無い — 警告を出して exit 0 し CI を壊さない |
 | 7日 LRU が再現しない | 仕様 | Simulator では 7日待機しても削除は発火しない。`touch` ロジックの存在確認のみ。実機 iPad が必要。詳細は `README.md: Safari 7日注意` |
+| コードを直したのに Simulator の挙動が古い | Safari が旧 `static/app.js` をキャッシュ (`max-age` はなしでも重複ヒットする) | `xcrun simctl shutdown` → `boot` で fresh セッション、または URL の search 部 (`#` の前) に `&r=<n>` を付けて開き直す(`sim-gesture-battery.sh` は自動付与) |
+| `:8094` など local dev 環境に届かない (curl `000`) | re-up 時に `--local --port` を付け忘れ tailnet モードで再作成され、ポートが publish されていない | `./dev.sh list` で URL が `http://127.0.0.1:<port>` か確認。`https://dev-*` なら `./dev.sh up <name> --local --port <n>` で作り直す |
+| `idb ui tap` が全滅・tap/swipe コマンドが無い | idb 未導入 | `brew tap facebook/fb && brew install idb-companion && pipx install fb-idb`; `./scripts/open-simulator.sh check` |
+| Simulator GUI (Simulator.app) が存在しない | 環境依存で GUI バンドルが無い | 不要 — `simctl`/`idb` はヘッドレスで完結 (`openurl`・`screenshot`・`recordVideo`・`idb ui tap`) |
+| HUD 計測が表示されない | URL に `?perf=1` が無い / hash の後ろに付けている | `.../?perf=1#/view/...` の形 (`#` の前)。HUD は `app.js` が `location.search` を読む |
 
 `video-verification` スキルは Chromium 前提。Simulator の動画は `xcrun simctl io booted recordVideo /tmp/sim.mp4` を使う。
 
