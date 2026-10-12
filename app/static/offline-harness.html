@@ -145,6 +145,17 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
     <div id="harness-wipe-preview" class="mono hint" style="margin-top:8px">—</div>
   </section>
 
+  <!-- ⑦ 表示・計測 -->
+  <section id="sec-perf" aria-labelledby="sec-perf-title">
+    <h2 id="sec-perf-title">⑦ 表示・計測</h2>
+    <p class="hint">ビューアのページめくり計測HUD（<code>?perf=1</code> と同等）。PWAにはURLバーが無いためここで切替える。切替後は「Viewerに戻る」で文書が再読込されて反映される。</p>
+    <div class="row" style="margin-top:10px">
+      <span id="harness-perf-status" class="badge">perf: —</span>
+      <button id="btn-perf-toggle" class="btn btn-primary" type="button">切替</button>
+    </div>
+    <p class="hint" style="margin-top:8px">ONで次回Viewer表示から緑のHUD（<code>move/snap@/img</code>）が出る。OFFで消える。</p>
+  </section>
+
   <!-- wipe confirm modal — two-step custom overlay, z-index 57 like quota modal -->
   <div id="harness-wipe-modal" style="display:none;position:fixed;inset:0;z-index:57;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
     <div role="dialog" aria-modal="true" aria-labelledby="harness-wipe-modal-title" style="background:#1e1e1e;border:1px solid #333;border-radius:12px;padding:20px;max-width:380px;width:calc(100% - 32px);box-shadow:0 8px 32px rgba(0,0,0,.5)">
@@ -619,10 +630,32 @@ document.getElementById('btn-set-offline')?.addEventListener('click', ()=>{
   window.setOfflineDone=true;
 });
 
+function refreshPerfBadge(){
+  var on = false;
+  try { on = localStorage.getItem('bookq_perf') === '1'; } catch(e) {}
+  var el = document.getElementById('harness-perf-status');
+  if (el) {
+    el.textContent = on ? 'perf: ON（次回Viewer表示からHUD）' : 'perf: OFF';
+    el.className = 'badge ' + (on ? 'online' : '');
+  }
+  var btn = document.getElementById('btn-perf-toggle');
+  if (btn) btn.textContent = on ? 'OFFにする' : 'ONにする';
+}
+
+document.getElementById('btn-perf-toggle').addEventListener('click', ()=>{
+  var on = false;
+  try { on = localStorage.getItem('bookq_perf') === '1'; } catch(e) {}
+  try {
+    if (on) localStorage.removeItem('bookq_perf');
+    else localStorage.setItem('bookq_perf', '1');
+  } catch(e) {}
+  refreshPerfBadge();
+});
+
 if(document.readyState==='loading'){
-  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); });
+  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); refreshPerfBadge(); });
 }else{
-  fetchTree().then(()=> refresh());
+  fetchTree().then(()=> refresh()); refreshPerfBadge();
 }
 window.addEventListener('online', ()=> refresh());
 window.addEventListener('offline', ()=> refresh());
