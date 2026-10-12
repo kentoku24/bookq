@@ -2856,22 +2856,7 @@
       // Simulator), and that gap is the whole "did it register?" feeling on a
       // burst. preventDefault kills the synthesized click outright (measured
       // in WebKit); suppressClick is only a backstop after this.
-    moveHistory = [];
-
-    // A finger that crossed the 8px decision line but never reached swipe
-    // territory WAS a tap — a few px of roll while lifting. Falling through to
-    // the bounce branch turned it into: no turn now, no preventDefault, then
-    // WebKit's click turning the page 40–400ms later (measured iOS Simulator:
-    // a 12px drift read as "dead" or "late"), the *press feels late* symptom.
-    // 24px headroom stays clear of the >20px velocity flick, which turns in
-    // the committed swipe animation below.
-    if (Math.abs(dxFinal) < 24) {
       moveHistory = [];
-      e.preventDefault();
-      zoneActionAt(dragStartX);
-      suppressClickFor(400);
-      return;
-    }
       e.preventDefault();
       zoneActionAt(released.clientX);
       suppressClickFor(400);
@@ -2894,6 +2879,20 @@
       if (dt > 1) swipeVelocity = (last.x - first.x) / dt;
     }
     moveHistory = [];
+    // A finger that crossed the 8px decision line but never reached swipe
+    // territory WAS a tap — a few px of roll while lifting. Falling through to
+    // the bounce branch turned it into: no turn now, no preventDefault, then
+    // WebKit's click turning the page 40–400ms later (measured iOS Simulator:
+    // a 12px drift read as "dead" or "late"), the *press feels late* symptom.
+    // 24px headroom stays clear of the >20px velocity flick, which turns in
+    // the committed swipe animation below.
+    if (Math.abs(dxFinal) < 24) {
+      moveHistory = [];
+      e.preventDefault();
+      zoneActionAt(dragStartX);
+      suppressClickFor(400);
+      return;
+    }
 
     let advanced = 0;
     if (viewerSwipeReady) {
