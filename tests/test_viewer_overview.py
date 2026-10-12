@@ -372,8 +372,9 @@ def test_tap_exit_shows_crossfade_that_is_removed_on_load_or_error(ios_page, ser
 
 
 def test_prebuilt_cur_cell_follows_page_turns(ios_page, server, touch):
-    """Zoom.driftTarget() is the `.cur` cell's centre — a prebuilt grid left on
-    the page the book was opened on would aim the shrink drift at the wrong cell."""
+    """`.cur` follows turns without a rebuild (markCurrent runs in snapTo's
+    deferred window job), while scroll/cellCenter sync lazily via
+    syncPosition() — the pinch-start path — instead of every turn (#23)."""
     open_book(ios_page, server, SERIES, 0, 5)
     ios_page.evaluate("window.Overview.prebuild()")
     ios_page.wait_for_function("!!window.Overview.cellCenter()")
@@ -388,8 +389,13 @@ def test_prebuilt_cur_cell_follows_page_turns(ios_page, server, touch):
         "+document.querySelector('#overview .ov-cell.cur').dataset.gidx === 2"
     )
     assert ios_page.locator("#overview .ov-cell.cur").count() == 1
-    # ... and cellCenter() — what Zoom.driftTarget() returns — is that cell
+    # position sync is lazy now: cellCenter() still aims at the page the book
+    # was opened on until the pinch-start path refreshes it ...
+    stale = ios_page.evaluate("window.Overview.cellCenter()")
+    # ... and a sync (exactly what Zoom onStart calls) makes it that cell
+    ios_page.evaluate("window.Overview.syncPosition()")
     center = ios_page.evaluate("window.Overview.cellCenter()")
+    assert center != stale
     rect = ios_page.evaluate(
         "(() => { const r = document.querySelector('#overview .ov-cell.cur')"
         ".getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()"
@@ -501,3 +507,38 @@ def test_overview_button_opens_and_is_labelled_without_implying_a_toggle(ios_pag
     assert ios_page.get_attribute("#overview-btn", "title") == "ページ一覧 (G)"
     ios_page.locator("#overview-btn").click()
     ios_page.wait_for_function("window.Overview.isOpen()")
+
+def test_shrink_drift_aims_at_post_turn_cell_via_pinch_start_sync(ios_page, server, touch):
+    """#23: per-turn markCurrent no longer scrolls/measures, so right after
+    turns the drift target is stale — but the pinch-start syncPosition()
+    refreshes it before any drift read, and the shrink aims at the NEW cell."""
+    open_book(ios_page, server, SERIES, 0, 5)
+    ios_page.evaluate("window.Overview.prebuild()")
+    ios_page.wait_for_function("!!window.Overview.cellCenter()")
+    ios_page.keyboard.press("ArrowLeft")  # RTL: ← is the NEXT page
+    ios_page.keyboard.press("ArrowLeft")
+    ios_page.wait_for_function("window.currentIdx === 2")
+    ios_page.wait_for_function(
+        "+document.querySelector('#overview .ov-cell.cur').dataset.gidx === 2"
+    )
+    pinch(touch, CX, CY, [50, 40, 30], hold=True)  # 0.6 — mid drift
+    # pinch onStart synced position: drift target is the NEW cell now
+    dest = ios_page.evaluate("window.Overview.cellCenter()")
+    rect = ios_page.evaluate(
+        "(() => { const r = document.querySelector('#overview .ov-cell.cur')"
+        ".getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; })()"
+    )
+    assert abs(dest["x"] - rect["x"]) < 1 and abs(dest["y"] - rect["y"]) < 1
+    st = zoom_state(ios_page)
+    org = ios_page.evaluate(
+        "(() => { const r = document.getElementById('img-container').getBoundingClientRect();"
+        " return {left: r.left, top: r.top, w: r.width, h: r.height}; })()"
+    )
+    W, H = org["w"], org["h"]
+    center_x = org["left"] + st["tx"] + st["zoom"] * W / 2
+    center_y = org["top"] + st["ty"] + st["zoom"] * H / 2
+    rest_x, rest_y = org["left"] + W / 2, org["top"] + H / 2
+    d_before = ((rest_x - dest["x"]) ** 2 + (rest_y - dest["y"]) ** 2) ** 0.5
+    d_now = ((center_x - dest["x"]) ** 2 + (center_y - dest["y"]) ** 2) ** 0.5
+    assert d_now < d_before
+    touch_end(touch)
