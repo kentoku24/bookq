@@ -155,6 +155,87 @@ async def _scan_and_rebuild(
     return tree, index, folders, images, archives, epubs, rars, pdfs
 
 
+def _schedule_index_refresh(app) -> None:
+    """Schedule a single-flight background index rebuild on *app*.
+
+    A second caller arriving while a refresh is still running is a no-op —
+    the in-flight task's swap covers it. The handle lives on
+    ``app.state.index_refresh_task``; it is read with getattr and assigned
+    as a plain attribute so SimpleNamespace stub states work the same as
+    the real Starlette State. Never raises: the caller already served
+    stale, so a missed refresh only delays freshness, never breaks serving.
+    """
+    state = getattr(app, "state", app)
+    try:
+        existing = getattr(state, "index_refresh_task", None)
+    except Exception:
+        existing = None
+    if existing is not None and not existing.done():
+        return
+    try:
+        state.index_refresh_task = asyncio.create_task(_background_index_refresh(app))
+    except Exception:
+        # No running loop (or a read-only state): skip the refresh. Stale
+        # was already served, so this only delays freshness.
+        pass
+
+
+async def _background_index_refresh(app) -> None:
+    """Rebuild the index off the request path and atomically swap it in.
+
+    The full scan runs OUTSIDE _index_lock (a 5-10s walk must never hold
+    it); only the swap takes the lock. Inside the lock the cache is
+    re-read: a cache that turned fresh while the scan ran (manual
+    /api/refresh or another rebuild) is left untouched, and the swap
+    preserves the pre-swap generation so the background fill's progress
+    (ETag suffix / since=) stays stable. Failures keep the old cache and
+    log a warning — a partial tree is never kept. CancelledError is
+    re-raised; the task handle is always cleared.
+    """
+    state = getattr(app, "state", app)
+    try:
+        try:
+            downloads_path = state.settings.downloads_path
+        except Exception:
+            return
+        try:
+            tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "background index refresh skip error=%s: %s",
+                type(exc).__name__, exc,
+            )
+            return
+        try:
+            async with _index_lock:
+                cache_data = getattr(state, "metadata_index_cache", None)
+                if (
+                    cache_data is not None
+                    and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+                    and "tree" in cache_data
+                ):
+                    return
+                prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
+                state.metadata_index_cache = {
+                    "tree": tree, "index": index,
+                    "timestamp": time.time(), "generation": prev_gen,
+                }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "background index refresh swap skip error=%s: %s",
+                type(exc).__name__, exc,
+            )
+    finally:
+        try:
+            state.index_refresh_task = None
+        except Exception:
+            pass
+
+
 async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], MetadataIndex]:
     """Return a fresh (tree, index) pair, reusing the shared cache when within TTL.
 
@@ -163,13 +244,19 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
     The lock is check-and-swap only (double-checked, never held across the
     build beyond run_in_threadpool dispatch). On rebuild failure nothing is
     cached — a partial tree is never kept — and the error propagates.
+
+    Stale-serve: a TTL-expired cache is returned IMMEDIATELY and the
+    rebuild moves to a single-flight background task (_schedule_index_refresh),
+    so the first request past expiry never blocks on a 5-10s full scan.
+    Only a missing cache (cold start, warmup failure) still builds
+    synchronously under the lock.
     """
     cache_data = getattr(request.app.state, "metadata_index_cache", None)
-    if (
-        cache_data is not None
-        and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
-        and "tree" in cache_data
-    ):
+    if cache_data is not None and "tree" in cache_data:
+        if (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL:
+            return cache_data["tree"], cache_data["index"]
+        # Stale: serve now, refresh in the background (single-flight).
+        _schedule_index_refresh(request.app)
         return cache_data["tree"], cache_data["index"]
 
     async with _index_lock:
