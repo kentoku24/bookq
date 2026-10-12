@@ -198,6 +198,14 @@ def test_etag_changes_when_tree_changes(client, downloads_tree):
         from tests.conftest import _make_png
         _make_png(new / "001.png")
         client.app.state.metadata_index_cache["timestamp"] -= 10_000
+        # Stale-serve (plan thumb-warmup-stale-serve Todo 1): TTL 期限切れ直後の
+        # read は stale tree を即返却する (ETag 不変・blocking なし)。背景 rebuild
+        # は TestClient の request スコープでは応答と共に cancel されるため、ここでは
+        # 同期 rebuild である手動 /api/refresh で新フォルダの ETag 変化を pin する。
+        # 背景 swap 自体の契約は tests/test_stale_serve.py の unit テストで pin 済み。
+        assert client.get("/api/folders").headers["etag"] == etag1
+        r = client.post("/api/refresh")
+        assert r.status_code == 200
         etag2 = client.get("/api/folders").headers["etag"]
         assert etag2 != etag1
     finally:
