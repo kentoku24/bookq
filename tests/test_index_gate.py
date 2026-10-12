@@ -1,17 +1,28 @@
-"""Signature gate + depth=1 decouple integration tests (T4).
+"""Signature gate + depth=1 decouple integration tests (T4), merged with
+stale-serve (thumb-warmup-stale-serve).
 
-Pins the gate and decouple contracts at the HTTP level (plain TestClient,
-no lifespan warmup — every test primes explicitly):
+Pins the request-path contracts at the HTTP level (plain TestClient, no
+lifespan warmup — every test primes explicitly):
 
-- gate: an expired-but-unchanged tree refreshes the timestamp in place with
-  zero rebuilds and a stable ETag; only a signature mismatch rebuilds;
+- gate: expired+unchanged serves the identical payload with a stable ETag
+  and zero request-path rebuilds; the signature walk lives entirely in the
+  single-flight background refresh, which this suite stubs out
+  (_schedule_index_refresh → no-op) to keep HTTP tests deterministic — the
+  background contract (in-place refresh / rebuild swap / race re-read) is
+  pinned at unit level in tests/test_ensure_index.py and tests/test_stale_serve.py;
 - decouple: ?depth=1 never populates or rebuilds metadata_index_cache — it
   serves from a fresh cache or falls back to a live-FS read (bypassing the
   body cache), so an expired cache is never served stale.
 
-Teeth: (a) goes red under forced always-rebuild (compute_signature mismatch);
-(d) goes red when the depth path serves the expired cache as fresh
-(INDEX_CACHE_TTL inflated). Both restore to green unpatched.
+Teeth: (a) goes red under a forced synchronous rebuild on the expired
+path (request-path rebuilds > 0); (d) goes red when the depth path serves
+the expired cache as fresh (INDEX_CACHE_TTL inflated). Both restore to
+green unpatched.
+
+NOTE: TestClient portals run per request, so background tasks created inside
+a handler are cancelled with the response — HTTP tests must never depend on,
+or observe, background refresh effects (see the PR/test-plan notes in
+tests/test_ensure_index.py).
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_index_gate.py -q
@@ -20,7 +31,6 @@ Run:
 import os
 import shutil
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -56,17 +66,30 @@ def _expire(client):
 
 
 def _prime_then_gate(client):
-    """Cold full GET, expire, full GET (first TTL miss rebuilds once and stores
-    the pre-lock signature), expire. Afterwards the cache carries a real
-    signature and is expired, so the next full GET exercises the gate — not
-    the cold-build path (whose signature is None). Mirrors the
-    prime-then-gate shape of tests/test_ensure_index.py:89-107."""
+    """Cold full GET, expire, full GET (stale-serve: served immediately with
+    the refresh deferred to a background task this suite stubs out), expire.
+    After the second expiry the cache is expired again, so the next full GET
+    exercises the stale-serve path (never a request-path rebuild). Mirrors the
+    prime-then-gate shape of tests/test_ensure_index.py."""
     r = client.get("/api/folders")
     assert r.status_code == 200
     _expire(client)
     r = client.get("/api/folders")
     assert r.status_code == 200
     _expire(client)
+
+
+def _stub_background_refresh(monkeypatch):
+    """No-op the background refresh scheduling.
+
+    TestClient portals are per request, so a real background task would be
+    cancelled mid-flight nondeterministically; HTTP-level tests here pin the
+    request path only. The background contract is pinned at unit level
+    (tests/test_ensure_index.py, tests/test_stale_serve.py).
+    """
+    import app.routes as routes
+
+    monkeypatch.setattr(routes, "_schedule_index_refresh", lambda app: None)
 
 
 def _count_rebuilds(monkeypatch):
@@ -112,11 +135,17 @@ def _mkdir_with_image(root: Path, name: str) -> Path:
 
 
 def test_a_expired_unchanged_gates_with_zero_rebuilds(client, monkeypatch):
-    """(a) Expired + unchanged tree → 0 rebuilds, identical ETag, dumps delta ≤ 1.
+    """(a) Expired + unchanged tree → 0 request-path rebuilds, identical ETag,
+    dumps delta ≤ 1.
 
-    The dumps delta is 1, never 0: the gate refreshes the timestamp in place,
-    so the body cache (keyed on that timestamp gen) re-serializes exactly once.
+    Stale-serve contract: the expired fetch is served IMMEDIATELY from cache
+    with the refresh deferred to the background (stubbed out here), so the
+    request path performs no signature walk and no rebuild. The dumps delta
+    is ≤ 1 (the body-cache gen key may roll once if a concurrent refresh
+    bumped the timestamp; the ETag — payload digest + fill generation — is
+    unchanged because the tree did not change).
     """
+    _stub_background_refresh(monkeypatch)
     rebuilds = _count_rebuilds(monkeypatch)
     dumps = _count_dumps(monkeypatch)
     _prime_then_gate(client)
@@ -131,11 +160,15 @@ def test_a_expired_unchanged_gates_with_zero_rebuilds(client, monkeypatch):
     assert dumps["n"] - base_dumps <= 1
 
 
-def test_b_expired_new_folder_rebuilds_visible_same_response(
+def test_b_expired_new_folder_serves_stale_without_rebuild(
     client, monkeypatch, downloads_tree
 ):
-    """(b) Expired + new folder → exactly 1 rebuild, ETag differs, and the new
-    folder is already present in the SAME response that rebuilt."""
+    """(b) Expired + new folder → the request path serves the STALE payload
+    immediately (no rebuild, stable ETag); the change becomes visible after
+    the background refresh swaps in a fresh index (pinned at unit level in
+    tests/test_ensure_index.py — TestClient cannot observe background swaps).
+    """
+    _stub_background_refresh(monkeypatch)
     rebuilds = _count_rebuilds(monkeypatch)
     _prime_then_gate(client)
     etag1 = client.get("/api/folders").headers["etag"]
@@ -145,9 +178,9 @@ def test_b_expired_new_folder_rebuilds_visible_same_response(
         _expire(client)
         r = client.get("/api/folders")
         assert r.status_code == 200
-        assert rebuilds["n"] - base == 1
-        assert r.headers["etag"] != etag1
-        assert "zz_gate_new_b" in _names(r.json())
+        assert rebuilds["n"] - base == 0
+        assert r.headers["etag"] == etag1  # stale serve, signature unchanged
+        assert "zz_gate_new_b" not in _names(r.json())
     finally:
         shutil.rmtree(new, ignore_errors=True)
 
@@ -195,10 +228,13 @@ def test_d_expired_new_folder_depth1_fallback_shows_immediately(
         shutil.rmtree(new, ignore_errors=True)
 
 
-def test_e_cold_sig_none_first_miss_rebuilds(client, monkeypatch):
-    """(e) A cold-built cache carries signature None, so the FIRST TTL miss
-    after a cold build rebuilds once (and stores the pre-lock sig for the
-    next miss to gate on)."""
+def test_e_cold_sig_none_first_refresh_self_heals(client, monkeypatch):
+    """(e) A cold-built cache carries signature None, so the first TTL
+    expiry cannot gate — the background refresh rebuilds once and stores
+    the walked signature (unit-level pin in tests/test_ensure_index.py;
+    TestClient cannot observe background effects). The request path itself
+    performs zero scans in either case."""
+    _stub_background_refresh(monkeypatch)
     rebuilds = _count_rebuilds(monkeypatch)
     r = client.get("/api/folders")
     assert r.status_code == 200
@@ -207,31 +243,24 @@ def test_e_cold_sig_none_first_miss_rebuilds(client, monkeypatch):
     base = rebuilds["n"]
     r = client.get("/api/folders")
     assert r.status_code == 200
-    assert rebuilds["n"] - base == 1
-    assert client.app.state.metadata_index_cache.get("signature") is not None
+    assert rebuilds["n"] - base == 0
+    assert client.app.state.metadata_index_cache.get("signature") is None
 
 
-def test_f_gate_refreshes_cache_dict_in_place(client):
-    """(f) The gate refreshes the timestamp WITHOUT rebinding the cache dict —
-    same dict, same tree list, same index object afterwards."""
-    _prime_then_gate(client)
-    before = client.app.state.metadata_index_cache
-    before_tree, before_index, before_ts = before["tree"], before["index"], before["timestamp"]
-    r = client.get("/api/folders")
-    assert r.status_code == 200
-    after = client.app.state.metadata_index_cache
-    assert after is before
-    assert after["tree"] is before_tree
-    assert after["index"] is before_index
-    assert after["timestamp"] >= before_ts
+# (f) and (h) are re-derived at unit level where the background task can be
+# awaited deterministically: (f) in-place timestamp refresh —
+# tests/test_ensure_index.py step 2; (h) concurrent-replacement winner —
+# tests/test_stale_serve.py::test_background_gate_race_serves_winner.
 
 
-def test_g_metadata_toml_edit_rebuilds_visible_same_response(
+def test_g_metadata_toml_edit_serves_stale_without_rebuild(
     client, monkeypatch, downloads_tree
 ):
-    """(g) In-place metadata.toml edit (no dir-mtime bump) moves the signature
-    via the toml mtime+size term → exactly 1 rebuild, and the new metadata is
-    visible in the SAME response that rebuilt."""
+    """(g) In-place metadata.toml edit (no dir-mtime bump) moves the
+    signature; the request path serves the STALE payload immediately (old
+    metadata, zero rebuilds, stable ETag) — the rebuild is pinned at unit
+    level in tests/test_ensure_index.py."""
+    _stub_background_refresh(monkeypatch)
     rebuilds = _count_rebuilds(monkeypatch)
     _prime_then_gate(client)
     base = rebuilds["n"]
@@ -242,46 +271,11 @@ def test_g_metadata_toml_edit_rebuilds_visible_same_response(
         _expire(client)
         r = client.get("/api/folders")
         assert r.status_code == 200
-        assert rebuilds["n"] - base == 1
+        assert rebuilds["n"] - base == 0
         node = next(n for n in r.json() if n.get("name") == "simple_manga")
-        assert node.get("has_metadata") is True
-        assert node["metadata"]["title_jp"] == "GateProbeTitle"
+        assert node.get("has_metadata") is False  # stale payload served
     finally:
         toml.unlink(missing_ok=True)
-
-
-def test_h_gate_race_reread_serves_winner(client, monkeypatch):
-    """(h) A concurrent rebuild may replace the cache dict while the signature
-    walks — the gate re-reads and serves the winner (cur), with zero rebuilds
-    of its own."""
-    import app.routes as routes
-
-    rebuilds = _count_rebuilds(monkeypatch)
-    _prime_then_gate(client)
-    app = client.app
-    old = app.state.metadata_index_cache
-    real_sig = old["signature"]
-    assert real_sig is not None
-    winner_tree = [{"name": "zz_race_winner", "type": "folder", "children": []}]
-
-    def fake_sig(path):
-        winner = {
-            "tree": winner_tree,
-            "index": old["index"],
-            "timestamp": time.time(),
-            "generation": old.get("generation", 1),
-            "signature": real_sig,
-        }
-        app.state.metadata_index_cache = winner
-        return real_sig
-
-    monkeypatch.setattr(routes, "compute_signature", fake_sig)
-    base = rebuilds["n"]
-    r = client.get("/api/folders")
-    assert r.status_code == 200
-    assert rebuilds["n"] == base
-    assert "zz_race_winner" in _names(r.json())
-    assert app.state.metadata_index_cache["tree"] is winner_tree
 
 
 def test_i_depth1_fresh_then_expire_shows_new_folder_without_full_fetch(

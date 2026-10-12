@@ -17,31 +17,12 @@ os.environ["BOOKQ_TEST_MODE"] = "true"
 
 from PIL import Image  # noqa: E402
 
+from tests.helpers import make_pdf  # noqa: E402
+
 
 def _make_noise_png(path: Path, w: int = 800, h: int = 600) -> None:
     """Write a large noisy PNG (incompressible → thumb bytes << original bytes)."""
     Image.frombytes("RGB", (w, h), os.urandom(w * h * 3)).save(path, format="PNG")
-
-
-def _make_pdf(path: Path, pages: int = 2) -> None:
-    """Minimal multi-page PDF (same shape as tests/test_archive.py)."""
-    objs: list[str] = ["1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"]
-    kids = " ".join(f"{3 + i} 0 R" for i in range(pages))
-    objs.append(f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {pages} >>\nendobj\n")
-    for i in range(pages):
-        objs.append(
-            f"{3 + i} 0 obj\n<< /Type /Page /Parent 2 0 R "
-            f"/MediaBox [0 0 200 200] /Contents {3 + pages + i} 0 R >>\nendobj\n"
-        )
-    for i in range(pages):
-        content = f"BT 10 90 Td (Page {i + 1}) Tj ET"
-        objs.append(
-            f"{3 + pages + i} 0 obj\n<< /Length {len(content)} >>\n"
-            f"stream\n{content}\nendstream\nendobj\n"
-        )
-    path.write_bytes(
-        b"%PDF-1.4\n" + "".join(objs).encode() + b"trailer\n<< /Root 1 0 R >>\n%%EOF"
-    )
 
 
 @pytest.fixture
@@ -52,7 +33,7 @@ def thumb_tree(tmp_path: Path, tmp_path_factory) -> Path:
     with zipfile.ZipFile(tmp_path / "work.zip", "w") as zf:
         zf.write(plain / "big.png", "2.png")
         zf.writestr("readme.txt", "hi")
-    _make_pdf(tmp_path / "doc.pdf", pages=2)
+    make_pdf(tmp_path / "doc.pdf", pages=2)
     # Symlink escaping DOWNLOADS_DIR → 403 (guard resolves symlinks).
     outside = tmp_path_factory.mktemp("outside") / "secret.png"
     _make_noise_png(outside, w=100, h=100)

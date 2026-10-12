@@ -26,25 +26,7 @@ if str(_repo_root) not in sys.path:
 from app import main as app_main
 from app.config import Settings
 from app.routes import warmup_metadata_index
-
-
-def _drive(coro):
-    """Run *coro* on a fresh event loop in a helper thread.
-
-    Same constraint as test_ensure_index: Playwright's sync API leaves a
-    running loop in the main thread, so asyncio.run() there fails. The
-    module-level _index_lock is never contended (strictly sequential awaits),
-    so it never binds to these short-lived loops.
-    """
-    outcome = {}
-
-    def target():
-        outcome["value"] = asyncio.run(coro)
-
-    worker = threading.Thread(target=target)
-    worker.start()
-    worker.join()
-    return outcome["value"]
+from tests.helpers import drive
 
 
 def _state(downloads_path):
@@ -61,7 +43,7 @@ def test_rebuild_log_contains_scan_and_rebuild_ms(tmp_path, caplog):
         await warmup_metadata_index(state)
 
     with caplog.at_level(logging.INFO, logger="app.routes"):
-        _drive(main())
+        drive(main())
 
     records = [r for r in caplog.records if r.msg.startswith("metadata index rebuilt")]
     assert len(records) == 1, [r.getMessage() for r in caplog.records]
@@ -78,7 +60,7 @@ def test_lifespan_completion_log_contains_import_ms(tmp_path, caplog):
             return state.metadata_index_cache
 
     with caplog.at_level(logging.INFO, logger="app.main"):
-        _drive(main())
+        drive(main())
 
     records = [r for r in caplog.records if r.msg.startswith("内部ウォームアップ完了")]
     assert len(records) == 1, [r.getMessage() for r in caplog.records]

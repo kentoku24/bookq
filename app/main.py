@@ -13,7 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.compression import ApiGZipMiddleware
 from app.config import load_settings
 from app.auth import router as auth_router, init_oauth
-from app.routes import _background_fill, api_router, warmup_metadata_index
+from app.routes import _background_fill, _warm_covers, api_router, warmup_metadata_index
 from app.static_files import NoCacheStaticFiles
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,11 @@ async def lifespan(app: FastAPI):
     # load. Fire-and-forget past yield — never blocks serving or shutdown
     # semantics; all fill errors are swallowed per item inside the task.
     asyncio.create_task(_background_fill(app.state))
+    # Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3):
+    # warm every folder's single cover into the thumb disk cache right
+    # away (no idle gating). Same fire-and-forget shape as the fill above;
+    # all warm errors are swallowed per job inside the task.
+    asyncio.create_task(_warm_covers(app.state))
     yield
 
 
