@@ -215,6 +215,10 @@
 
   function onStart(g) {
     if (window.Overview && window.Overview.isOpen()) return;
+    // Refresh the pinch-drift target for the page being read: per-turn
+    // markCurrent no longer scrolls/measures (full-grid layout cost, #23),
+    // so sync here, before any drift read in this gesture can observe it.
+    if (window.Overview && window.Overview.syncPosition) window.Overview.syncPosition();
     killTransition();
     // Reclaim an interrupted slide (app.js local snapTo; window.snapTo is the
     // dormant twin in spread.js). Only at rest: snapTo's head calls
