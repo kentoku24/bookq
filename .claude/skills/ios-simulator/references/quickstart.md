@@ -49,3 +49,18 @@ xcrun simctl io booted recordVideo /tmp/sim.mp4  # 停止は Ctrl-C
 ```
 
 `--fixture` で作られるツリーの詳細は `README.md` の「開発環境（実機・実データでの動作確認）」を参照。
+
+### タップ駆動テスト (エージェントが実指まで叩く)
+
+Simulator GUI 無しで `simctl` + `idb` が完結する (Simulator.app が見つからない環境でも可):
+
+```bash
+./scripts/open-simulator.sh check                                  # idb 有無チェック
+./scripts/sim-gesture-battery.sh "$URL"                             # タップ/ゆるドリフト/スワイプ 7連
+./scripts/open-simulator.sh screenshot /tmp/sim.png                 # counter と HUD を読む
+```
+
+- 開く URL には `?perf=1` を付ける (**`#` の前**, 例 `.../?perf=1#/view/...`) — ビューア内蔵 HUD (`app.js`) がタップ→ターン間の計測を表示する
+- 座標は**ポイント** (iPhone 17 は 393×852)、Retina ピクスポではない
+- コード変更後の再確認は **`xcrun simctl shutdown` → `boot`** で fresh セッションにする (Safari が古い `static/app.js` をキャッシュするため)
+- 詳細 (`references/tap-driving.md`): ジェスチャ分類・HUD 判読・idb 罠・dev env の local モード再 up 事故
