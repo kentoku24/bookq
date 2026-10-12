@@ -1,0 +1,31 @@
+# Dependabot auto-merge — merges dependabot PRs once CI is green.
+#
+# `gh pr merge --auto` は使わない: branch protection がない本リポジトリでは
+# CI を待たず即時マージしてしまうため。代わりにこのアクションがチェック完了を
+# 待ってマージする。MERGE_READY_STATE=clean のみ許可 = 赤CIでは決してマージしない。
+name: dependabot-auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: pascalgn/automerge-action@v0.16.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_LABELS: ""
+          MERGE_FILTER_AUTHOR: dependabot[bot]
+          MERGE_METHOD: squash
+          MERGE_DELETE_BRANCH: "true"
+          MERGE_READY_STATE: clean
