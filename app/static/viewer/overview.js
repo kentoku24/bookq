@@ -188,10 +188,23 @@
     curCenter = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }
 
-  // Keep a PREBUILT (not yet open) grid pointed at the page being read, without
-  // rebuilding it: app.js's snapTo calls this at the end of every page turn.
-  // Zoom.driftTarget() is the `.cur` cell's centre, so without this the shrink
-  // drift aims at whatever page the book was opened on.
+  // Refresh the grid position + pinch-drift target for the page being read.
+  // Runs on overview open (show()) and at pinch-gesture start (Zoom onStart),
+  // NOT on every page turn: scrollCurToThird forces a full-grid layout
+  // (offsetTop + scroll + rect), and on thousand-page books that costs every
+  // turn hundreds of ms on a real device (#23). Between syncs the `.cur`
+  // classes still follow turns via markCurrent below, so the only staleness
+  // window is scroll position + curCenter, both refreshed before any consumer
+  // can observe them.
+  function syncPosition() {
+    if (!ensureEls() || root.hidden || !body.children.length) return;
+    scrollCurToThird();
+  }
+
+  // Keep a PREBUILT (not yet open) grid's `.cur` cell on the page being read,
+  // without rebuilding it: app.js's snapTo calls this at the end of every
+  // page turn. Position (scroll + Zoom.driftTarget's curCenter) is synced
+  // lazily via syncPosition(), never here.
   function markCurrent(gidx) {
     if (open || !ensureEls() || root.hidden || !body.children.length) return;
     var reals = realList();
@@ -200,10 +213,9 @@
     var next = body.querySelector('.ov-cell[data-gidx="' + g + '"]');
     if (!next) return;
     var prev = body.querySelector('.ov-cell.cur');
-    if (prev === next) { scrollCurToThird(); return; }
+    if (prev === next) return;
     if (prev) prev.classList.remove('cur');
     next.classList.add('cur');
-    scrollCurToThird();
     updateChip(g);
     // Only claim the grid as prebuilt-for-this-page while the ±IMG_WINDOW band
     // still covers it; past that the cell has no <img> and show() must rebuild.
@@ -368,7 +380,7 @@
     document.body.classList.add('overview-open');
     setChromeInert(true);
     if (window.Zoom) window.Zoom.reset(false);
-    scrollCurToThird();
+    syncPosition();
     if (flySrc) flyIn(flySrc);
     var cell = root.querySelector('.ov-cell.cur');
     if (cell) cell.focus({ preventScroll: true });
@@ -595,6 +607,7 @@
     isOpen: function () { return open; },
     prebuild: prebuild,
     markCurrent: markCurrent,
+    syncPosition: syncPosition,
     relayout: relayout,
     cellCenter: function () { return curCenter; },
     _finishFlight: null,
