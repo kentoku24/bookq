@@ -67,15 +67,23 @@ def test_ensure_index_reuses_cached_object(tmp_path):
 
 
 def test_ensure_index_rebuilds_after_ttl_expiry(tmp_path):
+    # Stale-serve contract (plan thumb-warmup-stale-serve Todo 1): a
+    # TTL-expired cache is returned IMMEDIATELY (the stale object, not a
+    # rebuild), and the background refresh swaps in the fresh objects
+    # shortly after. The first request past expiry never blocks on a scan.
     async def main():
         request = _stub_request(tmp_path)
         first = await _ensure_index(request)
         request.app.state.metadata_index_cache["timestamp"] = time.time() - INDEX_CACHE_TTL - 1
-        rebuilt = await _ensure_index(request)
-        return first, rebuilt
+        stale = await _ensure_index(request)
+        assert stale is first
+        task = getattr(request.app.state, "index_refresh_task", None)
+        assert task is not None
+        await asyncio.wait_for(asyncio.ensure_future(task), 30)
+        return first, request.app.state.metadata_index_cache["index"]
 
-    first, rebuilt = _drive(main())
-    assert rebuilt is not first
+    first, swapped = _drive(main())
+    assert swapped is not first
 
 
 def test_ensure_index_hit_just_inside_ttl(tmp_path):
