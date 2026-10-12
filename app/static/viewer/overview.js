@@ -71,12 +71,12 @@
   }
 
   // The <img> is created with its URL parked in data-src, never a live `src`:
-  // the PREBUILT grid is laid out (opacity 0) behind the reader, and lazy
-  // loading keys on scrollport intersection, not visibility, so a live src
-  // there would fetch (and make the server resize) two screens of thumbnails
-  // on every book open and again on every page turn that moves `.cur` —
-  // bandwidth the staged page prefetch exists to protect. hydrate() assigns
-  // the src when the grid actually shows (show(), slideWindow()).
+  // the PREBUILT grid is display:none (no layout/paint cost during reading),
+  // and lazy loading keys on scrollport intersection, not visibility, so a
+  // live src there would fetch (and make the server resize) two screens of
+  // thumbnails on every book open and again on every page turn that moves
+  // `.cur` — bandwidth the staged page prefetch exists to protect. hydrate()
+  // assigns the src when the grid actually shows (show(), slideWindow()).
   function makeImg(im) {
     var img = document.createElement('img');
     img.loading = 'lazy'; img.decoding = 'async'; img.alt = ''; img.draggable = false;
@@ -190,23 +190,28 @@
 
   // Refresh the grid position + pinch-drift target for the page being read.
   // Runs on overview open (show()) and at pinch-gesture start (Zoom onStart),
-  // NOT on every page turn: scrollCurToThird forces a full-grid layout
-  // (offsetTop + scroll + rect), and on thousand-page books that costs every
-  // turn hundreds of ms on a real device (#23). Between syncs the `.cur`
+  // NOT on every page turn: measuring needs a laid-out grid, and laying out
+  // thousands of cells every turn costs hundreds of ms on a real device (#25).
+  // Temporarily unhides a prebuilt-hidden grid to measure, then re-hides it;
+  // an already-visible grid is measured in place. Between syncs the `.cur`
   // classes still follow turns via markCurrent below, so the only staleness
   // window is scroll position + curCenter, both refreshed before any consumer
   // can observe them.
   function syncPosition() {
-    if (!ensureEls() || root.hidden || !body.children.length) return;
+    if (!ensureEls() || !body.children.length) return;
+    var wasHidden = root.hidden;
+    root.hidden = false;
     scrollCurToThird();
+    if (wasHidden && !open) root.hidden = true;
   }
 
   // Keep a PREBUILT (not yet open) grid's `.cur` cell on the page being read,
   // without rebuilding it: app.js's snapTo calls this at the end of every
-  // page turn. Position (scroll + Zoom.driftTarget's curCenter) is synced
-  // lazily via syncPosition(), never here.
+  // page turn. Class swaps and text updates work on a display:none tree, so
+  // no unhiding here — position (scroll + Zoom.driftTarget's curCenter) is
+  // synced lazily via syncPosition(), never here.
   function markCurrent(gidx) {
-    if (open || !ensureEls() || root.hidden || !body.children.length) return;
+    if (open || !ensureEls() || !body.children.length) return;
     var reals = realList();
     if (!reals.length) return;
     var g = reals[nearestRealPos(reals, gidx)];   // a spacer has no cell of its own
@@ -265,15 +270,18 @@
       // this check a 700-page book is built twice back-to-back. close()
       // empties the grid and nulls prebuiltFor, so a stale grid can never
       // pass here.
-      if (!root.hidden && body.children.length && prebuiltFor === (window.currentIdx || 0)) return;
-      // Unhide FIRST: the grid must be laid out for cellWidth() to measure a
-      // real cell. `prebuilt` (opacity 0 + pointer-events none) and `inert`
-      // keep it invisible, click-through and out of the tab order meanwhile.
+      if (body.children.length && prebuiltFor === (window.currentIdx || 0)) return;
+      // Stay hidden (display:none): a thousand-page grid kept laid out behind
+      // the reader makes every forced full-document layout — the per-turn
+      // track reflow, markCurrent reads — pay for thousands of cells on a
+      // real device (#25). Geometry is measured on demand: show() and
+      // syncPosition() unhide before measuring. applyHeights() below falls
+      // back to estimateCellWidth() while hidden (same constants as the
+      // grid CSS by convention); show() re-applies real heights on open.
       root.classList.add('prebuilt');
       root.inert = true;
-      root.hidden = false;
       if (build(window.currentIdx || 0)) scrollCurToThird();
-      else { root.hidden = true; root.classList.remove('prebuilt'); }
+      else { root.classList.remove('prebuilt'); }
     };
     if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 1000 });
     else setTimeout(run, 300);
@@ -375,6 +383,9 @@
     root.hidden = false;
     if (closeBtn) closeBtn.hidden = false;
     if (prebuiltFor !== cur || !body.children.length) build(cur);
+    // The prebuilt grid was built hidden: heights came from the arithmetic
+    // fallback. Re-apply with a real cell now that geometry is measurable.
+    applyHeights();
     hydrateAll();   // the grid is about to be seen: start the thumbnail fetches now, not at prebuild
     open = true;
     document.body.classList.add('overview-open');
