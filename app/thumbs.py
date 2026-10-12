@@ -290,19 +290,56 @@ def _make_thumb_bytes(data: bytes, is_svg: bool, width: int) -> bytes:
     return data if is_svg else make_thumbnail(data, width)
 
 
-def _store_thumb(dest: Path, thumb_bytes: bytes) -> None:
-    """Persist *thumb_bytes* at *dest* (atomic write, then prune the namespace).
+def _store_thumb(dest: Path, thumb_bytes: bytes, *, prune: bool = True) -> None:
+    """Persist *thumb_bytes* at *dest* (atomic write, optional namespace prune).
 
-    Parents are created, the body lands via tmp-file + replace so
-    concurrent readers never see a partial file, and the namespace dir is
-    pruned back under cap. Fail-open like prune_cache_dir: callers decide
-    whether a store error matters.
+    Parents are created and the body lands via a UNIQUELY named sibling tmp
+    file + ``replace`` so concurrent writers of the SAME cover (the startup
+    warm and a ``/thumb`` request, now both real) never share a tmp path. A
+    fixed tmp name would let one writer truncate the other's in-flight tmp
+    and publish a half-written JPEG, and would make the loser's replace raise
+    FileNotFoundError (a 500 on the request path). The namespace dir is
+    pruned back under cap when *prune* is true; batched callers (the warm
+    pass) pass ``prune=False`` and prune once per pass, because per-write
+    pruning over ~5k files is an O(N^2) stat storm. Fail-open like
+    prune_cache_dir: callers decide whether a store error matters.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
-    tmp.write_bytes(thumb_bytes)
-    tmp.replace(dest)  # atomic so concurrent readers never see partial body
-    prune_cache_dir(dest.parent)
+    tmp = dest.parent / f".{dest.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    try:
+        tmp.write_bytes(thumb_bytes)
+        tmp.replace(dest)  # atomic so concurrent readers never see partial body
+    finally:
+        try:
+            tmp.unlink()  # replaced (or failed) tmp must never linger
+        except OSError:
+            pass
+    if prune:
+        prune_cache_dir(dest.parent)
+
+
+def _touch_thumb(dest: Path) -> None:
+    """Refresh *dest*'s mtime so a warm hit counts as recent use.
+
+    The namespace prune evicts oldest-mtime-first, so without this a warmed
+    cover (written once at startup, never rewritten on a hit) would be the
+    first thing evicted once viewer thumbnails fill the namespace — and
+    first paint would silently go cold again. Fail-open: a failed touch only
+    restores the pre-existing eviction order.
+    """
+    try:
+        os.utime(dest)
+    except OSError:
+        pass
+
+
+def thumb_cache_namespace(width: int) -> Path:
+    """Namespace dir holding cached thumbs for *width* (batched-prune target).
+
+    Mirrors ``cache_path_for``'s ``thumbs/<w>/`` layout so a caller that
+    stores with ``prune=False`` can prune the same directory once per batch.
+    """
+    return cache_root() / "thumbs" / str(width)
 
 
 async def warm_thumb_cache(downloads_dir: Path, path: str, width: int) -> bool:
@@ -311,7 +348,12 @@ async def warm_thumb_cache(downloads_dir: Path, path: str, width: int) -> bool:
     Stat-only hit check first (no archive open on a hit), miss path loads
     the source bytes and stores via the same _make_thumb_bytes/_store_thumb
     helpers handle_thumb uses, so warmed files are byte-identical to served
-    ones. Fail-open: ANY exception (missing source, corrupt bytes, missing
+    ones. A hit refreshes the cache file's mtime (see _touch_thumb) so the
+    warmed covers are not the first victims of namespace pruning. Both heavy
+    steps run in the threadpool: the Pillow decode/resize is CPU-bound and
+    would otherwise starve concurrent requests for the whole pass. Stores
+    pass ``prune=False``; the warm pass prunes each namespace once per pass.
+    Fail-open: ANY exception (missing source, corrupt bytes, missing
     extractor, unwritable cache) is swallowed and reported as False —
     warming must never break serving or startup.
     """
@@ -322,15 +364,17 @@ async def warm_thumb_cache(downloads_dir: Path, path: str, width: int) -> bool:
         if is_svg:
             dest = dest.with_suffix(".svg")
         if dest.is_file():
+            _touch_thumb(dest)
             return True
         data, _mtime, _size, key = await load_source_bytes(downloads_dir, path)
         dest = cache_path_for(cache_root(), width, key)
         if is_svg:
             dest = dest.with_suffix(".svg")
         if dest.is_file():
+            _touch_thumb(dest)
             return True
-        thumb = _make_thumb_bytes(data, is_svg, width)
-        await run_in_threadpool(_store_thumb, dest, thumb)
+        thumb = await run_in_threadpool(_make_thumb_bytes, data, is_svg, width)
+        await run_in_threadpool(_store_thumb, dest, thumb, prune=False)
         return True
     except Exception:
         return False

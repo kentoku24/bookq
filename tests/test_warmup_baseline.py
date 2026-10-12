@@ -43,6 +43,7 @@ from tests.test_scanner_perf_todo6 import _make_pdf, _make_png, _make_zip  # noq
 from app import main as app_main  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.routes import warmup_metadata_index  # noqa: E402
+from tests.helpers import drive  # noqa: E402
 
 pytestmark = pytest.mark.slow
 
@@ -136,23 +137,6 @@ def _build_baseline(root: Path) -> None:
             )
 
 
-def _drive(coro):
-    """Run *coro* on a fresh event loop in a helper thread.
-
-    Same constraint as test_warmup_breakdown: Playwright's sync API leaves a
-    running loop in the main thread, so asyncio.run() there fails.
-    """
-    outcome = {}
-
-    def target():
-        outcome["value"] = asyncio.run(coro)
-
-    worker = threading.Thread(target=target)
-    worker.start()
-    worker.join()
-    return outcome["value"]
-
-
 def _state(downloads_path):
     return SimpleNamespace(
         settings=Settings(downloads_dir=str(downloads_path)),
@@ -173,7 +157,7 @@ def test_warmup_baseline_fixed_scale(tmp_path, caplog):
     os.environ["BOOKQ_CACHE_DIR"] = str(cache_a)
     state_a = _state(downloads)
     with caplog.at_level(logging.INFO, logger="app.routes"):
-        folders_a, images_a, _elapsed_a = _drive(warmup_metadata_index(state_a))
+        folders_a, images_a, _elapsed_a = drive(warmup_metadata_index(state_a))
     rebuild_records = [
         r for r in caplog.records if r.msg.startswith("metadata index rebuilt")
     ]
@@ -218,7 +202,7 @@ def test_warmup_baseline_fixed_scale(tmp_path, caplog):
 
     with caplog.at_level(logging.INFO, logger="app.main"):
         with caplog.at_level(logging.INFO, logger="app.routes"):
-            _drive(boot())
+            drive(boot())
     done_records = [
         r for r in caplog.records if r.msg.startswith("内部ウォームアップ完了")
     ]

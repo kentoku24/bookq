@@ -31,25 +31,9 @@ from app.config import Settings  # noqa: E402
 from app.routes import warmup_metadata_index  # noqa: E402
 from app.scanner import scan_tree  # noqa: E402
 from tests.test_scanner_perf_todo6 import _make_pdf, _make_png, _make_zip  # noqa: E402
+from tests.helpers import drive  # noqa: E402
 
 _PHASE_RE = re.compile(r"(walk_ms|archive_ms|pdf_ms)=(\S+)")
-
-
-def _drive(coro):
-    """Run *coro* on a fresh event loop in a helper thread.
-
-    Same constraint as test_warmup_breakdown: Playwright's sync API leaves
-    a running loop in the main thread, so asyncio.run() there fails.
-    """
-    outcome = {}
-
-    def target():
-        outcome["value"] = asyncio.run(coro)
-
-    worker = threading.Thread(target=target)
-    worker.start()
-    worker.join()
-    return outcome["value"]
 
 
 def _state(downloads_path):
@@ -84,7 +68,7 @@ def test_rebuild_log_contains_phase_timings(tmp_path, caplog):
         await warmup_metadata_index(state)
 
     with caplog.at_level(logging.INFO, logger="app.routes"):
-        _drive(main())
+        drive(main())
 
     records = [r for r in caplog.records if r.msg.startswith("metadata index rebuilt")]
     assert len(records) == 1, [r.getMessage() for r in caplog.records]
