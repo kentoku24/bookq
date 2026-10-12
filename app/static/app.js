@@ -2387,8 +2387,15 @@
 
   // ── touch/click zones ──
   // suppressClick guards tap zones from firing immediately after a real drag.
-  let suppressClick = false;
-  const suppressClickFor = ms => { suppressClick = true; setTimeout(() => { suppressClick = false; }, ms); };
+  // WHY a deadline, not boolean+setTimeout: WebKit synthesizes the tap's click
+  // up to ~400ms after touchend when the gesture looked drag-like, and a timer
+  // that flips a boolean can expire before that queued click is dispatched
+  // (the timer and the click race each other). Comparing the clock at dispatch
+  // time has no race — the deadline is acted on exactly once, whenever the
+  // click finally lands.
+  let suppressClickUntil = 0;
+  const suppressClickFor = ms => { suppressClickUntil = performance.now() + ms; };
+  const suppressClickNow = () => performance.now() < suppressClickUntil;
   // viewer/zoom.js drives the page turn at the pan clamp edge. It must go
   // through THESE functions, not window.goNext/goPrev — those are spread.js's
   // dormant twins and turn nothing.
@@ -2396,7 +2403,7 @@
     window.suppressClickFor = suppressClickFor;
     window.viewerGoNext = () => goNext({crossChapter:true});
     window.viewerGoPrev = () => goPrev({crossChapter:true});
-    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__suppressClickActive = () => suppressClick;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__suppressClickActive = () => suppressClickNow();
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__tapForward = () => tapForward;
   } catch(e) { console.warn(e); }
   // One resolver for "which zone is under x", shared by the touchend tap path
@@ -2439,18 +2446,18 @@
     zoneNext.setAttribute("aria-label", left ? "前のページ" : "次のページ");
     if (!opts || opts.notify !== false) showToast(left ? "タップ送り: 左" : "タップ送り: 右");
   }
-  tapmodeLeft.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); setTapForward('left'); });
-  tapmodeRight.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); setTapForward('right'); });
+  tapmodeLeft.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); setTapForward('left'); });
+  tapmodeRight.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); setTapForward('right'); });
   setTapForward('left', {notify:false});
-  zonePrev.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); });
+  zonePrev.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); });
   zoneToggle.addEventListener("click", e => {
     e.stopPropagation();
     // toggleToolbarZone owns the zoomed branch (and the reason it must ignore
     // suppressClick); this handler only adds the un-zoomed suppress guard.
-    if (suppressClick && !window.Zoom.isActive()) return;
+    if (suppressClickNow() && !window.Zoom.isActive()) return;
     toggleToolbarZone();
   });
-  zoneNext.addEventListener("click", e => { if (suppressClick) return; e.stopPropagation(); if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); });
+  zoneNext.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); });
 
   // ── keyboard ──
   document.addEventListener("keydown", e => {
@@ -2847,8 +2854,25 @@
       // A tap. Act on it NOW instead of waiting for the synthesized click:
       // WebKit delivers `click` ~40ms after touchend (measured in the iOS
       // Simulator), and that gap is the whole "did it register?" feeling on a
-      // burst. The click that follows is swallowed by suppressClick.
+      // burst. preventDefault kills the synthesized click outright (measured
+      // in WebKit); suppressClick is only a backstop after this.
+    moveHistory = [];
+
+    // A finger that crossed the 8px decision line but never reached swipe
+    // territory WAS a tap — a few px of roll while lifting. Falling through to
+    // the bounce branch turned it into: no turn now, no preventDefault, then
+    // WebKit's click turning the page 40–400ms later (measured iOS Simulator:
+    // a 12px drift read as "dead" or "late"), the *press feels late* symptom.
+    // 24px headroom stays clear of the >20px velocity flick, which turns in
+    // the committed swipe animation below.
+    if (Math.abs(dxFinal) < 24) {
       moveHistory = [];
+      e.preventDefault();
+      zoneActionAt(dragStartX);
+      suppressClickFor(400);
+      return;
+    }
+      e.preventDefault();
       zoneActionAt(released.clientX);
       suppressClickFor(400);
       return;
@@ -2907,8 +2931,12 @@
       };
       track.addEventListener("transitionend", finalize);
       setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
+      e.preventDefault();
       suppressClickFor(400);
     } else {
+      // Cancelled drag: WebKit can still synthesize a click for this gesture
+      // and turn the page after the reader cancelled — preventDefault ends that.
+      e.preventDefault();
       snapTo(newIdx);   // same page: bounce-back animation
     }
   });
