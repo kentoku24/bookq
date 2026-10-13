@@ -29,20 +29,60 @@ function perWorkCacheName(req) {
   }
 }
 
+// Page/cover bytes are cache-first, but a hit is revalidated with a
+// conditional GET before it is trusted: a work's image URLs never change, so
+// without this a re-downloaded (or repaired) file on disk could never reach a
+// client that had already viewed it — the phone kept rendering the old bytes
+// forever. 304 keeps the cached copy (no body transfer), 200 swaps the entry
+// and the fresh bytes go straight to the page. Offline, a slow/unreachable
+// origin, or an entry without validators falls back to the cached copy, so
+// offline reading is never blocked by revalidation.
+// The HTTP cache is bypassed ({cache:'no-store'}): Cache storage + ETag is the
+// single freshness authority, otherwise a stale HTTP copy could satisfy a
+// miss and re-seed the old bytes.
+const REVALIDATE_TIMEOUT_MS = 1200;
+
+function revalidateRequest(req, hit) {
+  const headers = new Headers();
+  const etag = hit.headers.get("ETag");
+  if (etag) headers.set("If-None-Match", etag);
+  const lastModified = hit.headers.get("Last-Modified");
+  if (lastModified) headers.set("If-Modified-Since", lastModified);
+  if (!etag && !lastModified) return null; // nothing to validate against
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REVALIDATE_TIMEOUT_MS);
+  const init = {headers, cache: "no-store", signal: controller.signal};
+  return fetch(new Request(req, init)).finally(() => clearTimeout(timer));
+}
+
 async function cacheFirst(req) {
   const cacheName = perWorkCacheName(req) || "bookq-images-fallback";
+  const c = await caches.open(cacheName);
   const hit = await caches.match(req);
-  if (hit) return hit;
-  try {
-    const res = await fetch(req);
-    if (!res.ok || res.status===206) return res;
-    const clone = res.clone();
-    const c = await caches.open(cacheName);
-    await c.put(req, clone).catch(() => {});
-    return res;
-  } catch {
-    return Response.error();
+  if (!hit) {
+    try {
+      const res = await fetch(req, {cache: "no-store"});
+      if (!res.ok || res.status===206) return res;
+      await c.put(req, res.clone()).catch(() => {});
+      return res;
+    } catch {
+      return Response.error();
+    }
   }
+  if (self.navigator && self.navigator.onLine === false) return hit;
+  let fresh = null;
+  try {
+    fresh = await revalidateRequest(req, hit);
+  } catch {
+    fresh = null; // aborted (timeout) or unreachable — the cached copy wins
+  }
+  if (!fresh) return hit;
+  if (fresh.status === 304) return hit;
+  if (fresh.ok && fresh.status !== 206) {
+    await c.put(req, fresh.clone()).catch(() => {});
+    return fresh;
+  }
+  return hit;
 }
 
 async function networkFirst(req, cacheName) {
