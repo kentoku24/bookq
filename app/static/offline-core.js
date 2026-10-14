@@ -265,7 +265,20 @@
         return (await c.keys()).length;
       } catch(e) { console.warn(e); return 0; }
     }
-    return { DB_NAME, STORE, DB_VERSION, cacheNameFor, open, _open: openRawDB, get, put, delete: del, getAll, getOldest, storageEstimate, cacheKeysCount };
+    // Wipe both stores: work records AND the KV snapshot (the cached tree).
+    // Used by offline-core's wipeClientData; a partial wipe would leave the
+    // tree snapshot behind and reload could still paint cached browse state.
+    function clear() {
+      return open().then((db) => new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE, KV], "readwrite");
+        tx.objectStore(STORE).clear();
+        tx.objectStore(KV).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      }));
+    }
+    return { DB_NAME, STORE, DB_VERSION, cacheNameFor, open, _open: openRawDB, get, put, delete: del, getAll, getOldest, storageEstimate, cacheKeysCount, clear };
   })();
 
   const OfflineTree = (function () {
@@ -324,10 +337,70 @@
     return { DB_NAME, KV, TREE_KEY, DB_VERSION, openKV, _openKV: openKV, putTree, getTree, delTree };
   })();
 
+  // ── Client-data wipe ──────────────────────────────────────────────────────
+  // Everything kept for offline reading lives in one of three places: per-work
+  // /image+/thumb caches (created by *viewing* as well as by downloadWork), the
+  // fallback + api caches, and IndexedDB (work records + the cached tree).
+  // A wipe has to cover all three, including work caches with no IndexedDB
+  // record: those orphans are invisible to the "saved works" list but still pin
+  // stale bytes after the library changes on disk (the 2026-10-13 report).
+  // The shell cache is deliberately kept — it holds the app code and the
+  // offline page, is rebuilt by the SW install, and the harness itself has to
+  // stay usable offline.
+  const SHELL_CACHE_PREFIX = "bookq-shell-";
+  const DATA_CACHE_PREFIXES = ["bookq-work-", "bookq-api-", "bookq-images-"];
+  const WIPE_STORAGE_KEYS = ["bookq_progress", "bookq_persist_toast"];
+  const WIPE_SESSION_KEYS = ["bookq_auto_sync_done", "bookq_return_hash"];
+  // Kept on purpose (QA/registration flags, not reading data):
+  // bookq_harness / bookq_enable_sw / bookq_touch / bookq_perf.
+
+  function isDataCacheName(name) {
+    return DATA_CACHE_PREFIXES.some((p) => String(name).startsWith(p));
+  }
+
+  // What a wipe would remove — drives the harness preview and button state, so
+  // a client that only *viewed* a work (no saved record) can still wipe.
+  async function wipeTargets() {
+    const report = {caches: [], entries: 0, works: 0, tree: false, keys: []};
+    try {
+      for (const name of await caches.keys()) {
+        if (!isDataCacheName(name)) continue;
+        let count = 0;
+        try { count = (await (await caches.open(name)).keys()).length; } catch (e) { console.warn(e); }
+        report.caches.push({name, entries: count});
+        report.entries += count;
+      }
+    } catch (e) { console.warn(e); }
+    try { report.works = (await OfflineStore.getAll()).length; } catch (e) { console.warn(e); }
+    try { report.tree = !!(await OfflineTree.getTree()); } catch (e) { console.warn(e); }
+    for (const k of WIPE_STORAGE_KEYS) {
+      try { if (localStorage.getItem(k) !== null) report.keys.push(k); } catch (e) {}
+    }
+    return report;
+  }
+
+  async function wipeClientData() {
+    const report = await wipeTargets();
+    const deleted = {caches: [], entries: 0, works: report.works, tree: report.tree, keys: []};
+    for (const c of report.caches) {
+      try {
+        if (await caches.delete(c.name)) { deleted.caches.push(c.name); deleted.entries += c.entries; }
+      } catch (e) { console.warn(e); }
+    }
+    try { await OfflineStore.clear(); } catch (e) { console.warn(e); }  // records + tree snapshot
+    for (const k of WIPE_STORAGE_KEYS) {
+      try { if (localStorage.getItem(k) !== null) { localStorage.removeItem(k); deleted.keys.push(k); } } catch (e) {}
+    }
+    for (const k of WIPE_SESSION_KEYS) {
+      try { if (sessionStorage.getItem(k) !== null) { sessionStorage.removeItem(k); deleted.keys.push(k); } } catch (e) {}
+    }
+    return deleted;
+  }
+
   // globalThis, not window: sw.js importScripts()es this file and a Service
   // Worker has no window (globalThis === self there, === window in a page).
   globalThis.OfflineStore = OfflineStore;
   globalThis.OfflineTree = OfflineTree;
   globalThis.OfflineThumb = OfflineThumb;
-  globalThis.OfflineCore = { encodePath, imageUrl, thumbUrl, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls };
+  globalThis.OfflineCore = { encodePath, imageUrl, thumbUrl, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS };
 })();
