@@ -414,6 +414,10 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **根拠**: `deleteWork()` (app.js) （`caches.delete` + IndexedDB メタ削除）
 - **説明**: 作品キャッシュとメタをまとめて解放する。
 
+### 全データ削除 ／ 全消去 (Wipe All)
+- **根拠**: `OfflineCore.wipeTargets()` / `OfflineCore.wipeClientData()` (offline-core.js) と ⑥ 全消去の `doWipeAll()` (offline-harness.html) （`bookq-work-*` / `bookq-api-*` / `bookq-images-*` を削除、`bookq-shell-*` は保持。IndexedDB は作品レコード+ツリー スナップショットを `OfflineStore.clear()` で消し、`bookq_progress` 等の読書データも削除）
+- **説明**: 端末のデータをまとめて消す出口。**IndexedDB レコードを持たない「閲覧だけで作られた `bookq-work-*`」も対象**に含む（保存作品が0件でもボタンが有効）。QA フラグ（`bookq_harness` / `bookq_enable_sw` / `bookq_touch` / `bookq_perf`）とアプリ本体の SHELL は残す。
+
 ### オフラインバッジと操作ボタン (Offline Badge & Controls)
 - **根拠**: `offlineControlsHtml()` / `#tile-grid` への委譲リスナ （✓オフライン / ⬇︎ / DL / 削除）
 - **説明**: 各作品タイルに保存状態バッジと DL・削除ボタンを表示する。
