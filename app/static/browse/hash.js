@@ -308,16 +308,29 @@
   }
 
   function resetToTop() {
+    // ルート（作品一覧）はアンカーを使わない: 常に上端。ビューア復帰の文脈も切る。
+    try { if (window.BrowseScroll) window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
     _teardownViewer();
     var empty = document.getElementById("empty");
     if (empty) { empty.innerHTML = "<p>\uD83D\uDCC2 サイドバーからフォルダを選んでください</p>"; empty.style.display = "flex"; }
     try { window.currentBrowsePath = null; } catch(e) { console.warn(e); }
     if (typeof window.updateBrowseHeader === 'function') try { window.updateBrowseHeader(); } catch(e) { console.warn(e); }
-    if (typeof window.renderView === 'function') try { window.renderView(); } catch(e) { console.warn(e); }
+    if (typeof window.renderView === 'function') try { window.renderView({ scrollAnchor: null }); } catch(e) { console.warn(e); }
     clearViewerState();
   }
 
   function restoreBrowse(path) {
+    // ビューア復帰の章は teardown 前の live 状態から確定する（URL の p= は 200ms
+    // デバウンスで古いので使わない）。☰ 復帰はこの関数が 2 回走る
+    // （returnToBrowse と、pushBrowseUrl の history.go(-1) 後の hashchange）ため、
+    // BrowseScroll 側にマーカーとして残し、2 回目も同じ位置を返せるようにする。
+    var BS = window.BrowseScroll;
+    if (BS && path) {
+      try {
+        var vst = currentViewerState();
+        if (vst && vst.folder) BS.noteViewerReturn(path, vst.folder);
+      } catch(e) { console.warn(e); }
+    }
     // Bump token first so in-flight loadImages cannot overwrite
     try { ++window.urlRestoreGen; window.urlRestoring = false; } catch(e) { console.warn(e); }
     _teardownViewer();
@@ -329,20 +342,40 @@
     try { window.searchMode = false; } catch(e) { console.warn(e); }
     var si = document.getElementById("search-input");
     if (si) si.value = "";
-    if (typeof window.renderView === 'function') try { window.renderView(); } catch(e) { console.warn(e); }
-    // Restore scroll
+    // 位置は BrowseScroll.decide が一元管理する: 保存位置（従来の rAF 復元）か
+    // アンカー（ビューア復帰 / 最大既読 / 上端）のどちらか一方だけを書く。
+    var savedTop;
     try {
       var getScrollKey = window.getScrollKey;
       var scrollPositions = window.scrollPositions;
-      var sidebarScroll = document.getElementById("sidebar-scroll");
-      var curPath = window.currentBrowsePath;
-      if (getScrollKey && scrollPositions && sidebarScroll) {
-        var key = getScrollKey(curPath);
-        if (scrollPositions[key] !== undefined) {
-          requestAnimationFrame(function () { sidebarScroll.scrollTop = scrollPositions[key]; });
-        }
+      if (getScrollKey && scrollPositions) {
+        var key = getScrollKey(window.currentBrowsePath);
+        if (scrollPositions[key] !== undefined) savedTop = scrollPositions[key];
       }
     } catch(e) { console.warn(e); }
+    var decision = null;
+    if (BS) {
+      try {
+        decision = BS.decide({
+          level: window.currentBrowsePath || null,
+          cause: 'restore',
+          hasSaved: savedTop !== undefined,
+        });
+      } catch(e) { console.warn(e); }
+    }
+    // 書き込みは常に 1 系統: アンカー（viewer/progress/top）か保存位置（saved）のどちらか。
+    var useSaved = decision ? decision.via === 'saved' : savedTop !== undefined;
+    if (typeof window.renderView === 'function') {
+      try {
+        window.renderView((!useSaved && decision) ? { scrollAnchor: decision.anchor } : undefined);
+      } catch(e) { console.warn(e); }
+    }
+    if (useSaved && savedTop !== undefined) {
+      requestAnimationFrame(function () {
+        var ss = document.getElementById("sidebar-scroll");
+        if (ss) ss.scrollTop = savedTop;
+      });
+    }
     // Clear the hash back to canonical root when: (a) a dead/nonexistent
     // folder was requested — CLAUDE.md "a dead or empty folder clears the
     // hash" is unconditional, view mode notwithstanding (a bogus

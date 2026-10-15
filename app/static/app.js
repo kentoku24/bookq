@@ -1123,7 +1123,11 @@
     scrollPositions[key] = sidebarScroll.scrollTop;
     currentBrowsePath = path;
     updateBrowseHeader();
-    renderView();
+    // 開いた直後の位置: 直下に既読エピソードがあればその最大番号、無ければ上端。
+    // window.BrowseScroll は index.html の defer 順で app.js より先に読み込まれる
+    // ハード依存（window.Overview と同じ扱い。フォールバック実装は書かない）。
+    const decision = window.BrowseScroll.decide({ level: path, cause: 'open', hasSaved: false });
+    renderView({ scrollAnchor: decision.anchor });
     writeBrowseState();
   }
   try { window.navigateToFolder = navigateToFolder; } catch(e) { console.warn(e); }
@@ -1538,7 +1542,10 @@
   });
 
   // ── unified render ──
-  function renderView(){
+  // opts.scrollAnchor: undefined = 位置を決めない（再描画・モード切替・検索）、
+  // null = 上端、path = そのタイルを上端に。指定できるのは
+  // navigateToFolder / restoreBrowse / resetToTop の 3 経路だけ（設計 §3.1）。
+  function renderView(opts){
     tileGrid.classList.remove("list-mode", "card-mode");
     sidebar.classList.remove("tile-full");
     viewer.classList.remove("tile-full");
@@ -1546,7 +1553,11 @@
     viewer.classList.toggle("tile-full", viewMode !== "list");
     tileGrid.classList.toggle("list-mode", viewMode === "list");
     tileGrid.classList.toggle("card-mode", viewMode === "card");
-    window.BrowseRender.renderBrowse({mode: viewMode, results: searchMode ? searchResults : null});
+    window.BrowseRender.renderBrowse({
+      mode: viewMode,
+      results: searchMode ? searchResults : null,
+      scrollAnchor: (opts && 'scrollAnchor' in opts) ? opts.scrollAnchor : undefined,
+    });
     updateResumeButton();
   }
   window.renderView = renderView;
@@ -1668,6 +1679,8 @@
       if (_empty){ _empty.innerHTML = "<p>読込中…</p>"; _empty.style.display = "flex"; }
       return;
     }
+    // 別の本を開いた＝ビューア復帰の文脈は切れた（一覧のアンカーには使わない）
+    try { window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
     currentFolder = fullPath;
     const myGen = ++urlRestoreGen;      // every loadImages invocation claims the newest restore token
     // A load starting while the overview is open (deep link, sidebar pick)

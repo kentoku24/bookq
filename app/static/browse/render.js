@@ -483,6 +483,11 @@
     tileGrid.innerHTML=html||'<div style="color:#555;text-align:center;padding:20px;font-size:13px">'+_emptyBrowseMessage()+'</div>';
     _bindCards();
   }
+  // scrollAnchor が渡された描画だけが位置を決める（undefined = 触らない）。
+  // innerHTML 置換と同一タスクで書くので、誤った位置が 1 フレーム見えない。
+  function _applyScrollAnchor(anchorPath){
+    try { if (window.BrowseScroll) window.BrowseScroll.apply(anchorPath); } catch(e){ console.warn(e); }
+  }
   function renderBrowse(opts){
     var mode=opts&&opts.mode?opts.mode:(window.viewMode||'tile');
     var results=opts&&'results' in opts?opts.results:(window.searchMode?window.searchResults:null);
@@ -490,6 +495,8 @@
     if(mode==='tile'){ if(isSearch) { if(window.renderSearchTiles) window.renderSearchTiles(); else renderTiles(); } else renderTiles(); }
     else if(mode==='card'){ if(isSearch) { if(window.renderSearchCards) window.renderSearchCards(); else renderCards(); } else renderCards(); }
     else { if(isSearch) { if(window.renderSearchList) window.renderSearchList(); else renderList(); } else renderList(); }
+    // 検索結果の描画には適用しない。undefined は「位置を決めない」の合図。
+    if(!isSearch && opts && opts.scrollAnchor !== undefined) _applyScrollAnchor(opts.scrollAnchor);
   }
   window.multiThumbSpec=multiThumbSpec;
   window.FillPoll={noteFullLoad:noteFullLoad,stop:fillPollStop,state:fillPollState};

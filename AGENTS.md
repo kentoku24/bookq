@@ -70,8 +70,8 @@ issue タイトルからスラッグを生成する:
 
 ### URL ハッシュ状態 / Viewer
 
-- `app/static/browse/hash.js` `applyUrlState` (338L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`app/static/app.js` (3279L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
-- `app/templates/index.html` — 139行 shell (`{% if not user %}` でログイン/ビューア分岐)。JS は外部分割: `app/static/app.js` 3279L composition root + 7 modules (`browse/hash.js` 338L, `browse/render.js` 173L, `viewer/spread.js` 547L, `search/facets.js` 343L, `offline/storeAdapter.js` 601L, `thumbs/prefetch.js` 86L, `thumbs/resolveCover.js` 42L; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (`app/routes.py:26` の global `_jinja_env = Environment(auto_reload=True, cache_size=0)` が `get_template` をキャッシュしつつ即時反映)。
+- `app/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`app/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
+- `app/templates/index.html` — 161行 shell (`{% if not user %}` でログイン/ビューア分岐)。JS は外部分割: `app/static/app.js` 3252L composition root + 12 modules (`offline-core.js` 333L, `thumbs/resolveCover.js` 58L, `browse/hash.js` 490L, `browse/render.js` 510L, `browse/scroll.js` 157L, `search/facets.js` 356L, `offline/storeAdapter.js` 646L, `thumbs/prefetch.js` 140L, `viewer/spread.js` 442L, `viewer/gesture.js` 147L, `viewer/zoom.js` 301L, `viewer/overview.js` 639L; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (`app/routes.py:26` の global `_jinja_env = Environment(auto_reload=True, cache_size=0)` が `get_template` をキャッシュしつつ即時反映)。
 
 ### テスト
 
