@@ -9,7 +9,7 @@
 390x844 では fixture のほとんどの階層がスクロール不能（実測: group は
 scrollHeight == clientHeight == 728）で空振りするため、このファイルは専用
 ビューポート 390x400（tile モードで 3 件以上の階層が確実にスクロールし、最終行の
-タイルも上端まで運べる高さ。実測: group の 4 件で max 368 >= other_work の offset 357）
+タイルも上端まで運べる高さ。実測: group の 4 件で max 378 >= other_work の offset 357）
 で測る。位置を測るテストは _assert_scrollable() で scrollHeight > clientHeight
 （＝そもそもスクロールできる階層か）を確認し、空振りを構造的に排除する。
 decide() の決定表と保存位置の pin は DOM 位置を測らないので対象外。
@@ -243,6 +243,58 @@ def test_viewer_return_beats_saved_scroll(small):
     assert ow_top is not None and ow_top > 0, "前提: other_work は 2 行目にある"
     top = _scroll(small)["top"]
     assert abs(top - ow_top) <= 2, f"保存位置({saved})ではなく other_work({ow_top}) (top={top})"
+
+
+def test_back_without_viewer_restores_saved_scroll(small):
+    """保存位置: ビューアを挟まない Back は restoreBrowse の via='saved' を通る。"""
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 200; }")
+    _open(small, "group")
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 200; }")
+    _open(small, "group/deep_series")            # group の保存位置が入る
+    saved = small.evaluate("() => window.scrollPositions[window.getScrollKey('group')]")
+    assert saved is not None and saved > 0, f"前提: group に保存位置がある (saved={saved})"
+    small.go_back()                              # ビューア無しの Back → via='saved'
+    small.wait_for_function("() => window.currentBrowsePath === 'group'", timeout=5000)
+    small.wait_for_timeout(500)
+    top = _scroll(small)["top"]
+    assert abs(top - saved) <= 2, f"Back で保存位置({saved})が復元される (top={top})"
+
+
+def test_reopen_same_level_drops_viewer_marker(small):
+    """タイルで開き直したら（cause='open'）ビューア復帰の印は効かない。"""
+    small.goto(small.url + "#/browse/group/deep_series")
+    small.wait_for_selector(".tile")
+    small.wait_for_function("() => window.currentBrowsePath === 'group/deep_series'", timeout=5000)
+    small.locator("#browse-header").click()      # ↩ → group（pushState のみ = decide 不発）
+    small.wait_for_timeout(300)
+    _open(small, "group/other_work")             # leaf → viewer
+    small.locator("#menu-btn").click()           # ☰ → 印(group, other_work)
+    _wait_browse(small, "group")
+    assert small.evaluate("() => window.BrowseScroll.peekViewerReturn()") is not None, "前提: 印が残る"
+    small.locator("#browse-header").click()      # ↩ → root（pushState のみ）
+    small.wait_for_timeout(300)
+    assert small.evaluate("() => window.BrowseScroll.peekViewerReturn()") is not None, "前提: 印が残る"
+    _open(small, "group")                        # タイルで開き直す → cause:'open'
+    assert _scroll(small)["top"] == 0, "開き直しは上端（印は破棄/置換される）"
+
+
+def test_tile_tap_is_not_overridden_by_stale_saved_scroll(small):
+    """タイルで開いた直後の history.go(-1) 経由の restoreBrowse が、古い保存位置で上書きしない。"""
+    small.goto(small.url + "#/browse/group")
+    small.wait_for_selector(".tile")
+    small.wait_for_function("() => window.currentBrowsePath === 'group'", timeout=5000)
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 200; }")
+    _open(small, "group/deep_series")            # group の保存位置が入る（200 前後）
+    saved = small.evaluate("() => window.scrollPositions[window.getScrollKey('group')]")
+    assert saved is not None and saved > 0, f"前提: group に保存位置がある (saved={saved})"
+    small.locator("#browse-header").click()      # ↩ → group（push 経路）
+    small.wait_for_timeout(300)
+    small.locator("#browse-header").click()      # ↩ → root（push 経路）
+    small.wait_for_timeout(300)
+    _open(small, "group")                        # タイルtap = 新規オープン
+    small.wait_for_timeout(500)                  # 直後の history.go(-1) → hashchange を待つ
+    top = _scroll(small)["top"]
+    assert top == 0, f"新規オープンは上端のまま（保存位置 {saved} に戻されない） (top={top})"
 
 
 def test_root_fresh_open_is_always_top(small):
