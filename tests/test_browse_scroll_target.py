@@ -326,6 +326,9 @@ def test_decide_exposes_decision_table(small):
     )
     assert d({"level": SERIES, "cause": "open", "hasSaved": False}) == {"via": "progress", "anchor": EP3}
     # 保存位置 > 最大既読: 既読（ep-3）があっても、その階層に保存位置があれば保存位置
+    # 直前の cause:'open' が level 一致の intent を残しているので、まず期限切れにする
+    # （intent は level が変わるまで有効。同一 level では保存位置より優先される）
+    d({"level": "group", "cause": "restore", "hasSaved": False})
     assert d({"level": SERIES, "cause": "restore", "hasSaved": True}) == {"via": "saved", "anchor": None}
     # マーカー: level 一致なら viewer（保存位置より優先）
     small.evaluate("(p) => window.BrowseScroll.noteViewerReturn(p.level, p.chapter)",
@@ -339,6 +342,10 @@ def test_decide_exposes_decision_table(small):
                    {"level": SERIES, "chapter": EP2})
     d({"level": SERIES, "cause": "open", "hasSaved": False})
     assert small.evaluate("() => window.BrowseScroll.peekViewerReturn()") is None
+
+    # intent（cause:'open' 由来）は同一 level では保存位置より優先される
+    d({"level": SERIES, "cause": "open", "hasSaved": False})
+    assert d({"level": SERIES, "cause": "restore", "hasSaved": True}) == {"via": "progress", "anchor": EP3}
 
     # 直下の子のみ: group 直下に既読は無い（既読は孫の deep_series/vol1 だけ）→ 上端
     small.evaluate(
