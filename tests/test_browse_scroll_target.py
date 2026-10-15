@@ -137,6 +137,8 @@ def test_viewer_return_anchors_displayed_episode_beats_progress(small):
     assert _chapter(small) == EP2, "前提: ep-2 を表示している"
     small.keyboard.press("ArrowLeft")   # 1 ページ送り（章は ep-2 のまま）
     small.wait_for_timeout(300)
+    # クリック時の自動スクロールを持ち越さない（これが無いと現状コードでも ±2 で通ってしまう）
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 0; }")
     small.locator("#menu-btn").click()  # ☰ で一覧へ復帰
     _wait_browse(small, SERIES)
     ep2_top, ep3_top = _tile_top(small, EP2), _tile_top(small, EP3)
@@ -157,6 +159,8 @@ def test_viewer_return_is_idempotent_across_double_restore(small):
         "() => { window.__rv = 0; const orig = window.renderView;"
         " window.renderView = function(){ window.__rv++; return orig.apply(this, arguments); }; }"
     )
+    # クリック時の自動スクロールを持ち越さない（これが無いと現状コードでも ±2 で通ってしまう）
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 0; }")
     small.locator("#menu-btn").click()
     _wait_browse(small, SERIES)
     calls = small.evaluate("() => window.__rv")
@@ -173,6 +177,8 @@ def test_browser_back_from_viewer_anchors_displayed_episode(small):
     assert _chapter(small) == EP3, "前提: ep-3 を表示している"
     small.keyboard.press("ArrowLeft")
     small.wait_for_timeout(300)
+    # クリック時の自動スクロールを持ち越さない（これが無いと現状コードでも ±2 で通ってしまう）
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 0; }")
     small.go_back()
     _wait_browse(small, SERIES)
     ep3_top = _tile_top(small, EP3)
@@ -182,13 +188,15 @@ def test_browser_back_from_viewer_anchors_displayed_episode(small):
 
 def test_breadcrumb_back_keeps_saved_scroll(small):
     """回帰 pin: ↩ で親に戻るときの保存位置復元は従来どおり（アンカーは働かない）。"""
-    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 500; }")
     _open(small, "group")
-    _open(small, "group/deep_series")
-    small.locator("#browse-header").click()   # ↩
+    _open(small, "group/deep_series")            # ← ここで group の保存位置が入る
+    saved = small.evaluate("() => window.scrollPositions[window.getScrollKey('group')]")
+    assert saved is not None and saved > 0, f"前提: group に保存位置がある (saved={saved})"
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 0; }")  # 復元されなければ 0 のまま
+    small.locator("#browse-header").click()      # ↩
     small.wait_for_timeout(600)
     top = _scroll(small)["top"]
-    assert abs(top - 500) <= 2, f"親の保存位置 (500) が復元される (top={top})"
+    assert abs(top - saved) <= 2, f"親の保存位置({saved}) が復元される (top={top})"
 
 
 def test_viewer_return_beats_saved_scroll(small):
