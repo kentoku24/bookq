@@ -1538,7 +1538,10 @@
   });
 
   // ── unified render ──
-  function renderView(){
+  // opts.scrollAnchor: undefined = 位置を決めない（再描画・モード切替・検索）、
+  // null = 上端、path = そのタイルを上端に。指定できるのは
+  // navigateToFolder / restoreBrowse / resetToTop の 3 経路だけ（設計 §3.1）。
+  function renderView(opts){
     tileGrid.classList.remove("list-mode", "card-mode");
     sidebar.classList.remove("tile-full");
     viewer.classList.remove("tile-full");
@@ -1546,7 +1549,11 @@
     viewer.classList.toggle("tile-full", viewMode !== "list");
     tileGrid.classList.toggle("list-mode", viewMode === "list");
     tileGrid.classList.toggle("card-mode", viewMode === "card");
-    window.BrowseRender.renderBrowse({mode: viewMode, results: searchMode ? searchResults : null});
+    window.BrowseRender.renderBrowse({
+      mode: viewMode,
+      results: searchMode ? searchResults : null,
+      scrollAnchor: (opts && 'scrollAnchor' in opts) ? opts.scrollAnchor : undefined,
+    });
     updateResumeButton();
   }
   window.renderView = renderView;
