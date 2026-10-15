@@ -36,7 +36,7 @@ def test_shell_precache_v2_count():
     m = re.search(r'SHELL_ASSETS\s*=\s*\[(.*?)\]', text, re.S)
     assert m, "SHELL_ASSETS not found"
     entries = re.findall(r'"[^"]+"', m.group(1))
-    assert len(entries) == 19, f"expected 19 SHELL_ASSETS, got {len(entries)}: {entries}"
+    assert len(entries) == 20, f"expected 20 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert "new Request" in text and "reload" in text, "install must use new Request with cache:reload"
 
 def test_static_swr_branch_order_and_guard():
