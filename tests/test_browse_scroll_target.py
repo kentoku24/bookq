@@ -14,13 +14,14 @@ scrollHeight == clientHeight == 728）で空振りするため、このファイ
 （＝そもそもスクロールできる階層か）を確認し、空振りを構造的に排除する。
 decide() の決定表と保存位置の pin は DOM 位置を測らないので対象外。
 
-WebKit の後追いスクロール調整: apply が正しく scrollTop を書いた後（実測: `zoom_series` で
-370）、WebKit が約 100ms 後に scrollTop を数 px 動かすことがある（366 前後。JS は走っておらず、
-タイルの相対オフセットは 370 のまま。既読バッジでタイル高さが変わる階層で起きる）。
-この機能の不変条件は「対象タイルが一覧の上端に来る（数 px の後追いを許容）」なので、
-位置の assert は TOL = 10 で比較する。候補位置は最低でも 50px 離れている
-（0 vs 52 vs 370 vs 437、53 vs 357、0 vs 1584）ため、±10 でも誤ったルール
-（上端 / 最大既読 / 保存位置）は検出できる。
+WebKit での失敗観測（PR レビュー時）: `test_fresh_open_anchors_last_read_episode` が 13 回中
+5 回失敗し、`top=365〜367`（expected 370、当時の許容は ±2）だった。機序は未確定で、`apply` 直後に
+ブラウザが数 px 後追いで調整している可能性を仮説として置いている（再レビュー環境では再現せず、
+20ms 刻み 900ms のサンプルでも 370 のままだった）。
+不変条件は「対象タイルが一覧の上端に来る（数 px の後追いを許容）」とし、位置の assert は
+TOL = 10 で比較する。候補位置の最小間隔は実測 44px（list モードの `apply`: 44 vs 0。次いで
+47〜49px = 保存位置 vs 0、52px = ep-1/ep-2、357/370px）なので、±10 でも誤ったルール
+（上端 0 / 最大既読 / 保存位置）は判別できる。
 
 fixture（tests/conftest.py）:
   zoom_series = zoom_series/series/ep-1..3（scanner の flatten で zoom_series の直下）
@@ -35,8 +36,9 @@ import pytest
 # 到達可能性の上限は実測で約 423（±2 許容時）。±TOL(=10) まで広げると 430（max 348）でも
 # 9px 差で通ってしまうため、clamp された値を測らないよう 400 を維持する。
 W, H = 390, 400
-# 位置 assert の許容値。WebKit の後追い調整（apply 後 約100ms で数 px）を吸収する。
-# 候補位置は 50px 以上離れているので、誤ったルールは ±10 でも検出できる。
+# 位置 assert の許容値。WebKit の失敗観測（top=365〜367 vs 370、機序は未確定）を吸収する。
+# 候補位置の最小間隔は実測 44px（list モードの apply: 44 vs 0）なので、誤ったルールは
+# ±10 でも検出できる。
 TOL = 10
 SERIES = "zoom_series"
 EP2 = "zoom_series/series/ep-2"
@@ -228,7 +230,8 @@ def test_breadcrumb_back_keeps_saved_scroll(small):
     _open(small, "group")
     _open(small, "group/deep_series")            # ← ここで group の保存位置が入る
     saved = small.evaluate("() => window.scrollPositions[window.getScrollKey('group')]")
-    assert saved is not None and saved > 0, f"前提: group に保存位置がある (saved={saved})"
+    # 前提: 保存位置は上端から ±TOL で判別できるだけ離れていること
+    assert saved is not None and saved > 2 * TOL, f"前提: group に保存位置がある (saved={saved})"
     small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 0; }")  # 復元されなければ 0 のまま
     small.locator("#browse-header").click()      # ↩
     small.wait_for_timeout(600)
@@ -263,7 +266,8 @@ def test_back_without_viewer_restores_saved_scroll(small):
     small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 200; }")
     _open(small, "group/deep_series")            # group の保存位置が入る
     saved = small.evaluate("() => window.scrollPositions[window.getScrollKey('group')]")
-    assert saved is not None and saved > 0, f"前提: group に保存位置がある (saved={saved})"
+    # 前提: 保存位置は上端から ±TOL で判別できるだけ離れていること
+    assert saved is not None and saved > 2 * TOL, f"前提: group に保存位置がある (saved={saved})"
     small.go_back()                              # ビューア無しの Back → via='saved'
     small.wait_for_function("() => window.currentBrowsePath === 'group'", timeout=5000)
     small.wait_for_timeout(500)
