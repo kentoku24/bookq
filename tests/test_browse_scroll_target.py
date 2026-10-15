@@ -9,12 +9,14 @@
 390x844 では fixture のほとんどの階層がスクロール不能（実測: group は
 scrollHeight == clientHeight == 728）で空振りするため、このファイルは専用
 ビューポート 390x430（tile モードで 3 件以上の階層が確実にスクロールする高さ）
-で測る。各テストは冒頭で scrollHeight > clientHeight を前提として assert し、
-空振りを構造的に排除する。
+で測る。位置を測るテストは _assert_scrollable() で scrollHeight > clientHeight
+（＝そもそもスクロールできる階層か）を確認し、空振りを構造的に排除する。
+decide() の決定表と保存位置の pin は DOM 位置を測らないので対象外。
 
 fixture（tests/conftest.py）:
   zoom_series = zoom_series/series/ep-1..3（scanner の flatten で zoom_series の直下）
   group = deep_series / episodes / fullwidth_episodes / other_work
+          （deep_series/vol1 は group の孫＝「直下の子のみ」の確認に使う）
 """
 import os
 
@@ -93,6 +95,19 @@ def _wait_browse(page, path):
     page.wait_for_timeout(400)
 
 
+def _navigate(page, path, child):
+    """navigateToFolder(path) して、その階層のタイル（child）が描かれるまで待つ。"""
+    page.evaluate("(p) => window.navigateToFolder(p)", path)
+    page.wait_for_function(
+        "(a) => window.currentBrowsePath === a.path &&"
+        " [...document.querySelectorAll('#tile-grid [data-path]')]"
+        ".some(e => e.dataset.path === a.child)",
+        arg={"path": path, "child": child},
+        timeout=5000,
+    )
+    page.wait_for_timeout(150)
+
+
 def _seed_progress(page, entries):
     page.evaluate("(o) => localStorage.setItem('bookq_progress', JSON.stringify(o))", entries)
     page.reload()
@@ -154,6 +169,7 @@ def test_viewer_return_is_idempotent_across_double_restore(small):
     2 回目の描画で位置が変わらないこと（＝マーカーが level 一致で冪等に効くこと）。
     """
     _open(small, SERIES)
+    _assert_scrollable(small)
     _open(small, EP3)
     small.evaluate(
         "() => { window.__rv = 0; const orig = window.renderView;"
@@ -173,6 +189,7 @@ def test_viewer_return_is_idempotent_across_double_restore(small):
 def test_browser_back_from_viewer_anchors_displayed_episode(small):
     """ブラウザ Back でも表示していた章に合う。"""
     _open(small, SERIES)
+    _assert_scrollable(small)
     _open(small, EP3)
     assert _chapter(small) == EP3, "前提: ep-3 を表示している"
     small.keyboard.press("ArrowLeft")
@@ -207,6 +224,7 @@ def test_viewer_return_beats_saved_scroll(small):
     small.wait_for_timeout(600)
     saved = small.evaluate("() => window.scrollPositions[window.getScrollKey('group')]")
     assert saved is not None, "前提: group に保存位置がある"
+    _assert_scrollable(small)  # 前提: group がスクロール可能（アンカーが空振りしない）
     small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 0; }")
     _open(small, "group/other_work")             # leaf → ビューア
     assert _chapter(small) == "group/other_work", "前提: other_work を表示している"
@@ -221,6 +239,7 @@ def test_viewer_return_beats_saved_scroll(small):
 def test_root_fresh_open_is_always_top(small):
     """ルート（作品一覧）はアンカーを使わない: ビューアから戻っても上端。"""
     _seed_progress(small, {"simple_manga": {"page": 0, "total": 5, "ts": 1}})
+    _assert_scrollable(small)  # 前提: ルートがスクロールできる（上端リセットが空振りしない）
     small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 500; }")
     _open(small, "simple_manga")
     assert _chapter(small) == "simple_manga", "前提: root 直下の leaf を開いた"
@@ -245,6 +264,8 @@ def test_decide_exposes_decision_table(small):
         {EP3: {"page": 0, "total": 7, "ts": 1}},
     )
     assert d({"level": SERIES, "cause": "open", "hasSaved": False}) == {"via": "progress", "anchor": EP3}
+    # 保存位置 > 最大既読: 既読（ep-3）があっても、その階層に保存位置があれば保存位置
+    assert d({"level": SERIES, "cause": "restore", "hasSaved": True}) == {"via": "saved", "anchor": None}
     # マーカー: level 一致なら viewer（保存位置より優先）
     small.evaluate("(p) => window.BrowseScroll.noteViewerReturn(p.level, p.chapter)",
                    {"level": SERIES, "chapter": EP2})
@@ -257,6 +278,19 @@ def test_decide_exposes_decision_table(small):
                    {"level": SERIES, "chapter": EP2})
     d({"level": SERIES, "cause": "open", "hasSaved": False})
     assert small.evaluate("() => window.BrowseScroll.peekViewerReturn()") is None
+
+    # 直下の子のみ: group 直下に既読は無い（既読は孫の deep_series/vol1 だけ）→ 上端
+    small.evaluate(
+        "(e) => localStorage.setItem('bookq_progress', JSON.stringify(e))",
+        {"group/deep_series/vol1": {"page": 0, "total": 2, "ts": 1}},
+    )
+    _navigate(small, "group", "group/deep_series")
+    assert d({"level": "group", "cause": "open", "hasSaved": False}) == {"via": "top", "anchor": None}
+    # 対照: 同じ既読がその直下の階層では効く（シード自体が有効なことの確認）
+    _navigate(small, "group/deep_series", "group/deep_series/vol1")
+    assert d({"level": "group/deep_series", "cause": "open", "hasSaved": False}) == {
+        "via": "progress", "anchor": "group/deep_series/vol1"
+    }
 
 
 @pytest.mark.parametrize("mode,clicks", [("list", 1), ("card", 2)])
