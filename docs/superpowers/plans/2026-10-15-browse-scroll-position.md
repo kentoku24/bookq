@@ -385,6 +385,14 @@ git add tests/test_browse_scroll_target.py
 git commit -m "test(ai): フォルダ一覧の表示位置（アンカー）のREDテストを追加"
 ```
 
+> **実装時の実測メモ（Task 1 完了時の状態）**
+> 実装（commit `e273a77` + `d33905f` + `75a703f`）で、上のコードブロックから次の点が変わった。理由はすべて「テストが空振りする」または「Playwright のAPI差」で、契約の意味は同じ:
+> - `page.wait_for_function(expr, path, timeout=...)` → `arg=path` をキーワードで渡す（Python 版 Playwright のシグネチャ）。`_open` / `_wait_browse` の 2 箇所。
+> - **ビューア復帰系 3 本は復帰操作の直前に `document.getElementById('sidebar-scroll').scrollTop = 0` を入れる**。Playwright の `click()` がクリック前にタイルをビューポートへスクロールさせるため、リセットが無いと未実装コードでも `|top - 期待値| <= 2` に収まって空振り pass する（実測で反証済み）。
+> - `test_breadcrumb_back_keeps_saved_scroll` は期待値 500 が誤り（保存されるのは子階層へドリルした時点の親の位置）。`window.scrollPositions[window.getScrollKey('group')]` を読んでから 0 に壊し、復元値と比較する形に変更（現状コードで GREEN の回帰 pin）。
+> - `decide` の決定表テストに「保存位置 > 最大既読」の反例と「直下の子のみ（孫の既読は効かない）」＋その対照（`group/deep_series` では `progress`）を追加。
+> - 実測の RED 内訳: `assert 373 == 0` / `top=437 expected=370` / 復帰系 3 本 `top=0 expected=370` / `保存位置(53)ではなく other_work(357)` / `assert 1569 == 0` / `window.BrowseScroll is undefined` ×3（テストは 11 本、10 failed / 1 passed）。
+
 ---
 
 ### Task 2: `browse/scroll.js`（決定と適用）＋ shell 登録
