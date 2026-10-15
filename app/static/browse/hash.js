@@ -363,14 +363,14 @@
         });
       } catch(e) { console.warn(e); }
     }
+    // 書き込みは常に 1 系統: アンカー（viewer/progress/top）か保存位置（saved）のどちらか。
+    var useSaved = decision ? decision.via === 'saved' : savedTop !== undefined;
     if (typeof window.renderView === 'function') {
       try {
-        window.renderView(
-          (decision && decision.via !== 'saved') ? { scrollAnchor: decision.anchor } : undefined
-        );
+        window.renderView((!useSaved && decision) ? { scrollAnchor: decision.anchor } : undefined);
       } catch(e) { console.warn(e); }
     }
-    if (savedTop !== undefined && (!decision || decision.via === 'saved')) {
+    if (useSaved && savedTop !== undefined) {
       requestAnimationFrame(function () {
         var ss = document.getElementById("sidebar-scroll");
         if (ss) ss.scrollTop = savedTop;
