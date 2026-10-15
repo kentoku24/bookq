@@ -54,6 +54,10 @@
     return found;
   }
 
+  // 契約: opts.level は「表示中の階層」と一致していること。_visibleChildPaths は
+  // window.getBrowseChildren()（＝表示中階層の子）を読むため、level を切り替える前に
+  // 呼ぶと別階層の子で判定してしまう（呼び出し側は currentBrowsePath 更新後に呼ぶ）。
+  // opts.hasSaved は呼び出し側の申告を信頼する（'open' は常に false を渡す）。
   function decide(opts) {
     opts = opts || {};
     var level = (opts.level === undefined) ? null : opts.level;
@@ -100,6 +104,8 @@
   }
 
   // innerHTML 置換と同一タスク内で呼ぶ（同期）。anchorPath が null/'' なら上端。
+  // 容器の解決（scrollHeight/clientHeight の比較）は null 経路でも 1 回入るが、
+  // cold なトップ表示は renderView が anchor を渡さないので apply 自体が呼ばれない。
   function apply(anchorPath) {
     var sc = scroller();
     if (!sc) return;
