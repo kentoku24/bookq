@@ -24,8 +24,8 @@ import os
 import pytest
 
 # 400: 最終行のタイル（例 group/other_work の offset 357）を上端まで運べる高さ。
-# 到達可能性の閾値は実測で約 423（±2 許容込み）。430 では max が 348 になり
-# 最終行のアンカーが clamp されて検証にならない。
+# 到達可能性の上限は実測で約 423（±2 許容込み。423 では max 355 < 357、430 では 348）。
+# 430 では最終行のアンカーが clamp されて検証にならない。
 W, H = 390, 400
 SERIES = "zoom_series"
 EP2 = "zoom_series/series/ep-2"
@@ -372,6 +372,18 @@ def test_marker_chapter_not_in_visible_children_falls_back(small):
     assert _decide(small, {"level": SERIES, "cause": "restore", "hasSaved": True}) == {
         "via": "saved", "anchor": None
     }
+
+
+def test_render_without_anchor_does_not_move_the_list(small):
+    """§4/§8: アンカー未指定の再描画（モード切替・ツリー再取得・サムネ追加）は位置を触らない。"""
+    _open(small, SERIES)
+    _assert_scrollable(small)
+    small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 200; }")
+    assert _scroll(small)["top"] == 200, "前提: 200px スクロールできる"
+    small.evaluate("() => window.renderView()")                              # 引数なし
+    assert _scroll(small)["top"] == 200, "引数なしの再描画で位置が動かない"
+    small.evaluate("() => window.renderView({scrollAnchor: undefined})")     # 明示 undefined
+    assert _scroll(small)["top"] == 200, "scrollAnchor: undefined でも動かない"
 
 
 @pytest.mark.parametrize("mode,clicks", [("list", 1), ("card", 2)])

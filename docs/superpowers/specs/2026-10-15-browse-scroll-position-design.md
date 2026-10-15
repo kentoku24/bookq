@@ -121,7 +121,7 @@ cause === 'restore' && hasSaved                     -> {via:'saved',    anchor:n
 
 ## 5. テスト（新規 `tests/test_browse_scroll_target.py`）
 
-**ビューポートは 390x430**（390x844 では fixture のほとんどの階層がスクロール不能で空振りする。実測: `group` は `scrollHeight == clientHeight == 728`）。
+**ビューポートは 390x400**（390x844 では fixture のほとんどの階層がスクロール不能で空振りする。実測: `group` は `scrollHeight == clientHeight == 728`。390x430 では最終行タイルのアンカーが max に clamp されるため 400 にした — 実測で到達可能性の上限は約 423、430 では `group/other_work` の offset 357 に対し max 348）。
 各テストの冒頭で `#sidebar-scroll` の `scrollHeight > clientHeight` を**前提として assert** し、空振りを構造的に排除する。
 容器は `#sidebar-scroll` を直接読み書きする（既存 `test_sidebar_scroll.py` のメディアクエリ推測ヘルパは使わない）。
 
@@ -172,5 +172,5 @@ cause === 'restore' && hasSaved                     -> {via:'saved',    anchor:n
 
 ## 9. 未解決（実装時に実測して決める）
 
-- `scroller()` の解決順は実測で `#sidebar-scroll` に確定している（390x844 / 1200x800）。テストで使う 390x430 と 900x600 でも同じであることをテスト冒頭の前提 assert で固定する（`#tile-grid` へのフォールバックは将来 CSS が変わったときの保険）
+- `scroller()` の解決順は実測で `#sidebar-scroll` に確定している（390x844 / 1200x800）。テストで使う 390x400 でも同じであることをテスト冒頭の前提 assert で固定する（900x600 は未実施。`#tile-grid` へのフォールバックは将来 CSS が変わったときの保険）
 - 360 度回転・リサイズ直後（`updateOrientation` 後）のアンカー適用は今回のスコープ外（フォルダを開く操作ではない）。必要になれば `renderView` に anchor を渡すだけで拡張できる

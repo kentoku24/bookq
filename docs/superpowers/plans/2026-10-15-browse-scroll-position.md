@@ -1021,14 +1021,14 @@ Expected: コミットが 7〜8 個（設計・RED テスト・モジュール�
 
 **2. Placeholder scan:** `TBD` / `TODO` / 「同様に」「適切に」の類は無し。Task 7 の WebKit は環境依存のためスキップ条件を明記（Chromium の緑が必須条件）。Task 9 の目視は「何を見るか」を 1〜4 で列挙済み。
 
-**3. Type consistency:** `decide({level, cause, hasSaved}) -> {via, anchor}`（`via` は `'viewer'|'saved'|'progress'|'top'`）を Task 2 で定義し、Task 4（`cause:'open'`）・Task 5（`cause:'restore'`、`via==='saved'` の分岐）・Task 6（`clearViewerReturn`）・Task 1（全 `via` の期待値）で同じ名前を使用。`renderView({scrollAnchor})` / `renderBrowse({scrollAnchor})` の三状態（`undefined`=触らない / `null`=上端 / path=そのタイル）は Task 3 で定義し Task 4/5/6/1 で一致。マーカーのフィールド名は `level` / `chapterPath`（`noteViewerReturn(level, chapterPath)`、`peekViewerReturn()` が返すオブジェクトのキーも同じ）。
+**3. Type consistency:** `decide({level, cause, hasSaved}) -> {via, anchor}`（`via` は `'viewer'|'saved'|'progress'|'top'`）を Task 2 で定義し、Task 4（`cause:'open'`）・Task 5（`cause:'restore'`、`via==='saved'` の分岐）・Task 6（`clearViewerReturn`）・Task 1（全 `via` の期待値）で同じ名前を使用。`renderView({scrollAnchor})` / `renderBrowse({scrollAnchor})` の三状態（`undefined`=触らない / `null`=上端 / path=そのタイル）は Task 3 で定義し Task 4/5/6/1 で一致。マーカーのフィールド名は `level` / `anchor` / `via`（intent 統一後。`noteViewerReturn(level, chapterPath)` は `{level, anchor: chapterPath, via: 'viewer'}` を記録し、`peekViewerReturn()` が返すオブジェクトのキーも同じ）。
 
 ---
 
 ## 実装完了時の状態（計画からの差分）
 
-- テストは 15 ケース（`tests/test_browse_scroll_target.py`）。追加分: 表示子に無い章のフォールバック、保存位置の Back 経路、`cause:'open'` の pin、stale 保存位置の上書き防止、intent の寿命。
-- ビューポートは 390x400（390x430 では最終行タイルのアンカーが max に clamp され検証にならなかったため。閾値は実測で約 423）。
+- テストは 16 ケース（`tests/test_browse_scroll_target.py`）。追加分: 表示子に無い章のフォールバック、保存位置の Back 経路、`cause:'open'` の pin、stale 保存位置の上書き防止、intent の寿命、アンカー未指定の再描画が位置を触らない契約。
+- ビューポートは 390x400（390x430 では最終行タイルのアンカーが max に clamp され検証にならなかったため。到達可能性の上限は実測で約 423）。
 - ビューア復帰マーカーは「level に紐づく intent」に統一した（新規オープンの決定も同じ仕組みで保持し、直後の `history.go(-1)` 経由の `restoreBrowse` が古い保存位置で上書きするのを防ぐ）。`peekViewerReturn()` は `via==='viewer'` のときだけ返す。
-- 検証: Chromium 15 passed / WebKit 15 passed / フルスイート 731 passed, 6 skipped。live 実データ回帰は未実施。
+- 検証: Chromium 16 passed / WebKit 16 passed / フルスイート 732 passed, 6 skipped。live 実データ回帰は未実施。
 - スコープ外として残した既知事項: `tests/test_sidebar_scroll.py` のデスクトップ分岐が空振り（`#tile-grid.scrollTop` は効かない）、URL の `p=` が 200ms デバウンスで古い、`ReadingProgress` が `teardownViewer` で flush されない。
