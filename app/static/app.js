@@ -1679,6 +1679,8 @@
       if (_empty){ _empty.innerHTML = "<p>読込中…</p>"; _empty.style.display = "flex"; }
       return;
     }
+    // 別の本を開いた＝ビューア復帰の文脈は切れた（一覧のアンカーには使わない）
+    try { window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
     currentFolder = fullPath;
     const myGen = ++urlRestoreGen;      // every loadImages invocation claims the newest restore token
     // A load starting while the overview is open (deep link, sidebar pick)

@@ -308,12 +308,14 @@
   }
 
   function resetToTop() {
+    // ルート（作品一覧）はアンカーを使わない: 常に上端。ビューア復帰の文脈も切る。
+    try { if (window.BrowseScroll) window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
     _teardownViewer();
     var empty = document.getElementById("empty");
     if (empty) { empty.innerHTML = "<p>\uD83D\uDCC2 サイドバーからフォルダを選んでください</p>"; empty.style.display = "flex"; }
     try { window.currentBrowsePath = null; } catch(e) { console.warn(e); }
     if (typeof window.updateBrowseHeader === 'function') try { window.updateBrowseHeader(); } catch(e) { console.warn(e); }
-    if (typeof window.renderView === 'function') try { window.renderView(); } catch(e) { console.warn(e); }
+    if (typeof window.renderView === 'function') try { window.renderView({ scrollAnchor: null }); } catch(e) { console.warn(e); }
     clearViewerState();
   }
 
