@@ -137,7 +137,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
   <!-- ⑥ 全消去 -->
   <section id="sec-wipe" aria-labelledby="sec-wipe-title">
     <h2 id="sec-wipe-title">⑥ 全消去</h2>
-    <p class="hint">危険: ローカルの保存をすべて削除</p>
+    <p class="hint">危険: ローカルのデータをすべて削除（閲覧で作られた作品キャッシュ・保存作品・IndexedDB・読書進捗。アプリ本体の SHELL キャッシュは残す）</p>
     <div class="row" style="margin-top:10px">
       <button id="btn-wipe-all" class="btn" type="button">すべて削除</button>
       <span id="harness-wipe-status" class="hint mono">—</span>
@@ -160,7 +160,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
   <div id="harness-wipe-modal" style="display:none;position:fixed;inset:0;z-index:57;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
     <div role="dialog" aria-modal="true" aria-labelledby="harness-wipe-modal-title" style="background:#1e1e1e;border:1px solid #333;border-radius:12px;padding:20px;max-width:380px;width:calc(100% - 32px);box-shadow:0 8px 32px rgba(0,0,0,.5)">
       <h3 id="harness-wipe-modal-title" style="font-size:14px;font-weight:600;color:#e0e0e0;margin-bottom:8px">すべて削除しますか？</h3>
-      <p class="hint" style="margin-bottom:16px">保存済みの作品とキャッシュをすべて削除します。この操作は元に戻せません。</p>
+      <p class="hint" style="margin-bottom:16px">閲覧だけで作られた作品キャッシュも含めて、ローカルの保存データ（作品キャッシュ・IndexedDB・読書進捗）をすべて削除します。アプリ本体のキャッシュは残ります。この操作は元に戻せません。</p>
       <div class="row" style="justify-content:flex-end">
         <button id="btn-wipe-cancel" class="btn" type="button">キャンセル</button>
         <button id="btn-wipe-confirm" class="btn btn-primary" type="button">削除する</button>
@@ -358,22 +358,32 @@ async function loadShellAssets(){
   }
 }
 
-function updateWipeUI(all, dedupSum){
+// ⑥ 全消去 — every client-side data store, not just the "saved works" list.
+// OfflineCore.wipeClientData owns the coverage (per-work caches created by
+// *viewing*, fallback/api caches, IndexedDB records + cached tree, progress
+// keys). The SHELL cache that holds this harness and the app code is kept.
+async function updateWipeUI(){
   const btn=document.getElementById('btn-wipe-all');
   const status=document.getElementById('harness-wipe-status');
   const preview=document.getElementById('harness-wipe-preview');
-  const count=all ? all.length : 0;
-  const bytes=dedupSum!=null ? dedupSum : (all ? dedupedBytes(all) : 0);
+  let t={caches:[],entries:0,works:0,tree:false,keys:[]};
+  try{ if(window.OfflineCore&&OfflineCore.wipeTargets) t=await OfflineCore.wipeTargets(); }catch(e){ console.warn(e); }
+  const works=t.caches.filter((c)=>String(c.name).startsWith('bookq-work-')).length;
+  const others=t.caches.length-works;
+  const total=t.entries+t.works+(t.tree?1:0)+t.keys.length;
   if(preview){
-    preview.textContent=count+'件 / '+fmt(bytes)+' ('+bytes+' bytes) — dedup';
+    preview.textContent = 'work '+works+' / その他 '+others+' キャッシュ ('+t.entries+' 項目) / 保存作品 '+t.works+' 件'
+      + (t.tree?' / ツリー 1':'') + (t.keys.length?' / 進捗キー '+t.keys.join(','):'') + ' — SHELL は保持';
   }
   if(btn){
-    btn.disabled = count===0;
-    btn.style.opacity = count===0 ? '0.45' : '';
-    btn.style.pointerEvents = count===0 ? 'none' : '';
+    btn.disabled = total===0;
+    btn.style.opacity = total===0 ? '0.45' : '';
+    btn.style.pointerEvents = total===0 ? 'none' : '';
   }
   if(status){
-    status.textContent = count===0 ? '削除対象なし' : count+'件の保存を削除できます';
+    status.textContent = total===0
+      ? '削除対象なし'
+      : (t.caches.length+' キャッシュ + 保存作品 '+t.works+' 件'+(t.keys.length?' + 進捗キー':''))+'を削除できます';
   }
 }
 function openWipeModal(){
@@ -395,22 +405,21 @@ async function doWipeAll(){
   if(btn) btn.disabled=true;
   if(confirmBtn) confirmBtn.disabled=true;
   if(status) status.textContent='削除中…';
+  let report=null;
   try{
-    const all = await OfflineStore.getAll();
-    for(const w of all){
-      try{ await caches.delete(w.cacheName); await OfflineStore.delete(w.folder); }catch{}
+    if(window.OfflineCore&&OfflineCore.wipeClientData){
+      report=await OfflineCore.wipeClientData();
     }
-    try{ await caches.delete('bookq-api-v1'); }catch{}
-    try{ await caches.delete('bookq-images-fallback'); }catch{}
-    // keep SHELL: bookq_harness / bookq_enable_sw / bookq_touch are NOT removed
-    try{ localStorage.removeItem('bookq_progress'); }catch{}
-    try{ localStorage.removeItem('bookq_persist_toast'); }catch{}
-    try{ sessionStorage.removeItem('bookq_auto_sync_done'); }catch{}
     try{ if(window.updateStorageBar) await window.updateStorageBar(); }catch{}
-  }catch{}
+  }catch(e){ console.warn(e); }
   if(confirmBtn) confirmBtn.disabled=false;
   closeWipeModal();
-  if(status) status.textContent='削除しました — 更新中…';
+  // keep SHELL: bookq_harness / bookq_enable_sw / bookq_touch are NOT removed
+  if(status){
+    status.textContent = report
+      ? '削除しました: キャッシュ '+report.caches.length+' / 作品 '+report.works+' / キー '+report.keys.length+' — 更新中…'
+      : '削除しました — 更新中…';
+  }
   try{ await refresh(); }catch{}
   try{ if(window.showToastSuccess) window.showToastSuccess('全消去しました'); }catch{}
 }
@@ -482,7 +491,7 @@ async function refresh(){
   }
   window.__harnessRawSum = rawSum;
   window.__harnessDedupSum = dedupSum;
-  try{ updateWipeUI(all, dedupSum); }catch{}
+  try{ await updateWipeUI(); }catch{}
 
   let est=null;
   try{

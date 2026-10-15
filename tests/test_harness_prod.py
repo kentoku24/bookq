@@ -106,33 +106,29 @@ def test_harness_link_visible(server):
 # ── 3. harness wipe logic ────────────────────────────────────────────────────
 
 def _file_wipe_assertions():
-    """File-content fallback: doWipeAll exists, iterates caches.delete+IDB delete, keeps SHELL, removes correct keys."""
+    """File-content fallback: the harness delegates the wipe to OfflineCore, which
+    owns the coverage (viewing-only work caches included, SHELL kept, progress keys)."""
     html = (REPO_ROOT / "app" / "static" / "offline-harness.html").read_text(encoding="utf-8")
-    # doWipeAll exists
+    core = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    # doWipeAll exists and no longer does the deletion work itself
     assert "doWipeAll" in html, "offline-harness.html missing doWipeAll"
-    assert "async function doWipeAll" in html or "function doWipeAll" in html or "doWipeAll" in html
-    # iterates caches.delete + OfflineStore.delete / IDB delete
-    assert "caches.delete" in html, "doWipeAll should call caches.delete"
-    assert "OfflineStore.delete" in html or "indexedDB.deleteDatabase" in html or ".delete(" in html, "doWipeAll should delete IDB entries"
-    # keeps SHELL — comment or logic that SHELL is not deleted
-    # The wipe deletes bookq-api-v1 and bookq-images-fallback but must keep bookq-shell-*
-    assert "bookq-shell" in html.lower() or "SHELL" in html, "harness should reference SHELL cache"
-    # verify it deletes api and fallback caches
-    assert "bookq-api-v1" in html, "should delete bookq-api-v1"
-    assert "bookq-images-fallback" in html, "should delete bookq-images-fallback"
-    # verify it removes bookq_progress / persist_toast and auto_sync_done with correct keys
-    assert "bookq_progress" in html, "should remove bookq_progress"
-    assert "bookq_persist_toast" in html, "should remove bookq_persist_toast"
-    assert "bookq_auto_sync_done" in html, "should remove bookq_auto_sync_done (sessionStorage)"
-    # verify it does NOT remove harness/enable_sw/touch — keep list
-    # The comment says NOT removed, so ensure those strings exist and are not in removal calls
-    # At minimum, ensure localStorage.removeItem is not called for bookq_harness
-    # Check that bookq_harness is mentioned as kept
+    assert "wipeClientData" in html, "the harness wipe must delegate to OfflineCore.wipeClientData"
+    # keeps SHELL / keep-flag keys
     assert "bookq_harness" in html, "should mention bookq_harness as kept"
+    assert "bookq_enable_sw" in html, "should mention bookq_enable_sw as kept"
     # Ensure wipe UI exists: sec-wipe, btn-wipe-all, modal
     assert 'id="sec-wipe"' in html, "missing sec-wipe"
     assert 'id="btn-wipe-all"' in html, "missing btn-wipe-all"
     assert 'id="harness-wipe-modal"' in html, "missing harness-wipe-modal"
+    # coverage lives in offline-core (shared with the app)
+    assert "caches.delete" in core, "wipe must call caches.delete"
+    assert "wipeTargets" in core, "wipe needs a preview/targets helper (button state)"
+    assert "bookq-work-" in core and "bookq-api-" in core and "bookq-images-" in core, "data cache prefixes"
+    assert "bookq-shell" in core and "SHELL" in core, "shell cache must be kept"
+    assert "function clear()" in core, "IDB works+KV store clear"
+    assert "bookq_progress" in core, "reads progress key list"
+    assert "bookq_persist_toast" in core, "reads persist toast key"
+    assert "bookq_auto_sync_done" in core, "reads session auto_sync key"
 
 
 def test_harness_wipe_logic(page, server):
