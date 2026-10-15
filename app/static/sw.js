@@ -19,8 +19,14 @@ const { cacheNameFor } = self.OfflineCore;
 function perWorkCacheName(req) {
   try {
     const url = new URL(req.url);
-    if (!url.pathname.startsWith('/image/')) return null;
-    const parts = url.pathname.slice(7).split('/');
+    // /thumb/ shares the per-work cache with /image: prefetch.js stores covers
+    // there (cacheNameFor(folder)) and caches.match() reads that copy back, so
+    // writing refreshed thumbs anywhere else would update a copy nobody reads.
+    const prefix = url.pathname.startsWith('/image/') ? '/image/'
+      : url.pathname.startsWith('/thumb/') ? '/thumb/'
+      : null;
+    if (!prefix) return null;
+    const parts = url.pathname.slice(prefix.length).split('/');
     if (parts.length < 2) return null;
     const folder = decodeURIComponent(parts.slice(0, -1).join('/'));
     return cacheNameFor(folder);
@@ -42,6 +48,24 @@ function perWorkCacheName(req) {
 // miss and re-seed the old bytes.
 const REVALIDATE_TIMEOUT_MS = 1200;
 
+// Rebuilding a Request from another Request inherits that request's header
+// guard: an <img> load arrives as mode:"no-cors", whose guard drops every
+// non-CORS-safelisted header — If-None-Match/If-Modified-Since vanish without
+// an error in Chromium and WebKit alike, so the "conditional" GET went out bare.
+// That made every hit a full re-download (no 304 ever) which also had to finish
+// inside REVALIDATE_TIMEOUT_MS, i.e. a replaced image never landed on a slow
+// origin. Same-origin URLs are therefore re-issued from their URL, where the
+// guard keeps the validators (credentials stay equivalent: cookies are sent).
+function revalidationRequest(req, headers, signal) {
+  const init = {cache: "no-store", signal};
+  if (new URL(req.url).origin === self.location.origin) {
+    return new Request(req.url, {...init, headers, mode: "same-origin", credentials: "same-origin"});
+  }
+  // Cross-origin no-cors cannot carry validators anyway; keep the old shape so
+  // the request at least still reaches the origin.
+  return new Request(req, {...init, headers});
+}
+
 function revalidateRequest(req, hit) {
   const headers = new Headers();
   const etag = hit.headers.get("ETag");
@@ -51,8 +75,8 @@ function revalidateRequest(req, hit) {
   if (!etag && !lastModified) return null; // nothing to validate against
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REVALIDATE_TIMEOUT_MS);
-  const init = {headers, cache: "no-store", signal: controller.signal};
-  return fetch(new Request(req, init)).finally(() => clearTimeout(timer));
+  return fetch(revalidationRequest(req, headers, controller.signal))
+    .finally(() => clearTimeout(timer));
 }
 
 async function cacheFirst(req) {
