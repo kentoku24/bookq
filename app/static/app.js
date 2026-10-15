@@ -1123,7 +1123,11 @@
     scrollPositions[key] = sidebarScroll.scrollTop;
     currentBrowsePath = path;
     updateBrowseHeader();
-    renderView();
+    // 開いた直後の位置: 直下に既読エピソードがあればその最大番号、無ければ上端。
+    // window.BrowseScroll は index.html の defer 順で app.js より先に読み込まれる
+    // ハード依存（window.Overview と同じ扱い。フォールバック実装は書かない）。
+    const decision = window.BrowseScroll.decide({ level: path, cause: 'open', hasSaved: false });
+    renderView({ scrollAnchor: decision.anchor });
     writeBrowseState();
   }
   try { window.navigateToFolder = navigateToFolder; } catch(e) { console.warn(e); }
