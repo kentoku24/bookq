@@ -8,7 +8,8 @@
 
 390x844 では fixture のほとんどの階層がスクロール不能（実測: group は
 scrollHeight == clientHeight == 728）で空振りするため、このファイルは専用
-ビューポート 390x430（tile モードで 3 件以上の階層が確実にスクロールする高さ）
+ビューポート 390x400（tile モードで 3 件以上の階層が確実にスクロールし、最終行の
+タイルも上端まで運べる高さ。実測: group の 4 件で max 368 >= other_work の offset 357）
 で測る。位置を測るテストは _assert_scrollable() で scrollHeight > clientHeight
 （＝そもそもスクロールできる階層か）を確認し、空振りを構造的に排除する。
 decide() の決定表と保存位置の pin は DOM 位置を測らないので対象外。
@@ -22,7 +23,10 @@ import os
 
 import pytest
 
-W, H = 390, 430
+# 400: 最終行のタイル（例 group/other_work の offset 357）を上端まで運べる高さ。
+# 到達可能性の閾値は実測で約 423（±2 許容込み）。430 では max が 348 になり
+# 最終行のアンカーが clamp されて検証にならない。
+W, H = 390, 400
 SERIES = "zoom_series"
 EP2 = "zoom_series/series/ep-2"
 EP3 = "zoom_series/series/ep-3"
@@ -36,7 +40,7 @@ def _browser(request):
 
 @pytest.fixture
 def small(request, server):
-    """390x430 の専用コンテキスト（フルツリー到着まで待つ）。"""
+    """390x400 の専用コンテキスト（フルツリー到着まで待つ）。"""
     b = _browser(request)
     context = b.new_context(viewport={"width": W, "height": H})
     page = context.new_page()
