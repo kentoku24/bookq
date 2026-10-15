@@ -14,6 +14,14 @@ scrollHeight == clientHeight == 728）で空振りするため、このファイ
 （＝そもそもスクロールできる階層か）を確認し、空振りを構造的に排除する。
 decide() の決定表と保存位置の pin は DOM 位置を測らないので対象外。
 
+WebKit の後追いスクロール調整: apply が正しく scrollTop を書いた後（実測: `zoom_series` で
+370）、WebKit が約 100ms 後に scrollTop を数 px 動かすことがある（366 前後。JS は走っておらず、
+タイルの相対オフセットは 370 のまま。既読バッジでタイル高さが変わる階層で起きる）。
+この機能の不変条件は「対象タイルが一覧の上端に来る（数 px の後追いを許容）」なので、
+位置の assert は TOL = 10 で比較する。候補位置は最低でも 50px 離れている
+（0 vs 52 vs 370 vs 437、53 vs 357、0 vs 1584）ため、±10 でも誤ったルール
+（上端 / 最大既読 / 保存位置）は検出できる。
+
 fixture（tests/conftest.py）:
   zoom_series = zoom_series/series/ep-1..3（scanner の flatten で zoom_series の直下）
   group = deep_series / episodes / fullwidth_episodes / other_work
@@ -24,9 +32,12 @@ import os
 import pytest
 
 # 400: 最終行のタイル（例 group/other_work の offset 357）を上端まで運べる高さ。
-# 到達可能性の上限は実測で約 423（±2 許容込み。423 では max 355 < 357、430 では 348）。
-# 430 では最終行のアンカーが clamp されて検証にならない。
+# 到達可能性の上限は実測で約 423（±2 許容時）。±TOL(=10) まで広げると 430（max 348）でも
+# 9px 差で通ってしまうため、clamp された値を測らないよう 400 を維持する。
 W, H = 390, 400
+# 位置 assert の許容値。WebKit の後追い調整（apply 後 約100ms で数 px）を吸収する。
+# 候補位置は 50px 以上離れているので、誤ったルールは ±10 でも検出できる。
+TOL = 10
 SERIES = "zoom_series"
 EP2 = "zoom_series/series/ep-2"
 EP3 = "zoom_series/series/ep-3"
@@ -86,7 +97,7 @@ def _open(page, path):
     page.wait_for_function(
         "(p) => window.currentFolder === p || window.currentBrowsePath === p", arg=path, timeout=5000
     )
-    page.wait_for_timeout(150)
+    page.wait_for_timeout(300)  # WebKit の後追い調整（約100ms）が計測前に終わるように
 
 
 def _wait_browse(page, path):
@@ -149,7 +160,7 @@ def test_fresh_open_anchors_last_read_episode(small):
     assert ep3_top is not None and ep2_top is not None, "前提: ep-2 / ep-3 のタイルが並んでいる"
     assert ep3_top > ep2_top, "前提: ep-3 は ep-2 より下の行にある"
     top = _scroll(small)["top"]
-    assert abs(top - ep3_top) <= 2, f"最大既読 ep-3 が上端 (top={top} expected={ep3_top})"
+    assert abs(top - ep3_top) <= TOL, f"最大既読 ep-3 が上端 (top={top} expected={ep3_top})"
 
 
 def test_viewer_return_anchors_displayed_episode_beats_progress(small):
@@ -167,7 +178,7 @@ def test_viewer_return_anchors_displayed_episode_beats_progress(small):
     _wait_browse(small, SERIES)
     ep2_top, ep3_top = _tile_top(small, EP2), _tile_top(small, EP3)
     top = _scroll(small)["top"]
-    assert abs(top - ep2_top) <= 2, (
+    assert abs(top - ep2_top) <= TOL, (
         f"表示していた ep-2 が上端 (top={top} ep-2={ep2_top} ep-3={ep3_top})"
     )
 
@@ -192,7 +203,7 @@ def test_viewer_return_is_idempotent_across_double_restore(small):
     assert calls >= 2, f"前提: ☰ 復帰では renderView が 2 回走る (calls={calls})"
     ep3_top = _tile_top(small, EP3)
     top = _scroll(small)["top"]
-    assert abs(top - ep3_top) <= 2, f"2 回目の描画で位置が変わらない (top={top} expected={ep3_top})"
+    assert abs(top - ep3_top) <= TOL, f"2 回目の描画で位置が変わらない (top={top} expected={ep3_top})"
 
 
 def test_browser_back_from_viewer_anchors_displayed_episode(small):
@@ -209,7 +220,7 @@ def test_browser_back_from_viewer_anchors_displayed_episode(small):
     _wait_browse(small, SERIES)
     ep3_top = _tile_top(small, EP3)
     top = _scroll(small)["top"]
-    assert abs(top - ep3_top) <= 2, f"Back でも ep-3 が上端 (top={top} expected={ep3_top})"
+    assert abs(top - ep3_top) <= TOL, f"Back でも ep-3 が上端 (top={top} expected={ep3_top})"
 
 
 def test_breadcrumb_back_keeps_saved_scroll(small):
@@ -222,7 +233,7 @@ def test_breadcrumb_back_keeps_saved_scroll(small):
     small.locator("#browse-header").click()      # ↩
     small.wait_for_timeout(600)
     top = _scroll(small)["top"]
-    assert abs(top - saved) <= 2, f"親の保存位置({saved}) が復元される (top={top})"
+    assert abs(top - saved) <= TOL, f"親の保存位置({saved}) が復元される (top={top})"
 
 
 def test_viewer_return_beats_saved_scroll(small):
@@ -242,7 +253,7 @@ def test_viewer_return_beats_saved_scroll(small):
     ow_top = _tile_top(small, "group/other_work")
     assert ow_top is not None and ow_top > 0, "前提: other_work は 2 行目にある"
     top = _scroll(small)["top"]
-    assert abs(top - ow_top) <= 2, f"保存位置({saved})ではなく other_work({ow_top}) (top={top})"
+    assert abs(top - ow_top) <= TOL, f"保存位置({saved})ではなく other_work({ow_top}) (top={top})"
 
 
 def test_back_without_viewer_restores_saved_scroll(small):
@@ -257,7 +268,7 @@ def test_back_without_viewer_restores_saved_scroll(small):
     small.wait_for_function("() => window.currentBrowsePath === 'group'", timeout=5000)
     small.wait_for_timeout(500)
     top = _scroll(small)["top"]
-    assert abs(top - saved) <= 2, f"Back で保存位置({saved})が復元される (top={top})"
+    assert abs(top - saved) <= TOL, f"Back で保存位置({saved})が復元される (top={top})"
 
 
 def test_reopen_same_level_drops_viewer_marker(small):
@@ -404,6 +415,6 @@ def test_apply_geometry_in_list_and_card(small, mode, clicks):
     assert target, "前提: スクロール範囲内にタイルがある"
     small.evaluate("(p) => window.BrowseScroll.apply(p)", target)
     top = _scroll(small)["top"]
-    assert abs(top - _tile_top(small, target)) <= 2, f"{mode}: apply がタイル上端に合わせる (top={top})"
+    assert abs(top - _tile_top(small, target)) <= TOL, f"{mode}: apply がタイル上端に合わせる (top={top})"
     small.evaluate("() => window.BrowseScroll.apply(null)")
     assert _scroll(small)["top"] == 0, f"{mode}: apply(null) は上端"
