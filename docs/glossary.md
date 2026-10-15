@@ -368,7 +368,11 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 
 ### 画像CacheFirst戦略 (Image CacheFirst)
 - **根拠**: `cacheNameFor()` → `bookq-work-<encoded>-v1` / フォールバック `bookq-images-fallback` (sw.js) （206 Range応答は非保存）
-- **説明**: 作品ごとのキャッシュを優先して画像を返し、ミス時はネットワーク取得を保存する。
+- **説明**: 作品ごとのキャッシュを優先して画像を返し、ミス時はネットワーク取得（`cache: "no-store"` でHTTPキャッシュを迂回）を保存する。ヒット時は次項の再検証を通す。
+
+### 画像キャッシュ再検証 (Image Cache Revalidation)
+- **根拠**: `revalidateRequest()` / `REVALIDATE_TIMEOUT_MS = 1200` (sw.js) （ヒット時に `If-None-Match`/`If-Modified-Since` で条件付きGET。304 はキャッシュ継続、200 は差し替えて新バイトを返す。オフライン・タイムアウト・非OKはキャッシュにフォールバック）
+- **説明**: 作品の画像URLは差し替え後も不変なため、キャッシュを無条件に返すとライブラリ側で直した画像が端末へ永久に届かない（2026-10-13 の実機報告）。ヒット時は必ず再検証し、304 では本文を転送し直さない。
 
 ### 自動キャッシュ (Auto-cache)
 - **根拠**: sw.js fetch ハンドラの CacheFirst 保存処理 / `PREFETCH_AHEAD = 8` (app.js)
@@ -409,6 +413,10 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 ### オフライン削除 (Offline Delete)
 - **根拠**: `deleteWork()` (app.js) （`caches.delete` + IndexedDB メタ削除）
 - **説明**: 作品キャッシュとメタをまとめて解放する。
+
+### 全データ削除 ／ 全消去 (Wipe All)
+- **根拠**: `OfflineCore.wipeTargets()` / `OfflineCore.wipeClientData()` (offline-core.js) と ⑥ 全消去の `doWipeAll()` (offline-harness.html) （`bookq-work-*` / `bookq-api-*` / `bookq-images-*` を削除、`bookq-shell-*` は保持。IndexedDB は作品レコード+ツリー スナップショットを `OfflineStore.clear()` で消し、`bookq_progress` 等の読書データも削除）
+- **説明**: 端末のデータをまとめて消す出口。**IndexedDB レコードを持たない「閲覧だけで作られた `bookq-work-*`」も対象**に含む（保存作品が0件でもボタンが有効）。QA フラグ（`bookq_harness` / `bookq_enable_sw` / `bookq_touch` / `bookq_perf`）とアプリ本体の SHELL は残す。
 
 ### オフラインバッジと操作ボタン (Offline Badge & Controls)
 - **根拠**: `offlineControlsHtml()` / `#tile-grid` への委譲リスナ （✓オフライン / ⬇︎ / DL / 削除）
