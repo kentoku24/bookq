@@ -119,6 +119,11 @@ def _chapter(page):
     return page.evaluate("() => (window.currentViewerState() || {}).folder || null")
 
 
+def _decide(page, opts):
+    """BrowseScroll.decide を DOM 計測なしで評価する（決定表の pin 用）。"""
+    return page.evaluate("(o) => window.BrowseScroll.decide(o)", opts)
+
+
 def test_fresh_open_without_progress_starts_at_top(small):
     """上端: 親をスクロールしていても、新しく開いた階層は上端から始まる。"""
     small.evaluate("() => { document.getElementById('sidebar-scroll').scrollTop = 500; }")
@@ -255,7 +260,7 @@ def test_decide_exposes_decision_table(small):
     """decide() の決定表（DOM 計測なし）とマーカーの寿命。"""
     _open(small, SERIES)
     _assert_scrollable(small)
-    d = lambda o: small.evaluate("(o) => window.BrowseScroll.decide(o)", o)  # noqa: E731
+    d = lambda o: _decide(small, o)  # noqa: E731
     assert d({"level": None, "cause": "restore", "hasSaved": False}) == {"via": "top", "anchor": None}
     assert d({"level": None, "cause": "restore", "hasSaved": True}) == {"via": "saved", "anchor": None}
     assert d({"level": SERIES, "cause": "restore", "hasSaved": True}) == {"via": "saved", "anchor": None}
@@ -290,6 +295,19 @@ def test_decide_exposes_decision_table(small):
     _navigate(small, "group/deep_series", "group/deep_series/vol1")
     assert d({"level": "group/deep_series", "cause": "open", "hasSaved": False}) == {
         "via": "progress", "anchor": "group/deep_series/vol1"
+    }
+
+
+def test_marker_chapter_not_in_visible_children_falls_back(small):
+    """§4: 章がこの階層の表示子に無い → viewer にせず saved / top へ落ちる。"""
+    _open(small, SERIES)
+    small.evaluate("(p) => window.BrowseScroll.noteViewerReturn(p.level, p.chapter)",
+                   {"level": SERIES, "chapter": "group/other_work"})
+    assert _decide(small, {"level": SERIES, "cause": "restore", "hasSaved": False}) == {
+        "via": "top", "anchor": None
+    }
+    assert _decide(small, {"level": SERIES, "cause": "restore", "hasSaved": True}) == {
+        "via": "saved", "anchor": None
     }
 
 
