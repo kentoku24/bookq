@@ -1,0 +1,243 @@
+{
+  // bookq の Devin CLI 権限設定 (コミット対象・チーム共通)。
+  // AGENTS.md §1/§6 と opencode.json の permission ポリシーを Devin 形式で
+  // 反映したもの (opencode.json の permission は Devin に import されないため
+  // こちらで別途管理する)。
+  //
+  // 評価順: deny > ask > allow。同一レベル内では、より具体的な allow が
+  // 広い ask を上書きできる (例: `Exec(docker)` を ask にしつつ
+  // `Exec(docker ps)` を allow すると docker の読み取り系だけ通る)。
+  // `a && b` のような複合コマンドはセグメント毎に評価されるため、
+  // 先頭を許可しても後段の deny は効く。
+  "permissions": {
+    "deny": [
+      // .env — AGENTS.md §6: 読み取りも書き込みも禁止 (ツール経由 + 代表的な shell 経路)
+      "Read(.env*)",
+      "Read(**/.env*)",
+      "Write(.env*)",
+      "Write(**/.env*)",
+      "Exec(cat .env)",
+      "Exec(cat .env.local)",
+      "Exec(cat .env.backup)",
+      "Exec(head .env)",
+      "Exec(tail .env)",
+      "Exec(source .env)",
+      "Exec(. .env)",
+
+      // 破壊的・権限昇格操作 (AGENTS.md §6)
+      "Exec(sudo)",
+      "Exec(rm -rf)",
+      "Exec(rm -fr)",
+      "Exec(rm -Rf)",
+      "Exec(rm -r -f)",
+      "Exec(rm -f -r)",
+
+      // main への直接 push は禁止 (AGENTS.md §1)。回避形があり得るので
+      // Exec(git push) 自体は ask にして全経路を人間確認に流す
+      "Exec(git push origin main)",
+      "Exec(git push -u origin main)",
+      "Exec(git push --set-upstream origin main)",
+      "Exec(git push origin HEAD:main)",
+      "Exec(git push --force)",
+      "Exec(git push -f)",
+      "Exec(git push --force-with-lease)",
+      "Exec(git push --no-verify)",
+
+      // コミットフックのバイパスは禁止
+      "Exec(git commit --no-verify)",
+      "Exec(git commit -n)",
+      "Exec(git merge --no-verify)",
+
+      // opencode.json と同等 — wget 全般 / curl の書き込み系メソッド
+      "Exec(wget)",
+      "Exec(curl -X POST)",
+      "Exec(curl -X PUT)",
+      "Exec(curl -X PATCH)",
+      "Exec(curl -X DELETE)",
+      "Exec(curl --request POST)",
+      "Exec(curl --request PUT)",
+      "Exec(curl --request PATCH)",
+      "Exec(curl --request DELETE)"
+    ],
+    "ask": [
+      // feature branch への push は許可だが必ず確認 (deny の main/force 規則を先に評価)
+      "Exec(git push)",
+
+      // 本番・共有 deploy エンジン (AGENTS.md §8 — メイン checkout 専用)
+      "Exec(./prd.sh)",
+      "Exec(bash prd.sh)",
+      "Exec(./rebuild.sh)",
+      "Exec(bash rebuild.sh)",
+
+      // dev プールの全撤去は破壊的なので確認 (単体 up/down/list/url/logs/gc は許可側)
+      "Exec(./dev.sh down --all)",
+      "Exec(bash dev.sh down --all)",
+
+      // git の作業ツリー破壊系・設定変更系 (広い allow Exec(git) からの例外)
+      "Exec(git reset --hard)",
+      "Exec(git clean)",
+      "Exec(git checkout --)",
+      "Exec(git checkout .)",
+      "Exec(git restore .)",
+      "Exec(git restore --worktree)",
+      "Exec(git worktree remove)",
+      "Exec(git worktree prune)",
+      "Exec(git branch -D)",
+      "Exec(git tag -d)",
+      "Exec(git update-ref)",
+      "Exec(git rebase)",
+      "Exec(git stash drop)",
+      "Exec(git stash clear)",
+      "Exec(git config)",
+      "Exec(git remote add)",
+      "Exec(git remote set-url)",
+      "Exec(git remote remove)",
+
+      // docker の変更系 (読み取り系は allow 側で個別に通す)。
+      // worktree での素の docker compose up は compose label 競合を起こすため常に確認
+      "Exec(docker)",
+
+      // curl は GET 系のローカル/開発環境ヘルスチェックのみ allow 側へ
+      "Exec(curl)",
+
+      // gh の副作用系・認証系 (gh pr/issue/run/search 等のワークフローは許可側)
+      "Exec(gh api)",
+      "Exec(gh auth)",
+      "Exec(gh secret)",
+      "Exec(gh repo)",
+      "Exec(gh release)",
+      "Exec(gh gist)",
+      "Exec(gh pr merge)",
+
+      // ファイル削除は確認 (agent 生成の一時ファイル含め)
+      "Exec(rm)"
+    ],
+    "allow": [
+      // この repo 内の編集は自動承認 (Accept Edits 相当)。deny の .env 規則が優先
+      "Write(**)",
+
+      // 標準ワークフロー: ブランチ操作・commit・worktree add 等を含む
+      // (push 系・破壊系は上の ask/deny が先に評価される)
+      "Exec(git)",
+
+      // bookq の dev 環境マネージャ (up/down/url/logs/list/gc)
+      "Exec(./dev.sh)",
+      "Exec(bash dev.sh)",
+      "Exec(./scripts/)",
+      "Exec(bash scripts/)",
+      "Exec(python3 scripts/)",
+      "Exec(./setup-hooks.sh)",
+      "Exec(bash setup-hooks.sh)",
+
+      // テスト / Python ツールチェーン
+      // 例: uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+      "Exec(uv run)",
+      "Exec(uvx)",
+      "Exec(uv sync)",
+      "Exec(pytest)",
+      "Exec(BOOKQ_TEST_MODE=true uv run)",
+
+      // GitHub CLI — PR/issue 作成・閲覧はワークフローの一部
+      // (api/auth/repo/release/pr merge 等は ask 側)
+      "Exec(gh)",
+
+      // docker 読み取り系 (Exec(docker) ask に対する具体的 allow の carve-out)
+      "Exec(docker ps)",
+      "Exec(docker inspect)",
+      "Exec(docker logs)",
+      "Exec(docker stats)",
+      "Exec(docker images)",
+      "Exec(docker volume ls)",
+      "Exec(docker network ls)",
+      "Exec(docker compose ps)",
+      "Exec(docker compose logs)",
+      "Exec(docker compose config)",
+      "Exec(docker compose images)",
+      "Exec(docker compose top)",
+
+      // curl — localhost / dev-XX.<tailnet>.ts.net の GET ヘルスチェックのみ
+      "Exec(curl http://127.0.0.1",
+      "Exec(curl http://localhost",
+      "Exec(curl -s http://127.0.0.1",
+      "Exec(curl -s http://localhost",
+      "Exec(curl -sf http://127.0.0.1",
+      "Exec(curl -sf http://localhost",
+      "Exec(curl -sS http://127.0.0.1",
+      "Exec(curl -sS http://localhost",
+      "Exec(curl -o /dev/null http://127.0.0.1",
+      "Exec(curl -o /dev/null http://localhost",
+      "Exec(curl -I http://127.0.0.1",
+      "Exec(curl -I http://localhost",
+      "Exec(curl https://dev-",
+      "Exec(curl -s https://dev-",
+      "Exec(curl -sf https://dev-",
+      "Exec(curl -sS https://dev-",
+      "Exec(curl -o /dev/null https://dev-",
+      "Exec(curl -s -o /dev/null https://dev-",
+      "Exec(curl -s -o /dev/null http://127.0.0.1",
+      "Exec(curl -s -o /dev/null http://localhost",
+
+      // iOS Simulator / macOS (ios-simulator skill 経由の検証用)
+      "Exec(xcrun)",
+      "Exec(open)",
+      "Exec(defaults read)",
+      "Exec(plutil -p)",
+      "Exec(tailscale status)",
+      "Exec(tailscale ip)",
+      "Exec(tailscale whois)",
+
+      // 読み取り・テキスト処理・ナビゲーション系ユーティリティ
+      "Exec(cd)",
+      "Exec(ls)",
+      "Exec(pwd)",
+      "Exec(echo)",
+      "Exec(printf)",
+      "Exec(which)",
+      "Exec(file)",
+      "Exec(stat)",
+      "Exec(realpath)",
+      "Exec(basename)",
+      "Exec(dirname)",
+      "Exec(date)",
+      "Exec(uname)",
+      "Exec(sw_vers)",
+      "Exec(df)",
+      "Exec(du)",
+      "Exec(ps)",
+      "Exec(lsof)",
+      "Exec(find)",
+      "Exec(wc)",
+      "Exec(tree)",
+      "Exec(column)",
+      "Exec(cat)",
+      "Exec(head)",
+      "Exec(tail)",
+      "Exec(rg)",
+      "Exec(grep)",
+      "Exec(jq)",
+      "Exec(sort)",
+      "Exec(uniq)",
+      "Exec(tr)",
+      "Exec(cut)",
+      "Exec(diff)",
+      "Exec(paste)",
+      "Exec(comm)",
+      "Exec(pbcopy)",
+      "Exec(pbpaste)",
+      "Exec(mkdir)",
+      "Exec(touch)",
+      "Exec(chmod +x)",
+      "Exec(bash -n)",
+
+      // Chrome DevTools MCP (ブラウザデバッグ用に導入済み)
+      "mcp__chrome-devtools__*",
+
+      // よく使う参照先の fetch
+      "Fetch(domain:github.com)",
+      "Fetch(domain:api.github.com)",
+      "Fetch(domain:raw.githubusercontent.com)",
+      "Fetch(domain:pypi.org)",
+      "Fetch(domain:tailscale.com)"
+    ]
+  }
+}
