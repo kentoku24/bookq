@@ -25,8 +25,10 @@ def test_top_page_fetches_folders_body_once(server, browser):
 
     Todo2 の shallow-first 契約: 1 回目 `?depth=1` (first paint)、2 回目 full
     (同一 DOM への追従)。ボディ判定は transfer >= encoded の実転送で行う。
-    3 回目以降は tryAutoSync → revalidateFoldersForOnline の If-None-Match 付き
-    再検証で 304 になり、転送量はヘッダ分のみ（< 2KB）でなければならない。
+    起動時の tryAutoSync は freshness gate（5 分）に守られ第 3 リクエストを
+    出さない — 3 回目はゲートを越えた手動 revalidateFoldersForOnline() の
+    If-None-Match 付き warm 条件付き再検証で 304 になり、転送量はヘッダ分のみ
+    （< 2KB）でなければならない。
     """
     context = browser.new_context(viewport={"width": 1280, "height": 800})
     page = context.new_page()

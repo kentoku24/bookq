@@ -14,6 +14,8 @@
 
 1. **CI（決定的指標）** `tests/test_perf_budget.py` — `/api/folders` ボディ転送 2 回（shallow `?depth=1` 先行 + full 追従）・gzip 比、
    本を開いた直後の `/image/` リクエスト数 = `PREFETCH_AHEAD + 1`、ページ送り 10 回で long task 0。
+   `tests/test_frontend_perf_lifecycle.py` — 起動リクエスト回数・warm 304 再検証の結合・
+   生成ガード・worker/idle 永続化・viewport prefetch 選択の決定的カバレッジ。
    `tests/` 一括実行に含まれる。
 2. **手動（ms 指標）** `scripts/perf/measure.py` — 実データのある example-host に対して PR ごとに before/after。
 

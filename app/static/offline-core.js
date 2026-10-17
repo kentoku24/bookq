@@ -299,14 +299,42 @@
     // back to an immediate write where idle callbacks don't exist) so warm
     // revalidation never blocks the redraw. Default stays immediate so
     // reload-restore tests observe the snapshot without extra waiting.
+    // Generation + cancellation are established at call time: the pending
+    // slot's cancel() drops the queued idle callback (where cancelIdleCallback
+    // exists) and settles the promise immediately, and a stale idle callback
+    // re-checks before it can spawn the real write — latest-wins still holds
+    // while nothing runs before idle.
+    function _deferTreeJob(gen, run) {
+      return new Promise(function (resolve, reject) {
+        let settled = false;
+        let idleId = null;
+        const slot = {
+          cancel() {
+            if (settled) return;
+            settled = true;
+            if (idleId !== null) {
+              try { if (typeof cancelIdleCallback === "function") cancelIdleCallback(idleId); } catch (e) {}
+            }
+            if (_treeWriterSlot === slot) _treeWriterSlot = null;
+            resolve();
+          }
+        };
+        idleId = requestIdleCallback(function () {
+          if (settled || gen !== _treeWriterGen) return;
+          settled = true;
+          if (_treeWriterSlot === slot) _treeWriterSlot = null;
+          try { Promise.resolve(run()).then(resolve, reject); }
+          catch (e) { reject(e); }
+        });
+        _treeWriterSlot = slot;
+      });
+    }
     async function putTree(data, opts) {
       _cancelTreeWrites();
       const gen = _treeWriterGen;
       if (!Array.isArray(data)) return Promise.resolve();
       if (opts && opts.defer && typeof requestIdleCallback === "function") {
-        return new Promise((resolve) => {
-          requestIdleCallback(() => { _writeTree(data, gen).then(resolve, resolve); });
-        });
+        return _deferTreeJob(gen, function () { return _writeTree(data, gen); });
       }
       return _writeTree(data, gen);
     }
@@ -323,66 +351,76 @@
       _cancelTreeWrites();
       const gen = _treeWriterGen;
       const treeEnvelope = !!(opts && opts.treeEnvelope);
-      return new Promise((resolve, reject) => {
-        if (typeof jsonText !== "string" || !jsonText.length) { resolve(); return; }
-        function fallback() {
-          if (gen !== _treeWriterGen) { resolve(); return; }
-          const r = _parseTreeJson(jsonText, treeEnvelope);
-          if (r.error) { reject(r.error); return; }
-          _writeTree(r.data, gen).then(resolve, reject);
-        }
-        let worker = null;
-        if (typeof Worker === "function") {
-          try { worker = new Worker(TREE_WRITER_URL); } catch (e) { worker = null; }
-        }
-        if (!worker) { fallback(); return; }
-        let settled = false;
-        const timer = setTimeout(function () { fail(); }, TREE_WRITER_TIMEOUT_MS);
-        function dispose(ownGlobals) {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          worker.onmessage = null;
-          worker.onerror = null;
-          if (ownGlobals) {
-            if (_treeWriterSlot === slot) _treeWriterSlot = null;
-            if (_treeWriterWorker === worker) _treeWriterWorker = null;
-          }
-          try { worker.terminate(); } catch (e) {}
-        }
-        const slot = {
-          cancel() {
-            if (settled) return;
-            dispose(false);
-            resolve();
-          }
-        };
-        function settle(fn) {
-          if (settled) return;
-          dispose(true);
-          fn();
-        }
-        function fail() {
-          settle(function () {
+      if (typeof jsonText !== "string" || !jsonText.length) return Promise.resolve();
+      function start() {
+        return new Promise((resolve, reject) => {
+          function fallback() {
             if (gen !== _treeWriterGen) { resolve(); return; }
-            fallback();
-          });
-        }
-        _treeWriterWorker = worker;
-        _treeWriterSlot = slot;
-        worker.onmessage = function (e) {
-          if (settled || gen !== _treeWriterGen) return;
-          const d = e && e.data;
-          if (d && d.ok) { settle(resolve); return; }
-          if (d && d.invalid) { settle(function () { reject(new Error("invalid tree snapshot")); }); return; }
-          fail();
-        };
-        worker.onerror = function () {
-          if (settled || gen !== _treeWriterGen) return;
-          fail();
-        };
-        try { worker.postMessage({ text: jsonText, envelope: treeEnvelope }); } catch (e) { fail(); }
-      });
+            const r = _parseTreeJson(jsonText, treeEnvelope);
+            if (r.error) { reject(r.error); return; }
+            _writeTree(r.data, gen).then(resolve, reject);
+          }
+          let worker = null;
+          if (typeof Worker === "function") {
+            try { worker = new Worker(TREE_WRITER_URL); } catch (e) { worker = null; }
+          }
+          if (!worker) { fallback(); return; }
+          let settled = false;
+          const timer = setTimeout(function () { fail(); }, TREE_WRITER_TIMEOUT_MS);
+          function dispose(ownGlobals) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            worker.onmessage = null;
+            worker.onerror = null;
+            if (ownGlobals) {
+              if (_treeWriterSlot === slot) _treeWriterSlot = null;
+              if (_treeWriterWorker === worker) _treeWriterWorker = null;
+            }
+            try { worker.terminate(); } catch (e) {}
+          }
+          const slot = {
+            cancel() {
+              if (settled) return;
+              dispose(false);
+              resolve();
+            }
+          };
+          function settle(fn) {
+            if (settled) return;
+            dispose(true);
+            fn();
+          }
+          function fail() {
+            settle(function () {
+              if (gen !== _treeWriterGen) { resolve(); return; }
+              fallback();
+            });
+          }
+          _treeWriterWorker = worker;
+          _treeWriterSlot = slot;
+          worker.onmessage = function (e) {
+            if (settled || gen !== _treeWriterGen) return;
+            const d = e && e.data;
+            if (d && d.ok) { settle(resolve); return; }
+            if (d && d.invalid) { settle(function () { reject(new Error("invalid tree snapshot")); }); return; }
+            fail();
+          };
+          worker.onerror = function () {
+            if (settled || gen !== _treeWriterGen) return;
+            fail();
+          };
+          try { worker.postMessage({ text: jsonText, envelope: treeEnvelope }); } catch (e) { fail(); }
+        });
+      }
+      // Defer holds the whole Worker/fallback write until idle; _deferTreeJob's
+      // pending slot already owns cancellation so superseded jobs settle
+      // without ever spawning or parsing. Once idle runs, start()'s worker
+      // slot replaces it.
+      if (opts && opts.defer && typeof requestIdleCallback === "function") {
+        return _deferTreeJob(gen, start);
+      }
+      return start();
     }
     async function _writeTree(data, gen) {
       if (!Array.isArray(data)) return Promise.resolve();

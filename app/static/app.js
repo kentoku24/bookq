@@ -320,7 +320,10 @@
     _onlineRevalidateTimer = setTimeout(()=>{ _onlineRevalidateTimer=null; revalidateFoldersForOnline(); }, 500);
   }
   window.addEventListener('online',()=>{ updateOnlineStatus(); updateStorageBar(); scheduleOnlineRevalidation(); });
-  window.addEventListener('offline',()=>{ updateOnlineStatus(); updateStorageBar(); });
+  // Going offline must invalidate the freshness stamp: an online→offline→online
+  // flip inside the 5-minute window has to revalidate immediately, since the
+  // tree could not be revalidated while offline.
+  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; if(_onlineRevalidateTimer){ clearTimeout(_onlineRevalidateTimer); _onlineRevalidateTimer = null; } updateOnlineStatus(); updateStorageBar(); });
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   function ensurePersist(deps){
     if(persistRequested) return;
@@ -1077,12 +1080,19 @@
       if (typeof window !== "undefined") window.__cc_thumbIndex = {tree:nodes, single:b.singles, full:b.full};
     } catch(e) { console.warn(e); }
   }
-  function setFullPathsAndIndex(nodes){
-    _indexGen++;
+  // Sync build+publish WITHOUT superseding: callers that only need a map for
+  // the current tree (buildNodeMap read/repair) must not cancel an in-flight
+  // async build. setFullPathsAndIndex keeps the generation bump — an explicit
+  // public replacement still supersedes.
+  function _buildIndexSync(nodes){
     const b = _indexBuilder(nodes);
     while (!b.step()) {}
     _publishIndex(nodes, b);
     return b.map;
+  }
+  function setFullPathsAndIndex(nodes){
+    _indexGen++;
+    return _buildIndexSync(nodes);
   }
   function setFullPathsAndIndexAsync(nodes){
     const gen = ++_indexGen;
@@ -1227,9 +1237,11 @@
   function buildNodeMap(){
     // Todo 5: the map is built by setFullPathsAndIndex on every restoreTree;
     // return the cache when it tracks the live tree, rebuild (one walk) only
-    // when an out-of-band mutation replaced the reference.
+    // when an out-of-band mutation replaced the reference. The repair walk
+    // uses the non-superseding helper — a pending async full-index build
+    // must still finish and publish.
     if (_indexedTreeRef === tree && _nodeMapCache) return _nodeMapCache;
-    return setFullPathsAndIndex(tree);
+    return _buildIndexSync(tree);
   }
   // Todo 4: single delegated #tile-grid listener + closest() — replaces the
   // per-tile addEventListener loops (N listeners → 1). The selector arg is
@@ -1310,7 +1322,7 @@
       const _OT = window.OfflineTree;
       if (_raw && _OT && typeof _OT.putJson === "function"){
         const _txt = typeof _raw === "string" ? _raw : _raw.text;
-        void _OT.putJson(_txt, {treeEnvelope: !!(typeof _raw === "object" && _raw.treeEnvelope)}).catch(function(){});
+        void _OT.putJson(_txt, Object.assign({}, opts, {treeEnvelope: !!(typeof _raw === "object" && _raw.treeEnvelope)})).catch(function(){});
       } else {
         void window.OfflineTree.putTree(data, opts).catch(function(){});
       }
@@ -1394,8 +1406,11 @@
       // never delay first paint.
       if (!await restoreTree(data, {shallow:false})) return;
       if (_loadGen !== _loadFoldersGen) return;
-      _onlineRevalidateLast = Date.now();
-      _persistTreeSnapshot(data);
+      // Stamp only a genuinely-online load: an offline cold start must keep
+      // _onlineRevalidateLast=0 so the reconnect revalidation fires instead
+      // of being eaten by the freshness gate.
+      if (typeof navigator === 'undefined' || navigator.onLine) _onlineRevalidateLast = Date.now();
+      _persistTreeSnapshot(data, {defer:true});
       // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
       // a reload. The filled tree re-enters via restoreTree (existing path).
@@ -1410,6 +1425,9 @@
         }});
       } catch(e) { console.warn(e); }
     } catch(e){
+      // Recovery work is only valid while this load generation still owns the
+      // pipeline — a newer loadFolders must never see stale marks/renders.
+      if (_loadGen !== _loadFoldersGen) return;
       if (shallowOk){
         // Full failed after a shallow paint: stay on the shallow grid with
         // the waiting badge — treeLoaded stays false so neither prefetch nor
@@ -1420,14 +1438,19 @@
       let recovered = false;
       try {
         const snap = await window.OfflineTree.getTree();
+        if (_loadGen !== _loadFoldersGen) return;
         if (Array.isArray(snap) && snap.length>0) {
-          await restoreTree(snap);
+          // A false return means this load was superseded mid-restore — bail
+          // instead of treating it as recovered (no mark/render below).
+          if (!await restoreTree(snap)) return;
           recovered = true;
         }
       } catch(e) { console.warn(e); }
       if (!recovered) {
+        if (_loadGen !== _loadFoldersGen) return;
         if (tree && tree.length) {
           try { await refreshOfflineMap(); } catch(e) { console.warn(e); }
+          if (_loadGen !== _loadFoldersGen) return;
           renderView();
           markTreeReady();
           // Stale tree rendered — resolve so applyUrlState() still restores the view.
