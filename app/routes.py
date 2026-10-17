@@ -695,7 +695,7 @@ async def index(request: Request):
     if thumb_perf:
         context["thumbnail_perf"] = True
         context["thumbnail_probe"] = (
-            Path(__file__).parent / "static" / "thumbnail-probe.js"
+            Path(__file__).parent / "perf" / "thumbnail-probe.js"
         ).read_text(encoding="utf-8")
     response = render_template(request, "index.html", context)
     if thumb_perf:

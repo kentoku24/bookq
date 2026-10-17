@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-PROBE = (ROOT / "app/static/thumbnail-probe.js").read_text(encoding="utf-8")
+PROBE = (ROOT / "app/perf/thumbnail-probe.js").read_text(encoding="utf-8")
 SPEC = importlib.util.spec_from_file_location(
     "measure_thumbnails", ROOT / "scripts/perf/measure_thumbnails.py"
 )

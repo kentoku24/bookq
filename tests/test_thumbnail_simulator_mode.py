@@ -1,7 +1,7 @@
 """Integration tests for the dev-only ?thumb_perf=1 instrumentation mode.
 
 These tests assert the route/template wiring only — the metric itself is
-authored in scripts/perf/measure_thumbnails.py + app/static/thumbnail-probe.js
+authored in scripts/perf/measure_thumbnails.py + app/perf/thumbnail-probe.js
 and covered by tests/test_thumbnail_measurement.py.
 """
 
@@ -32,6 +32,12 @@ def test_normal_index_has_no_probe_or_panel(plain_client):
     assert PROBE_MARKER not in html
     assert "thumbnail-perf-panel" not in html
     assert "no-store" not in r.headers.get("cache-control", "")
+
+
+def test_probe_source_is_not_public_static_asset(plain_client):
+    """The shared probe is inlined by the gated route, never publicly served."""
+    r = plain_client.get("/static/thumbnail-probe.js")
+    assert r.status_code == 404
 
 
 def test_thumb_perf_inlines_probe_and_panel(plain_client):
