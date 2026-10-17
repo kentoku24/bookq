@@ -44,7 +44,7 @@ uv run --with playwright --with-requirements requirements-dev.txt \
 
 ### iOS Simulator での計測
 
-iOS Simulator の Safari（WebKit）でも同じ `app/static/thumbnail-probe.js` と同じ指標定義で計測できる。dev 環境の `BOOKQ_TEST_MODE` でのみ有効な `?thumb_perf=1` を付けて開くと、計測終了後に結果パネルが出る。
+iOS Simulator の Safari（WebKit）でも同じ `app/perf/thumbnail-probe.js` と同じ指標定義で計測できる。dev 環境の `BOOKQ_TEST_MODE` でのみ有効な `?thumb_perf=1` を付けて開くと、計測終了後に結果パネルが出る。プローブ本体は `/static` に公開しない。
 
 ```bash
 ./dev.sh up ios-live-perf-explore --local --fixture --port 8099

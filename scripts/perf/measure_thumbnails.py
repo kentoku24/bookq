@@ -11,7 +11,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-PROBE = Path(__file__).resolve().parents[2] / "app/static/thumbnail-probe.js"
+PROBE = Path(__file__).resolve().parents[2] / "app/perf/thumbnail-probe.js"
 PROFILES = {
     "iphone": {
         "viewport": {"width": 390, "height": 844},
