@@ -19,6 +19,24 @@
    `tests/` 一括実行に含まれる。
 2. **手動（ms 指標）** `scripts/perf/measure.py` — 実データのある example-host に対して PR ごとに before/after。
 
+## サムネイル表示速度の再計測
+
+PR #39 で追加した成功判定付きの計測。既存 `scripts/perf/measure.py` の値や旧 `img.complete` 指標とは別バージョンの指標であり、直接比較しない。
+
+```bash
+# 隔離した dev 環境の loopback URL を指定（本番 URL は受け付けない）
+uv run --with playwright --with-requirements requirements-dev.txt \
+  python scripts/perf/measure_thumbnails.py http://127.0.0.1:8099 --runs 3
+```
+
+- `first_visible_ms`: navigation start から、画面内で最初の画像の読み込み・decode 成功を animation frame 上で確認するまで（shallow 表示を含む）。
+- `visible_ready_ms`: full tree ready 後、画面と sidebar scrollport の両方に入る画像すべてが読み込み・decode に成功したことを animation frame 上で確認するまで。DOM/対象画像と成功状態が 250ms 安定した後に確定し、250ms の確認待ちは値に加算しない。ブラウザ内の表示準備完了の代理指標であり、実画面の発光時刻ではない。
+- 404・decode 失敗・対象 0 枚・タイムアウトを表示成功にしない。失敗時の `visible_ready_ms` は null、壊れた画像数と未完了数を記録する。全 run 成功時のみ中央値を出し、失敗があれば終了コード 1。
+- 既定は Chromium の iPhone 相当（390x844、DPR3）、`--profile desktop` で 1280x800。実機 Safari の結果ではない。各 run は新規 browser context、Service Worker は無効。サーバー側キャッシュはリセットしないため、before/after はデータ・表示領域・キャッシュ条件を揃える。
+- 初期表示の画面内だけが対象。画面外 lazy 画像は待たず、scroll・階層移動後の速度やオフライン性能は測らない。画像の読み込み設定は変更しない。
+- 結果は既定で `.omo/evidence/thumbnail-speed-<timestamp>/thumbnails.json`。`--out <新規ディレクトリ>`、`--timeout-ms 30000` を指定可能。既存出力ディレクトリは拒否し、過去データを上書きしない。出力には作品名・画像 URL・スクリーンショットを含めない。
+- 定義の回帰テスト: `tests/test_thumbnail_measurement.py`（full tree 待ち、decode、破損画像、scrollport、DOM 置換、失敗 run の集計）。速度の固定 ms 閾値は CI に置かない。
+
 ## 手動計測の手順
 
 1. ブランチを push し、example-host 側で `git pull` → `./dev.sh up --lan-allow --local`（人間が実行）。
