@@ -98,15 +98,6 @@
       // curl は GET 系のローカル/開発環境ヘルスチェックのみ allow 側へ
       "Exec(curl)",
 
-      // gh の副作用系・認証系 (gh pr/issue/run/search 等のワークフローは許可側)
-      "Exec(gh api)",
-      "Exec(gh auth)",
-      "Exec(gh secret)",
-      "Exec(gh repo)",
-      "Exec(gh release)",
-      "Exec(gh gist)",
-      "Exec(gh pr merge)",
-
       // ファイル削除は確認 (agent 生成の一時ファイル含め)
       "Exec(rm)"
     ],
@@ -144,12 +135,8 @@
       "Exec(python)",
       "Exec(sqlite3)",
 
-      // GitHub CLI — PR/issue 作成・閲覧はワークフローの一部
-      // (api/auth/repo/release/pr merge 等は ask 側)
+      // GitHub CLI 全操作を許可 (ユーザ指定 — pr merge/api POST/auth 系含む)
       "Exec(gh)",
-      // gh repo ask に対する読み取り系 carve-out
-      "Exec(gh repo view)",
-      "Exec(gh repo list)",
 
       // docker 読み取り系 (Exec(docker) ask に対する具体的 allow の carve-out)
       "Exec(docker ps)",
