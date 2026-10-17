@@ -29,8 +29,12 @@ runs-on: macos
 initialize: |
   curl -LsSf https://astral.sh/uv/install.sh | sh
   echo "PATH=$HOME/.local/bin:$PATH" >> $ENVRC
+  echo "SIMULATOR_DEVICE=iPhone 17" >> $ENVRC
   $HOME/.local/bin/uv python install 3.12
   $HOME/.local/bin/uv run --python 3.12 --with playwright playwright install chromium
+  if ! xcrun simctl list runtimes | grep -q "iOS 27.0"; then
+    xcodebuild -downloadPlatform iOS -buildVersion 27.0
+  fi
   brew install pipx sevenzip
   brew tap facebook/fb && brew install idb-companion
   $HOME/.local/bin/pipx install fb-idb || pipx install fb-idb
@@ -40,6 +44,7 @@ knowledge:
       uv run --python 3.12 --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
   - name: ios-simulator
     contents: |
+      # Snapshot pins iOS 27.0; open-simulator.sh defaults to SIMULATOR_DEVICE="iPhone 17".
       BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images uv run --python 3.12 --with-requirements requirements-dev.txt uvicorn app.main:app --port 8080 &
       ./scripts/open-simulator.sh check && ./scripts/open-simulator.sh http://127.0.0.1:8080
       # タップ駆動: idb ui tap x y --udid <udid> / ./scripts/sim-gesture-battery.sh <url>
