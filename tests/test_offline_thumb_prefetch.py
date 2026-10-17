@@ -519,3 +519,98 @@ def test_prefetch_visible_preference_over_cap(browser, server):
         )
     finally:
         context.close()
+
+
+def test_prefetch_viewport_rank_deterministic(browser, server):
+    """Hard-coded rects → exact fetch order. Independent of the app's rank
+    algorithm (no ELIGIBLE_URLS_JS mirror): pinned rects + expected URLs catch
+    sign/off-by-one changes directly.
+
+    Scrollport {top:100,bottom:300,left:20,right:220} in an 800x600 window.
+    DOM order: farbelow, belowedge, aboveedge, farabove, visible-b, visible-a,
+    leftclip, rightclip, zero-size — all normal x = left40..right60.
+    Expected fetch order EXACTLY: visible-b, visible-a, aboveedge, belowedge.
+    """
+    context = browser.new_context(viewport={"width": 800, "height": 600})
+    page = context.new_page()
+    try:
+        _goto_offline(page, server)
+        # Hold idle + capture thumb fetches before any DOM churn can schedule.
+        page.evaluate(
+            """() => {
+                window.__idleQueue = [];
+                window.requestIdleCallback = (fn) => { window.__idleQueue.push(fn); return window.__idleQueue.length; };
+                window.__cap = [];
+                const of = window.fetch.bind(window);
+                window.__capFetch = of;
+                window.fetch = (input, init) => {
+                    const u = typeof input === 'string' ? input : (input && input.url) || '';
+                    if (u.indexOf('/thumb/') === 0 || u.indexOf('/api/thumb-sprite') === 0) {
+                        window.__cap.push(u);
+                        return new Promise(r => setTimeout(
+                            () => r(new Response('thumb-bytes', {status: 200})), 15));
+                    }
+                    return of(input, init);
+                };
+                caches.match = async () => null;
+            }"""
+        )
+        page.evaluate(
+            """() => {
+                // Pinned scrollport + per-tile rects (DOM order as designed).
+                const s = document.getElementById('sidebar-scroll');
+                s.getBoundingClientRect = () =>
+                    ({top: 100, bottom: 300, left: 20, right: 220, width: 200, height: 200});
+                const grid = document.getElementById('tile-grid');
+                const specs = [
+                    ['farbelow',  {top: 501,  bottom: 521}],
+                    ['belowedge', {top: 500,  bottom: 520}],
+                    ['aboveedge', {top: -100, bottom: -80}],
+                    ['farabove',  {top: -130, bottom: -110}],
+                    ['visible-b', {top: 150,  bottom: 170}],
+                    ['visible-a', {top: 200,  bottom: 220}],
+                    ['leftclip',  {top: 150,  bottom: 170, left: 0,   right: 20}],
+                    ['rightclip', {top: 150,  bottom: 170, left: 220, right: 240}],
+                    ['zerosize',  {top: 150,  bottom: 170, zero: true}],
+                ];
+                grid.innerHTML = specs.map(([n]) =>
+                    `<div class="tile" data-path="${n}"><img src="/thumb/${n}/cover.png"></div>`
+                ).join('');
+                grid.querySelectorAll('.tile').forEach((el, i) => {
+                    const [, r] = specs[i];
+                    const left = r.left !== undefined ? r.left : 40;
+                    const right = r.right !== undefined ? r.right : 60;
+                    const rect = r.zero
+                        ? {top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0}
+                        : {top: r.top, bottom: r.bottom, left, right,
+                           width: right - left, height: r.bottom - r.top};
+                    el.getBoundingClientRect = () => rect;
+                });
+            }"""
+        )
+        # Drain the MutationObserver-triggered schedule, then cancel + reset —
+        # the manual prefetchThumbs below is the only batch that may record.
+        page.wait_for_timeout(300)
+        page.evaluate(
+            """() => {
+                const q = window.__idleQueue.splice(0);
+                q.forEach(f => { try { f(); } catch(e){} });
+                window.ThumbPrefetch.cancelThumbPrefetch();
+            }"""
+        )
+        page.wait_for_timeout(150)
+        page.evaluate("() => { window.__idleQueue.splice(0); window.__cap.length = 0; }")
+        calls = page.evaluate(
+            """async () => {
+                await window.__BOOKQ_DEBUG.prefetchThumbs();
+                return window.__cap;
+            }"""
+        )
+        assert calls == [
+            "/thumb/visible-b/cover.png",
+            "/thumb/visible-a/cover.png",
+            "/thumb/aboveedge/cover.png",
+            "/thumb/belowedge/cover.png",
+        ], f"exact visible→above→below order expected, got {calls}"
+    finally:
+        context.close()
