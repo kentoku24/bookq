@@ -37,6 +37,20 @@ uv run --with playwright --with-requirements requirements-dev.txt \
 - 結果は既定で `.omo/evidence/thumbnail-speed-<timestamp>/thumbnails.json`。`--out <新規ディレクトリ>`、`--timeout-ms 30000` を指定可能。既存出力ディレクトリは拒否し、過去データを上書きしない。出力には作品名・画像 URL・スクリーンショットを含めない。
 - 定義の回帰テスト: `tests/test_thumbnail_measurement.py`（full tree 待ち、decode、破損画像、scrollport、DOM 置換、失敗 run の集計）。速度の固定 ms 閾値は CI に置かない。
 
+### iOS Simulator での計測
+
+iOS Simulator の Safari（WebKit）でも同じ `app/static/thumbnail-probe.js` と同じ指標定義で計測できる。dev 環境の `BOOKQ_TEST_MODE` でのみ有効な `?thumb_perf=1` を付けて開くと、計測終了後に結果パネルが出る。
+
+```bash
+./dev.sh up ios-live-perf-explore --local --fixture --port 8099
+./scripts/open-simulator.sh 'http://127.0.0.1:8099/?thumb_perf=1'
+```
+
+- `--fixture` はツール動作確認用。実際の計測は実データを読み取り専用でマウントした dev 環境に対して同じ URL で行う。
+- 計測は成功または約 30 秒のタイムアウトで終了し、画面内にパネルが表示される。「JSONをコピー」「JSONを保存」で `window.__thumbnailProbeReport`（Web Inspector からも参照可）を出力、「再計測」で reload して別 run を取る。
+- `environment` に実 Safari の UA・実 viewport・DPR・`browser_cache`（`existing_browser_session_not_reset`）・Service Worker controller 有無が記録され、CLI の Chromium fresh-context 結果と区別できる。
+- キャッシュ・SW・データを勝手に消去しない。ハードウェア・キャッシュ条件が違うため Chromium CLI の値や実機 iPhone の発光時刻と同一ではなく、比較は揃えた条件内でのみ意味を持つ。
+
 ## 手動計測の手順
 
 1. ブランチを push し、example-host 側で `git pull` → `./dev.sh up --lan-allow --local`（人間が実行）。
