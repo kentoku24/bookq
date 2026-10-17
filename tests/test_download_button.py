@@ -420,7 +420,7 @@ def test_03_single_tap_stop_leaves_partial(page, server):
         assert _has(second_url), "second image (observed durable pre-stop) must persist after abort"
         if not _is_webkit():
             assert _has(first_url), "first image should be cached after partial abort"
-        cnt = page.evaluate("async () => { const c=await caches.open(window.OfflineStore.cacheNameFor('simple_manga')); const ks=await c.keys(); return ks.length; }")
+        cnt = page.evaluate("async () => { const c=await caches.open(window.OfflineStore.cacheNameFor('simple_manga')); const ks=await c.keys(); return ks.filter(k => new URL(k.url).pathname.startsWith('/image/')).length; }")
         if _is_webkit():
             assert 0 < cnt <= rec["cachedCount"], f"cache keys {cnt} vs rec {rec}"
         else:

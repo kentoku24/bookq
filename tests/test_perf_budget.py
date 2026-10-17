@@ -33,9 +33,22 @@ def test_top_page_fetches_folders_body_once(server, browser):
     try:
         page.goto(server + "/")
         page.wait_for_selector("#tile-grid .tile")
-        _wait_for_folders_entries(page, 3)
+        page.wait_for_function("() => window.treeLoaded === true", timeout=10_000)
+        page.wait_for_function(
+            "() => sessionStorage.getItem('bookq_auto_sync_done') === '1'",
+            timeout=5_000,
+        )
+        page.evaluate("() => { try { window.FillPoll.stop(); } catch(e){} }")
+        page.evaluate(
+            """() => new Promise(resolve => {
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    setTimeout(resolve, 0);
+                }));
+            })"""
+        )
         entries = page.evaluate(FOLDERS_ENTRIES_JS)
         print(f"[perf-budget] folders_entries={entries}")
+        assert len(entries) == 2, entries
         # ボディを運ぶ 200 応答は shallow + full のちょうど 2 回。304 は
         # transfer < encoded（ヘッダのみ転送・ボディは HTTP キャッシュ）で識別する
         # — decoded はキャッシュボディのサイズを報告するため 304 でも > 0 になる。
@@ -59,11 +72,48 @@ def test_top_page_fetches_folders_body_once(server, browser):
             shallow,
             full,
         )
+        etag = page.evaluate("() => window.__BOOKQ_DEBUG.etagByKey.get(':full')")
+        assert etag, "full-tree ETag must seed etagByKey for warm revalidation"
+        page.evaluate(
+            """() => {
+                window.__perfReqs = [];
+                window.__perfBody = {json: 0, text: 0};
+                const oj = Response.prototype.json;
+                const ot = Response.prototype.text;
+                Response.prototype.json = function(){ window.__perfBody.json++; return oj.call(this); };
+                Response.prototype.text = function(){ window.__perfBody.text++; return ot.call(this); };
+                const of = window.fetch.bind(window);
+                window.fetch = (input, init) => {
+                    const u = typeof input === 'string' ? input : (input && input.url) || '';
+                    const p = of(input, init);
+                    if (u.indexOf('/api/folders') === 0)
+                        window.__perfReqs.push({
+                            inm: (init && init.headers && init.headers['If-None-Match']) || null,
+                            status: p.then(r => r.status),
+                        });
+                    return p;
+                };
+                const r = Date.now.bind(Date);
+                Date.now = () => r() + 300001;
+            }"""
+        )
+        page.evaluate("() => window.revalidateFoldersForOnline()")
+        _wait_for_folders_entries(page, 3)
+        entries = page.evaluate(FOLDERS_ENTRIES_JS)
+        inm = page.evaluate("() => window.__perfReqs.map(r => r.inm)")
+        statuses = page.evaluate("() => Promise.all(window.__perfReqs.map(r => r.status))")
+        assert len(inm) == 1 and inm[0] == etag, (
+            f"revalidation must send If-None-Match with the seeded ETag: {inm}"
+        )
+        assert statuses == [304], f"warm revalidation must be answered 304: {statuses}"
+        body_calls = page.evaluate("() => window.__perfBody")
+        assert body_calls == {"json": 0, "text": 0}, f"304 must never parse a body: {body_calls}"
         # 3 回目以降はボディを運ばない
-        rest = [e for e in entries if e["transfer"] < e["encoded"]]
-        assert len(rest) >= 1, entries
+        rest = entries[2:]
+        assert len(rest) == 1, entries
         for e in rest:
             assert e["transfer"] < 2048, e
+            assert e["encoded"] == 0, e
             # 304 は 200 より必ず小さい（no-store だと同じ gzip ボディを再送するので同サイズになる）
             assert e["transfer"] < full["transfer"], (full, e)
     finally:
