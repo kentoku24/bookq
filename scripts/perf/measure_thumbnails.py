@@ -11,7 +11,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-PROBE = Path(__file__).with_name("thumbnail_probe.js")
+PROBE = Path(__file__).resolve().parents[2] / "app/static/thumbnail-probe.js"
 PROFILES = {
     "iphone": {
         "viewport": {"width": 390, "height": 844},
@@ -51,7 +51,9 @@ def measure_once(browser, base_url, profile, timeout_ms):
     context = browser.new_context(**PROFILES[profile], service_workers="block")
     try:
         page = context.new_page()
-        page.add_init_script(path=str(PROBE))
+        page.add_init_script("window.__thumbnailProbeConfig = " + json.dumps({
+            "timeoutMs": timeout_ms, "cacheCondition": "fresh_browser_context",
+        }) + ";\n" + PROBE.read_text(encoding="utf-8"))
         response = page.goto(base_url, wait_until="commit", timeout=timeout_ms)
         if not response or response.status != 200 or page.url.rstrip("/") != base_url.rstrip("/"):
             return {"status": "navigation_error", "visible_ready_ms": None}
@@ -60,10 +62,11 @@ def measure_once(browser, base_url, profile, timeout_ms):
                 "() => window.__thumbnailProbe && window.__thumbnailProbe.done",
                 timeout=timeout_ms,
             )
-            status = "ok"
+            status = None
         except PlaywrightTimeoutError:
             status = "timeout"
         result = page.evaluate("() => window.__thumbnailProbe") or {}
+        status = status or result.get("status", "timeout")
         if result.get("broken_images", 0):
             status = "broken_images"
         result["status"] = status
