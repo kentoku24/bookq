@@ -271,11 +271,14 @@ def test_delete_offline(page, server):
     # go offline and try to view — cache should be gone
     page.context.set_offline(True)
     try:
-        # check that per-work cache no longer has entries
+        # check that per-work cache no longer has page images: the cover
+        # thumb may legitimately come back (the post-delete re-render reloads
+        # the cover <img> and the SW stores /thumb/ in the same work cache),
+        # but the /image/ payload is what offline reading needs.
         has_cache = page.evaluate(
-            "async () => { const n = window.OfflineStore.cacheNameFor('simple_manga'); const c = await caches.open(n); const keys = await c.keys(); return keys.length > 0; }"
+            "async () => { const n = window.OfflineStore.cacheNameFor('simple_manga'); const c = await caches.open(n); const keys = await c.keys(); return keys.filter(k => new URL(k.url).pathname.startsWith('/image/')).length > 0; }"
         )
-        assert not has_cache, "per-work cache still has entries after delete"
+        assert not has_cache, "per-work cache still has page images after delete"
         # opening viewer offline should not show cached image (will hit Response.error fallback)
         # We just verify placeholder/error handling — not asserting exact image count as flaky
         try:
