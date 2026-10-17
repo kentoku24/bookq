@@ -199,31 +199,47 @@
   // a missing ETag falls back to the isSameTree compare, exactly once.
   const etagByKey = new Map();
   function _foldersEtagKey(depth){ return ":" + (depth ? "shallow" + depth : "full"); }
-  async function fetchLatestFolders(deps, opts){
-    const _d = _resolveDeps(deps);
-    const depth = (opts && opts.depth) || null;
-    const url = depth ? ("/api/folders?depth=" + depth) : "/api/folders";
-    const key = _foldersEtagKey(depth);
-    // "no-cache" = 必ずサーバに再検証（If-None-Match）するが、304 なら HTTP
-    // キャッシュのボディを使う。"no-store" だと 3.8MB を毎回まるごと取り直す。
-    const init = {cache:"no-cache", credentials:"same-origin"};
-    const warmEtag = etagByKey.get(key);
-    if (warmEtag) init.headers = {"If-None-Match": warmEtag};
-    const res = await _d.fetch(url, init);
+  const _rawFoldersText = new WeakMap();
+  async function readFoldersResponse(res, depth, isCurrent){
     if(res.status === 304){
       // Warm revalidation hit: server tree unchanged. No body; the caller
       // keeps the current tree with zero redraws and no retry loop.
       return {notModified:true};
     }
     if(!res.ok) return;
+    const _cur = () => (typeof isCurrent !== "function") || !!isCurrent();
+    let data = null;
+    if (typeof res.text === "function"){
+      let text;
+      try { text = await res.text(); } catch(e) { return; }
+      if (!_cur()) return;
+      try { data = JSON.parse(text); } catch(e) { return; }
+      if (Array.isArray(data)){ try { _rawFoldersText.set(data, {text: text, treeEnvelope: false}); } catch(e) {} }
+    } else if (typeof res.json === "function"){
+      try { data = await res.json(); } catch(e) { return; }
+      if (!_cur()) return;
+    } else return;
+    if(!Array.isArray(data)) return;
+    if (!_cur()) return;
     try {
       const etag = res.headers ? res.headers.get("ETag") : null;
+      const key = _foldersEtagKey(depth);
       if (etag) etagByKey.set(key, etag);
       else etagByKey.delete(key);
     } catch(e) { console.warn(e); }
-    const data = await res.json();
-    if(!Array.isArray(data)) return;
     return data;
+  }
+  async function fetchLatestFolders(deps, opts){
+    const _d = _resolveDeps(deps);
+    const depth = (opts && opts.depth) || null;
+    const url = depth ? ("/api/folders?depth=" + depth) : "/api/folders";
+    // "no-cache" = 必ずサーバに再検証（If-None-Match）するが、304 なら HTTP
+    // キャッシュのボディを使う。"no-store" だと 3.8MB を毎回まるごと取り直す。
+    const init = {cache:"no-cache", credentials:"same-origin"};
+    const warmEtag = etagByKey.get(_foldersEtagKey(depth));
+    if (warmEtag) init.headers = {"If-None-Match": warmEtag};
+    const res = await _d.fetch(url, init);
+    return readFoldersResponse(res, depth, opts && opts.isCurrent);
   }
   // tree carries _fullPath from setFullPaths; /api/folders does not — strip it for deep-equal.
   function isSameTree(a, b){
@@ -244,14 +260,17 @@
     }
     return next;
   }
-  async function revalidateFoldersForOnline(deps){
+  let _revalidateInFlight = null;
+  async function _revalidateFoldersForOnlineInner(deps){
     const _d = _resolveDeps(deps);
     try{
       if(typeof navigator!=='undefined' && !navigator.onLine) return;
       const now=Date.now();
       if(now - _onlineRevalidateLast < 5*60*1000) return;
-      const result = await fetchLatestFolders(_d);
+      const loadGen = _loadFoldersGen;
+      const result = await fetchLatestFolders(_d, {isCurrent: function(){ return loadGen === _loadFoldersGen; }});
       if(!result) return;
+      if (loadGen !== _loadFoldersGen) return;
       if(result && result.notModified){
         // 304: tree unchanged — stamp the gate, redraw nothing, loop never.
         _onlineRevalidateLast = now;
@@ -262,8 +281,9 @@
         _onlineRevalidateLast = now;
         return;
       }
+      const map = await setFullPathsAndIndexAsync(data);
+      if(!map || loadGen !== _loadFoldersGen) return;
       tree = data;
-      setFullPathsAndIndex(tree);
       invalidateLeafPaths();
       if(currentBrowsePath && !getNodeAt(currentBrowsePath)){
         currentBrowsePath = resolveAliveAncestor(currentBrowsePath);
@@ -272,19 +292,28 @@
         const c = await (_d.caches || caches).open("bookq-api-v1");
         await c.put("/api/folders", new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
       } catch(e) { console.warn(e); }
+      if (loadGen !== _loadFoldersGen) return;
+      try{ await refreshOfflineMap(); } catch(e) { console.warn(e); }
+      if (loadGen !== _loadFoldersGen) return;
       // IDB is the sole offline tree source (IDB-only since 8aacd57): persist
       // the revalidated tree alongside Cache, otherwise the next offline
       // reload would serve the stale snapshot. Full-only, background, never
       // blocking the redraw (Todo2 contract; shallow never reaches here).
-      try{
-        void window.OfflineTree.putTree(data, {defer:true}).catch(()=>{});
-      } catch(e) { console.warn(e); }
-      try{ await refreshOfflineMap(); } catch(e) { console.warn(e); }
+      _persistTreeSnapshot(data, {defer:true});
       updateBrowseHeader();
       renderView();
       scheduleThumbPrefetch();
       _onlineRevalidateLast = now;
     } catch(e) { console.warn(e); }
+  }
+  function revalidateFoldersForOnline(deps){
+    if(!_revalidateInFlight){
+      _revalidateInFlight = _revalidateFoldersForOnlineInner(deps).then(
+        function(){ _revalidateInFlight = null; },
+        function(e){ _revalidateInFlight = null; console.warn(e); }
+      );
+    }
+    return _revalidateInFlight;
   }
   function scheduleOnlineRevalidation(){
     if(_onlineRevalidateTimer) clearTimeout(_onlineRevalidateTimer);
@@ -961,7 +990,32 @@
   let _indexedTreeRef = null;
   let _thumbSingleListCache = [];
   let _thumbFullListCache = [];
-  function setFullPathsAndIndex(nodes){
+  let _indexGen = 0;
+  const _indexNow = (typeof performance === "object" && performance && typeof performance.now === "function")
+    ? function(){ return performance.now(); }
+    : Date.now;
+  const _indexYieldQueue = [];
+  let _indexYieldChannel = null;
+  function _indexYield(fn){
+    if (typeof MessageChannel === "function"){
+      if (!_indexYieldChannel){
+        try {
+          _indexYieldChannel = new MessageChannel();
+          _indexYieldChannel.port1.onmessage = function(){
+            const f = _indexYieldQueue.shift();
+            if (f) f();
+          };
+        } catch(e) { _indexYieldChannel = null; }
+      }
+      if (_indexYieldChannel){
+        _indexYieldQueue.push(fn);
+        _indexYieldChannel.port2.postMessage(0);
+        return;
+      }
+    }
+    setTimeout(fn, 0);
+  }
+  function _indexBuilder(nodes){
     const map = new Map();
     const singles = [];
     const full = [];
@@ -981,9 +1035,16 @@
       return "/thumb/" + String(fp).split("/").map(encodeURIComponent).join("/")
         + "/" + String(name).split("/").map(encodeURIComponent).join("/") + "?w=" + width;
     }
-    (function walk(list, parentPath){
-      for (const n of list || []){
-        n._fullPath = parentPath ? parentPath + "/" + n.name : n.name;
+    const stack = [{list: nodes, i: 0, parentPath: ""}];
+    function step(){
+      const start = _indexNow();
+      let visited = 0;
+      while (stack.length){
+        const fr = stack[stack.length - 1];
+        if (fr.i >= (fr.list ? fr.list.length : 0)){ stack.pop(); continue; }
+        const n = fr.list[fr.i++];
+        visited++;
+        n._fullPath = fr.parentPath ? fr.parentPath + "/" + n.name : n.name;
         const fp = n._fullPath;
         map.set(fp, n);
         if (fp){
@@ -1000,17 +1061,45 @@
             }
           }
         }
-        if (n.children) walk(n.children, fp);
+        if (n.children) stack.push({list: n.children, i: 0, parentPath: fp});
+        if (visited >= 512 || _indexNow() - start >= 4) return false;
       }
-    })(nodes, "");
-    _nodeMapCache = map;
+      return true;
+    }
+    return {step: step, map: map, singles: singles, full: full};
+  }
+  function _publishIndex(nodes, b){
+    _nodeMapCache = b.map;
     _indexedTreeRef = nodes;
-    _thumbSingleListCache = singles;
-    _thumbFullListCache = full;
+    _thumbSingleListCache = b.singles;
+    _thumbFullListCache = b.full;
     try {
-      if (typeof window !== "undefined") window.__cc_thumbIndex = {tree:nodes, single:singles, full:full};
+      if (typeof window !== "undefined") window.__cc_thumbIndex = {tree:nodes, single:b.singles, full:b.full};
     } catch(e) { console.warn(e); }
-    return map;
+  }
+  function setFullPathsAndIndex(nodes){
+    _indexGen++;
+    const b = _indexBuilder(nodes);
+    while (!b.step()) {}
+    _publishIndex(nodes, b);
+    return b.map;
+  }
+  function setFullPathsAndIndexAsync(nodes){
+    const gen = ++_indexGen;
+    const b = _indexBuilder(nodes);
+    return new Promise(function(resolve){
+      function loop(){
+        if (gen !== _indexGen){ resolve(null); return; }
+        if (b.step()){
+          if (gen !== _indexGen){ resolve(null); return; }
+          _publishIndex(nodes, b);
+          resolve(b.map);
+          return;
+        }
+        _indexYield(loop);
+      }
+      loop();
+    });
   }
 
   let currentBrowsePath = null; // null=root, else full path of folder being browsed
@@ -1214,11 +1303,28 @@
     scheduleThumbPrefetch();
   }
 
+  function _persistTreeSnapshot(data, opts){
+    try {
+      const _raw = _rawFoldersText.get(data);
+      try { _rawFoldersText.delete(data); } catch(e){}
+      const _OT = window.OfflineTree;
+      if (_raw && _OT && typeof _OT.putJson === "function"){
+        const _txt = typeof _raw === "string" ? _raw : _raw.text;
+        void _OT.putJson(_txt, {treeEnvelope: !!(typeof _raw === "object" && _raw.treeEnvelope)}).catch(function(){});
+      } else {
+        void window.OfflineTree.putTree(data, opts).catch(function(){});
+      }
+    } catch(e) { console.warn(e); }
+  }
+
+  let _loadFoldersGen = 0;
   async function loadFolders(opts, deps){
     const _d = _resolveDeps(deps);
     const _fetch = _d.fetch;
     const preservePath = !!(opts && opts.preservePath);
     const _wantedPath = preservePath ? currentBrowsePath : null;
+    const _loadGen = ++_loadFoldersGen;
+    _indexGen++;
     // Interface contract: restoreTree(tree, {shallow}). shallow:true skips
     // isSameTree compare (none here) and OfflineTree.putTree (full-only per
     // routes.py:287-290), keeps treeLoaded=false with no markTreeReady /
@@ -1226,10 +1332,18 @@
     // (getBrowseChildren guard + 読込中 badge instead).
     async function restoreTree(data, opts){
       const shallow = !!(opts && opts.shallow);
+      if (_loadGen !== _loadFoldersGen) return false;
+      if (shallow){
+        tree = data;
+        setFullPathsAndIndex(tree);
+        treeLoaded = false;
+      } else {
+        const map = await setFullPathsAndIndexAsync(data);
+        if (!map || _loadGen !== _loadFoldersGen) return false;
+        tree = data;
+      }
       _shallowMode = shallow;
       try { window.__cc_singleCoverFirst = shallow; } catch(e) { console.warn(e); }
-      tree = data;
-      setFullPathsAndIndex(tree);
       invalidateLeafPaths();
       // Todo 5: first paint before IndexedDB — folder names/counts must not
       // wait on refreshOfflineMap (OfflineStore.getAll). The offline map
@@ -1241,8 +1355,9 @@
       updateBrowseHeader();
       renderView();
       updateShallowBadge();
-      try { await refreshOfflineMap(); renderView(); updateShallowBadge(); } catch(e) { console.warn(e); }
-      if (shallow) return;
+      try { await refreshOfflineMap(); if (_loadGen !== _loadFoldersGen) return false; renderView(); updateShallowBadge(); } catch(e) { console.warn(e); }
+      if (shallow) return true;
+      if (_loadGen !== _loadFoldersGen) return false;
       markTreeReady();
       // Drain the shallow-window queue: clicks stashed a view folder; URL
       // deep-links (#/browse drill-down, #/view open) stayed pending because
@@ -1252,41 +1367,48 @@
       _pendingBrowsePath = null;
       if (queuedView) { loadImages(queuedView); }
       else if (typeof location !== "undefined" && location.hash) { applyUrlState(); }
+      return true;
     }
     // Stage 1: shallow first paint (direct children only, no facets).
     let shallowOk = false;
     try {
       const res = await _fetch("/api/folders?depth=1", {credentials: 'same-origin'});
+      if (_loadGen !== _loadFoldersGen) return;
       if (!res.ok) throw new Error("http "+res.status);
-      const data = await res.json();
+      const data = await readFoldersResponse(res, 1, () => _loadGen === _loadFoldersGen);
+      if (_loadGen !== _loadFoldersGen) return;
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
-      await restoreTree(data, {shallow:true});
+      if (!await restoreTree(data, {shallow:true})) return;
       shallowOk = true;
     } catch(e){ console.warn("shallow folders failed, falling through to full", e); }
     // Stage 2: full tree in the background — final DOM identical to full-only.
     try {
       const res = await _fetch("/api/folders", {credentials: 'same-origin'});
+      if (_loadGen !== _loadFoldersGen) return;
       if (!res.ok) throw new Error("http "+res.status);
-      const data = await res.json();
+      const data = await readFoldersResponse(res, null, () => _loadGen === _loadFoldersGen);
+      if (_loadGen !== _loadFoldersGen) return;
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
-      const _persistPromises = [];
-      try { _persistPromises.push(window.OfflineTree.putTree(data).catch(()=>{})); } catch(e) { console.warn(e); }
       // Render first, persist in the background — the fetched `data` drives the
       // tree, IDB persistence only matters for the next reload, so it must
       // never delay first paint.
-      await restoreTree(data, {shallow:false});
+      if (!await restoreTree(data, {shallow:false})) return;
+      if (_loadGen !== _loadFoldersGen) return;
+      _onlineRevalidateLast = Date.now();
+      _persistTreeSnapshot(data);
       // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
       // a reload. The filled tree re-enters via restoreTree (existing path).
       try {
         var _fillPollEtag = null;
         try { _fillPollEtag = (res.headers && res.headers.get) ? res.headers.get("ETag") : null; } catch(_fillPollEtagErr) {}
-        if (window.FillPoll) window.FillPoll.noteFullLoad({etag: _fillPollEtag, onTree: function(t){
-          try { void window.OfflineTree.putTree(t).catch(function(){}); } catch(_fillPollPutErr) { console.warn(_fillPollPutErr); }
-          restoreTree(t, {shallow:false}).catch(function(e){ console.warn(e); });
+        if (window.FillPoll) window.FillPoll.noteFullLoad({etag: _fillPollEtag, onTree: function(t, rawText, rawOpts){
+          if (typeof rawText === "string"){ try { _rawFoldersText.set(t, {text: rawText, treeEnvelope: !!(rawOpts && rawOpts.treeEnvelope)}); } catch(_fillPollSetErr) {} }
+          restoreTree(t, {shallow:false}).then(function(ok){
+            if (ok) _persistTreeSnapshot(t);
+          }).catch(function(e){ console.warn(e); });
         }});
       } catch(e) { console.warn(e); }
-      if (_persistPromises.length) void Promise.allSettled(_persistPromises);
     } catch(e){
       if (shallowOk){
         // Full failed after a shallow paint: stay on the shallow grid with
@@ -1347,7 +1469,7 @@
     }
     return null;
   }
-  try { if (typeof window !== 'undefined'){ window.getParentPath = getParentPath; window.findNodeByPath = findNodeByPath; window.getSiblingLeafFolders = getSiblingLeafFolders; window.getBrowseChildren = getBrowseChildren; window.buildNodeMap = buildNodeMap; window.setFullPathsAndIndex = setFullPathsAndIndex; window.emptyBrowseMessage = emptyBrowseMessage; window.progressBarHtml = progressBarHtml; window._coverUrl = _coverUrl; } } catch(e) { console.warn(e); }
+  try { if (typeof window !== 'undefined'){ window.getParentPath = getParentPath; window.findNodeByPath = findNodeByPath; window.getSiblingLeafFolders = getSiblingLeafFolders; window.getBrowseChildren = getBrowseChildren; window.buildNodeMap = buildNodeMap; window.setFullPathsAndIndex = setFullPathsAndIndex; window.setFullPathsAndIndexAsync = setFullPathsAndIndexAsync; window.emptyBrowseMessage = emptyBrowseMessage; window.progressBarHtml = progressBarHtml; window._coverUrl = _coverUrl; } } catch(e) { console.warn(e); }
 
 
   // ── Search / Filter / Facets ──

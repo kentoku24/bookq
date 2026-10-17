@@ -211,6 +211,17 @@
     });
   }
 
+  let _treeWriterGen = 0;
+  let _treeWriterWorker = null;
+  let _treeWriterSlot = null;
+  function _cancelTreeWrites() {
+    _treeWriterGen++;
+    const slot = _treeWriterSlot;
+    _treeWriterSlot = null;
+    _treeWriterWorker = null;
+    if (slot) { try { slot.cancel(); } catch (e) {} }
+  }
+
   const OfflineStore = (function () {
     function open() { return openDB(); }
     function get(folder) {
@@ -269,6 +280,7 @@
     // Used by offline-core's wipeClientData; a partial wipe would leave the
     // tree snapshot behind and reload could still paint cached browse state.
     function clear() {
+      _cancelTreeWrites();
       return open().then((db) => new Promise((resolve, reject) => {
         const tx = db.transaction([STORE, KV], "readwrite");
         tx.objectStore(STORE).clear();
@@ -288,27 +300,105 @@
     // revalidation never blocks the redraw. Default stays immediate so
     // reload-restore tests observe the snapshot without extra waiting.
     async function putTree(data, opts) {
+      _cancelTreeWrites();
+      const gen = _treeWriterGen;
       if (!Array.isArray(data)) return Promise.resolve();
       if (opts && opts.defer && typeof requestIdleCallback === "function") {
         return new Promise((resolve) => {
-          requestIdleCallback(() => { _writeTree(data).then(resolve, resolve); });
+          requestIdleCallback(() => { _writeTree(data, gen).then(resolve, resolve); });
         });
       }
-      return _writeTree(data);
+      return _writeTree(data, gen);
     }
-    async function _writeTree(data) {
+    const TREE_WRITER_URL = "/static/offline/tree-writer.js";
+    const TREE_WRITER_TIMEOUT_MS = 10000;
+    function _parseTreeJson(jsonText, treeEnvelope) {
+      let parsed;
+      try { parsed = JSON.parse(jsonText); } catch (e) { return { error: e }; }
+      const data = (treeEnvelope && parsed && !Array.isArray(parsed)) ? parsed.tree : parsed;
+      if (!Array.isArray(data)) return { error: new Error("invalid tree snapshot") };
+      return { data };
+    }
+    function putJson(jsonText, opts) {
+      _cancelTreeWrites();
+      const gen = _treeWriterGen;
+      const treeEnvelope = !!(opts && opts.treeEnvelope);
+      return new Promise((resolve, reject) => {
+        if (typeof jsonText !== "string" || !jsonText.length) { resolve(); return; }
+        function fallback() {
+          if (gen !== _treeWriterGen) { resolve(); return; }
+          const r = _parseTreeJson(jsonText, treeEnvelope);
+          if (r.error) { reject(r.error); return; }
+          _writeTree(r.data, gen).then(resolve, reject);
+        }
+        let worker = null;
+        if (typeof Worker === "function") {
+          try { worker = new Worker(TREE_WRITER_URL); } catch (e) { worker = null; }
+        }
+        if (!worker) { fallback(); return; }
+        let settled = false;
+        const timer = setTimeout(function () { fail(); }, TREE_WRITER_TIMEOUT_MS);
+        function dispose(ownGlobals) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          worker.onmessage = null;
+          worker.onerror = null;
+          if (ownGlobals) {
+            if (_treeWriterSlot === slot) _treeWriterSlot = null;
+            if (_treeWriterWorker === worker) _treeWriterWorker = null;
+          }
+          try { worker.terminate(); } catch (e) {}
+        }
+        const slot = {
+          cancel() {
+            if (settled) return;
+            dispose(false);
+            resolve();
+          }
+        };
+        function settle(fn) {
+          if (settled) return;
+          dispose(true);
+          fn();
+        }
+        function fail() {
+          settle(function () {
+            if (gen !== _treeWriterGen) { resolve(); return; }
+            fallback();
+          });
+        }
+        _treeWriterWorker = worker;
+        _treeWriterSlot = slot;
+        worker.onmessage = function (e) {
+          if (settled || gen !== _treeWriterGen) return;
+          const d = e && e.data;
+          if (d && d.ok) { settle(resolve); return; }
+          if (d && d.invalid) { settle(function () { reject(new Error("invalid tree snapshot")); }); return; }
+          fail();
+        };
+        worker.onerror = function () {
+          if (settled || gen !== _treeWriterGen) return;
+          fail();
+        };
+        try { worker.postMessage({ text: jsonText, envelope: treeEnvelope }); } catch (e) { fail(); }
+      });
+    }
+    async function _writeTree(data, gen) {
       if (!Array.isArray(data)) return Promise.resolve();
+      if (gen !== undefined && gen !== _treeWriterGen) return Promise.resolve();
       const snapshot = (typeof structuredClone === "function")
         ? structuredClone(data)
         : JSON.parse(JSON.stringify(data));
       try {
         const db = await openKV();
+        if (gen !== undefined && gen !== _treeWriterGen) return;
         await new Promise((resolve, reject) => {
           const tx = db.transaction(KV, "readwrite");
-          const st = tx.objectStore(KV);
-          const req = st.put({ key: TREE_KEY, data: snapshot, savedAt: Date.now(), version: DB_VERSION });
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => reject(req.error);
+          tx.objectStore(KV).put({ key: TREE_KEY, data: snapshot, savedAt: Date.now(), version: DB_VERSION });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error("tx aborted"));
         });
       } catch (e) { console.warn(e); }
     }
@@ -325,6 +415,7 @@
       } catch (e) { console.warn(e); return null; }
     }
     async function delTree() {
+      _cancelTreeWrites();
       try {
         const db = await openKV();
         await new Promise((resolve, reject) => {
@@ -334,7 +425,7 @@
         });
       } catch (e) { console.warn(e); }
     }
-    return { DB_NAME, KV, TREE_KEY, DB_VERSION, openKV, _openKV: openKV, putTree, getTree, delTree };
+    return { DB_NAME, KV, TREE_KEY, DB_VERSION, openKV, _openKV: openKV, putTree, putJson, getTree, delTree };
   })();
 
   // ── Client-data wipe ──────────────────────────────────────────────────────
