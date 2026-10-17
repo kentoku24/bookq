@@ -47,7 +47,8 @@
 <link rel="manifest" href="/static/manifest.json">
 <link rel="stylesheet" href="/static/style.css">
 <script>window.__BOOKQ_TEST_MODE__ = "{{ 'true' if test_mode else 'false' }}";</script>
-</head>
+{% if thumbnail_perf %}<script>{{ thumbnail_probe | safe }}</script>
+{% endif %}</head>
 <body>
 
 <aside id="sidebar" class="open">
@@ -156,6 +157,7 @@
 <script src="/static/viewer/zoom.js" defer></script>
 <script src="/static/viewer/overview.js" defer></script>
 <script src="/static/app.js" defer></script>
+{% if thumbnail_perf %}{% include "thumbnail_perf.html" %}{% endif %}
 </body>
 </html>
 {% endif %}
