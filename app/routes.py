@@ -22,7 +22,7 @@ from app import auth as auth_module
 from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
 from app.metadata import MetadataIndex
-from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, is_pdf_file, list_images, natural_key, scan_tree
+from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
 
 logger = logging.getLogger(__name__)
@@ -392,27 +392,56 @@ async def warmup_metadata_index(app_state) -> tuple[int, int, float]:
     return folders, images, elapsed_ms
 
 
-def _find_first_opaque(nodes: list[dict], parent_path: str, skip: set[str]):
-    """Return the first fillable opaque node as (parent_list, idx, full_path, is_pdf).
+def _find_first_opaque(nodes: list[dict], parent_path: str, skip: set[str],
+                       _chain: tuple = ()):
+    """Return the first fillable opaque node as ``(chain, full_path, is_pdf)``.
 
     Opaque = shallow-scan placeholder (``archive`` flag with ``children == []``).
     *skip* holds already-filled full paths: a genuinely empty archive
     materializes to the identical shape, so without *skip* the fill would
     loop on it forever. Paths compose as parent/name (never split names —
     flattened names contain "/").
+
+    *chain* is the root-down hop list to the node — ``((nodes_list, idx),
+    ...)`` where the last hop is the node itself and every earlier hop's node
+    is one of its ancestors. The fill walks it back to front after replacing
+    the node so each ancestor's cover fields catch up in the same pass.
     """
     for idx, node in enumerate(nodes):
         if node.get("type") != "folder":
             continue
         full = f"{parent_path}/{node['name']}" if parent_path else node["name"]
+        chain = _chain + ((nodes, idx),)
         if node.get("archive") and not node.get("children") and full not in skip:
-            return nodes, idx, full, bool(node.get("pdf"))
+            return chain, full, bool(node.get("pdf"))
         children = node.get("children")
         if children:
-            found = _find_first_opaque(children, full, skip)
+            found = _find_first_opaque(children, full, skip, chain)
             if found is not None:
                 return found
     return None
+
+
+def _refresh_ancestor_covers(chain: tuple) -> None:
+    """Recompute ``thumb``/``thumbs`` bottom-up for a materialized node's ancestors.
+
+    A shallow-scan tree carries no cover for a folder whose images live only
+    inside archives (``thumb is None`` — its archive children were opaque).
+    Materializing those children never re-derived the folder's own cover, so
+    the tile stayed a placeholder for the process lifetime (the TTL/signature
+    refresh skips the rescan of an unchanged filesystem). Each hop's node is
+    recomputed from its (now richer) children with the scan's shared cover
+    rule, deepest ancestor first so the level above sees the updated value —
+    the shallow tree converges to the full-scan shape without a rescan.
+    """
+    for nodes, idx in reversed(chain[:-1]):
+        node = nodes[idx]
+        thumb, sub_thumbs = folder_cover_fields(node.get("children") or [])
+        node["thumb"] = thumb
+        if sub_thumbs is None:
+            node.pop("thumbs", None)
+        else:
+            node["thumbs"] = sub_thumbs
 
 
 async def _background_fill(app_state) -> None:
@@ -425,7 +454,11 @@ async def _background_fill(app_state) -> None:
     _FILL_STEP_SECONDS and pauses while requests are fresh (idle detection
     via app_state.last_request_at). Per-item exceptions are logged and
     skipped; index/facets are untouched (name-only registration already
-    covers archives). Never raises.
+    covers archives). The swapped node keeps the tree's own ``name`` (a
+    flattened name carries a parent/child path that the built node, made
+    from the file's real name, does not) and every ancestor's cover fields
+    are refreshed from the enriched children, so a folder whose covers live
+    only inside archives stops being a placeholder. Never raises.
     """
     try:
         cache = getattr(app_state, "metadata_index_cache", None)
@@ -450,7 +483,9 @@ async def _background_fill(app_state) -> None:
                     found = _find_first_opaque(tree, "", done)
                     if found is None:
                         return
-                    parent_list, idx, full, is_pdf = found
+                    chain, full, is_pdf = found
+                    nodes, idx = chain[-1]
+                    tree_name = nodes[idx].get("name")
                     archive_file = downloads_path / full
                     if is_pdf:
                         filled = await run_in_threadpool(
@@ -462,7 +497,14 @@ async def _background_fill(app_state) -> None:
                             _scan_archive_node, archive_file.parent, archive_file.name,
                             downloads_path,
                         )
-                    parent_list[idx] = filled
+                    if tree_name is not None:
+                        # Flattened nodes carry the parent/child name the scan
+                        # hoisted ("wrap/v1.zip"); the built node only knows the
+                        # file's own name. Keeping the tree's name is what makes
+                        # the composed path resolve on disk for the client.
+                        filled["name"] = tree_name
+                    nodes[idx] = filled
+                    _refresh_ancestor_covers(chain)
                     done.add(full)
                     cache["generation"] = int(cache.get("generation", 1) or 1) + 1
             except asyncio.CancelledError:
