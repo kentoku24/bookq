@@ -71,16 +71,6 @@
       "Exec(curl --request DELETE)"
     ],
     "ask": [
-      // 本番・共有 deploy エンジン (AGENTS.md §8 — メイン checkout 専用)
-      "Exec(./prd.sh)",
-      "Exec(bash prd.sh)",
-      "Exec(./rebuild.sh)",
-      "Exec(bash rebuild.sh)",
-
-      // dev プールの全撤去は破壊的なので確認 (単体 up/down/list/url/logs/gc は許可側)
-      "Exec(./dev.sh down --all)",
-      "Exec(bash dev.sh down --all)",
-
       // Simulator のデバイス/app 破壊 (Exec(xcrun) 広域 allow からの例外。
       // boot/shutdown/openurl/io screenshot/recordVideo 等の通常操作は許可側)
       "Exec(xcrun simctl erase)",
@@ -109,9 +99,14 @@
       // deny 側で残す
       "Exec(git)",
 
-      // bookq の dev 環境マネージャ (up/down/url/logs/list/gc)
+      // bookq の dev 環境マネージャ + deploy エンジンを全て許可
+      // (dev 環境は作り直せる・state なし。prd.sh は worktree ガード内蔵)
       "Exec(./dev.sh)",
       "Exec(bash dev.sh)",
+      "Exec(./prd.sh)",
+      "Exec(bash prd.sh)",
+      "Exec(./rebuild.sh)",
+      "Exec(bash rebuild.sh)",
       "Exec(./scripts/)",
       "Exec(bash scripts/)",
       "Exec(./setup-hooks.sh)",
