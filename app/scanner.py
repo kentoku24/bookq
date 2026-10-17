@@ -102,6 +102,27 @@ def _first_image_of(children: list[dict]) -> str | None:
     return None
 
 
+def folder_cover_fields(children: list[dict]) -> tuple[str | None, list[str] | None]:
+    """Return ``(thumb, thumbs)`` for one folder node from its built *children*.
+
+    Single source of the folder-level cover rule shared by ``scan_tree``,
+    ``_scan_archive_node``, ``app.archive.build_archive_tree`` and the
+    shallow-warmup fill's ancestor refresh (``app.routes._background_fill``):
+    ``thumb`` is the first image of the children (see ``_first_image_of``),
+    ``thumbs`` the first up-to-9 immediate sub-folder covers — returned as
+    ``None`` when fewer than two exist, so callers never emit the key (the
+    rule that keeps multi-thumb grids off single-cover folders).
+    """
+    thumb = _first_image_of(children)
+    sub_thumbs: list[str] = []
+    for child in children:
+        if child["type"] == "folder" and child.get("thumb"):
+            sub_thumbs.append(child["name"] + "/" + child["thumb"])
+        if len(sub_thumbs) >= 9:
+            break
+    return thumb, (sub_thumbs if len(sub_thumbs) >= 2 else None)
+
+
 def _scan_archive_node(base: Path, aname: str, downloads_root=None) -> dict:
     """Build the virtual-folder node for one archive file.
 
@@ -129,13 +150,7 @@ def _scan_archive_node(base: Path, aname: str, downloads_root=None) -> dict:
             "archive": True,
         }
     children = build_archive_tree(inner)
-    thumb = _first_image_of(children)
-    sub_thumbs: list[str] = []
-    for c in children:
-        if c["type"] == "folder" and c.get("thumb"):
-            sub_thumbs.append(c["name"] + "/" + c["thumb"])
-        if len(sub_thumbs) >= 9:
-            break
+    thumb, sub_thumbs = folder_cover_fields(children)
     node: dict = {
         "name": aname,
         "type": "folder",
@@ -143,7 +158,7 @@ def _scan_archive_node(base: Path, aname: str, downloads_root=None) -> dict:
         "thumb": thumb,
         "archive": True,
     }
-    if len(sub_thumbs) >= 2:
+    if sub_thumbs is not None:
         node["thumbs"] = sub_thumbs
     return node
 
@@ -356,16 +371,10 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
                 c["name"] = dname + "/" + c["name"]
             entries.extend(child)
         else:
-            thumb = _first_image_of(child)
-            sub_thumbs: list[str] = []
-            for c in child:
-                if c["type"] == "folder" and c.get("thumb"):
-                    sub_thumbs.append(c["name"] + "/" + c["thumb"])
-                if len(sub_thumbs) >= 9:
-                    break
+            thumb, sub_thumbs = folder_cover_fields(child)
             entry: dict = {"name": dname, "type": "folder", "children": child,
                             "thumb": thumb}
-            if len(sub_thumbs) >= 2:
+            if sub_thumbs is not None:
                 entry["thumbs"] = sub_thumbs
             entries.append(entry)
 

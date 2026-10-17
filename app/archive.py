@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from app.scanner import IMAGE_EXTENSIONS, natural_key
+from app.scanner import IMAGE_EXTENSIONS, folder_cover_fields, natural_key
 from app import warmup_cache
 
 logger = logging.getLogger(__name__)
@@ -110,22 +110,6 @@ def split_archive_entries(entries: list[str]) -> tuple[list[str], dict[str, list
 _ARCHIVE_TREE_MAX_DEPTH = 32
 
 
-def _first_image_of_children(children: list[dict]) -> str | None:
-    """Bottom-up thumb for one built level (``app/scanner._first_image_of`` idiom).
-
-    Every folder child already carries its own folder-relative ``thumb``
-    (``None`` when imageless), so this level's thumb is the first image
-    child or ``"<child>/<child.thumb>"`` — a single level, never a re-DFS.
-    """
-    for child in children:
-        if child["type"] == "image":
-            return child["name"]
-        thumb = child.get("thumb")
-        if thumb is not None:
-            return child["name"] + "/" + thumb
-    return None
-
-
 def build_archive_tree(entries: list[str]) -> list[dict]:
     """Build a nested folder tree from finalized archive image entry names.
 
@@ -141,8 +125,9 @@ def build_archive_tree(entries: list[str]) -> list[dict]:
 
     - Loose entries (no ``/``) come first, then sub-folders, at every
       level; each level is re-sorted by ``(natural_key, name)``.
-    - Folder ``thumb`` is bottom-up via :func:`_first_image_of_children`;
-      imageless folders carry ``thumb=None`` and are excluded from the
+    - Folder ``thumb``/``thumbs`` come from ``scanner.folder_cover_fields``
+      (the shared folder-cover rule): ``thumb`` is the first image below the
+      folder; imageless folders carry ``thumb=None`` and are excluded from the
       parent's ``thumbs`` (same guard as ``scanner.py``).
     - Iterative with a depth cap of 32: deeper remainders collapse into a
       single ``/``-joined leaf name (still servable as one inner entry).
@@ -192,7 +177,6 @@ def build_archive_tree(entries: list[str]) -> list[dict]:
         bfs.extend(node.dirs.values())
 
     built: dict[int, list[dict]] = {}
-    thumbs: dict[int, str | None] = {}
 
     def _build_children(node: _Dir) -> list[dict]:
         files = sorted(node.files, key=lambda n: (natural_key(n), n))
@@ -202,27 +186,23 @@ def build_archive_tree(entries: list[str]) -> list[dict]:
         for dirname in sorted(node.dirs, key=lambda d: (natural_key(d), d)):
             child = node.dirs[dirname]
             sub = built[id(child)]
+            # One shared rule for the level's cover fields (scanner's
+            # folder_cover_fields): the child's own thumb AND its multi-thumb
+            # grid both come from its already-built children.
+            thumb, sub_thumbs = folder_cover_fields(sub)
             entry: dict = {
                 "name": dirname,
                 "type": "folder",
                 "children": sub,
-                "thumb": thumbs[id(child)],
+                "thumb": thumb,
             }
-            sub_thumbs: list[str] = []
-            for c in sub:
-                if c["type"] == "folder" and c.get("thumb"):
-                    sub_thumbs.append(c["name"] + "/" + c["thumb"])
-                if len(sub_thumbs) >= 9:
-                    break
-            if len(sub_thumbs) >= 2:
+            if sub_thumbs is not None:
                 entry["thumbs"] = sub_thumbs
             children.append(entry)
         return children
 
     for node in reversed(bfs):
-        children = _build_children(node)
-        built[id(node)] = children
-        thumbs[id(node)] = _first_image_of_children(children)
+        built[id(node)] = _build_children(node)
 
     return built[id(root)]
 
