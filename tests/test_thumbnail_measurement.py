@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-PROBE = (ROOT / "scripts/perf/thumbnail_probe.js").read_text(encoding="utf-8")
+PROBE = (ROOT / "app/static/thumbnail-probe.js").read_text(encoding="utf-8")
 SPEC = importlib.util.spec_from_file_location(
     "measure_thumbnails", ROOT / "scripts/perf/measure_thumbnails.py"
 )
@@ -18,7 +18,7 @@ PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAA
 BROKEN = "data:image/png;base64,AAAA"
 
 
-def _start(browser, *, ready=True, source=PIXEL, extra=""):
+def _start(browser, *, ready=True, source=PIXEL, extra="", timeout_ms=30000):
     context = browser.new_context(viewport={"width": 800, "height": 600})
     page = context.new_page()
     page.set_content(
@@ -29,6 +29,7 @@ def _start(browser, *, ready=True, source=PIXEL, extra=""):
         '</div></div></div>'
     )
     page.evaluate("(ready) => { window.treeLoaded = ready; }", ready)
+    page.evaluate("(timeoutMs) => { window.__thumbnailProbeConfig = {timeoutMs}; }", timeout_ms)
     page.evaluate(PROBE)
     return context, page
 
@@ -112,6 +113,22 @@ def test_probe_empty_grid_never_reports_success(browser):
         page.wait_for_function("() => window.__thumbnailProbe.visible_images === 0")
         assert page.evaluate("() => window.__thumbnailProbe.visible_ready_ms") is None
         assert not page.evaluate("() => window.__thumbnailProbe.done")
+    finally:
+        context.close()
+
+
+def test_probe_timeout_exports_same_safe_terminal_report(browser):
+    context, page = _start(browser, source=BROKEN, timeout_ms=500)
+    try:
+        result = _result(page)
+        assert result["status"] == "broken_images"
+        assert result["visible_ready_ms"] is None
+        report = page.evaluate("() => window.__thumbnailProbeReport")
+        assert report["result"] == result
+        assert report["environment"]["browser_cache"] == "existing_browser_session_not_reset"
+        assert report["environment"]["viewport"] == {"width": 800, "height": 600, "dpr": 1}
+        assert report["metric_version"] == 1
+        assert BROKEN not in json.dumps(report)
     finally:
         context.close()
 

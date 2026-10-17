@@ -7,6 +7,9 @@
   let stableSince = 0;
   let readyAt = null;
   let firstVisibleAt = null;
+  const config = window.__thumbnailProbeConfig || {};
+  const timeoutMs = Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
+    ? config.timeoutMs : 30000;
   window.__thumbnailProbe = {done: false};
 
   function intersects(r, clip) {
@@ -70,11 +73,15 @@
     if (!allReady) readyAt = null;
     else if (readyAt === null) readyAt = now;
     // Confirm a quiet final grid, but do not add the quiet window to the KPI.
-    const done = allReady && now - Math.max(stableSince, readyAt) >= 250;
+    const confirmedAt = Math.max(stableSince, readyAt) + 250;
+    const success = allReady && now >= confirmedAt && confirmedAt <= timeoutMs;
+    const timedOut = now >= timeoutMs;
+    const done = success || timedOut;
     window.__thumbnailProbe = {
       done,
+      status: success ? "ok" : timedOut ? (broken ? "broken_images" : "timeout") : "measuring",
       first_visible_ms: firstVisibleAt,
-      visible_ready_ms: done ? readyAt : null,
+      visible_ready_ms: success ? readyAt : null,
       observed_ms: now,
       full_tree_ready: fullTreeReady,
       rendered_tiles: tiles.length,
@@ -85,6 +92,21 @@
       pending_images: images.length - loaded - broken,
       stability_window_ms: 250,
     };
+    if (done) {
+      // Only aggregate state leaves the probe; never expose image URLs or work names.
+      window.__thumbnailProbeReport = {
+        metric_version: 1,
+        environment: {
+          user_agent: navigator.userAgent,
+          navigation_time_origin_ms: performance.timeOrigin,
+          viewport: {width: innerWidth, height: innerHeight, dpr: devicePixelRatio},
+          browser_cache: config.cacheCondition || "existing_browser_session_not_reset",
+          service_worker_controlled: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+          timeout_ms: timeoutMs,
+        },
+        result: window.__thumbnailProbe,
+      };
+    }
     if (!done) requestAnimationFrame(sample);
   }
   requestAnimationFrame(sample);
