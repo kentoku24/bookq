@@ -863,6 +863,9 @@ def test_auto_sync_on_first_online_visit(page, server):
     )
     try:
         page.evaluate("() => { window.__apiHits = []; }")
+        # No Date.now spoof needed: the real offline event now resets
+        # _onlineRevalidateLast, so the online flip revalidates immediately
+        # even though the initial load stamped the 5-minute freshness gate.
         # Ensure we are online, then simulate offline→online flip
         page.context.set_offline(True)
         page.wait_for_selector(".tile", timeout=2300)

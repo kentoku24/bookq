@@ -311,10 +311,17 @@
       if (res.status === 304 || !res.ok){ _fillPollBackoff(); return null; }
       var etag = null;
       try { etag = res.headers ? res.headers.get("ETag") : null; } catch(e){}
-      return res.json().then(function(body){ return {body: body, etag: etag}; });
+      if (typeof res.text === "function"){
+        return res.text().then(function(text){
+          var body; try { body = JSON.parse(text); } catch(e){ body = null; }
+          return {body: body, etag: etag, raw: text};
+        });
+      }
+      return res.json().then(function(body){ return {body: body, etag: etag, raw: null}; });
     }).then(function(out){
       if (!out) return; // 304 / HTTP error already backed off above
       var body = out.body;
+      if (body === null){ _fillPollBackoff(); return; }
       if (body && !Array.isArray(body) && body.tree){
         // Dict-with-generation shape: numeric compare against known gen.
         var gen = body.generation;
@@ -322,7 +329,7 @@
         if (typeof gen === "number" && isFinite(gen)) _fillPoll.gen = gen;
         if (out.etag) _fillPoll.etag = out.etag;
         _fillPoll.delay = FILL_POLL_BASE_MS;
-        try { _fillPoll.onTree(body.tree); } catch(e){ console.warn(e); }
+        try { _fillPoll.onTree(body.tree, out.raw, {treeEnvelope:true}); } catch(e){ console.warn(e); }
         _fillPollSchedule();
         return;
       }
@@ -336,7 +343,7 @@
         if (g !== null) _fillPoll.gen = g;
         if (!hadBaseline){ _fillPoll.delay = FILL_POLL_BASE_MS; _fillPollSchedule(); return; }
         _fillPoll.delay = FILL_POLL_BASE_MS;
-        try { _fillPoll.onTree(body); } catch(e){ console.warn(e); }
+        try { _fillPoll.onTree(body, out.raw); } catch(e){ console.warn(e); }
         _fillPollSchedule();
         return;
       }
