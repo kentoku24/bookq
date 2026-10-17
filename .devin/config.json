@@ -32,18 +32,29 @@
       "Exec(rm -r -f)",
       "Exec(rm -f -r)",
 
-      // main への直接 push は禁止 (AGENTS.md §1)。回避形があり得るので
-      // Exec(git push) 自体は ask にして全経路を人間確認に流す
+      // main への直接 push は禁止 (AGENTS.md §1)。feature branch への push /
+      // force push は allow 側の Exec(git) で通る。prefix マッチの限界:
+      // bare `git push` や `git push <url> main` 等の回避形は残存するため、
+      // 最終防衛線は GitHub 側の branch protection
       "Exec(git push origin main)",
       "Exec(git push -u origin main)",
       "Exec(git push --set-upstream origin main)",
       "Exec(git push origin HEAD:main)",
-      "Exec(git push --force)",
-      "Exec(git push -f)",
-      "Exec(git push --force-with-lease)",
-      "Exec(git push --no-verify)",
+      "Exec(git push -f origin main)",
+      "Exec(git push -u -f origin main)",
+      "Exec(git push -fu origin main)",
+      "Exec(git push --force origin main)",
+      "Exec(git push --force-with-lease origin main)",
+      "Exec(git push --delete origin main)",
+      "Exec(git push origin :main)",
+      "Exec(git push origin :refs/heads/main)",
+      "Exec(git push upstream main)",
+      "Exec(git push -u upstream main)",
+      "Exec(git push --force upstream main)",
+      "Exec(git push upstream HEAD:main)",
 
       // コミットフックのバイパスは禁止
+      "Exec(git push --no-verify)",
       "Exec(git commit --no-verify)",
       "Exec(git commit -n)",
       "Exec(git merge --no-verify)",
@@ -60,9 +71,6 @@
       "Exec(curl --request DELETE)"
     ],
     "ask": [
-      // feature branch への push は許可だが必ず確認 (deny の main/force 規則を先に評価)
-      "Exec(git push)",
-
       // 本番・共有 deploy エンジン (AGENTS.md §8 — メイン checkout 専用)
       "Exec(./prd.sh)",
       "Exec(bash prd.sh)",
@@ -72,33 +80,6 @@
       // dev プールの全撤去は破壊的なので確認 (単体 up/down/list/url/logs/gc は許可側)
       "Exec(./dev.sh down --all)",
       "Exec(bash dev.sh down --all)",
-
-      // git の作業ツリー破壊系・設定変更系 (広い allow Exec(git) からの例外)
-      "Exec(git reset --hard)",
-      "Exec(git clean)",
-      "Exec(git checkout --)",
-      "Exec(git checkout .)",
-      "Exec(git restore .)",
-      "Exec(git restore --worktree)",
-      "Exec(git worktree remove)",
-      "Exec(git worktree prune)",
-      "Exec(git branch -D)",
-      "Exec(git tag -d)",
-      "Exec(git update-ref)",
-      "Exec(git rebase)",
-      "Exec(git stash drop)",
-      "Exec(git stash clear)",
-      "Exec(git config)",
-      "Exec(git remote add)",
-      "Exec(git remote set-url)",
-      "Exec(git remote remove)",
-
-      // 未コミット変更を捨てる強制切替 (checkout --/. と同系、Exec(git) 広域
-      // allow からの例外)
-      "Exec(git checkout -f)",
-      "Exec(git checkout --force)",
-      "Exec(git switch -f)",
-      "Exec(git switch --force)",
 
       // Simulator のデバイス/app 破壊 (Exec(xcrun) 広域 allow からの例外。
       // boot/shutdown/openurl/io screenshot/recordVideo 等の通常操作は許可側)
@@ -133,8 +114,8 @@
       // この repo 内の編集は自動承認 (Accept Edits 相当)。deny の .env 規則が優先
       "Write(**)",
 
-      // 標準ワークフロー: ブランチ操作・commit・worktree add 等を含む
-      // (push 系・破壊系は上の ask/deny が先に評価される)
+      // git 全操作を許可 (ユーザ指定)。main への push と --no-verify 系のみ
+      // deny 側で残す
       "Exec(git)",
 
       // bookq の dev 環境マネージャ (up/down/url/logs/list/gc)
