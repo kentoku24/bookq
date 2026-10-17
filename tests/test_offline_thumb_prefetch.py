@@ -533,20 +533,39 @@ def test_prefetch_viewport_rank_deterministic(browser, server):
     """
     context = browser.new_context(viewport={"width": 800, "height": 600})
     page = context.new_page()
+    # Install idle capture before app scripts can register a native callback.
+    # A callback registered before the stub would still fire later and overlap
+    # the explicit batch, which produced CI-only duplicate fetch calls.
+    page.add_init_script(
+        """(() => {
+            window.__idleQueue = [];
+            window.requestIdleCallback = (fn) => { window.__idleQueue.push(fn); return window.__idleQueue.length; };
+            window.__flushIdle = () => {
+                for (let i = 0; i < 10 && window.__idleQueue.length; i++) {
+                    const q = window.__idleQueue.splice(0);
+                    q.forEach(f => { try { f(); } catch(e){} });
+                }
+            };
+            window.__cap = [];
+            window.__capArmed = false;
+        })()"""
+    )
     try:
         _goto_offline(page, server)
-        # Hold idle + capture thumb fetches before any DOM churn can schedule.
+        # Wait for the shallow/full tree transition to finish; a later render
+        # would replace the pinned grid before the explicit prefetch runs.
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        # Capture thumb fetches before any DOM churn can schedule a batch.
         page.evaluate(
             """() => {
-                window.__idleQueue = [];
-                window.requestIdleCallback = (fn) => { window.__idleQueue.push(fn); return window.__idleQueue.length; };
                 window.__cap = [];
+                window.__capArmed = false;
                 const of = window.fetch.bind(window);
                 window.__capFetch = of;
                 window.fetch = (input, init) => {
                     const u = typeof input === 'string' ? input : (input && input.url) || '';
                     if (u.indexOf('/thumb/') === 0 || u.indexOf('/api/thumb-sprite') === 0) {
-                        window.__cap.push(u);
+                        if (window.__capArmed) window.__cap.push(u);
                         return new Promise(r => setTimeout(
                             () => r(new Response('thumb-bytes', {status: 200})), 15));
                     }
@@ -557,6 +576,9 @@ def test_prefetch_viewport_rank_deterministic(browser, server):
         )
         page.evaluate(
             """() => {
+                // Keep prefetch eligible; the sidebar MutationObserver may see
+                // this class change and must be drained before measurement.
+                document.getElementById('sidebar').classList.add('open');
                 // Pinned scrollport + per-tile rects (DOM order as designed).
                 const s = document.getElementById('sidebar-scroll');
                 s.getBoundingClientRect = () =>
@@ -593,24 +615,41 @@ def test_prefetch_viewport_rank_deterministic(browser, server):
         page.wait_for_timeout(300)
         page.evaluate(
             """() => {
-                const q = window.__idleQueue.splice(0);
-                q.forEach(f => { try { f(); } catch(e){} });
+                window.__flushIdle();
                 window.ThumbPrefetch.cancelThumbPrefetch();
+                // Late DOM/timer-triggered schedules must not start a second
+                // batch while the explicit prefetch below is being measured.
+                window.requestIdleCallback = () => 0;
             }"""
         )
         page.wait_for_timeout(150)
         page.evaluate("() => { window.__idleQueue.splice(0); window.__cap.length = 0; }")
-        calls = page.evaluate(
+        result = page.evaluate(
             """async () => {
-                await window.__BOOKQ_DEBUG.prefetchThumbs();
-                return window.__cap;
+                window.__capArmed = true;
+                try { await window.__BOOKQ_DEBUG.prefetchThumbs(); }
+                finally { window.__capArmed = false; }
+                const grid = document.getElementById('tile-grid');
+                const scroll = document.getElementById('sidebar-scroll');
+                return {
+                    calls: window.__cap,
+                    hidden: document.hidden,
+                    sidebarOpen: document.getElementById('sidebar').classList.contains('open'),
+                    scrollRect: scroll ? scroll.getBoundingClientRect() : null,
+                    tiles: grid ? Array.from(grid.querySelectorAll('.tile[data-path]')).map(t => ({
+                        path: t.getAttribute('data-path'),
+                        srcs: Array.from(t.querySelectorAll('img[src]')).map(i => i.getAttribute('src')),
+                        rect: t.getBoundingClientRect(),
+                    })) : [],
+                };
             }"""
         )
+        calls = result["calls"]
         assert calls == [
             "/thumb/visible-b/cover.png",
             "/thumb/visible-a/cover.png",
             "/thumb/aboveedge/cover.png",
             "/thumb/belowedge/cover.png",
-        ], f"exact visible→above→below order expected, got {calls}"
+        ], f"exact visible→above→below order expected, got {result}"
     finally:
         context.close()
