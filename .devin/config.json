@@ -32,29 +32,11 @@
       "Exec(rm -r -f)",
       "Exec(rm -f -r)",
 
-      // main への直接 push は禁止 (AGENTS.md §1)。feature branch への push /
-      // force push は allow 側の Exec(git) で通る。prefix マッチの限界:
-      // bare `git push` や `git push <url> main` 等の回避形は残存するため、
-      // 最終防衛線は GitHub 側の branch protection
-      "Exec(git push origin main)",
-      "Exec(git push -u origin main)",
-      "Exec(git push --set-upstream origin main)",
-      "Exec(git push origin HEAD:main)",
-      "Exec(git push -f origin main)",
-      "Exec(git push -u -f origin main)",
-      "Exec(git push -fu origin main)",
-      "Exec(git push --force origin main)",
-      "Exec(git push --force-with-lease origin main)",
-      "Exec(git push --delete origin main)",
-      "Exec(git push origin :main)",
-      "Exec(git push origin :refs/heads/main)",
-      "Exec(git push upstream main)",
-      "Exec(git push -u upstream main)",
-      "Exec(git push --force upstream main)",
-      "Exec(git push upstream HEAD:main)",
+      // git push は全て許可 (ユーザ指定)。main 直接 push は AGENTS.md §1 で
+      // 規約上禁止されているが、permission ではガードしない — private free
+      // repo で branch protection が使えないため、守るのは運用規約のみ
 
       // コミットフックのバイパスは禁止
-      "Exec(git push --no-verify)",
       "Exec(git commit --no-verify)",
       "Exec(git commit -n)",
       "Exec(git merge --no-verify)",
