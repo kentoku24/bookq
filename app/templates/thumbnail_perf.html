@@ -1,0 +1,103 @@
+{# Dev-only thumbnail timing panel (?thumb_perf=1). Reads the terminal
+   window.__thumbnailProbeReport produced by app/perf/thumbnail-probe.js —
+   no metric math is duplicated here. #}
+<div id="thumbnail-perf-panel" role="dialog" aria-label="Thumbnail Timing" hidden>
+  <div class="tp-head">
+    <strong>Thumbnail Timing</strong>
+    <button type="button" id="thumbnail-perf-close" aria-label="閉じる">✕</button>
+  </div>
+  <p class="tp-note">既存ブラウザセッションのキャッシュ状態で計測。実機発光タイミングではありません。</p>
+  <dl class="tp-summary">
+    <div><dt>status</dt><dd id="thumbnail-perf-status">—</dd></div>
+    <div><dt>first_visible_ms</dt><dd id="thumbnail-perf-first">—</dd></div>
+    <div><dt>visible_ready_ms</dt><dd id="thumbnail-perf-ready">—</dd></div>
+    <div><dt>counts</dt><dd id="thumbnail-perf-counts">—</dd></div>
+  </dl>
+  <textarea id="thumbnail-perf-json" readonly rows="8" aria-label="計測結果 JSON"></textarea>
+  <div class="tp-actions">
+    <button type="button" id="thumbnail-perf-copy">JSONをコピー</button>
+    <button type="button" id="thumbnail-perf-save">JSONを保存</button>
+    <button type="button" id="thumbnail-perf-reload">再計測</button>
+  </div>
+  <p id="thumbnail-perf-hint" class="tp-hint" hidden></p>
+</div>
+<style>
+#thumbnail-perf-panel{position:fixed;left:8px;right:8px;bottom:8px;z-index:90;max-height:55vh;display:flex;flex-direction:column;gap:8px;background:rgba(26,26,26,0.97);border:1px solid #39414f;border-radius:12px;padding:10px 12px;color:#dfe5ee;font-size:12px;line-height:1.4;box-shadow:0 10px 28px rgba(0,0,0,.5);overflow-y:auto;-webkit-overflow-scrolling:touch}
+#thumbnail-perf-panel[hidden]{display:none}
+#thumbnail-perf-panel .tp-head{display:flex;align-items:center;justify-content:space-between}
+#thumbnail-perf-panel .tp-head strong{font-size:13px}
+#thumbnail-perf-panel .tp-note{margin:0;color:#9aa4b2;font-size:11px}
+#thumbnail-perf-panel .tp-summary{margin:0;display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
+#thumbnail-perf-panel .tp-summary div{display:flex;gap:6px}
+#thumbnail-perf-panel .tp-summary dt{color:#9aa4b2}
+#thumbnail-perf-panel .tp-summary dd{margin:0;font-variant-numeric:tabular-nums}
+#thumbnail-perf-panel #thumbnail-perf-json{width:100%;box-sizing:border-box;background:#0f1420;color:#c9d4e3;border:1px solid #2a2f3a;border-radius:8px;font-family:ui-monospace,Menlo,monospace;font-size:10px;padding:6px;resize:vertical}
+#thumbnail-perf-panel .tp-actions{display:flex;gap:8px;flex-wrap:wrap}
+#thumbnail-perf-panel .tp-actions button,#thumbnail-perf-panel .tp-head button{min-height:44px;min-width:44px;padding:6px 12px;background:#22262d;color:#dfe5ee;border:1px solid #39414f;border-radius:8px;font-size:12px;cursor:pointer}
+#thumbnail-perf-panel .tp-head button{padding:6px 10px}
+#thumbnail-perf-panel .tp-hint{margin:0;color:#c9a24f;font-size:11px}
+</style>
+<script>
+(() => {
+  const panel = document.getElementById("thumbnail-perf-panel");
+  if (!panel) return;
+  const jsonEl = document.getElementById("thumbnail-perf-json");
+  const hintEl = document.getElementById("thumbnail-perf-hint");
+  // Keep taps inside the overlay from reaching the browse/viewer handlers.
+  for (const type of ["click", "touchstart", "touchend", "pointerdown", "pointerup"]) {
+    panel.addEventListener(type, (e) => e.stopPropagation());
+  }
+  const fmt = (v) => (typeof v === "number" ? v.toFixed(1) : "unavailable");
+  const poll = setInterval(() => {
+    const report = window.__thumbnailProbeReport;
+    if (!report) return;
+    clearInterval(poll);
+    const result = report.result || {};
+    document.getElementById("thumbnail-perf-status").textContent =
+      result.status || "unavailable";
+    document.getElementById("thumbnail-perf-first").textContent =
+      fmt(result.first_visible_ms);
+    document.getElementById("thumbnail-perf-ready").textContent =
+      fmt(result.visible_ready_ms);
+    document.getElementById("thumbnail-perf-counts").textContent =
+      result.decoded_images + "/" + result.visible_images + " decoded, " +
+      result.broken_images + " broken, " + result.pending_images + " pending";
+    jsonEl.value = JSON.stringify(report, null, 2);
+    panel.hidden = false;
+  }, 100);
+  document.getElementById("thumbnail-perf-copy").addEventListener("click", () => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(jsonEl.value).then(() => {
+        hintEl.textContent = "";
+        hintEl.hidden = true;
+      }, () => {
+        jsonEl.focus();
+        jsonEl.select();
+        hintEl.textContent = "コピーできませんでした。選択済みのテキストを手動でコピーしてください。";
+        hintEl.hidden = false;
+      });
+    } else {
+      jsonEl.focus();
+      jsonEl.select();
+      hintEl.textContent = "コピーできませんでした。選択済みのテキストを手動でコピーしてください。";
+      hintEl.hidden = false;
+    }
+  });
+  document.getElementById("thumbnail-perf-save").addEventListener("click", () => {
+    const blob = new Blob([jsonEl.value], {type: "application/json"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "thumbnail-perf-" + new Date().toISOString().replace(/[:.]/g, "-") + ".json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+  document.getElementById("thumbnail-perf-reload").addEventListener("click", () => {
+    location.reload();
+  });
+  document.getElementById("thumbnail-perf-close").addEventListener("click", () => {
+    panel.hidden = true;
+  });
+})();
+</script>

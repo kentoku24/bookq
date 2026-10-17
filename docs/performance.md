@@ -10,12 +10,51 @@
 | ページ送り中 long task | 0 | 0 | 0 維持 |
 | 開く時の先読み転送量 | 2.9MB | 2.9MB（不変） | 観測のみ（画像は原寸配信を維持する決定） |
 
+### PR #39 の viewport thumbnail prefetch
+
+- 事前取得対象は描画済みタイルのうち sidebar scrollport ±1 viewport に限定され、上限 50 件。未スクロールでオフライン再読込した場合、scrollport 外タイルのカバーは未取得のまま broken-image プレースホルダになり得る。オンライン中のスクロールで順次キャッシュされる。
+- frozen 実測では `本を開く→初画像` が 131.9ms → 186.9ms（中央値）。ユーザーがこの差を速度上問題ないと明示的に受容したため本 PR の blocker ではない。歴史的 KPI 表は変更しない。
+
 ## 2 層のデグレ検知
 
 1. **CI（決定的指標）** `tests/test_perf_budget.py` — `/api/folders` ボディ転送 2 回（shallow `?depth=1` 先行 + full 追従）・gzip 比、
    本を開いた直後の `/image/` リクエスト数 = `PREFETCH_AHEAD + 1`、ページ送り 10 回で long task 0。
+   `tests/test_frontend_perf_lifecycle.py` — 起動リクエスト回数・warm 304 再検証の結合・
+   生成ガード・worker/idle 永続化・viewport prefetch 選択の決定的カバレッジ。
    `tests/` 一括実行に含まれる。
 2. **手動（ms 指標）** `scripts/perf/measure.py` — 実データのある example-host に対して PR ごとに before/after。
+
+## サムネイル表示速度の再計測
+
+PR #39 で追加した成功判定付きの計測。既存 `scripts/perf/measure.py` の値や旧 `img.complete` 指標とは別バージョンの指標であり、直接比較しない。
+
+```bash
+# 隔離した dev 環境の loopback URL を指定（本番 URL は受け付けない）
+uv run --with playwright --with-requirements requirements-dev.txt \
+  python scripts/perf/measure_thumbnails.py http://127.0.0.1:8099 --runs 3
+```
+
+- `first_visible_ms`: navigation start から、画面内で最初の画像の読み込み・decode 成功を animation frame 上で確認するまで（shallow 表示を含む）。
+- `visible_ready_ms`: full tree ready 後、画面と sidebar scrollport の両方に入る画像すべてが読み込み・decode に成功したことを animation frame 上で確認するまで。DOM/対象画像と成功状態が 250ms 安定した後に確定し、250ms の確認待ちは値に加算しない。ブラウザ内の表示準備完了の代理指標であり、実画面の発光時刻ではない。
+- 404・decode 失敗・対象 0 枚・タイムアウトを表示成功にしない。失敗時の `visible_ready_ms` は null、壊れた画像数と未完了数を記録する。全 run 成功時のみ中央値を出し、失敗があれば終了コード 1。
+- 既定は Chromium の iPhone 相当（390x844、DPR3）、`--profile desktop` で 1280x800。実機 Safari の結果ではない。各 run は新規 browser context、Service Worker は無効。サーバー側キャッシュはリセットしないため、before/after はデータ・表示領域・キャッシュ条件を揃える。
+- 初期表示の画面内だけが対象。画面外 lazy 画像は待たず、scroll・階層移動後の速度やオフライン性能は測らない。画像の読み込み設定は変更しない。
+- 結果は既定で `.omo/evidence/thumbnail-speed-<timestamp>/thumbnails.json`。`--out <新規ディレクトリ>`、`--timeout-ms 30000` を指定可能。既存出力ディレクトリは拒否し、過去データを上書きしない。出力には作品名・画像 URL・スクリーンショットを含めない。
+- 定義の回帰テスト: `tests/test_thumbnail_measurement.py`（full tree 待ち、decode、破損画像、scrollport、DOM 置換、失敗 run の集計）。速度の固定 ms 閾値は CI に置かない。
+
+### iOS Simulator での計測
+
+iOS Simulator の Safari（WebKit）でも同じ `app/perf/thumbnail-probe.js` と同じ指標定義で計測できる。dev 環境の `BOOKQ_TEST_MODE` でのみ有効な `?thumb_perf=1` を付けて開くと、計測終了後に結果パネルが出る。プローブ本体は `/static` に公開しない。
+
+```bash
+./dev.sh up ios-live-perf-explore --local --fixture --port 8099
+./scripts/open-simulator.sh 'http://127.0.0.1:8099/?thumb_perf=1'
+```
+
+- `--fixture` はツール動作確認用。実際の計測は実データを読み取り専用でマウントした dev 環境に対して同じ URL で行う。
+- 計測は成功または約 30 秒のタイムアウトで終了し、画面内にパネルが表示される。「JSONをコピー」「JSONを保存」で `window.__thumbnailProbeReport`（Web Inspector からも参照可）を出力、「再計測」で reload して別 run を取る。
+- `environment` に実 Safari の UA・実 viewport・DPR・`browser_cache`（`existing_browser_session_not_reset`）・Service Worker controller 有無が記録され、CLI の Chromium fresh-context 結果と区別できる。
+- キャッシュ・SW・データを勝手に消去しない。ハードウェア・キャッシュ条件が違うため Chromium CLI の値や実機 iPhone の発光時刻と同一ではなく、比較は揃えた条件内でのみ意味を持つ。
 
 ## 手動計測の手順
 
