@@ -863,6 +863,12 @@ def test_auto_sync_on_first_online_visit(page, server):
     )
     try:
         page.evaluate("() => { window.__apiHits = []; }")
+        page.evaluate(
+            """() => {
+                const r = Date.now.bind(Date);
+                Date.now = () => r() + 300001;
+            }"""
+        )
         # Ensure we are online, then simulate offline→online flip
         page.context.set_offline(True)
         page.wait_for_selector(".tile", timeout=2300)
