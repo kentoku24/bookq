@@ -230,6 +230,8 @@ def test_parent_shows_images_tile_plus_folder(mixed_page, mixed_server):
     # (data-read-child, このフォルダを読む) after the folder tiles.
     mixed_page.goto(mixed_server + f"/#/browse/{MIXED_PARENT}")
     expect(mixed_page.locator("#browse-header")).to_have_text("↩ mseries")
+    # Same async-convergence guard as test_archive_parent_shows_images_tile.
+    expect(mixed_page.locator('.tile[data-read-child="1"]')).to_have_count(1)
     folders, reads, selfs = _grid_tiles(mixed_page)
     assert folders == [
         f"{MIXED_PARENT}/v01",
@@ -273,6 +275,9 @@ def test_archive_parent_shows_images_tile(mixed_page, mixed_server):
     # Archive parent level mirrors the fs tree: folder tiles plus ONE
     # images-tile for the mixed child, and its click reads loose-only.
     mixed_page.goto(mixed_server + f"/#/browse/{AMIXED_PARENT}")
+    # Images-tile converges asynchronously (archive fill-poll re-render);
+    # wait for it before the synchronous _grid_tiles snapshot (flake guard).
+    expect(mixed_page.locator('.tile[data-read-child="1"]')).to_have_count(1)
     folders, reads, selfs = _grid_tiles(mixed_page)
     assert folders == [
         f"{AMIXED_PARENT}/v01",
