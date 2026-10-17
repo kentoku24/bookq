@@ -93,6 +93,23 @@
       "Exec(git remote set-url)",
       "Exec(git remote remove)",
 
+      // 未コミット変更を捨てる強制切替 (checkout --/. と同系、Exec(git) 広域
+      // allow からの例外)
+      "Exec(git checkout -f)",
+      "Exec(git checkout --force)",
+      "Exec(git switch -f)",
+      "Exec(git switch --force)",
+
+      // Simulator のデバイス/app 破壊 (Exec(xcrun) 広域 allow からの例外。
+      // boot/shutdown/openurl/io screenshot/recordVideo 等の通常操作は許可側)
+      "Exec(xcrun simctl erase)",
+      "Exec(xcrun simctl delete)",
+      "Exec(xcrun simctl uninstall)",
+
+      // エージェント自身のグローバル権限設定の書き換えは確認 (権限昇格の防止。
+      // repo 内 .devin/ はコミット+PR レビュー経由なので許可側のまま)
+      "Write(~/.config/devin/**)",
+
       // docker の変更系 (読み取り系は allow 側で個別に通す)。
       // worktree での素の docker compose up は compose label 競合を起こすため常に確認
       "Exec(docker)",
@@ -125,9 +142,12 @@
       "Exec(bash dev.sh)",
       "Exec(./scripts/)",
       "Exec(bash scripts/)",
-      "Exec(python3 scripts/)",
       "Exec(./setup-hooks.sh)",
       "Exec(bash setup-hooks.sh)",
+
+      // BOOKQ_LIVE_ROOT=... ./scripts/live-regress.sh 等の env 前置形。
+      // 変数名で絞っているが後段は任意コマンドを実行し得ることに留意
+      "Exec(BOOKQ_LIVE_ROOT",
 
       // テスト / Python ツールチェーン
       // 例: uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
@@ -137,9 +157,18 @@
       "Exec(pytest)",
       "Exec(BOOKQ_TEST_MODE=true uv run)",
 
+      // 分析用ワンライナー・ヒアドキュメント・scripts/ 直叩き。
+      // uv run / bash scripts/ で任意実行は既に許可済みのため同等リスク
+      "Exec(python3)",
+      "Exec(python)",
+      "Exec(sqlite3)",
+
       // GitHub CLI — PR/issue 作成・閲覧はワークフローの一部
       // (api/auth/repo/release/pr merge 等は ask 側)
       "Exec(gh)",
+      // gh repo ask に対する読み取り系 carve-out
+      "Exec(gh repo view)",
+      "Exec(gh repo list)",
 
       // docker 読み取り系 (Exec(docker) ask に対する具体的 allow の carve-out)
       "Exec(docker ps)",
@@ -149,6 +178,9 @@
       "Exec(docker images)",
       "Exec(docker volume ls)",
       "Exec(docker network ls)",
+      "Exec(docker info)",
+      "Exec(docker version)",
+      "Exec(docker compose version)",
       "Exec(docker compose ps)",
       "Exec(docker compose logs)",
       "Exec(docker compose config)",
@@ -177,11 +209,16 @@
       "Exec(curl -s -o /dev/null http://127.0.0.1",
       "Exec(curl -s -o /dev/null http://localhost",
 
-      // iOS Simulator / macOS (ios-simulator skill 経由の検証用)
+      // iOS Simulator / macOS (ios-simulator skill 経由の検証用。
+      // simctl の erase/delete/uninstall は ask 側)
       "Exec(xcrun)",
+      "Exec(idb ui)",
+      "Exec(idb list-targets)",
+      "Exec(idb describe)",
       "Exec(open)",
       "Exec(defaults read)",
       "Exec(plutil -p)",
+      "Exec(plutil -lint)",
       "Exec(tailscale status)",
       "Exec(tailscale ip)",
       "Exec(tailscale whois)",
@@ -224,10 +261,22 @@
       "Exec(comm)",
       "Exec(pbcopy)",
       "Exec(pbpaste)",
+      "Exec(sed -n)",
+      "Exec(sed -e)",
+      "Exec(sed -E)",
+      "Exec(cp)",
+      "Exec(mv)",
+      "Exec(kill)",
+      "Exec(sleep)",
+      "Exec(set -o pipefail)",
       "Exec(mkdir)",
       "Exec(touch)",
-      "Exec(chmod +x)",
+      "Exec(chmod)",
       "Exec(bash -n)",
+
+      // video-verification skill: 録画からのフレーム抽出と probe
+      "Exec(ffmpeg)",
+      "Exec(ffprobe)",
 
       // Chrome DevTools MCP (ブラウザデバッグ用に導入済み)
       "mcp__chrome-devtools__*",
@@ -237,7 +286,13 @@
       "Fetch(domain:api.github.com)",
       "Fetch(domain:raw.githubusercontent.com)",
       "Fetch(domain:pypi.org)",
-      "Fetch(domain:tailscale.com)"
+      "Fetch(domain:files.pythonhosted.org)",
+      "Fetch(domain:tailscale.com)",
+      "Fetch(domain:developer.apple.com)",
+      "Fetch(domain:developer.mozilla.org)",
+      "Fetch(domain:playwright.dev)",
+      "Fetch(domain:fastapi.tiangolo.com)",
+      "Fetch(domain:docs.docker.com)"
     ]
   }
 }
