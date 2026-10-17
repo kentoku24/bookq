@@ -177,16 +177,21 @@ def _grid_tiles(page):
 
     Folder tiles carry no read marker; images-tiles carry data-read-child and
     the root self-tile carries data-read-self. Order-sensitive: folders render
-    first, images-tiles after.
+    first, images-tiles after. Read the grid atomically: a deep link applied
+    during the shallow/full tree transition can replace the element list while
+    Playwright is iterating it.
     """
-    folders, reads, selfs = [], [], []
-    for t in page.locator(".tile").all():
-        if t.get_attribute("data-read-child") == "1":
-            reads.append(t.get_attribute("data-path"))
-        elif t.get_attribute("data-read-self") == "1":
-            selfs.append(t.get_attribute("data-path"))
-        else:
-            folders.append(t.get_attribute("data-path"))
+    page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+    tiles = page.evaluate(
+        """() => Array.from(document.querySelectorAll('#tile-grid .tile')).map(t => ({
+            path: t.getAttribute('data-path'),
+            readChild: t.getAttribute('data-read-child'),
+            readSelf: t.getAttribute('data-read-self'),
+        }))"""
+    )
+    folders = [t["path"] for t in tiles if t["readChild"] != "1" and t["readSelf"] != "1"]
+    reads = [t["path"] for t in tiles if t["readChild"] == "1"]
+    selfs = [t["path"] for t in tiles if t["readSelf"] == "1"]
     return folders, reads, selfs
 
 

@@ -237,58 +237,39 @@ def test_thumb_prefetch_cached(page, server):
     # uses actual browse-level tiles which correspond to currentBrowsePath children (root when hash empty)
     dom_urls = page.evaluate(
         """() => {
-            const srcs = Array.from(document.querySelectorAll('.tile img')).map(el => el.getAttribute('src')).filter(Boolean);
-            // Fallback: also collect .tile[data-path] with thumb via dataset? but img src is sufficient
-            // Deduplicate preserving order
+            const s = document.getElementById('sidebar-scroll');
+            const r0 = s ? s.getBoundingClientRect() : null;
+            const vh = window.innerHeight, vw = window.innerWidth;
+            const vp = {top: Math.max(0, r0 ? r0.top : 0), bottom: Math.min(vh, r0 ? r0.bottom : vh),
+                        left: Math.max(0, r0 ? r0.left : 0), right: Math.min(vw, r0 ? r0.right : vw)};
+            const h = Math.max(1, vp.bottom - vp.top);
             const seen = new Set();
             const out = [];
-            for(const u of srcs){
-                if(!seen.has(u)){ seen.add(u); out.push(u); }
-            }
+            // Fallback: also collect .tile[data-path] with thumb via dataset? but img src is sufficient
+            // Deduplicate preserving order
+            document.querySelectorAll('#tile-grid .tile[data-path]').forEach(t => {
+                const r = t.getBoundingClientRect();
+                if (!r || (r.width === 0 && r.height === 0)) return;
+                if (r.right <= vp.left || r.left >= vp.right) return;
+                const on = r.bottom > vp.top && r.top < vp.bottom;
+                const near = (r.bottom <= vp.top && r.bottom >= vp.top - h) ||
+                             (r.top >= vp.bottom && r.top <= vp.bottom + h);
+                if (!on && !near) return;
+                Array.from(t.querySelectorAll('img')).forEach(img => {
+                    const src = img.getAttribute('src') || '';
+                    if (src && !seen.has(src)) { seen.add(src); out.push(src); }
+                });
+            });
             return out;
         }"""
     )
     # Also collect authoritative tree urls via API for completeness (fallback when tiles not yet rendered as multi-grid)
     # Use DOM count vs tree walk to ensure cap respected; prefer DOM for verification of cached thumbs
-    urls = dom_urls
-    if(not urls or len(urls)==0):
-        # fallback to tree walk via fetch if DOM empty (e.g., no tiles)
-        fallback = page.evaluate(
-            """async () => {
-                const r = await fetch('/api/folders');
-                const data = await r.json();
-                const urls=[];
-                function walk(nodes, base){
-                    for(const n of nodes){
-                        if(n.type!=='folder') continue;
-                        const full = base ? base + '/' + n.name : n.name;
-                        if(n.thumb){
-                            const u = (window.OfflineCore && window.OfflineCore.thumbUrl)
-                              ? window.OfflineCore.thumbUrl(full, n.thumb)
-                              : '/thumb/' + full.split('/').map(encodeURIComponent).join('/') + '/' + n.thumb.split('/').map(encodeURIComponent).join('/') + '?w=400';
-                            urls.push(u);
-                        }
-                        if(n.thumbs && Array.isArray(n.thumbs) && n.thumbs.length>=2){
-                            for(const t of n.thumbs.slice(0,9)){
-                                const u = (window.OfflineCore && window.OfflineCore.thumbUrl)
-                                  ? window.OfflineCore.thumbUrl(full, t, 200)
-                                  : '/thumb/' + full.split('/').map(encodeURIComponent).join('/') + '/' + t.split('/').map(encodeURIComponent).join('/') + '?w=200';
-                                urls.push(u);
-                            }
-                        }
-                        if(n.children) walk(n.children, full);
-                    }
-                }
-                walk(data,'');
-                const seen2=new Set(); const dedup=[];
-                for(const u of urls){ if(!seen2.has(u)){ seen2.add(u); dedup.push(u); } }
-                return dedup.slice(0,50);
-            }"""
-        )
-        urls = fallback
+    # fallback to tree walk via fetch if DOM empty (e.g., no tiles)
     # Fixture always carries thumbs; an empty tree is a broken fixture, not a
     # reason to skip — fail loudly instead of silently passing with no coverage.
-    assert urls, "no thumb urls found in fixture tree"
+    urls = dom_urls[:50]
+    assert urls, "no viewport-eligible thumb urls found in fixture tiles"
     raw_count = len(urls)
     # cap 50 enforced
     assert len(urls) <= 50, f"prefetch cap 50 violated: {len(urls)}"
@@ -450,62 +431,225 @@ def test_thumb_prefetch_cached(page, server):
         pass
 
 
-def test_prefetch_visible_preference_over_cap(page, server):
+def test_prefetch_visible_preference_over_cap(browser, server):
     app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
     prefetch_text = (REPO_ROOT / "app" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
-    assert "filtered.slice(0, 50)" in prefetch_text
     assert "__BOOKQ_DEBUG" in app_text
 
-    _goto_offline(page, server)
-    _wait_for_sw(page)
+    context = browser.new_context(viewport={"width": 1280, "height": 20000})
+    page = context.new_page()
     try:
+        _goto_offline(page, server)
+        _wait_for_sw(page)
         assert page.evaluate("() => typeof window.__BOOKQ_DEBUG.prefetchThumbs === 'function'")
-        orig = page.evaluate("() => JSON.parse(JSON.stringify(window.__BOOKQ_DEBUG.getTree()))")
+        page.evaluate(
+            """() => {
+                window.__idleQueue = window.__idleQueue || [];
+                window.requestIdleCallback = (fn) => { window.__idleQueue.push(fn); return window.__idleQueue.length; };
+            }"""
+        )
+        page.wait_for_timeout(300)
+        page.evaluate(
+            """() => {
+                const q = (window.__idleQueue || []).splice(0);
+                q.forEach(f => { try { f(); } catch(e){} });
+                window.ThumbPrefetch.cancelThumbPrefetch();
+            }"""
+        )
+        page.wait_for_timeout(200)
         synth = [{"name": f"synth{i}", "type": "folder", "thumb": "a.png", "children": [{"name": "a.png", "type": "image"}]} for i in range(80)]
-        page.evaluate("(s) => window.__BOOKQ_DEBUG.setTree(s)", synth)
+        page.evaluate(
+            "(s) => { window.__BOOKQ_DEBUG.setTree(s); window.renderView(); }", synth
+        )
+        page.wait_for_selector("#tile-grid .tile", timeout=5000)
         res = page.evaluate("""async () => {
-            const origQSA=document.querySelectorAll.bind(document);
             const origFetch=window.fetch.bind(window);
             const origMatch=caches.match.bind(caches);
             const origOpen=caches.open.bind(caches);
             const captured=[];
+            let inflight=0, maxInflight=0;
             try{
-                const visible=Array.from({length:60},(_,i)=>'synth'+(20+i));
-                document.querySelectorAll=(sel)=> sel==='.tile[data-path]'? visible.map(p=>({getAttribute:()=>p})): origQSA(sel);
                 caches.match=async()=>null;
                 caches.open=async()=>({put:async()=>{}});
-                window.fetch=(input,init)=>{ const u=typeof input==='string'?input:(input&&input.url)||''; if(u.includes('/thumb/')){ captured.push(u); return Promise.resolve(new Response(new Blob(),{status:200})); } return origFetch(input,init); };
+                window.fetch=(input,init)=>{
+                    const u=typeof input==='string'?input:(input&&input.url)||'';
+                    if(u.indexOf('/thumb/')===0 || u.indexOf('/api/thumb-sprite')===0){
+                        captured.push(u);
+                        inflight++; maxInflight=Math.max(maxInflight,inflight);
+                        return new Promise(r=>setTimeout(()=>{inflight--;r(new Response(new Blob(),{status:200}));},15));
+                    }
+                    return origFetch(input,init);
+                };
                 await window.__BOOKQ_DEBUG.prefetchThumbs();
                 // Only synth URLs belong to this invocation; background
                 // auto-sync may capture real thumbs concurrently — ignore those.
                 const synthCap=captured.filter(u=>u.includes('synth'));
-                const allVisible=synthCap.every(u=> visible.some(f=> u.includes(f)));
-                return {len:synthCap.length, allVisible, total:captured.length};
-            } finally { document.querySelectorAll=origQSA; window.fetch=origFetch; caches.match=origMatch; caches.open=origOpen; }
+                return {len:synthCap.length, urls:captured, maxInflight};
+            } finally { window.fetch=origFetch; caches.match=origMatch; caches.open=origOpen; }
         }""")
-        assert res["len"] <= 50 and res["len"] > 0
-        assert res["allVisible"]
-        res2 = page.evaluate("""async () => {
-            const origQSA=document.querySelectorAll.bind(document);
-            const origFetch=window.fetch.bind(window);
-            const origMatch=caches.match.bind(caches);
-            const origOpen=caches.open.bind(caches);
-            const captured=[];
-            try{
-                document.querySelectorAll=(sel)=> sel==='.tile[data-path]'? [{getAttribute:()=>'nope'}]: origQSA(sel);
-                caches.match=async()=>null;
-                caches.open=async()=>({put:async()=>{}});
-                window.fetch=(input,init)=>{ const u=typeof input==='string'?input:(input&&input.url)||''; if(u.includes('/thumb/')){ captured.push(u); return Promise.resolve(new Response(new Blob(),{status:200})); } return origFetch(input,init); };
-                await window.__BOOKQ_DEBUG.prefetchThumbs();
-                const first50=Array.from({length:50},(_,i)=>'synth'+i);
-                const synthCap2=captured.filter(u=>u.includes('synth'));
-                const isFirst=synthCap2.every(u=> first50.some(f=> u.includes(f)));
-                return {len:synthCap2.length, isFirst, total:captured.length};
-            } finally { document.querySelectorAll=origQSA; window.fetch=origFetch; caches.match=origMatch; caches.open=origOpen; }
-        }""")
-        assert res2["len"] == 50
-        assert res2["isFirst"]
-        page.evaluate("(o)=> window.__BOOKQ_DEBUG.setTree(o)", orig)
+        eligible = page.evaluate(
+            """() => {
+                const s = document.getElementById('sidebar-scroll');
+                const r0 = s ? s.getBoundingClientRect() : null;
+                const vh = window.innerHeight, vw = window.innerWidth;
+                const vp = {top: Math.max(0, r0?r0.top:0), bottom: Math.min(vh, r0?r0.bottom:vh),
+                            left: Math.max(0, r0?r0.left:0), right: Math.min(vw, r0?r0.right:vw)};
+                const h = Math.max(1, vp.bottom - vp.top);
+                const seen = new Set(); const out = [];
+                document.querySelectorAll('#tile-grid .tile[data-path], #tile-grid .item[data-path], #tile-grid .card[data-path]').forEach(el => {
+                    const r = el.getBoundingClientRect();
+                    if (!r || (r.width === 0 && r.height === 0)) return;
+                    if (r.right <= vp.left || r.left >= vp.right) return;
+                    const on = r.bottom > vp.top && r.top < vp.bottom;
+                    const near = (r.bottom <= vp.top && r.bottom >= vp.top - h) || (r.top >= vp.bottom && r.top <= vp.bottom + h);
+                    if (!on && !near) return;
+                    el.querySelectorAll('img[src]').forEach(img => {
+                        const u = img.getAttribute('src');
+                        if ((u.indexOf('/thumb/') === 0 || u.indexOf('/api/thumb-sprite') === 0) && !seen.has(u)) { seen.add(u); out.push(u); }
+                    });
+                });
+                return out;
+            }"""
+        )
+        assert len(eligible) >= 50, f"fixture/viewport must yield >50 eligible urls, got {len(eligible)}"
+        assert res["len"] == 50, f"cap 50 on the eligible list must bind: {res}"
+        assert res["maxInflight"] <= 3, f"batch concurrency must stay <=3, got {res['maxInflight']}"
+        assert set(res["urls"]) <= set(eligible), (
+            f"fetched URLs outside eligible set: {set(res['urls']) - set(eligible)}"
+        )
     finally:
-        page.goto(server+"/?offline=1")
-        page.wait_for_selector(".tile", timeout=10000)
+        context.close()
+
+
+def test_prefetch_viewport_rank_deterministic(browser, server):
+    """Hard-coded rects → exact fetch order. Independent of the app's rank
+    algorithm (no ELIGIBLE_URLS_JS mirror): pinned rects + expected URLs catch
+    sign/off-by-one changes directly.
+
+    Scrollport {top:100,bottom:300,left:20,right:220} in an 800x600 window.
+    DOM order: farbelow, belowedge, aboveedge, farabove, visible-b, visible-a,
+    leftclip, rightclip, zero-size — all normal x = left40..right60.
+    Expected fetch order EXACTLY: visible-b, visible-a, aboveedge, belowedge.
+    """
+    context = browser.new_context(viewport={"width": 800, "height": 600})
+    page = context.new_page()
+    # Install idle capture before app scripts can register a native callback.
+    # A callback registered before the stub would still fire later and overlap
+    # the explicit batch, which produced CI-only duplicate fetch calls.
+    page.add_init_script(
+        """(() => {
+            window.__idleQueue = [];
+            window.requestIdleCallback = (fn) => { window.__idleQueue.push(fn); return window.__idleQueue.length; };
+            window.__flushIdle = () => {
+                for (let i = 0; i < 10 && window.__idleQueue.length; i++) {
+                    const q = window.__idleQueue.splice(0);
+                    q.forEach(f => { try { f(); } catch(e){} });
+                }
+            };
+            window.__cap = [];
+            window.__capArmed = false;
+        })()"""
+    )
+    try:
+        _goto_offline(page, server)
+        # Wait for the shallow/full tree transition to finish; a later render
+        # would replace the pinned grid before the explicit prefetch runs.
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        # Capture thumb fetches before any DOM churn can schedule a batch.
+        page.evaluate(
+            """() => {
+                window.__cap = [];
+                window.__capArmed = false;
+                const of = window.fetch.bind(window);
+                window.__capFetch = of;
+                window.fetch = (input, init) => {
+                    const u = typeof input === 'string' ? input : (input && input.url) || '';
+                    if (u.indexOf('/thumb/') === 0 || u.indexOf('/api/thumb-sprite') === 0) {
+                        if (window.__capArmed) window.__cap.push(u);
+                        return new Promise(r => setTimeout(
+                            () => r(new Response('thumb-bytes', {status: 200})), 15));
+                    }
+                    return of(input, init);
+                };
+                caches.match = async () => null;
+            }"""
+        )
+        page.evaluate(
+            """() => {
+                // Keep prefetch eligible; the sidebar MutationObserver may see
+                // this class change and must be drained before measurement.
+                document.getElementById('sidebar').classList.add('open');
+                // Pinned scrollport + per-tile rects (DOM order as designed).
+                const s = document.getElementById('sidebar-scroll');
+                s.getBoundingClientRect = () =>
+                    ({top: 100, bottom: 300, left: 20, right: 220, width: 200, height: 200});
+                const grid = document.getElementById('tile-grid');
+                const specs = [
+                    ['farbelow',  {top: 501,  bottom: 521}],
+                    ['belowedge', {top: 500,  bottom: 520}],
+                    ['aboveedge', {top: -100, bottom: -80}],
+                    ['farabove',  {top: -130, bottom: -110}],
+                    ['visible-b', {top: 150,  bottom: 170}],
+                    ['visible-a', {top: 200,  bottom: 220}],
+                    ['leftclip',  {top: 150,  bottom: 170, left: 0,   right: 20}],
+                    ['rightclip', {top: 150,  bottom: 170, left: 220, right: 240}],
+                    ['zerosize',  {top: 150,  bottom: 170, zero: true}],
+                ];
+                grid.innerHTML = specs.map(([n]) =>
+                    `<div class="tile" data-path="${n}"><img src="/thumb/${n}/cover.png"></div>`
+                ).join('');
+                grid.querySelectorAll('.tile').forEach((el, i) => {
+                    const [, r] = specs[i];
+                    const left = r.left !== undefined ? r.left : 40;
+                    const right = r.right !== undefined ? r.right : 60;
+                    const rect = r.zero
+                        ? {top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0}
+                        : {top: r.top, bottom: r.bottom, left, right,
+                           width: right - left, height: r.bottom - r.top};
+                    el.getBoundingClientRect = () => rect;
+                });
+            }"""
+        )
+        # Drain the MutationObserver-triggered schedule, then cancel + reset —
+        # the manual prefetchThumbs below is the only batch that may record.
+        page.wait_for_timeout(300)
+        page.evaluate(
+            """() => {
+                window.__flushIdle();
+                window.ThumbPrefetch.cancelThumbPrefetch();
+                // Late DOM/timer-triggered schedules must not start a second
+                // batch while the explicit prefetch below is being measured.
+                window.requestIdleCallback = () => 0;
+            }"""
+        )
+        page.wait_for_timeout(150)
+        page.evaluate("() => { window.__idleQueue.splice(0); window.__cap.length = 0; }")
+        result = page.evaluate(
+            """async () => {
+                window.__capArmed = true;
+                try { await window.__BOOKQ_DEBUG.prefetchThumbs(); }
+                finally { window.__capArmed = false; }
+                const grid = document.getElementById('tile-grid');
+                const scroll = document.getElementById('sidebar-scroll');
+                return {
+                    calls: window.__cap,
+                    hidden: document.hidden,
+                    sidebarOpen: document.getElementById('sidebar').classList.contains('open'),
+                    scrollRect: scroll ? scroll.getBoundingClientRect() : null,
+                    tiles: grid ? Array.from(grid.querySelectorAll('.tile[data-path]')).map(t => ({
+                        path: t.getAttribute('data-path'),
+                        srcs: Array.from(t.querySelectorAll('img[src]')).map(i => i.getAttribute('src')),
+                        rect: t.getBoundingClientRect(),
+                    })) : [],
+                };
+            }"""
+        )
+        calls = result["calls"]
+        assert calls == [
+            "/thumb/visible-b/cover.png",
+            "/thumb/visible-a/cover.png",
+            "/thumb/aboveedge/cover.png",
+            "/thumb/belowedge/cover.png",
+        ], f"exact visible→above→below order expected, got {result}"
+    finally:
+        context.close()
