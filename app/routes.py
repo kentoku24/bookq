@@ -688,11 +688,19 @@ def _attach_subtree_facets(nodes: list[dict], subtree: dict, parent_path: str) -
 async def index(request: Request):
     """Viewer home page. Shows login prompt if unauthenticated, full viewer if authenticated."""
     user = await get_current_user(request)
-    # The harness link and the SW-registration gate read this; take it from the
-    # authoritative flag, not from the mock user's email.
-    return render_template(
-        request, "index.html", {"user": user, "test_mode": auth_module._TEST_MODE}
-    )
+    # Dev-only thumbnail timing mode: ?thumb_perf=1 inlines the shared probe and
+    # result panel. Never enabled in production (_TEST_MODE is import-time false).
+    thumb_perf = auth_module._TEST_MODE and request.query_params.get("thumb_perf") == "1"
+    context = {"user": user, "test_mode": auth_module._TEST_MODE}
+    if thumb_perf:
+        context["thumbnail_perf"] = True
+        context["thumbnail_probe"] = (
+            Path(__file__).parent / "perf" / "thumbnail-probe.js"
+        ).read_text(encoding="utf-8")
+    response = render_template(request, "index.html", context)
+    if thumb_perf:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @api_router.api_route("/sw.js", methods=["GET", "HEAD"], include_in_schema=False)
