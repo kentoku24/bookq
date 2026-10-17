@@ -10,6 +10,11 @@
 | ページ送り中 long task | 0 | 0 | 0 維持 |
 | 開く時の先読み転送量 | 2.9MB | 2.9MB（不変） | 観測のみ（画像は原寸配信を維持する決定） |
 
+### PR #39 の viewport thumbnail prefetch
+
+- 事前取得対象は描画済みタイルのうち sidebar scrollport ±1 viewport に限定され、上限 50 件。未スクロールでオフライン再読込した場合、scrollport 外タイルのカバーは未取得のまま broken-image プレースホルダになり得る。オンライン中のスクロールで順次キャッシュされる。
+- frozen 実測では `本を開く→初画像` が 131.9ms → 186.9ms（中央値）。KPI の ≤150ms 維持を超えるため、マージ前に再計測または明示的な受容が必要。
+
 ## 2 層のデグレ検知
 
 1. **CI（決定的指標）** `tests/test_perf_budget.py` — `/api/folders` ボディ転送 2 回（shallow `?depth=1` 先行 + full 追従）・gzip 比、

@@ -18,6 +18,14 @@ def _new_page(browser, width=1280, height=800):
     return context, context.new_page()
 
 
+def _new_prefetch_page(browser, width=1280, height=800):
+    """Install prefetch capture before app scripts can queue a real idle task."""
+    context = browser.new_context(viewport={"width": width, "height": height})
+    page = context.new_page()
+    page.add_init_script(f"({PREFETCH_STUB_JS})()")
+    return context, page
+
+
 def _folder_entries(page):
     return page.evaluate(
         """() => performance.getEntriesByType('resource')
@@ -836,7 +844,12 @@ PREFETCH_STUB_JS = """() => {
     };
     window.__idleQueue = window.__idleQueue || [];
     window.requestIdleCallback = (fn) => { window.__idleQueue.push(fn); return window.__idleQueue.length; };
-    window.__flushIdle = () => { const q = window.__idleQueue.splice(0); q.forEach(f => f()); };
+    window.__flushIdle = () => {
+        for (let i = 0; i < 10 && window.__idleQueue.length; i++) {
+            const q = window.__idleQueue.splice(0);
+            q.forEach(f => f());
+        }
+    };
 }"""
 
 
@@ -915,19 +928,20 @@ def _quiesce_prefetch(page):
 
 
 def test_prefetch_exact_dom_urls_viewport_only(browser, server):
-    context, page = _new_page(browser)
+    context, page = _new_prefetch_page(browser)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.wait_for_selector("#tile-grid .tile")
-        page.evaluate(PREFETCH_STUB_JS)
         _quiesce_prefetch(page)
         page.evaluate("() => window.__BOOKQ_DEBUG.prefetchThumbs()")
         calls = page.evaluate("() => window.__pf.calls")
+        puts = page.evaluate("() => window.__pf.puts")
         expected = page.evaluate(ELIGIBLE_URLS_JS)
         dom_srcs = page.evaluate(DOM_SRCS_JS)
         assert len(calls) > 0, "eligible viewport tiles produced no prefetch calls"
+        assert set(puts) == set(calls), "fetched URLs must land in the thumb caches"
         extra = set(calls) - set(expected)
         assert not extra, f"fetched URLs outside viewport-eligible set: {extra}"
         assert set(calls) <= set(dom_srcs), (
@@ -943,12 +957,11 @@ def test_prefetch_exact_dom_urls_viewport_only(browser, server):
 
 
 def test_prefetch_exact_urls_list_and_card_modes(browser, server):
-    context, page = _new_page(browser)
+    context, page = _new_prefetch_page(browser)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
-        page.evaluate(PREFETCH_STUB_JS)
         _quiesce_prefetch(page)
         for mode, sel in (("list", ".item[data-path]"), ("card", ".card[data-path]")):
             page.evaluate(
@@ -971,32 +984,31 @@ def test_prefetch_exact_urls_list_and_card_modes(browser, server):
 
 
 def test_prefetch_cap_50(browser, server):
-    context = browser.new_context(viewport={"width": 1280, "height": 20000})
-    page = context.new_page()
+    context, page = _new_prefetch_page(browser, height=20000)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
-        page.evaluate(PREFETCH_STUB_JS)
         _seed_many_tiles(page, 70)
         page.wait_for_selector("#tile-grid .tile")
         _quiesce_prefetch(page)
         page.evaluate("() => window.__BOOKQ_DEBUG.prefetchThumbs()")
         calls = page.evaluate("() => window.__pf.calls")
+        puts = page.evaluate("() => window.__pf.puts")
         eligible = page.evaluate(ELIGIBLE_URLS_JS)
         assert len(eligible) >= 50, f"fixture produced only {len(eligible)} eligible URLs"
         assert len(set(calls)) == 50, f"prefetch must cap at 50, got {len(set(calls))}"
+        assert set(puts) == set(calls), "the 50 fetched URLs must land in the thumb caches"
     finally:
         context.close()
 
 
 def test_prefetch_coalesced_schedule_and_close_cancel(browser, server):
-    context, page = _new_page(browser)
+    context, page = _new_prefetch_page(browser)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
-        page.evaluate(PREFETCH_STUB_JS)
         _quiesce_prefetch(page)
         queued = page.evaluate(
             """() => {
@@ -1047,12 +1059,11 @@ def test_prefetch_coalesced_schedule_and_close_cancel(browser, server):
 
 
 def test_prefetch_scroll_reopen_resume(browser, server):
-    context, page = _new_page(browser, width=1280, height=600)
+    context, page = _new_prefetch_page(browser, width=1280, height=600)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
-        page.evaluate(PREFETCH_STUB_JS)
         _seed_many_tiles(page, 80)
         page.wait_for_selector("#tile-grid .tile")
         _quiesce_prefetch(page)
@@ -1094,12 +1105,11 @@ def test_prefetch_scroll_reopen_resume(browser, server):
 
 
 def test_prefetch_quota_fails_silent(browser, server):
-    context, page = _new_page(browser)
+    context, page = _new_prefetch_page(browser)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
-        page.evaluate(PREFETCH_STUB_JS)
         _quiesce_prefetch(page)
         page.evaluate(
             """() => {
