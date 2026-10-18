@@ -306,7 +306,7 @@
       for(var i=0;i<files.length;i++){
         throwIfAborted();
         var f=files[i];
-        var url=window.OfflineCore.imageUrl(lp, f);
+        var url=window.OfflineCore.readerUrl(lp, f);
         var cached = await cache.match(url);
         if(cached){
           var len = await responseBytes(cached);

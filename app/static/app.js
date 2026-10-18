@@ -719,6 +719,12 @@
   // enables the profiler the same way (takes effect on next document load,
   // e.g. the harness's "back to Viewer" link which reloads the app).
   const perfOn = /[?&]perf=1/.test(location.search) || (()=>{try{return localStorage.getItem('bookq_perf')==='1'}catch(e){return false}})();
+  // ?view=jpeg routes reader pages through /view (server-normalized JPEG —
+  // webp/avif software decode is the suspected page-turn stall on low-end
+  // devices). Same localStorage escape hatch as bookq_perf for the PWA.
+  // readerUrl is shared with downloadWork so offline cache keys match.
+  const viewJpeg = /[?&]view=jpeg/.test(location.search) || (()=>{try{return localStorage.getItem('bookq_view')==='jpeg'}catch(e){return false}})();
+  try { window.OfflineCore.readerUseView = viewJpeg; } catch(e) { console.warn(e); }
   let perfTapAt = 0, perfTapX = 0;
   try {
     Object.defineProperty(window, 'spreads', {get(){return spreads;}, set(v){spreads=v;}, configurable:true});
@@ -2068,7 +2074,7 @@
     // Encode per path segment — image names may carry flattened "sub/dir/" prefixes.
     const img = images[idx];
     if (img.isSpacer) return "";
-    return window.OfflineCore.imageUrl(img.folder, img.name);
+    return window.OfflineCore.readerUrl(img.folder, img.name);
   }
   try { window.getUrl = getUrl; } catch(e) { console.warn(e); }
 
@@ -2575,7 +2581,7 @@
       if (dt > fWorst) fWorst = dt;
       const el = now - fStart;
       if (el >= 500){
-        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms";
+        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig");
         fN = 0; fStart = now; fWorst = 0;
       }
       requestAnimationFrame(fpsTick);
