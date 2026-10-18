@@ -62,16 +62,20 @@ body{position:fixed;inset:0}
 	.tile-multi img{width:100%;height:100%;object-fit:cover;object-position:center;display:block;background:#0d0d0d}
 	.tile-name{position:relative;padding:6px 8px 4px;font-size:11px;color:#ccc;display:flex;flex-direction:column;gap:1px;min-width:0;text-align:center;letter-spacing:0.01em;line-height:1.3}
 	.tile-count{font-size:10px;color:#9a9a9a;text-align:center;padding:0 8px 6px;letter-spacing:0.02em}
-	/* content-visibility: skip layout+paint for off-screen tiles/cards/items.
+	/* content-visibility (.cv-on-gated): skip layout+paint for off-screen
+	   tiles/cards/items. Enabled one rAF after each render by _scheduleCv in
+	   browse/render.js — skipped elements report contain-intrinsic-height (an
+	   estimate), so switching it on earlier would corrupt same-task
+	   scroll-anchor math; after a real layout `auto` remembers true heights.
 	   :has(.ux-pop) exclusion is required — c-v:auto carries permanent
 	   contain:paint, which would clip the partial-download popover that
 	   deliberately overflows the tile box (top:52px / min-width:190px).
-	   contain-intrinsic-height gives never-rendered elements a stand-in
-	   height; `auto` substitutes the remembered real height once rendered.
+	   contain-intrinsic-height = content-box height; --*-h vars are measured
+	   from rendered elements (clientHeight−padding) at enable time.
 	   Safari <26 ignores both properties (today's behaviour continues). */
-	.tile:not(:has(.ux-pop)){content-visibility:auto;contain-intrinsic-height:auto 280px}
-	#tile-grid.card-mode .card:not(:has(.ux-pop)){content-visibility:auto;contain-intrinsic-height:auto 380px}
-	#tile-grid.list-mode .item:not(:has(.ux-pop)){content-visibility:auto;contain-intrinsic-height:auto 37px}
+	#tile-grid.cv-on .tile:not(:has(.ux-pop)){content-visibility:auto;contain-intrinsic-height:auto var(--tile-h, 280px)}
+	#tile-grid.cv-on.card-mode .card:not(:has(.ux-pop)){content-visibility:auto;contain-intrinsic-height:auto var(--card-h, 380px)}
+	#tile-grid.cv-on.list-mode .item:not(:has(.ux-pop)){content-visibility:auto;contain-intrinsic-height:auto var(--item-h, 18px)}
 
 	/* transient toast (S-F2) — role=alert live region, auto-dismiss.
 	   Base is neutral; .err (red) and .ok (neutral-emphasis border) variants
