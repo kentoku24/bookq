@@ -2216,6 +2216,9 @@
         if (!sliding && spreadOf(idx) === anchorSpread) applyTrackTransform(currentIdx, 0, false);
       }
       img.classList.add("loaded");
+      // Freshly fetched and still adjacent — decode now rather than letting the
+      // first post-turn raster pay it (Gecko decodes lazily at paint).
+      if (Math.abs(idx - currentIdx) <= 2) predecode(img);
     }, {once:true});
     img.addEventListener("error", () => { if (stripImgs[idx] === img) img.classList.add("loaded"); }, {once:true});
     // Fetch priority by distance: the page the reader will see next must not
@@ -2236,6 +2239,15 @@
     return img;
   }
   function isImgReady(img){ return !!(img && img.complete && img.naturalWidth > 0); }
+  // Kick an off-critical-path decode ahead of the turn. decode() awaits the
+  // in-flight fetch AND decodes, so the first raster after the slide doesn't
+  // pay it — decoding=async is only a hint, this actually schedules the work.
+  // No-op without src (still-deferred cells) or decode support; the rejection
+  // on a cleared/evicted src is swallowed.
+  function predecode(img){
+    if (!img || !img.src || !img.decode) return;
+    try { const p = img.decode(); if (p && p.catch) p.catch(() => {}); } catch(e){}
+  }
   function startDeferred(img){
     if (!img || !img.dataset.deferredSrc) return;
     img.src = img.dataset.deferredSrc;
@@ -2261,6 +2273,7 @@
       const img = stripImgs[k], d = Math.abs(Number(k) - idx);
       if (!img) continue;
       if (d <= 1) startDeferred(img);
+      if (d <= 2) predecode(img);
       if (!isImgReady(img)) img.fetchPriority = d <= 1 ? "high" : "low";
     }
     const next = stripImgs[idx + 1];
@@ -2549,6 +2562,31 @@
     document.body.appendChild(box);
     imgContainer.addEventListener("touchstart", e => { perfTapAt = performance.now(); perfTapX = e.touches[0] ? e.touches[0].clientX : 0; }, {capture:true, passive:true});
     window.__perfLine = (s) => { box.textContent = (s + "\n" + box.textContent).split("\n").slice(0, 8).join("\n"); };
+    // Rolling FPS + worst-frame readout, in its own element so it doesn't
+    // churn the turn log. Slide and tile scrolling both drive rAF, so one
+    // meter covers viewer and browse alike.
+    const fpsBox = document.createElement("pre");
+    fpsBox.id = "perf-fps";
+    fpsBox.style.cssText = "position:fixed;left:8px;bottom:60px;z-index:99;margin:0;padding:4px 8px;background:rgba(0,0,0,.75);color:#8ff;font:12px/1.2 monospace;pointer-events:none";
+    document.body.appendChild(fpsBox);
+    let fN = 0, fStart = performance.now(), fWorst = 0, fPrev = fStart;
+    requestAnimationFrame(function fpsTick(){
+      const now = performance.now(), dt = now - fPrev; fPrev = now; fN++;
+      if (dt > fWorst) fWorst = dt;
+      const el = now - fStart;
+      if (el >= 500){
+        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms";
+        fN = 0; fStart = now; fWorst = 0;
+      }
+      requestAnimationFrame(fpsTick);
+    });
+    // >50ms main-thread stalls. Chrome only — Firefox lacks the entry type and
+    // throws (caught); there the worst-frame number above is the jank proxy.
+    try {
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) window.__perfLine("longtask " + Math.round(e.duration) + "ms");
+      }).observe({type:"longtask"});
+    } catch(e){}
   }
   function perfRecordTurn(idx, entry, afterWindow, afterLayout){
     if (!perfOn || !perfTapAt) return;
