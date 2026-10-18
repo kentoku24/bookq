@@ -31,7 +31,7 @@ from app.config import Settings  # noqa: E402
 from app.routes import _background_fill  # noqa: E402
 from app.scanner import scan_tree  # noqa: E402
 
-from tests.helpers import drive  # noqa: E402
+from tests.helpers import drive, make_pdf  # noqa: E402
 
 
 def _make_zip(path: Path, names: list[str]) -> None:
@@ -140,6 +140,11 @@ def test_filled_shallow_tree_equals_full_scan(tmp_path, monkeypatch):
     (downloads / "mixed" / "loose").mkdir(parents=True)
     (downloads / "mixed" / "loose" / "01.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     _make_zip(downloads / "deep" / "wrap" / "v1.zip", ["01.png", "02.png"])
+    # The fill's other materialize branches under flattened names:
+    # _scan_pdf_node (pdf flag) and the EPUB early-return path.
+    (downloads / "pdfs" / "wrap").mkdir(parents=True)
+    make_pdf(downloads / "pdfs" / "wrap" / "doc.pdf", pages=2)
+    _make_zip(downloads / "epubs" / "wrap" / "book.epub", ["OEBPS/Images/p01.png"])
     state = _shallow_state(downloads)
 
     async def main():
