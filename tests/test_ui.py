@@ -284,6 +284,23 @@ def test_spread_shift_makes_cover_solo(landscape_page):
     expect(shift).not_to_have_class(re.compile(r"\bactive\b"))
 
 
+def test_spread_controls_follow_toolbar_visibility(landscape_page):
+    page = landscape_page
+    open_folder(page, "long", expect_pages=30)
+    controls = page.locator("#spread-controls")
+    expect(controls).to_have_css("opacity", "1")
+    page.locator("#zone-toggle").click()
+    expect(controls).to_have_class(re.compile(r"\bhidden\b"))
+    # The class alone was always toggled — the regression this guards is the
+    # missing CSS: opacity must actually drop, and the invisible buttons must
+    # not keep eating taps (#spread-controls>* would otherwise stay
+    # pointer-events:auto under a pointer-events:none parent).
+    expect(controls).to_have_css("opacity", "0")
+    expect(page.locator("#spread-toggle")).to_have_css("pointer-events", "none")
+    page.locator("#zone-toggle").click()
+    expect(controls).to_have_css("opacity", "1")
+
+
 # ── viewer: spread-centric layout (issue #13) ─────────────────────────────────
 #
 # Each spread (1-2 pages) is one container sized by contain-fit against the
