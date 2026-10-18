@@ -244,8 +244,10 @@ body.overview-open #toolbar>*,body.overview-open #spread-controls>*,body.overvie
 @media (min-width:768px){.ov-cell{min-width:150px}}
 
 /* landscape page-mode toggle button (top-right, below counter) */
-#spread-controls{display:none;position:fixed;top:48px;right:14px;z-index:10;gap:6px;pointer-events:none}
+#spread-controls{display:none;position:fixed;top:48px;right:14px;z-index:10;gap:6px;pointer-events:none;transition:opacity .25s}
 #spread-controls>*{pointer-events:auto}
+#spread-controls.hidden{opacity:0;pointer-events:none}
+#spread-controls.hidden>*{pointer-events:none}
 #spread-toggle{display:inline-flex;align-items:center;justify-content:center;background:rgba(30,30,30,0.6);color:#aaa;border:1px solid #444;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;transition:opacity .25s;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);min-width:44px;min-height:44px}
 #spread-toggle:active{background:rgba(60,60,60,.9)}
 #spread-toggle.hidden{opacity:0;pointer-events:none}
@@ -268,7 +270,7 @@ body.landscape-single #spread-shift{display:none}
 #tapmode-controls button[aria-pressed="true"]{background:rgba(74,122,196,.35);color:#8ab4f8;border-color:rgba(74,122,196,.6)}
 @media (prefers-reduced-motion:reduce){
   #sidebar,#toolbar,#img-track,.tile,#hint,
-  #spread-toggle,#spread-shift,#tapmode-controls,#tapmode-controls button,#menu-btn,
+  #spread-controls,#spread-toggle,#spread-shift,#tapmode-controls,#tapmode-controls button,#menu-btn,
   .item,.item .chevron,#spread-shift,
   #footer-refresh-btn,#logout-btn,#page-slider{
     transition-duration:0.01ms !important;
