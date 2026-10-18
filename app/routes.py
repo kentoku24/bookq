@@ -1367,6 +1367,19 @@ async def serve_thumb(
     return await handle_thumb(request, path, w)
 
 
+@api_router.get("/view/{path:path}")
+async def serve_view(
+    path: str,
+    request: Request,
+    _user: dict = Depends(require_auth),
+):
+    """Serve a reader page normalized for fast decode. Requires authentication."""
+    from app.thumbs import handle_view
+
+    request.app.state.last_request_at = time.time()
+    return await handle_view(request, path)
+
+
 @api_router.get("/api/thumb-sprite")
 async def serve_thumb_sprite(
     request: Request,

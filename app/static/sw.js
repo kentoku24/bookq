@@ -22,8 +22,10 @@ function perWorkCacheName(req) {
     // /thumb/ shares the per-work cache with /image: prefetch.js stores covers
     // there (cacheNameFor(folder)) and caches.match() reads that copy back, so
     // writing refreshed thumbs anywhere else would update a copy nobody reads.
+    // /view/ (normalized reader pages) keys into the same work cache.
     const prefix = url.pathname.startsWith('/image/') ? '/image/'
       : url.pathname.startsWith('/thumb/') ? '/thumb/'
+      : url.pathname.startsWith('/view/') ? '/view/'
       : null;
     if (!prefix) return null;
     const parts = url.pathname.slice(prefix.length).split('/');
@@ -208,8 +210,8 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Image CacheFirst (per-work)
-  if ((url.pathname.startsWith('/image/') || request.destination==='image') && !url.pathname.startsWith('/static/')) {
+  // Image CacheFirst (per-work) — /view/ reader pages share this path.
+  if ((url.pathname.startsWith('/image/') || url.pathname.startsWith('/view/') || request.destination==='image') && !url.pathname.startsWith('/static/')) {
     event.respondWith(cacheFirst(request));
     return;
   }

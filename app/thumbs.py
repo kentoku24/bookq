@@ -453,6 +453,132 @@ async def handle_thumb(request: Request, path: str, w: str | int | None) -> Resp
     )
 
 
+# ── /view/{path}: reader-page format normalization ──────────────────────────
+# Reader pages are original-size by policy; /view keeps that size but
+# normalizes formats that decode slowly on low-end hardware (webp/avif —
+# software-decoded there) into baseline JPEG. Sources already optimal for
+# decode (jpeg/png/gif) or natively scalable (svg) pass through byte-identical.
+VIEW_JPEG_QUALITY = 85
+VIEW_MAX_WIDTH = 2560
+VIEW_PASSTHROUGH = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+}
+
+
+def view_cache_path_for(cache_dir: Path, key: str) -> Path:
+    """``<cache_dir>/view/<sha1(key)>.jpg`` — own namespace under the shared cap."""
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return cache_dir / "view" / f"{digest}.jpg"
+
+
+def view_cache_namespace() -> Path:
+    """Namespace dir for normalized reader pages (batched-prune target)."""
+    return cache_root() / "view"
+
+
+def make_view_bytes(data: bytes) -> bytes:
+    """Normalize any Pillow-decodable source to JPEG q85 (≤VIEW_MAX_WIDTH).
+
+    Alpha is flattened onto white (paper); like make_thumbnail, non-image
+    bytes raise 404 to mirror the ``/image/*`` flow.
+    """
+    from PIL import Image, ImageOps
+
+    try:
+        im = Image.open(io.BytesIO(data))
+        im = ImageOps.exif_transpose(im)
+        im.thumbnail((VIEW_MAX_WIDTH, VIEW_MAX_WIDTH * 4), Image.LANCZOS)
+        if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[-1])
+            im = bg
+        elif im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=VIEW_JPEG_QUALITY)
+        return buf.getvalue()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+async def handle_view(request: Request, path: str) -> Response:
+    """Serve ``GET /view/{path}`` — a reader page in a fast-decode format.
+
+    Passthrough formats serve the original bytes straight through (a
+    re-encode would only lose quality and still cost the same decode). The
+    normalized branch mirrors ``handle_thumb``: stat-only fast path checks
+    the ``view/`` disk cache before any archive open or byte extraction, and
+    the same ``_not_modified``/304 conditional semantics apply.
+    """
+    from app.routes import _not_modified
+
+    downloads_dir = request.app.state.settings.downloads_path
+    suffix = Path(path).suffix.lower()
+
+    if suffix in VIEW_PASSTHROUGH or suffix == ".svg":
+        data, mtime, size, key = await load_source_bytes(downloads_dir, path)
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+        etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+        if _not_modified(request, etag, mtime):
+            return Response(status_code=304)
+        headers = {
+            "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+            "ETag": etag,
+            "Last-Modified": utils.formatdate(mtime, usegmt=True),
+            "X-Content-Type-Options": "nosniff",
+        }
+        if suffix == ".svg":
+            # Same rationale as handle_thumb: served as image/svg+xml it runs
+            # script on top-level navigation; sandbox it to an opaque origin.
+            headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+            media = "image/svg+xml"
+        else:
+            media = VIEW_PASSTHROUGH[suffix]
+        return Response(content=data, media_type=media, headers=headers)
+
+    mtime, size, key = _stat_source(downloads_dir, path)
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+    if _not_modified(request, etag, mtime):
+        return Response(status_code=304)
+
+    dest = view_cache_path_for(cache_root(), key)
+    if dest.is_file():
+        body = await run_in_threadpool(dest.read_bytes)
+    else:
+        data, mtime, size, key = await load_source_bytes(downloads_dir, path)
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+        etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+        if _not_modified(request, etag, mtime):
+            return Response(status_code=304)
+        dest = view_cache_path_for(cache_root(), key)
+
+        def _get_or_make() -> bytes:
+            if dest.is_file():
+                return dest.read_bytes()
+            body = make_view_bytes(data)
+            _store_thumb(dest, body)
+            return body
+
+        body = await run_in_threadpool(_get_or_make)
+    return Response(
+        content=body,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+            "ETag": etag,
+            "Last-Modified": utils.formatdate(mtime, usegmt=True),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 def _raw_query_value(query_string: bytes, key: str) -> str | None:
     """First still-percent-encoded value of *key* in a raw query string.
 
