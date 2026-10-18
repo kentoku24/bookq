@@ -221,6 +221,38 @@
     }
     return '<div class="tile-multi" style="grid-template-columns:repeat(' + gridCols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + imgs + '</div>';
   }
+  // content-visibility scheduling: .cv-on is REMOVED before every render's
+  // innerHTML so all children lay out at real heights and the same-task
+  // scroll-anchor math stays exact; one rAF later we measure a real element,
+  // refresh the --*-h estimate vars, then re-enable skipping. Never-rendered
+  // elements then fall back to that estimate while rendered ones report their
+  // remembered true size (`auto`), keeping scrollHeight stable.
+  function _scheduleCv(tileGrid){
+    if (!tileGrid) return;
+    tileGrid.classList.remove("cv-on");
+    requestAnimationFrame(function(){
+      _measureIntrinsicHeights(tileGrid);
+      tileGrid.classList.add("cv-on");
+    });
+  }
+  // Measure the real content height (clientHeight − padding) of the first
+  // rendered element of each kind and feed it back via CSS vars — a skipped
+  // element reports the estimate, so this only reads true sizes while cv-on
+  // is off (the _isInViewport guard keeps display:none'd parents out).
+  function _measureIntrinsicHeights(tileGrid){
+    if (!tileGrid) return;
+    var kinds = [[".tile", "--tile-h"], [".card", "--card-h"], [".item", "--item-h"]];
+    for (var kind of kinds){
+      var els = tileGrid.querySelectorAll(kind[0]);
+      for (var i = 0; i < els.length; i++){
+        if (!_isInViewport(els[i])) continue;
+        var cs = getComputedStyle(els[i]);
+        var h = els[i].clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+        if (h > 0) tileGrid.style.setProperty(kind[1], h + "px");
+        break;
+      }
+    }
+  }
   function _isInViewport(el){
     try {
       var r = el.getBoundingClientRect();
@@ -410,6 +442,7 @@
       html+='<div class="tile" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button">'+_tilePlaceholder()+'<div class="tile-name">'+sProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+sOffline+'</div>';
     }
     tileGrid.innerHTML = html || '<div style="color:#555;text-align:center;padding:20px;font-size:13px">' + _emptyBrowseMessage() + '</div>';
+    _scheduleCv(tileGrid);
     _bindTiles();
     var el=document.getElementById("folder-count"); if(el) el.textContent=(folders.length+readChildren.length+(rootLoose?1:0))+" 件";
   }
@@ -446,6 +479,7 @@
       html+='<div class="item folder" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+lsProgress.inlineBarHtml+'</span>'+_offlineHtmlFor(ctx, "")+'</div>';
     }
     tileGrid.innerHTML=html||'<div class="item" style="color:#555">'+_emptyBrowseMessage()+'</div>';
+    _scheduleCv(tileGrid);
     _bindList();
     var ec=document.getElementById("folder-count"); if(ec) ec.textContent=(nodes.length+readChildren.length+(rootLoose?1:0))+" 件";
   }
@@ -488,6 +522,7 @@
       html+='<div class="card" data-path="" data-read-self="1" tabindex="0" role="button">'+_cardPlaceholder()+'<div class="card-content"><div class="card-title">'+csProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+csOffline+'</div>';
     }
     tileGrid.innerHTML=html||'<div style="color:#555;text-align:center;padding:20px;font-size:13px">'+_emptyBrowseMessage()+'</div>';
+    _scheduleCv(tileGrid);
     _bindCards();
   }
   // scrollAnchor が渡された描画だけが位置を決める（undefined = 触らない）。
@@ -515,4 +550,10 @@
   window.renderCards=renderCards;
   window.renderBrowse=renderBrowse;
   window.BrowseRender={renderTiles,renderList,renderCards,renderBrowse,multiThumbSpec,splitDisplayName,nameHtml,hydrateMultiCovers,scheduleMultiHydration};
+  // Real tile/card/item heights follow the responsive width breakpoints —
+  // re-measure on resize so the skipped-element estimates don't drift stale.
+  window.addEventListener('resize', function(){
+    var g = _getTileGrid();
+    if (g && g.firstElementChild) _scheduleCv(g);
+  });
 })();
