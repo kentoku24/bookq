@@ -22,8 +22,12 @@ Run:
 """
 
 import hashlib
+import http.client
 import os
 import re
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -235,3 +239,132 @@ def test_sw_image_branch_revalidates_with_validators():
     )
     assert "no-store" in block, "the HTTP cache must be bypassed (Cache storage + ETag is the authority)"
     assert "res.clone()" in block, "refreshed bytes must be cloned before put()"
+
+
+class _RecordingProxy(BaseHTTPRequestHandler):
+    """Pass-through proxy that records the headers the app actually received.
+
+    A browser test can see *which bytes* came back but not *which request* the SW
+    sent, so the revalidation contract has to be observed on the wire.
+    """
+
+    protocol_version = "HTTP/1.1"
+    upstream = ""
+    received: list = []
+
+    def log_message(self, *args):  # silence the default stderr access log
+        pass
+
+    def _proxy(self):
+        length = self.headers.get("content-length")
+        body = self.rfile.read(int(length)) if length else None
+        self.received.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
+        host, port = urllib.parse.urlsplit(self.upstream).netloc.rsplit(":", 1)
+        conn = http.client.HTTPConnection(host, int(port), timeout=30)
+        conn.request(self.command, self.path, body=body, headers=dict(self.headers))
+        res = conn.getresponse()
+        payload = res.read()
+        conn.close()
+        self.send_response(res.status)
+        for key, value in res.getheaders():
+            if key.lower() in ("connection", "transfer-encoding", "content-length"):
+                continue
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+    do_GET = do_POST = do_HEAD = _proxy
+
+
+@pytest.fixture
+def recording_proxy(server):
+    """Serve the app through a recording proxy: yields (base_url, received_headers)."""
+    received: list = []
+    handler = type("Handler", (_RecordingProxy,), {"upstream": server, "received": received})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}", received
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_nocors_image_load_revalidates_with_validators(page, recording_proxy, downloads_tree):
+    """An ``<img>``-shaped (no-cors) hit must revalidate with If-None-Match.
+
+    The viewer loads pages with ``<img>``, i.e. mode:"no-cors". Re-deriving a
+    no-cors Request silently drops every non-CORS-safelisted header, so the SW has
+    to re-issue the same-origin request in a mode that keeps the validators —
+    otherwise the "revalidation" is a full re-download (no 304 ever) and the
+    1200ms budget has to cover the whole body, which on a slow origin means the
+    replaced image never reaches the client.
+    """
+    base_url, received = recording_proxy
+    goto_offline(page, base_url)
+    assert wait_for_sw(page), "SW did not take control"
+    url, _target, _img = open_work(page, downloads_tree)
+    path = urllib.parse.urlsplit(url).path
+    prime(page, url)
+
+    del received[:]  # only the revalidation interests us
+    # Same mode as the viewer's <img>, minus the HTML image cache in the way.
+    page.evaluate(
+        """async (u) => { await fetch(u, {mode: 'no-cors'}).then(r => r.arrayBuffer()).catch(() => {}); }""",
+        url,
+    )
+    hits = [h for p, h in received if p == path]
+    assert hits, "a cached image must be revalidated over the network"
+    assert any(h.get("if-none-match") for h in hits), (
+        "the revalidation must carry If-None-Match; a no-cors Request drops it silently, "
+        f"turning every hit into a full re-download. received={hits}"
+    )
+
+
+def test_cover_thumb_is_cached_with_the_work(page, server, downloads_tree):
+    """A cover thumb belongs in the same per-work cache prefetch.js writes.
+
+    ``cacheNameFor(folder)`` is where prefetch puts covers and where
+    ``caches.match()`` reads them back; storing a refreshed thumb in the fallback
+    cache updated a copy nothing ever returns, so the entry that *is* returned
+    revalidated (and re-downloaded) forever.
+    """
+    goto_offline(page, server)
+    assert wait_for_sw(page), "SW did not take control"
+    # w=800: prefetch.js only writes 200/400, so this URL is untouched by it.
+    url = server + "/thumb/simple_manga/1.png?w=800"
+    page.evaluate(
+        """async (u) => {
+            for (const n of await caches.keys()) {
+                if (n.startsWith('bookq-shell-')) continue;
+                try { await (await caches.open(n)).delete(u); } catch (e) {}
+            }
+        }""",
+        url,
+    )
+    page.evaluate(
+        """async (u) => {
+            await new Promise((res) => {
+                const im = new Image();
+                im.onload = () => res();
+                im.onerror = () => res();
+                im.src = u;
+            });
+        }""",
+        url,
+    )
+    where = page.evaluate(
+        """async (u) => {
+            const out = [];
+            for (const n of await caches.keys()) {
+                if (n.startsWith('bookq-shell-')) continue;
+                if (await (await caches.open(n)).match(u)) out.push(n);
+            }
+            return out;
+        }""",
+        url,
+    )
+    work = page.evaluate("() => window.OfflineCore.cacheNameFor('simple_manga')")
+    assert where == [work], f"the thumb must live in the per-work cache only: {where}"

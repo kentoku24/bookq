@@ -137,7 +137,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
   <!-- ⑥ 全消去 -->
   <section id="sec-wipe" aria-labelledby="sec-wipe-title">
     <h2 id="sec-wipe-title">⑥ 全消去</h2>
-    <p class="hint">危険: ローカルのデータをすべて削除（閲覧で作られた作品キャッシュ・保存作品・IndexedDB・読書進捗。アプリ本体の SHELL キャッシュは残す）</p>
+    <p class="hint">危険: ローカルのデータをすべて削除（閲覧で作られた作品キャッシュ・保存作品・IndexedDB・読書進捗。アプリ本体の SHELL キャッシュは残す）。既に画面に出ている画像はブラウザ側のキャッシュが残るため、反映にはアプリの開き直しが必要</p>
     <div class="row" style="margin-top:10px">
       <button id="btn-wipe-all" class="btn" type="button">すべて削除</button>
       <span id="harness-wipe-status" class="hint mono">—</span>
