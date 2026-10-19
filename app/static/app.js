@@ -727,14 +727,9 @@
   try { window.OfflineCore.readerUseView = viewJpeg; } catch(e) { console.warn(e); }
   // Android composites the toolbar/sidebar backdrop-filter by re-blurring
   // the scrolled backdrop every frame — measured fps 4 vs 22 (Firefox) and
-  // 45 vs 83 (Chrome) on the CP08-J1 tile grid. Tag the document so CSS can
-  // drop the frost there; desktop browsers keep it.
-  try {
-    const _ua = navigator.userAgent || '';
-    if (_ua.indexOf('Android') !== -1) {
-      document.documentElement.classList.add('ua-android');
-    }
-  } catch(e) { console.warn(e); }
+  // 45 vs 83 (Chrome) on the CP08-J1 tile grid. The server tags <html> with
+  // .ua-android from the request UA header (no client feature test exists and
+  // UA sniffing is banned in this file); CSS drops the frost, desktop keeps it.
   // ?noblur=1 drops backdrop-filter from the floating toolbar for scroll A/B
   // measurement on low-end GPUs (diagnostic flag, not a shipping behavior).
   if (/[?&]noblur=1/.test(location.search)) {
