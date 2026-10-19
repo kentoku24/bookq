@@ -193,33 +193,21 @@
     if (url) return '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" data-cc-single="1" onerror="this.style.display=\'none\'">';
     return _tilePlaceholder();
   }
-  function _isArchiveTile(folderEnc){
-    try {
-      var leaf = String(folderEnc || "").split("/").pop();
-      return /\.(zip|cbz|rar|cbr|epub)$/i.test(decodeURIComponent(leaf));
-    } catch(e){ return false; }
-  }
+  // Multi-thumb tiles render ONE server-composed sprite (same rows layout
+  // as the old per-cell DOM grid) — up to 9 fetches+decodes collapse into a
+  // single img, which is the difference between a smooth and a janky fling
+  // on low-end devices (FPD CP08-J1: 60 multi tiles ≈ 500 img decodes).
+  // The img spans the whole .tile-multi box; the sheet is 2:3 like the box,
+  // so object-fit:cover reproduces the per-cell crop grid faithfully.
   function _multiGridHtml(f, folderEnc){
     var spec = multiThumbSpec(f.thumbs.length);
     if(!spec) return null;
     var n = Math.min(f.thumbs.length, 9);
-    var gridCols = spec.cols;
-    if(n >= 2 && _isArchiveTile(folderEnc)){
-      var names = f.thumbs.slice(0, n).map(encodeURIComponent).join(",");
-      var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names + "&w=200";
-      var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async">';
-      return '<div class="tile-multi" style="grid-template-columns:repeat(' + gridCols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + one + '</div>';
-    }
-    var imgs = "";
-    var idx = 0;
-    for (var itemsInRow of spec.rows) {
-      var span = gridCols / itemsInRow;
-      for (var j = 0; j < itemsInRow && idx < n; j++, idx++) {
-        var tp = f.thumbs[idx].split('/').map(encodeURIComponent).join('/');
-        imgs += '<img src="/thumb/' + folderEnc + '/' + tp + '?w=200" loading="lazy" decoding="async" style="grid-column:span ' + span + '">';
-      }
-    }
-    return '<div class="tile-multi" style="grid-template-columns:repeat(' + gridCols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + imgs + '</div>';
+    var names = f.thumbs.slice(0, n).map(encodeURIComponent).join(",");
+    var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names +
+      "&w=200&rows=" + spec.rows.join(",");
+    var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async" style="grid-column:1/-1;grid-row:1/-1">';
+    return '<div class="tile-multi" style="grid-template-columns:repeat(' + spec.cols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + one + '</div>';
   }
   // Scroll-gated thumbnail loading (Firefox-class devices): on Firefox —
   // or ?thumbgate=1 / localStorage bookq_thumbgate=1 — cover imgs that sit

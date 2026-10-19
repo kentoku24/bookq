@@ -3,7 +3,10 @@
 One request opens the archive ONCE, thumbnails up to 9 entries to w=200
 (JPEG q70, same make_thumbnail), and returns a horizontal contact sheet.
 Per-entry failures paint a gray cell (fail-open); all-fail → 404;
-non-archive folder → 400.
+non-archive non-directory folder → 400. ``folder`` may also be a
+DIRECTORY: names resolve relative to it via the shared stat/load helpers
+(archive children inside it work). ``rows=a,b,c`` composes a 600x900 2D
+sheet matching the DOM multi-thumb grid (one img per tile).
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_thumb_sprite.py -q
@@ -118,9 +121,62 @@ def test_sprite_opens_archive_exactly_once(client, monkeypatch) -> None:
 
 
 def test_sprite_non_archive_folder_is_400(client) -> None:
-    assert client.get("/api/thumb-sprite?folder=plain&names=big.png&w=200").status_code == 400
+    # plain is a directory now (dir sprites are supported) — see dir tests.
     assert client.get("/api/thumb-sprite?folder=nope.zip&names=a.png&w=200").status_code == 400
+    assert client.get("/api/thumb-sprite?folder=r.png&names=a.png&w=200").status_code == 400
     assert client.get("/api/thumb-sprite?folder=work.zip&w=200").status_code == 400
+
+
+def test_sprite_directory_entries(client) -> None:
+    res = client.get("/api/thumb-sprite?folder=plain&names=big.png&w=200")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/jpeg"
+    assert _size(res.content) == (200, 150)
+
+
+def test_sprite_directory_nested_and_root_names(client) -> None:
+    # Directory names are folder-relative paths; ../ escapes stay blocked.
+    res = client.get("/api/thumb-sprite?folder=.&names=plain%2Fbig.png,r.png&w=200")
+    assert res.status_code == 200
+    assert _size(res.content) == (400, 150)
+    res = client.get("/api/thumb-sprite?folder=plain&names=..%2Fbig.png&w=200")
+    assert res.status_code == 404  # traversal name == all-fail
+    res = client.get("/api/thumb-sprite?folder=plain&names=big.png,..%2Fr.png&w=200")
+    assert res.status_code == 200
+    assert _near(_pixel(res.content, 300, 75), GRAY)
+
+
+def test_sprite_directory_grid_rows(client) -> None:
+    res = client.get(
+        "/api/thumb-sprite?folder=.&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
+    )
+    assert res.status_code == 200
+    assert _size(res.content) == (600, 900)
+    # cells: r top-left, g top-right, b bottom-left, p bottom-right
+    assert _near(_pixel(res.content, 150, 225), (255, 0, 0))
+    assert _near(_pixel(res.content, 450, 225), (0, 255, 0))
+    assert _near(_pixel(res.content, 150, 675), (0, 0, 255))
+    assert _near(_pixel(res.content, 450, 675), (255, 0, 255))
+
+
+def test_sprite_archive_grid_rows(client) -> None:
+    res = client.get(
+        "/api/thumb-sprite?folder=work.zip&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
+    )
+    assert res.status_code == 200
+    assert _size(res.content) == (600, 900)
+    assert _near(_pixel(res.content, 450, 675), (255, 0, 255))
+
+
+def test_sprite_grid_all_bad_is_404_and_invalid_rows_fall_back(client) -> None:
+    assert (
+        client.get("/api/thumb-sprite?folder=plain&names=nope.png&rows=1&w=200").status_code
+        == 404
+    )
+    # invalid rows → horizontal strip fallback (existing behavior)
+    res = client.get("/api/thumb-sprite?folder=work.zip&names=r.png,g.png&rows=x&w=200")
+    assert res.status_code == 200
+    assert _size(res.content) == (400, 150)
 
 
 def test_sprite_one_bad_entry_gray_others_intact(client) -> None:
