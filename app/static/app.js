@@ -725,6 +725,24 @@
   // readerUrl is shared with downloadWork so offline cache keys match.
   const viewJpeg = /[?&]view=jpeg/.test(location.search) || (()=>{try{return localStorage.getItem('bookq_view')==='jpeg'}catch(e){return false}})();
   try { window.OfflineCore.readerUseView = viewJpeg; } catch(e) { console.warn(e); }
+  // Firefox on Android composites the toolbar/sidebar backdrop-filter by
+  // re-blurring the scrolled backdrop every frame — measured fps 4 vs 22 on
+  // the CP08-J1 tile grid. Tag the document so CSS can drop the frost there.
+  try {
+    const _ua = navigator.userAgent || '';
+    if (_ua.indexOf('Firefox') !== -1 && _ua.indexOf('Android') !== -1) {
+      document.documentElement.classList.add('ua-fx-android');
+    }
+  } catch(e) { console.warn(e); }
+  // ?noblur=1 drops backdrop-filter from the floating toolbar for scroll A/B
+  // measurement on low-end GPUs (diagnostic flag, not a shipping behavior).
+  if (/[?&]noblur=1/.test(location.search)) {
+    try {
+      const st = document.createElement('style');
+      st.textContent = '#toolbar{-webkit-backdrop-filter:none !important;backdrop-filter:none !important}';
+      document.head.appendChild(st);
+    } catch(e) { console.warn(e); }
+  }
   let perfTapAt = 0, perfTapX = 0;
   try {
     Object.defineProperty(window, 'spreads', {get(){return spreads;}, set(v){spreads=v;}, configurable:true});
