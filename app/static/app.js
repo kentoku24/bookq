@@ -2601,7 +2601,7 @@
       if (el >= 500){
         var st = 0; try { var _sc = document.getElementById('sidebar-scroll'); st = _sc ? _sc.scrollTop : window.scrollY; } catch(e){}
         var g = window.__bookqThumbgate;
-        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig") + " st:" + Math.round(st) + " g:" + (g === undefined ? "-" : g);
+        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig") + " st:" + Math.round(st) + " g:" + (g === undefined ? "-" : g) + " v9";
         fN = 0; fStart = now; fWorst = 0;
       }
       requestAnimationFrame(fpsTick);
