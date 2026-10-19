@@ -221,6 +221,60 @@
     }
     return '<div class="tile-multi" style="grid-template-columns:repeat(' + gridCols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + imgs + '</div>';
   }
+  // Scroll-gated thumbnail loading (Firefox-class devices): on Firefox —
+  // or ?thumbgate=1 / localStorage bookq_thumbgate=1 — cover imgs that sit
+  // more than one viewport outside the scrollport keep their URL in
+  // data-src instead of src, so nothing can fetch or decode mid-fling
+  // (measured 240-500ms main-thread frames on FPD CP08-J1 / Mali-G57).
+  // Scrolling quiet for ~250ms restores src for imgs inside viewport ±1
+  // screen; once hydrated an img keeps its src forever (data-hyd=1) so
+  // scrolling back does not re-fetch or re-decode. thumbgate=0 or
+  // localStorage "0" opts out; other browsers keep native loading=lazy.
+  var _gateOn = null;
+  function _thumbGateOn(){
+    if (_gateOn !== null) return _gateOn;
+    try {
+      var v = localStorage.getItem('bookq_thumbgate');
+      if (v === '0') { _gateOn = false; return _gateOn; }
+      if (v === '1') { _gateOn = true; return _gateOn; }
+    } catch(e){}
+    var q = location.search || '';
+    if (q.indexOf('thumbgate=0') !== -1) { _gateOn = false; return _gateOn; }
+    if (q.indexOf('thumbgate=1') !== -1) { _gateOn = true; return _gateOn; }
+    _gateOn = (navigator.userAgent || '').indexOf('Firefox') !== -1;
+    return _gateOn;
+  }
+  function _inImgZone(el, vh){
+    try {
+      var r = el.getBoundingClientRect();
+      return r.bottom > -vh && r.top < vh * 2;
+    } catch(e){ return true; }
+  }
+  function _refreshImgGate(){
+    var grid = _getTileGrid(); if (!grid) return;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    var gate = grid.querySelectorAll('img[src]:not([data-hyd])');
+    for (var i = 0; i < gate.length; i++){
+      var im = gate[i];
+      if (_inImgZone(im, vh)) continue;
+      im.setAttribute('data-src', im.getAttribute('src'));
+      im.removeAttribute('src');
+    }
+    var imgs = grid.querySelectorAll('img[data-src]');
+    for (var j = 0; j < imgs.length; j++){
+      var im2 = imgs[j];
+      if (!_inImgZone(im2, vh)) continue;
+      im2.setAttribute('src', im2.getAttribute('data-src'));
+      im2.removeAttribute('data-src');
+      im2.setAttribute('data-hyd', '1');
+    }
+  }
+  var _imgTimer = 0;
+  function _scheduleImgGate(){
+    if (!_thumbGateOn()) return;
+    if (_imgTimer) clearTimeout(_imgTimer);
+    _imgTimer = setTimeout(function(){ _imgTimer = 0; _refreshImgGate(); }, 250);
+  }
   // content-visibility scheduling: .cv-on is REMOVED before every render's
   // innerHTML so all children lay out at real heights and the same-task
   // scroll-anchor math stays exact; one rAF later we measure a real element,
@@ -233,6 +287,7 @@
     requestAnimationFrame(function(){
       _measureIntrinsicHeights(tileGrid);
       tileGrid.classList.add("cv-on");
+      if (_thumbGateOn()) _refreshImgGate();
     });
   }
   // Measure the real content height (clientHeight − padding) of the first
@@ -555,5 +610,10 @@
   window.addEventListener('resize', function(){
     var g = _getTileGrid();
     if (g && g.firstElementChild) _scheduleCv(g);
+    _scheduleImgGate();
   });
+  try {
+    var _ss = document.getElementById('sidebar-scroll');
+    if (_ss) _ss.addEventListener('scroll', _scheduleImgGate, {passive: true});
+  } catch(e){}
 })();
