@@ -46,6 +46,7 @@ else
         # 無効/未設定。対話ログイン URL をログに残し、承認されるまで
         # ブロックする（承認後は serve 設定へ進む）。
         echo "[tailscale] Not authenticated (stale node key or no valid TS_AUTHKEY)."
+        echo "[tailscale] Hint: expired authkeys auto-renew via scripts/ensure-ts-authkey.sh when OAuth client is configured in .env."
         echo "[tailscale] Interactive login required — open the printed URL to approve:"
         tailscale --socket="$SOCKET" login || {
             echo "[tailscale] ERROR: interactive login failed." >&2
