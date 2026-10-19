@@ -214,7 +214,7 @@
   // more than one viewport outside the scrollport keep their URL in
   // data-src instead of src, so nothing can fetch or decode mid-fling
   // (measured 240-500ms main-thread frames on FPD CP08-J1 / Mali-G57).
-  // Scrolling quiet for ~250ms restores src for imgs inside viewport ±1
+  // Scrolling quiet for ~250ms restores src for imgs inside viewport ±0.5
   // screen; once hydrated an img keeps its src forever (data-hyd=1) so
   // scrolling back does not re-fetch or re-decode. thumbgate=0 or
   // localStorage "0" opts out; other browsers keep native loading=lazy.
@@ -236,7 +236,7 @@
   function _inImgZone(el, vh){
     try {
       var r = el.getBoundingClientRect();
-      return r.bottom > -vh && r.top < vh * 2;
+      return r.bottom > -vh * 0.5 && r.top < vh * 1.5;
     } catch(e){ return true; }
   }
   function _refreshImgGate(){
@@ -260,13 +260,13 @@
       due.push(im2);
       // Spread src restores in small batches: assigning ~24 at once after
       // a settle concentrates their decode+paint into one ~230ms frame on
-      // low-end devices (measured NSFW folder). 6 per 40ms tick keeps each
-      // post-fling frame under ~16ms while still filling the viewport fast.
-      if (due.length >= 6) break;
+      // low-end devices (measured on a multi-thumb folder). 4 per 60ms tick
+      // keeps each burst small while still filling the viewport fast.
+      if (due.length >= 4) break;
     }
     // Cap hit → chain another pass shortly; the next call re-scans zones
     // and ends the chain when no in-zone data-src imgs remain.
-    if (due.length === 6) setTimeout(_refreshImgGate, 40);
+    if (due.length === 4) setTimeout(_refreshImgGate, 60);
   }
   var _imgTimer = 0;
   var _touchesDown = 0;
