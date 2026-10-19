@@ -6,7 +6,7 @@ Usage:
 
 Tab selection: picks the first /json page whose URL contains the substring
 arg (default: the BOOKQ_TAB_MATCH env var, or the dev host if unset — set
-BOOKQ_DEV_HOST, e.g. "dev-04-1.javanese-goblin.ts.net"). When several tabs
+BOOKQ_DEV_HOST, e.g. "dev-04.javanese-goblin.ts.net"). When several tabs
 match, narrow with a more specific substring (e.g. 'r=24' or '#/browse').
 
 Requires: adb forward tcp:9222 localabstract:chrome_devtools_remote
@@ -37,7 +37,7 @@ def pick_tab(match):
 async def main():
     expr = sys.argv[1]
     match = sys.argv[2] if len(sys.argv) > 2 else os.environ.get(
-        "BOOKQ_TAB_MATCH", os.environ.get("BOOKQ_DEV_HOST", "dev-04-1"))
+        "BOOKQ_TAB_MATCH", os.environ.get("BOOKQ_DEV_HOST", "dev-04"))
     tab = pick_tab(match)
     async with websockets.connect(tab["webSocketDebuggerUrl"],
                                   max_size=50_000_000) as ws:

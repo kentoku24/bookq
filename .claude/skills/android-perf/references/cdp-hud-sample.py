@@ -32,7 +32,7 @@ def pick_tab(match):
 async def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 12
     match = sys.argv[2] if len(sys.argv) > 2 else os.environ.get(
-        "BOOKQ_TAB_MATCH", os.environ.get("BOOKQ_DEV_HOST", "dev-04-1"))
+        "BOOKQ_TAB_MATCH", os.environ.get("BOOKQ_DEV_HOST", "dev-04"))
     tab = pick_tab(match)
     expr = (
         "new Promise(function(res){var out=[];var i=0;var iv="

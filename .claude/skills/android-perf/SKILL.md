@@ -24,10 +24,13 @@ curl -s http://localhost:9222/json | head          # must list pages
 - Wireless ADB drops on sleep/network changes: `adb pair <ip:port>` (code from
   the tablet's 開発者向けオプション→ワイヤレスデバッグ→ペア設定) then
   `adb connect <ip:port>`. Ask the user for the pairing code — never guess.
-- The dev environment's serve URL is `https://dev-XX-1.<tailnet>.ts.net`
-  (hostname **with the `-1` suffix**). `./dev.sh up` may hang curling the bare
-  `dev-XX` name — check `dev-XX-1` directly before assuming failure.
-- Measurement page: `https://dev-XX-1.../?perf=1&r=<cache-buster>#/browse/<folder>`
+- The dev environment's URL is `https://dev-XX.<tailnet>.ts.net` (XX = slot
+  01..10). `./dev.sh url <name>` resolves the env name to its slot FQDN.
+  **If only a `dev-XX-1` name serves, that's a ghost-node collision** — an
+  offline `dev-XX` node still registered in the tailnet forced the suffix.
+  Recover via docs/deployment.md「ノード名の衝突」; until then, measure
+  against the `dev-XX-1` URL (dev.sh prints the real FQDN after `up`).
+- Measurement page: `https://dev-XX.../?perf=1&r=<cache-buster>#/browse/<folder>`
   — bump `r=` to force a fresh navigation past SW stale-while-revalidate.
 
 ## The HUD (`?perf=1`)
@@ -143,6 +146,7 @@ compositor-bound costs (blur, raster); it under-reports input-path costs
 | Numbers differ run to run | Cold sprite/thumb generation on first scroll | Scroll the full list once to warm, then measure |
 | `g:-` despite `thumbgate` override | `_gateOn` memoised per document | Full reload after changing localStorage/flag |
 | screenrecord output won't decode | Killed in background → no moov | Run `--time-limit` in foreground shell |
+| `dev-XX` URL hangs / only `dev-XX-1` serves | Offline ghost node still holds the `dev-XX` name in the tailnet | `tailscale status` for the ghost; delete in admin console, re-up (docs/deployment.md「ノード名の衝突」) |
 
 ## References
 
