@@ -89,7 +89,12 @@ def test_kanji_folder_tree_order(page):
 
 def test_multi_thumbnail_tile_for_folder_with_subfolders(page):
     tile = page.locator('.tile[data-path="series"]')
-    expect(tile.locator(".tile-multi img")).to_have_count(2)  # vol1 + vol2 thumbs
+    # multi-thumb tiles render ONE server-composed sprite (rows layout in
+    # the query), not per-cell imgs — see _multiGridHtml in browse/render.js.
+    imgs = tile.locator(".tile-multi img")
+    expect(imgs).to_have_count(1)
+    src = imgs.first.get_attribute("src") or ""
+    assert "/api/thumb-sprite?" in src and "rows=2" in src
 
 
 def test_list_mode_toggle(page):
