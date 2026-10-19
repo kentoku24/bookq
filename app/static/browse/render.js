@@ -269,10 +269,19 @@
     if (due.length === 6) setTimeout(_refreshImgGate, 40);
   }
   var _imgTimer = 0;
+  var _touchesDown = 0;
   function _scheduleImgGate(){
     if (!_thumbGateOn()) return;
     if (_imgTimer) clearTimeout(_imgTimer);
-    _imgTimer = setTimeout(function(){ _imgTimer = 0; _refreshImgGate(); }, 250);
+    _imgTimer = setTimeout(function(){
+      _imgTimer = 0;
+      // Never hydrate mid-drag: the src-set → decode burst it triggers lands
+      // inside the finger's own gesture and stalls it (worst ~240-330ms
+      // measured). While a touch is active just re-arm; touchend schedules
+      // the real pass.
+      if (_touchesDown > 0) { _scheduleImgGate(); return; }
+      _refreshImgGate();
+    }, 250);
   }
   // content-visibility scheduling: .cv-on is REMOVED before every render's
   // innerHTML so all children lay out at real heights and the same-task
@@ -614,5 +623,11 @@
   try {
     var _ss = document.getElementById('sidebar-scroll');
     if (_ss) _ss.addEventListener('scroll', _scheduleImgGate, {passive: true});
+    if (_ss) _ss.addEventListener('touchstart', function(e){ _touchesDown = e.touches ? e.touches.length : 0; }, {passive: true});
+    if (_ss) {
+      var _touchUp = function(e){ _touchesDown = e.touches ? e.touches.length : 0; if (_touchesDown === 0) _scheduleImgGate(); };
+      _ss.addEventListener('touchend', _touchUp, {passive: true});
+      _ss.addEventListener('touchcancel', _touchUp, {passive: true});
+    }
   } catch(e){}
 })();
