@@ -445,7 +445,10 @@ cmd_up() {
     fi
 
     # サイドカーの初回認証に必要。本番 (prd.sh) と同じく必須（--local は skip）。
+    # OAuth client 設定時は期限切れの authkey をここで自動更新する（警告のみ、失敗しない）。
     if [ -z "$local_mode" ]; then
+        [ -x "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" ] \
+            && "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" || true
         find_authkey >/dev/null || die "TS_AUTHKEY が見つかりません。環境変数に設定するか $(main_checkout)/.env に書いてください。"
     fi
 
@@ -646,7 +649,8 @@ cmd_down() {
 # 再利用で identity を保つ。
 down_full() {
     local name="$1" project="$2"
-    local labels commit="" ref="" image_tag="" rest="" node_done=0 api_key ids code devices found=0 http deleted=0 slot_for_api=""
+    local labels commit="" ref="" image_tag="" rest="" node_done=0 api_key bearer="" ids code devices found=0 http deleted=0 slot_for_api=""
+    local api_auth_args=()
 
     # pool slot を導出して API スキップ判定に使う（数値は repair、ラベル有りの不正値は die）
     slot_for_api="$(docker ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Label "com.bookq.pool_slot"}}' 2>/dev/null | head -1 || true)"
@@ -697,14 +701,25 @@ down_full() {
         printf 'ℹ️  プールスロット dev-%s は再利用のためノード登録の API 削除をスキップします（state ボリュームは compose down -v で削除されます）\n' "$slot_for_api"
         node_done=1
     else
+        # admin API の認証は OAuth client の短命トークンを優先（tskey-api- は
+        # 最長90日で失効する）。未設定なら従来の TS_API_KEY basic auth に落ちる。
+        bearer=""
+        if [ -x "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" ]; then
+            bearer="$("$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" --token 2>/dev/null || true)"
+        fi
         api_key="${TS_API_KEY:-}"
         [ -n "$api_key" ] || api_key="$(dotenv_value TS_API_KEY || true)"
-        if [ -z "$api_key" ]; then
-            warn "TS_API_KEY が未設定のため、ノード登録 dev-$name は削除しません。"
+        if [ -n "$bearer" ]; then
+            api_auth_args=(-H "Authorization: Bearer $bearer")
+        elif [ -n "$api_key" ]; then
+            api_auth_args=(-u "$api_key:")
+        fi
+        if [ ${#api_auth_args[@]} -eq 0 ]; then
+            warn "TS_API_KEY / OAuth client が未設定のため、ノード登録 dev-$name は削除しません。"
         elif ! command -v python3 >/dev/null 2>&1; then
             warn "python3 が見つからないため、ノード登録 dev-$name を削除できません。"
         else
-            devices="$(curl -s --max-time 10 -w '\n%{http_code}' -u "$api_key:" \
+            devices="$(curl -s --max-time 10 -w '\n%{http_code}' "${api_auth_args[@]}" \
                 "https://api.tailscale.com/api/v2/tailnet/${TS_TAILNET:--}/devices" 2>/dev/null || true)"
             http="$(printf '%s' "$devices" | tail -1)"
             devices="$(printf '%s' "$devices" | sed '$d')"
@@ -730,7 +745,7 @@ for d in data.get("devices", []):
                             [ -n "$id" ] || continue
                             found=1
                             code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X DELETE \
-                                -u "$api_key:" "https://api.tailscale.com/api/v2/device/$id" || true)"
+                                "${api_auth_args[@]}" "https://api.tailscale.com/api/v2/device/$id" || true)"
                             case "$code" in
                                 200) printf '🗑️  ノード登録 dev-%s を削除しました\n' "$name"; deleted=1 ;;
                                 404) printf 'ℹ️  ノード登録 dev-%s は既に存在しません\n' "$name" ;;
@@ -854,6 +869,10 @@ cmd_list() {
         fi
         printf '%-30s %-6s %-9s %-24s %-13s %s\n' "$name" "$slot" "$state" "$ref" "$commit" "$url"
     done
+
+    # キー期限切れの静的警告（ネットワーク不要の --quick モード）
+    [ -x "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" ] \
+        && "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" --quick || true
 }
 
 cmd_url() {
