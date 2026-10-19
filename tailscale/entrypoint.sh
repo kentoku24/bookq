@@ -18,8 +18,11 @@ while [ ! -S "$SOCKET" ]; do sleep 0.2; done
 # 直後は NoState/Starting の遷移期があり、Running/NeedsLogin が確定する
 # まで待たないと誤った分岐を取る（pending の login URL を吐いて詰まった）。
 backend_state() {
+    # "BackendState": "Running" — バージョン/状態によりコロン後に空白が入る
+    # ことがある（実測で "NeedsLogin" が空白付きで返り、no-space パターンが
+    # 恒久的に空 → wait_state 全滅 → login が nodekey を再生成した実績あり）。
     tailscale --socket="$SOCKET" status --json 2>/dev/null \
-        | grep -o '"BackendState":"[^"]*"' | cut -d'"' -f4
+        | grep -o '"BackendState"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4
 }
 
 # 最大 ~10s。Running なら確定済み、NeedsLogin は変わらないので即抜けする。
