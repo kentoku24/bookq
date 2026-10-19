@@ -738,6 +738,8 @@ async def index(request: Request):
     # test exists for the platform and navigator.userAgent is banned in app.js
     # (test_feature_test_replaces_ua_sniff), so tag <html> from the request's
     # User-Agent header; style.css drops the frost under .ua-android.
+    # No Vary: User-Agent — the SW precaches '/' via a header-less Request, so a
+    # varying response would never match a real navigation's cache lookup.
     ua_android = "android" in request.headers.get("user-agent", "").lower()
     context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android}
     if thumb_perf:
@@ -746,7 +748,6 @@ async def index(request: Request):
             Path(__file__).parent / "perf" / "thumbnail-probe.js"
         ).read_text(encoding="utf-8")
     response = render_template(request, "index.html", context)
-    response.headers["Vary"] = "User-Agent"
     if thumb_perf:
         response.headers["Cache-Control"] = "no-store"
     return response
