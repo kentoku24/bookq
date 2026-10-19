@@ -110,6 +110,17 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 - legacy のノード削除は `hostname` が `dev-<名前>` と**完全一致**するものだけが対象。
 - `TS_API_KEY` 未設定・API 失敗時は警告して続行する（ローカル資源の撤去は完了）。
 
+#### ノード名の衝突（`dev-XX-1` が出来てしまう仕組みと直し方）
+
+`tailscale up --hostname=dev-XX` は、tailnet に同名ノードが既に残っていると**自動で `dev-XX-1` / `-2` の尾番を付ける**。`dev-XX-1` が見えたら「`dev-XX` 名を持つ別ノードが tailnet に残っている」サイン。
+
+- **よくある原因 1 — ゴーストノード**: state ボリューム（= ノードの machine key）をリセット・再作成したのに、tailnet 側の旧ノード登録が残ったまま再 `up` した場合。旧ノードは offline のまま残り続け、新ノードが `-1` を取る。
+- **よくある原因 2 — 他プロジェクトとの名前空間衝突**: `dev.sh` 派生の別アプリ（同じ `dev-XX` 命名を使う compose プロジェクト）が同じ tailnet にあると、先に登録した側が `dev-XX` 名を取る。実例: comicrypt 側のゲートウェイが `dev-02` を取得し、`https://dev-02...` が bookq ではなく comicrypt を返した（2026-10 に発生・同プロジェクト退役のため解消済み）。
+- **検出**: `./dev.sh up` は deploy 後に sidecar の実登録名（`tailscale status --json` の `Self.DNSName`）を期待名と比較し、ずれていれば警告して実名で verify する（期待名で待つと offline ノードへ最大 ~6 分ハングする）。手動確認はホスト側 `tailscale status | grep dev-` で offline の同名ノードを探す。
+- **復旧**: [管理コンソール](https://login.tailscale.com/admin/machines)で旧 `dev-XX` ノードを削除 → sidecar を `docker restart bookq-dev-tailscaleGateway-dev-XX`（entrypoint が起動毎に `tailscale up --hostname=dev-XX` を再実行するため、state を保ったまま `dev-XX` 名を再取得できる）。別プロジェクトに名を取られている場合は、そちらの hostname 命名を変えるか `down --full` で譲ってもらうしかない。
+- `dev.sh down`（pool slot）が API 削除をスキップするのは identity 再利用のため — **state ボリュームがある限りノードは同一登録を名乗る**。問題なのは state 無しでの再登録で、その場合は上記のように `-1` が付く。
+- **逆方向の罠**: ノードを管理コンソールで削除した後も state ボリュームが残っていると、sidecar は「認証済み」判定だが tailnet 側は `Online:False`（ログアウト）で URL が 000 になる。entrypoint は `BackendState` が `NeedsLogin` の場合 `tailscale login` の対話 URL をログに出して待機する — `docker logs bookq-dev-tailscaleGateway-dev-XX` の URL をブラウザで承認すれば即復旧する。`TS_AUTHKEY` が有効な再利用キーならこの対話は不要。
+
 ### iPad から見る
 
 `./dev.sh up` が表示する `https://dev-<名前>.your-tailnet.ts.net` をそのまま Safari で開く。
@@ -125,6 +136,17 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 3. メインのチェックアウトの `.env`（worktree には `.env` が無いのでここに落ちてくる）
 
 一度認証すれば以後の `up` でキーは不要（本番と同じ）。
+
+#### キーの期限切れと自動更新
+
+`TS_AUTHKEY`（`tskey-auth-`）も `TS_API_KEY`（`tskey-api-`）も最長 90 日で期限切れになる。検知と更新は `scripts/ensure-ts-authkey.sh` が担う（`./dev.sh up`・`./dev.sh list`・`./prd.sh` から自動で呼ばれる。警告のみで、デプロイはブロックしない）。
+
+- **静的な期限記録**: `.env` の `TS_AUTHKEY_EXPIRES` / `TS_API_KEY_EXPIRES`（YYYY-MM-DD）を残 14 日または期限切れで警告する。キーを手動再発行したときは日付も更新すること（記録が無い・不正な場合も警告が出る）。
+- **OAuth client による自動更新（推奨）**: `.env` に `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_CLIENT_SECRET` を設定すると、期限が近い・不明な authkey を `up` 時に自動で mint し `.env` の `TS_AUTHKEY` / `TS_AUTHKEY_EXPIRES` / `TS_AUTHKEY_ID` を書き換える（記録済みの旧キーは DELETE で失効）。発行は[管理コンソールの Trust credentials](https://login.tailscale.com/admin/settings/trust-credentials)で scope `auth_keys`（`down --full` のノード削除にも使うなら `devices` も）。client secret 自体に期限はないため、設定後の更新作業は不要になる。
+- **OAuth mint のキーはタグ付き**: Tailscale API の仕様で OAuth 発行の authkey は tailnet 所有＝タグ必須。mint されるキーには既定で `tag:bookq-dev` が付く（`TS_AUTHKEY_TAGS` で変更可）。そのため tailnet ACL の `tagOwners` に `"tag:bookq-dev": ["autogroup:admin"]` を追加済み（2026-10）。このキーで新規登録したノードはタグ所有デバイスになり、ユーザー所有ではなくなる — 既存の state ボリューム持ちノード（dev-01/02 等）は保存済み login で動くので変わらない。現行 ACL は全許可 (`*:*`) のため到達性への影響はない。
+- OAuth 未設定・失効時は手動再発行の案内だけが出る: [Keys ページ](https://login.tailscale.com/admin/settings/keys)で **reusable / 非 ephemeral** なキーを発行し `TS_AUTHKEY` と `TS_AUTHKEY_EXPIRES` を更新。
+- `down --full` のノード API 削除は OAuth client 設定時、`TS_API_KEY` の代わりに短命トークンを使う（`TS_API_KEY` の期限切れ後も機能する）。
+- `TS_AUTHKEY` をシェル環境に export していると .env より優先される（自動更新後に警告が出る）。恒久的には .env 側だけに置くこと。
 
 ---
 

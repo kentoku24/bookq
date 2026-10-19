@@ -733,7 +733,15 @@ async def index(request: Request):
     # Dev-only thumbnail timing mode: ?thumb_perf=1 inlines the shared probe and
     # result panel. Never enabled in production (_TEST_MODE is import-time false).
     thumb_perf = auth_module._TEST_MODE and request.query_params.get("thumb_perf") == "1"
-    context = {"user": user, "test_mode": auth_module._TEST_MODE}
+    # Android re-blurs backdrop-filter every composited frame (measured on
+    # CP08-J1: fps 4 vs 22 Firefox, 45 vs 83 Chrome). No client-side feature
+    # test exists for the platform and navigator.userAgent is banned in app.js
+    # (test_feature_test_replaces_ua_sniff), so tag <html> from the request's
+    # User-Agent header; style.css drops the frost under .ua-android.
+    # No Vary: User-Agent — the SW precaches '/' via a header-less Request, so a
+    # varying response would never match a real navigation's cache lookup.
+    ua_android = "android" in request.headers.get("user-agent", "").lower()
+    context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android}
     if thumb_perf:
         context["thumbnail_perf"] = True
         context["thumbnail_probe"] = (
@@ -1365,6 +1373,19 @@ async def serve_thumb(
 
     request.app.state.last_request_at = time.time()
     return await handle_thumb(request, path, w)
+
+
+@api_router.get("/view/{path:path}")
+async def serve_view(
+    path: str,
+    request: Request,
+    _user: dict = Depends(require_auth),
+):
+    """Serve a reader page normalized for fast decode. Requires authentication."""
+    from app.thumbs import handle_view
+
+    request.app.state.last_request_at = time.time()
+    return await handle_view(request, path)
 
 
 @api_router.get("/api/thumb-sprite")
