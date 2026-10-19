@@ -115,7 +115,7 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 `tailscale up --hostname=dev-XX` は、tailnet に同名ノードが既に残っていると**自動で `dev-XX-1` / `-2` の尾番を付ける**。`dev-XX-1` が見えたら「`dev-XX` 名を持つ別ノードが tailnet に残っている」サイン。
 
 - **よくある原因 1 — ゴーストノード**: state ボリューム（= ノードの machine key）をリセット・再作成したのに、tailnet 側の旧ノード登録が残ったまま再 `up` した場合。旧ノードは offline のまま残り続け、新ノードが `-1` を取る。
-- **よくある原因 2 — 他プロジェクトとの名前空間衝突**: `dev.sh` 派生の別アプリ（同じ `dev-XX` 命名を使う compose プロジェクト）が同じ tailnet にあると、先に登録した側が `dev-XX` 名を取る。実例: comicrypt 側のゲートウェイが `dev-02` を取得し、`https://dev-02...` が bookq ではなく comicrypt を返す（2026-10 時点で実際に発生）。
+- **よくある原因 2 — 他プロジェクトとの名前空間衝突**: `dev.sh` 派生の別アプリ（同じ `dev-XX` 命名を使う compose プロジェクト）が同じ tailnet にあると、先に登録した側が `dev-XX` 名を取る。実例: comicrypt 側のゲートウェイが `dev-02` を取得し、`https://dev-02...` が bookq ではなく comicrypt を返した（2026-10 に発生・同プロジェクト退役のため解消済み）。
 - **検出**: `./dev.sh up` は deploy 後に sidecar の実登録名（`tailscale status --json` の `Self.DNSName`）を期待名と比較し、ずれていれば警告して実名で verify する（期待名で待つと offline ノードへ最大 ~6 分ハングする）。手動確認はホスト側 `tailscale status | grep dev-` で offline の同名ノードを探す。
 - **復旧**: [管理コンソール](https://login.tailscale.com/admin/machines)で旧 `dev-XX` ノードを削除 → sidecar を `docker restart bookq-dev-tailscaleGateway-dev-XX`（entrypoint が起動毎に `tailscale up --hostname=dev-XX` を再実行するため、state を保ったまま `dev-XX` 名を再取得できる）。別プロジェクトに名を取られている場合は、そちらの hostname 命名を変えるか `down --full` で譲ってもらうしかない。
 - `dev.sh down`（pool slot）が API 削除をスキップするのは identity 再利用のため — **state ボリュームがある限りノードは同一登録を名乗る**。問題なのは state 無しでの再登録で、その場合は上記のように `-1` が付く。
