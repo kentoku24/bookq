@@ -2581,7 +2581,8 @@
       if (dt > fWorst) fWorst = dt;
       const el = now - fStart;
       if (el >= 500){
-        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig");
+        var st = 0; try { var _sc = document.getElementById('sidebar-scroll'); st = _sc ? _sc.scrollTop : window.scrollY; } catch(e){}
+        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig") + " st:" + Math.round(st);
         fN = 0; fStart = now; fWorst = 0;
       }
       requestAnimationFrame(fpsTick);
