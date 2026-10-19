@@ -119,6 +119,7 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 - **検出**: `./dev.sh up` は deploy 後に sidecar の実登録名（`tailscale status --json` の `Self.DNSName`）を期待名と比較し、ずれていれば警告して実名で verify する（期待名で待つと offline ノードへ最大 ~6 分ハングする）。手動確認はホスト側 `tailscale status | grep dev-` で offline の同名ノードを探す。
 - **復旧**: [管理コンソール](https://login.tailscale.com/admin/machines)で旧 `dev-XX` ノードを削除 → sidecar を `docker restart bookq-dev-tailscaleGateway-dev-XX`（entrypoint が起動毎に `tailscale up --hostname=dev-XX` を再実行するため、state を保ったまま `dev-XX` 名を再取得できる）。別プロジェクトに名を取られている場合は、そちらの hostname 命名を変えるか `down --full` で譲ってもらうしかない。
 - `dev.sh down`（pool slot）が API 削除をスキップするのは identity 再利用のため — **state ボリュームがある限りノードは同一登録を名乗る**。問題なのは state 無しでの再登録で、その場合は上記のように `-1` が付く。
+- **逆方向の罠**: ノードを管理コンソールで削除した後も state ボリュームが残っていると、sidecar は「認証済み」判定だが tailnet 側は `Online:False`（ログアウト）で URL が 000 になる。entrypoint は `BackendState` が `NeedsLogin` の場合 `tailscale login` の対話 URL をログに出して待機する — `docker logs bookq-dev-tailscaleGateway-dev-XX` の URL をブラウザで承認すれば即復旧する。`TS_AUTHKEY` が有効な再利用キーならこの対話は不要。
 
 ### iPad から見る
 
