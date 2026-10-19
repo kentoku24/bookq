@@ -120,18 +120,23 @@
     nativeGuardsInstalled = true;
     function inViewer(e) { return !!(viewerEl && e.target && viewerEl.contains(e.target)) && isActive(); }
     ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (t) {
-      document.addEventListener(t, function (e) { if (inViewer(e) && e.cancelable) e.preventDefault(); }, { passive: false, capture: true });
+      viewerEl.addEventListener(t, function (e) { if (inViewer(e) && e.cancelable) e.preventDefault(); }, { passive: false, capture: true });
     });
-    // Capture phase on `document`, like the other guards: overview.js calls
+    // Capture phase on `viewerEl`, like the other guards: overview.js calls
     // stopPropagation() on every touch event at #overview, so a bubble-phase
     // listener on #viewer never sees a pinch inside the grid — and in Safari
     // that pinch then zooms the page natively (pinch-in opens the tab
     // switcher). A natively zoomed page pans on horizontal swipe, which is
     // what "the left column is cut off in the overview" looks like.
-    document.addEventListener('touchmove', function (e) {
+    // The listeners must NOT be on `document`: a non-passive touch listener
+    // anywhere above the scroller makes every browse-grid drag block on the
+    // main thread (real-finger scroll jank on low-end Android; fps ~3 on the
+    // CP08-J1). #sidebar/#tile-grid live outside #viewer so scoping the
+    // guards here leaves tile scrolling fully compositor-driven.
+    viewerEl.addEventListener('touchmove', function (e) {
       if (e.touches.length >= 2 && inViewer(e) && e.cancelable) e.preventDefault();
     }, { passive: false, capture: true });
-    document.addEventListener('touchstart', function (e) {
+    viewerEl.addEventListener('touchstart', function (e) {
       if (e.touches.length >= 2 && inViewer(e) && e.cancelable) e.preventDefault();
     }, { passive: false, capture: true });
   }
