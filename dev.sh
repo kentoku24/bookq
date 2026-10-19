@@ -212,6 +212,21 @@ pool_fqdn_of() {
     printf '%s.%s' "$hostname" "$domain"
 }
 
+# sidecar が tailnet に実際登録した FQDN（例: dev-03-1.<tailnet>）。同名の
+# ゴーストノードが残っていると Tailscale が自動で -1 等の尾番を付けるため、
+# 期待名と一致しないことがある。空の場合は tailscaled 未起動か status 未応答。
+actual_dev_fqdn() {
+    local slot="$1" gw dns=""
+    gw="bookq-dev-tailscaleGateway-dev-${slot}"
+    for _ in $(seq 1 10); do
+        dns="$(docker exec "$gw" tailscale --socket=/var/run/tailscale/tailscaled.sock status --json 2>/dev/null \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null || true)"
+        [ -n "$dns" ] && break
+        sleep 1
+    done
+    printf '%s' "$dns"
+}
+
 # ローカル検出はラベル com.bookq.local=true のみ（shell export は
 # 後続プロセスに見えないため labels が唯一の受渡し手段 — Todo 2 契約）。
 # 成功時は http://<bind>:<port> を出力して 0、非ローカル/不在は 1。
@@ -476,6 +491,15 @@ cmd_up() {
         local_verify "$local_port"
     else
         "$SCRIPT_DIR/rebuild.sh" dev deploy
+        # 実登録名が期待と違う（= 同名ゴーストノード残存で -1 付与）場合は
+        # 警告しつつ実名で verify する。期待名のまま待つと verify_url が
+        # offline ノードへ最大 ~6 分ハングする（verify は 30×10s リトライ）。
+        actual_fqdn="$(actual_dev_fqdn "$slot")"
+        if [ -n "$actual_fqdn" ] && [ "$actual_fqdn" != "$fqdn" ]; then
+            warn "tailnet 登録名が期待と異なります: 期待 $fqdn → 実際 $actual_fqdn"
+            warn "同名のゴーストノードが tailnet に残っています。admin コンソールで旧 $hostname ノードを削除し、環境を再 up すると $fqdn で使えます（docs/deployment.md「ノード名の衝突」参照）。"
+            export DEV_FQDN="$actual_fqdn"
+        fi
         "$SCRIPT_DIR/rebuild.sh" dev verify
     fi
 
