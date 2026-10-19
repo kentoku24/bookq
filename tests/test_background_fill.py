@@ -177,7 +177,9 @@ def test_api_folders_reports_cover_for_archive_only_folder(tmp_path, monkeypatch
         while time.monotonic() < deadline:
             body = client.get("/api/folders").json()
             series = _find(body, "series")
-            if series and series.get("thumb"):
+            # The fill materializes archives one at a time: thumb lands after
+            # vol-01, thumbs only once vol-02 is filled too — wait for both.
+            if series and series.get("thumb") and series.get("thumbs"):
                 break
             time.sleep(0.1)
 

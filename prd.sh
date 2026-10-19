@@ -88,6 +88,10 @@ cmd_up() {
     echo "   ref が古い場合は先に git fetch origin を実行してください（自動 fetch はしません）"
     echo ""
 
+    # OAuth client 設定時は期限切れの authkey をここで自動更新する（警告のみ）。
+    [ -x "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" ] \
+        && "$SCRIPT_DIR/scripts/ensure-ts-authkey.sh" || true
+
     # TS_AUTHKEY は tailscale/entrypoint.sh が必須にしている。
     # シェル環境に無ければ .env からの compose 補間に任せる。
     if [ -z "${TS_AUTHKEY:-}" ] && ! grep -qE '^TS_AUTHKEY=.+' .env 2>/dev/null; then

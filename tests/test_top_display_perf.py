@@ -171,7 +171,13 @@ def test_top_covers_use_thumbnails(server, browser):
         srcs = _tile_img_srcs(page)
         print(f"[top-display-perf] thumb_src_sample={srcs[:3]}")
         assert len(srcs) > 0
-        non_thumb = [s for s in srcs if not s.startswith("/thumb/")]
+        # /api/thumb-sprite is the composed variant of the same thumbnail
+        # pipeline (multi-thumb tiles render one sheet img, not 9 /thumb/ imgs).
+        non_thumb = [
+            s
+            for s in srcs
+            if not (s.startswith("/thumb/") or s.startswith("/api/thumb-sprite"))
+        ]
         print(f"[top-display-perf] non_thumb_src_count={len(non_thumb)}")
         assert non_thumb == []
         non_lazy = _non_lazy_tile_img_count(page)

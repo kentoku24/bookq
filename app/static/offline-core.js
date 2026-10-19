@@ -41,6 +41,13 @@
     return "/thumb/" + encodePath(inner) + "?w=" + width;
   }
 
+  // Reader-page URL targeting /view (server-normalized to a fast-decode
+  // format). Only used via readerUrl, gated by OfflineCore.readerUseView.
+  function viewUrl(folder, name) {
+    var inner = folder ? folder + "/" + name : name;
+    return "/view/" + encodePath(inner);
+  }
+
   function cacheNameFor(folder) {
     return "bookq-work-" + encodeURIComponent(folder) + "-v1";
   }
@@ -531,5 +538,14 @@
   globalThis.OfflineStore = OfflineStore;
   globalThis.OfflineTree = OfflineTree;
   globalThis.OfflineThumb = OfflineThumb;
-  globalThis.OfflineCore = { encodePath, imageUrl, thumbUrl, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS };
+  var api = { encodePath, imageUrl, thumbUrl, viewUrl, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS };
+  // Single reader-page URL source for the viewer AND downloadWork — the flag
+  // (?view=jpeg / localStorage bookq_view=jpeg, set by app.js) must resolve
+  // identically in both or offline caches would key pages the viewer never
+  // requests (caches.match is exact-URL).
+  api.readerUseView = false;
+  api.readerUrl = function (folder, name) {
+    return api.readerUseView ? viewUrl(folder, name) : imageUrl(folder, name);
+  };
+  globalThis.OfflineCore = api;
 })();

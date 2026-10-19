@@ -719,6 +719,26 @@
   // enables the profiler the same way (takes effect on next document load,
   // e.g. the harness's "back to Viewer" link which reloads the app).
   const perfOn = /[?&]perf=1/.test(location.search) || (()=>{try{return localStorage.getItem('bookq_perf')==='1'}catch(e){return false}})();
+  // ?view=jpeg routes reader pages through /view (server-normalized JPEG —
+  // webp/avif software decode is the suspected page-turn stall on low-end
+  // devices). Same localStorage escape hatch as bookq_perf for the PWA.
+  // readerUrl is shared with downloadWork so offline cache keys match.
+  const viewJpeg = /[?&]view=jpeg/.test(location.search) || (()=>{try{return localStorage.getItem('bookq_view')==='jpeg'}catch(e){return false}})();
+  try { window.OfflineCore.readerUseView = viewJpeg; } catch(e) { console.warn(e); }
+  // Android composites the toolbar/sidebar backdrop-filter by re-blurring
+  // the scrolled backdrop every frame — measured fps 4 vs 22 (Firefox) and
+  // 45 vs 83 (Chrome) on the CP08-J1 tile grid. The server tags <html> with
+  // .ua-android from the request UA header (no client feature test exists and
+  // UA sniffing is banned in this file); CSS drops the frost, desktop keeps it.
+  // ?noblur=1 drops backdrop-filter from the floating toolbar for scroll A/B
+  // measurement on low-end GPUs (diagnostic flag, not a shipping behavior).
+  if (/[?&]noblur=1/.test(location.search)) {
+    try {
+      const st = document.createElement('style');
+      st.textContent = '#toolbar{-webkit-backdrop-filter:none !important;backdrop-filter:none !important}';
+      document.head.appendChild(st);
+    } catch(e) { console.warn(e); }
+  }
   let perfTapAt = 0, perfTapX = 0;
   try {
     Object.defineProperty(window, 'spreads', {get(){return spreads;}, set(v){spreads=v;}, configurable:true});
@@ -2068,7 +2088,7 @@
     // Encode per path segment — image names may carry flattened "sub/dir/" prefixes.
     const img = images[idx];
     if (img.isSpacer) return "";
-    return window.OfflineCore.imageUrl(img.folder, img.name);
+    return window.OfflineCore.readerUrl(img.folder, img.name);
   }
   try { window.getUrl = getUrl; } catch(e) { console.warn(e); }
 
@@ -2216,6 +2236,9 @@
         if (!sliding && spreadOf(idx) === anchorSpread) applyTrackTransform(currentIdx, 0, false);
       }
       img.classList.add("loaded");
+      // Freshly fetched and still adjacent — decode now rather than letting the
+      // first post-turn raster pay it (Gecko decodes lazily at paint).
+      if (Math.abs(idx - currentIdx) <= 2) predecode(img);
     }, {once:true});
     img.addEventListener("error", () => { if (stripImgs[idx] === img) img.classList.add("loaded"); }, {once:true});
     // Fetch priority by distance: the page the reader will see next must not
@@ -2236,6 +2259,15 @@
     return img;
   }
   function isImgReady(img){ return !!(img && img.complete && img.naturalWidth > 0); }
+  // Kick an off-critical-path decode ahead of the turn. decode() awaits the
+  // in-flight fetch AND decodes, so the first raster after the slide doesn't
+  // pay it — decoding=async is only a hint, this actually schedules the work.
+  // No-op without src (still-deferred cells) or decode support; the rejection
+  // on a cleared/evicted src is swallowed.
+  function predecode(img){
+    if (!img || !img.src || !img.decode) return;
+    try { const p = img.decode(); if (p && p.catch) p.catch(() => {}); } catch(e){}
+  }
   function startDeferred(img){
     if (!img || !img.dataset.deferredSrc) return;
     img.src = img.dataset.deferredSrc;
@@ -2261,6 +2293,7 @@
       const img = stripImgs[k], d = Math.abs(Number(k) - idx);
       if (!img) continue;
       if (d <= 1) startDeferred(img);
+      if (d <= 2) predecode(img);
       if (!isImgReady(img)) img.fetchPriority = d <= 1 ? "high" : "low";
     }
     const next = stripImgs[idx + 1];
@@ -2549,6 +2582,33 @@
     document.body.appendChild(box);
     imgContainer.addEventListener("touchstart", e => { perfTapAt = performance.now(); perfTapX = e.touches[0] ? e.touches[0].clientX : 0; }, {capture:true, passive:true});
     window.__perfLine = (s) => { box.textContent = (s + "\n" + box.textContent).split("\n").slice(0, 8).join("\n"); };
+    // Rolling FPS + worst-frame readout, in its own element so it doesn't
+    // churn the turn log. Slide and tile scrolling both drive rAF, so one
+    // meter covers viewer and browse alike.
+    const fpsBox = document.createElement("pre");
+    fpsBox.id = "perf-fps";
+    fpsBox.style.cssText = "position:fixed;left:8px;bottom:60px;z-index:99;margin:0;padding:4px 8px;background:rgba(0,0,0,.75);color:#8ff;font:12px/1.2 monospace;pointer-events:none";
+    document.body.appendChild(fpsBox);
+    let fN = 0, fStart = performance.now(), fWorst = 0, fPrev = fStart;
+    requestAnimationFrame(function fpsTick(){
+      const now = performance.now(), dt = now - fPrev; fPrev = now; fN++;
+      if (dt > fWorst) fWorst = dt;
+      const el = now - fStart;
+      if (el >= 500){
+        var st = 0; try { var _sc = document.getElementById('sidebar-scroll'); st = _sc ? _sc.scrollTop : window.scrollY; } catch(e){}
+        var g = window.__bookqThumbgate;
+        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig") + " st:" + Math.round(st) + " g:" + (g === undefined ? "-" : g) + " v10";
+        fN = 0; fStart = now; fWorst = 0;
+      }
+      requestAnimationFrame(fpsTick);
+    });
+    // >50ms main-thread stalls. Chrome only — Firefox lacks the entry type and
+    // throws (caught); there the worst-frame number above is the jank proxy.
+    try {
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) window.__perfLine("longtask " + Math.round(e.duration) + "ms");
+      }).observe({type:"longtask"});
+    } catch(e){}
   }
   function perfRecordTurn(idx, entry, afterWindow, afterLayout){
     if (!perfOn || !perfTapAt) return;
@@ -2739,12 +2799,30 @@
       if(tileGrid){ tileGrid.style.transition=''; tileGrid.style.willChange=''; }
     }, PTR_SNAP_MS);
   }
+  let ptrAtBottom = false;
+  let tmBlockArmed = false;
+  let suppressGridClick = false;
+  function updatePtrAtBottom(){
+    ptrAtBottom = sidebarScroll.scrollTop + sidebarScroll.clientHeight >= sidebarScroll.scrollHeight - 1;
+  }
+  sidebarScroll.addEventListener('scroll', updatePtrAtBottom, {passive: true});
+  window.addEventListener('resize', updatePtrAtBottom);
+  // preventDefault must come from a non-passive listener, but a non-passive
+  // touchmove on the scroller forces every real-finger drag to block on the
+  // main thread. Keep the tracking listener passive and arm a preventer only
+  // while a gesture actually needs it (h-drag / bottom overscroll pull).
+  function tmBlocker(e){ if (e.cancelable) e.preventDefault(); }
+  function armTmBlock(){ if(!tmBlockArmed){ tmBlockArmed = true; sidebarScroll.addEventListener('touchmove', tmBlocker, {passive: false}); } }
+  function disarmTmBlock(){ if(tmBlockArmed){ tmBlockArmed = false; sidebarScroll.removeEventListener('touchmove', tmBlocker); } }
   sidebarScroll.addEventListener('touchstart', function(e){
     if (!e.touches || e.touches.length !== 1) return;
     if (!e.target.closest('#sidebar') && !e.target.closest('#sidebar-scroll')) return;
     ptrStartY = e.touches[0].clientY;
     ptrStartX = e.touches[0].clientX;
     startScrollTop = sidebarScroll.scrollTop;
+    updatePtrAtBottom();
+    suppressGridClick = false;
+    disarmTmBlock();
     hHapticFired = false;
     ptrLocked = null;
     hDragState = 'idle';
@@ -2755,8 +2833,7 @@
   sidebarScroll.addEventListener('touchmove', function(e){
     if (!e.touches || e.touches.length !== 1) return;
     if (bottomPull === 0 && hDragState === 'idle' && hDragX === 0) {
-      const atBottomIdle = sidebarScroll.scrollTop + sidebarScroll.clientHeight >= sidebarScroll.scrollHeight - 1;
-      if (!atBottomIdle) {
+      if (!ptrAtBottom) {
         const startXGate = ptrStartX < 24 || currentBrowsePath !== null;
         if (!startXGate) return;
       }
@@ -2790,30 +2867,36 @@
         } else if (hDragState === 'ready_to_pop' && hDragX < H_SWIPE_DEACTIVATE) {
           hDragState = 'draggingH';
         }
-        if (e.cancelable) e.preventDefault();
+        armTmBlock();
         if (hRaf) cancelAnimationFrame(hRaf);
         hRaf = requestAnimationFrame(function(){ hRaf = null; applyVisual(); });
       }
       return;
     }
     if (ptrLocked && ptrLocked !== 'v') return;
-    const atBottom = sidebarScroll.scrollTop + sidebarScroll.clientHeight >= sidebarScroll.scrollHeight - 1;
+    const atBottom = ptrAtBottom;
     if (atBottom && dy < 0 && ptrLocked === 'v') {
       const rawUp = -dy;
       bottomPull = 18 * (1 - Math.exp(-rawUp / 40));
-      if (e.cancelable) e.preventDefault();
+      armTmBlock();
       if (ptrRaf) cancelAnimationFrame(ptrRaf);
       ptrRaf = requestAnimationFrame(function(){ ptrRaf = null; applyVisual(); });
       return;
     } else {
       if (bottomPull > 0) {
         bottomPull = 0;
+        disarmTmBlock();
         if (ptrRaf) cancelAnimationFrame(ptrRaf);
         ptrRaf = requestAnimationFrame(function(){ ptrRaf = null; applyVisual(); });
       }
     }
-  }, {passive: false});
+  }, {passive: true});
   function handlePtrEnd(){
+    if (hDragState !== 'idle' || bottomPull > 0) {
+      suppressGridClick = true;
+      setTimeout(function(){ suppressGridClick = false; }, 400);
+    }
+    disarmTmBlock();
     if (ptrRaf) { cancelAnimationFrame(ptrRaf); ptrRaf = null; }
     if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
     if (hDragState === 'ready_to_pop' && hDragX >= H_SWIPE_THRESHOLD) {
@@ -2900,6 +2983,15 @@
     if (e && e.changedTouches && e.changedTouches.length > 0) { /* use handlePtrEnd without accessing [0] directly when empty */ }
     handlePtrEnd();
   }, {passive: true});
+  // A drag that armed the gesture visuals must not resolve as a tap on the
+  // tile under the release point. The old non-passive touchmove did this via
+  // preventDefault; with the passive tracker we swallow the click ourselves.
+  if (tileGrid) tileGrid.addEventListener('click', function(e){
+    if (!suppressGridClick) return;
+    suppressGridClick = false;
+    e.stopPropagation();
+    if (e.cancelable) e.preventDefault();
+  }, {capture: true});
   if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
 
   imgContainer.addEventListener("dblclick", e => e.preventDefault());

@@ -193,33 +193,131 @@
     if (url) return '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" data-cc-single="1" onerror="this.style.display=\'none\'">';
     return _tilePlaceholder();
   }
-  function _isArchiveTile(folderEnc){
-    try {
-      var leaf = String(folderEnc || "").split("/").pop();
-      return /\.(zip|cbz|rar|cbr|epub)$/i.test(decodeURIComponent(leaf));
-    } catch(e){ return false; }
-  }
+  // Multi-thumb tiles render ONE server-composed sprite (same rows layout
+  // as the old per-cell DOM grid) — up to 9 fetches+decodes collapse into a
+  // single img, which is the difference between a smooth and a janky fling
+  // on low-end devices (FPD CP08-J1: 60 multi tiles ≈ 500 img decodes).
+  // The img spans the whole .tile-multi box; the sheet is 2:3 like the box,
+  // so object-fit:cover reproduces the per-cell crop grid faithfully.
   function _multiGridHtml(f, folderEnc){
     var spec = multiThumbSpec(f.thumbs.length);
     if(!spec) return null;
     var n = Math.min(f.thumbs.length, 9);
-    var gridCols = spec.cols;
-    if(n >= 2 && _isArchiveTile(folderEnc)){
-      var names = f.thumbs.slice(0, n).map(encodeURIComponent).join(",");
-      var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names + "&w=200";
-      var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async">';
-      return '<div class="tile-multi" style="grid-template-columns:repeat(' + gridCols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + one + '</div>';
+    var names = f.thumbs.slice(0, n).map(encodeURIComponent).join(",");
+    var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names +
+      "&w=200&rows=" + spec.rows.join(",");
+    var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async" style="grid-column:1/-1;grid-row:1/-1">';
+    return '<div class="tile-multi" style="grid-template-columns:repeat(' + spec.cols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + one + '</div>';
+  }
+  // Scroll-gated thumbnail loading (Firefox-class devices): on Firefox —
+  // or ?thumbgate=1 / localStorage bookq_thumbgate=1 — cover imgs that sit
+  // more than one viewport outside the scrollport keep their URL in
+  // data-src instead of src, so nothing can fetch or decode mid-fling
+  // (measured 240-500ms main-thread frames on FPD CP08-J1 / Mali-G57).
+  // Scrolling quiet for ~250ms restores src for imgs inside viewport ±0.5
+  // screen; once hydrated an img keeps its src forever (data-hyd=1) so
+  // scrolling back does not re-fetch or re-decode. thumbgate=0 or
+  // localStorage "0" opts out; other browsers keep native loading=lazy.
+  var _gateOn = null;
+  function _setGate(v){
+    _gateOn = v;
+    try { window.__bookqThumbgate = v ? 1 : 0; } catch(e){}
+    return v;
+  }
+  function _thumbGateOn(){
+    if (_gateOn !== null) return _gateOn;
+    try {
+      var v = localStorage.getItem('bookq_thumbgate');
+      if (v === '0') return _setGate(false);
+      if (v === '1') return _setGate(true);
+    } catch(e){}
+    var q = location.search || '';
+    if (q.indexOf('thumbgate=0') !== -1) return _setGate(false);
+    if (q.indexOf('thumbgate=1') !== -1) return _setGate(true);
+    return _setGate((navigator.userAgent || '').indexOf('Firefox') !== -1);
+  }
+  function _inImgZone(el, vh){
+    try {
+      var r = el.getBoundingClientRect();
+      return r.bottom > -vh * 0.5 && r.top < vh * 1.5;
+    } catch(e){ return true; }
+  }
+  function _refreshImgGate(){
+    var grid = _getTileGrid(); if (!grid) return;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    var gate = grid.querySelectorAll('img[src]:not([data-hyd])');
+    for (var i = 0; i < gate.length; i++){
+      var im = gate[i];
+      if (_inImgZone(im, vh)) continue;
+      im.setAttribute('data-src', im.getAttribute('src'));
+      im.removeAttribute('src');
     }
-    var imgs = "";
-    var idx = 0;
-    for (var itemsInRow of spec.rows) {
-      var span = gridCols / itemsInRow;
-      for (var j = 0; j < itemsInRow && idx < n; j++, idx++) {
-        var tp = f.thumbs[idx].split('/').map(encodeURIComponent).join('/');
-        imgs += '<img src="/thumb/' + folderEnc + '/' + tp + '?w=200" loading="lazy" decoding="async" style="grid-column:span ' + span + '">';
+    var imgs = grid.querySelectorAll('img[data-src]');
+    var due = [];
+    for (var j = 0; j < imgs.length; j++){
+      var im2 = imgs[j];
+      if (!_inImgZone(im2, vh)) continue;
+      im2.setAttribute('src', im2.getAttribute('data-src'));
+      im2.removeAttribute('data-src');
+      im2.setAttribute('data-hyd', '1');
+      due.push(im2);
+      // Spread src restores in small batches: assigning ~24 at once after
+      // a settle concentrates their decode+paint into one ~230ms frame on
+      // low-end devices (measured on a multi-thumb folder). 4 per 60ms tick
+      // keeps each burst small while still filling the viewport fast.
+      if (due.length >= 4) break;
+    }
+    // Cap hit → chain another pass shortly; the next call re-scans zones
+    // and ends the chain when no in-zone data-src imgs remain.
+    if (due.length === 4) setTimeout(_refreshImgGate, 60);
+  }
+  var _imgTimer = 0;
+  var _touchesDown = 0;
+  function _scheduleImgGate(){
+    if (!_thumbGateOn()) return;
+    if (_imgTimer) clearTimeout(_imgTimer);
+    _imgTimer = setTimeout(function(){
+      _imgTimer = 0;
+      // Never hydrate mid-drag: the src-set → decode burst it triggers lands
+      // inside the finger's own gesture and stalls it (worst ~240-330ms
+      // measured). While a touch is active just re-arm; touchend schedules
+      // the real pass.
+      if (_touchesDown > 0) { _scheduleImgGate(); return; }
+      _refreshImgGate();
+    }, 250);
+  }
+  // content-visibility scheduling: .cv-on is REMOVED before every render's
+  // innerHTML so all children lay out at real heights and the same-task
+  // scroll-anchor math stays exact; one rAF later we measure a real element,
+  // refresh the --*-h estimate vars, then re-enable skipping. Never-rendered
+  // elements then fall back to that estimate while rendered ones report their
+  // remembered true size (`auto`), keeping scrollHeight stable.
+  function _scheduleCv(tileGrid){
+    if (!tileGrid) return;
+    tileGrid.classList.remove("cv-on");
+    requestAnimationFrame(function(){
+      _measureIntrinsicHeights(tileGrid);
+      tileGrid.classList.add("cv-on");
+      if (_thumbGateOn()) _refreshImgGate();
+    });
+  }
+  // Measure the real content height (clientHeight − padding) of the first
+  // rendered element of each kind and feed it back via CSS vars — a skipped
+  // element reports the estimate, so this only reads true sizes while cv-on
+  // is off (the _isInViewport guard keeps display:none'd parents out).
+  function _measureIntrinsicHeights(tileGrid){
+    if (!tileGrid) return;
+    var kinds = [[".tile", "--tile-h"], [".card", "--card-h"], [".item", "--item-h"]];
+    for (var kind of kinds){
+      var els = tileGrid.querySelectorAll(kind[0]);
+      for (var i = 0; i < els.length; i++){
+        if (!_isInViewport(els[i])) continue;
+        var cs = getComputedStyle(els[i]);
+        var h = els[i].clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+        if (h > 0) tileGrid.style.setProperty(kind[1], h + "px");
+        break;
       }
     }
-    return '<div class="tile-multi" style="grid-template-columns:repeat(' + gridCols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + imgs + '</div>';
   }
   function _isInViewport(el){
     try {
@@ -410,6 +508,7 @@
       html+='<div class="tile" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button">'+_tilePlaceholder()+'<div class="tile-name">'+sProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+sOffline+'</div>';
     }
     tileGrid.innerHTML = html || '<div style="color:#555;text-align:center;padding:20px;font-size:13px">' + _emptyBrowseMessage() + '</div>';
+    _scheduleCv(tileGrid);
     _bindTiles();
     var el=document.getElementById("folder-count"); if(el) el.textContent=(folders.length+readChildren.length+(rootLoose?1:0))+" 件";
   }
@@ -446,6 +545,7 @@
       html+='<div class="item folder" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+lsProgress.inlineBarHtml+'</span>'+_offlineHtmlFor(ctx, "")+'</div>';
     }
     tileGrid.innerHTML=html||'<div class="item" style="color:#555">'+_emptyBrowseMessage()+'</div>';
+    _scheduleCv(tileGrid);
     _bindList();
     var ec=document.getElementById("folder-count"); if(ec) ec.textContent=(nodes.length+readChildren.length+(rootLoose?1:0))+" 件";
   }
@@ -488,6 +588,7 @@
       html+='<div class="card" data-path="" data-read-self="1" tabindex="0" role="button">'+_cardPlaceholder()+'<div class="card-content"><div class="card-title">'+csProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+csOffline+'</div>';
     }
     tileGrid.innerHTML=html||'<div style="color:#555;text-align:center;padding:20px;font-size:13px">'+_emptyBrowseMessage()+'</div>';
+    _scheduleCv(tileGrid);
     _bindCards();
   }
   // scrollAnchor が渡された描画だけが位置を決める（undefined = 触らない）。
@@ -515,4 +616,21 @@
   window.renderCards=renderCards;
   window.renderBrowse=renderBrowse;
   window.BrowseRender={renderTiles,renderList,renderCards,renderBrowse,multiThumbSpec,splitDisplayName,nameHtml,hydrateMultiCovers,scheduleMultiHydration};
+  // Real tile/card/item heights follow the responsive width breakpoints —
+  // re-measure on resize so the skipped-element estimates don't drift stale.
+  window.addEventListener('resize', function(){
+    var g = _getTileGrid();
+    if (g && g.firstElementChild) _scheduleCv(g);
+    _scheduleImgGate();
+  });
+  try {
+    var _ss = document.getElementById('sidebar-scroll');
+    if (_ss) _ss.addEventListener('scroll', _scheduleImgGate, {passive: true});
+    if (_ss) _ss.addEventListener('touchstart', function(e){ _touchesDown = e.touches ? e.touches.length : 0; }, {passive: true});
+    if (_ss) {
+      var _touchUp = function(e){ _touchesDown = e.touches ? e.touches.length : 0; if (_touchesDown === 0) _scheduleImgGate(); };
+      _ss.addEventListener('touchend', _touchUp, {passive: true});
+      _ss.addEventListener('touchcancel', _touchUp, {passive: true});
+    }
+  } catch(e){}
 })();

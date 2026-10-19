@@ -216,8 +216,12 @@
   }
   function _debouncedReschedule(){
     cancelThumbPrefetch();
-    if (_scrollTimer) return;
-    _scrollTimer = setTimeout(function(){ _scrollTimer = 0; _onDomMaybeChanged(); }, 80);
+    // True trailing debounce: reset on every scroll event so the
+    // _eligibleTargets rect walk + hydration DOM writes run ~250ms after
+    // scrolling settles, never mid-fling (Firefox on low-end Android
+    // serializes them into 250-500ms main-thread frames otherwise).
+    if (_scrollTimer) clearTimeout(_scrollTimer);
+    _scrollTimer = setTimeout(function(){ _scrollTimer = 0; _onDomMaybeChanged(); }, 250);
   }
   function _installObservers(){
     if (_observersInstalled) return;

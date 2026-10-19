@@ -40,6 +40,13 @@ THUMB_CACHE_MAX_FILES = 5000
 # SPRITE_GRAY so a single bad entry never fails the whole sheet (fail-open).
 SPRITE_MAX_ENTRIES = 9
 SPRITE_CELL_WIDTH = 200
+# 2D grid sheet (rows= param): the tile's 2:3 aspect at ~1.5x its largest
+# real device-pixel footprint. Bigger sheets decode measurably slower on
+# low-end Android (a 6-img hydration burst of 600x900 sheets produced
+# ~240-330ms frames on Unisoc T620); 480x720 still oversamples the
+# ~400x600px display size at 280dpi.
+SPRITE_GRID_W = 480
+SPRITE_GRID_H = 720
 SPRITE_GRAY = (128, 128, 128)
 
 # Syntactic half of ``parse_pdf_page_name`` (``p001.png`` shape WITHOUT the
@@ -453,6 +460,132 @@ async def handle_thumb(request: Request, path: str, w: str | int | None) -> Resp
     )
 
 
+# ── /view/{path}: reader-page format normalization ──────────────────────────
+# Reader pages are original-size by policy; /view keeps that size but
+# normalizes formats that decode slowly on low-end hardware (webp/avif —
+# software-decoded there) into baseline JPEG. Sources already optimal for
+# decode (jpeg/png/gif) or natively scalable (svg) pass through byte-identical.
+VIEW_JPEG_QUALITY = 85
+VIEW_MAX_WIDTH = 2560
+VIEW_PASSTHROUGH = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+}
+
+
+def view_cache_path_for(cache_dir: Path, key: str) -> Path:
+    """``<cache_dir>/view/<sha1(key)>.jpg`` — own namespace under the shared cap."""
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return cache_dir / "view" / f"{digest}.jpg"
+
+
+def view_cache_namespace() -> Path:
+    """Namespace dir for normalized reader pages (batched-prune target)."""
+    return cache_root() / "view"
+
+
+def make_view_bytes(data: bytes) -> bytes:
+    """Normalize any Pillow-decodable source to JPEG q85 (≤VIEW_MAX_WIDTH).
+
+    Alpha is flattened onto white (paper); like make_thumbnail, non-image
+    bytes raise 404 to mirror the ``/image/*`` flow.
+    """
+    from PIL import Image, ImageOps
+
+    try:
+        im = Image.open(io.BytesIO(data))
+        im = ImageOps.exif_transpose(im)
+        im.thumbnail((VIEW_MAX_WIDTH, VIEW_MAX_WIDTH * 4), Image.LANCZOS)
+        if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[-1])
+            im = bg
+        elif im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=VIEW_JPEG_QUALITY)
+        return buf.getvalue()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+async def handle_view(request: Request, path: str) -> Response:
+    """Serve ``GET /view/{path}`` — a reader page in a fast-decode format.
+
+    Passthrough formats serve the original bytes straight through (a
+    re-encode would only lose quality and still cost the same decode). The
+    normalized branch mirrors ``handle_thumb``: stat-only fast path checks
+    the ``view/`` disk cache before any archive open or byte extraction, and
+    the same ``_not_modified``/304 conditional semantics apply.
+    """
+    from app.routes import _not_modified
+
+    downloads_dir = request.app.state.settings.downloads_path
+    suffix = Path(path).suffix.lower()
+
+    if suffix in VIEW_PASSTHROUGH or suffix == ".svg":
+        data, mtime, size, key = await load_source_bytes(downloads_dir, path)
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+        etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+        if _not_modified(request, etag, mtime):
+            return Response(status_code=304)
+        headers = {
+            "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+            "ETag": etag,
+            "Last-Modified": utils.formatdate(mtime, usegmt=True),
+            "X-Content-Type-Options": "nosniff",
+        }
+        if suffix == ".svg":
+            # Same rationale as handle_thumb: served as image/svg+xml it runs
+            # script on top-level navigation; sandbox it to an opaque origin.
+            headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+            media = "image/svg+xml"
+        else:
+            media = VIEW_PASSTHROUGH[suffix]
+        return Response(content=data, media_type=media, headers=headers)
+
+    mtime, size, key = _stat_source(downloads_dir, path)
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+    if _not_modified(request, etag, mtime):
+        return Response(status_code=304)
+
+    dest = view_cache_path_for(cache_root(), key)
+    if dest.is_file():
+        body = await run_in_threadpool(dest.read_bytes)
+    else:
+        data, mtime, size, key = await load_source_bytes(downloads_dir, path)
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+        etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+        if _not_modified(request, etag, mtime):
+            return Response(status_code=304)
+        dest = view_cache_path_for(cache_root(), key)
+
+        def _get_or_make() -> bytes:
+            if dest.is_file():
+                return dest.read_bytes()
+            body = make_view_bytes(data)
+            _store_thumb(dest, body)
+            return body
+
+        body = await run_in_threadpool(_get_or_make)
+    return Response(
+        content=body,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+            "ETag": etag,
+            "Last-Modified": utils.formatdate(mtime, usegmt=True),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 def _raw_query_value(query_string: bytes, key: str) -> str | None:
     """First still-percent-encoded value of *key* in a raw query string.
 
@@ -579,17 +712,136 @@ def sprite_cache_path_for(cache_dir: Path, width: int, key: str) -> Path:
     return cache_dir / "sprites" / str(width) / f"{digest}.jpg"
 
 
-async def handle_thumb_sprite(request: Request) -> Response:
-    """Serve ``GET /api/thumb-sprite?folder=&names=&w=`` (called by routes.py).
+def _parse_sprite_rows(raw: str | None) -> list[int] | None:
+    """Parse ``rows=3,3,3`` into a per-row item-count list (2D grid sheet).
 
-    ``folder`` must be a SINGLE archive file under the downloads dir
-    (anything else → 400; symlink escape → 403, same ``_is_within`` guard as
-    ``/thumb/``). ``names`` is a comma-separated list of entry names (up to
-    SPRITE_MAX_ENTRIES, extras ignored); each entry passes the same
-    ``_is_image_entry`` traversal guard as the single-thumb path, but a
-    per-entry failure paints that cell gray instead of failing the request.
-    All entries failing → 404. Sheets are cached on disk under a ``sprites/``
-    namespace (keyed by archive mtime/size + names) so repeat views are free.
+    Returns None for missing/invalid specs — callers fall back to the legacy
+    horizontal strip. Each row holds 1..9 items, at most 3 rows (the
+    frontend's multiThumbSpec table).
+    """
+    if not raw:
+        return None
+    try:
+        rows = [int(x) for x in raw.split(",")]
+    except ValueError:
+        return None
+    if not 1 <= len(rows) <= 3 or any(r < 1 or r > 9 for r in rows):
+        return None
+    return rows
+
+
+def compose_sprite_grid(cells: list[bytes | None], rows: list[int]) -> tuple[bytes, int]:
+    """Compose a 2D contact sheet matching the DOM multi-thumb grid.
+
+    The sheet is SPRITE_GRID_W x SPRITE_GRID_H (the tile's 2:3 aspect) so a
+    single ``object-fit:cover`` img spanning the tile reproduces the
+    multi-img grid with ONE decoded image. Each row's cells share the row
+    width equally (matching the grid's column spanning); every cell is
+    center-crop fitted like CSS ``object-fit:cover``. Failed entries
+    leave their slot SPRITE_GRAY (fail-open). Returns (jpeg, ok-count) so
+    the caller can map all-fail to 404 like the strip path.
+    """
+    from PIL import Image, ImageOps
+
+    sheet_w, sheet_h = SPRITE_GRID_W, SPRITE_GRID_H
+    sheet = Image.new("RGB", (sheet_w, sheet_h), SPRITE_GRAY)
+    row_h = sheet_h // len(rows)
+    ok = 0
+    idx = 0
+    for r, items in enumerate(rows):
+        cw = sheet_w // items
+        for c in range(items):
+            if idx >= len(cells):
+                break
+            raw = cells[idx]
+            idx += 1
+            if raw is None:
+                continue
+            try:
+                im = Image.open(io.BytesIO(raw))
+                im = ImageOps.exif_transpose(im)
+                cell_im = ImageOps.fit(im, (cw, row_h), Image.LANCZOS)
+                sheet.paste(cell_im.convert("RGB"), (c * cw, r * row_h))
+                ok += 1
+            except Exception:
+                continue
+    buf = io.BytesIO()
+    sheet.save(buf, format="JPEG", quality=JPEG_QUALITY)
+    return buf.getvalue(), ok
+
+
+def _dir_sprite_name_bad(name: str) -> bool:
+    """Per-name guard for dir sprites: traversal/absolute/null → bad cell."""
+    return (
+        not name
+        or name.startswith("/")
+        or ".." in name.split("/")
+        or "\x00" in name
+    )
+
+
+def _stat_dir_sprite_entries(
+    downloads_dir: Path, folder: str, names: list[str]
+) -> tuple[list[str], float]:
+    """Stat-only pass over dir-sprite names → (key parts, max mtime).
+
+    Each name is a path RELATIVE to *folder* (e.g. ``sub/cover.jpg``, or a
+    virtual ``child.cbz/entry.png`` resolved by ``_resolve_archive`` inside
+    the shared helpers). Bad/failed names contribute a placeholder part so
+    the cache key still distinguishes them — matching the archive path's
+    fail-open semantics.
+    """
+    keys: list[str] = []
+    max_mtime = 0.0
+    for name in names:
+        if _dir_sprite_name_bad(name):
+            keys.append("bad:" + name)
+            continue
+        try:
+            mtime, _size, skey = _stat_source(downloads_dir, folder + "/" + name)
+        except HTTPException:
+            keys.append("miss:" + name)
+            continue
+        max_mtime = max(max_mtime, mtime)
+        keys.append(skey)
+    return keys, max_mtime
+
+
+async def _load_dir_sprite_entries(
+    downloads_dir: Path, folder: str, names: list[str]
+) -> list[bytes | None]:
+    """Load dir-sprite cell bytes; per-entry failure → None (fail-open)."""
+    raws: list[bytes | None] = []
+    for name in names:
+        if _dir_sprite_name_bad(name):
+            raws.append(None)
+            continue
+        try:
+            data, _m, _s, _k = await load_source_bytes(downloads_dir, folder + "/" + name)
+        except HTTPException:
+            data = None
+        raws.append(data)
+    return raws
+
+
+async def handle_thumb_sprite(request: Request) -> Response:
+    """Serve ``GET /api/thumb-sprite?folder=&names=&w=&rows=`` (called by routes.py).
+
+    ``folder`` is either a SINGLE archive file (``names`` = entry names) or a
+    directory (``names`` = paths relative to it, e.g. ``sub/cover.jpg`` — the
+    same ``thumbs[]`` shape the frontend emits, resolved through the shared
+    ``_stat_source``/``load_source_bytes`` so archive children inside a
+    directory sprite work too). Anything else → 400; symlink escape → 403,
+    same ``_is_within`` guard as ``/thumb/``. ``names`` is a comma-separated
+    list (up to SPRITE_MAX_ENTRIES, extras ignored); each entry passes the
+    same traversal guards as the single-thumb path, but a per-entry failure
+    paints that cell gray instead of failing the request. All entries
+    failing → 404. Sheets are cached on disk under a ``sprites/`` namespace
+    so repeat views are free.
+
+    ``rows`` (e.g. ``rows=3,3,3``) composes a SPRITE_GRID_W x SPRITE_GRID_H
+    2D sheet matching the DOM multi-thumb grid (one decoded img per tile);
+    omitted → the legacy horizontal strip.
     """
     from urllib.parse import unquote
 
@@ -602,17 +854,23 @@ async def handle_thumb_sprite(request: Request) -> Response:
     # Sheet geometry is fixed (SPRITE_CELL_WIDTH); `w` is accepted for URL-shape
     # compatibility with the single-thumb endpoint and otherwise ignored.
     cell = SPRITE_CELL_WIDTH
+    rows = _parse_sprite_rows(params.get("rows"))
 
-    if not folder or folder.startswith("/") or folder.endswith("/"):
+    if not folder or folder.startswith("/") or folder.endswith("/") or "\x00" in folder:
         raise HTTPException(status_code=400, detail="Invalid sprite folder")
     if ".." in folder.split("/"):
         raise HTTPException(status_code=400, detail="Invalid sprite folder")
-    archive = downloads_dir / folder
-    if not _is_within(downloads_dir, archive):
+    folder_path = downloads_dir / folder
+    if not _is_within(downloads_dir, folder_path):
         raise HTTPException(status_code=403, detail="Forbidden")
-    archive = archive.resolve()
-    if not archive.is_file() or not is_archive_file(archive):
-        raise HTTPException(status_code=400, detail="Not a single archive")
+    try:
+        folder_path = folder_path.resolve()
+        is_archive = folder_path.is_file() and is_archive_file(folder_path)
+        is_dir = folder_path.is_dir()
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_archive and not is_dir:
+        raise HTTPException(status_code=400, detail="Not an archive or directory")
 
     raw_names = _raw_query_value(request.scope.get("query_string", b""), "names")
     if raw_names is None:
@@ -622,47 +880,90 @@ async def handle_thumb_sprite(request: Request) -> Response:
     if not names:
         raise HTTPException(status_code=400, detail="Missing names")
 
-    try:
-        stat = archive.stat()
-    except (OSError, ValueError):
-        # ValueError: embedded null byte makes stat() raise instead of
-        # failing with OSError — map to 404 like any other stat failure.
-        raise HTTPException(status_code=404, detail="File not found")
-
     # \x00 separator (not ","): a literal comma inside one entry name
     # (e.g. "a,b") would otherwise collide with two entries "a"+"b"
     # (same key/etag → wrong sheet served). Matches warmup_cache's key
     # style; safe here because the key is only ever sha1-hashed.
     names_part = "\x00".join(names)
-    key = f"{archive}|{stat.st_mtime}|{stat.st_size}|{names_part}|{cell}"
+    # Grid geometry goes in the key so a sheet-size change invalidates old
+    # cache entries instead of serving stale-dimension sheets forever.
+    rows_part = ("-".join(str(r) for r in rows) + f"@{SPRITE_GRID_W}x{SPRITE_GRID_H}") if rows else ""
+
+    if is_archive:
+        try:
+            stat = folder_path.stat()
+        except (OSError, ValueError):
+            # ValueError: embedded null byte makes stat() raise instead of
+            # failing with OSError — map to 404 like any other stat failure.
+            raise HTTPException(status_code=404, detail="File not found")
+        key = f"{folder_path}|{stat.st_mtime}|{stat.st_size}|{names_part}|{cell}|{rows_part}"
+        etag_mtime = stat.st_mtime
+        etag_size = stat.st_size
+    else:
+        entry_keys, max_mtime = _stat_dir_sprite_entries(downloads_dir, folder, names)
+        entries_part = "\x00".join(entry_keys)
+        key = f"dir|{folder_path}|{names_part}|{entries_part}|{cell}|{rows_part}"
+        etag_mtime = max_mtime or 0.0
+        etag_size = float(len(entry_keys))
+
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    etag = f'"{stat.st_mtime:.0f}-{stat.st_size:.0f}-{cell}-s{digest[:16]}"'
-    if _not_modified(request, etag, stat.st_mtime):
+    etag = f'"{etag_mtime:.0f}-{etag_size:.0f}-{cell}-s{digest[:16]}"'
+    if _not_modified(request, etag, etag_mtime):
         return Response(status_code=304)
     dest = sprite_cache_path_for(cache_root(), cell, key)
 
-    def _get_or_make() -> bytes:
-        if dest.is_file():
-            return dest.read_bytes()
-        try:
-            raws = _read_sprite_entries(archive, names)
-        except ArchiveToolMissing as exc:
-            raise HTTPException(status_code=501, detail=str(exc))
-        thumbs: list[bytes | None] = []
-        failed = 0
-        for raw in raws:
-            if raw is None:
-                thumbs.append(None)
-                failed += 1
-                continue
+    # Cache-hit check BEFORE loading source bytes: dir sprites would
+    # otherwise pay one file/archive read per cell on every view.
+    if dest.is_file():
+        return Response(
+            content=await run_in_threadpool(dest.read_bytes),
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+                "ETag": etag,
+                "Last-Modified": utils.formatdate(etag_mtime, usegmt=True),
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    if is_archive:
+        def _load_raws() -> list[bytes | None]:
             try:
-                thumbs.append(make_thumbnail(raw, cell))
-            except HTTPException:
-                thumbs.append(None)
-                failed += 1
-        if failed == len(names):
+                return _read_sprite_entries(folder_path, names)
+            except ArchiveToolMissing as exc:
+                raise HTTPException(status_code=501, detail=str(exc))
+        try:
+            raws = await run_in_threadpool(_load_raws)
+        except HTTPException:
+            raise
+        except Exception:
             raise HTTPException(status_code=404, detail="File not found")
-        sheet = compose_sprite(thumbs, cell)
+    else:
+        raws = await _load_dir_sprite_entries(downloads_dir, folder, names)
+
+    def _make() -> bytes:
+        if rows:
+            # Grid cells take the raw bytes — compose_sprite_grid does its
+            # own decode + cover-crop and reports how many cells rendered.
+            sheet, ok = compose_sprite_grid(raws, rows)
+            if ok == 0:
+                raise HTTPException(status_code=404, detail="File not found")
+        else:
+            thumbs: list[bytes | None] = []
+            failed = 0
+            for raw in raws:
+                if raw is None:
+                    thumbs.append(None)
+                    failed += 1
+                    continue
+                try:
+                    thumbs.append(make_thumbnail(raw, cell))
+                except HTTPException:
+                    thumbs.append(None)
+                    failed += 1
+            if failed == len(names):
+                raise HTTPException(status_code=404, detail="File not found")
+            sheet = compose_sprite(thumbs, cell)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp")
         tmp.write_bytes(sheet)
@@ -671,7 +972,7 @@ async def handle_thumb_sprite(request: Request) -> Response:
         return sheet
 
     try:
-        body = await run_in_threadpool(_get_or_make)
+        body = await run_in_threadpool(_make)
     except HTTPException:
         raise
     except Exception:
@@ -679,7 +980,7 @@ async def handle_thumb_sprite(request: Request) -> Response:
     headers = {
         "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
         "ETag": etag,
-        "Last-Modified": utils.formatdate(stat.st_mtime, usegmt=True),
+        "Last-Modified": utils.formatdate(etag_mtime, usegmt=True),
         "X-Content-Type-Options": "nosniff",
     }
     return Response(content=body, media_type="image/jpeg", headers=headers)
