@@ -77,7 +77,7 @@ DevTools → Console で以下を実行すると、最大 30 秒間、requestAni
           });
         }
       });
-      observer.observe({ type: "longtask", buffered: true });
+      observer.observe({ type: "longtask" });
     }
   } catch (_) {
     observer = null;
