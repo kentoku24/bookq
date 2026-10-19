@@ -103,3 +103,5 @@ Verify with label-filtered `docker ps` (empty) + `./dev.sh list` (row gone). Nev
 - `docs/performance.md` — KPI table, targets, and the TODO block this fills
 - `scripts/perf/measure.py` — canonical baseline tool (read-only, Playwright chromium)
 - `tests/test_top_display_perf.py` — settle-definition reference (`img.complete` polling)
+- `.claude/skills/android-perf/SKILL.md` — on-device scroll/page-turn FPS on the
+  Android tablet (ADB + CDP + `?perf=1` HUD); different question than this skill
