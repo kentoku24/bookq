@@ -497,7 +497,7 @@ cmd_up() {
         actual_fqdn="$(actual_dev_fqdn "$slot")"
         if [ -n "$actual_fqdn" ] && [ "$actual_fqdn" != "$fqdn" ]; then
             warn "tailnet 登録名が期待と異なります: 期待 $fqdn → 実際 $actual_fqdn"
-            warn "同名のゴーストノードが tailnet に残っています。admin コンソールで旧 $hostname ノードを削除し、環境を再 up すると $fqdn で使えます（docs/deployment.md「ノード名の衝突」参照）。"
+            warn "同名のゴーストノードが tailnet に残っています。admin コンソールで旧 $hostname ノードを削除して sidecar を docker restart すると $fqdn で使えます（docs/deployment.md「ノード名の衝突」参照）。"
             export DEV_FQDN="$actual_fqdn"
         fi
         "$SCRIPT_DIR/rebuild.sh" dev verify
