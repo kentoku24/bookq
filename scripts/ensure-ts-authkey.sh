@@ -20,6 +20,9 @@
 # OAuth client の発行: 管理コンソール → Trust credentials。
 # 必要 scope は auth_keys（ノード削除にも使うなら devices も）。client
 # secret 自体は期限切れにならないので、設定後の更新作業は不要になる。
+# 注意: OAuth mint の authkey は tailnet 所有・タグ付き専用（API の仕様）。
+# 既定で tag:bookq-dev を付ける（TS_AUTHKEY_TAGS で変更可）— tailnet の
+# tagOwners にそのタグが無いと mint は "must have tags set" で失敗する。
 set -uo pipefail
 
 WARN_DAYS=14
@@ -90,6 +93,9 @@ PY
 OAUTH_ID="$(getv TS_OAUTH_CLIENT_ID)"
 OAUTH_SECRET="$(getv TS_OAUTH_CLIENT_SECRET)"
 TAILNET="$(getv TS_TAILNET)"; TAILNET="${TAILNET:--}"
+# OAuth mint の authkey は tailnet 所有のためタグ必須。カンマ区切りで複数可。
+AUTHKEY_TAGS="$(getv TS_AUTHKEY_TAGS)"; AUTHKEY_TAGS="${AUTHKEY_TAGS:-tag:bookq-dev}"
+TAGS_JSON="$(printf '%s' "$AUTHKEY_TAGS" | sed 's/[[:space:]]//g;s/,/","/g;s/^/"/;s/$/"/')"
 
 # admin API 用 access token（1h TTL）。失敗時は空出力+非0。
 oauth_token() {
@@ -175,7 +181,7 @@ fi
 
 resp="$(curl -sS -m 10 -w '\n%{http_code}' -X POST \
     -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-    -d "{\"capabilities\":{\"devices\":{\"create\":{\"reusable\":true,\"ephemeral\":false,\"preauthorized\":true}}},\"expirySeconds\":$AUTHKEY_LIFETIME,\"description\":\"bookq authkey (auto-renewed by ensure-ts-authkey.sh)\"}" \
+    -d "{\"capabilities\":{\"devices\":{\"create\":{\"reusable\":true,\"ephemeral\":false,\"preauthorized\":true,\"tags\":[${TAGS_JSON}]}}},\"expirySeconds\":$AUTHKEY_LIFETIME,\"description\":\"bookq-authkey-auto\"}" \
     "https://api.tailscale.com/api/v2/tailnet/${TAILNET}/keys" 2>/dev/null || true)"
 http="$(printf '%s\n' "$resp" | tail -1)"
 body="$(printf '%s\n' "$resp" | sed '$d')"
