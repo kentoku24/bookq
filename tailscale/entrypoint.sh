@@ -12,18 +12,47 @@ tailscaled --state="$STATE_DIR/tailscaled.state" --socket="$SOCKET" --tun=usersp
 echo "[tailscale] Waiting for socket..."
 while [ ! -S "$SOCKET" ]; do sleep 0.2; done
 
-if tailscale --socket="$SOCKET" status >/dev/null 2>&1; then
+# status の終了コードはログアウト時も 0 を返すため信用できない（削除済み
+# ノードの state で "Already authenticated" と誤判定し Online:False のまま
+# 止まった実績あり）。BackendState を見て判定する。ただし tailscaled 起動
+# 直後は NoState/Starting の遷移期があり、Running/NeedsLogin が確定する
+# まで待たないと誤った分岐を取る（pending の login URL を吐いて詰まった）。
+backend_state() {
+    tailscale --socket="$SOCKET" status --json 2>/dev/null \
+        | grep -o '"BackendState":"[^"]*"' | cut -d'"' -f4
+}
+
+# 最大 ~10s。Running なら確定済み、NeedsLogin は変わらないので即抜けする。
+wait_state() {
+    local st i
+    for i in $(seq 1 40); do
+        st="$(backend_state)"
+        case "$st" in Running|NeedsLogin) break ;; esac
+        sleep 0.25
+    done
+    printf '%s' "$st"
+}
+
+if [ "$(wait_state)" = "Running" ]; then
     echo "[tailscale] Already authenticated, updating hostname..."
     tailscale --socket="$SOCKET" up --hostname="$HOSTNAME"
 else
-    # 認証キーが要るのは初回だけ。state ボリュームが残っていれば上の分岐に入る。
-    if [ -z "$AUTHKEY" ]; then
-        echo "[tailscale] ERROR: not authenticated and TS_AUTHKEY is empty." >&2
-        echo "[tailscale] Set TS_AUTHKEY (env or .env) for the first start." >&2
-        exit 1
+    if [ -n "$AUTHKEY" ]; then
+        echo "[tailscale] Authenticating as $HOSTNAME..."
+        tailscale --socket="$SOCKET" up --authkey="$AUTHKEY" --hostname="$HOSTNAME" || true
     fi
-    echo "[tailscale] Authenticating as $HOSTNAME..."
-    tailscale --socket="$SOCKET" up --authkey="$AUTHKEY" --hostname="$HOSTNAME"
+    if [ "$(wait_state)" != "Running" ]; then
+        # state ボリュームのキーが tailnet から削除済み、または authkey
+        # 無効/未設定。対話ログイン URL をログに残し、承認されるまで
+        # ブロックする（承認後は serve 設定へ進む）。
+        echo "[tailscale] Not authenticated (stale node key or no valid TS_AUTHKEY)."
+        echo "[tailscale] Interactive login required — open the printed URL to approve:"
+        tailscale --socket="$SOCKET" login || {
+            echo "[tailscale] ERROR: interactive login failed." >&2
+            exit 1
+        }
+        tailscale --socket="$SOCKET" up --hostname="$HOSTNAME"
+    fi
 fi
 
 # Both production and every dev environment serve a single fixed backend on :443,
