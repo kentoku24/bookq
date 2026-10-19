@@ -33,6 +33,21 @@ wait_state() {
     printf '%s' "$st"
 }
 
+# up 直後の確認用。profile 復旧中は localapi が status に応答せず
+# backend_state が空を返し続けることがあり、その空白を NeedsLogin と誤認して
+# tailscale login で nodekey 再生成（復旧済み login の破壊）を起こした実績がある。
+# こちらは Running のみを長め (~60s) に待つ — 一時的な NeedsLogin 表示や
+# status 無応答では途中で諦めない。失敗時も 60s 待ち切るだけなので安全側。
+wait_running() {
+    local st i
+    for i in $(seq 1 240); do
+        st="$(backend_state)"
+        [ "$st" = "Running" ] && break
+        sleep 0.25
+    done
+    printf '%s' "$st"
+}
+
 if [ "$(wait_state)" = "Running" ]; then
     echo "[tailscale] Already authenticated, updating hostname..."
     tailscale --socket="$SOCKET" up --hostname="$HOSTNAME"
@@ -41,7 +56,7 @@ else
         echo "[tailscale] Authenticating as $HOSTNAME..."
         tailscale --socket="$SOCKET" up --authkey="$AUTHKEY" --hostname="$HOSTNAME" || true
     fi
-    if [ "$(wait_state)" != "Running" ]; then
+    if [ "$(wait_running)" != "Running" ]; then
         # state ボリュームのキーが tailnet から削除済み、または authkey
         # 無効/未設定。対話ログイン URL をログに残し、承認されるまで
         # ブロックする（承認後は serve 設定へ進む）。
