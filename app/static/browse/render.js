@@ -230,6 +230,7 @@
     if (q.indexOf('thumbgate=0') !== -1) { _gateOn = false; return _gateOn; }
     if (q.indexOf('thumbgate=1') !== -1) { _gateOn = true; return _gateOn; }
     _gateOn = (navigator.userAgent || '').indexOf('Firefox') !== -1;
+    try { window.__bookqThumbgate = _gateOn ? 1 : 0; } catch(e){}
     return _gateOn;
   }
   function _inImgZone(el, vh){
@@ -249,13 +250,23 @@
       im.removeAttribute('src');
     }
     var imgs = grid.querySelectorAll('img[data-src]');
+    var due = [];
     for (var j = 0; j < imgs.length; j++){
       var im2 = imgs[j];
       if (!_inImgZone(im2, vh)) continue;
       im2.setAttribute('src', im2.getAttribute('data-src'));
       im2.removeAttribute('data-src');
       im2.setAttribute('data-hyd', '1');
+      due.push(im2);
+      // Spread src restores in small batches: assigning ~24 at once after
+      // a settle concentrates their decode+paint into one ~230ms frame on
+      // low-end devices (measured NSFW folder). 6 per 40ms tick keeps each
+      // post-fling frame under ~16ms while still filling the viewport fast.
+      if (due.length >= 6) break;
     }
+    // Cap hit → chain another pass shortly; the next call re-scans zones
+    // and ends the chain when no in-zone data-src imgs remain.
+    if (due.length === 6) setTimeout(_refreshImgGate, 40);
   }
   var _imgTimer = 0;
   function _scheduleImgGate(){
