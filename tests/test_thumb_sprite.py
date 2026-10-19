@@ -5,7 +5,7 @@ One request opens the archive ONCE, thumbnails up to 9 entries to w=200
 Per-entry failures paint a gray cell (fail-open); all-fail → 404;
 non-archive non-directory folder → 400. ``folder`` may also be a
 DIRECTORY: names resolve relative to it via the shared stat/load helpers
-(archive children inside it work). ``rows=a,b,c`` composes a 600x900 2D
+(archive children inside it work). ``rows=a,b,c`` composes a 480x720 2D
 sheet matching the DOM multi-thumb grid (one img per tile).
 
 Run:
@@ -151,12 +151,12 @@ def test_sprite_directory_grid_rows(client) -> None:
         "/api/thumb-sprite?folder=.&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
     )
     assert res.status_code == 200
-    assert _size(res.content) == (600, 900)
+    assert _size(res.content) == (480, 720)
     # cells: r top-left, g top-right, b bottom-left, p bottom-right
-    assert _near(_pixel(res.content, 150, 225), (255, 0, 0))
-    assert _near(_pixel(res.content, 450, 225), (0, 255, 0))
-    assert _near(_pixel(res.content, 150, 675), (0, 0, 255))
-    assert _near(_pixel(res.content, 450, 675), (255, 0, 255))
+    assert _near(_pixel(res.content, 120, 180), (255, 0, 0))
+    assert _near(_pixel(res.content, 360, 180), (0, 255, 0))
+    assert _near(_pixel(res.content, 120, 540), (0, 0, 255))
+    assert _near(_pixel(res.content, 360, 540), (255, 0, 255))
 
 
 def test_sprite_archive_grid_rows(client) -> None:
@@ -164,8 +164,8 @@ def test_sprite_archive_grid_rows(client) -> None:
         "/api/thumb-sprite?folder=work.zip&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
     )
     assert res.status_code == 200
-    assert _size(res.content) == (600, 900)
-    assert _near(_pixel(res.content, 450, 675), (255, 0, 255))
+    assert _size(res.content) == (480, 720)
+    assert _near(_pixel(res.content, 360, 540), (255, 0, 255))
 
 
 def test_sprite_grid_all_bad_is_404_and_invalid_rows_fall_back(client) -> None:
