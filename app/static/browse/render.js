@@ -219,19 +219,22 @@
   // scrolling back does not re-fetch or re-decode. thumbgate=0 or
   // localStorage "0" opts out; other browsers keep native loading=lazy.
   var _gateOn = null;
+  function _setGate(v){
+    _gateOn = v;
+    try { window.__bookqThumbgate = v ? 1 : 0; } catch(e){}
+    return v;
+  }
   function _thumbGateOn(){
     if (_gateOn !== null) return _gateOn;
     try {
       var v = localStorage.getItem('bookq_thumbgate');
-      if (v === '0') { _gateOn = false; return _gateOn; }
-      if (v === '1') { _gateOn = true; return _gateOn; }
+      if (v === '0') return _setGate(false);
+      if (v === '1') return _setGate(true);
     } catch(e){}
     var q = location.search || '';
-    if (q.indexOf('thumbgate=0') !== -1) { _gateOn = false; return _gateOn; }
-    if (q.indexOf('thumbgate=1') !== -1) { _gateOn = true; return _gateOn; }
-    _gateOn = (navigator.userAgent || '').indexOf('Firefox') !== -1;
-    try { window.__bookqThumbgate = _gateOn ? 1 : 0; } catch(e){}
-    return _gateOn;
+    if (q.indexOf('thumbgate=0') !== -1) return _setGate(false);
+    if (q.indexOf('thumbgate=1') !== -1) return _setGate(true);
+    return _setGate((navigator.userAgent || '').indexOf('Firefox') !== -1);
   }
   function _inImgZone(el, vh){
     try {
