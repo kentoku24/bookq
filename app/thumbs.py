@@ -40,6 +40,13 @@ THUMB_CACHE_MAX_FILES = 5000
 # SPRITE_GRAY so a single bad entry never fails the whole sheet (fail-open).
 SPRITE_MAX_ENTRIES = 9
 SPRITE_CELL_WIDTH = 200
+# 2D grid sheet (rows= param): the tile's 2:3 aspect at ~1.5x its largest
+# real device-pixel footprint. Bigger sheets decode measurably slower on
+# low-end Android (a 6-img hydration burst of 600x900 sheets produced
+# ~240-330ms frames on Unisoc T620); 480x720 still oversamples the
+# ~400x600px display size at 280dpi.
+SPRITE_GRID_W = 480
+SPRITE_GRID_H = 720
 SPRITE_GRAY = (128, 128, 128)
 
 # Syntactic half of ``parse_pdf_page_name`` (``p001.png`` shape WITHOUT the
@@ -726,17 +733,17 @@ def _parse_sprite_rows(raw: str | None) -> list[int] | None:
 def compose_sprite_grid(cells: list[bytes | None], rows: list[int]) -> tuple[bytes, int]:
     """Compose a 2D contact sheet matching the DOM multi-thumb grid.
 
-    The sheet is 600x900 (the tile's 2:3 aspect) so a single
-    ``object-fit:cover`` img spanning the tile reproduces the multi-img
-    grid with ONE decoded image. Each row's cells share the row width
-    equally (matching the grid's column spanning); every cell is
+    The sheet is SPRITE_GRID_W x SPRITE_GRID_H (the tile's 2:3 aspect) so a
+    single ``object-fit:cover`` img spanning the tile reproduces the
+    multi-img grid with ONE decoded image. Each row's cells share the row
+    width equally (matching the grid's column spanning); every cell is
     center-crop fitted like CSS ``object-fit:cover``. Failed entries
     leave their slot SPRITE_GRAY (fail-open). Returns (jpeg, ok-count) so
     the caller can map all-fail to 404 like the strip path.
     """
     from PIL import Image, ImageOps
 
-    sheet_w, sheet_h = 600, 900
+    sheet_w, sheet_h = SPRITE_GRID_W, SPRITE_GRID_H
     sheet = Image.new("RGB", (sheet_w, sheet_h), SPRITE_GRAY)
     row_h = sheet_h // len(rows)
     ok = 0
@@ -832,9 +839,9 @@ async def handle_thumb_sprite(request: Request) -> Response:
     failing → 404. Sheets are cached on disk under a ``sprites/`` namespace
     so repeat views are free.
 
-    ``rows`` (e.g. ``rows=3,3,3``) composes a 600x900 2D sheet matching the
-    DOM multi-thumb grid (one decoded img per tile); omitted → the legacy
-    horizontal strip.
+    ``rows`` (e.g. ``rows=3,3,3``) composes a SPRITE_GRID_W x SPRITE_GRID_H
+    2D sheet matching the DOM multi-thumb grid (one decoded img per tile);
+    omitted → the legacy horizontal strip.
     """
     from urllib.parse import unquote
 
@@ -878,7 +885,9 @@ async def handle_thumb_sprite(request: Request) -> Response:
     # (same key/etag → wrong sheet served). Matches warmup_cache's key
     # style; safe here because the key is only ever sha1-hashed.
     names_part = "\x00".join(names)
-    rows_part = "-".join(str(r) for r in rows) if rows else ""
+    # Grid geometry goes in the key so a sheet-size change invalidates old
+    # cache entries instead of serving stale-dimension sheets forever.
+    rows_part = ("-".join(str(r) for r in rows) + f"@{SPRITE_GRID_W}x{SPRITE_GRID_H}") if rows else ""
 
     if is_archive:
         try:
