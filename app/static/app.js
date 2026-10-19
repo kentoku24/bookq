@@ -2785,12 +2785,30 @@
       if(tileGrid){ tileGrid.style.transition=''; tileGrid.style.willChange=''; }
     }, PTR_SNAP_MS);
   }
+  let ptrAtBottom = false;
+  let tmBlockArmed = false;
+  let suppressGridClick = false;
+  function updatePtrAtBottom(){
+    ptrAtBottom = sidebarScroll.scrollTop + sidebarScroll.clientHeight >= sidebarScroll.scrollHeight - 1;
+  }
+  sidebarScroll.addEventListener('scroll', updatePtrAtBottom, {passive: true});
+  window.addEventListener('resize', updatePtrAtBottom);
+  // preventDefault must come from a non-passive listener, but a non-passive
+  // touchmove on the scroller forces every real-finger drag to block on the
+  // main thread. Keep the tracking listener passive and arm a preventer only
+  // while a gesture actually needs it (h-drag / bottom overscroll pull).
+  function tmBlocker(e){ if (e.cancelable) e.preventDefault(); }
+  function armTmBlock(){ if(!tmBlockArmed){ tmBlockArmed = true; sidebarScroll.addEventListener('touchmove', tmBlocker, {passive: false}); } }
+  function disarmTmBlock(){ if(tmBlockArmed){ tmBlockArmed = false; sidebarScroll.removeEventListener('touchmove', tmBlocker); } }
   sidebarScroll.addEventListener('touchstart', function(e){
     if (!e.touches || e.touches.length !== 1) return;
     if (!e.target.closest('#sidebar') && !e.target.closest('#sidebar-scroll')) return;
     ptrStartY = e.touches[0].clientY;
     ptrStartX = e.touches[0].clientX;
     startScrollTop = sidebarScroll.scrollTop;
+    updatePtrAtBottom();
+    suppressGridClick = false;
+    disarmTmBlock();
     hHapticFired = false;
     ptrLocked = null;
     hDragState = 'idle';
@@ -2801,8 +2819,7 @@
   sidebarScroll.addEventListener('touchmove', function(e){
     if (!e.touches || e.touches.length !== 1) return;
     if (bottomPull === 0 && hDragState === 'idle' && hDragX === 0) {
-      const atBottomIdle = sidebarScroll.scrollTop + sidebarScroll.clientHeight >= sidebarScroll.scrollHeight - 1;
-      if (!atBottomIdle) {
+      if (!ptrAtBottom) {
         const startXGate = ptrStartX < 24 || currentBrowsePath !== null;
         if (!startXGate) return;
       }
@@ -2836,30 +2853,36 @@
         } else if (hDragState === 'ready_to_pop' && hDragX < H_SWIPE_DEACTIVATE) {
           hDragState = 'draggingH';
         }
-        if (e.cancelable) e.preventDefault();
+        armTmBlock();
         if (hRaf) cancelAnimationFrame(hRaf);
         hRaf = requestAnimationFrame(function(){ hRaf = null; applyVisual(); });
       }
       return;
     }
     if (ptrLocked && ptrLocked !== 'v') return;
-    const atBottom = sidebarScroll.scrollTop + sidebarScroll.clientHeight >= sidebarScroll.scrollHeight - 1;
+    const atBottom = ptrAtBottom;
     if (atBottom && dy < 0 && ptrLocked === 'v') {
       const rawUp = -dy;
       bottomPull = 18 * (1 - Math.exp(-rawUp / 40));
-      if (e.cancelable) e.preventDefault();
+      armTmBlock();
       if (ptrRaf) cancelAnimationFrame(ptrRaf);
       ptrRaf = requestAnimationFrame(function(){ ptrRaf = null; applyVisual(); });
       return;
     } else {
       if (bottomPull > 0) {
         bottomPull = 0;
+        disarmTmBlock();
         if (ptrRaf) cancelAnimationFrame(ptrRaf);
         ptrRaf = requestAnimationFrame(function(){ ptrRaf = null; applyVisual(); });
       }
     }
-  }, {passive: false});
+  }, {passive: true});
   function handlePtrEnd(){
+    if (hDragState !== 'idle' || bottomPull > 0) {
+      suppressGridClick = true;
+      setTimeout(function(){ suppressGridClick = false; }, 400);
+    }
+    disarmTmBlock();
     if (ptrRaf) { cancelAnimationFrame(ptrRaf); ptrRaf = null; }
     if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
     if (hDragState === 'ready_to_pop' && hDragX >= H_SWIPE_THRESHOLD) {
@@ -2946,6 +2969,15 @@
     if (e && e.changedTouches && e.changedTouches.length > 0) { /* use handlePtrEnd without accessing [0] directly when empty */ }
     handlePtrEnd();
   }, {passive: true});
+  // A drag that armed the gesture visuals must not resolve as a tap on the
+  // tile under the release point. The old non-passive touchmove did this via
+  // preventDefault; with the passive tracker we swallow the click ourselves.
+  if (tileGrid) tileGrid.addEventListener('click', function(e){
+    if (!suppressGridClick) return;
+    suppressGridClick = false;
+    e.stopPropagation();
+    if (e.cancelable) e.preventDefault();
+  }, {capture: true});
   if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
 
   imgContainer.addEventListener("dblclick", e => e.preventDefault());
