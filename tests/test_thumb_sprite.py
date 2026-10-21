@@ -148,7 +148,7 @@ def test_sprite_directory_nested_and_root_names(client) -> None:
 
 def test_sprite_directory_grid_rows(client) -> None:
     res = client.get(
-        "/api/thumb-sprite?folder=.&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
+        "/api/thumb-sprite?folder=.&names=r.png,g.png,b.png,p.png&rows=2,2&w=400"
     )
     assert res.status_code == 200
     assert _size(res.content) == (480, 720)
@@ -159,9 +159,22 @@ def test_sprite_directory_grid_rows(client) -> None:
     assert _near(_pixel(res.content, 360, 540), (255, 0, 255))
 
 
+def test_sprite_grid_rows_w200_small_sheet(client) -> None:
+    """w=200 → the low-dpr sheet class: 240x360, same 2:3 grid layout."""
+    res = client.get(
+        "/api/thumb-sprite?folder=.&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
+    )
+    assert res.status_code == 200
+    assert _size(res.content) == (240, 360)
+    assert _near(_pixel(res.content, 60, 90), (255, 0, 0))
+    assert _near(_pixel(res.content, 180, 90), (0, 255, 0))
+    assert _near(_pixel(res.content, 60, 270), (0, 0, 255))
+    assert _near(_pixel(res.content, 180, 270), (255, 0, 255))
+
+
 def test_sprite_archive_grid_rows(client) -> None:
     res = client.get(
-        "/api/thumb-sprite?folder=work.zip&names=r.png,g.png,b.png,p.png&rows=2,2&w=200"
+        "/api/thumb-sprite?folder=work.zip&names=r.png,g.png,b.png,p.png&rows=2,2&w=400"
     )
     assert res.status_code == 200
     assert _size(res.content) == (480, 720)
