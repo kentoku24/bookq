@@ -79,20 +79,40 @@
   let offlineParentPaths = new Set();
   function refreshOfflineMap(){
     return OfflineStore.getAll().then(all=>{
-      const m={};
-      all.forEach(w=>{ m[w.folder]=true; });
-      offlineMap=m;
-      window.offlineMap=m;
-      offlineRecordMap=new Map(all.map(w=>[w.folder, w]));
-      try { window.offlineRecordMap = offlineRecordMap; } catch(e) { console.warn(e); }
-      offlineParentPaths=new Set();
-      for(const folder of offlineRecordMap.keys()){
-        for(let slash=folder.indexOf('/'); slash>=0; slash=folder.indexOf('/', slash+1)){
-          offlineParentPaths.add(folder.slice(0, slash));
-        }
-      }
-      try { window.offlineParentPaths = offlineParentPaths; } catch(e) { console.warn(e); }
-      window.offlineRecords=all.slice();
+      // The rebuild measured ~75ms on the T620 — landing it mid-gesture
+      // stalls the scroll it's riding on, so wait for the gesture to settle.
+      // A badge updating a few hundred ms late beats a dropped frame.
+      return new Promise(res=>{
+        // Resolve only after apply() so existing `await refreshOfflineMap();
+        // renderView()` callers repaint with the fresh map, not a stale one.
+        const apply = () => {
+          const m={};
+          all.forEach(w=>{ m[w.folder]=true; });
+          offlineMap=m;
+          window.offlineMap=m;
+          offlineRecordMap=new Map(all.map(w=>[w.folder, w]));
+          try { window.offlineRecordMap = offlineRecordMap; } catch(e) { console.warn(e); }
+          offlineParentPaths=new Set();
+          for(const folder of offlineRecordMap.keys()){
+            for(let slash=folder.indexOf('/'); slash>=0; slash=folder.indexOf('/', slash+1)){
+              offlineParentPaths.add(folder.slice(0, slash));
+            }
+          }
+          try { window.offlineParentPaths = offlineParentPaths; } catch(e) { console.warn(e); }
+          window.offlineRecords=all.slice();
+          res();
+        };
+        const tryApply = (tries) => {
+          // typeof guard: harness contexts run app.js without render.js
+          // loaded, and an unguarded call would throw into the outer catch
+          // and never apply the map at all.
+          if (typeof window.browseInteracting === 'function' && window.browseInteracting() && tries < 40) {
+            setTimeout(()=>tryApply(tries+1), 300); return;
+          }
+          apply();
+        };
+        tryApply(0);
+      });
     }).catch(()=>{});
   }
   refreshOfflineMap();
@@ -1007,7 +1027,8 @@
   // nodeMap, and emits both thumb lists with byte-identical URL semantics to
   // OfflineThumb.collect — singles via {singleOnly:true} (w=200 only, same
   // strings resolveCoverSingle requests), full via the default path (single
-  // w=400 + multi w=200, MAX_PER_NODE cap). Replaces the three separate
+  // w=200 + multi w=200, MAX_PER_NODE cap — the tile/list DOM contract;
+  // card-img w=400 is not enumerated). Replaces the three separate
   // walks (setFullPaths + buildNodeMap + collect); prefetch reuses the
   // cached lists instead of re-walking. findNodeByPath stays a linear walk.
   let _nodeMapCache = new Map();
@@ -1075,7 +1096,7 @@
           if (n.thumb){
             const su = thumbUrlFor(fp, n.thumb, 200);
             if (!seenS.has(su)){ seenS.add(su); singles.push({url:su, folder:fp, thumb:n.thumb}); }
-            const fu = thumbUrlFor(fp, n.thumb);
+            const fu = thumbUrlFor(fp, n.thumb, 200);
             if (!seenF.has(fu)){ seenF.add(fu); full.push({url:fu, folder:fp, thumb:n.thumb}); }
           }
           if (n.thumbs && Array.isArray(n.thumbs) && n.thumbs.length >= 2){
@@ -1254,7 +1275,7 @@
 
   // ── render tile grid ──
   // thumbs/resolveCover.js owns the cover fallback chain (thumb → thumbs[0] → null).
-  function _coverUrl(node){ return window.ThumbResolve.resolveCover(node); }
+  function _coverUrl(node, w){ return window.ThumbResolve.resolveCover(node, w); }
   function buildNodeMap(){
     // Todo 5: the map is built by setFullPathsAndIndex on every restoreTree;
     // return the cache when it tracks the live tree, rebuild (one walk) only
@@ -2608,7 +2629,7 @@
       if (el >= 500){
         var st = 0; try { var _sc = document.getElementById('sidebar-scroll'); st = _sc ? _sc.scrollTop : window.scrollY; } catch(e){}
         var g = window.__bookqThumbgate;
-        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig") + " st:" + Math.round(st) + " g:" + (g === undefined ? "-" : g) + " v10";
+        fpsBox.textContent = "fps " + Math.round(fN * 1000 / el) + " worst " + Math.round(fWorst) + "ms view:" + (viewJpeg ? "jpeg" : "orig") + " st:" + Math.round(st) + " g:" + (g === undefined ? "-" : g) + " v12";
         fN = 0; fStart = now; fWorst = 0;
       }
       requestAnimationFrame(fpsTick);
@@ -2866,8 +2887,26 @@
     const curX = e.touches[0].clientX;
     const dx = curX - ptrStartX;
     const dy = curY - ptrStartY;
+    // Direction lock: 'h' only on a DELIBERATE horizontal intent (|dx|>14
+    // and dominant by 1.4x). The old rule (|dx|>=|dy| at the first 8px)
+    // caught natural diagonal flicks — inside a folder hGate is always
+    // true, so the gesture then suppressed vertical scroll AND armed the
+    // blocking tmBlocker (~25fps under a real finger). Ambiguous starts
+    // stay undecided instead of forcing 'v', so a small first move can't
+    // kill an actual back-swipe either.
     if (!ptrLocked && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-      ptrLocked = Math.abs(dy) > Math.abs(dx) ? 'v' : 'h';
+      if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.4) ptrLocked = 'h';
+      else if (Math.abs(dy) >= Math.abs(dx)) ptrLocked = 'v';
+    }
+    // A diagonal flick that still locks 'h' releases to 'v' once the
+    // cumulative direction is clearly vertical.
+    if (ptrLocked === 'h' && Math.abs(dy) > 20 && Math.abs(dy) > Math.abs(dx) * 1.6) {
+      ptrLocked = 'v';
+      hDragState = 'idle';
+      hDragX = 0;
+      disarmTmBlock();
+      if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
+      applyVisual();
     }
     if (ptrLocked === 'h') {
       const hGate = ptrStartX < 24 || currentBrowsePath !== null;

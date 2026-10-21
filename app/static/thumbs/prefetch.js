@@ -14,7 +14,7 @@
 
   // Todo 3: opts passthrough to OfflineThumb.collect — {singleOnly:true}
   // while window.__cc_singleCoverFirst so idle prefetch emits exactly the
-  // widths the single-first DOM requests (w=200 singles, no w=400 upgrade).
+  // widths the single-first DOM requests (w=200 singles).
   function collectThumbPrefetchUrls(nodes, out, seen, opts) {
     out = out || [];
     seen = seen || new Set();
@@ -133,8 +133,8 @@
     // Also try closure-exposed via window proxy (app.js defines window.tree getter)
     // Fallback: try window.getTree if app exposes getter
     // Todo 3: while the single-first flag holds, collect ONLY the w=200
-    // singles the DOM requests (no w=400 upgrade → no double-fetch, no
-    // orphan cache entries — caches.match below hits exact URLs).
+    // singles the DOM requests (no double-fetch, no orphan cache entries —
+    // caches.match below hits exact URLs).
     // Todo 5: reuse the list setFullPathsAndIndex built in the same pass
     // as _fullPath/nodeMap (window.__cc_thumbIndex) — no second full walk.
     // Missing or stale cache (different tree reference) falls back to the
@@ -220,8 +220,16 @@
     // _eligibleTargets rect walk + hydration DOM writes run ~250ms after
     // scrolling settles, never mid-fling (Firefox on low-end Android
     // serializes them into 250-500ms main-thread frames otherwise).
+    // The settle path only schedules — it does NOT cancel: a batch that
+    // started after the last scroll event already holds fresh targets, so
+    // killing it would discard good fetches and re-queue identical work
+    // (the next prefetchThumbs() self-cancels on start anyway).
     if (_scrollTimer) clearTimeout(_scrollTimer);
-    _scrollTimer = setTimeout(function(){ _scrollTimer = 0; _onDomMaybeChanged(); }, 250);
+    _scrollTimer = setTimeout(function(){
+      _scrollTimer = 0;
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (_sidebarOpen()) scheduleThumbPrefetch();
+    }, 250);
   }
   function _installObservers(){
     if (_observersInstalled) return;
