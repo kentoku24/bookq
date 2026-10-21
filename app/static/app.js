@@ -30,6 +30,7 @@
   const PTR_SNAP_MS = 180;
   const H_SWIPE_THRESHOLD = 60;
   const H_SWIPE_DEACTIVATE = 48;
+  const H_DRAG_ARM = 20;
   const VIEWER_SWIPE_THRESHOLD = 70;
   const VIEWER_SWIPE_DEACTIVATE = 58;
 
@@ -2814,7 +2815,27 @@
   function tmBlocker(e){ if (e.cancelable) e.preventDefault(); }
   function armTmBlock(){ if(!tmBlockArmed){ tmBlockArmed = true; sidebarScroll.addEventListener('touchmove', tmBlocker, {passive: false}); } }
   function disarmTmBlock(){ if(tmBlockArmed){ tmBlockArmed = false; sidebarScroll.removeEventListener('touchmove', tmBlocker); } }
+  // Non-committing cleanup shared by every "gesture context changed" path.
+  // Drops the armed preventer and the drag/pull bookkeeping so a leaked state
+  // can never keep scroll suppressed.
+  function resetBrowseGesture(){
+    disarmTmBlock();
+    hDragState = 'idle';
+    hDragX = 0;
+    bottomPull = 0;
+    ptrLocked = null;
+    hHapticFired = false;
+    if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
+    if (ptrRaf) { cancelAnimationFrame(ptrRaf); ptrRaf = null; }
+    applyVisual();
+  }
   sidebarScroll.addEventListener('touchstart', function(e){
+    // Always reset first — even when this start is multi-touch
+    // (e.touches.length !== 1). If a previous gesture's touchend never
+    // reached us (its target was detached by a re-render, or the OS
+    // interrupted the gesture), tmBlockArmed would otherwise stay armed and
+    // keep preventDefault-ing every touchmove, permanently freezing scroll.
+    resetBrowseGesture();
     if (!e.touches || e.touches.length !== 1) return;
     if (!e.target.closest('#sidebar') && !e.target.closest('#sidebar-scroll')) return;
     ptrStartY = e.touches[0].clientY;
@@ -2822,13 +2843,6 @@
     startScrollTop = sidebarScroll.scrollTop;
     updatePtrAtBottom();
     suppressGridClick = false;
-    disarmTmBlock();
-    hHapticFired = false;
-    ptrLocked = null;
-    hDragState = 'idle';
-    hDragX = 0;
-    if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
-    bottomPull = 0;
   }, {passive: true});
   sidebarScroll.addEventListener('touchmove', function(e){
     if (!e.touches || e.touches.length !== 1) return;
@@ -2848,30 +2862,38 @@
     if (ptrLocked === 'h') {
       const hGate = ptrStartX < 24 || currentBrowsePath !== null;
       if (!hGate) return;
-      hDragX = dx;
-      if (hDragX < 0) hDragX = 0;
-      if (hDragState === 'idle' && dx > 8 && Math.abs(dx) > Math.abs(dy)) {
-        hDragState = 'draggingH';
-        if (tileGrid) tileGrid.style.willChange = 'transform, opacity';
-      }
-      if (hDragState === 'draggingH' || hDragState === 'ready_to_pop') {
-        if (hDragX >= H_SWIPE_THRESHOLD && hDragState === 'draggingH') {
-          hDragState = 'ready_to_pop';
-          if (!hHapticFired) {
-            try {
-              const prefersReduced = prefersReducedMotion();
-              if (!prefersReduced && 'vibrate' in navigator) navigator.vibrate(10);
-            } catch(_) { console.warn(_); }
-            hHapticFired = true;
-          }
-        } else if (hDragState === 'ready_to_pop' && hDragX < H_SWIPE_DEACTIVATE) {
+      // The 'h' lock is provisional while unarmed: a flick that started
+      // diagonal and turned clearly vertical belongs to native scrolling.
+      // Once draggingH arms, preventDefault owns the gesture — no way back.
+      if (hDragState === 'idle' && Math.abs(dy) > Math.abs(dx) * 1.5) {
+        ptrLocked = 'v';
+        hDragX = 0;
+      } else {
+        hDragX = dx;
+        if (hDragX < 0) hDragX = 0;
+        if (hDragState === 'idle' && dx > H_DRAG_ARM && Math.abs(dx) > Math.abs(dy)) {
           hDragState = 'draggingH';
+          if (tileGrid) tileGrid.style.willChange = 'transform, opacity';
         }
-        armTmBlock();
-        if (hRaf) cancelAnimationFrame(hRaf);
-        hRaf = requestAnimationFrame(function(){ hRaf = null; applyVisual(); });
+        if (hDragState === 'draggingH' || hDragState === 'ready_to_pop') {
+          if (hDragX >= H_SWIPE_THRESHOLD && hDragState === 'draggingH') {
+            hDragState = 'ready_to_pop';
+            if (!hHapticFired) {
+              try {
+                const prefersReduced = prefersReducedMotion();
+                if (!prefersReduced && 'vibrate' in navigator) navigator.vibrate(10);
+              } catch(_) { console.warn(_); }
+              hHapticFired = true;
+            }
+          } else if (hDragState === 'ready_to_pop' && hDragX < H_SWIPE_DEACTIVATE) {
+            hDragState = 'draggingH';
+          }
+          armTmBlock();
+          if (hRaf) cancelAnimationFrame(hRaf);
+          hRaf = requestAnimationFrame(function(){ hRaf = null; applyVisual(); });
+        }
+        return;
       }
-      return;
     }
     if (ptrLocked && ptrLocked !== 'v') return;
     const atBottom = ptrAtBottom;
@@ -2977,12 +2999,34 @@
       applyVisual();
     }
   }
-  sidebarScroll.addEventListener('touchend', handlePtrEnd, {passive: true});
-  sidebarScroll.addEventListener('touchcancel', function(e){
-    if (e && e.changedTouches && e.changedTouches.length === 0) { handlePtrEnd(); return; }
-    if (e && e.changedTouches && e.changedTouches.length > 0) { /* use handlePtrEnd without accessing [0] directly when empty */ }
+  function reseedForSurvivingTouch(e){
+    // Partial release: a finger is still down and the gesture continues for
+    // it. The survivor must not inherit the original finger's deltas — a
+    // stale start point could lock it 'h' instantly and re-arm the blocker.
+    resetBrowseGesture();
+    const t = e.touches[0];
+    ptrStartX = t.clientX;
+    ptrStartY = t.clientY;
+    startScrollTop = sidebarScroll.scrollTop;
+    updatePtrAtBottom();
+  }
+  sidebarScroll.addEventListener('touchend', function(e){
+    if (e.touches && e.touches.length > 0) { reseedForSurvivingTouch(e); return; }
     handlePtrEnd();
   }, {passive: true});
+  sidebarScroll.addEventListener('touchcancel', function(e){
+    if (e.touches && e.touches.length > 0) { reseedForSurvivingTouch(e); return; }
+    handlePtrEnd();
+  }, {passive: true});
+  // If the grid is rebuilt mid-gesture the touch's target is detached and its
+  // touchend/touchcancel never reaches us — sweep any leaked blocker/visuals.
+  if (tileGrid && window.MutationObserver) {
+    new MutationObserver(function(){
+      if (tmBlockArmed || hDragState !== 'idle' || bottomPull > 0 || hDragX !== 0 || ptrLocked) {
+        resetBrowseGesture();
+      }
+    }).observe(tileGrid, {childList: true});
+  }
   // A drag that armed the gesture visuals must not resolve as a tap on the
   // tile under the release point. The old non-passive touchmove did this via
   // preventDefault; with the passive tracker we swallow the click ourselves.
@@ -2992,7 +3036,7 @@
     e.stopPropagation();
     if (e.cancelable) e.preventDefault();
   }, {capture: true});
-  if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
+  if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get tmArmed(){return tmBlockArmed}, get ptrLock(){return ptrLocked}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
 
   imgContainer.addEventListener("dblclick", e => e.preventDefault());
   // H6: do NOT preventDefault() on multi-touch here — that also cancels the
