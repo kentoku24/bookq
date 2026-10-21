@@ -1512,6 +1512,16 @@
     }
     return null;
   }
+
+  // Browse-level parent of a _fullPath: getParentPath tree walk when the node
+  // is live, else the nearest live ancestor. NEVER split("/") — flattened node
+  // names like "wrap/inner" make the textual parent a dead path, and callers
+  // that fell back to null on a dead parent jumped to root instead of one
+  // level up.
+  function browseParentOf(path){
+    const node = path ? getNodeAt(path) : null;
+    return node ? getParentPath(path) : resolveAliveAncestor(path);
+  }
   try { if (typeof window !== 'undefined'){ window.getParentPath = getParentPath; window.findNodeByPath = findNodeByPath; window.getSiblingLeafFolders = getSiblingLeafFolders; window.getBrowseChildren = getBrowseChildren; window.buildNodeMap = buildNodeMap; window.setFullPathsAndIndex = setFullPathsAndIndex; window.setFullPathsAndIndexAsync = setFullPathsAndIndexAsync; window.emptyBrowseMessage = emptyBrowseMessage; window.progressBarHtml = progressBarHtml; window._coverUrl = _coverUrl; } } catch(e) { console.warn(e); }
 
 
@@ -2902,9 +2912,7 @@
     if (hDragState === 'ready_to_pop' && hDragX >= H_SWIPE_THRESHOLD) {
       const prefersReducedH = prefersReducedMotion();
       if (prefersReducedH) {
-        let parent = currentBrowsePath ? currentBrowsePath.split('/').slice(0,-1).join('/') : null;
-        if (parent && !getNodeAt(parent)) parent = null;
-        currentBrowsePath = parent || null;
+        currentBrowsePath = browseParentOf(currentBrowsePath);
         updateBrowseHeader();
         renderView();
         writeBrowseStateWith(currentBrowsePath);
@@ -2921,9 +2929,7 @@
           tileGrid.style.opacity = '0.7';
         }
         setTimeout(function(){
-          let parent = currentBrowsePath ? currentBrowsePath.split('/').slice(0,-1).join('/') : null;
-          if (parent && !getNodeAt(parent)) parent = null;
-          currentBrowsePath = parent || null;
+          currentBrowsePath = browseParentOf(currentBrowsePath);
           updateBrowseHeader();
           renderView();
           writeBrowseStateWith(currentBrowsePath);
@@ -3374,9 +3380,7 @@
         closeSidebar();
         loadImages(folderPath);
       } else {
-        const parts = folderPath.split("/");
-        parts.pop();
-        currentBrowsePath = parts.length ? parts.join("/") : null;
+        currentBrowsePath = browseParentOf(folderPath);
         updateBrowseHeader();
         renderView();
         writeBrowseState();
