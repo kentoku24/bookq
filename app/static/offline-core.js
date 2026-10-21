@@ -110,7 +110,7 @@
   // Thumb enumeration shared by app.js prefetch and offline-harness hit-rate.
   // Single source for: per-segment thumbUrl, per-node cap (thumbs>=2 →
   // first MAX_PER_NODE), dedup by URL. Widths mirror the DOM renders exactly
-  // (single cover w=400, multi-grid w=200) so prefetch's exact-URL match/put
+  // (single cover w=200, multi-grid w=200) so prefetch's exact-URL match/put
   // lines up with what the grid requests — no orphan entries. Returns
   // [{url, folder, thumb}]. Cache policy (Todo 4): /thumb entries live in the
   // same per-work cache as /image (prefetch puts + SW caches.match hit the
@@ -120,7 +120,12 @@
   // node at w=200 — exactly what the single-first DOM requests, so idle
   // prefetch's exact-URL caches.match hits and no w=400 orphan is created
   // (first-to-verdict stays w=200 unified, no double-fetch). Default (no opts)
-  // is unchanged: single w=400 + multi w=200 (full-mode DOM contract).
+  // follows the tile-mode DOM contract: single w=200 + multi w=200 (tile/list
+  // imgs request w=200; card-img still requests w=400 explicitly and is
+  // intentionally not enumerated — DOM-scan prefetch covers card URLs).
+  // Android scroll perf (2026-10): w=400 singles decoded to ~52MB of bitmaps
+  // across a 57-tile grid → image decode cache thrash → ~34ms frames. w=200
+  // singles cut that ~4x and restored ~22ms drag cadence.
   const OfflineThumb = (function () {
     const MAX_PER_NODE = 9;
     const MAX_TOTAL = 50;
@@ -133,7 +138,7 @@
           const fp = n._fullPath;
           if (fp) {
             if (n.thumb) {
-              const url = singleOnly ? thumbUrl(fp, n.thumb, 200) : thumbUrl(fp, n.thumb);
+              const url = thumbUrl(fp, n.thumb, 200);
               if (!seen.has(url)) { seen.add(url); out.push({ url, folder: fp, thumb: n.thumb }); }
             }
             if (!singleOnly && n.thumbs && Array.isArray(n.thumbs) && n.thumbs.length >= 2) {
