@@ -54,6 +54,10 @@ def test_bottom_sheet_opens_and_closes(page):
 
     # ---- open ----
     filter_btn = page.locator("#filter-btn")
+    # The button is disabled while the shallow first-paint window is open
+    # (updateShallowBadge); a .click() during that window is a no-op. Wait
+    # for the full tree to re-enable it instead of racing the window.
+    expect(filter_btn).to_be_enabled()
     page.evaluate("document.getElementById('filter-btn').click()")
     page.wait_for_timeout(100)  # requestAnimationFrame + layout
     expect(sheet).to_have_class(re.compile(r"\bopen\b"))
@@ -68,6 +72,7 @@ def test_bottom_sheet_opens_and_closes(page):
     expect(overlay).not_to_have_class(re.compile(r"\bvisible\b"))
 
     # ---- open again, close via overlay tap ----
+    expect(filter_btn).to_be_enabled()
     page.evaluate("document.getElementById('filter-btn').click()")
     page.wait_for_timeout(100)
     expect(sheet).to_have_class(re.compile(r"\bopen\b"))
