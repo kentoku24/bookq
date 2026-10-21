@@ -35,7 +35,7 @@ def test_search_filters_local_folders(page):
     # Folders restored
     expect(page.locator(".tile").first).to_be_visible()
     # Parent-level spec: root count includes the ONE images-tile ("mixed").
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
 
 
 # ── filter bottom sheet ─────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ def test_view_mode_cycles_through_three_modes(page):
     page.wait_for_timeout(100)
     assert _current_view_modes(grid) == set(), f"Expected tile mode, got {_current_view_modes(grid)}"
     expect(page.locator(".tile").first).to_be_visible()
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
 
 
 # ── pull-to-refresh delegated to Safari native (custom top reload removed) ──
@@ -234,7 +234,7 @@ def test_ptr_touchcancel_resets(page):
         assert cur == 0
         has_indicator = page.evaluate("document.getElementById('pull-indicator') !== null")
         assert not has_indicator
-        expect(page.locator("#folder-count")).to_have_text("17 件")
+        expect(page.locator("#folder-count")).to_have_text("18 件")
     finally:
         try:
             page.remove_listener("pageerror", lambda exc: None)
@@ -346,7 +346,7 @@ def test_card_mode_renders_folders_without_metadata(page):
     first_card = page.locator(".card").first
     expect(first_card.locator(".card-title")).to_be_visible()
     # Count matches the number of root folders plus the ONE images-tile ("mixed").
-    expected_count = 17
+    expected_count = 18
     expect(page.locator(".card")).to_have_count(expected_count)
 
 

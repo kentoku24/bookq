@@ -45,7 +45,7 @@ def test_breadcrumb_updates_hash(page, server):
     # Root count includes the parent-level images-tile ("mixed").
     page.locator("#browse-header").click()
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page.locator("#browse-header")).to_have_text("📁 フォルダ")
 
 
@@ -104,14 +104,14 @@ def test_deep_link_browse_restores_level(page, server):
 
 def test_deep_link_browse_root_normalizes(page, server):
     page.goto(server + "/#/browse/")
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page.locator("#browse-header")).to_have_text("📁 フォルダ")
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
 
 
 def test_dead_browse_path_falls_back_to_root(page, server):
     page.goto(server + "/#/browse/nonexistent")
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
 
 
@@ -156,7 +156,7 @@ def test_back_walks_hierarchy(page, server):
     expect(page.locator("#folder-count")).to_have_text("4 件")
     page.go_back()
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page.locator("#browse-header")).to_have_text("📁 フォルダ")
 
 
@@ -244,7 +244,7 @@ def test_empty_viewer_reset_renders_root_browse(page, server):
     page.goto(server + "/#/view/empty_folder?p=0")
     expect(page.locator("#empty")).to_have_text("📭 このフォルダに画像はありません")
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page.locator("#sidebar")).to_have_class(re.compile(r"open"))
 
 
@@ -259,7 +259,7 @@ def test_resume_hop_keeps_url_consistent(page, server):
     page.reload()
     page.locator("#resume-btn").click()
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page.locator("#sidebar")).to_have_class(re.compile(r"open"))
 
 
@@ -310,7 +310,7 @@ def test_pull_refresh_preserves_browse_hash(page, server):
 
 def test_pull_refresh_at_root_keeps_root(page, server):
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     page.evaluate("""() => {
       const grid = document.getElementById('tile-grid');
       const scroll = document.getElementById('sidebar-scroll');
@@ -339,7 +339,7 @@ def test_pull_refresh_at_root_keeps_root(page, server):
     }""")
     page.wait_for_timeout(900)
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
 
 
 # ── T4: unicode round-trip + manual hash edit ─────────────────────────────────
@@ -370,7 +370,7 @@ def test_manual_hash_edit_away_clears_to_root(page, server):
     page.locator('.tile[data-path="group"]').click()
     expect(page).to_have_url(re.compile(r"#/browse/group$"))
     page.evaluate("location.hash = ''")
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
 
 
@@ -384,5 +384,5 @@ def test_stash_bridge_browse_hash_restored(page, server):
 
 def test_malformed_browse_hash_falls_back_to_root(page, server):
     page.goto(server + "/#/browse/%zz")
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))

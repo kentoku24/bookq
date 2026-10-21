@@ -223,6 +223,45 @@ def test_swipe_back_commits_on_release(page, server):
     expect(page.locator("#folder-count")).to_have_text("4 件")
 
 
+def test_swipe_back_from_flattened_node_pops_tree_parent(page, server):
+    """Regression: node "inner/aa" under "nest/wrap" has _fullPath
+    "nest/wrap/inner/aa". The old commit path string-split that path, produced
+    the dead textual parent "nest/wrap/inner" (scanner flatten), failed the
+    getNodeAt guard, and fell back to root. The real tree parent is "nest/wrap".
+    """
+    page.locator('.tile[data-path="nest"]').click()
+    page.locator('.tile[data-path="nest/wrap"]').click()
+    page.locator('.tile[data-path="nest/wrap/inner/aa"]').click()
+    expect(page).to_have_url(re.compile(r"#/browse/nest/wrap/inner/aa$"))
+    expect(page.locator("#browse-header")).to_have_text("↩ inner/aa")
+    page.evaluate("""() => {
+        const scroll = document.getElementById('sidebar-scroll');
+        const grid = document.getElementById('tile-grid');
+        const target = scroll;
+        const fire = (type, x, y, hasTouch) => {
+            let ev;
+            try {
+                const t = hasTouch ? [new Touch({identifier:0, target:grid, clientX:x, clientY:y})] : [];
+                const ct = hasTouch ? [] : [new Touch({identifier:0, target:grid, clientX:x, clientY:y})];
+                ev = new TouchEvent(type, {touches: t, changedTouches: ct, bubbles:true, cancelable:true});
+            } catch {
+                ev = new Event(type, {bubbles:true, cancelable:true});
+                ev.touches = hasTouch ? [{clientX:x, clientY:y, identifier:0, target:grid}] : [];
+                ev.changedTouches = hasTouch ? [] : [{clientX:x, clientY:y, identifier:0, target:grid}];
+            }
+            target.dispatchEvent(ev);
+        };
+        fire('touchstart', 10, 50, true);
+        fire('touchmove', 25, 50, true);
+        fire('touchmove', 85, 50, true);
+        fire('touchend', 85, 50, false);
+    }""")
+    page.wait_for_timeout(600)
+    expect(page).to_have_url(re.compile(r"#/browse/nest/wrap$"))
+    expect(page.locator("#browse-header")).to_have_text("↩ wrap")
+    expect(page.locator("#folder-count")).to_have_text("2 件")
+
+
 def test_swipe_preview_drag_0_42_transform_and_opacity(page, server):
     page.locator('.tile[data-path="group"]').click()
     expect(page).to_have_url(re.compile(r"#/browse/group$"))
