@@ -22,9 +22,9 @@
     if (typeof window.offlineControlsHtml === 'function') return window.offlineControlsHtml(path);
     return '';
   }
-  function _coverUrl(node) {
-    if (typeof window._coverUrl === 'function') return window._coverUrl(node);
-    if (window.resolveCover) return window.resolveCover(node);
+  function _coverUrl(node, w) {
+    if (typeof window._coverUrl === 'function') return window._coverUrl(node, w);
+    if (window.resolveCover) return window.resolveCover(node, w);
     return null;
   }
   // Todo 4: search renders share the one-shot ctx (single localStorage parse +
@@ -158,7 +158,7 @@
     for (var r of searchResults) {
       var imgHtml;
       var node = nodeByPath.get(r.folder_path);
-      var url = node ? _coverUrl(node) : null;
+      var url = node ? _coverUrl(node, 200) : null;
       if (url) imgHtml = '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">';
       else imgHtml = '<div class="tile-placeholder">\uD83D\uDCC1</div>';
       var metaHtml = "";

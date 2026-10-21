@@ -6,21 +6,25 @@
  * Todo 3 (single-cover-first): resolveCoverSingle(node) is thumb-ONLY at
  * ?w=200 (null when no node.thumb — caller shows placeholder). First-to-
  * verdict stays w=200 unified, never w=400 (no double-fetch).
- * Browse-list covers go through /thumb/?w=400 (window.OfflineCore.thumbUrl);
+ * resolveCover(node, w): callers pass the display width (w=200 for
+ * tile/list thumbs, default w=400 for card-img); only 200/400/800 are
+ * valid (OfflineCore.thumbUrl clamps anything else to 400).
+ * Browse-list covers go through /thumb/ (window.OfflineCore.thumbUrl);
  * viewer + downloads stay on /image/ (window.OfflineCore.imageUrl, untouched).
  */
 (function () {
-  function resolveCover(node) {
+  function resolveCover(node, w) {
     if (!node) return null;
     var folder = node._fullPath;
     if (!folder) return null;
     var OC = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
+    var width = (w === 200 || w === 800) ? w : 400;
     if (node.thumb) {
-      return OC && OC.thumbUrl ? OC.thumbUrl(folder, node.thumb) : "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + node.thumb.split("/").map(encodeURIComponent).join("/") + "?w=400";
+      return OC && OC.thumbUrl ? OC.thumbUrl(folder, node.thumb, w) : "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + node.thumb.split("/").map(encodeURIComponent).join("/") + "?w=" + width;
     }
     if (node.thumbs && Array.isArray(node.thumbs) && node.thumbs.length > 0 && node.thumbs[0]) {
       var t = node.thumbs[0];
-      return OC && OC.thumbUrl ? OC.thumbUrl(folder, t) : "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + t.split("/").map(encodeURIComponent).join("/") + "?w=400";
+      return OC && OC.thumbUrl ? OC.thumbUrl(folder, t, w) : "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + t.split("/").map(encodeURIComponent).join("/") + "?w=" + width;
     }
     return null;
   }
