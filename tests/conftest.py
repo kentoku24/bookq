@@ -96,6 +96,10 @@ def downloads_tree(tmp_path_factory) -> Path:
                             prevents kanji single-child flattening)
       zoom_series/series/ep-1..3/  5/4/7 pages                (zoom + overview, depth-2 chapters)
       huge/book/part1,part2/       350 + 351 pages            (overview ±200 img window)
+      nest/keep/1.png                                          (prevents nest flattening)
+      nest/wrap/inner/{aa,bb}/{x,y}/p1.png                     (browseable flattened node
+                            "inner/aa" under nest/wrap — its _fullPath
+                            "nest/wrap/inner/aa" has no live textual parent)
     """
     root = tmp_path_factory.mktemp("downloads")
 
@@ -224,6 +228,21 @@ def downloads_tree(tmp_path_factory) -> Path:
         d.mkdir(parents=True)
         for i in range(1, pages + 1):
             _make_png(d / f"p{i:03d}.png")
+
+    # Browseable flattened node: wrap→inner is a single-child chain, so inner's
+    # children hoist into "wrap" with names "inner/aa"/"inner/bb" — each still a
+    # folder with subfolders, so the tile navigates (not straight to viewer).
+    # Its _fullPath "nest/wrap/inner/aa" has no live textual parent: splitting on
+    # "/" yields the dead "nest/wrap/inner"; the real tree parent is "nest/wrap".
+    # Regression fixture for swipe-back / breadcrumb parent resolution.
+    keep = root / "nest" / "keep"
+    keep.mkdir(parents=True)
+    _make_png(keep / "1.png")
+    for grp in ["aa", "bb"]:
+        for vol in ["x", "y"]:
+            d = root / "nest" / "wrap" / "inner" / grp / vol
+            d.mkdir(parents=True)
+            _make_png(d / "p1.png")
 
     # kanji — kanji-numeral natural-sort case (第一部 < 第二部 < … < 第五部;
     # 第二話 < 第十話 < 第十一話). "series2" is a second child of "kanji" so

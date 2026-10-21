@@ -139,5 +139,5 @@ def test_dead_folder_with_v_clears_hash(page, server):
     # case, letting a bogus "?v=list" hash survive).
     page.goto(server + "/#/browse/bogus_nonexistent?v=list")
     # Root count includes the parent-level images-tile ("mixed").
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))

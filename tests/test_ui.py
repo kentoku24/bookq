@@ -28,7 +28,7 @@ def test_initial_load_shows_root_folder_tiles(page, root_folder_names):
     # images-tile per mixed child (here: "mixed"), so the count and the
     # path list both include it — folders first, images-tiles after.
     expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"))
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     paths = [t.get_attribute("data-path") for t in page.locator(".tile").all()]
     assert paths == root_folder_names + ["mixed"]
 
@@ -53,7 +53,7 @@ def test_drill_down_and_back(page):
 
     page.locator("#browse-header").click()  # back to root
     # Root count includes the parent-level images-tile (see above).
-    expect(page.locator("#folder-count")).to_have_text("17 件")
+    expect(page.locator("#folder-count")).to_have_text("18 件")
     expect(page.locator("#browse-header")).to_have_text("📁 フォルダ")
 
 
