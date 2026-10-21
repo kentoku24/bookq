@@ -10,9 +10,9 @@
   var _readChildLabel = "このフォルダを読む";
   function _offlineControlsHtml(p){ var fn=window.offlineControlsHtml; return fn?fn(p):''; }
   function _progressBarHtml(saved){ var fn=window.progressBarHtml; return fn?fn(saved):{barHtml:'',inlineBarHtml:''}; }
-  function _coverUrl(node){
-    if (window._coverUrl) return window._coverUrl(node);
-    if (window.resolveCover) return window.resolveCover(node);
+  function _coverUrl(node, w){
+    if (window._coverUrl) return window._coverUrl(node, w);
+    if (window.resolveCover) return window.resolveCover(node, w);
     return null;
   }
   function _getTileGrid(){ return document.getElementById("tile-grid"); }
@@ -204,8 +204,15 @@
     if(!spec) return null;
     var n = Math.min(f.thumbs.length, 9);
     var names = f.thumbs.slice(0, n).map(encodeURIComponent).join(",");
+    // w selects the server sheet size: 200 → 240x360 (≈1.8x the ~128px
+    // tile at dpr<=1.75 — decoded-sheet bytes stay ~4x smaller, which is
+    // what keeps low-end Android scroll off the image-decode cliff),
+    // 400 → 480x720 for dpr>=2. `v=2` busts client-side caches (SW /
+    // prefetch / HTTP) that hold a same-URL 480x720 body from before the
+    // w=200 sheet shrink.
+    var sw = (typeof window !== "undefined" && (window.devicePixelRatio || 0) >= 2) ? 400 : 200;
     var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names +
-      "&w=200&rows=" + spec.rows.join(",");
+      "&w=" + sw + "&v=2&rows=" + spec.rows.join(",");
     var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async" style="grid-column:1/-1;grid-row:1/-1">';
     return '<div class="tile-multi" style="grid-template-columns:repeat(' + spec.cols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + one + '</div>';
   }
@@ -273,6 +280,36 @@
   }
   var _imgTimer = 0;
   var _touchesDown = 0;
+  var _lastScrollTs = -1e9;
+  var _lastTouchEndTs = -1e9;
+  var _wheelTs = -1e9;
+  // True while the user is mid-gesture or the scroller is still moving under
+  // their input: any big synchronous job landing now stalls the gesture's own
+  // frames, so fill-poll applies and IDB map rebuilds consult this and retry
+  // later. Scroll events only count when real input is plausibly driving them
+  // (touch held, a fling coasting right after release, or a wheel tick) —
+  // programmatic scrollTop writes during load/render must not trip this or
+  // first-load applies get deferred behind a window with no user at all.
+  // Exposed for app.js consumers (refreshOfflineMap) that live outside this
+  // IIFE but share the same scroller.
+  function _interacting(){
+    var now = performance.now();
+    return _touchesDown > 0
+        || (now - _lastScrollTs) < 400
+        || (now - _wheelTs) < 400;
+  }
+  window.browseInteracting = _interacting;
+  // Resolve once the gesture has settled (or after ~12s regardless — a user
+  // can drag forever and the deferred work must still land eventually).
+  function _whenSettled(){
+    return new Promise(function(res){
+      var tries = 0;
+      (function wait(){
+        if (_interacting() && tries++ < 40) setTimeout(wait, 300);
+        else res();
+      })();
+    });
+  }
   function _scheduleImgGate(){
     if (!_thumbGateOn()) return;
     if (_imgTimer) clearTimeout(_imgTimer);
@@ -292,12 +329,18 @@
   // refresh the --*-h estimate vars, then re-enable skipping. Never-rendered
   // elements then fall back to that estimate while rendered ones report their
   // remembered true size (`auto`), keeping scrollHeight stable.
+  // Small grids stay fully rendered: cv:auto trades a cheaper first paint
+  // for a style+layout+paint tax on EVERY tile that enters the viewport mid-
+  // scroll (measured render:57-60ms frames during real-finger drags on the
+  // T620). Below this many children the upfront cost is trivial and keeping
+  // everything rendered turns scrolling into pure compositing.
+  var CV_MIN_TILES = 120;
   function _scheduleCv(tileGrid){
     if (!tileGrid) return;
     tileGrid.classList.remove("cv-on");
     requestAnimationFrame(function(){
       _measureIntrinsicHeights(tileGrid);
-      tileGrid.classList.add("cv-on");
+      if (tileGrid.children.length > CV_MIN_TILES) tileGrid.classList.add("cv-on");
       if (_thumbGateOn()) _refreshImgGate();
     });
   }
@@ -411,8 +454,14 @@
       try { etag = res.headers ? res.headers.get("ETag") : null; } catch(e){}
       if (typeof res.text === "function"){
         return res.text().then(function(text){
-          var body; try { body = JSON.parse(text); } catch(e){ body = null; }
-          return {body: body, etag: etag, raw: text};
+          // The tree JSON can be multi-MB on a real library — parsing it is a
+          // ~200ms main-thread task here, and the restoreTree render that
+          // follows is similar. Landing either mid-gesture stalls the user's
+          // own scroll (measured 180-235ms LoAF frames), so wait for settle.
+          return _whenSettled().then(function(){
+            var body; try { body = JSON.parse(text); } catch(e){ body = null; }
+            return {body: body, etag: etag, raw: text};
+          });
         });
       }
       return res.json().then(function(body){ return {body: body, etag: etag, raw: null}; });
@@ -465,11 +514,11 @@
     if (f.thumbs && f.thumbs.length >= 2){
       var multi = _multiGridHtml(f, folderEnc);
       if (multi) return multi;
-      var url = _coverUrl(f);
+      var url = _coverUrl(f, 200);
       if(url) return '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async">';
       return _tilePlaceholder();
     }
-    var url2 = _coverUrl(f);
+    var url2 = _coverUrl(f, 200);
     if(url2) return '<img class="tile-img" src="' + _escapeHtml(url2) + '" loading="lazy" decoding="async">';
     return _tilePlaceholder();
   }
@@ -523,7 +572,7 @@
       var path=node._fullPath;
       var isActive=path===_getCurrentFolder();
       var cls=["item","folder"]; if(isActive) cls.push("active");
-      var url=_coverUrl(node);
+      var url=_coverUrl(node, 200);
       var thumbHtml=url?'<img class="thumb" src="'+_escapeHtml(url)+'" loading="lazy" decoding="async">':"";
       var progress=_progressFor(ctx, path);
       var badge=progress.inlineBarHtml;
@@ -534,7 +583,7 @@
     for(var rcn of readChildren){
       var rcp=rcn._fullPath;
       var rcCls=["item","folder"]; if(rcp===_getCurrentFolder()) rcCls.push("active");
-      var rcUrl=_coverUrl(rcn);
+      var rcUrl=_coverUrl(rcn, 200);
       var rcThumb=rcUrl?'<img class="thumb" src="'+_escapeHtml(rcUrl)+'" loading="lazy" decoding="async">':"";
       var rcProgress=_progressFor(ctx, rcp);
       html+='<div class="'+rcCls.join(" ")+'" data-path="'+_escapeHtml(rcp)+'" data-read-child="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+rcProgress.inlineBarHtml+'</span>'+rcThumb+_offlineHtmlFor(ctx, rcp)+'</div>';
@@ -625,10 +674,18 @@
   });
   try {
     var _ss = document.getElementById('sidebar-scroll');
-    if (_ss) _ss.addEventListener('scroll', _scheduleImgGate, {passive: true});
+    if (_ss) _ss.addEventListener('scroll', function(){
+      var now = performance.now();
+      if (_touchesDown > 0 || (now - _lastTouchEndTs) < 1500 || (now - _wheelTs) < 400) _lastScrollTs = now;
+      _scheduleImgGate();
+    }, {passive: true});
+    if (_ss) _ss.addEventListener('wheel', function(){ _wheelTs = performance.now(); }, {passive: true});
     if (_ss) _ss.addEventListener('touchstart', function(e){ _touchesDown = e.touches ? e.touches.length : 0; }, {passive: true});
     if (_ss) {
-      var _touchUp = function(e){ _touchesDown = e.touches ? e.touches.length : 0; if (_touchesDown === 0) _scheduleImgGate(); };
+      var _touchUp = function(e){
+        _touchesDown = e.touches ? e.touches.length : 0;
+        if (_touchesDown === 0){ _lastTouchEndTs = performance.now(); _scheduleImgGate(); }
+      };
       _ss.addEventListener('touchend', _touchUp, {passive: true});
       _ss.addEventListener('touchcancel', _touchUp, {passive: true});
     }
