@@ -15,6 +15,13 @@
     if (window.resolveCover) return window.resolveCover(node, w);
     return null;
   }
+  // Device cover width class — same dpr rule OfflineCore.coverWidth uses;
+  // sprites and single covers share it so a grid never mixes sharp/blurry.
+  function _coverW(){
+    var OC = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
+    if (OC && OC.coverWidth) return OC.coverWidth();
+    return (typeof window !== "undefined" && (window.devicePixelRatio || 0) >= 2) ? 400 : 200;
+  }
   function _getTileGrid(){ return document.getElementById("tile-grid"); }
 
   function splitDisplayName(name) {
@@ -183,10 +190,11 @@
 
   // Todo 3 single-cover-first: while window.__cc_singleCoverFirst===true
   // (shallow window; set by app.js restoreTree, consumed here — never
-  // re-derived), tiles emit ONLY the single cover at w=200 via
-  // window.resolveCoverSingle, with onerror matching resolveCoverHtml.
-  // Full mode (flag false) keeps the existing order: multi-grid w=200 →
-  // thumb/thumbs[0] single → placeholder. All covers keep loading=lazy.
+  // re-derived), tiles emit ONLY the single cover at the device cover
+  // width via window.resolveCoverSingle, with onerror matching
+  // resolveCoverHtml. Full mode (flag false) keeps the existing order:
+  // multi-grid sprite → thumb/thumbs[0] single → placeholder.
+  // All covers keep loading=lazy.
   function _isSingleCoverFirst(){ try { return window.__cc_singleCoverFirst === true; } catch(e){ return false; } }
   function _singleCoverImg(f){
     var url = window.resolveCoverSingle ? window.resolveCoverSingle(f) : null;
@@ -210,7 +218,7 @@
     // 400 → 480x720 for dpr>=2. `v=2` busts client-side caches (SW /
     // prefetch / HTTP) that hold a same-URL 480x720 body from before the
     // w=200 sheet shrink.
-    var sw = (typeof window !== "undefined" && (window.devicePixelRatio || 0) >= 2) ? 400 : 200;
+    var sw = _coverW();
     var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names +
       "&w=" + sw + "&v=2&rows=" + spec.rows.join(",");
     var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async" style="grid-column:1/-1;grid-row:1/-1">';
@@ -310,6 +318,9 @@
       })();
     });
   }
+  // app.js's refreshOfflineMap waits on this too — one settle implementation,
+  // one place to tune the interval/cap.
+  window.browseWhenSettled = _whenSettled;
   function _scheduleImgGate(){
     if (!_thumbGateOn()) return;
     if (_imgTimer) clearTimeout(_imgTimer);
@@ -419,6 +430,9 @@
   var FILL_POLL_BASE_MS = 5000;
   var FILL_POLL_MAX_MS = 30000;
   var _fillPoll = { gen: null, etag: null, delay: FILL_POLL_BASE_MS, timer: 0, onTree: null };
+  // Bumped by noteFullLoad/fillPollStop so a tick that sat behind the
+  // settle wait can't apply its stale body to the successor's onTree.
+  var _fillPollEpoch = 0;
   function _fillPollParseGen(etag){
     var m = /-g(\d+)"?\s*$/.exec(String(etag || ""));
     if (!m) return null;
@@ -447,6 +461,7 @@
   function _fillPollTick(){
     if (!_fillPoll.onTree) return;
     if (typeof document !== "undefined" && document.hidden){ _fillPollSchedule(); return; }
+    var epoch = _fillPollEpoch;
     var url = (_fillPoll.gen === null) ? "/api/folders" : ("/api/folders?since=" + _fillPoll.gen);
     fetch(url, {credentials: "same-origin"}).then(function(res){
       if (res.status === 304 || !res.ok){ _fillPollBackoff(); return null; }
@@ -467,6 +482,10 @@
       return res.json().then(function(body){ return {body: body, etag: etag, raw: null}; });
     }).then(function(out){
       if (!out) return; // 304 / HTTP error already backed off above
+      // A loadFolders that ran while this tick waited to settle re-seeded
+      // the poller — applying now would hand the OLD body to the NEW onTree
+      // and roll _fillPoll.gen back a generation. Drop the stale tick.
+      if (epoch !== _fillPollEpoch) return;
       var body = out.body;
       if (body === null){ _fillPollBackoff(); return; }
       if (body && !Array.isArray(body) && body.tree){
@@ -500,6 +519,7 @@
   }
   function noteFullLoad(info){
     _fillPollClear();
+    _fillPollEpoch++;
     _fillPoll.onTree = (info && info.onTree) || null;
     _fillPoll.etag = (info && info.etag) || null;
     _fillPoll.gen = _fillPollParseGen(_fillPoll.etag);
@@ -507,18 +527,18 @@
     if (!_fillPoll.onTree) return; // nothing to feed — stay idle, no timer
     _fillPollSchedule();
   }
-  function fillPollStop(){ _fillPollClear(); _fillPoll.onTree = null; }
+  function fillPollStop(){ _fillPollClear(); _fillPollEpoch++; _fillPoll.onTree = null; }
   function fillPollState(){ return {generation: _fillPoll.gen, delayMs: _fillPoll.delay, active: !!_fillPoll.onTree}; }
   function renderTileImg(f, folderEnc){
     if (_isSingleCoverFirst()) return _singleCoverImg(f);
     if (f.thumbs && f.thumbs.length >= 2){
       var multi = _multiGridHtml(f, folderEnc);
       if (multi) return multi;
-      var url = _coverUrl(f, 200);
+      var url = _coverUrl(f, _coverW());
       if(url) return '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async">';
       return _tilePlaceholder();
     }
-    var url2 = _coverUrl(f, 200);
+    var url2 = _coverUrl(f, _coverW());
     if(url2) return '<img class="tile-img" src="' + _escapeHtml(url2) + '" loading="lazy" decoding="async">';
     return _tilePlaceholder();
   }
@@ -572,7 +592,7 @@
       var path=node._fullPath;
       var isActive=path===_getCurrentFolder();
       var cls=["item","folder"]; if(isActive) cls.push("active");
-      var url=_coverUrl(node, 200);
+      var url=_coverUrl(node, _coverW());
       var thumbHtml=url?'<img class="thumb" src="'+_escapeHtml(url)+'" loading="lazy" decoding="async">':"";
       var progress=_progressFor(ctx, path);
       var badge=progress.inlineBarHtml;
@@ -583,7 +603,7 @@
     for(var rcn of readChildren){
       var rcp=rcn._fullPath;
       var rcCls=["item","folder"]; if(rcp===_getCurrentFolder()) rcCls.push("active");
-      var rcUrl=_coverUrl(rcn, 200);
+      var rcUrl=_coverUrl(rcn, _coverW());
       var rcThumb=rcUrl?'<img class="thumb" src="'+_escapeHtml(rcUrl)+'" loading="lazy" decoding="async">':"";
       var rcProgress=_progressFor(ctx, rcp);
       html+='<div class="'+rcCls.join(" ")+'" data-path="'+_escapeHtml(rcp)+'" data-read-child="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+rcProgress.inlineBarHtml+'</span>'+rcThumb+_offlineHtmlFor(ctx, rcp)+'</div>';
@@ -688,6 +708,22 @@
       };
       _ss.addEventListener('touchend', _touchUp, {passive: true});
       _ss.addEventListener('touchcancel', _touchUp, {passive: true});
+    }
+    // A grid rebuild mid-gesture detaches the touch's target — its
+    // touchend/touchcancel then never reaches _ss and _touchesDown pins
+    // _interacting() true, so every deferred job pays the full settle wait
+    // until the next complete gesture (same leak app.js's gesture-state
+    // observer handles for tmBlock/hDrag). Reset on the same signals plus a
+    // hidden/blurred page, where an OS-interrupted gesture delivers nothing.
+    var _tg = document.getElementById('tile-grid');
+    if (_tg && typeof MutationObserver === "function"){
+      try { new MutationObserver(function(){ _touchesDown = 0; }).observe(_tg, {childList: true}); } catch(e){}
+    }
+    if (typeof document !== "undefined"){
+      document.addEventListener("visibilitychange", function(){ if (document.hidden) _touchesDown = 0; });
+    }
+    if (typeof window !== "undefined"){
+      window.addEventListener("blur", function(){ _touchesDown = 0; });
     }
   } catch(e){}
 })();
