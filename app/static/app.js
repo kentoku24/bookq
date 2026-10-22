@@ -77,41 +77,40 @@
   let offlineMap = {};
   let offlineRecordMap = new Map();
   let offlineParentPaths = new Set();
+  let _offlineMapGen = 0;
   function refreshOfflineMap(){
+    const gen = ++_offlineMapGen;
     return OfflineStore.getAll().then(all=>{
       // The rebuild measured ~75ms on the T620 — landing it mid-gesture
       // stalls the scroll it's riding on, so wait for the gesture to settle.
       // A badge updating a few hundred ms late beats a dropped frame.
-      return new Promise(res=>{
-        // Resolve only after apply() so existing `await refreshOfflineMap();
-        // renderView()` callers repaint with the fresh map, not a stale one.
-        const apply = () => {
-          const m={};
-          all.forEach(w=>{ m[w.folder]=true; });
-          offlineMap=m;
-          window.offlineMap=m;
-          offlineRecordMap=new Map(all.map(w=>[w.folder, w]));
-          try { window.offlineRecordMap = offlineRecordMap; } catch(e) { console.warn(e); }
-          offlineParentPaths=new Set();
-          for(const folder of offlineRecordMap.keys()){
-            for(let slash=folder.indexOf('/'); slash>=0; slash=folder.indexOf('/', slash+1)){
-              offlineParentPaths.add(folder.slice(0, slash));
-            }
+      // typeof guard: harness contexts run app.js without render.js loaded,
+      // and an unguarded call would throw into the outer catch and never
+      // apply the map at all.
+      const settle = (typeof window.browseWhenSettled === 'function')
+        ? window.browseWhenSettled()
+        : Promise.resolve();
+      return settle.then(()=>{
+        // Resolve only after the map swap so existing `await
+        // refreshOfflineMap(); renderView()` callers repaint with the fresh
+        // map, not a stale one. A call overtaken while waiting (getAll ran
+        // before a later caller's) must not apply its older snapshot over
+        // the newer map — drop it instead.
+        if (gen !== _offlineMapGen) return;
+        const m={};
+        all.forEach(w=>{ m[w.folder]=true; });
+        offlineMap=m;
+        window.offlineMap=m;
+        offlineRecordMap=new Map(all.map(w=>[w.folder, w]));
+        try { window.offlineRecordMap = offlineRecordMap; } catch(e) { console.warn(e); }
+        offlineParentPaths=new Set();
+        for(const folder of offlineRecordMap.keys()){
+          for(let slash=folder.indexOf('/'); slash>=0; slash=folder.indexOf('/', slash+1)){
+            offlineParentPaths.add(folder.slice(0, slash));
           }
-          try { window.offlineParentPaths = offlineParentPaths; } catch(e) { console.warn(e); }
-          window.offlineRecords=all.slice();
-          res();
-        };
-        const tryApply = (tries) => {
-          // typeof guard: harness contexts run app.js without render.js
-          // loaded, and an unguarded call would throw into the outer catch
-          // and never apply the map at all.
-          if (typeof window.browseInteracting === 'function' && window.browseInteracting() && tries < 40) {
-            setTimeout(()=>tryApply(tries+1), 300); return;
-          }
-          apply();
-        };
-        tryApply(0);
+        }
+        try { window.offlineParentPaths = offlineParentPaths; } catch(e) { console.warn(e); }
+        window.offlineRecords=all.slice();
       });
     }).catch(()=>{});
   }
@@ -1024,11 +1023,14 @@
   }
 
   // Todo 5: single-traversal index. One walk assigns _fullPath, builds the
-  // nodeMap, and emits both thumb lists with byte-identical URL semantics to
-  // OfflineThumb.collect — singles via {singleOnly:true} (w=200 only, same
-  // strings resolveCoverSingle requests), full via the default path (single
-  // w=200 + multi w=200, MAX_PER_NODE cap — the tile/list DOM contract;
-  // card-img w=400 is not enumerated). Replaces the three separate
+  // nodeMap, and emits both thumb lists matching OfflineThumb.collect —
+  // singles via {singleOnly:true} (device cover width, the same string
+  // resolveCoverSingle requests), full via the default path (singles at the
+  // device cover width + multi per-cell w=200, MAX_PER_NODE cap — the
+  // tile/list DOM contract; card-img w=400 is not enumerated). Multi tiles
+  // enumerate cell thumbs, not the sprite-sheet URL the DOM fetches — that
+  // mismatch is by design (prefetch eligibility is DOM-scan driven).
+  // Replaces the three separate
   // walks (setFullPaths + buildNodeMap + collect); prefetch reuses the
   // cached lists instead of re-walking. findNodeByPath stays a linear walk.
   let _nodeMapCache = new Map();
@@ -1071,6 +1073,13 @@
       const api = (typeof window !== "undefined" && window.OfflineThumb) ? window.OfflineThumb : null;
       if (api && api.MAX_PER_NODE) maxPerNode = api.MAX_PER_NODE;
     } catch(e) { console.warn(e); }
+    // Device cover width — the enumerate lists must carry the URL the DOM
+    // actually requests on this device (coverWidth: dpr>=2 → 400, else 200).
+    let coverW = 200;
+    try {
+      const oc = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
+      if (oc && oc.coverWidth) coverW = oc.coverWidth();
+    } catch(e) { console.warn(e); }
     function thumbUrlFor(fp, name, w){
       try {
         const OC = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
@@ -1094,9 +1103,9 @@
         map.set(fp, n);
         if (fp){
           if (n.thumb){
-            const su = thumbUrlFor(fp, n.thumb, 200);
+            const su = thumbUrlFor(fp, n.thumb, coverW);
             if (!seenS.has(su)){ seenS.add(su); singles.push({url:su, folder:fp, thumb:n.thumb}); }
-            const fu = thumbUrlFor(fp, n.thumb, 200);
+            const fu = thumbUrlFor(fp, n.thumb, coverW);
             if (!seenF.has(fu)){ seenF.add(fu); full.push({url:fu, folder:fp, thumb:n.thumb}); }
           }
           if (n.thumbs && Array.isArray(n.thumbs) && n.thumbs.length >= 2){
@@ -1409,7 +1418,10 @@
       updateBrowseHeader();
       renderView();
       updateShallowBadge();
-      try { await refreshOfflineMap(); if (_loadGen !== _loadFoldersGen) return false; renderView(); updateShallowBadge(); } catch(e) { console.warn(e); }
+      // The map refresh can sit behind a settle wait (~12s worst) while the
+      // user is mid-gesture — loadFolders' stage-2 fetch must not queue
+      // behind it, so don't await: converge the badges when the map lands.
+      try { refreshOfflineMap().then(()=>{ if (_loadGen === _loadFoldersGen){ renderView(); updateShallowBadge(); } }); } catch(e) { console.warn(e); }
       if (shallow) return true;
       if (_loadGen !== _loadFoldersGen) return false;
       markTreeReady();
@@ -2895,18 +2907,13 @@
     // stay undecided instead of forcing 'v', so a small first move can't
     // kill an actual back-swipe either.
     if (!ptrLocked && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-      if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.4) ptrLocked = 'h';
+      // 'h' only while the browser hasn't claimed this gesture: once native
+      // scrolling starts, touchmove arrives cancelable:false and the armed
+      // blocker couldn't preventDefault it anyway — the list would keep
+      // scrolling while the back-swipe preview also moved. Leaving
+      // ptrLocked null there means every later move re-checks harmlessly.
+      if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.4 && e.cancelable !== false) ptrLocked = 'h';
       else if (Math.abs(dy) >= Math.abs(dx)) ptrLocked = 'v';
-    }
-    // A diagonal flick that still locks 'h' releases to 'v' once the
-    // cumulative direction is clearly vertical.
-    if (ptrLocked === 'h' && Math.abs(dy) > 20 && Math.abs(dy) > Math.abs(dx) * 1.6) {
-      ptrLocked = 'v';
-      hDragState = 'idle';
-      hDragX = 0;
-      disarmTmBlock();
-      if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
-      applyVisual();
     }
     if (ptrLocked === 'h') {
       const hGate = ptrStartX < 24 || currentBrowsePath !== null;
