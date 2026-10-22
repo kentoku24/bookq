@@ -81,10 +81,32 @@ function revalidateRequest(req, hit) {
     .finally(() => clearTimeout(timer));
 }
 
+// Same-path /thumb/ URLs at the other width classes. A cover cached before
+// the tile width-class change lives at a different w — matching it beats an
+// offline miss (scaled cover > no cover).
+function thumbWidthFallbacks(reqUrl) {
+  try {
+    const u = new URL(reqUrl);
+    if (!u.pathname.startsWith('/thumb/')) return [];
+    const cur = u.searchParams.get('w') || '400';
+    return ['200', '400', '800'].filter(w => w !== cur).map(w => {
+      const v = new URL(u.href);
+      v.searchParams.set('w', w);
+      return v.href;
+    });
+  } catch { return []; }
+}
+
 async function cacheFirst(req) {
   const cacheName = perWorkCacheName(req) || "bookq-images-fallback";
   const c = await caches.open(cacheName);
-  const hit = await caches.match(req);
+  let hit = await caches.match(req);
+  if (!hit) {
+    for (const alt of thumbWidthFallbacks(req.url)) {
+      hit = await caches.match(alt);
+      if (hit) break;
+    }
+  }
   if (!hit) {
     try {
       const res = await fetch(req, {cache: "no-store"});
@@ -121,10 +143,21 @@ async function networkFirst(req, cacheName) {
     return res;
   } catch {
     let hit = await caches.match(req);
+    // Sprite URLs gained a v= cache-buster — pre-change caches hold the same
+    // sheet under the v-less URL. Match that exactly (folder+names+w stay
+    // in the query) rather than the broad ignoreSearch below, which ignores
+    // `folder`/`names` too and could serve a DIFFERENT folder's sheet.
+    if (!hit && req.url.includes('/api/thumb-sprite')) {
+      try {
+        const u = new URL(req.url);
+        u.searchParams.delete('v');
+        hit = await caches.match(u.href);
+      } catch { /* malformed URL — fall through */ }
+    }
     if (!hit && req.url && req.url.includes('/api/folders')) {
       hit = await caches.match('/api/folders');
     }
-    if (!hit) hit = await caches.match(req, { ignoreSearch: true });
+    if (!hit && !req.url.includes('/api/thumb-sprite')) hit = await caches.match(req, { ignoreSearch: true });
     return hit || Response.error();
   }
 }

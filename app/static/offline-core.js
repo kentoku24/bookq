@@ -41,6 +41,17 @@
     return "/thumb/" + encodePath(inner) + "?w=" + width;
   }
 
+  // The cover width class this device's browse grid requests. dpr>=2 renders
+  // the ~128px tile at >=256 device px, so the 400 class keeps covers sharp
+  // (a 200px thumb stretched ~1.8x visibly blurs); below that, 200 is the
+  // ~1.8x fit measured on the low-end Android target (decoded bitmaps stay
+  // ~4x smaller — what keeps that device off the image-decode-cache cliff).
+  // One rule drives sprites, single covers, and the enumerate lists below.
+  function coverWidth() {
+    var dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 0;
+    return dpr >= 2 ? 400 : 200;
+  }
+
   // Reader-page URL targeting /view (server-normalized to a fast-decode
   // format). Only used via readerUrl, gated by OfflineCore.readerUseView.
   function viewUrl(folder, name) {
@@ -109,23 +120,27 @@
 
   // Thumb enumeration shared by app.js prefetch and offline-harness hit-rate.
   // Single source for: per-segment thumbUrl, per-node cap (thumbs>=2 →
-  // first MAX_PER_NODE), dedup by URL. Widths mirror the DOM renders exactly
-  // (single cover w=200, multi-grid w=200) so prefetch's exact-URL match/put
-  // lines up with what the grid requests — no orphan entries. Returns
-  // [{url, folder, thumb}]. Cache policy (Todo 4): /thumb entries live in the
+  // first MAX_PER_NODE), dedup by URL. Single covers enumerate at
+  // coverWidth() — the same device-dpr rule the DOM applies — so idle
+  // prefetch's exact-URL caches.match lines up with the real requests.
+  // Multi-thumb nodes enumerate their per-cell /thumb/?w=200 URLs, NOT the
+  // sprite-sheet URL the DOM actually requests (one /api/thumb-sprite at a
+  // dpr-dependent w plus v=2) — enumerate-vs-DOM is not byte-identical there,
+  // which is fine because prefetch eligibility is DOM-scan driven and the
+  // harness hit-rate was never exact on multi tiles anyway.
+  // Cache policy (Todo 4): /thumb entries live in the
   // same per-work cache as /image (prefetch puts + SW caches.match hit the
   // exact same URL string, so no orphan entries); storeAdapter downloads stay
   // on /image (full-res reading source, untouched).
   // Todo 3: collect(nodes, {singleOnly:true}) emits ONLY the single cover per
-  // node at w=200 — exactly what the single-first DOM requests, so idle
-  // prefetch's exact-URL caches.match hits and no w=400 orphan is created
-  // (first-to-verdict stays w=200 unified, no double-fetch). Default (no opts)
-  // follows the tile-mode DOM contract: single w=200 + multi w=200 (tile/list
-  // imgs request w=200; card-img still requests w=400 explicitly and is
-  // intentionally not enumerated — DOM-scan prefetch covers card URLs).
-  // Android scroll perf (2026-10): w=400 singles decoded to ~52MB of bitmaps
-  // across a 57-tile grid → image decode cache thrash → ~34ms frames. w=200
-  // singles cut that ~4x and restored ~22ms drag cadence.
+  // node at coverWidth() — exactly what the single-first DOM requests on this
+  // device, so no orphan entry is created and first-to-verdict stays
+  // unified (no double-fetch). Card-img still requests w=400 explicitly and
+  // is intentionally not enumerated — DOM-scan prefetch covers card URLs.
+  // Android scroll perf (2026-10): w=400 singles on a dpr<2 device decoded
+  // to ~52MB of bitmaps across a 57-tile grid → image decode cache thrash →
+  // ~34ms frames. dpr-scaled singles cut that ~4x and restored ~22ms drag
+  // cadence on the target device.
   const OfflineThumb = (function () {
     const MAX_PER_NODE = 9;
     const MAX_TOTAL = 50;
@@ -138,7 +153,7 @@
           const fp = n._fullPath;
           if (fp) {
             if (n.thumb) {
-              const url = thumbUrl(fp, n.thumb, 200);
+              const url = thumbUrl(fp, n.thumb, coverWidth());
               if (!seen.has(url)) { seen.add(url); out.push({ url, folder: fp, thumb: n.thumb }); }
             }
             if (!singleOnly && n.thumbs && Array.isArray(n.thumbs) && n.thumbs.length >= 2) {
@@ -543,7 +558,7 @@
   globalThis.OfflineStore = OfflineStore;
   globalThis.OfflineTree = OfflineTree;
   globalThis.OfflineThumb = OfflineThumb;
-  var api = { encodePath, imageUrl, thumbUrl, viewUrl, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS };
+  var api = { encodePath, imageUrl, thumbUrl, viewUrl, coverWidth, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS };
   // Single reader-page URL source for the viewer AND downloadWork — the flag
   // (?view=jpeg / localStorage bookq_view=jpeg, set by app.js) must resolve
   // identically in both or offline caches would key pages the viewer never
