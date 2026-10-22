@@ -454,7 +454,7 @@ def search_page(request, search_server):
 
 def test_search_results_show_thumbnail(search_page):
     """H10: a search result whose metadata has no embedded thumbnail renders a tile
-    <img> backed by the folder's tree thumbnail (/thumb/...?w=400), not the 📁
+    <img> backed by the folder's tree thumbnail (/thumb/...?w=200), not the 📁
     placeholder.
 
     RED pre-fix (placeholder div), GREEN post-fix (tree-thumb fallback).
