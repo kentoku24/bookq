@@ -27,6 +27,13 @@
     if (window.resolveCover) return window.resolveCover(node, w);
     return null;
   }
+  // Same device cover width the browse grid uses — search tiles render at
+  // the same ~128px CSS size, so they share the dpr-scaled width class.
+  function _coverW() {
+    var OC = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
+    if (OC && OC.coverWidth) return OC.coverWidth();
+    return (typeof window !== "undefined" && (window.devicePixelRatio || 0) >= 2) ? 400 : 200;
+  }
   // Todo 4: search renders share the one-shot ctx (single localStorage parse +
   // single offlineMap snapshot + memoized leafPaths per visible folder).
   // Render-scoped like the browse ctx — rebuilt on every search render, so
@@ -158,7 +165,7 @@
     for (var r of searchResults) {
       var imgHtml;
       var node = nodeByPath.get(r.folder_path);
-      var url = node ? _coverUrl(node, 200) : null;
+      var url = node ? _coverUrl(node, _coverW()) : null;
       if (url) imgHtml = '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">';
       else imgHtml = '<div class="tile-placeholder">\uD83D\uDCC1</div>';
       var metaHtml = "";

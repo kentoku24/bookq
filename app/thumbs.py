@@ -49,8 +49,6 @@ SPRITE_CELL_WIDTH = 200
 # sheets ≈ 52MB of decoded bitmaps thrashed the GPU image-decode cache
 # into ~34ms frames on CP08-J1, vs ~22ms once the sheet bytes shrank ~4x).
 SPRITE_GRID_DIMS = {200: (240, 360), 400: (480, 720), 800: (960, 1440)}
-SPRITE_GRID_W = 480
-SPRITE_GRID_H = 720
 SPRITE_GRAY = (128, 128, 128)
 
 # Syntactic half of ``parse_pdf_page_name`` (``p001.png`` shape WITHOUT the
@@ -737,7 +735,7 @@ def _parse_sprite_rows(raw: str | None) -> list[int] | None:
 def compose_sprite_grid(cells: list[bytes | None], rows: list[int], size: tuple[int, int] | None = None) -> tuple[bytes, int]:
     """Compose a 2D contact sheet matching the DOM multi-thumb grid.
 
-    The sheet is ``size`` (default SPRITE_GRID_W x SPRITE_GRID_H — the
+    The sheet is ``size`` (default ``SPRITE_GRID_DIMS[DEFAULT_WIDTH]`` — the
     tile's 2:3 aspect) so a single ``object-fit:cover`` img spanning the
     tile reproduces the multi-img grid with ONE decoded image. Each row's
     cells share the row width equally (matching the grid's column
@@ -748,7 +746,7 @@ def compose_sprite_grid(cells: list[bytes | None], rows: list[int], size: tuple[
     """
     from PIL import Image, ImageOps
 
-    sheet_w, sheet_h = size or (SPRITE_GRID_W, SPRITE_GRID_H)
+    sheet_w, sheet_h = size or SPRITE_GRID_DIMS[DEFAULT_WIDTH]
     sheet = Image.new("RGB", (sheet_w, sheet_h), SPRITE_GRAY)
     row_h = sheet_h // len(rows)
     ok = 0

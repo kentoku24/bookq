@@ -5,8 +5,10 @@ One request opens the archive ONCE, thumbnails up to 9 entries to w=200
 Per-entry failures paint a gray cell (fail-open); all-fail → 404;
 non-archive non-directory folder → 400. ``folder`` may also be a
 DIRECTORY: names resolve relative to it via the shared stat/load helpers
-(archive children inside it work). ``rows=a,b,c`` composes a 480x720 2D
-sheet matching the DOM multi-thumb grid (one img per tile).
+(archive children inside it work). ``rows=a,b,c`` composes a 2D sheet
+matching the DOM multi-thumb grid (one img per tile); the sheet size
+follows ``w`` via SPRITE_GRID_DIMS (200 → 240x360, 400 → 480x720,
+800 → 960x1440).
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_thumb_sprite.py -q
