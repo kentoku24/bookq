@@ -12,10 +12,18 @@ for HUD sampling, LoAF/traces, or cost attribution.
 
 ## Prerequisites
 
-Same as `android-perf`: wireless ADB connected (`adb devices` lists CP08_J1),
-Chrome CDP forwarded, the bookq tab open on a `#/browse/<folder>` tile grid.
-The script re-issues the forward itself; pairing is the manual step (see
-`android-perf/SKILL.md` — never guess the pairing code).
+`adb` on PATH, the tablet wireless-ADB paired once, Chrome open on a bookq
+`#/browse/<folder>` tile grid. The script handles the setup chain itself —
+each stage self-recovers or fails with a specific message:
+
+| Stage | What the script does | If it can't recover |
+|---|---|---|
+| adb binary | `shutil.which` check | install platform-tools |
+| device attached | `adb devices`; on empty, `adb connect`s every `adb mdns services` `_adb-tls-connect` entry (paired devices reconnect without a code) | exits with pairing instructions — the on-screen code cannot be guessed |
+| screen awake | `dumpsys power` `mWakefulness` warn | swipes land on the lock screen → wake/unlock first |
+| CDP forward | issues `adb forward` itself, checks rc | Chrome isn't running on the tablet |
+| tab found | URL-substring match over `/json/list` | prints all open tabs to pick a better `--url` |
+| scroller | probe returns `NO-SCROLLER` | open a `#/browse/` tile grid (not viewer) |
 
 **Stale-JS check before trusting numbers**: the SW serves old JS for 2–3
 reloads after a deploy. `--reload` hard-reloads the tab; verify the change
@@ -65,13 +73,19 @@ scroll-active frames: 484 (of 586 total)
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `no adb devices` | Wireless transport dropped (sleep/LAN change) | Script auto-`adb connect`s mDNS services; if that fails the tablet needs re-pairing — user must supply the on-screen code |
+| `adb not on PATH` | platform-tools missing | `brew install --cask android-platform-tools` |
+| `WARN: tablet wakefulness=Dozing` | Screen asleep/locked | Wake + unlock the tablet — swipes on the lock screen produce zero scrolls |
+| `cannot reach localhost:9222` | Chrome closed on the tablet, or forward broken | Open Chrome on the device, re-run — script re-issues the forward |
+| `websockets missing` | Ran with system python | Always `uv run --with websockets python3 flick-fps.py` |
 | `probe lost` after run | A **downward** swipe at scrollTop=0 fired pull-to-refresh → page reloaded | Keep swipes upward (`y1>y2`); script defaults already do |
-| `NO SCROLL EVENTS` | Swipe hit banner/dialog or wrong tab | `adb shell screencap` first; narrow `--url` |
+| `NO SCROLL EVENTS` | Swipe hit banner/dialog, lock screen, or wrong tab | `adb shell screencap` first; narrow `--url` |
 | `dev-04` matches `dev-04-1` tabs | Ghost-node suffix contains the substring | Pass the FQDN: `--url dev-04.javanese` |
 | p50 looks great but grid stutters | You read all-frames p50 (idle-dominated) | Read the scroll-active block |
 | First run slower than second | Cold sprite/thumb decode | `--warmup` covers it; don't compare cold vs warm |
 | Real finger much worse than `input swipe` | Injected swipes have no touchmove density | Expected — `--finger` is the authoritative pass |
 | Numbers differ run to run | Fling speed/thermal/other tabs | Fix params; screencap to confirm no dialogs |
+| `note: N adb transports` | Same tablet via IP:port AND the mDNS `_adb-tls-connect` alias | Harmless — script uses the first; `--serial` to pin one |
 
 ## References
 

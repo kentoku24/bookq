@@ -11,17 +11,24 @@ Usage:
     uv run --with websockets python3 flick-fps.py [--url dev-04] [--swipes 8]
     uv run --with websockets python3 flick-fps.py --finger 12   # human drag
 
-Requires: adb forward tcp:9222 localabstract:chrome_devtools_remote
+Requires: `adb` on PATH, Chrome running on the tablet. The script re-issues
+the CDP forward itself and tries `adb connect` on mDNS-discovered services
+when no device is attached — only first-time pairing needs the user.
 """
 import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
 
-import websockets
+try:
+    import websockets
+except ImportError:
+    sys.exit("websockets missing — run via: "
+             "uv run --with websockets python3 flick-fps.py ...")
 
 CDP = "http://localhost:9222/json"
 
@@ -43,15 +50,61 @@ PROBE = r"""(() => {
 })()"""
 
 
-def pick_serial():
+def _adb_devices():
     out = subprocess.run(["adb", "devices"], capture_output=True,
-                         text=True).stdout
-    devs = [l.split()[0] for l in out.splitlines()[1:]
+                         text=True, timeout=15).stdout
+    return [l.split()[0] for l in out.splitlines()[1:]
             if l.split() and l.split()[-1] == "device"]
+
+
+def _mdns_reconnect():
+    """adb connect on every mDNS-discovered _adb-tls-connect service.
+
+    Recovers a previously-paired wireless device whose transport dropped —
+    no code needed. First-time pairing still needs the on-screen code, so
+    this is best-effort before giving up.
+    """
+    try:
+        out = subprocess.run(["adb", "mdns", "services"], capture_output=True,
+                             text=True, timeout=15).stdout
+    except Exception:
+        return 0
+    n = 0
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) >= 3 and "_adb-tls-connect._tcp" in cols[-2]:
+            try:
+                subprocess.run(["adb", "connect", cols[-1]],
+                               capture_output=True, timeout=15)
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
+def pick_serial():
+    if not shutil.which("adb"):
+        sys.exit("adb not on PATH — install platform-tools "
+                 "(brew install --cask android-platform-tools)")
+    devs = _adb_devices()
     if not devs:
-        sys.exit("no adb devices — pair/connect wireless ADB first")
+        n = _mdns_reconnect()
+        if n:
+            print("note: reconnected via mDNS (%d service(s))" % n,
+                  file=sys.stderr)
+            devs = _adb_devices()
+    if not devs:
+        sys.exit(
+            "no adb devices.\n"
+            "  If wireless ADB was paired before: check the tablet is awake "
+            "and on the same LAN, then `adb connect <tablet-ip>:<port>`.\n"
+            "  If never paired: on the tablet — 開発者向けオプション → "
+            "ワイヤレスデバッグ → ペア設定, then `adb pair <ip:port>` + the "
+            "on-screen code. Ask the user for the code — never guess.")
     if len(devs) > 1:
-        print("note: %d adb devices, using %s (override with --serial)"
+        # The same physical tablet often appears twice (IP:port + the
+        # _adb-tls-connect mDNS alias). Either works for input/CDP.
+        print("note: %d adb transports, using %s (override with --serial)"
               % (len(devs), devs[0]), file=sys.stderr)
     return devs[0]
 
@@ -62,10 +115,18 @@ def adb(serial, *args):
 
 
 def pick_tab(match):
-    tabs = [t for t in json.load(urllib.request.urlopen(CDP))
-            if t["type"] == "page"]
+    try:
+        pages = json.load(urllib.request.urlopen(CDP, timeout=10))
+    except Exception:
+        sys.exit("cannot reach http://localhost:9222/json — Chrome must be "
+                 "running on the tablet AND `adb forward tcp:9222 "
+                 "localabstract:chrome_devtools_remote` must succeed "
+                 "(script tries it, but the socket name only exists while "
+                 "Chrome is running)")
+    tabs = [t for t in pages if t["type"] == "page"]
     if not tabs:
-        sys.exit("no debuggable Chrome pages — is Chrome running + forwarded?")
+        sys.exit("no debuggable Chrome pages — is Chrome running on the "
+                 "tablet and on the bookq tab?")
     hits = [t for t in tabs if match in t.get("url", "")]
     if not hits:
         sys.exit("no tab matches %r\ntabs:\n%s" % (
@@ -76,6 +137,23 @@ def pick_tab(match):
         for t in hits:
             print("  " + t["url"][:100], file=sys.stderr)
     return hits[0]
+
+
+def check_awake(serial):
+    """Warn when the tablet is dozing — input swipe lands on the lock
+    screen (silently zero scroll events) or nowhere at all."""
+    try:
+        out = adb(serial, "shell", "dumpsys", "power").stdout
+        for line in out.splitlines():
+            if "mWakefulness=" in line:
+                state = line.split("=")[-1].strip()
+                if state != "Awake":
+                    print("WARN: tablet wakefulness=%s — swipes may land on "
+                          "the lock screen; wake/unlock it first" % state,
+                          file=sys.stderr)
+                return
+    except Exception:
+        pass
 
 
 async def ev(ws, expr, mid):
@@ -177,7 +255,13 @@ async def main():
     args = p.parse_args()
 
     serial = args.serial or pick_serial()
-    adb(serial, "forward", "tcp:9222", "localabstract:chrome_devtools_remote")
+    check_awake(serial)
+    fw = adb(serial, "forward", "tcp:9222",
+             "localabstract:chrome_devtools_remote")
+    if fw.returncode != 0:
+        sys.exit("adb forward failed: " + (fw.stderr or fw.stdout).strip()
+                 + "\n  (the chrome_devtools_remote socket exists only "
+                   "while Chrome runs on the tablet)")
     tab = pick_tab(args.url)
     print("tab:", tab["url"][:90])
     async with websockets.connect(tab["webSocketDebuggerUrl"],
