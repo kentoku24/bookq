@@ -53,7 +53,7 @@ body{position:fixed;inset:0}
 	@media(min-width:1000px){.tile{width:calc(12.5% - 7px)}}
 	@media(min-width:1400px){.tile{width:calc(10% - 7.2px)}}
 	.tile{cursor:pointer;border-radius:6px;overflow:hidden;background:#1a1a1a;border:1px solid #2a2a2a;transition:border-color .15s,transform .1s}
-	.tile:hover{border-color:#555;transform:scale(1.03)}
+	@media (hover:hover){.tile:hover{border-color:#555;transform:scale(1.03)}}
 	.tile.active{border-color:#4a7ac4;box-shadow:0 0 0 1px #4a7ac4}
 	.tile-img{width:100%;aspect-ratio:2/3;object-fit:cover;object-position:center;display:block;background:#0d0d0d}
 	.tile-placeholder{width:100%;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;background:#111;color:#8f8f8f;font-size:28px}
@@ -397,7 +397,7 @@ body.landscape-single #spread-shift{display:none}
 	  #tile-grid.card-mode:not(:has(> .card:nth-child(5))){justify-content:center}
 	  #tile-grid.card-mode:not(:has(> .card:nth-child(5))) > .card{flex:1 1 0;max-width:480px}
 	}
-	#tile-grid.card-mode .card:hover{border-color:#555;transform:scale(1.02)}
+	@media (hover:hover){#tile-grid.card-mode .card:hover{border-color:#555;transform:scale(1.02)}}
 	#tile-grid.card-mode .card:active{transform:scale(0.98);border-color:#666;transition:transform 80ms ease-out}
 	#tile-grid.card-mode .card.active{border-color:#4a7ac4;box-shadow:0 0 0 1px #4a7ac4}
 	.card-img{width:100%;aspect-ratio:16/9;object-fit:cover;object-position:center;display:block;background:#0d0d0d}

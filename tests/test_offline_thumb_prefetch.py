@@ -218,7 +218,7 @@ def _wait_for_sw(page, timeout=15000):
 def test_thumb_prefetch_cached(page, server):
     """After loadFolders success, thumb/thumbs must be cached per-work via OfflineCore.thumbUrl.
 
-    Walk tree, collect thumb (single, w=400) and thumbs (len>=2, max9 composites,
+    Walk tree, collect thumb (single, w=200) and thumbs (len>=2, max9 composites,
     w=200) URLs via OfflineCore.thumbUrl per-segment encodePath, verify each hits caches.match
     (dedup), cap 50, batch3 via fetch→cache.put, RIC→setTimeout(0) ordering,
     silent skip on QuotaExceededError, preserve cacheClone→sizeClone.blob() order,

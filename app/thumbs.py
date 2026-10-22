@@ -40,13 +40,15 @@ THUMB_CACHE_MAX_FILES = 5000
 # SPRITE_GRAY so a single bad entry never fails the whole sheet (fail-open).
 SPRITE_MAX_ENTRIES = 9
 SPRITE_CELL_WIDTH = 200
-# 2D grid sheet (rows= param): the tile's 2:3 aspect at ~1.5x its largest
-# real device-pixel footprint. Bigger sheets decode measurably slower on
-# low-end Android (a 6-img hydration burst of 600x900 sheets produced
-# ~240-330ms frames on Unisoc T620); 480x720 still oversamples the
-# ~400x600px display size at 280dpi.
-SPRITE_GRID_W = 480
-SPRITE_GRID_H = 720
+# 2D grid sheet (rows= param): the tile's 2:3 aspect. Sheet size follows the
+# `w` class: w=200 → 240x360 (the ~128px sidebar tile at ~1.8x — an exact
+# fit at the ~133px/dpr1.75 low-end Android tile), w=400 → 480x720 (the
+# original fixed size, kept for dpr>=2), w=800 → 960x1440. Bigger sheets
+# decode measurably slower on low-end Android (a 6-img hydration burst of
+# 600x900 sheets produced ~240-330ms frames on Unisoc T620; 38 x 480x720
+# sheets ≈ 52MB of decoded bitmaps thrashed the GPU image-decode cache
+# into ~34ms frames on CP08-J1, vs ~22ms once the sheet bytes shrank ~4x).
+SPRITE_GRID_DIMS = {200: (240, 360), 400: (480, 720), 800: (960, 1440)}
 SPRITE_GRAY = (128, 128, 128)
 
 # Syntactic half of ``parse_pdf_page_name`` (``p001.png`` shape WITHOUT the
@@ -730,20 +732,21 @@ def _parse_sprite_rows(raw: str | None) -> list[int] | None:
     return rows
 
 
-def compose_sprite_grid(cells: list[bytes | None], rows: list[int]) -> tuple[bytes, int]:
+def compose_sprite_grid(cells: list[bytes | None], rows: list[int], size: tuple[int, int] | None = None) -> tuple[bytes, int]:
     """Compose a 2D contact sheet matching the DOM multi-thumb grid.
 
-    The sheet is SPRITE_GRID_W x SPRITE_GRID_H (the tile's 2:3 aspect) so a
-    single ``object-fit:cover`` img spanning the tile reproduces the
-    multi-img grid with ONE decoded image. Each row's cells share the row
-    width equally (matching the grid's column spanning); every cell is
-    center-crop fitted like CSS ``object-fit:cover``. Failed entries
-    leave their slot SPRITE_GRAY (fail-open). Returns (jpeg, ok-count) so
-    the caller can map all-fail to 404 like the strip path.
+    The sheet is ``size`` (default ``SPRITE_GRID_DIMS[DEFAULT_WIDTH]`` — the
+    tile's 2:3 aspect) so a single ``object-fit:cover`` img spanning the
+    tile reproduces the multi-img grid with ONE decoded image. Each row's
+    cells share the row width equally (matching the grid's column
+    spanning); every cell is center-crop fitted like CSS
+    ``object-fit:cover``. Failed entries leave their slot SPRITE_GRAY
+    (fail-open). Returns (jpeg, ok-count) so the caller can map all-fail
+    to 404 like the strip path.
     """
     from PIL import Image, ImageOps
 
-    sheet_w, sheet_h = SPRITE_GRID_W, SPRITE_GRID_H
+    sheet_w, sheet_h = size or SPRITE_GRID_DIMS[DEFAULT_WIDTH]
     sheet = Image.new("RGB", (sheet_w, sheet_h), SPRITE_GRAY)
     row_h = sheet_h // len(rows)
     ok = 0
@@ -839,8 +842,9 @@ async def handle_thumb_sprite(request: Request) -> Response:
     failing → 404. Sheets are cached on disk under a ``sprites/`` namespace
     so repeat views are free.
 
-    ``rows`` (e.g. ``rows=3,3,3``) composes a SPRITE_GRID_W x SPRITE_GRID_H
-    2D sheet matching the DOM multi-thumb grid (one decoded img per tile);
+    ``rows`` (e.g. ``rows=3,3,3``) composes a 2D sheet matching the DOM
+    multi-thumb grid (one decoded img per tile) at the SPRITE_GRID_DIMS
+    size for ``w`` (200 → 240x360, 400 → 480x720, 800 → 960x1440);
     omitted → the legacy horizontal strip.
     """
     from urllib.parse import unquote
@@ -851,10 +855,13 @@ async def handle_thumb_sprite(request: Request) -> Response:
     downloads_dir = request.app.state.settings.downloads_path
     params = request.query_params
     folder = params.get("folder", "")
-    # Sheet geometry is fixed (SPRITE_CELL_WIDTH); `w` is accepted for URL-shape
-    # compatibility with the single-thumb endpoint and otherwise ignored.
+    # Strip cells keep the fixed SPRITE_CELL_WIDTH geometry; `w` selects
+    # the grid-sheet size class (SPRITE_GRID_DIMS) for the rows= path —
+    # the frontend picks w by devicePixelRatio so low-dpr Android gets a
+    # ~4x smaller decode footprint.
     cell = SPRITE_CELL_WIDTH
     rows = _parse_sprite_rows(params.get("rows"))
+    grid_size = SPRITE_GRID_DIMS[normalize_width(params.get("w"))]
 
     if not folder or folder.startswith("/") or folder.endswith("/") or "\x00" in folder:
         raise HTTPException(status_code=400, detail="Invalid sprite folder")
@@ -887,7 +894,7 @@ async def handle_thumb_sprite(request: Request) -> Response:
     names_part = "\x00".join(names)
     # Grid geometry goes in the key so a sheet-size change invalidates old
     # cache entries instead of serving stale-dimension sheets forever.
-    rows_part = ("-".join(str(r) for r in rows) + f"@{SPRITE_GRID_W}x{SPRITE_GRID_H}") if rows else ""
+    rows_part = ("-".join(str(r) for r in rows) + f"@{grid_size[0]}x{grid_size[1]}") if rows else ""
 
     if is_archive:
         try:
@@ -945,7 +952,7 @@ async def handle_thumb_sprite(request: Request) -> Response:
         if rows:
             # Grid cells take the raw bytes — compose_sprite_grid does its
             # own decode + cover-crop and reports how many cells rendered.
-            sheet, ok = compose_sprite_grid(raws, rows)
+            sheet, ok = compose_sprite_grid(raws, rows, grid_size)
             if ok == 0:
                 raise HTTPException(status_code=404, detail="File not found")
         else:
