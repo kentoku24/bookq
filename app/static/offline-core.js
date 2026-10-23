@@ -508,9 +508,9 @@
   const WIPE_STORAGE_KEYS = ["bookq_progress", "bookq_persist_toast"];
   const WIPE_SESSION_KEYS = ["bookq_auto_sync_done", "bookq_return_hash"];
   // Kept on purpose (QA/registration flags, not reading data):
-  // bookq_harness / bookq_enable_sw / bookq_touch / bookq_perf.
-  // (bookq_reader lives in a cookie — the server must see it to decide
-  // whether the ring modules ship — and cookies are untouched here anyway.)
+  // bookq_harness / bookq_enable_sw / bookq_touch / bookq_perf /
+  // bookq_reader (the harness ring toggle — a localStorage flag read by
+  // app.js; the modules load client-side so the server never sees it).
 
   function isDataCacheName(name) {
     return DATA_CACHE_PREFIXES.some((p) => String(name).startsWith(p));

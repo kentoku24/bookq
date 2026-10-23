@@ -103,7 +103,8 @@ def test_ring_flag_mounts_three_slot_roots(page, server):
 
 
 def test_ring_scripts_only_load_with_flag(page, server):
-    """Default pages must not even request the ring modules."""
+    """Default pages must not even request the ring modules — the opt-in
+    loads them on demand from the client, so a strip session stays lean."""
     seen = []
     page.on(
         "request",
@@ -112,6 +113,11 @@ def test_ring_scripts_only_load_with_flag(page, server):
     page.goto(f"{server}/#/view/{FOLDER}?p=0")
     expect(page.locator("#counter")).to_have_text("1 / 30")
     assert not any("ring" in u for u in seen), seen
+    # The opt-in DOES fetch them — client-initiated, on first viewer open.
+    page.goto(f"{server}/?reader=ring#/view/{FOLDER}?p=0")
+    expect(page.locator("#counter")).to_have_text("1 / 30")
+    assert any("viewer/ring.js" in u for u in seen), seen
+    assert any("viewer/ringCache.js" in u for u in seen), seen
 
 
 def test_ring_flag_with_missing_module_falls_back(page, server):
@@ -172,6 +178,10 @@ def test_adjacent_turn_ack_does_not_rebind_window(page, server):
     (acknowledge-first). The factory is wrapped before the book opens so the
     real public method is counted, no production instrumentation."""
     page.goto(f"{server}/?reader=ring")
+    # Modules load on demand at the first viewer open — inject them here so
+    # the factory is wrapped before the book's first create() runs.
+    page.add_script_tag(url=f"{server}/static/viewer/ringCache.js")
+    page.add_script_tag(url=f"{server}/static/viewer/ring.js")
     page.wait_for_function("!!window.RingReader")
     page.evaluate(
         """(() => {
@@ -287,10 +297,26 @@ def test_early_tap_during_pending_swipe_advances_again(ios_page, server):
     s.detach()
     # The tap must arrive while the commit is still pending — otherwise the
     # landing below exercises a plain tap turn, not the pending-commit path.
-    ios_page.wait_for_function("window.__ringCommitPending() === true")
-    s = touch_session(ios_page)
-    tap(s, LX, Y)                     # arrives while the commit is pending
-    s.detach()
+    ios_page.evaluate(
+        """() => {
+          // Pending-assert and the tap dispatch share one task — see the
+          // regroup test for why a separate input round-trip could pass
+          // vacuously. Left-zone tap = forward, so this both lands the
+          // pending swipe (armDrag) and turns once more (touchend classify).
+          if (!window.__ringCommitPending || !window.__ringCommitPending())
+            throw new Error('ring commit already finalized before tap');
+          const el = document.getElementById('img-container');
+          const r = el.getBoundingClientRect();
+          const mk = () => new Touch({identifier: 7, target: el,
+            clientX: r.left + 60, clientY: r.top + r.height / 2});
+          el.dispatchEvent(new TouchEvent('touchstart',
+            {touches: [mk()], targetTouches: [mk()], changedTouches: [mk()],
+             bubbles: true, cancelable: true}));
+          el.dispatchEvent(new TouchEvent('touchend',
+            {touches: [], changedTouches: [mk()],
+             bubbles: true, cancelable: true}));
+        }"""
+    )
     ios_page.wait_for_function("window.currentIdx === 3")
     settle(ios_page)
     ios_page.wait_for_timeout(450)    # outlast the 260ms fallback timer
@@ -706,6 +732,9 @@ def test_reader_image_cache_pin_lru_and_clear(page, server):
     """Bounded cache contract: pinned survive, unpinned evict LRU-first,
     clear() invalidates pending completions."""
     page.goto(f"{server}/?reader=ring")
+    # Module loads on demand at viewer-open; inject it directly —
+    # these tests exercise the cache API, not the load path.
+    page.add_script_tag(url=f"{server}/static/viewer/ringCache.js")
     page.wait_for_function("!!window.ReaderImageCache")
     out = page.evaluate(
         """async () => {
@@ -825,6 +854,9 @@ def test_cache_admission_counts_unpinned_and_inflight(page, server):
     set — in-flight entries still at bytes=0 estimate at the largest known
     size — plus the new entry."""
     page.goto(f"{server}/?reader=ring")
+    # Module loads on demand at viewer-open; inject it directly —
+    # these tests exercise the cache API, not the load path.
+    page.add_script_tag(url=f"{server}/static/viewer/ringCache.js")
     page.wait_for_function("!!window.ReaderImageCache")
     out = page.evaluate(
         """async () => {
@@ -866,6 +898,9 @@ def test_cache_failed_entry_retries_on_next_ensure(page, server):
     spreads away — ensure() on a failed pinned entry rebuilds and refetches.
     Unpinned failures must NOT retry (far-prefetch misses don't churn)."""
     page.goto(f"{server}/?reader=ring")
+    # Module loads on demand at viewer-open; inject it directly —
+    # these tests exercise the cache API, not the load path.
+    page.add_script_tag(url=f"{server}/static/viewer/ringCache.js")
     page.wait_for_function("!!window.ReaderImageCache")
     out = page.evaluate(
         """async () => {
@@ -928,33 +963,54 @@ def test_regroup_during_ring_commit_still_lands_turn(page, server):
     s = touch_session(page)
     drag(s, 200, 450, 330, 450)          # forward swipe → commit in flight
     s.detach()
-    # The resize MUST interleave inside the ~260ms commit window — if the
-    # fallback timer already finalized, currentIdx===5 holds even for the
-    # old cancelRingSwipe() code and this test proves nothing.
-    page.wait_for_function("window.__ringCommitPending() === true")
-    # A real size change routes through the app's own updateOrientation →
-    # regroupCells, inside the commit window. Portrait→portrait delta only,
-    # so pageMode does not change and idx is not re-paired.
-    page.set_viewport_size({"width": 380, "height": 844})
+    # The regroup MUST run inside the ~260ms commit window — if the fallback
+    # timer already finalized, currentIdx===5 holds even for the old
+    # cancelRingSwipe() code and this test proves nothing. Assert pending
+    # and invoke the interrupt in ONE task (a resize's own route is
+    # window resize → updateOrientation → regroupCells; calling it in-page
+    # removes the CDP round-trip that could outlast the window).
+    page.evaluate(
+        """() => {
+          if (!window.__ringCommitPending || !window.__ringCommitPending())
+            throw new Error('ring commit already finalized before regroup');
+          window.__orientDebug.regroup();
+        }"""
+    )
     page.wait_for_function("window.currentIdx === 5", timeout=3000)
     page.wait_for_function("window.__ringCommitPending() === false")
 
 
-def test_touch_during_ring_commit_rebases_anchor(page, server):
+def test_touch_during_ring_commit_rebases_anchor(ios_page, server):
     """A touch landing inside a pending ring commit used to finish the turn
     while anchorSpread stayed on the pre-slide spread — corrupting the pinch
     measureBox and the next tap's jump-distance check. armDrag must re-base."""
+    page = ios_page
     _ring_book(page, server, p=1)
     s = touch_session(page)
     drag(s, 200, 450, 330, 450)          # forward swipe → commit pending
     s.detach()
-    # Same interleave guarantee as the regroup test — the tap must arrive
-    # while the commit is still pending or the assertion below passes
-    # vacuously on slow runners.
-    page.wait_for_function("window.__ringCommitPending() === true")
-    s = touch_session(page)
-    tap(s, CX, Y)                        # centre tap: arms a drag, turns nothing
-    s.detach()
+    # Same interleave guarantee as the regroup test — and atomic: the
+    # pending assert and the touch dispatch share one JS task, so no CDP
+    # round-trip can outlast the commit window. A synthetic touchstart on
+    # #img-container runs the app's real listener chain (armDrag →
+    # finishRingSwipe + rebaseAnchor); the touchend mirrors a centre tap —
+    # arms a drag, turns nothing.
+    page.evaluate(
+        """() => {
+          if (!window.__ringCommitPending || !window.__ringCommitPending())
+            throw new Error('ring commit already finalized before touch');
+          const el = document.getElementById('img-container');
+          const r = el.getBoundingClientRect();
+          const mk = () => new Touch({identifier: 7, target: el,
+            clientX: r.left + r.width / 2, clientY: r.top + r.height / 2});
+          el.dispatchEvent(new TouchEvent('touchstart',
+            {touches: [mk()], targetTouches: [mk()], changedTouches: [mk()],
+             bubbles: true, cancelable: true}));
+          el.dispatchEvent(new TouchEvent('touchend',
+            {touches: [], changedTouches: [mk()],
+             bubbles: true, cancelable: true}));
+        }"""
+    )
     page.wait_for_function(
         "window.currentIdx === 2 && "
         "window.anchorSpread === window.SpreadView.spreadOf(2)")
@@ -1017,58 +1073,76 @@ def test_chapter_boundary_swipe_does_not_cross(page, server):
 
 # ── 7. harness toggle / flag precedence ─────────────────────────────────────
 
-def _clear_reader_cookie(page):
-    page.evaluate("document.cookie='bookq_reader=; Max-Age=0; path=/'")
+def _clear_reader_flag(page):
+    page.evaluate("try { localStorage.removeItem('bookq_reader'); } catch(e) {}")
 
 
-def test_reader_cookie_flag_and_param_precedence(ios_page, server):
-    """The harness §7 toggle sets cookie bookq_reader=ring — the flag must
-    be a cookie because the SERVER decides whether to ship the ring modules
-    (localStorage is invisible to it). No reader param → cookie selects
-    ring; an explicit ?reader= param still wins so measurement URLs stay
-    deterministic."""
+def test_index_document_is_reader_flag_invariant(page, server):
+    """The ring modules load client-side on demand — the served '/' must be
+    one identical document for every flag state, or the SW-precached copy
+    could silently disagree with the client's reader decision offline."""
+    a = page.request.get(server + "/").text()
+    b = page.request.get(server + "/?reader=ring").text()
+    c = page.request.get(
+        server + "/", headers={"Cookie": "bookq_reader=ring"}).text()
+    assert a == b == c
+    assert "viewer/ring" not in a
+
+
+def test_reader_localstorage_flag_and_param_precedence(ios_page, server):
+    """The harness §7 toggle sets localStorage bookq_reader=ring — a purely
+    client-side flag (the ring modules load on demand; the document served
+    never varies). No reader param → flag selects ring; an explicit
+    ?reader= param wins both ways so measurement URLs stay deterministic —
+    and ?reader=strip must not even REQUEST the ring modules."""
     page = ios_page
-    _clear_reader_cookie(page)
-    page.evaluate("document.cookie='bookq_reader=ring; path=/'")
-    # A hash-only navigation never re-requests '/' — the cookie only reaches
-    # the server on a real document load. (?_=1 is a dummy; only 'reader' is
-    # looked at, so this stays the "no reader param" path.)
+    _clear_reader_flag(page)
+    page.evaluate("localStorage.setItem('bookq_reader', 'ring')")
+    # (?_=1 is a dummy; only 'reader' is looked at, so this stays the
+    # "no reader param" path.)
     page.goto(f"{server}/?_=1#/view/{FOLDER}?p=0")
     expect(page.locator("#counter")).to_have_text("1 / 30")
     assert page.evaluate("window.__bookqReader") == "ring"
     assert _slots(page) == 3
     # An explicit param overrides the flag both ways.
+    seen = []
+    page.on(
+        "request",
+        lambda r: seen.append(r.url) if r.resource_type == "script" else None,
+    )
     page.goto(f"{server}/?reader=strip#/view/{FOLDER}?p=1")
     expect(page.locator("#counter")).to_have_text("2 / 30")
     assert page.evaluate("window.__bookqReader") == "strip"
     assert _slots(page) == 0
+    assert not any("ring" in u for u in seen), seen   # strip stays lean
     page.goto(f"{server}/?reader=ring#/view/{FOLDER}?p=1")
     expect(page.locator("#counter")).to_have_text("2 / 30")
     assert page.evaluate("window.__bookqReader") == "ring"
-    _clear_reader_cookie(page)
+    _clear_reader_flag(page)
 
 
 def test_harness_ring_toggle_enables_ring_next_visit(ios_page, server):
     """The real flow: toggle ring ON in the harness, return via the title
-    link, open a book — the document served after the toggle must include
-    the ring modules and the viewer must come up ring without any param."""
+    link, open a book — the client-side flag loads the ring modules on
+    demand and the viewer comes up ring without any URL param."""
     page = ios_page
     page.goto(server + "/static/offline-harness.html?harness=1")
     page.locator("#btn-ring-toggle").click()
     expect(page.locator("#harness-ring-status")).to_contain_text("reader: ring")
     page.locator("header h1 a").click()          # title → tile view
     page.wait_for_selector("#tile-grid .tile", timeout=10000)
-    # The in-app hash navigation reuses this document — which was already
-    # served with the ring modules thanks to the cookie.
+    # In-app hash navigation reuses this document; the flag was read at
+    # load and the modules are fetched on first open (SW-precached, so
+    # this path works offline too).
     page.evaluate("location.hash = '#/view/long?p=0'")
     expect(page.locator("#counter")).to_have_text("1 / 30")
     assert page.evaluate("window.__bookqReader") == "ring"
     assert _slots(page) == 3
-    _clear_reader_cookie(page)
+    _clear_reader_flag(page)
 
 
 def test_harness_ring_toggle_on_off(ios_page, server):
-    """Harness §7's ring toggle writes/clears the bookq_reader cookie and
+    """Harness §7's ring toggle writes/clears localStorage bookq_reader and
     reflects the current state in its badge — same shape as the perf HUD
     toggle it sits next to."""
     page = ios_page
@@ -1077,14 +1151,10 @@ def test_harness_ring_toggle_on_off(ios_page, server):
     expect(page.locator("#harness-ring-status")).to_contain_text("reader: strip")
     page.locator("#btn-ring-toggle").click()
     expect(page.locator("#harness-ring-status")).to_contain_text("reader: ring")
-    assert page.evaluate(
-        "document.cookie.split(';').some(c => c.trim() === 'bookq_reader=ring')"
-    ) is True
+    assert page.evaluate("localStorage.getItem('bookq_reader')") == "ring"
     page.locator("#btn-ring-toggle").click()
     expect(page.locator("#harness-ring-status")).to_contain_text("reader: strip")
-    assert page.evaluate(
-        "document.cookie.split(';').some(c => c.trim().startsWith('bookq_reader='))"
-    ) is False
+    assert page.evaluate("localStorage.getItem('bookq_reader')") is None
 
 
 def test_harness_title_links_back_to_tiles(ios_page, server):

@@ -70,11 +70,17 @@ tap: 10 gestures, 260 frames
 
 ## Reader A/B protocol
 
-`--reader` navigates the tab (`?reader=ring` vs none) preserving the book
-hash, then asserts `window.__bookqReader` — SW stale-while-revalidate can
-serve the old app.js, so a mode mismatch fails fast instead of producing
-numbers for the wrong build. For comparisons use identical
-`--taps/--swipes/--settle`, same tab, same book, warmed each time.
+`--reader` navigates the tab (`?reader=ring` / `?reader=strip`) preserving
+the book hash, then asserts `window.__bookqReader` — SW
+stale-while-revalidate can serve the old app.js, so a mode mismatch fails
+fast instead of producing numbers for the wrong build. For comparisons use
+identical `--taps/--swipes/--settle`, same tab, same book, warmed each time.
+
+**Always pass `--reader` for A/B.** With no `reader` param the app's
+localStorage `bookq_reader` flag (Offline Harness §7 toggle) decides — a
+tablet left toggled to ring makes a `--reader`-less run measure ring while
+you think you have strip baseline. The `state` line prints the resolved
+reader; check it.
 
 ## Caveats (hit for real)
 

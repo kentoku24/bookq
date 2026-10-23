@@ -737,24 +737,68 @@
   // ── experimental ring reader (?reader=ring) ──
   // Opt-in prototype: three fixed-stride slots replace the variable-width
   // strip. Gestures, URL sync, progress, overview, zoom and the offline URL
-  // resolver stay shared — only the DOM/cache layer differs. The query flag
-  // alone decides (no persistence); a missing module (e.g. an offline page
-  // from an older precache) falls back to the strip, never fatally.
-  // ?reader=ring is the explicit opt-in; with NO reader param at all the
-  // harness-set cookie decides (PWA has no URL bar — and the flag must be a
-  // cookie, not localStorage, because the SERVER decides whether to ship
-  // the ring modules). An explicit non-ring param wins over the cookie so
-  // measurement URLs (?reader=strip) stay deterministic.
+  // resolver stay shared — only the DOM/cache layer differs. The decision is
+  // client-side ONLY: ?reader=ring is the explicit opt-in; with NO reader
+  // param at all the harness-set localStorage flag decides (PWA has no URL
+  // bar). An explicit non-ring param wins over the flag so measurement URLs
+  // (?reader=strip) stay deterministic. The index HTML never varies — the
+  // SW precaches a single '/' — so the two ring modules load on demand from
+  // the SW-precached SHELL_ASSETS and offline sees the identical decision.
+  // A missing/failed module falls back to the strip, never fatally.
   const readerParam = new URLSearchParams(location.search).get("reader");
   const ringRequested = readerParam === "ring"
     || (readerParam === null
-        && (()=>{try{return /\bbookq_reader=ring\b/.test(document.cookie)}catch(e){return false}})());
-  const ringOn = ringRequested
-    && typeof window.RingReader !== "undefined" && typeof window.RingReader.create === "function"
-    && typeof window.ReaderImageCache !== "undefined" && typeof window.ReaderImageCache.create === "function";
-  if (ringRequested && !ringOn) console.warn("reader=ring requested but viewer/ring*.js is not loaded — using strip");
-  try { window.__bookqReader = ringOn ? "ring" : "strip"; } catch(e) { console.warn(e); }
+        && (()=>{try{
+          var v = localStorage.bookq_reader;
+          if (v === undefined){          // migrate the short-lived cookie flag
+            var m = /(?:^|;\s*)bookq_reader=([^;]*)/.exec(document.cookie);
+            if (m){
+              v = m[1] === "ring" ? "ring" : null;
+              document.cookie = "bookq_reader=; Max-Age=0; path=/";
+              if (v) localStorage.bookq_reader = v;
+            }
+          }
+          return v === "ring";
+        }catch(e){return false}})());
+  let ringOn = false;
   let ringReader = null;
+  let ringReady = null;
+  function loadScriptOnce(src){
+    return new Promise((res, rej)=>{
+      const s = document.createElement("script");
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error(src));
+      document.head.appendChild(s);
+    });
+  }
+  // Called once on the viewer-open path (loadImages) — awaited before the
+  // first ring read so the open is deterministic, not a load-vs-use race.
+  function ensureRing(){
+    if (!ringRequested) return Promise.resolve(false);
+    if (!ringReady){
+      const loaded = () =>
+        typeof window.RingReader !== "undefined" && typeof window.RingReader.create === "function"
+        && typeof window.ReaderImageCache !== "undefined" && typeof window.ReaderImageCache.create === "function";
+      // Skip the fetch when the globals already exist (double navigation in
+      // the same document, or a test injecting the modules early) — a second
+      // execution would reset the IIFE state and overwrite instrumentation.
+      ringReady = (loaded() ? Promise.resolve()
+                          : Promise.all([
+                              loadScriptOnce("/static/viewer/ringCache.js"),
+                              loadScriptOnce("/static/viewer/ring.js"),
+                            ]).then(()=>{})).then(()=>{
+        ringOn = loaded();
+        if (ringOn) track.classList.add("ring-reader");
+        try { window.__bookqReader = ringOn ? "ring" : "strip"; } catch(e) { console.warn(e); }
+        if (!ringOn) console.warn("reader=ring requested but viewer/ring*.js did not initialize — using strip");
+        return ringOn;
+      }, (e)=>{
+        console.warn("reader=ring requested but viewer/ring*.js failed to load — using strip", e);
+        return false;
+      });
+    }
+    return ringReady;
+  }
+  try { window.__bookqReader = "strip"; } catch(e) { console.warn(e); }
   // A ring swipe commit that has not landed yet. The .25s track transition
   // runs without `sliding` (same as the legacy swipe path), so this
   // transaction is the only record that a turn is in flight — a second
@@ -784,8 +828,10 @@
   // Read-only probe for the app-side commit transaction above (the ring
   // analog of `sliding`) — tests must confirm an interleaving action lands
   // INSIDE the commit window, not after the fallback timer already fired.
-  try { window.__ringCommitPending = () => !!ringSwipe; } catch(e) { console.warn(e); }
-  if (ringOn) track.classList.add("ring-reader");
+  // Test-mode only, like __zoomDebug — a prod page leaks no probe surface.
+  if (window.__BOOKQ_TEST_MODE__ === 'true'){
+    try { window.__ringCommitPending = () => !!ringSwipe; } catch(e) { console.warn(e); }
+  }
 
   // Commit a pending ring swipe immediately — the next input must see the
   // landed index, not the one the slide started from. Runs the same
@@ -1967,6 +2013,10 @@
       if (_empty){ _empty.innerHTML = "<p>読込中…</p>"; _empty.style.display = "flex"; }
       return;
     }
+    // Resolve the reader before anything below consults `ringOn` — the two
+    // modules load on demand (never static tags), so the first open awaits
+    // them here instead of racing script arrival vs. renderer selection.
+    await ensureRing();
     // 別の本を開いた＝ビューア復帰の文脈は切れた（一覧のアンカーには使わない）
     try { window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
     currentFolder = fullPath;
@@ -3247,7 +3297,7 @@
     e.stopPropagation();
     if (e.cancelable) e.preventDefault();
   }, {capture: true});
-  if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get tmArmed(){return tmBlockArmed}, get ptrLock(){return ptrLocked}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
+  if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get tmArmed(){return tmBlockArmed}, get ptrLock(){return ptrLocked}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; }, regroup(){ regroupCells(); } }; }
 
   imgContainer.addEventListener("dblclick", e => e.preventDefault());
   // H6: do NOT preventDefault() on multi-touch here — that also cancels the
