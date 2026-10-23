@@ -239,11 +239,15 @@ for d in devs:
             | python3 -c 'import sys,json; print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null || true)"
         if [ "$actual" = "$expected" ]; then
             info "✅ tailnet 登録名を $expected に復旧しました"
-            # 改名直後の FQDN は ACME dns-01 の発行遅延で最初の TLS が失敗し
-            # うる。ここで1回温めておくと後続の verify_url が即通る
-            #（失敗しても verify_url のリトライがカバーするので best-effort）。
-            docker exec "$sidecar" tailscale --socket=/var/run/tailscale/tailscaled.sock \
-                cert "$expected" >/dev/null 2>&1 || true
+            # 改名直後の FQDN は ACME dns-01 の発行遅延（set-dns 伝播・LE 側の
+            # 検証タイミング）で最初の TLS が数分失敗しうる。ここで温めておくと
+            # 後続の verify_url が即通る。失敗しても verify_url のリトライが
+            # カバーするので best-effort。
+            for _ in 1 2 3; do
+                docker exec "$sidecar" tailscale --socket=/var/run/tailscale/tailscaled.sock \
+                    cert "$expected" >/dev/null 2>&1 && break
+                sleep 20
+            done
             return 0
         fi
     done
