@@ -25,7 +25,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 
 try:
@@ -166,14 +165,22 @@ async def ev(ws, expr, mid):
                    "awaitPromise": True}}))
     while True:
         m = json.loads(await asyncio.wait_for(ws.recv(), 120))
-        if m.get("id") == mid:
-            r = m["result"]
-            if "exceptionDetails" in r:
-                ed = r["exceptionDetails"]
-                desc = (ed.get("exception") or {}).get("description") \
-                    or ed.get("text") or json.dumps(ed)
-                raise RuntimeError("page eval failed: %s" % desc[:300])
-            return r.get("result", {}).get("value")
+        if m.get("id") != mid:
+            continue
+        # Protocol-level failure ("Execution context was destroyed" while a
+        # navigation is in flight, etc.) — a bare KeyError on m["result"]
+        # would otherwise escape cli()'s RuntimeError catch as a traceback.
+        if "error" in m:
+            err = m["error"]
+            raise RuntimeError("CDP error %s: %s"
+                               % (err.get("code"), err.get("message")))
+        r = m["result"]
+        if "exceptionDetails" in r:
+            ed = r["exceptionDetails"]
+            desc = (ed.get("exception") or {}).get("description") \
+                or ed.get("text") or json.dumps(ed)
+            raise RuntimeError("page eval failed: %s" % desc[:300])
+        return r.get("result", {}).get("value")
 
 
 def pct(sorted_vals, q):
@@ -266,13 +273,21 @@ async def main():
     p.add_argument("--finger", type=float, default=0,
                    help="seconds to wait for a real finger instead")
     args = p.parse_args()
+    # A swipe commit lands ~260ms after touchend — a shorter settle window
+    # would call committed swipes "no turn" and drop them from the results.
+    if args.settle < 300:
+        print("note: --settle %dms is below the ~260ms swipe commit — "
+              "clamping to 300ms" % args.settle, file=sys.stderr)
+        args.settle = 300
 
     serial = args.serial or pick_serial()
     check_awake(serial)
     fw = adb(serial, "forward", "tcp:9222",
              "localabstract:chrome_devtools_remote")
     if fw.returncode != 0:
-        sys.exit("adb forward failed: " + (fw.stderr or fw.stdout).strip())
+        sys.exit("adb forward failed: " + (fw.stderr or fw.stdout).strip() +
+                 "\n  the chrome_devtools_remote socket exists only while "
+                 "Chrome is running on the tablet — start Chrome and retry")
     tab = pick_tab(args.url)
     print("tab:", tab["url"][:90])
     async with websockets.connect(tab["webSocketDebuggerUrl"],
@@ -287,9 +302,16 @@ async def main():
             want = ("(window.__bookqReader||'strip')==='%s'" % reader
                     if reader else "true")
             for _ in range(60):
-                ready = await ev_(
-                    "(()=>{try{return location.hash.startsWith('#/view/')"
-                    "&&images.length>0&&%s}catch(e){return false}})()" % want)
+                try:
+                    ready = await ev_(
+                        "(()=>{try{return location.hash.startsWith('#/view/')"
+                        "&&images.length>0&&%s}catch(e){return false}})()"
+                        % want)
+                except RuntimeError:
+                    # The eval raced the navigation — the execution context
+                    # was destroyed mid-poll. That IS the "still loading"
+                    # state; keep polling instead of dying on a traceback.
+                    ready = False
                 if ready:
                     return True
                 await asyncio.sleep(0.5)

@@ -110,20 +110,21 @@
       for (var c of sl.cells) while (c.firstChild) c.removeChild(c.firstChild);
       sl.root.style.display = "none";
     }
+    function mountIntoCell(cell, img) {
+      if (cell.firstChild === img) return;
+      while (cell.firstChild) cell.removeChild(cell.firstChild);
+      if (img) cell.appendChild(img);
+    }
     function mountPages(sl, pages) {
       // The spread the reader is looking at fetches high; mounted neighbours
       // stay low — promotion happens only when a spread becomes current.
       var pri = sl.spread === curSpread ? "high" : "low";
       for (var i = 0; i < 2; i++) {
-        var cell = sl.cells[i];
         if (i < pages.length) {
           var img = cache.ensure(pages[i], pri);
-          if (img && cell.firstChild !== img) {
-            while (cell.firstChild) cell.removeChild(cell.firstChild);
-            cell.appendChild(img);
-          }
+          if (img) mountIntoCell(sl.cells[i], img);
         } else {
-          while (cell.firstChild) cell.removeChild(cell.firstChild);
+          while (sl.cells[i].firstChild) sl.cells[i].removeChild(sl.cells[i].firstChild);
         }
       }
       sl.pages = pages;
@@ -205,11 +206,21 @@
       }
       // Retune priorities on already-mounted pages — mountPages only runs
       // when the page set changed, so promotion/demotion (a neighbour
-      // becoming current, or vice versa) needs its own pass. ensure() on an
-      // existing entry mutates fetchPriority only: no remount, no refetch.
+      // becoming current, or vice versa) needs its own pass. ensure() on a
+      // healthy entry mutates fetchPriority only: no remount, no refetch.
+      // But a failed PINNED entry is rebuilt here — release() detached its
+      // old img, so the fresh element must reach the slot's cell or the
+      // neighbour stays empty until a commit's ensureImage runs.
       for (var t3 of want) {
         var pri3 = t3 === s ? "high" : "low";
-        for (var p3 of spreads[t3].pages) cache.ensure(p3, pri3);
+        var sl3 = slotFor(t3);
+        var pages3 = spreads[t3].pages;
+        for (var i3 = 0; i3 < pages3.length; i3++) {
+          var img3 = cache.ensure(pages3[i3], pri3);
+          if (sl3 && img3 && sl3.cells[i3].firstChild !== img3) {
+            mountIntoCell(sl3.cells[i3], img3);
+          }
+        }
       }
       publish();
       if (!moving) flushPrefetch();
@@ -230,8 +241,7 @@
       if (sl && img) {
         var cell = sl.cells[spreads[s].pages.indexOf(idx)];
         if (cell.firstChild !== img) {
-          while (cell.firstChild) cell.removeChild(cell.firstChild);
-          cell.appendChild(img);
+          mountIntoCell(cell, img);
           reparented = true;
         }
         cell.style.display = "";

@@ -294,7 +294,8 @@
     onOverviewFire: null, driftTarget: null
   };
   if (window.__BOOKQ_TEST_MODE__ === 'true') {
-    window.__zoomDebug = { get panStarts() { return panStartsFromTouch; } };
+    window.__zoomDebug = { get panStarts() { return panStartsFromTouch; },
+                           measureBox: measureBox };
   }
   var container = document.getElementById('img-container');
   if (container) window.ViewerGesture.attach(container, { onStart: onStart, onMove: onMove, onEnd: onEnd });

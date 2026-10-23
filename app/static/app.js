@@ -773,6 +773,10 @@
     return ringReader;
   }
   try { window.__ringReaderDebug = () => ringReader ? ringReader.debug() : null; } catch(e) { console.warn(e); }
+  // Read-only probe for the app-side commit transaction above (the ring
+  // analog of `sliding`) — tests must confirm an interleaving action lands
+  // INSIDE the commit window, not after the fallback timer already fired.
+  try { window.__ringCommitPending = () => !!ringSwipe; } catch(e) { console.warn(e); }
   if (ringOn) track.classList.add("ring-reader");
 
   // Commit a pending ring swipe immediately — the next input must see the

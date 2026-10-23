@@ -285,6 +285,9 @@ def test_early_tap_during_pending_swipe_advances_again(ios_page, server):
     s = touch_session(ios_page)
     drag(s, 200, 450, 330, 450)       # forward swipe → commit in flight
     s.detach()
+    # The tap must arrive while the commit is still pending — otherwise the
+    # landing below exercises a plain tap turn, not the pending-commit path.
+    ios_page.wait_for_function("window.__ringCommitPending() === true")
     s = touch_session(ios_page)
     tap(s, LX, Y)                     # arrives while the commit is pending
     s.detach()
@@ -925,11 +928,16 @@ def test_regroup_during_ring_commit_still_lands_turn(page, server):
     s = touch_session(page)
     drag(s, 200, 450, 330, 450)          # forward swipe → commit in flight
     s.detach()
+    # The resize MUST interleave inside the ~260ms commit window — if the
+    # fallback timer already finalized, currentIdx===5 holds even for the
+    # old cancelRingSwipe() code and this test proves nothing.
+    page.wait_for_function("window.__ringCommitPending() === true")
     # A real size change routes through the app's own updateOrientation →
     # regroupCells, inside the commit window. Portrait→portrait delta only,
     # so pageMode does not change and idx is not re-paired.
     page.set_viewport_size({"width": 380, "height": 844})
     page.wait_for_function("window.currentIdx === 5", timeout=3000)
+    page.wait_for_function("window.__ringCommitPending() === false")
 
 
 def test_touch_during_ring_commit_rebases_anchor(page, server):
@@ -940,9 +948,68 @@ def test_touch_during_ring_commit_rebases_anchor(page, server):
     s = touch_session(page)
     drag(s, 200, 450, 330, 450)          # forward swipe → commit pending
     s.detach()
+    # Same interleave guarantee as the regroup test — the tap must arrive
+    # while the commit is still pending or the assertion below passes
+    # vacuously on slow runners.
+    page.wait_for_function("window.__ringCommitPending() === true")
     s = touch_session(page)
     tap(s, CX, Y)                        # centre tap: arms a drag, turns nothing
     s.detach()
     page.wait_for_function(
         "window.currentIdx === 2 && "
         "window.anchorSpread === window.SpreadView.spreadOf(2)")
+    # …and the property that actually matters: the box a pinch would capture
+    # via Zoom.measureBox() (keyed on anchorSpread) is the CURRENT spread's
+    # rect, not the pre-commit neighbour's.
+    box = page.evaluate("window.__zoomDebug.measureBox()")
+    rect = page.evaluate(
+        """(() => {
+          const c = document.getElementById('img-container')
+                            .getBoundingClientRect();
+          const r = window.spreadEls[window.SpreadView.spreadOf(
+                            window.currentIdx)].getBoundingClientRect();
+          return {x: r.left - c.left, w: r.width};
+        })()"""
+    )
+    assert abs(box["x"] - rect["x"]) < 2 and abs(box["w"] - rect["w"]) < 2
+
+
+def test_chapter_crossing_tap_rebinds_window(page, server):
+    """A next-zone tap on a chapter's last page crosses into the next
+    chapter (tap zones use crossChapter:true). The ring must land there —
+    chapter info, bounded window and viewport position all consistent."""
+    _ring_book(page, server, folder=SERIES, p=4, total=5)   # ep-1 last page
+    assert page.evaluate(
+        "window.getCurrentChapterInfo(window.currentIdx).chapterIdx") == 0
+    s = touch_session(page)
+    tap(s, LX, Y)                        # next-zone tap (tapForward='left')
+    s.detach()
+    # ep-2's first page — the global idx is chapter-local numbering plus
+    # chapter-boundary spacers, so key on chapterIdx instead of a literal.
+    page.wait_for_function(
+        "window.getCurrentChapterInfo(window.currentIdx).chapterIdx === 1")
+    settle(page)
+    idx = page.evaluate("window.currentIdx")
+    _assert_window(page, idx)
+    assert _mounted_imgs(page) <= 6
+    assert page.evaluate(
+        """(() => {
+          const s = window.SpreadView.spreadOf(window.currentIdx);
+          const r = (window.spreadEls || {})[s].getBoundingClientRect();
+          return r.left < window.innerWidth && r.right > 0;
+        })()"""
+    ) is True
+
+
+def test_chapter_boundary_swipe_does_not_cross(page, server):
+    """Swipes clamp to the chapter range — only taps cross. A forward swipe
+    on a chapter's last page must bounce back: no turn, no commit left
+    pending, window still bound around the same spread."""
+    _ring_book(page, server, folder=SERIES, p=4, total=5)
+    s = touch_session(page)
+    drag(s, 200, 450, 330, 450)          # forward swipe at chapter end
+    s.detach()
+    settle(page)
+    assert page.evaluate("window.currentIdx") == 4
+    assert page.evaluate("window.__ringCommitPending()") is False
+    _assert_window(page, 4)

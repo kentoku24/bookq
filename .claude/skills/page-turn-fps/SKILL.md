@@ -41,7 +41,9 @@ including a persisted `localStorage bookq_perf=1`, which it clears once.
 
 Useful flags: `--taps/--swipes` (per direction, default 5), `--warmup`
 (default 4 turns — cold decode skews the first pass), `--settle` (ms of
-post-release window counted as turn-active, default 400), `--serial`,
+post-release window counted as turn-active, default 400, clamped to a
+300ms floor — a swipe commit lands ~260ms after touchend, so a shorter
+window would misclassify committed swipes as no-turn), `--serial`,
 `--reader strip|ring`, `--finger`.
 
 ## Reading the output
