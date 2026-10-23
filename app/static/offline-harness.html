@@ -45,7 +45,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
 </head>
 <body>
 <header>
-  <h1>🧪 Offline Harness</h1>
+  <h1><a href="/" title="Tileビューに戻る" style="color:inherit;text-decoration:none">🧪 Offline Harness</a></h1>
   <p>bookq オフラインQAハーネス — 静的配信 / gated リンク検証用シェル</p>
 </header>
 <main>
@@ -154,6 +154,11 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
       <button id="btn-perf-toggle" class="btn btn-primary" type="button">切替</button>
     </div>
     <p class="hint" style="margin-top:8px">ONで次回Viewer表示から緑のHUD（<code>move/snap@/img</code>）が出る。OFFで消える。</p>
+    <div class="row" style="margin-top:14px">
+      <span id="harness-ring-status" class="badge">reader: —</span>
+      <button id="btn-ring-toggle" class="btn" type="button">切替</button>
+    </div>
+    <p class="hint" style="margin-top:8px">リングリーダー試作（<code>?reader=ring</code> と同等の3スロット構成）。ONで次回Viewer表示から ring、OFFで従来の strip。フラグは cookie <code>bookq_reader=ring</code> — サーバがモジュール同梱を判定するため localStorage ではなく cookie。<code>?reader=</code> 付きURLはこのフラグより優先される。</p>
   </section>
 
   <!-- wipe confirm modal — two-step custom overlay, z-index 57 like quota modal -->
@@ -661,10 +666,31 @@ document.getElementById('btn-perf-toggle').addEventListener('click', ()=>{
   refreshPerfBadge();
 });
 
+function refreshRingBadge(){
+  var on = /\bbookq_reader=ring\b/.test(document.cookie);
+  var el = document.getElementById('harness-ring-status');
+  if (el) {
+    el.textContent = on ? 'reader: ring（次回Viewer表示から3スロット）' : 'reader: strip';
+    el.className = 'badge ' + (on ? 'online' : '');
+  }
+  var btn = document.getElementById('btn-ring-toggle');
+  if (btn) btn.textContent = on ? 'stripにする' : 'ringにする';
+}
+
+document.getElementById('btn-ring-toggle').addEventListener('click', ()=>{
+  var on = /\bbookq_reader=ring\b/.test(document.cookie);
+  // The flag must be a cookie — the server includes the ring modules only
+  // when it can see the intent (?reader=ring or this cookie).
+  document.cookie = on
+    ? 'bookq_reader=; Max-Age=0; path=/'
+    : 'bookq_reader=ring; path=/; Max-Age=31536000; SameSite=Lax';
+  refreshRingBadge();
+});
+
 if(document.readyState==='loading'){
-  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); refreshPerfBadge(); });
+  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); refreshPerfBadge(); refreshRingBadge(); });
 }else{
-  fetchTree().then(()=> refresh()); refreshPerfBadge();
+  fetchTree().then(()=> refresh()); refreshPerfBadge(); refreshRingBadge();
 }
 window.addEventListener('online', ()=> refresh());
 window.addEventListener('offline', ()=> refresh());

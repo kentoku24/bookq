@@ -509,6 +509,8 @@
   const WIPE_SESSION_KEYS = ["bookq_auto_sync_done", "bookq_return_hash"];
   // Kept on purpose (QA/registration flags, not reading data):
   // bookq_harness / bookq_enable_sw / bookq_touch / bookq_perf.
+  // (bookq_reader lives in a cookie — the server must see it to decide
+  // whether the ring modules ship — and cookies are untouched here anyway.)
 
   function isDataCacheName(name) {
     return DATA_CACHE_PREFIXES.some((p) => String(name).startsWith(p));

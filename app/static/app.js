@@ -740,7 +740,15 @@
   // resolver stay shared — only the DOM/cache layer differs. The query flag
   // alone decides (no persistence); a missing module (e.g. an offline page
   // from an older precache) falls back to the strip, never fatally.
-  const ringRequested = new URLSearchParams(location.search).get("reader") === "ring";
+  // ?reader=ring is the explicit opt-in; with NO reader param at all the
+  // harness-set cookie decides (PWA has no URL bar — and the flag must be a
+  // cookie, not localStorage, because the SERVER decides whether to ship
+  // the ring modules). An explicit non-ring param wins over the cookie so
+  // measurement URLs (?reader=strip) stay deterministic.
+  const readerParam = new URLSearchParams(location.search).get("reader");
+  const ringRequested = readerParam === "ring"
+    || (readerParam === null
+        && (()=>{try{return /\bbookq_reader=ring\b/.test(document.cookie)}catch(e){return false}})());
   const ringOn = ringRequested
     && typeof window.RingReader !== "undefined" && typeof window.RingReader.create === "function"
     && typeof window.ReaderImageCache !== "undefined" && typeof window.ReaderImageCache.create === "function";

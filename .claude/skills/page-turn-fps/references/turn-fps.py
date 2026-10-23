@@ -318,9 +318,11 @@ async def main():
             return False
 
         if args.reader:
-            q = "reader=ring&" if args.reader == "ring" else ""
-            await ev_("location.href = location.pathname + '?perf=0&%sr=' "
-                      "+ Date.now() + location.hash" % q)
+            # Always pass an explicit reader= value — without one the app's
+            # localStorage bookq_reader flag decides, which would silently
+            # A/B against the wrong renderer after a harness toggle.
+            await ev_("location.href = location.pathname + '?perf=0&reader="
+                      "%s&r=' + Date.now() + location.hash" % args.reader)
             if not await wait_viewer(args.reader):
                 sys.exit("viewer did not come up as %r within 30s "
                          "(SW stale JS? book hash 404?)" % args.reader)

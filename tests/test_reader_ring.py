@@ -1013,3 +1013,86 @@ def test_chapter_boundary_swipe_does_not_cross(page, server):
     assert page.evaluate("window.currentIdx") == 4
     assert page.evaluate("window.__ringCommitPending()") is False
     _assert_window(page, 4)
+
+
+# ── 7. harness toggle / flag precedence ─────────────────────────────────────
+
+def _clear_reader_cookie(page):
+    page.evaluate("document.cookie='bookq_reader=; Max-Age=0; path=/'")
+
+
+def test_reader_cookie_flag_and_param_precedence(ios_page, server):
+    """The harness §7 toggle sets cookie bookq_reader=ring — the flag must
+    be a cookie because the SERVER decides whether to ship the ring modules
+    (localStorage is invisible to it). No reader param → cookie selects
+    ring; an explicit ?reader= param still wins so measurement URLs stay
+    deterministic."""
+    page = ios_page
+    _clear_reader_cookie(page)
+    page.evaluate("document.cookie='bookq_reader=ring; path=/'")
+    # A hash-only navigation never re-requests '/' — the cookie only reaches
+    # the server on a real document load. (?_=1 is a dummy; only 'reader' is
+    # looked at, so this stays the "no reader param" path.)
+    page.goto(f"{server}/?_=1#/view/{FOLDER}?p=0")
+    expect(page.locator("#counter")).to_have_text("1 / 30")
+    assert page.evaluate("window.__bookqReader") == "ring"
+    assert _slots(page) == 3
+    # An explicit param overrides the flag both ways.
+    page.goto(f"{server}/?reader=strip#/view/{FOLDER}?p=1")
+    expect(page.locator("#counter")).to_have_text("2 / 30")
+    assert page.evaluate("window.__bookqReader") == "strip"
+    assert _slots(page) == 0
+    page.goto(f"{server}/?reader=ring#/view/{FOLDER}?p=1")
+    expect(page.locator("#counter")).to_have_text("2 / 30")
+    assert page.evaluate("window.__bookqReader") == "ring"
+    _clear_reader_cookie(page)
+
+
+def test_harness_ring_toggle_enables_ring_next_visit(ios_page, server):
+    """The real flow: toggle ring ON in the harness, return via the title
+    link, open a book — the document served after the toggle must include
+    the ring modules and the viewer must come up ring without any param."""
+    page = ios_page
+    page.goto(server + "/static/offline-harness.html?harness=1")
+    page.locator("#btn-ring-toggle").click()
+    expect(page.locator("#harness-ring-status")).to_contain_text("reader: ring")
+    page.locator("header h1 a").click()          # title → tile view
+    page.wait_for_selector("#tile-grid .tile", timeout=10000)
+    # The in-app hash navigation reuses this document — which was already
+    # served with the ring modules thanks to the cookie.
+    page.evaluate("location.hash = '#/view/long?p=0'")
+    expect(page.locator("#counter")).to_have_text("1 / 30")
+    assert page.evaluate("window.__bookqReader") == "ring"
+    assert _slots(page) == 3
+    _clear_reader_cookie(page)
+
+
+def test_harness_ring_toggle_on_off(ios_page, server):
+    """Harness §7's ring toggle writes/clears the bookq_reader cookie and
+    reflects the current state in its badge — same shape as the perf HUD
+    toggle it sits next to."""
+    page = ios_page
+    page.goto(server + "/static/offline-harness.html?harness=1")
+    page.wait_for_selector("#harness-ring-status", timeout=10000)
+    expect(page.locator("#harness-ring-status")).to_contain_text("reader: strip")
+    page.locator("#btn-ring-toggle").click()
+    expect(page.locator("#harness-ring-status")).to_contain_text("reader: ring")
+    assert page.evaluate(
+        "document.cookie.split(';').some(c => c.trim() === 'bookq_reader=ring')"
+    ) is True
+    page.locator("#btn-ring-toggle").click()
+    expect(page.locator("#harness-ring-status")).to_contain_text("reader: strip")
+    assert page.evaluate(
+        "document.cookie.split(';').some(c => c.trim().startsWith('bookq_reader='))"
+    ) is False
+
+
+def test_harness_title_links_back_to_tiles(ios_page, server):
+    """The header title is the way back — it must navigate to the app's
+    tile grid (the harness page has no other visible exit at the top)."""
+    page = ios_page
+    page.goto(server + "/static/offline-harness.html?harness=1")
+    link = page.locator("header h1 a")
+    assert link.get_attribute("href") == "/"
+    link.click()
+    page.wait_for_selector("#tile-grid .tile", timeout=10000)

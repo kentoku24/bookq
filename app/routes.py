@@ -742,7 +742,11 @@ async def index(request: Request):
     # varying response would never match a real navigation's cache lookup.
     ua_android = "android" in request.headers.get("user-agent", "").lower()
     context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android,
-               "reader_ring": request.query_params.get("reader") == "ring"}
+               # The ring modules ship only on explicit intent: ?reader=ring,
+               # or the harness-set cookie (PWA has no URL bar — localStorage
+               # is invisible to the server, so the flag lives in a cookie).
+               "reader_ring": request.query_params.get("reader") == "ring"
+               or request.cookies.get("bookq_reader") == "ring"}
     if thumb_perf:
         context["thumbnail_perf"] = True
         context["thumbnail_probe"] = (
