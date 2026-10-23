@@ -567,6 +567,10 @@
   // and neutralize the track's transition/transform. Shared by loadImages and
   // resetToTop — keep the two in sync (any change to strip teardown goes here).
   function resetStrip() {
+    // Ring: tear down slots/cache first — reset() publishes empty maps so the
+    // legacy release loop below can never hand a cache-owned img to imagePool.
+    cancelRingSwipe();
+    if (ringReader) ringReader.reset();
     // Reset strip
     for (const k of Object.keys(stripImgs)){
       const img = stripImgs[k];
@@ -729,6 +733,69 @@
   const SLIDE_MS = 300;  // matches the .3s transform transition in applyTrackTransform
   let lastTurnAt = -Infinity; // performance.now() of the last snapTo — turns within SLIDE_MS cut instantly (burst mode)
   let snapGen = 0;       // bumped to invalidate a pending slide (new snap, or a drag)
+
+  // ── experimental ring reader (?reader=ring) ──
+  // Opt-in prototype: three fixed-stride slots replace the variable-width
+  // strip. Gestures, URL sync, progress, overview, zoom and the offline URL
+  // resolver stay shared — only the DOM/cache layer differs. The query flag
+  // alone decides (no persistence); a missing module (e.g. an offline page
+  // from an older precache) falls back to the strip, never fatally.
+  const ringRequested = new URLSearchParams(location.search).get("reader") === "ring";
+  const ringOn = ringRequested
+    && typeof window.RingReader !== "undefined" && typeof window.RingReader.create === "function"
+    && typeof window.ReaderImageCache !== "undefined" && typeof window.ReaderImageCache.create === "function";
+  if (ringRequested && !ringOn) console.warn("reader=ring requested but viewer/ring*.js is not loaded — using strip");
+  try { window.__bookqReader = ringOn ? "ring" : "strip"; } catch(e) { console.warn(e); }
+  let ringReader = null;
+  // A ring swipe commit that has not landed yet. The .25s track transition
+  // runs without `sliding` (same as the legacy swipe path), so this
+  // transaction is the only record that a turn is in flight — a second
+  // gesture commits it instantly instead of computing from a stale index.
+  let ringSwipe = null;    // {newIdx, done, listener, timer}
+  function ringInstance(){
+    if (!ringOn) return null;
+    if (!ringReader){
+      ringReader = window.RingReader.create({
+        track: track,
+        getSpreads: () => spreads,
+        spreadOf: spreadOf,
+        getMetrics: spreadMetrics,
+        getAnchor: () => anchorSpread,
+        getView: () => ({width: viewW, height: viewH}),
+        urlFor: getUrl,
+        onAspect: recordAR,
+        isMoving: () => dragActive || sliding || !!ringSwipe,
+        publish: ({imgs, cells, spreads}) => {
+          stripImgs = imgs; stripCells = cells; spreadEls = spreads;
+        },
+      });
+    }
+    return ringReader;
+  }
+  try { window.__ringReaderDebug = () => ringReader ? ringReader.debug() : null; } catch(e) { console.warn(e); }
+  if (ringOn) track.classList.add("ring-reader");
+
+  // Commit a pending ring swipe immediately — the next input must see the
+  // landed index, not the one the slide started from. Runs the same
+  // completion the transitionend would have run.
+  function finishRingSwipe(){
+    const s = ringSwipe;
+    if (!s) return;
+    const finalize = s.listener;
+    if (finalize) finalize();
+    clearTimeout(s.timer);
+  }
+  // Drop a pending ring swipe without committing (reset/regroup/rotation/
+  // book change/slider jump): the old timer or event can no longer land.
+  function cancelRingSwipe(){
+    const s = ringSwipe;
+    if (!s) return;
+    s.done = true;
+    ringSwipe = null;
+    clearTimeout(s.timer);
+    if (s.listener) track.removeEventListener("transitionend", s.listener);
+  }
+
   // ?perf=1 page-turn profiler state. Declared HERE, with the rest of the
   // snapTo state, because snapTo reads it: a `const` declared further down the
   // IIFE is in its temporal dead zone until that line runs, and any synchronous
@@ -2137,6 +2204,19 @@
   try { window.getUrl = getUrl; } catch(e) { console.warn(e); }
 
   function updateStripPositions(){
+    if (ringOn){
+      // No book open (post-teardown): `spreads` is stale until the next
+      // loadImages rebuilds it — must not resurrect slots from it.
+      if (!images.length) return;
+      const r = ringInstance();
+      if (r){
+        // Rebind only when the current page isn't mounted — a mounted page
+        // just needs a geometry pass (the deferred window job owns rebinding).
+        if (!stripImgs[currentIdx]) r.ensureWindow(currentIdx);
+        r.layout();
+      }
+      return;
+    }
     for (const k in spreadEls){
       const s = Number(k);
       const el = spreadEls[s];
@@ -2173,6 +2253,7 @@
   // the other per-turn window maintenance (evict/markCurrent).
   const LABEL_WINDOW = 2; // chapters each side of the current chapter
   function ensureChapterLabels(centerChapterIdx){
+    if (ringOn) return;      // prototype has no strip labels; toolbar chapter name stays
     if (chapterList.length <= 1) return;
     const lo = Math.max(1, centerChapterIdx - LABEL_WINDOW);
     const hi = Math.min(chapterList.length - 1, centerChapterIdx + LABEL_WINDOW);
@@ -2198,6 +2279,7 @@
   // screenLeft(s) = translateX + spreadLeft(s), and we want that to equal
   // (viewW - width(s)) / 2.
   function pageOffsetPx(idx){
+    if (ringOn) return (spreadOf(idx) - anchorSpread) * viewW;   // fixed stride
     const s = spreadOf(idx);
     return (viewW - spreadMetrics(s).width) / 2 - spreadLeft(s);
   }
@@ -2231,6 +2313,14 @@
   // Re-home every live cell after the spread grouping changes (1P⇄2P, cover
   // shift, orientation). Empties are dropped so no stale container lingers.
   function regroupCells(){
+    if (ringOn){
+      // Grouping changed (1P⇄2P / orientation / cover shift): drop any pending
+      // swipe (its target offset is stale geometry) and rebind the window.
+      cancelRingSwipe();
+      const r = ringInstance();
+      if (r){ r.ensureWindow(currentIdx); r.layout(); }
+      return;
+    }
     for (const k of Object.keys(spreadEls)){
       spreadEls[k].remove();
       delete spreadEls[k];
@@ -2255,6 +2345,19 @@
     // Spacers exist only to fix spread parity at a chapter boundary; they are
     // dropped from `spreads`, so they get no DOM node at all.
     if (imgData && imgData.isSpacer) return null;
+    if (ringOn){
+      const r = ringInstance();
+      if (!r) return null;
+      // Acknowledge-first: an already-mounted target (the common prepared
+      // adjacent turn) gets only its own cache entry — re-pinning/rebinding
+      // the whole window here would duplicate the deferred job's work on the
+      // synchronous ack path. Unmounted targets (initial open / far jump)
+      // still bind+pin the window BEFORE their entry is allocated, so a
+      // hard-budget trim can't evict it behind the old window's pins.
+      if (stripImgs[idx]) return r.ensureImage(idx);
+      r.ensureWindow(idx);
+      return r.ensureImage(idx);
+    }
     if (stripImgs[idx]) return stripImgs[idx];
     const cell = document.createElement("div");
     cell.className = "page-cell";
@@ -2319,6 +2422,7 @@
   }
   // Start every still-deferred fetch, nearest to `idx` first.
   function flushDeferredFetches(idx){
+    if (ringOn){ if (ringReader && images.length) ringReader.prefetch(idx); return; }
     Object.keys(stripImgs)
       .map(Number)
       .filter(i => stripImgs[i] && stripImgs[i].dataset.deferredSrc)
@@ -2332,6 +2436,7 @@
   // prefetch. Also re-ranks fetchPriority as the reader moves.
   const DEFERRED_FLUSH_MS = 400;
   function scheduleDeferredFetches(idx){
+    if (ringOn){ if (ringReader && images.length) ringReader.prefetch(idx); return; }
     clearTimeout(deferredFlushTimer);
     for (const k in stripImgs){
       const img = stripImgs[k], d = Math.abs(Number(k) - idx);
@@ -2353,12 +2458,18 @@
 
   function ensureWindow(idx){
     if (!images.length) return;
+    if (ringOn){
+      const r = ringInstance();
+      if (r) r.ensureWindow(idx);
+      return;
+    }
     const lo = Math.max(0, idx - PREFETCH_BEHIND);
     const hi = Math.min(images.length - 1, idx + PREFETCH_AHEAD);
     for (let i = lo; i <= hi; i++) ensureStripImage(i);
   }
 
   function evictStrip(idx){
+    if (ringOn){ if (ringReader) ringReader.trim(); return; }
     for (const k of Object.keys(stripImgs)){
       const i = Number(k);
       if (i < idx - EVICT_BEHIND || i > idx + EVICT_AHEAD){
@@ -2388,6 +2499,7 @@
 
   // Apply the track's transform for the given idx (with optional live dragPx).
   function applyTrackTransform(idx, dragPx, animate){
+    if (ringReader) ringReader.cancelDrag();  // a queued drag rAF must not overwrite this write
     if (animate){
       track.style.transition = "transform .3s cubic-bezier(0.25,0.1,0.25,1.0)";
       // Flush the transition change with the OLD transform still in place. Setting
@@ -2412,8 +2524,20 @@
 
   function snapTo(idx, animate=true){
     if (idx < 0 || idx >= images.length) return;
+    cancelRingSwipe();
     if (window.Zoom.isActive()) window.Zoom.reset(true);
     currentIdx = idx;
+    if (ringOn){
+      // Slots exist only for the anchor±1 window — a snap farther than one
+      // spread (slider/overview/deep link) has nothing to slide across, so
+      // cut: rebase the anchor now and rest the track, don't animate.
+      const ts = spreadOf(idx);
+      if (Math.abs(ts - anchorSpread) > 1){
+        animate = false;
+        anchorSpread = ts;
+        applyTrackTransform(idx, 0, false);
+      }
+    }
     syncChapterSlider(idx);
     // Chapter-aware counter and folder name
     if (chapterList.length > 1) {
@@ -2521,6 +2645,9 @@
       // aborted fetches while decoding fine — naturalWidth > 0 means the
       // bitmap is there, so those must not append ⚠.
       if (idx !== currentIdx) return;
+      // Ring: `cur` may be a detached old-book img at the same index — only a
+      // failure of the currently mounted image counts.
+      if (ringOn && stripImgs[idx] !== cur) return;
       if (cur.naturalWidth !== 0) return;
       if (cur.getAttribute("src") !== getUrl(currentIdx)) return;
       imgContainer.classList.remove("loading");
@@ -2538,7 +2665,10 @@
     };
     if (cur){
       const done = () => {
-        if (idx === currentIdx){
+        // Ring: `cur` may be a detached old-book img whose queued load fires
+        // after a new book opened the same index — only the currently mounted
+        // image may dismiss the new book's spinner.
+        if (idx === currentIdx && (!ringOn || stripImgs[idx] === cur)){
           imgContainer.classList.remove("loading");
           spinner.style.display = "none";
         }
@@ -2566,6 +2696,13 @@
   try { window.viewerSnapTo = snapTo; } catch(e) { console.warn(e); }
 
   function setTrackOffset(idx, dragPx){
+    if (ringOn){
+      // Ring: the drag only moves the track transform — slots never get a
+      // per-touchmove position pass (their layout is fixed-stride).
+      const r = ringInstance();
+      if (r) r.drag(pageOffsetPx(idx) + dragPx);
+      return;
+    }
     track.style.transition = "none";
     updateStripPositions();
     applyTrackTransform(idx, dragPx, false);
@@ -2576,6 +2713,7 @@
   // Chapter crossing happens only with opts.crossChapter (tap zones); keys clamp to the current chapter.
   function goNext(opts){
     if (!images.length) return;
+    if (ringSwipe) finishRingSwipe();   // pending ring commit lands first
     const crossChapter = !!(opts && opts.crossChapter === true);
     const s = spreadOf(currentIdx);
     if (s + 1 >= spreads.length) return;
@@ -2590,6 +2728,7 @@
 
   function goPrev(opts){
     if (!images.length) return;
+    if (ringSwipe) finishRingSwipe();
     const crossChapter = !!(opts && opts.crossChapter === true);
     const s = spreadOf(currentIdx);
     if (s <= 0) return;
@@ -3186,6 +3325,7 @@
   let pendingPalmId = null;
   const findTouch = window.ViewerGesture.findTouch;
   function armDrag(t0, startX, startY){
+    if (ringSwipe) finishRingSwipe();   // a touch during a ring commit lands it
     dragTouchId = t0.identifier;
     pendingPalmId = null;
     track.style.transition = "none";
@@ -3384,6 +3524,13 @@
     if (newIdx !== currentIdx) {
       // Page change: animate the track smoothly to the target page's position
       // using the CURRENT base coordinate system — then re-base invisibly.
+      let swipe = null;
+      if (ringOn){
+        const r = ringInstance();
+        if (r) r.flushDrag();        // pending rAF drag must not race the commit
+        swipe = {newIdx, done: false, listener: null, timer: 0};
+        ringSwipe = swipe;           // isMoving() true BEFORE ensureWindow below
+      }
       ensureWindow(newIdx);
       scheduleDeferredFetches(newIdx); // ensureStripImage judged "near" against the OLD currentIdx
       const targetOffset = pageOffsetPx(newIdx);
@@ -3391,15 +3538,21 @@
       track.offsetHeight; // force reflow so transition applies from current position
       track.style.transform = "translateX(" + targetOffset + "px)";
       let finalized = false;
-      const finalize = () => {
-        if (finalized) return;
+      const finalize = (e) => {
+        if (!isTrackSlideEnd(e)) return;
+        if (finalized || (swipe && swipe.done)) return;
         finalized = true;
+        // Ring: drop the transaction BEFORE snapTo so its cancel-guard sees
+        // a clean slate and isMoving() stops reporting this commit.
+        if (swipe){ swipe.done = true; if (ringSwipe === swipe) ringSwipe = null; }
         track.removeEventListener("transitionend", finalize);
         track.style.transition = "none";
         snapTo(newIdx, false);
       };
+      if (swipe) swipe.listener = finalize;
       track.addEventListener("transitionend", finalize);
-      setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
+      const swipeTimer = setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
+      if (swipe) swipe.timer = swipeTimer;
       e.preventDefault();
       dropTapFocus();
       dismissOutsidePopovers();

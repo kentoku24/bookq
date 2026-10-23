@@ -6,7 +6,7 @@
 const SHELL_CACHE = "bookq-shell-v2";
 const API_CACHE = "bookq-api-v1";
 const FALLBACK_CACHE = "bookq-images-fallback";
-const SHELL_ASSETS = ["/", "/static/offline.html", "/static/manifest.json", "/static/style.css", "/static/app.js", "/static/offline-core.js", "/static/browse/hash.js", "/static/browse/render.js", "/static/browse/scroll.js", "/static/search/facets.js", "/static/offline/storeAdapter.js", "/static/offline/tree-writer.js", "/static/thumbs/resolveCover.js", "/static/thumbs/prefetch.js", "/static/viewer/spread.js", "/static/viewer/gesture.js", "/static/viewer/zoom.js", "/static/viewer/overview.js", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/icons/icon-512-maskable.png"];
+const SHELL_ASSETS = ["/", "/static/offline.html", "/static/manifest.json", "/static/style.css", "/static/app.js", "/static/offline-core.js", "/static/browse/hash.js", "/static/browse/render.js", "/static/browse/scroll.js", "/static/search/facets.js", "/static/offline/storeAdapter.js", "/static/offline/tree-writer.js", "/static/thumbs/resolveCover.js", "/static/thumbs/prefetch.js", "/static/viewer/spread.js", "/static/viewer/gesture.js", "/static/viewer/zoom.js", "/static/viewer/overview.js", "/static/viewer/ringCache.js", "/static/viewer/ring.js", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/icons/icon-512-maskable.png"];
 
 // Per-work cache naming comes from offline-core.js, the same file the page
 // loads: a second copy here would rename every work's cache the moment either

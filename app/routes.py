@@ -741,7 +741,8 @@ async def index(request: Request):
     # No Vary: User-Agent — the SW precaches '/' via a header-less Request, so a
     # varying response would never match a real navigation's cache lookup.
     ua_android = "android" in request.headers.get("user-agent", "").lower()
-    context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android}
+    context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android,
+               "reader_ring": request.query_params.get("reader") == "ring"}
     if thumb_perf:
         context["thumbnail_perf"] = True
         context["thumbnail_probe"] = (
