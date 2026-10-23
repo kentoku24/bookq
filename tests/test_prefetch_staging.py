@@ -1,6 +1,8 @@
 """Staged prefetch: the next page must not share bandwidth with the far-ahead
 window. Neighbours (|d|<=1) start fetching at once; the rest wait for the
 next page's load (or a 400ms fallback), then start nearest-first."""
+import pytest
+
 from playwright.sync_api import expect
 
 FOLDER = "long"  # 30 pages
@@ -14,6 +16,7 @@ def _src_state(page):
     )
 
 
+@pytest.mark.strip_only
 def test_far_pages_start_after_next_page_loads(page, server):
     # Hold every image response so the staging is observable.
     gate = {"open": False}
@@ -44,6 +47,7 @@ def test_far_pages_start_after_next_page_loads(page, server):
     expect(page.locator("#img-track img.loaded").first).to_be_visible()
 
 
+@pytest.mark.strip_only
 def test_turning_promotes_the_new_neighbours(page, server):
     page.goto(f"{server}/#/view/{FOLDER}?p=0")
     expect(page.locator("#counter")).to_have_text("1 / 30")

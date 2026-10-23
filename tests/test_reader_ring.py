@@ -49,6 +49,17 @@ def _mounted_imgs(page):
     )
 
 
+def _reader_off(page):
+    """Pin the localStorage flag to a non-ring sentinel, then RELOAD so the
+    already-initialized document re-reads it. Any value other than 'ring'
+    means OFF — this survives navigations and the suite-wide
+    BOOKQ_TEST_READER default, which only fills an UNSET flag. The reload
+    matters: a hash-only goto reuses the document whose ringRequested was
+    already latched at app.js init."""
+    page.evaluate("localStorage.setItem('bookq_reader', 'strip')")
+    page.reload()
+
+
 def _wait_turn(page, idx):
     """A turn has fully landed: index moved, slide settled, anchor re-based.
     currentIdx alone is racy — it updates before the next rAF sets
@@ -78,6 +89,7 @@ def _assert_window(page, idx):
 @pytest.mark.parametrize("q", ["", "?reader=bogus", "?reader=Ring"], ids=["absent", "unknown", "case"])
 def test_flag_absent_or_unknown_keeps_strip(page, server, q):
     """Without the exact flag the strip renderer runs and no ring nodes exist."""
+    _reader_off(page)          # neutralize the BOOKQ_TEST_READER default
     page.goto(f"{server}/{q}#/view/{FOLDER}?p=0")
     expect(page.locator("#counter")).to_have_text("1 / 30")
     assert page.evaluate("window.__bookqReader") == "strip"
@@ -105,6 +117,7 @@ def test_ring_flag_mounts_three_slot_roots(page, server):
 def test_ring_scripts_only_load_with_flag(page, server):
     """Default pages must not even request the ring modules — the opt-in
     loads them on demand from the client, so a strip session stays lean."""
+    _reader_off(page)          # neutralize the BOOKQ_TEST_READER default
     seen = []
     page.on(
         "request",
@@ -1127,6 +1140,8 @@ def test_harness_ring_toggle_enables_ring_next_visit(ios_page, server):
     demand and the viewer comes up ring without any URL param."""
     page = ios_page
     page.goto(server + "/static/offline-harness.html?harness=1")
+    _reader_off(page)          # neutralize the BOOKQ_TEST_READER default
+    page.evaluate("refreshRingBadge()")
     page.locator("#btn-ring-toggle").click()
     expect(page.locator("#harness-ring-status")).to_contain_text("reader: ring")
     page.locator("header h1 a").click()          # title → tile view
@@ -1147,6 +1162,8 @@ def test_harness_ring_toggle_on_off(ios_page, server):
     toggle it sits next to."""
     page = ios_page
     page.goto(server + "/static/offline-harness.html?harness=1")
+    _reader_off(page)          # neutralize the BOOKQ_TEST_READER default
+    page.evaluate("refreshRingBadge()")
     page.wait_for_selector("#harness-ring-status", timeout=10000)
     expect(page.locator("#harness-ring-status")).to_contain_text("reader: strip")
     page.locator("#btn-ring-toggle").click()

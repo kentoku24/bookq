@@ -2013,20 +2013,34 @@
       if (_empty){ _empty.innerHTML = "<p>読込中…</p>"; _empty.style.display = "flex"; }
       return;
     }
+    // The restore intent must be captured in this call's synchronous head:
+    // applyUrlState re-arms urlRestoring right before EACH loadImages call,
+    // so after the ensureRing await a second racing call would read the flag
+    // this call already cleared — and silently drop the URL's &s=/&o= params.
+    const entrySt = parseViewerHash();  // the URL the load STARTED from — decides replace vs push at success-end
+    const wasRestore = urlRestoring;    // a deep-link restore had this set by applyUrlState a microtask earlier
+    urlRestoring = false;               // a direct user open clears the restore intent
+    const myGen = ++urlRestoreGen;      // every loadImages invocation claims the newest restore token
+    // Open feedback that consults no ring state must not sit behind the
+    // module fetch below (a resume click closes the sidebar itself, then the
+    // folder name is expected to be there already).
+    try { window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); } // 別の本を開いた＝ビューア復帰の文脈は切れた（一覧のアンカーには使わない）
+    currentFolder = fullPath;
+    folderName.textContent = fullPath;
+    counter.textContent = "";
+    empty.style.display = "none";
+    imgContainer.classList.add("loading");
+    spinner.style.display = "block";
+    pageSliderWrap.classList.remove("visible");
+    closeSidebar();
+    // A load starting while the overview is open (deep link, sidebar pick)
+    // would leave the previous book's grid on screen over the new one.
+    window.Overview.close();
     // Resolve the reader before anything below consults `ringOn` — the two
     // modules load on demand (never static tags), so the first open awaits
     // them here instead of racing script arrival vs. renderer selection.
     await ensureRing();
-    // 別の本を開いた＝ビューア復帰の文脈は切れた（一覧のアンカーには使わない）
-    try { window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
-    currentFolder = fullPath;
-    const myGen = ++urlRestoreGen;      // every loadImages invocation claims the newest restore token
-    // A load starting while the overview is open (deep link, sidebar pick)
-    // would leave the previous book's grid on screen over the new one.
-    window.Overview.close();
-    const entrySt = parseViewerHash();  // the URL the load STARTED from — decides replace vs push at success-end
-    const wasRestore = urlRestoring;    // a deep-link restore had this set by applyUrlState a microtask earlier
-    urlRestoring = false;               // a direct user open clears the restore intent
+    if (myGen !== urlRestoreGen) return; // a newer open superseded this one while the modules fetched
     currentIdx = 0;
     images = [];
     resetStrip();
@@ -2037,13 +2051,6 @@
       spreadOffset = fromUrl && entrySt.o === 1 ? 1 : 0;
     }
     updateOrientation(true); // force: URL wins over the last-known viewport size (決定 Q17)
-    folderName.textContent = fullPath;
-    counter.textContent = "";
-    empty.style.display = "none";
-    imgContainer.classList.add("loading");
-    spinner.style.display = "block";
-    pageSliderWrap.classList.remove("visible");
-    closeSidebar();
 
     try {
       const siblings = getSiblingLeafFolders(fullPath);
@@ -2770,7 +2777,17 @@
       // Ring: the drag only moves the track transform — slots never get a
       // per-touchmove position pass (their layout is fixed-stride).
       const r = ringInstance();
-      if (r) r.drag(pageOffsetPx(idx) + dragPx);
+      if (!r) return;
+      if (dragPx === 0){
+        // A reset (abortDrag / land) must be synchronous — r.drag() queues
+        // via rAF, so a queued reset leaves the strip visibly displaced for
+        // a frame and lets a same-task reader (pinch measureBox, tests) see
+        // the stale mid-drag offset. applyTrackTransform cancels the queued
+        // drag write itself.
+        applyTrackTransform(idx, 0, false);
+      } else {
+        r.drag(pageOffsetPx(idx) + dragPx);
+      }
       return;
     }
     track.style.transition = "none";
