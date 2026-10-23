@@ -1,3 +1,8 @@
+---
+name: page-turn-fps
+description: Measure bookq viewer page-turn frame gaps on the real Android tablet — tap/swipe next/prev via `adb shell input`, rAF probe over CDP, strip/ring A/B via --reader, optional --finger real-input mode. Trigger on 「ページ送りのfps測って」「めくりアニメーションのフレーム時間」「viewer turn fps」「reader=ring A/B」.
+---
+
 # page-turn-fps — viewer page-turn frame-gap measurement (Android)
 
 One command measures frame gaps during page turns (tap / swipe, both
@@ -27,7 +32,12 @@ Setup (adb pairing, CDP forward, wakefulness check, tab picking) is
 self-recovering exactly like `tile-flick-fps` — the script re-issues the
 `adb forward`, reconnects wireless ADB via mDNS, and fails with specific
 messages otherwise. The device page must be a bookq **viewer** (a `#/view/`
-book open) — the probe returns `NO-VIEWER` on browse pages.
+book open) — the script verifies the hash AND a non-empty image list
+*before* sending any input, so it never taps on a browse grid. It also
+calibrates the tap Y coordinate against a real `clientY` readback (top
+chrome ≠ `screen.height - innerHeight`), holds synthetic taps for 65ms via
+a same-point `input swipe`, and aborts if the `?perf=1` HUD is on —
+including a persisted `localStorage bookq_perf=1`, which it clears once.
 
 Useful flags: `--taps/--swipes` (per direction, default 5), `--warmup`
 (default 4 turns — cold decode skews the first pass), `--settle` (ms of
@@ -40,16 +50,19 @@ post-release window counted as turn-active, default 400), `--serial`,
 gestures: 20, idx changes: [(14, 15), (15, 16), ...]
 tap: 10 gestures, 260 frames
   p50 11.9ms  p90 26.5ms  p99 33.8ms  max 39.0ms
-  >22.3ms(>=1 miss): 55 (21.2%)  >33.4ms(>=2): 3 (1.2%)
+  >16.7ms(>=1 miss): 55 (21.2%)  >27.8ms(>=2): 3 (1.2%)
   ~84 fps at p50
 ```
 
-- 90Hz panel: 11.1ms = vsync-bound (~90fps). >22.3ms gap = ≥1 missed vsync,
-  >33.4ms = ≥2. p50 near 11ms means vsync-bound — **compare the tails**
-  (p90/p99/max and miss %), not the median.
-- `idx changes` verifies every gesture actually turned a page — if few
-  changes appear, the input missed the tap zones (wrong tab, overlay, or
-  the viewer exited to the browse grid).
+- 90Hz panel: 11.1ms = vsync-bound (~90fps). Gap plateaus sit at
+  ~11.1/22.2/33.3ms, so miss thresholds are the midpoints: >16.7ms = ≥1
+  missed vsync, >27.8ms = ≥2. p50 near 11ms means vsync-bound — **compare
+  the tails** (p90/p99/max and miss %), not the median.
+- Each gesture is verified to have produced an `idx` change inside its
+  window; gestures that did not turn (missed zone, chapter boundary,
+  viewer exited) are excluded from the stats, reported as `skipped`, and
+  fail the run (exit 1) in synthetic mode — their clean ~11ms windows
+  would otherwise flatter the tail.
 - Classification: a gesture with zero `touchmove` events is a tap, any
   moves = swipe. Window per gesture = touchstart → touchend + `--settle`.
 
@@ -73,9 +86,8 @@ numbers for the wrong build. For comparisons use identical
   `--finger` mode records rAF windows for manual gestures.
 - The viewer must already be open on the right book — deep-link restore
   after a folder rename can 404 (check the `/json` tab URL still resolves).
-- `input swipe` page turns read `currentIdx` from the page — gestures that
-  don't turn (missed zones, book closed) corrupt grouping; the WARN check
-  above catches that.
+- Re-running against the same tab is safe — the probe un-arms any previous
+  install before re-arming, so a second run never re-reports stale frames.
 
 ## References
 
