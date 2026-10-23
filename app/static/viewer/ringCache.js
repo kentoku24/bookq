@@ -55,6 +55,12 @@
 
     function ensure(idx, priority) {
       var e = entries.get(idx);
+      // A failed PINNED entry must not be terminal — a transient drop on a
+      // mounted/neighbour page would otherwise stay broken until the reader
+      // walked two spreads away (and stall prefetch via the readiness gate).
+      // Rebuild and refetch on demand — bounded to once per ensure() call.
+      // Unpinned failures stay put: far-prefetch misses must not churn.
+      if (e && e.failed && e.pinned) { release(e); e = null; }
       if (e) {
         // Only an explicit priority retunes the request — an absent one must
         // never downgrade an entry that is already fetching high. And only
@@ -65,7 +71,10 @@
       }
       var url = urlFor(idx);
       if (!url) return null;   // chapter-boundary spacers have no URL
-      var img = new Image();
+      // Share the strip's element factory (decoding/draggable/alt init) —
+      // the pool's lazy fallback creates an identical img when drained.
+      var img = (window.imagePool && typeof window.imagePool.acquire === "function")
+                ? window.imagePool.acquire() : new Image();
       img.decoding = "async";
       img.draggable = false;
       img.alt = "";
@@ -168,7 +177,15 @@
         if (e2.ready && e2.bytes > largest) largest = e2.bytes;
       }
       if (largest <= 0) return false;
-      return pinnedBytes() + largest <= maxBytes;
+      // Project the WHOLE unpinned set plus the new entry — judging one page
+      // at a time accepts prefetches that trim() then has to evict back out
+      // (allocate→decode→evict churn on every turn). In-flight unpinned
+      // entries still report bytes=0; estimate them at `largest`.
+      var projected = pinnedBytes() + largest;
+      for (var e3 of entries.values()) {
+        if (!e3.pinned) projected += e3.bytes > 0 ? e3.bytes : largest;
+      }
+      return projected <= maxBytes;
     }
 
     return { pin: pin, ensure: ensure, canPrefetch: canPrefetch, trim: trim, clear: clear, debug: debug };

@@ -12,14 +12,16 @@
  */
 (function () {
   var SLOT_COUNT = 3;
-  var GAP_INNER = 5;           // matches #img-track .spread-container gap
+  // Single source is spread.js (its GAP_INNER feeds spreadMetrics width
+  // math) — a private copy would silently drift the two apart.
+  var GAP_INNER = (window.SpreadView && window.SpreadView.GAP_INNER) || 5;
 
   function create(config) {
     var track = config.track;
     var cache = window.ReaderImageCache.create({
       urlFor: config.urlFor,
       onAspect: onAspect,
-      onChange: function () {},
+      onChange: schedulePrefetchRetry,
       maxEntries: config.maxEntries,
       maxBytes: config.maxBytes,
     });
@@ -28,17 +30,44 @@
     var boundCenter = -1;      // spread the mounted window is bound around
     var boundModel = null;     // identity of the spreads array at bind time
     var layoutDirty = false;
+    var idleLayoutRaf = 0;
     var queuedPrefetch = null;
     var dragRaf = 0;
     var pendingDrag = null;
+    var prefetchRetryRaf = 0;
 
+    function scheduleIdleLayout() {
+      // layoutDirty marks a geometry write deferred by motion — schedule the
+      // retry here so the flag cannot sit true with nothing coming to clear
+      // it (it is not just debug telemetry).
+      if (idleLayoutRaf) return;
+      idleLayoutRaf = requestAnimationFrame(function check() {
+        if (config.isMoving()) { idleLayoutRaf = requestAnimationFrame(check); return; }
+        idleLayoutRaf = 0;
+        if (layoutDirty) layout();
+      });
+    }
     function onAspect(idx, img) {
       var changed = config.onAspect(idx, img);
       if (!changed) return;
       // A re-measured page resizes its spread. Geometry writes mid-drag or
       // mid-slide would move a live animation's rest position — defer them.
-      if (config.isMoving()) layoutDirty = true;
+      if (config.isMoving()) { layoutDirty = true; scheduleIdleLayout(); }
       else layout();
+    }
+    // A pinned page finishing (load OR error) is the signal that a prefetch
+    // refused by canPrefetch's pinned-readiness gate may now proceed —
+    // without this, a slow neighbour stalls far prefetch until the next
+    // user turn. Retries at the bound window when the reader comes to rest.
+    function schedulePrefetchRetry() {
+      if (prefetchRetryRaf || boundCenter < 0) return;
+      prefetchRetryRaf = requestAnimationFrame(function () {
+        prefetchRetryRaf = 0;
+        var spreads = config.getSpreads();
+        if (boundCenter >= 0 && spreads[boundCenter]) {
+          prefetch(spreads[boundCenter].pages[0]);
+        }
+      });
     }
 
     function setStyle(el, prop, value) {
@@ -141,6 +170,9 @@
       // NOT curSpread: ensureImage moves curSpread with the requested target
       // without meaning the window moved.
       if (slots && s === boundCenter && spreads === boundModel) return;
+      // A prefetch queued for the OLD window must not fetch after a jump —
+      // the caller re-queues for the new position via scheduleDeferredFetches.
+      if (s !== boundCenter) queuedPrefetch = null;
       ensureSlots();
       curSpread = s;
       var want = [], wantSet = {}, pinIdx = [];
@@ -190,20 +222,19 @@
       if (!spreads.length) return null;
       var s = config.spreadOf(idx);
       curSpread = s;             // ensureImage is always the requested target
-      var mounted = !!(spreads[s] && spreads[s].pages.indexOf(idx) >= 0);
       var img = cache.ensure(idx, "high");
       var reparented = false;
-      if (mounted && img) {
-        var sl = slotFor(s);
-        if (sl) {
-          var cell = sl.cells[spreads[s].pages.indexOf(idx)];
-          if (cell.firstChild !== img) {
-            while (cell.firstChild) cell.removeChild(cell.firstChild);
-            cell.appendChild(img);
-            reparented = true;
-          }
-          cell.style.display = "";
+      // "Displayed" means bound to a slot — spreads[s].pages always contains
+      // idx here (s is spreadOf(idx)), so that test would be a constant true.
+      var sl = slotFor(s);
+      if (sl && img) {
+        var cell = sl.cells[spreads[s].pages.indexOf(idx)];
+        if (cell.firstChild !== img) {
+          while (cell.firstChild) cell.removeChild(cell.firstChild);
+          cell.appendChild(img);
+          reparented = true;
         }
+        cell.style.display = "";
       }
       // The mounted maps only change when a page actually moved cells —
       // republishing the same bindings is pure churn on the ack path.
@@ -283,6 +314,8 @@
     function reset() {
       cancelDrag();
       queuedPrefetch = null;
+      if (idleLayoutRaf) { cancelAnimationFrame(idleLayoutRaf); idleLayoutRaf = 0; }
+      if (prefetchRetryRaf) { cancelAnimationFrame(prefetchRetryRaf); prefetchRetryRaf = 0; }
       layoutDirty = false;
       curSpread = -1;
       boundCenter = -1;

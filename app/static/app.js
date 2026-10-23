@@ -2314,9 +2314,12 @@
   // shift, orientation). Empties are dropped so no stale container lingers.
   function regroupCells(){
     if (ringOn){
-      // Grouping changed (1P⇄2P / orientation / cover shift): drop any pending
-      // swipe (its target offset is stale geometry) and rebind the window.
-      cancelRingSwipe();
+      // Grouping changed (1P⇄2P / orientation / cover shift): a pending ring
+      // commit must still LAND — the slide animation is what stale geometry
+      // invalidates, not the destination page. strip keeps its 260ms finalize
+      // timer alive through regroup; cancelling here would silently eat the
+      // reader's turn. Finish the commit, then rebind around the landed idx.
+      finishRingSwipe();
       const r = ringInstance();
       if (r){ r.ensureWindow(currentIdx); r.layout(); }
       return;
@@ -2420,9 +2423,14 @@
     img.src = img.dataset.deferredSrc;
     delete img.dataset.deferredSrc;
   }
+  // Shared ring branch for both deferred-fetch paths: neighbours-around-idx
+  // is exactly what ring's bounded cache prefetch wants, either way.
+  function ringPrefetchNow(idx){
+    if (ringReader && images.length) ringReader.prefetch(idx);
+  }
   // Start every still-deferred fetch, nearest to `idx` first.
   function flushDeferredFetches(idx){
-    if (ringOn){ if (ringReader && images.length) ringReader.prefetch(idx); return; }
+    if (ringOn){ ringPrefetchNow(idx); return; }
     Object.keys(stripImgs)
       .map(Number)
       .filter(i => stripImgs[i] && stripImgs[i].dataset.deferredSrc)
@@ -2436,7 +2444,7 @@
   // prefetch. Also re-ranks fetchPriority as the reader moves.
   const DEFERRED_FLUSH_MS = 400;
   function scheduleDeferredFetches(idx){
-    if (ringOn){ if (ringReader && images.length) ringReader.prefetch(idx); return; }
+    if (ringOn){ ringPrefetchNow(idx); return; }
     clearTimeout(deferredFlushTimer);
     for (const k in stripImgs){
       const img = stripImgs[k], d = Math.abs(Number(k) - idx);
@@ -3325,7 +3333,12 @@
   let pendingPalmId = null;
   const findTouch = window.ViewerGesture.findTouch;
   function armDrag(t0, startX, startY){
-    if (ringSwipe) finishRingSwipe();   // a touch during a ring commit lands it
+    // A touch during a ring commit lands it — and must also re-base the
+    // anchor NOW: the commit's own snapTo rAF (which would rebase) is killed
+    // by the snapGen++ below, and the ring path never sets `sliding`, so
+    // neither existing guard catches it. A stale anchorSpread corrupts both
+    // the pinch measureBox and the next tap's jump-distance check.
+    if (ringSwipe) { finishRingSwipe(); rebaseAnchor(currentIdx); }
     dragTouchId = t0.identifier;
     pendingPalmId = null;
     track.style.transition = "none";
@@ -3531,8 +3544,15 @@
         swipe = {newIdx, done: false, listener: null, timer: 0};
         ringSwipe = swipe;           // isMoving() true BEFORE ensureWindow below
       }
-      ensureWindow(newIdx);
-      scheduleDeferredFetches(newIdx); // ensureStripImage judged "near" against the OLD currentIdx
+      // Ring: the incoming spread is already mounted in the adjacent slot —
+      // rebinding here does unbind/pin/new Image()/src work inside the input
+      // handler before the slide even starts. snapTo's deferred window job
+      // (fired by `finalize`) owns the rebind — acknowledge-first, same as
+      // the tap path. Strip still needs the target mounted to slide to.
+      if (!ringOn){
+        ensureWindow(newIdx);
+        scheduleDeferredFetches(newIdx); // ensureStripImage judged "near" against the OLD currentIdx
+      }
       const targetOffset = pageOffsetPx(newIdx);
       track.style.transition = "transform .25s cubic-bezier(0.25,0.1,0.25,1.0)";
       track.offsetHeight; // force reflow so transition applies from current position

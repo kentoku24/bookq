@@ -411,7 +411,7 @@
     ensureStripImage, ensureWindow, evictStrip, snapTo, pageOffsetPx,
     sliderMax, idxToSlider, sliderToIdx, syncSliderValue, updateStripPositions, rebaseAnchor,
     invalidateSpreadSizes, spreadOf, arOf,
-    imagePool
+    imagePool, GAP_INNER
   };
 
   // ── Orientation helpers (also spread-related) ──

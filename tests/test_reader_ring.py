@@ -812,3 +812,137 @@ def test_reader_image_cache_pin_lru_and_clear(page, server):
     )
     for k, v in out.items():
         assert v is True, f"{k}: {v}"
+
+
+# ── 9. review-driven cache/commit regressions ────────────────────────────────
+
+def test_cache_admission_counts_unpinned_and_inflight(page, server):
+    """canPrefetch judged one page at a time and accepted prefetches that
+    trim() then evicted back out. Admission must project the whole unpinned
+    set — in-flight entries still at bytes=0 estimate at the largest known
+    size — plus the new entry."""
+    page.goto(f"{server}/?reader=ring")
+    page.wait_for_function("!!window.ReaderImageCache")
+    out = page.evaluate(
+        """async () => {
+          const mk = (opts) => window.ReaderImageCache.create(Object.assign({
+            urlFor: i => "/static/icons/icon-192.png?i=" + i,
+          }, opts));
+          const loads = (img) => new Promise(res => {
+            img.addEventListener("load", () => res(true));
+            img.addEventListener("error", () => res(false));
+          });
+          const B = 192 * 192 * 4;
+          const res = {};
+
+          // pinned 2B warm, two unpinned entries still in flight: the new
+          // page projects 2B + 2B + B > 4B — must refuse (old code: 2B+B
+          // <= 4B admitted, then trim() threw the just-fetched entry out).
+          const c = mk({ maxEntries: 10, maxBytes: 4 * B });
+          const z0 = c.ensure(0), z1 = c.ensure(1);
+          c.pin([0, 1]);
+          await Promise.all([loads(z0), loads(z1)]);
+          c.ensure(2); c.ensure(3);            // unpinned, still in flight
+          res.projectedRefusal = c.canPrefetch(4) === false;
+          // One unpinned in flight still fits: 2B + B + B = 4B <= 4B.
+          const c2 = mk({ maxEntries: 10, maxBytes: 4 * B });
+          const y0 = c2.ensure(0), y1 = c2.ensure(1);
+          c2.pin([0, 1]);
+          await Promise.all([loads(y0), loads(y1)]);
+          c2.ensure(2);
+          res.fittingAdmit = c2.canPrefetch(4) === true;
+          return res;
+        }"""
+    )
+    for k, v in out.items():
+        assert v is True, f"{k}: {v}"
+
+
+def test_cache_failed_entry_retries_on_next_ensure(page, server):
+    """A failed PINNED page must not stay broken until the reader walks two
+    spreads away — ensure() on a failed pinned entry rebuilds and refetches.
+    Unpinned failures must NOT retry (far-prefetch misses don't churn)."""
+    page.goto(f"{server}/?reader=ring")
+    page.wait_for_function("!!window.ReaderImageCache")
+    out = page.evaluate(
+        """async () => {
+          const loads = (img) => new Promise(res => {
+            img.addEventListener("load", () => res(true));
+            img.addEventListener("error", () => res(false));
+          });
+          const c = window.ReaderImageCache.create({
+            urlFor: () => "/definitely-not-here.png" });
+          c.pin([0]);
+          const first = c.ensure(0);
+          await loads(first);
+          const failedMarked = c.debug().failed.indexOf(0) >= 0;
+          const second = c.ensure(0);      // pinned retry → NEW element
+          const pinnedRetried = second !== first && c.debug().entries === 1;
+          await loads(second);
+          const c2 = window.ReaderImageCache.create({
+            urlFor: () => "/definitely-not-here.png" });
+          const u0 = c2.ensure(3);         // unpinned failure
+          await loads(u0);
+          const u1 = c2.ensure(3);
+          return { failedMarked, pinnedRetried,
+                   unpinnedKept: u1 === u0 };
+        }"""
+    )
+    for k, v in out.items():
+        assert v is True, f"{k}: {v}"
+
+
+def test_prefetch_resumes_once_pinned_neighbour_loads(page, server):
+    """A pinned neighbour still loading makes canPrefetch refuse — and
+    nothing re-asked until the next turn, so far prefetch silently stalled.
+    The pin set reporting ready must reschedule the refused prefetch."""
+    held = []
+    page.route("**/image/long/p002.png", lambda r: held.append(r))
+    _ring_book(page, server, p=0)
+    page.wait_for_function("document.querySelectorAll('.ring-slot').length >= 2")
+    for _ in range(50):
+        if held:
+            break
+        page.wait_for_timeout(20)
+    assert held, "neighbour fetch must be in flight"
+    # Portrait single-page: pinned window = pages {0,1}; far prefetch wants
+    # idx 2 (spread s+2). While p002 (idx 1) is held it must NOT be fetched…
+    page.wait_for_timeout(200)            # let the prefetch path run+refuse
+    assert 2 not in page.evaluate("window.__ringReaderDebug().cache.indices")
+    for r in held:
+        r.continue_()
+    page.unroute("**/image/long/p002.png")
+    # …and once the pin set reports ready the retry must land it.
+    page.wait_for_function(
+        "window.__ringReaderDebug().cache.indices.indexOf(2) >= 0")
+
+
+def test_regroup_during_ring_commit_still_lands_turn(page, server):
+    """regroupCells used to cancelRingSwipe() — a rotation/split-screen
+    resize inside the 250ms commit window silently ate the reader's turn.
+    It must finish the commit first, like strip's surviving finalize timer."""
+    _ring_book(page, server, p=4)
+    s = touch_session(page)
+    drag(s, 200, 450, 330, 450)          # forward swipe → commit in flight
+    s.detach()
+    # A real size change routes through the app's own updateOrientation →
+    # regroupCells, inside the commit window. Portrait→portrait delta only,
+    # so pageMode does not change and idx is not re-paired.
+    page.set_viewport_size({"width": 380, "height": 844})
+    page.wait_for_function("window.currentIdx === 5", timeout=3000)
+
+
+def test_touch_during_ring_commit_rebases_anchor(page, server):
+    """A touch landing inside a pending ring commit used to finish the turn
+    while anchorSpread stayed on the pre-slide spread — corrupting the pinch
+    measureBox and the next tap's jump-distance check. armDrag must re-base."""
+    _ring_book(page, server, p=1)
+    s = touch_session(page)
+    drag(s, 200, 450, 330, 450)          # forward swipe → commit pending
+    s.detach()
+    s = touch_session(page)
+    tap(s, CX, Y)                        # centre tap: arms a drag, turns nothing
+    s.detach()
+    page.wait_for_function(
+        "window.currentIdx === 2 && "
+        "window.anchorSpread === window.SpreadView.spreadOf(2)")
