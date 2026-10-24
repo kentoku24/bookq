@@ -401,6 +401,50 @@ def test_decode_and_error_states(page, server):
     assert "⚠" in page.locator("#counter").inner_text()
 
 
+def test_follower_slider_armed_from_shared_manifest(page, server):
+    """#100: a member that never opened the work solo must still get a live
+    page slider. enterPairStrip builds images/spreads/chapters from the
+    shared manifest, but pageSlider.max was only written on the solo entry
+    path (syncChapterSlider resetMax / chapter-change) — a follower that
+    lands in the same chapter it booted with keeps max=0 and cannot even
+    drag the thumb. Real-device acceptance hit exactly this."""
+    page.goto(server)
+    page.wait_for_selector(".tile")
+    man = _manifest("long", 30, 0)   # 30 pages -> 15 spreads
+    _commit(page, _snapshot("c0:s0"), man, "follower")
+    settle(page, 3)
+    _loaded_ready(page)
+
+    vals = page.evaluate(
+        "() => ({max: document.getElementById('page-slider').max,"
+        "       value: document.getElementById('page-slider').value})"
+    )
+    assert vals["max"] == "14"
+    assert vals["value"] == "0"
+
+    # a remote commit moves the thumb — value tracks the shared spreadId
+    _commit(page, _snapshot("c0:s3", "right", 2), man, "follower")
+    settle(page, 3)
+    assert page.evaluate("document.getElementById('page-slider').value") == "3"
+
+    # slider input emits exactly one goto intent for that spread's anchor
+    page.evaluate(
+        "window.__navIntents = [];"
+        "window.ViewerNavigation.setDefaultHandler("
+        "  i => { window.__navIntents.push(i); });"
+    )
+    page.evaluate(
+        "const s = document.getElementById('page-slider');"
+        "s.value = '5'; s.dispatchEvent(new Event('input', {bubbles:true}));"
+    )
+    settle(page, 2)
+    intents = page.evaluate("window.__navIntents")
+    assert [i["type"] for i in intents] == ["goto"]
+    assert intents[0]["via"] == "slider"
+    # spread 5 anchors at its right page — offset 0, R-to-L => p011.png
+    assert intents[0]["page"] == {"folder": "long", "name": "p011.png"}
+
+
 def test_render_path_emits_no_intents(page, server):
     page.goto(server)
     page.wait_for_selector(".tile")

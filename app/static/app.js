@@ -3052,7 +3052,8 @@
   // The display side of a committed paired state: update the projection, then
   // snap to the shared spread's anchor. Must never call request().
   function applyPairedCommit(desc, manifest){
-    if (!pairStrip || !pairStrip.active || desc.manifestChanged){
+    const entered = !pairStrip || !pairStrip.active || desc.manifestChanged;
+    if (entered){
       enterPairStrip(manifest, desc);
     }
     pairStrip.side = desc.side;
@@ -3062,6 +3063,12 @@
     const sp = spreads[desc.spreadIndex];
     const anchorIdx = sp && sp.pages.length ? sp.pages[0] : -1;
     if (anchorIdx < 0) return;   // unresolvable anchor: state recorded, no display move
+    // The pair strip builds its own images/spreads/chapters from the shared
+    // manifest, but the page slider's `max` is only written on solo entry
+    // (syncChapterSlider resetMax / chapter change). A member that never
+    // opened the work solo keeps max=0 — the slider cannot even be dragged.
+    // Every (re)entry / manifest swap re-arms it against the shared table.
+    if (entered) syncChapterSlider(anchorIdx, {resetMax: true});
     if (dragActive) abortDrag(); // a commit supersedes a half-finished drag
     snapTo(anchorIdx, false);
     // Write location.hash NOW — snapTo only schedules the usual 200ms
