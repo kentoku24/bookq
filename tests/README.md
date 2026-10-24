@@ -75,7 +75,7 @@ RECORD_VIDEO=1 RECORD_VIDEO_DIR=.omo/evidence BROWSER=webkit uv run --with pytes
 
 Android Chrome の既存タブに ADB + CDP で接続し、端末レベルの tap/swipe を実行します。ページ状態とグリッドの scrollTop をアサートし、JSON と各ステップのスクリーンショットを保存します。CDP 合成 touch event ではなく adb shell input を使うため、合成イベントだけのテストと区別できます。
 
-前提: Android 端末が unlock 済みで adb devices に1台だけ表示されること、端末 Chrome で bookq を開きリモートデバッグが有効なこと、PC から localhost:9222 の ADB forward が可能なこと。--url-match は既に開いているタブの URL に一意に一致する文字列を指定します。
+前提: Android 端末が unlock 済みで adb devices に表示されること（ワイヤレス ADB の IP 直結と mDNS エイリアスによる2表示はハードウェアシリアルで自動 dedupe。物理的に別の端末が複数ある場合のみ --serial が必須）、端末 Chrome にリモートデバッグが有効なこと、PC から localhost:9222 の ADB forward が可能なこと。--url-match は対象タブの URL に一意に一致する文字列を指定します。一致タブが0件のときは --reader-url を am start で Chrome に開かせてからポーリングするため、事前にタブを開いておく必要はありません。画面がスリープ中は KEYCODE_WAKEUP + keyguard 解除を試み、復帰しなければ environment_unavailable として失敗します（PIN/パターン lock がある端末は事前に人間が解除してください）。
 
 ```bash
 uv run --with websockets python3 scripts/android-touch-regress.py \

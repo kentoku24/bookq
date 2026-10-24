@@ -2131,7 +2131,7 @@
   function getUrl(idx){
     // Encode per path segment — image names may carry flattened "sub/dir/" prefixes.
     const img = images[idx];
-    if (img.isSpacer) return "";
+    if (!img || img.isSpacer) return "";
     return window.OfflineCore.readerUrl(img.folder, img.name);
   }
   try { window.getUrl = getUrl; } catch(e) { console.warn(e); }
