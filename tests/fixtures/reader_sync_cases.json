@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "spreadCases": [
+    {
+      "name": "0ページ",
+      "chapters": [{"folder": "empty", "pages": []}],
+      "offset": 0,
+      "expectSpreads": []
+    },
+    {
+      "name": "1ページ offset0",
+      "chapters": [{"folder": "one", "pages": ["p1.png"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "one", "right": "p1.png", "left": null}
+      ]
+    },
+    {
+      "name": "2ページ offset0",
+      "chapters": [{"folder": "two", "pages": ["p1.png", "p2.png"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "two", "right": "p1.png", "left": "p2.png"}
+      ]
+    },
+    {
+      "name": "3ページ offset0",
+      "chapters": [{"folder": "three", "pages": ["1.png", "2.png", "3.png"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "three", "right": "1.png", "left": "2.png"},
+        {"id": "c0:s1", "chapterFolder": "three", "right": "3.png", "left": null}
+      ]
+    },
+    {
+      "name": "偶数ページ offset0",
+      "chapters": [{"folder": "ev", "pages": ["1", "2", "3", "4"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "ev", "right": "1", "left": "2"},
+        {"id": "c0:s1", "chapterFolder": "ev", "right": "3", "left": "4"}
+      ]
+    },
+    {
+      "name": "奇数ページ offset0",
+      "chapters": [{"folder": "od", "pages": ["1", "2", "3", "4", "5"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "od", "right": "1", "left": "2"},
+        {"id": "c0:s1", "chapterFolder": "od", "right": "3", "left": "4"},
+        {"id": "c0:s2", "chapterFolder": "od", "right": "5", "left": null}
+      ]
+    },
+    {
+      "name": "偶数ページ offset1",
+      "chapters": [{"folder": "ev", "pages": ["1", "2", "3", "4"]}],
+      "offset": 1,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "ev", "right": "1", "left": null},
+        {"id": "c0:s1", "chapterFolder": "ev", "right": "2", "left": "3"},
+        {"id": "c0:s2", "chapterFolder": "ev", "right": "4", "left": null}
+      ]
+    },
+    {
+      "name": "奇数ページ offset1",
+      "chapters": [{"folder": "od", "pages": ["1", "2", "3", "4", "5"]}],
+      "offset": 1,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "od", "right": "1", "left": null},
+        {"id": "c0:s1", "chapterFolder": "od", "right": "2", "left": "3"},
+        {"id": "c0:s2", "chapterFolder": "od", "right": "4", "left": "5"}
+      ]
+    },
+    {
+      "name": "1ページ offset1",
+      "chapters": [{"folder": "one", "pages": ["p1.png"]}],
+      "offset": 1,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "one", "right": "p1.png", "left": null}
+      ]
+    },
+    {
+      "name": "複数章は見開きを跨がない",
+      "chapters": [
+        {"folder": "A", "pages": ["1", "2", "3"]},
+        {"folder": "B", "pages": ["x", "y"]}
+      ],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "A", "right": "1", "left": "2"},
+        {"id": "c0:s1", "chapterFolder": "A", "right": "3", "left": null},
+        {"id": "c1:s0", "chapterFolder": "B", "right": "x", "left": "y"}
+      ]
+    },
+    {
+      "name": "1ページ章×2",
+      "chapters": [
+        {"folder": "A", "pages": ["a.png"]},
+        {"folder": "B", "pages": ["b.png"]}
+      ],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "A", "right": "a.png", "left": null},
+        {"id": "c1:s0", "chapterFolder": "B", "right": "b.png", "left": null}
+      ]
+    },
+    {
+      "name": "Unicode・空白名",
+      "chapters": [{"folder": "夏 の 本", "pages": ["第 1話.png", "表 紙.png", "白い ページ.png"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "夏 の 本", "right": "第 1話.png", "left": "表 紙.png"},
+        {"id": "c0:s1", "chapterFolder": "夏 の 本", "right": "白い ページ.png", "left": null}
+      ]
+    },
+    {
+      "name": "アーカイブ内名",
+      "chapters": [{"folder": "vol", "pages": ["arc.cbz/001.jpg", "arc.cbz/002.jpg", "arc.cbz/003.jpg"]}],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c0:s0", "chapterFolder": "vol", "right": "arc.cbz/001.jpg", "left": "arc.cbz/002.jpg"},
+        {"id": "c0:s1", "chapterFolder": "vol", "right": "arc.cbz/003.jpg", "left": null}
+      ]
+    },
+    {
+      "name": "空章混在",
+      "chapters": [
+        {"folder": "A", "pages": []},
+        {"folder": "B", "pages": ["p1", "p2"]}
+      ],
+      "offset": 0,
+      "expectSpreads": [
+        {"id": "c1:s0", "chapterFolder": "B", "right": "p1", "left": "p2"}
+      ]
+    }
+  ],
+  "opCases": [
+    {
+      "name": "先頭・末尾のclamp",
+      "chapters": [{"folder": "A", "pages": ["1", "2", "3", "4", "5"]}],
+      "offset": 0,
+      "ops": [
+        {"op": "turn", "from": 0, "delta": -1, "crossChapter": true, "expect": 0},
+        {"op": "turn", "from": 2, "delta": 1, "crossChapter": true, "expect": 2},
+        {"op": "turn", "from": 0, "delta": 1, "crossChapter": true, "expect": 1},
+        {"op": "turn", "from": 9, "delta": 1, "crossChapter": true, "expectError": "ERR_RANGE"},
+        {"op": "turn", "from": 0, "delta": 0, "crossChapter": true, "expectError": "ERR_RANGE"}
+      ]
+    },
+    {
+      "name": "gotoから見開き解決",
+      "chapters": [{"folder": "A", "pages": ["1", "2", "3", "4", "5"]}],
+      "offset": 0,
+      "ops": [
+        {"op": "goto", "page": {"folder": "A", "name": "1"}, "expect": 0},
+        {"op": "goto", "page": {"folder": "A", "name": "2"}, "expect": 0},
+        {"op": "goto", "page": {"folder": "A", "name": "4"}, "expect": 1},
+        {"op": "goto", "page": {"folder": "A", "name": "5"}, "expect": 2},
+        {"op": "goto", "page": {"folder": "A", "name": "missing"}, "expectError": "ERR_RANGE"}
+      ]
+    },
+    {
+      "name": "章内制限と章跨ぎ",
+      "chapters": [
+        {"folder": "A", "pages": ["1", "2", "3"]},
+        {"folder": "B", "pages": ["x", "y"]}
+      ],
+      "offset": 0,
+      "ops": [
+        {"op": "turn", "from": 1, "delta": 1, "crossChapter": false, "expect": 1},
+        {"op": "turn", "from": 1, "delta": 1, "crossChapter": true, "expect": 2},
+        {"op": "turn", "from": 2, "delta": -1, "crossChapter": false, "expect": 2},
+        {"op": "turn", "from": 2, "delta": -1, "crossChapter": true, "expect": 1},
+        {"op": "turn", "from": 0, "delta": -1, "crossChapter": false, "expect": 0}
+      ]
+    },
+    {
+      "name": "投影と左右交換",
+      "chapters": [{"folder": "A", "pages": ["1", "2"]}],
+      "offset": 0,
+      "ops": [
+        {"op": "project", "spreadIndex": 0, "role": "leader", "leaderSide": "right", "expectSide": "right", "expectName": "1"},
+        {"op": "project", "spreadIndex": 0, "role": "follower", "leaderSide": "right", "expectSide": "left", "expectName": "2"},
+        {"op": "project", "spreadIndex": 0, "role": "leader", "leaderSide": "left", "expectSide": "left", "expectName": "2"},
+        {"op": "project", "spreadIndex": 0, "role": "follower", "leaderSide": "left", "expectSide": "right", "expectName": "1"}
+      ]
+    },
+    {
+      "name": "空白側の投影",
+      "chapters": [{"folder": "A", "pages": ["1"]}],
+      "offset": 0,
+      "ops": [
+        {"op": "project", "spreadIndex": 0, "role": "follower", "leaderSide": "right", "expectSide": "left", "expectName": null},
+        {"op": "project", "spreadIndex": 0, "role": "leader", "leaderSide": "left", "expectSide": "left", "expectName": null}
+      ]
+    },
+    {
+      "name": "offset1の空白spreadをgoto",
+      "chapters": [{"folder": "A", "pages": ["1", "2", "3"]}],
+      "offset": 1,
+      "ops": [
+        {"op": "goto", "page": {"folder": "A", "name": "1"}, "expect": 0},
+        {"op": "goto", "page": {"folder": "A", "name": "3"}, "expect": 1}
+      ]
+    }
+  ],
+  "rejectCases": [
+    {
+      "name": "version不一致",
+      "frame": {"v": 2, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "PING", "payload": {}},
+      "expectError": "ERR_VERSION"
+    },
+    {
+      "name": "version欠落",
+      "frame": {"requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "PING", "payload": {}},
+      "expectError": "ERR_VERSION"
+    },
+    {
+      "name": "未知type",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "FOO", "payload": {}},
+      "expectError": "ERR_TYPE"
+    },
+    {
+      "name": "frame非object",
+      "frame": [1, 2, 3],
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "requestId欠落",
+      "frame": {"v": 1, "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "PING", "payload": {}},
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "payload非object",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "PING", "payload": [1]},
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "baseRevision負",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": -1, "type": "PING", "payload": {}},
+      "expectError": "ERR_RANGE"
+    },
+    {
+      "name": "workEpoch負",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": -1, "baseRevision": 0, "type": "PING", "payload": {}},
+      "expectError": "ERR_RANGE"
+    },
+    {
+      "name": "TURN delta=0",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "TURN", "payload": {"delta": 0, "crossChapter": true, "fromChapter": "A"}},
+      "expectError": "ERR_RANGE"
+    },
+    {
+      "name": "TURN delta=2",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "TURN", "payload": {"delta": 2, "crossChapter": true, "fromChapter": "A"}},
+      "expectError": "ERR_RANGE"
+    },
+    {
+      "name": "GOTO page欠落",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "GOTO", "payload": {}},
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "GOTO page非str",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "GOTO", "payload": {"page": {"folder": "A", "name": 3}}},
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "SET_OFFSET範囲外",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "SET_OFFSET", "payload": {"offset": 2}},
+      "expectError": "ERR_RANGE"
+    },
+    {
+      "name": "JOINコード短い",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "JOIN", "payload": {"code": "123"}},
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "JOINコード非数字",
+      "frame": {"v": 1, "requestId": "r", "sessionId": "s", "workEpoch": 0, "baseRevision": 0, "type": "JOIN", "payload": {"code": "12345a"}},
+      "expectError": "ERR_MALFORMED"
+    },
+    {
+      "name": "size超過",
+      "frame": "__RAW_OVER_CAP__",
+      "expectError": "ERR_SIZE"
+    },
+    {
+      "name": "state phase未知",
+      "state": {"v": 1, "sessionId": "s", "revision": 1, "workEpoch": 0, "manifestVersion": 0, "phase": "bogus", "spreadId": null, "offset": 0, "leaderSide": "right", "presence": {}},
+      "expectError": "ERR_TYPE"
+    },
+    {
+      "name": "state revision負",
+      "state": {"v": 1, "sessionId": "s", "revision": -1, "workEpoch": 0, "manifestVersion": 0, "phase": "reading", "spreadId": "c0:s0", "offset": 0, "leaderSide": "right", "presence": {}},
+      "expectError": "ERR_RANGE"
+    },
+    {
+      "name": "state leaderSide不正",
+      "state": {"v": 1, "sessionId": "s", "revision": 1, "workEpoch": 0, "manifestVersion": 0, "phase": "reading", "spreadId": "c0:s0", "offset": 0, "leaderSide": "top", "presence": {}},
+      "expectError": "ERR_TYPE"
+    }
+  ],
+  "acceptFrames": [
+    {
+      "name": "TURN",
+      "frame": {"v": 1, "requestId": "r1", "sessionId": "s1", "workEpoch": 1, "baseRevision": 2, "type": "TURN", "payload": {"delta": 1, "crossChapter": true, "fromChapter": "A"}}
+    },
+    {
+      "name": "TURN章内制限",
+      "frame": {"v": 1, "requestId": "r2", "sessionId": "s1", "workEpoch": 1, "baseRevision": 2, "type": "TURN", "payload": {"delta": -1, "crossChapter": false, "fromChapter": "A"}}
+    },
+    {
+      "name": "GOTO",
+      "frame": {"v": 1, "requestId": "r3", "sessionId": "s1", "workEpoch": 1, "baseRevision": 2, "type": "GOTO", "payload": {"page": {"folder": "A", "name": "1.png"}}}
+    },
+    {
+      "name": "CREATE",
+      "frame": {"v": 1, "requestId": "r4", "sessionId": null, "workEpoch": 0, "baseRevision": 0, "type": "CREATE", "payload": {"work": {"folder": "w"}}}
+    },
+    {
+      "name": "JOIN",
+      "frame": {"v": 1, "requestId": "r5", "sessionId": null, "workEpoch": 0, "baseRevision": 0, "type": "JOIN", "payload": {"code": "123456"}}
+    },
+    {
+      "name": "SWAP_SIDES",
+      "frame": {"v": 1, "requestId": "r6", "sessionId": "s1", "workEpoch": 1, "baseRevision": 2, "type": "SWAP_SIDES", "payload": {"leaderSide": "left"}}
+    },
+    {
+      "name": "SIGNAL",
+      "frame": {"v": 1, "requestId": "r7", "sessionId": "s1", "workEpoch": 1, "baseRevision": 2, "type": "SIGNAL", "payload": {"kind": "offer", "data": {"sdp": "x"}}}
+    },
+    {
+      "name": "APPLIED",
+      "frame": {"v": 1, "requestId": "r8", "sessionId": "s1", "workEpoch": 1, "baseRevision": 3, "type": "APPLIED", "payload": {"requestId": "r1"}}
+    },
+    {
+      "name": "state",
+      "state": {"v": 1, "sessionId": "s", "revision": 3, "workEpoch": 1, "manifestVersion": 1, "phase": "reading", "spreadId": "c0:s0", "offset": 0, "leaderSide": "right", "presence": {"leader": "online", "follower": "online"}}
+    }
+  ]
+}
