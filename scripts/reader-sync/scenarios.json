@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "pair_and_signal",
+      "description": "CREATE/JOIN/APPROVE over real WS + SIGNAL relay in both directions + server RTT",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws", "webrtc-dc"],
+      "ops": [
+        {"op": "pair"},
+        {"op": "signal"},
+        {"op": "rtt", "samples": 6},
+        {"op": "screenshot", "label": "paired"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "turn_convergence",
+      "description": "spread turns initiated by both sides; markers + committed index converge",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws", "webrtc-dc"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "screenshot", "label": "opened"},
+        {"op": "turn", "actor": "leader", "delta": 1},
+        {"op": "turn", "actor": "follower", "delta": 1},
+        {"op": "turn", "actor": "follower", "delta": -1},
+        {"op": "screenshot", "label": "turned"},
+        {"op": "swap_sides", "actor": "leader"},
+        {"op": "screenshot", "label": "swapped"},
+        {"op": "rtt", "samples": 5},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "chapter_boundaries",
+      "description": "two-chapter work: turns never cross spread/chapter edges; blank side asserted",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws"],
+      "work": "fx_two_chapters",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "turn", "actor": "leader", "delta": -1},
+        {"op": "goto", "actor": "leader", "index": 1},
+        {"op": "turn", "actor": "follower", "delta": 1},
+        {"op": "screenshot", "label": "boundary"},
+        {"op": "goto", "actor": "leader", "index": 99},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "work_change",
+      "description": "work switch mid-session: new spread table applies on both clients",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "turn", "actor": "leader", "delta": 1},
+        {"op": "open_work", "work": "fx5"},
+        {"op": "screenshot", "label": "work-switched"},
+        {"op": "turn", "actor": "follower", "delta": 1},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "disconnect_resume",
+      "description": "follower drops the WS (peer sees offline), resumes, both keep the same spread",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "disconnect", "actor": "follower"},
+        {"op": "resume", "actor": "follower"},
+        {"op": "turn", "actor": "leader", "delta": 1},
+        {"op": "screenshot", "label": "resumed"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "resume_reject",
+      "description": "bad resume token is rejected (RESUME_REJECTED), then the real resume succeeds",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws"],
+      "ops": [
+        {"op": "pair"},
+        {"op": "disconnect", "actor": "follower"},
+        {"op": "resume_fail", "actor": "follower", "token": "bogus-token"},
+        {"op": "resume", "actor": "follower"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "fault_injection_isolation",
+      "description": "dup+delay+drop injection on the fixture session only; a second bystander session on the same env is unaffected",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "fault", "actor": "leader", "type": "ws_dup"},
+        {"op": "turn", "actor": "leader", "delta": 1},
+        {"op": "fault", "actor": "leader", "type": "clear"},
+        {"op": "fault", "actor": "leader", "type": "ws_delay", "ms": 120},
+        {"op": "turn", "actor": "follower", "delta": 1},
+        {"op": "fault", "actor": "leader", "type": "clear"},
+        {"op": "fault", "actor": "leader", "type": "sig_delay", "ms": 150},
+        {"op": "turn", "actor": "leader", "delta": -1},
+        {"op": "fault", "actor": "leader", "type": "clear"},
+        {"op": "fault", "actor": "leader", "type": "ws_drop"},
+        {"op": "wait", "ms": 2500},
+        {"op": "fault", "actor": "leader", "type": "clear"},
+        {"op": "wait", "ms": 600},
+        {"op": "turn", "actor": "leader", "delta": -1},
+        {"op": "bystander_check"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "transport_switch",
+      "description": "SIGNAL-brokered datachannel: plane flips to webrtc-dc at a revision boundary, falls back on close",
+      "drivers": ["chrome", "simulator"],
+      "transports": ["server-ws"],
+      "requires": ["webrtc"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "dc_open"},
+        {"op": "turn", "actor": "leader", "delta": 1},
+        {"op": "turn", "actor": "follower", "delta": -1},
+        {"op": "dc_close"},
+        {"op": "turn", "actor": "leader", "delta": -1},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "device_inputs",
+      "description": "simulator-only: real taps/text/swipe/pinch/rotate via idb; pairing driven through DOM buttons",
+      "drivers": ["simulator"],
+      "transports": ["server-ws"],
+      "requires": ["device_inputs"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair", "via": "taps"},
+        {"op": "open_work"},
+        {"op": "device_input", "actor": "leader", "kind": "swipe",
+         "params": {"x1": 320, "y1": 600, "x2": 60, "y2": 600, "duration": 0.2}},
+        {"op": "device_input", "actor": "follower", "kind": "pinch",
+         "params": {"x": 196, "y": 500, "scale": 0.6}},
+        {"op": "device_input", "actor": "leader", "kind": "rotate",
+         "params": {"orientation": "LANDSCAPE_LEFT"}},
+        {"op": "device_input", "actor": "leader", "kind": "rotate",
+         "params": {"orientation": "PORTRAIT"}},
+        {"op": "background", "actor": "follower"},
+        {"op": "foreground", "actor": "follower"},
+        {"op": "screenshot", "label": "inputs"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "pwa_install",
+      "description": "simulator-only: scripted Share -> Add to Home Screen -> Add via the idb AX tree",
+      "drivers": ["simulator"],
+      "transports": ["server-ws"],
+      "requires": ["pwa"],
+      "ops": [
+        {"op": "pair"},
+        {"op": "pwa_install", "actor": "leader"},
+        {"op": "screenshot", "label": "pwa"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "tailnet_ws",
+      "description": "tailnet-route marker: WS pairing across the tailscale serve proxy",
+      "drivers": ["chrome", "simulator"],
+      "route": "tailnet",
+      "transports": ["server-ws"],
+      "ops": [
+        {"op": "pair"},
+        {"op": "signal"},
+        {"op": "leave"}
+      ]
+    },
+    {
+      "name": "lan_direct",
+      "description": "lan-route marker: direct LAN env (./dev.sh up --local --fixture --port) over ws://",
+      "drivers": ["chrome", "simulator"],
+      "route": "lan",
+      "transports": ["server-ws"],
+      "work": "fx6",
+      "ops": [
+        {"op": "pair"},
+        {"op": "open_work"},
+        {"op": "turn", "actor": "leader", "delta": 1},
+        {"op": "leave"}
+      ]
+    }
+  ]
+}
