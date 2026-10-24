@@ -197,6 +197,39 @@ def test_oversized_frame_closed(server):
         assert "1009" in str(ei.value)
 
 
+def test_malformed_request_rejected_not_closed(server):
+    """A request frame that fails full validation earns a typed REJECT —
+    not a 1011 crash. Regression for _reject() indexing req["requestId"]
+    when the caller only had the requestId fragment (S11 raw probes hit
+    this and the link died with code 1011)."""
+    with _ws(server) as ws:
+        _recv(ws)
+        # requestId/type present but the rest of the request envelope is
+        # missing — parse_request raises, _reject must still echo both.
+        ws.send(json.dumps({"v": protocol.PROTOCOL_VERSION,
+                            "requestId": "bad1", "type": "RESUME"}))
+        rej = _expect(ws, "REJECT")
+        assert rej["reason"] == "malformed"
+        assert rej["requestId"] == "bad1"
+        assert rej["request"] == "RESUME"
+        # the link survived: heartbeat still answers after the reject.
+        ws.send(_request("PING", {"seq": 7}))
+        assert _expect(ws, "PONG")["seq"] == 7
+
+
+def test_unparseable_frame_rejected_not_closed(server):
+    """A frame that isn't even a request-shaped dict also gets a typed
+    REJECT with null echoes, and the link stays usable."""
+    with _ws(server) as ws:
+        _recv(ws)
+        ws.send(json.dumps([1, 2, 3]))
+        rej = _expect(ws, "REJECT")
+        assert rej["reason"] == "malformed"
+        assert rej["requestId"] is None and rej["request"] is None
+        ws.send(_request("PING", {"seq": 8}))
+        assert _expect(ws, "PONG")["seq"] == 8
+
+
 # ── real signed-cookie auth (no test-mode bypass) ──────────────────
 
 

@@ -38,6 +38,7 @@
       manifest: null,      // last applied manifest object (identity compare)
       ref: null,           // this device's assigned PageRef — null = blank side
       anchorRef: null,     // spread anchor PageRef (first real page)
+      spreadTotal: 0,      // committed manifest's shared spread-table length
     };
   }
 
@@ -77,6 +78,7 @@
       manifestVersion: st.manifestVersion,
       ref: st.ref,
       anchorRef: st.anchorRef,
+      spreadTotal: st.spreadTotal,
       blank: !!(st.active && st.ref === null),
     };
   }
@@ -149,6 +151,7 @@
     st.manifest = manifest;
     st.ref = proj.ref;
     st.anchorRef = anchor;
+    st.spreadTotal = table.length;
     return {
       kind: 'paired',
       spread: spread,

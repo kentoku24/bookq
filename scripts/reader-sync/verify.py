@@ -41,6 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from verify_core import (  # noqa: E402
     CAP_WEBRTC,
+    CAP_SERVER_RESTART,
+    CAP_REAL_UI,
     EXIT_ASSERT,
     EXIT_ENV,
     EXIT_PASS,
@@ -80,6 +82,21 @@ def _dev_url(name: str, repo_root: Path) -> str:
     if out.returncode != 0 or not out.stdout.strip().startswith("http"):
         raise EnvError(f"dev.sh url {name}: {out.stderr.strip() or out.stdout.strip()}")
     return out.stdout.strip()
+
+
+def _dev_container(name: str) -> str | None:
+    """The viewer container behind a named dev env — found via the
+    com.bookq.name docker label (the env pool's source of truth)."""
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "--filter", f"label=com.bookq.name={name}",
+             "--filter", "label=com.docker.compose.service=viewer",
+             "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    names = [n for n in out.stdout.splitlines() if n.strip()]
+    return names[0] if out.returncode == 0 and names else None
 
 
 def _lan_ip_for(url: str) -> str:
@@ -146,6 +163,9 @@ def _parse(argv=None) -> argparse.Namespace:
                    choices=["fixture", "ui"],
                    help="fixture = runner-served test page (default); "
                         "ui = the real app pairing UI (needs S09)")
+    p.add_argument("--repeat", type=int, metavar="N",
+                   help="override every scenario's repeat count "
+                        "(同一固定操作列の連続run)")
     p.add_argument("--run-id", help="override the evidence run id")
     p.add_argument("--evidence-root", metavar="DIR",
                    help="evidence root (default .omo/evidence/reader-sync)")
@@ -250,6 +270,9 @@ def main(argv=None) -> int:
 
         clients = {"leader": ClientSpec("leader", "leader"),
                    "follower": ClientSpec("follower", "follower")}
+        if args.driver == "simulator":
+            for cid, spec in clients.items():
+                spec.kind = "safari"
 
         if args.surface == "fixture":
             urls = {cid: fx.fixture_url(cid, spec.role, ws_url, base_url,
@@ -258,7 +281,7 @@ def main(argv=None) -> int:
         else:
             urls = {cid: base_url for cid in clients}
 
-        driver.launch(clients, urls)
+        driver.launch(clients, urls, fx=fx)
         result["devices"] = driver.devices(clients)
 
         hellos = {}
@@ -277,14 +300,23 @@ def main(argv=None) -> int:
 
         # capabilities -> run plan
         caps = set(driver.caps)
+        if args.surface == "ui":
+            caps.add(CAP_REAL_UI)
         if (hellos.get("leader", {}).get("hasRTC")
                 and hellos.get("follower", {}).get("hasRTC")):
             caps.add(CAP_WEBRTC)
+        dev_container = _dev_container(args.dev_env) if args.dev_env else None
+        if dev_container:
+            caps.add(CAP_SERVER_RESTART)
         result["capabilities"] = sorted(caps)
+        if dev_container:
+            result["dev_container"] = dev_container
         plan, skipped = resolve_plan(
             scenario_data, driver=args.driver, route=route,
-            caps=caps, only=args.scenario)
-        result["plan"] = [{"name": e["name"], "transport": e["transport"]}
+            caps=caps, only=args.scenario, repeat=args.repeat,
+            surface=args.surface)
+        result["plan"] = [{"name": e["name"], "transport": e["transport"],
+                           "run": e["run"]}
                           for e in plan]
         for sk in skipped:
             result["scenarios"].append(
@@ -303,7 +335,9 @@ def main(argv=None) -> int:
         for entry in plan:
             sc = entry["scenario"]
             t = entry["transport"]
-            sdir = evidence.scenario_dir(sc["name"], t)
+            run_i = entry["run"]
+            sdir = evidence.scenario_dir(
+                sc["name"], f"{t}" + (f"-r{run_i}" if run_i > 1 else ""))
             ops = list(sc["ops"])
             if t == "webrtc-dc" and not any(o["op"] == "dc_open" for o in ops):
                 # the dc plane can only attach once a pair exists — splice
@@ -312,11 +346,48 @@ def main(argv=None) -> int:
                     if o["op"] == "pair":
                         ops.insert(i + 1, {"op": "dc_open"})
                         break
-            ctx = RunCtx(fx=fx, driver=driver, clients=clients,
-                         ws_url=ws_url, base_url=base_url,
-                         evidence_dir=sdir, surface=args.surface)
-            print(f"[verify] scenario {sc['name']} [{t}] ...")
-            sres = run_scenario(ctx, {**sc, "ops": ops}, t)
+            # per-scenario client kinds (Safari×Safari / PWA×PWA /
+            # Safari×PWA on the simulator driver — spec #86): the page is
+            # already up, so a kind change is a surface switch — install +
+            # webclip launch for pwa, plain openurl for safari.
+            kinds = sc.get("clients") or {}
+            print(f"[verify] scenario {sc['name']} [{t}] run#{run_i} ...")
+            t0 = time.monotonic()
+            try:
+                for role, kind in kinds.items():
+                    spec = clients[role]
+                    if spec.kind != kind:
+                        driver.ensure_surface(spec, kind, fx, spec.id)
+                ctx = RunCtx(
+                    fx=fx, driver=driver, clients=clients,
+                    ws_url=ws_url, base_url=base_url,
+                    evidence_dir=sdir, surface=args.surface,
+                    dev_container=dev_container,
+                    # simulator webkit runs measurably slower — scale
+                    # every state-poll deadline rather than loosening
+                    # per-scenario timeouts one at a time.
+                    tscale=2.5 if args.driver == "simulator" else 1.0)
+                sres = run_scenario(ctx, {**sc, "ops": ops}, t,
+                                    run_index=run_i)
+            except EnvError as e:
+                # a surface switch that the environment can't do (e.g. a
+                # webclip install whose AX labels aren't there) must not
+                # abort the remaining plan — record it like a skipped op.
+                sres = {"name": sc["name"], "transport": t, "run": run_i,
+                        "status": "env_unavailable",
+                        "assertions": [{"name": "env", "ok": False,
+                                        "detail": str(e)}],
+                        "started_at":
+                            time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        "duration_ms": int((time.monotonic() - t0) * 1000)}
+            except UnsupportedError as e:
+                sres = {"name": sc["name"], "transport": t, "run": run_i,
+                        "status": "unsupported",
+                        "assertions": [{"name": "unsupported", "ok": False,
+                                        "detail": str(e)}],
+                        "started_at":
+                            time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        "duration_ms": int((time.monotonic() - t0) * 1000)}
             result["scenarios"].append(sres)
             for rel in (sres.get("artifacts") or {}).get("screenshots", []):
                 expected_files.append(rel)

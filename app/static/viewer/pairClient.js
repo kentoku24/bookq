@@ -1209,6 +1209,29 @@
       try { _sig.start(); } catch (e) { _sig = null; }
     }
 
+    /* Enable the webrtc-dc upgrade after client creation. The production
+     * wiring passes webrtc at construction; this exists so an opted-out
+     * client can adopt the upgrade mid-session (and so the S11 runner can
+     * decide the plane per scenario) without changing the default path. */
+    function enableWebRTC(rtcOpts) {
+      if (_destroyed || _term) return false;
+      _webrtc = rtcOpts || {};
+      _maybeStartDc();
+      return true;
+    }
+
+    /* Re-run signaling after a DC drop mid-session: the old peer's pc is
+     * closed, _sig cleared, and _maybeStartDc spins a fresh offer. The
+     * pair/session state is untouched — frames keep flowing on server-ws
+     * until the server confirms the plane flip again. */
+    function restartDataChannel() {
+      if (_destroyed || _term || !_webrtc) return false;
+      if (_sig && _sig.pc) { try { _sig.pc.close(); } catch (e) {} }
+      _sig = null;
+      _maybeStartDc();
+      return true;
+    }
+
     function attachDataChannel(raw) {
       var t = _adapt(raw, 'webrtc-dc');
       var prev = _dc.t;
@@ -1448,6 +1471,8 @@
       swapSides: swapSides,
       changeWork: changeWork,
       attachDataChannel: attachDataChannel,
+      enableWebRTC: enableWebRTC,
+      restartDataChannel: restartDataChannel,
       subscribe: subscribe,
       destroy: destroy,
       get state() { return _public(); },

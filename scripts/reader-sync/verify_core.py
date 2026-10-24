@@ -43,24 +43,37 @@ EVIDENCE_ROOT = REPO_ROOT / ".omo" / "evidence" / "reader-sync"
 # drivers interpret (spec: 同一 scenarios.json を両 driver が解釈する).
 KNOWN_OPS = frozenset({
     "pair",             # CREATE/JOIN/APPROVE over the real /ws/reader-sync
-    "open_work",        # load a synthetic work + render initial spread markers
-    "turn",             # spread turn, leader-sequenced, actor-initiated
-    "goto",             # absolute spread move
-    "swap_sides",       # leaderSide flip
-    "signal",           # SIGNAL relay round-trip (both directions)
-    "rtt",              # device-to-device RTT probe over the active data plane
+    "open_work",        # OPEN_WORK -> manifest -> READY -> reading markers
+    "turn",             # TURN through the real sequencer, actor-initiated
+    "goto",             # GOTO to a named page
+    "swap_sides",       # SWAP_SIDES leaderSide flip
+    "set_offset",       # SET_OFFSET 0/1 (offset変更)
+    "concurrent",       # fire several sub-ops "at once" (競合シナリオ)
+    "burst",            # N rapid-fire turns then converge (連打)
+    "rtt",              # client->server wire RTT probe (SET_ACTIVITY ack)
+    "latency",          # intent->committed-apply latency distribution
+    "expect",           # poll state for expected phase/spread/marker/…
     "dc_open",          # real WebRTC DataChannel via server-mediated signaling
     "dc_close",         # drop DC, TRANSPORT_STATE down, server-ws fallback
+    "dc_restart",       # re-signal a fresh DataChannel mid-session
     "disconnect",       # hard-drop the actor's sync WS
     "resume",           # reconnect + RESUME within the window
     "resume_fail",      # RESUME with a bad/expired-token -> expect reject
     "fault",            # adapter-level fault injection (scoped to own session)
+    "image_fault",      # client-side image delay/404/off render fault
+    "suspend",          # SET_ACTIVITY suspended (lock/background equivalent)
+    "activate",         # SET_ACTIVITY active again
+    "reload",           # real page reload -> credential resume path
+    "bfcache",          # pagehide->pageshow lifecycle round-trip
+    "server_restart",   # restart the target env's viewer container
     "bystander_check",  # runner-side second session proves fault isolation
     "background",       # device input: send the app to background (sim)
     "foreground",       # device input: return the app to foreground (sim)
     "device_input",     # device input: tap/text/swipe/pinch/rotate (sim)
     "tap_element",      # tap a named fixture control (sim AX / dom click)
     "pwa_install",      # scripted Add-to-Home-Screen (sim, best effort)
+    "ui_input",         # real-UI input path (chrome --surface ui)
+    "open_url",         # navigate a ui-surface client to a work
     "wait",             # deterministic dwell between ops (fault windows)
     "screenshot",       # capture both screens + marker pixel check
     "leave",            # LEAVE -> END on both sides
@@ -72,6 +85,11 @@ FAULT_TYPES = frozenset({
     "ws_drop",         # drop every outbound app frame (heartbeat kept alive)
     "sig_delay",       # delay only SIGNAL (signaling) frames
     "suppress_ice",    # ICE-establishment failure: drop outbound ice candidates
+    "stale_base",      # rewrite next sequenced op's baseRevision back N
+    "dup_next",        # send the next sequenced request twice (same requestId)
+    "in_drop",         # drop N inbound frames of a type (e.g. MANIFEST)
+    "in_corrupt",      # corrupt N inbound frames of a type (manifest digest)
+    "in_inject",       # inject crafted inbound frames (e.g. v:2 STATE)
     "clear",           # remove all injected faults
 })
 
@@ -81,6 +99,7 @@ CAP_DEVICE_INPUTS = "device_inputs"  # simctl/idb-driven tap/text/swipe/...
 CAP_PWA = "pwa"                   # scripted Add-to-Home-Screen
 CAP_BYSTANDER = "ws_bystander"    # runner-side raw-WS second session
 CAP_REAL_UI = "ui"                # real app pairing UI surface (post-S09)
+CAP_SERVER_RESTART = "server_restart"  # docker-manageable target env
 
 ROUTE_CLASSES = ("tailnet", "lan", "loopback")
 
@@ -88,6 +107,8 @@ ROUTE_CLASSES = ("tailnet", "lan", "loopback")
 # live folder名は収集しない).
 _SECRET_KEYS = re.compile(
     r"(code|resumetoken|token|secret|password|credential|cookie)", re.I)
+_FOLDER_KEYS = re.compile(
+    r"^(folder|chapterfolder|path|fullpath|workfolder|parentfolder)$", re.I)
 _FX_NAME = re.compile(r"^fx[:\-_ ]", re.I)
 
 
@@ -146,14 +167,16 @@ def redact(obj):
     """Deep-copy with secret keys masked and non-fx folder names hashed.
 
     Pairing codes, resume tokens, credentials and real folder names never
-    reach evidence. Synthetic fixture page names (``fx:…``) stay readable —
-    they carry no user data by construction.
-    """
+    reach evidence — folder-ish keys (folder/chapterFolder/path/fullPath)
+    collapse to a stable hash, while page ``name`` values stay readable
+    (they are the marker labels the asserts reason about)."""
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
             if _SECRET_KEYS.search(str(k)):
                 out[k] = "<redacted>"
+            elif _FOLDER_KEYS.search(str(k)) and isinstance(v, str):
+                out[k] = safe_name(v)
             else:
                 out[k] = redact(v)
         return out
@@ -201,6 +224,7 @@ def _validate_scenario(sc: dict, i: int, seen: set) -> None:
     for key, allowed in (
         ("drivers", ("chrome", "simulator")),
         ("route", ("any",) + ROUTE_CLASSES),
+        ("surface", ("fixture", "ui")),
         ("transports", ("server-ws", "webrtc-dc")),
     ):
         v = sc.get(key)
@@ -219,6 +243,10 @@ def _validate_scenario(sc: dict, i: int, seen: set) -> None:
                 f"scenario {name} op[{j}]: unknown op {op!r}")
         _validate_op(name, j, op)
     _validate_work(name, sc.get("work"))
+    _validate_clients(name, sc.get("clients"))
+    rep = sc.get("repeat", 1)
+    if not isinstance(rep, int) or isinstance(rep, bool) or rep < 1:
+        raise ScenarioError(f"scenario {name}: repeat must be an int >= 1")
     for req in sc.get("requires") or []:
         if req not in KNOWN_CAPS:
             raise ScenarioError(
@@ -226,8 +254,14 @@ def _validate_scenario(sc: dict, i: int, seen: set) -> None:
 
 
 def _validate_work(name: str, work) -> None:
-    """A scenario work is either an inline declaration or the name of a
-    synthetic work in tests/fixtures/reader_sync_tree.py."""
+    """A scenario work is either:
+    - the name of a synthetic work in tests/fixtures/reader_sync_tree.py
+    - an inline ``{chapters:[{folder:'fx:…',pages:[…]}], offset}`` declaration
+    - an ENV work ``{folder, page:{folder,name}, offset?}`` opened through
+      the real OPEN_WORK path against the target env's own tree. Env names
+      are synthetic dev-fixture folders, never user data — still, ops only
+      echo page names (never folders) into evidence.
+    """
     if work is None:
         return
     if isinstance(work, str):
@@ -235,16 +269,54 @@ def _validate_work(name: str, work) -> None:
             raise ScenarioError(
                 f"scenario {name}: named work {work!r} is not an fx fixture")
         return
-    if not isinstance(work, dict) or not isinstance(work.get("chapters"), list):
-        raise ScenarioError(f"scenario {name}: work needs a chapters list")
+    if not isinstance(work, dict):
+        raise ScenarioError(f"scenario {name}: work must be a name or object")
+    if isinstance(work.get("chapters"), list):
+        if work.get("offset", 0) not in (0, 1):
+            raise ScenarioError(f"scenario {name}: work.offset must be 0 or 1")
+        for ch in work["chapters"]:
+            folder = ch.get("folder", "")
+            if not isinstance(folder, str) or not _FX_NAME.match(folder):
+                raise ScenarioError(
+                    f"scenario {name}: chapter folder must be a synthetic "
+                    f"fx: name, got {folder!r}")
+        return
+    # env work form
+    if work.get("discover") is True:
+        mp = work.get("minPages", 6)
+        if not isinstance(mp, int) or mp < 2:
+            raise ScenarioError(
+                f"scenario {name}: discover work needs minPages >= 2")
+        if work.get("offset", 0) not in (0, 1):
+            raise ScenarioError(f"scenario {name}: work.offset must be 0 or 1")
+        return
+    if not isinstance(work.get("folder"), str):
+        raise ScenarioError(
+            f"scenario {name}: env work needs a folder string")
     if work.get("offset", 0) not in (0, 1):
         raise ScenarioError(f"scenario {name}: work.offset must be 0 or 1")
-    for ch in work["chapters"]:
-        folder = ch.get("folder", "")
-        if not isinstance(folder, str) or not _FX_NAME.match(folder):
+    page = work.get("page")
+    if page is not None and not (
+            isinstance(page, dict) and isinstance(page.get("name"), str)
+            and isinstance(page.get("folder"), str)):
+        raise ScenarioError(
+            f"scenario {name}: env work page must be {{folder,name}}")
+
+
+def _validate_clients(name: str, clients) -> None:
+    """Per-role client kind: 'safari'|'pwa' (simulator web clip) — the
+    Safari×Safari / PWA×PWA / Safari×PWA surface matrix of #86."""
+    if clients is None:
+        return
+    if not isinstance(clients, dict):
+        raise ScenarioError(f"scenario {name}: clients must be an object")
+    for role, kind in clients.items():
+        if role not in ("leader", "follower"):
             raise ScenarioError(
-                f"scenario {name}: chapter folder must be a synthetic "
-                f"fx: name, got {folder!r}")
+                f"scenario {name}: clients key must be leader|follower")
+        if kind not in ("safari", "pwa"):
+            raise ScenarioError(
+                f"scenario {name}: client kind must be safari|pwa")
 
 
 def _validate_op(name: str, j: int, op: dict) -> None:
@@ -260,23 +332,75 @@ def _validate_op(name: str, j: int, op: dict) -> None:
             raise ScenarioError(
                 f"scenario {name} op[{j}]: bad actor {op.get('actor')!r}")
     elif t == "goto":
-        if not isinstance(op.get("index"), int):
-            raise ScenarioError(f"scenario {name} op[{j}]: goto needs int index")
+        if not isinstance(op.get("page"), str) and not (
+                isinstance(op.get("index"), int)):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: goto needs page name or int index")
+    elif t == "set_offset":
+        if op.get("offset") not in (0, 1):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: set_offset needs offset 0|1")
+    elif t == "concurrent":
+        subs = op.get("ops")
+        if not isinstance(subs, list) or not subs:
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: concurrent needs a non-empty ops")
+        for k, sub in enumerate(subs):
+            if not isinstance(sub, dict) or \
+                    sub.get("op") not in ("turn", "goto", "swap_sides",
+                                          "open_work"):
+                raise ScenarioError(
+                    f"scenario {name} op[{j}].ops[{k}]: concurrent sub-op "
+                    f"must be turn|goto|swap_sides|open_work")
+            _validate_op(name, f"{j}.{k}", sub)
+    elif t == "burst":
+        if not isinstance(op.get("count"), int) or op["count"] < 1:
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: burst needs int count >= 1")
+    elif t == "pair":
+        if op.get("via") not in (None, "taps"):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: pair via must be 'taps' or absent")
+    elif t == "latency":
+        if op.get("samples", 8) < 1:
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: latency needs samples >= 1")
     elif t == "fault":
         if op.get("type") not in FAULT_TYPES:
             raise ScenarioError(
                 f"scenario {name} op[{j}]: unknown fault {op.get('type')!r}")
+    elif t == "image_fault":
+        if op.get("mode") not in ("ok", "404", "delay", "off"):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: image_fault mode "
+                "ok|404|delay|off")
+    elif t in ("suspend", "activate"):
+        pass
     elif t == "device_input":
         if op.get("kind") not in (
                 "tap", "text", "swipe", "pinch", "rotate", "describe"):
             raise ScenarioError(
                 f"scenario {name} op[{j}]: unknown device_input kind")
+    elif t == "ui_input":
+        if op.get("kind") not in (
+                "key", "tap_zone", "slider", "overview", "swipe",
+                "spread_shift", "open_work", "browse"):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: unknown ui_input kind")
     elif t == "tap_element":
         if not isinstance(op.get("target"), str):
             raise ScenarioError(
                 f"scenario {name} op[{j}]: tap_element needs a target label")
     elif t == "open_work":
         _validate_work(name, op.get("work"))
+    elif t == "open_url":
+        if not isinstance(op.get("path"), str):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: open_url needs a path")
+    elif t == "expect":
+        if not isinstance(op.get("actor"), str):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: expect needs an actor")
     elif t == "wait":
         if not isinstance(op.get("ms"), (int, float)) or op["ms"] < 0:
             raise ScenarioError(
@@ -288,7 +412,7 @@ def _validate_op(name: str, j: int, op: dict) -> None:
 
 
 KNOWN_CAPS = frozenset({
-    "webrtc", "device_inputs", "pwa", "ws_bystander", "ui",
+    "webrtc", "device_inputs", "pwa", "ws_bystander", "ui", "server_restart",
 })
 
 
@@ -296,13 +420,18 @@ KNOWN_CAPS = frozenset({
 
 
 def resolve_plan(scenario_data: dict, *, driver: str, route: str,
-                 caps: set, only: list | None = None) -> tuple[list, list]:
+                 caps: set, only: list | None = None,
+                 repeat: int | None = None,
+                 surface: str = "fixture") -> tuple[list, list]:
     """Expand the declaration into a run plan.
 
     Returns (plan, skipped). ``plan`` entries are
-    ``{name, transport, scenario}``; ``skipped`` entries are
-    ``{name, transport, status, reason}`` placeholders recorded into the
-    result JSON so a skipped-but-requested scenario is never silent.
+    ``{name, transport, scenario, run}`` where ``run`` is the 1-based
+    repeat index (spec: 同一固定操作列の連続runを全てPASSさせる — the same
+    fixed op sequence, back to back, every repetition passing);
+    ``skipped`` entries are ``{name, transport, status, reason}``
+    placeholders recorded into the result JSON so a skipped-but-requested
+    scenario is never silent.
     """
     only_set = set(only or [])
     plan, skipped = [], []
@@ -324,10 +453,27 @@ def resolve_plan(scenario_data: dict, *, driver: str, route: str,
                                 "status": "env_unavailable",
                                 "reason": f"route {sc_route} != {route}"})
             continue
+        # ``surface`` declares the surfaces a scenario can run on —
+        # undeclared means fixture-only (fixture cmds are the control
+        # plane; only scenarios written against ui_input/open_url/expect
+        # run on the real-UI surface).
+        sc_surfaces = sc.get("surface") or ["fixture"]
+        allowed_s = sc_surfaces if isinstance(sc_surfaces, list) \
+            else [sc_surfaces]
+        if surface not in allowed_s:
+            # structural mismatch — filtered silently unless the
+            # scenario was explicitly requested by name.
+            if only_set:
+                skipped.append({"name": name, "transport": None,
+                                "status": "unsupported",
+                                "reason": f"surface {allowed_s} does "
+                                          f"not include {surface}"})
+            continue
         requires = set(sc.get("requires") or [])
         missing = requires - caps
         if missing:
-            status = "unsupported" if (missing & _hard_requires(driver)) \
+            status = "unsupported" \
+                if (missing & _hard_requires(driver, surface)) \
                 else "env_unavailable"
             skipped.append({"name": name, "transport": None, "status": status,
                             "reason": f"missing capabilities: {sorted(missing)}"})
@@ -344,8 +490,11 @@ def resolve_plan(scenario_data: dict, *, driver: str, route: str,
                             "reason": "no usable transport "
                                       f"(declared {transports})"})
             continue
+        reps = repeat if repeat is not None else int(sc.get("repeat", 1))
         for t in picked:
-            plan.append({"name": name, "transport": t, "scenario": sc})
+            for run in range(1, reps + 1):
+                plan.append({"name": name, "transport": t, "scenario": sc,
+                             "run": run})
     if only_set:
         found = {e["name"] for e in plan} | {e["name"] for e in skipped}
         for n in sorted(only_set - found):
@@ -354,11 +503,18 @@ def resolve_plan(scenario_data: dict, *, driver: str, route: str,
     return plan, skipped
 
 
-def _hard_requires(driver: str) -> set:
-    """Requires a driver class can never satisfy (driver mismatch, not env)."""
+def _hard_requires(driver: str, surface: str = "fixture") -> set:
+    """Requires this driver/surface combination can never satisfy —
+    a structural mismatch (``unsupported``), not a transient environment
+    gap. ``ui``-capable scenarios only exist on the real-UI surface, so
+    requesting one under the fixture surface is unsupported, not
+    env_unavailable."""
+    hard = set()
     if driver == "chrome":
-        return {CAP_DEVICE_INPUTS, CAP_PWA}
-    return set()
+        hard |= {CAP_DEVICE_INPUTS, CAP_PWA}
+    if surface != "ui":
+        hard.add(CAP_REAL_UI)
+    return hard
 
 
 # ── exit-code mapping ────────────────────────────────────────────────
@@ -487,13 +643,16 @@ def result_required_ok(result: dict) -> tuple[bool, list]:
 
 def self_check(evidence: EvidenceWriter, result: dict,
                expected_files: list) -> dict:
-    """verify.py's own post-run inspection of required artifacts."""
+    """verify.py's own post-run inspection of required artifacts — plus
+    the spec's 実folder名 leak scan over every json/jsonl artifact."""
     ok, missing_keys = result_required_ok(result)
     missing_files = [str(p) for p in expected_files
                      if not (evidence.dir / p).exists()]
-    return {"passed": ok and not missing_files,
+    leaks = leak_scan([evidence.dir])
+    return {"passed": ok and not missing_files and not leaks,
             "missing_keys": missing_keys,
-            "missing_files": missing_files}
+            "missing_files": missing_files,
+            "leaks": leaks}
 
 
 # ── synthetic work -> shared spread table ───────────────────────────
@@ -533,6 +692,40 @@ def expected_marker(table: list[dict], index: int, role: str,
         side = "left" if leader_side == "right" else "right"
     ref = spread.get(side)
     return {"side": side, "ref": ref}
+
+
+def spread_table_index(table: list[dict], spread_id: str) -> int:
+    """Index of a spread id inside EITHER table shape: a real manifest's
+    spreadTable ({id,right:{folder,name},left}) or the fixture-reported
+    summary ({id,r:name,l:name})."""
+    for i, s in enumerate(table or []):
+        if isinstance(s, dict) and s.get("id") == spread_id:
+            return i
+    return -1
+
+
+def expected_page(table: list[dict], spread_id: str, role: str,
+                  leader_side: str) -> dict:
+    """Expected {side, page} for a member at ``spread_id`` — normalized over
+    both table shapes so runner asserts work against the server-built
+    manifest as reported by the client."""
+    idx = spread_table_index(table, spread_id)
+    if idx < 0:
+        return {"side": None, "page": None}
+    s = table[idx]
+    side = leader_side if role == "leader" else (
+        "left" if leader_side == "right" else "right")
+    ref = s.get(side)
+    page = None
+    if isinstance(ref, dict):
+        page = ref.get("name")
+    elif ref is not None:
+        page = ref
+    # summary shape uses r/l keys
+    if page is None:
+        key = "r" if side == "right" else "l"
+        page = s.get(key)
+    return {"side": side, "page": page, "index": idx}
 
 
 # ── deterministic marker palette ────────────────────────────────────
@@ -583,6 +776,32 @@ def rgb_close(a: tuple, b: tuple, tol: int = 24) -> bool:
     return all(abs(int(x) - int(y)) <= tol for x, y in zip(a, b))
 
 
+def png_marker_fraction(png_path: Path, want_rgb: tuple,
+                        tol: int = 14) -> float:
+    """Fraction of pixels within ``tol`` of ``want_rgb``.
+
+    Orientation/layout-proof alternative to a fixed sample box: in
+    landscape Safari chrome plus the fixture's own bars push the marker
+    below the portrait-tuned region, so instead assert the marker color
+    actually dominates a real screen region wherever it sits. Tight tol
+    keeps the blank marker (34,34,44) distinct from the page bg (17,17,17).
+    """
+    try:
+        from PIL import Image  # noqa: PLC0415
+    except ImportError as e:
+        raise EnvError("PIL unavailable — install pillow for pixel checks") from e
+    with Image.open(png_path) as im:
+        im = im.convert("RGB")
+        px = list(im.getdata())
+    if not px:
+        return 0.0
+    wr, wg, wb = want_rgb
+    hit = sum(1 for (r, g, b) in px
+              if abs(r - wr) <= tol and abs(g - wg) <= tol
+              and abs(b - wb) <= tol)
+    return hit / len(px)
+
+
 def percentile(sorted_vals: list, p: float) -> float:
     if not sorted_vals:
         return 0.0
@@ -599,3 +818,44 @@ def rtt_stats(samples: list) -> dict:
             "max": round(s[-1], 2) if s else None,
             "p50": round(percentile(s, 0.50), 2) if s else None,
             "p95": round(percentile(s, 0.95), 2) if s else None}
+
+
+# ── evidence leak scan (spec: 実folder名が成果物に現れないこと) ──────
+
+
+_LEAK_KEYS = re.compile(
+    r'"(?:folder|chapterFolder|path|fullPath|workFolder)"\s*:\s*"([^"]+)"')
+_LEAK_SAFE = re.compile(
+    r"^(fx[:\-_ ].*|sha256:[0-9a-f]+|<.*>|)$", re.I)
+
+
+def leak_scan(paths, allowed_folders: set | None = None) -> list:
+    """Pattern-scan evidence files for real folder names.
+
+    Walks ``paths`` (files and/or directories), extracts every
+    ``"folder"/"chapterFolder"/"path"`` JSON string value, and returns the
+    violations — values that are neither fx:-synthetic, already hashed
+    (sha256:…), empty, placeholder (<…>), nor explicitly allowed synthetic
+    dev-fixture names in ``allowed_folders``.
+    """
+    allowed = set(allowed_folders or ())
+    violations = []
+    files = []
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            files.extend(x for x in p.rglob("*") if x.is_file()
+                         and x.suffix in (".json", ".jsonl", ".txt", ".log"))
+        elif p.is_file():
+            files.append(p)
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in _LEAK_KEYS.finditer(text):
+            val = m.group(1)
+            if _LEAK_SAFE.match(val) or val in allowed:
+                continue
+            violations.append(f"{f.name}: {val!r}")
+    return violations

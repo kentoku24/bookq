@@ -411,12 +411,20 @@ class SessionRegistry:
             "requestId": req["requestId"], "request": req["type"],
             "sessionId": session_id, "data": data or {}})
 
-    def _reject(self, link: PeerLink, req: dict | None, rtype: str | None,
-                reason: str, session_id=None) -> None:
+    def _reject(self, link: PeerLink, req: dict | str | None,
+                rtype: str | None, reason: str, session_id=None) -> None:
+        # req is normally the request dict, but the malformed-parse path can
+        # only pass the requestId fragment (or None) — a str here crashed a
+        # live link with a 1011 instead of returning the typed REJECT.
+        if isinstance(req, dict):
+            rid, rname = req.get("requestId"), req.get("type")
+        else:
+            rid = req if isinstance(req, str) else None
+            rname = rtype
         link.send_obj({
             "v": protocol.PROTOCOL_VERSION, "type": "REJECT",
-            "requestId": req["requestId"] if req else None,
-            "request": (req["type"] if req else rtype),
+            "requestId": rid,
+            "request": rname,
             "reason": reason, "sessionId": session_id})
 
     def _create(self, link: PeerLink, req: dict) -> None:
