@@ -919,9 +919,13 @@
 
   spreadShift.addEventListener("click", e => {
     e.stopPropagation();
-    // Paired: the offset is a shared-session property (SET_OFFSET, S05/S09) —
-    // a local shift would corrupt the projection; the button is inert here.
-    if (pairStrip && pairStrip.active) return;
+    if (pairStrip && pairStrip.active){
+      // Paired: the offset is shared session state — one setOffset intent
+      // reaches the server sequencer; the rebuilt manifest commits back
+      // through applyCommittedState (S09). A local shift never runs here.
+      window.ViewerNavigation.request({type: "setOffset", offset: pairStrip.offset === 0 ? 1 : 0, via: "spread-shift"});
+      return;
+    }
     if (pageMode !== 'spread' || !images.length) return;
     // Offset change is a user movement request — one setOffset intent
     // through the navigation port (default handler applies it locally).
@@ -2944,6 +2948,7 @@
     if (!pairStrip){
       pairStrip = {
         active: true, side: desc.side, spreadId: null, renderSet: new Set(),
+        offset: 0,
         solo: {
           images: images, chapterList: chapterList, chapterBoundaries: chapterBoundaries,
           spreads: spreads, idxToSpread: idxToSpread,
@@ -2957,6 +2962,9 @@
       imgContainer.classList.add("pair-mode");
     }
     pairStrip.active = true;
+    // The session's shared offset rides the manifest — the ◀ control reads
+    // it to ask for the toggle (SET_OFFSET), never a local rebuild.
+    pairStrip.offset = (manifest && typeof manifest.offset === "number") ? manifest.offset : 0;
     const wireSpreads = (manifest && (manifest.spreadTable || manifest.spreads)) || [];
     let pageRefs = (manifest && Array.isArray(manifest.pageRefs)) ? manifest.pageRefs : null;
     if (!pageRefs){
