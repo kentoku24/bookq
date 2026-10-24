@@ -11,6 +11,7 @@ import os
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from authlib.integrations.starlette_client import OAuth, OAuthError
+from starlette.requests import HTTPConnection
 
 from app.config import Settings
 
@@ -32,20 +33,29 @@ def init_oauth(settings: Settings):
     )
 
 
+def user_from_connection(connection: HTTPConnection) -> dict | None:
+    """Shared signed-cookie user extraction for HTTP and WebSocket scopes.
+
+    SessionMiddleware populates ``scope["session"]`` for both scope types, so
+    Request (HTTP) and WebSocket reach the same session here — the WS endpoint
+    uses this instead of the Request-based dependency. The TEST_MODE check
+    lives here exactly once (#78: do not duplicate it in transport code).
+    """
+    if _TEST_MODE:
+        return {"email": "test@example.com", "name": "Test User", "picture": ""}
+    return connection.session.get("user")
+
+
 async def get_current_user(request: Request) -> dict | None:
     """FastAPI dependency: get current user from session. Returns None if not authenticated.
     In test mode, returns a mock user.
     """
-    if _TEST_MODE:
-        return {"email": "test@example.com", "name": "Test User", "picture": ""}
-    return request.session.get("user")
+    return user_from_connection(request)
 
 
 async def require_auth(request: Request) -> dict:
     """FastAPI dependency: require authentication. Raises 401 if not authenticated."""
-    if _TEST_MODE:
-        return {"email": "test@example.com", "name": "Test User", "picture": ""}
-    user = await get_current_user(request)
+    user = user_from_connection(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user

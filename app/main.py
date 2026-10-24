@@ -14,6 +14,8 @@ from app.compression import ApiGZipMiddleware
 from app.config import load_settings
 from app.auth import router as auth_router, init_oauth
 from app.routes import _background_fill, _warm_covers, api_router, warmup_metadata_index
+from app.reader_sync.sessions import SessionRegistry
+from app.reader_sync.transport import reader_sync_ws
 from app.static_files import NoCacheStaticFiles
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,10 @@ async def lifespan(app: FastAPI):
     # mean the server is about to serve, so tailing this line is a valid readiness
     # signal. Still before `yield`, so it precedes hypercorn/uvicorn accepting
     # connections and /api/health answering.
+    # reader-sync heartbeat ticker (#78/S03): one task drives every
+    # time-based transition (PING cadence, no-response close, code/resume
+    # expiry). Started before yield so links can attach immediately.
+    app.state.reader_sync.start()
     logger.info("起動完了 pid=%s", pid)
     # Shallow-warmup fill (plan shallow-warmup-fill T3): materialize opaque
     # archive nodes in the background, one at a time, pausing under request
@@ -163,6 +169,13 @@ async def lifespan(app: FastAPI):
     # all warm errors are swallowed per job inside the task.
     asyncio.create_task(_warm_covers(app.state))
     yield
+    # reader-sync teardown (#78/S03): close every link/socket, cancel the
+    # ticker and per-link drain tasks — zero reader-sync tasks or sessions
+    # may survive app shutdown.
+    try:
+        await app.state.reader_sync.aclose()
+    except Exception as exc:
+        logger.warning("reader-sync shutdown error=%s pid=%s", exc, pid)
 
 
 def create_app() -> FastAPI:
@@ -194,6 +207,11 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(api_router)
+
+    # dual-reader sync endpoint (#78/S03). Session state lives only on
+    # app.state (single worker); torn down by lifespan.
+    app.state.reader_sync = SessionRegistry()
+    app.add_api_websocket_route("/ws/reader-sync", reader_sync_ws)
 
     @app.exception_handler(401)
     async def unauthorized_handler(request: Request, exc: Exception):
