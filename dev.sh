@@ -495,9 +495,15 @@ cmd_up() {
     else
         "$SCRIPT_DIR/rebuild.sh" dev deploy
         # 実登録名が期待と違う（= 同名ゴーストノード残存で -1 付与）場合は
-        # 警告しつつ実名で verify する。期待名のまま待つと verify_url が
-        # offline ノードへ最大 ~6 分ハングする（verify は 30×10s リトライ）。
+        # まず自動復旧を試みる。残った場合だけ警告しつつ実名で verify する。
+        # 期待名のまま待つと verify_url が offline ノードへ最大 ~6 分ハングする
+        #（verify は 30×10s リトライ）。
         actual_fqdn="$(actual_dev_fqdn "$slot")"
+        if [ -n "$actual_fqdn" ] && [ "$actual_fqdn" != "$fqdn" ]; then
+            if "$SCRIPT_DIR/rebuild.sh" dev heal-fqdn; then
+                actual_fqdn="$(actual_dev_fqdn "$slot")"
+            fi
+        fi
         if [ -n "$actual_fqdn" ] && [ "$actual_fqdn" != "$fqdn" ]; then
             warn "tailnet 登録名が期待と異なります: 期待 $fqdn → 実際 $actual_fqdn"
             warn "同名のゴーストノードが tailnet に残っています。admin コンソールで旧 $hostname ノードを削除して sidecar を docker restart すると $fqdn で使えます（docs/deployment.md「ノード名の衝突」参照）。"
