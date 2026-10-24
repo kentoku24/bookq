@@ -69,6 +69,7 @@ from verify_fixture_server import FixtureServer  # noqa: E402
 from verify_drivers import (  # noqa: E402
     ChromeDriver,
     SimulatorDriver,
+    RealDriver,
     ClientSpec,
 )
 from verify_ops import RunCtx, run_scenario  # noqa: E402
@@ -103,6 +104,13 @@ def _lan_ip_for(url: str) -> str:
     """Outbound IP that would reach the target host — the fixture origin
     for lan-route runs (an http://<lan-ip> page can ws:// the LAN box)."""
     host = url.split("//", 1)[-1].split("/")[0].split(":")[0]
+    return _ip_towards(host)
+
+
+def _ip_towards(host: str) -> str:
+    """Source IP the OS would use to reach ``host`` — the Mac's LAN
+    address for a LAN target, its tailscale address for a tailnet one.
+    Either way it is an address a physical device can route to."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect((host, 80))
@@ -111,6 +119,19 @@ def _lan_ip_for(url: str) -> str:
         return ip
     except OSError as e:
         raise EnvError(f"cannot determine LAN ip for {host}: {e}") from e
+
+
+def _url_host(url: str) -> str:
+    return url.split("//", 1)[-1].split("/")[0].split(":")[0]
+
+
+def _replace_url_host(url: str, host: str) -> str:
+    pre, _, rest = url.partition("//")
+    hostport, _, path = rest.partition("/")
+    port = ""
+    if ":" in hostport:
+        port = ":" + hostport.split(":", 1)[1]
+    return f"{pre}//{host}{port}{'/' + path if path else ''}"
 
 
 def _external_snapshot() -> dict:
@@ -144,9 +165,11 @@ def _parse(argv=None) -> argparse.Namespace:
         prog="verify.py",
         description="dual-reader two-client verification runner (#85/S10)")
     p.add_argument("--driver", required=True,
-                   choices=["chrome", "simulator"],
+                   choices=["chrome", "simulator", "real"],
                    help="chrome = two Playwright BrowserContexts; "
-                        "simulator = two explicit-UDID iOS Simulators")
+                        "simulator = two explicit-UDID iOS Simulators; "
+                        "real = two PHYSICAL devices a human opens the "
+                        "printed fixture URLs on (S12/#87)")
     p.add_argument("--url", help="target env base URL "
                                  "(or use --dev-env to resolve via dev.sh)")
     p.add_argument("--dev-env", metavar="NAME",
@@ -199,6 +222,16 @@ def main(argv=None) -> int:
         print("[verify] --surface ui is not implemented for the simulator "
               "driver (real-UI AX driving lands with S09)", file=sys.stderr)
         return EXIT_UNSUPPORTED
+    if args.surface == "ui" and args.driver == "real":
+        print("[verify] --surface ui is not implemented for the real "
+              "driver (the real-UI DOM has no automation path on a "
+              "physical device)", file=sys.stderr)
+        return EXIT_UNSUPPORTED
+    if args.driver == "real" and (args.leader_udid or args.follower_udid):
+        print("[verify] --leader-udid/--follower-udid are simulator-only; "
+              "the real driver takes physical devices as they are",
+              file=sys.stderr)
+        return EXIT_UNSUPPORTED
 
     base_url = args.url
     if args.dev_env:
@@ -211,7 +244,21 @@ def main(argv=None) -> int:
         print("[verify] --url or --dev-env is required", file=sys.stderr)
         return EXIT_UNSUPPORTED
     base_url = base_url.rstrip("/")
+    # a wildcard bind address (dev.sh --local --lan-allow reports
+    # http://0.0.0.0:<port>) is listenable but not dialable — physical
+    # devices need the Mac's real LAN address instead.
+    if args.driver == "real" and _url_host(base_url) in ("0.0.0.0", "::"):
+        lan_ip = _ip_towards("8.8.8.8")
+        base_url = _replace_url_host(base_url, lan_ip)
+        print(f"[verify] real driver: --url host rewritten "
+              f"0.0.0.0 -> {lan_ip} (devices dial the LAN address)")
     route = classify_url(base_url)
+    if args.driver == "real" and route == "loopback":
+        print("[verify] real driver: physical devices cannot reach a "
+              "loopback target — use a tailnet dev env (--dev-env NAME) "
+              "or a LAN-exposed ./dev.sh up NAME --local --lan-allow URL",
+              file=sys.stderr)
+        return EXIT_ENV
     try:
         ws_url = ws_url_for(base_url)
     except ScenarioError as e:
@@ -252,13 +299,18 @@ def main(argv=None) -> int:
 
         if args.driver == "chrome":
             driver = ChromeDriver(headed=args.headed)
+        elif args.driver == "real":
+            driver = RealDriver()
         else:
             driver = SimulatorDriver(args.leader_udid, args.follower_udid)
         result["preflight"]["driver"] = driver.preflight()
 
         # fixture bind host: LAN runs need a non-loopback origin so ws://
         # to the LAN box is not mixed-content-blocked; loopback otherwise.
-        if route == "lan":
+        # real devices ALWAYS need the reachable interface — the phones
+        # open the fixture over LAN/tailnet even when --url is loopback
+        # or tailnet-hosted (the ws target stays the --url origin).
+        if route == "lan" or args.driver == "real":
             fx_host = _lan_ip_for(base_url)
             fx = FixtureServer(host="0.0.0.0", port=0)
             fx_url_host = fx_host
@@ -286,17 +338,21 @@ def main(argv=None) -> int:
 
         hellos = {}
         if args.surface == "fixture":
+            # real devices: the gate IS the human opening the page —
+            # give them manual-step time, not scripted-device time.
+            hello_wait = RealDriver.MANUAL_TIMEOUT \
+                if args.driver == "real" else 60.0
             for cid in clients:
-                hellos[cid] = fx.wait_hello(cid, timeout=60)
+                hellos[cid] = fx.wait_hello(cid, timeout=hello_wait)
                 if not hellos[cid].get("mods"):
                     raise EnvError(
                         f"fixture {cid}: production modules failed to load "
                         f"from {base_url}: {hellos[cid].get('error')}")
-            result["devices"]["leader"]["ua"] = hellos["leader"].get("ua")
-            result["devices"]["follower"]["ua"] = hellos["follower"].get("ua")
-            result["devices"]["leader"]["hasRTC"] = hellos["leader"].get("hasRTC")
-            result["devices"]["follower"]["hasRTC"] = \
-                hellos["follower"].get("hasRTC")
+            for cid in clients:
+                result["devices"][cid]["ua"] = hellos[cid].get("ua")
+                result["devices"][cid]["hasRTC"] = hellos[cid].get("hasRTC")
+                result["devices"][cid]["standalone"] = \
+                    hellos[cid].get("standalone")
 
         # capabilities -> run plan
         caps = set(driver.caps)
