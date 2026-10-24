@@ -39,6 +39,13 @@ def _open(page, path: str, expect_pages: int):
 
 def _geom(page, settle: int = 400):
     page.wait_for_selector("#img-track .spread-container")
+    # Images decode async; measuring before naturalWidth lands reads the
+    # pre-load fallback aspect (~0.7 cells) instead of the real geometry.
+    page.wait_for_function(
+        "() => [...document.querySelectorAll("
+        "  '#img-track .spread-container img')]"
+        "  .every(im => im.complete && im.naturalWidth > 0)",
+        timeout=10000)
     page.wait_for_timeout(settle)
     g = page.evaluate(_IOS_GEOM_JS)
     assert g["spreads"], "no spread containers rendered"
