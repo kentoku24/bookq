@@ -186,24 +186,31 @@ def main() -> int:
             log("reading", rev=rev, spread=sa["spreadId"])
 
             # ── ordered ops: NEXT x2 (leader + follower) -> +2 ──────
+            # cross-socket arrival order is genuinely receive-order, so wait
+            # for BOTH commit STATEs rather than a specific requestId order.
             a.send(_req("TURN", {"delta": 1, "crossChapter": True,
                                  "fromChapter": None},
                         sid=sid, rid="n1", epoch=1))
             b.send(_req("TURN", {"delta": 1, "crossChapter": True,
                                  "fromChapter": None},
                         sid=sid, rid="n2", epoch=1))
-            revs_a, revs_b = [], []
-            end_a, seen_a = _until(
-                a, lambda f: f.get("type") == "APPLIED"
-                and f.get("requestId") == "n2", "n2-applied")
-            end_b, seen_b = _until(
-                b, lambda f: f.get("type") == "APPLIED"
-                and f.get("requestId") == "n2", "n2-applied-b")
-            revs_a = [f["revision"] for f in seen_a if f["type"] == "STATE"]
-            revs_b = [f["revision"] for f in seen_b if f["type"] == "STATE"]
+
+            def _two_states(f, acc):
+                if f.get("type") == "STATE":
+                    acc.append(f["revision"])
+                return len(acc) >= 2
+
+            acc_a: list = []
+            _, seen_a = _until(a, lambda f: _two_states(f, acc_a), "ops-a")
+            acc_b: list = []
+            _, seen_b = _until(b, lambda f: _two_states(f, acc_b), "ops-b")
+            applied_a = {f["requestId"] for f in seen_a if f["type"] == "APPLIED"}
+            applied_b = {f["requestId"] for f in seen_b if f["type"] == "APPLIED"}
+            assert applied_a >= {"n1", "n2"} and applied_b >= {"n1", "n2"}
+            revs_a, revs_b = acc_a, acc_b
             assert revs_a == revs_b, (revs_a, revs_b)
             assert revs_a == sorted(revs_a) and len(set(revs_a)) == len(revs_a)
-            assert end_a["revision"] == end_b["revision"] == revs_a[-1]
+            rev = revs_a[-1]
             log("ordered-ops", revs=revs_a)
 
             # ── duplicate requestId -> replay, no new state ─────────
@@ -263,9 +270,8 @@ def main() -> int:
             b.send(_req("TURN", {"delta": 1, "crossChapter": True,
                                  "fromChapter": None},
                         sid=sid, rid="dc1", epoch=1))
-            _, seen = _until(b, lambda f: f.get("type") == "APPLIED"
-                             and f.get("requestId") == "dc1", "dc-op")
-            sa = [f for f in seen if f["type"] == "STATE"][-1]
+            sa, _ = _until(b, lambda f: f.get("type") == "STATE"
+                           and f.get("revision", 0) > ts["revision"], "dc-op")
             log("dc-seq", rev=sa["revision"], spread=sa["spreadId"],
                 plane=sa["dataPlane"])
 
