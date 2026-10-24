@@ -38,6 +38,24 @@ def pytest_configure(config):
             os.environ["BROWSER"] = "webkit"
     except Exception:
         pass
+    config.addinivalue_line(
+        "markers",
+        "strip_only: asserts strip-internal DOM/geometry (spread containers, "
+        "cell windows, gap px); skipped when BOOKQ_TEST_READER=ring",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """BOOKQ_TEST_READER=ring runs the suite against the ring reader, whose
+    fixed 3-slot layout makes strip-internal assertions meaningless by
+    construction. Tests marked strip_only are skipped there — shared
+    behaviour (gestures, URL state, zoom, chapters) still runs."""
+    if os.environ.get("BOOKQ_TEST_READER") != "ring":
+        return
+    skip = pytest.mark.skip(reason="strip-internal assertion — ring uses fixed 3-slot layout")
+    for item in items:
+        if "strip_only" in item.keywords:
+            item.add_marker(skip)
 
 
 def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -> None:
@@ -370,6 +388,16 @@ def _new_page(
         context_kwargs["record_video_dir"] = video_dir
         context_kwargs["record_video_size"] = {"width": width, "height": height}
     context = browser.new_context(**context_kwargs)
+    # BOOKQ_TEST_READER=ring runs the whole suite with the harness reader
+    # flag set — ?reader= params in individual tests still override it.
+    reader_flag = os.environ.get("BOOKQ_TEST_READER")
+    if reader_flag:
+        # Only fill an UNSET flag — a test that pins bookq_reader itself
+        # (e.g. to 'strip') must win over the suite-wide default.
+        context.add_init_script(
+            "try { if (localStorage.bookq_reader === undefined)"
+            f" localStorage.bookq_reader = {reader_flag!r}; }} catch(e) {{}}"
+        )
     page = context.new_page()
     page.goto(server)
     page.wait_for_selector(".tile")  # folder tree fetched and rendered

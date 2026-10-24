@@ -1,6 +1,8 @@
 """Tap acknowledgement: a zone tap is acted on at touchend (not the ~40ms-later
 synthesized click), the counter/slider/frame update in the same synchronous
 turn, and prefetch-window/evict/fetch work is deferred past the first frame."""
+import pytest
+
 from playwright.sync_api import expect
 
 from viewer_touch import open_book, touch_session, touch_start, touch_end
@@ -42,6 +44,7 @@ def test_center_tap_toggles_toolbar_once(ios_page, server):
     expect(page.locator("#counter")).to_have_text("1 / 30")
 
 
+@pytest.mark.strip_only
 def test_window_work_is_deferred_past_the_acknowledging_frame(ios_page, server):
     page = ios_page
     open_book(page, server, FOLDER, 0, 30)
@@ -60,6 +63,7 @@ def test_window_work_is_deferred_past_the_acknowledging_frame(ios_page, server):
     s.detach()
 
 
+@pytest.mark.strip_only
 def test_burst_defers_only_the_last_turns_window_job(ios_page, server):
     page = ios_page
     open_book(page, server, FOLDER, 0, 30)

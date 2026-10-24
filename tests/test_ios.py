@@ -4,6 +4,8 @@ import re
 
 from playwright.sync_api import expect
 
+import pytest
+
 from tests.fixtures.ios_helpers import (
     _GAP_INNER_EXPECT,
     _GAP_OUTER_EXPECT,
@@ -24,6 +26,7 @@ def test_ios_fixture_viewport(ios_page):
 
 
 # ── T2: iPad spread + responsive ──────────────────────────────────────────
+@pytest.mark.strip_only
 def test_ipad_spread_geometry(ipad_landscape_page):
     page = ipad_landscape_page
     assert page.viewport_size == {"width": 1180, "height": 820}
@@ -44,6 +47,7 @@ def test_ipad_spread_geometry(ipad_landscape_page):
     assert cur_c["height"] <= g["vh"] + _TOL
 
 
+@pytest.mark.strip_only
 def test_ipad_mixed_ar_page_mode(ipad_page, ipad_landscape_page):
     p = ipad_page
     assert p.viewport_size == {"width": 820, "height": 1180}

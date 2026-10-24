@@ -3,7 +3,19 @@ read keep a label, so #img-track never spans the full book width (~1.4M px on
 3667-page titles balloons its composited layer and slows every slide on a
 tile-GPU device). Fixture group/episodes has 4 chapters (ch-1/-2/-10/-11)."""
 
+import os
+
+import pytest
+
 from viewer_touch import open_book, touch_session, touch_start, touch_end
+
+# The ring reader is a documented prototype: three fixed slots, NO chapter
+# divider labels on the strip (the toolbar chapter name still works). These
+# tests pin a strip-DOM feature, so a ring-mode suite run skips them.
+pytestmark = pytest.mark.skipif(
+    os.environ.get("BOOKQ_TEST_READER") == "ring",
+    reason="ring reader has no strip chapter-divider labels (documented limitation)",
+)
 
 EP = "group/episodes"
 

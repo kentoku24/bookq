@@ -195,6 +195,19 @@ body.portrait #img-track .spread-container{bottom:50%;transform:translateY(50%)}
 #img-track .page-cell{position:relative;flex:none;display:flex;align-items:flex-end;justify-content:center;pointer-events:none;background:#161616;box-shadow:inset 0 0 0 1px #262626}
 #img-track .page-cell img{display:block;width:100%;height:100%;pointer-events:none;-webkit-user-drag:none;user-select:none;opacity:0;transition:opacity .15s}
 #img-track .page-cell img.loaded{opacity:1}
+/* Experimental ring reader (?reader=ring): the track keeps its shared
+   transform/transition role but carries three .ring-slot roots instead of the
+   variable-width strip — one .spread-container per slot on a fixed viewport
+   stride. The two offscreen neighbour slots are deliberately kept paintable
+   (content-visibility:visible) — the tradeoff is paying neighbour raster
+   up front so an adjacent turn lands on an already-painted page. Page imgs
+   skip the loaded fade (slot rebinds must not replay it) and use
+   object-fit:contain so a late aspect-correction while slot geometry is
+   frozen mid-drag/slide letterboxes instead of stretching to the stale cell. */
+#img-track.ring-reader{width:100%}
+#img-track.ring-reader .ring-slot{position:absolute;top:0;left:0;width:100%;height:100%;contain:layout paint}
+#img-track.ring-reader .spread-container{content-visibility:visible}
+#img-track.ring-reader .page-cell img{transition:none;object-fit:contain}
 .chapter-divider{position:absolute;top:50%;transform:translateY(-50%);font-size:11px;color:rgba(255,255,255,0.25);white-space:nowrap;pointer-events:none;writing-mode:vertical-rl;text-orientation:mixed;letter-spacing:0.05em;z-index:3}
 
 /* hint overlay (shown briefly on load) */
@@ -295,6 +308,12 @@ body.landscape-single #spread-shift{display:none}
 #tapmode-controls.hidden button{pointer-events:none}
 #tapmode-controls button{opacity:1}
 #tapmode-controls button[aria-pressed="true"]{background:rgba(74,122,196,.35);color:#8ab4f8;border-color:rgba(74,122,196,.6)}
+/* Avoid sampling the moving backdrop on Android. Opaque fills keep the
+   floating controls legible without blur. */
+.ua-android #tapmode-controls button,.ua-android #spread-controls>*{-webkit-backdrop-filter:none;backdrop-filter:none;background:#222}
+.ua-android #tapmode-controls button:hover,.ua-android #spread-controls>*:hover{background:#282828}
+.ua-android #tapmode-controls button:active,.ua-android #spread-controls>*:active{background:#3c3c3c}
+.ua-android #tapmode-controls button[aria-pressed="true"],.ua-android #spread-shift.active{background:#26364c}
 @media (prefers-reduced-motion:reduce){
   #sidebar,#toolbar,#img-track,.tile,#hint,
   #spread-controls,#spread-toggle,#spread-shift,#tapmode-controls,#tapmode-controls button,#menu-btn,

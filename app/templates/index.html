@@ -156,6 +156,8 @@
 <script src="/static/viewer/gesture.js" defer></script>
 <script src="/static/viewer/zoom.js" defer></script>
 <script src="/static/viewer/overview.js" defer></script>
+<!-- ring modules are NOT static tags: app.js loads them on demand so this
+     document stays identical for every client (the SW precaches '/' once). -->
 <script src="/static/app.js" defer></script>
 {% if thumbnail_perf %}{% include "thumbnail_perf.html" %}{% endif %}
 </body>

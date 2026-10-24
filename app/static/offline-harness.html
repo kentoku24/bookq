@@ -45,7 +45,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
 </head>
 <body>
 <header>
-  <h1>🧪 Offline Harness</h1>
+  <h1><a href="/" title="Tileビューに戻る" style="color:inherit;text-decoration:none">🧪 Offline Harness</a></h1>
   <p>bookq オフラインQAハーネス — 静的配信 / gated リンク検証用シェル</p>
 </header>
 <main>
@@ -154,6 +154,11 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
       <button id="btn-perf-toggle" class="btn btn-primary" type="button">切替</button>
     </div>
     <p class="hint" style="margin-top:8px">ONで次回Viewer表示から緑のHUD（<code>move/snap@/img</code>）が出る。OFFで消える。</p>
+    <div class="row" style="margin-top:14px">
+      <span id="harness-ring-status" class="badge">reader: —</span>
+      <button id="btn-ring-toggle" class="btn" type="button">切替</button>
+    </div>
+    <p class="hint" style="margin-top:8px">リングリーダー試作（<code>?reader=ring</code> と同等の3スロット構成）。ON で ring、OFF で従来の strip。フラグは app.js 初期化時に一度だけ読むため、反映にはアプリ文書の再読込が必要（本を閉じて開き直すだけでは切替わらない。「Viewerに戻る」で再読込される）。フラグは localStorage <code>bookq_reader=ring</code>（モジュールはクライアント側でオンデマンド読込 — SWプリキャッシュ済みなのでオフラインでも有効）。<code>?reader=</code> 付きURLはこのフラグより優先される。</p>
   </section>
 
   <!-- wipe confirm modal — two-step custom overlay, z-index 57 like quota modal -->
@@ -661,10 +666,34 @@ document.getElementById('btn-perf-toggle').addEventListener('click', ()=>{
   refreshPerfBadge();
 });
 
+function ringFlagOn(){
+  try { return localStorage.bookq_reader === 'ring'; } catch(e) { return false; }
+}
+function refreshRingBadge(){
+  var on = ringFlagOn();
+  var el = document.getElementById('harness-ring-status');
+  if (el) {
+    el.textContent = on ? 'reader: ring（アプリ再読込後に3スロット）' : 'reader: strip';
+    el.className = 'badge ' + (on ? 'online' : '');
+  }
+  var btn = document.getElementById('btn-ring-toggle');
+  if (btn) btn.textContent = on ? 'stripにする' : 'ringにする';
+}
+
+document.getElementById('btn-ring-toggle').addEventListener('click', ()=>{
+  // localStorage, like bookq_perf — the client loads the ring modules on
+  // demand, so the flag never needs to reach the server.
+  try {
+    if (ringFlagOn()) localStorage.removeItem('bookq_reader');
+    else localStorage.setItem('bookq_reader', 'ring');
+  } catch(e) {}
+  refreshRingBadge();
+});
+
 if(document.readyState==='loading'){
-  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); refreshPerfBadge(); });
+  document.addEventListener('DOMContentLoaded', ()=>{ fetchTree().then(()=> refresh()); refreshPerfBadge(); refreshRingBadge(); });
 }else{
-  fetchTree().then(()=> refresh()); refreshPerfBadge();
+  fetchTree().then(()=> refresh()); refreshPerfBadge(); refreshRingBadge();
 }
 window.addEventListener('online', ()=> refresh());
 window.addEventListener('offline', ()=> refresh());

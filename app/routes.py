@@ -741,6 +741,9 @@ async def index(request: Request):
     # No Vary: User-Agent — the SW precaches '/' via a header-less Request, so a
     # varying response would never match a real navigation's cache lookup.
     ua_android = "android" in request.headers.get("user-agent", "").lower()
+    # No reader_ring context: the ring modules load on demand from app.js
+    # (same Vary/SW reasoning as above — index.html must be one document for
+    # every client so the precached '/' can never disagree with the flag).
     context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android}
     if thumb_perf:
         context["thumbnail_perf"] = True

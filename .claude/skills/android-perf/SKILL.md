@@ -154,6 +154,10 @@ compositor-bound costs (blur, raster); it under-reports input-path costs
   (`uv run --with websockets python3 cdp-eval.py '<expr>' [url-substring]`)
 - `references/cdp-hud-sample.py` — in-page HUD sampler for gesture series
 - `references/perf-observers.js` — LoAF + longtask collectors (step 4)
+- `.claude/skills/page-turn-fps/SKILL.md` — page-turn frame-gap measurement
+  in the viewer (synthetic tap/swipe + rAF probe, `--reader strip|ring`
+  A/B, `--finger` real-finger pass). rAF = produced-frame cadence; physical
+  display fps still needs step 5.
 - `.claude/skills/video-verification/SKILL.md` — same frame-extraction idea
   for timing-dependent glitches
 - `.claude/skills/perf-measurement/SKILL.md` — display-complete timing

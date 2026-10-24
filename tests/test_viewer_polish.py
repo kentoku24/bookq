@@ -2,6 +2,8 @@
 import io
 import re
 
+import pytest
+
 from PIL import Image
 from playwright.sync_api import expect
 
@@ -48,6 +50,7 @@ def _assert_no_neighbour_peek_and_dark_margins(page):
         assert max(r, g, b) <= DARK_MAX, ((x, h / 2), (r, g, b))
 
 
+@pytest.mark.strip_only
 def test_solo_cover_partner_side_is_dark_not_neighbour_page(landscape_page, server):
     landscape_page.goto(server + "/#/view/long?p=0")
     landscape_page.wait_for_selector("#img-track img")
@@ -56,6 +59,7 @@ def test_solo_cover_partner_side_is_dark_not_neighbour_page(landscape_page, serv
     _assert_no_neighbour_peek_and_dark_margins(landscape_page)
 
 
+@pytest.mark.strip_only
 def test_odd_trailing_page_does_not_show_neighbour(landscape_page, server):
     landscape_page.goto(server + "/#/view/long?p=29")
     landscape_page.wait_for_selector("#img-track img")
@@ -64,6 +68,7 @@ def test_odd_trailing_page_does_not_show_neighbour(landscape_page, server):
     _assert_no_neighbour_peek_and_dark_margins(landscape_page)
 
 
+@pytest.mark.strip_only
 def test_chapter_start_spread_does_not_show_previous_chapter(landscape_page, server):
     """監査 V3: a chapter-start spread (vol2's solo spread, 1 page) used to use a
     fixed CHAPTER_GAP_PX=20 seam regardless of leftover, so the previous

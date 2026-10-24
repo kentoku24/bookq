@@ -148,6 +148,7 @@ def test_open_image_only_folder_closes_sidebar_and_shows_first_page(page):
     expect(page.locator("#page-slider-wrap")).to_have_class(re.compile(r"\bvisible\b"))
 
 
+@pytest.mark.strip_only
 def test_pages_are_natural_sorted(page):
     open_folder(page, "simple_manga", expect_pages=5)
     # Staged prefetch: pages beyond the immediate neighbours get their src once
@@ -242,6 +243,7 @@ def test_slider_maps_value_to_page(page):
     expect(page.locator("#counter")).to_have_text("5 / 5")
 
 
+@pytest.mark.strip_only
 def test_strip_keeps_only_a_window_of_page_cells(page):
     open_folder(page, "long", expect_pages=30)
     # At page 1: window is [0 .. PREFETCH_AHEAD] → 9 cells.
@@ -370,6 +372,7 @@ def loaded_pages(g):
     return [p for s in g["spreads"] for p in s["pages"] if p["loaded"]]
 
 
+@pytest.mark.strip_only
 def test_spread_pages_fit_viewport_and_keep_aspect(landscape_page):
     """A1/A2 — nothing is cropped and nothing is distorted."""
     page = landscape_page
@@ -385,6 +388,7 @@ def test_spread_pages_fit_viewport_and_keep_aspect(landscape_page):
         assert abs(got - want) < 0.02, f"aspect distorted: {got:.3f} != {want:.3f} ({p})"
 
 
+@pytest.mark.strip_only
 def test_current_spread_is_maximized(landscape_page):
     """A3 — one of the two constraints is always tight, so the image is as big as it fits."""
     page = landscape_page
@@ -396,6 +400,7 @@ def test_current_spread_is_maximized(landscape_page):
     assert height_tight or width_tight, f"spread is neither height- nor width-limited: {s}"
 
 
+@pytest.mark.strip_only
 def test_width_limited_spread_is_maximized(landscape_page):
     """A3 — the width-limited branch: a tall+wide pair cannot use the full height."""
     page = landscape_page
@@ -406,6 +411,7 @@ def test_width_limited_spread_is_maximized(landscape_page):
     assert s["height"] < g["vh"] - TOL, f"expected height slack on a width-limited spread: {s}"
 
 
+@pytest.mark.strip_only
 def test_no_slack_between_cell_and_image(landscape_page):
     """A4 — the fix for 意図しない余白: the cell is the image, not a box around it."""
     page = landscape_page
@@ -415,6 +421,7 @@ def test_no_slack_between_cell_and_image(landscape_page):
         assert abs(p["cellHeight"] - p["imgHeight"]) < TOL, f"vertical slack in cell: {p}"
 
 
+@pytest.mark.strip_only
 def test_spread_is_bottom_anchored(landscape_page):
     """A5 — 画面下端を原点とする."""
     page = landscape_page
@@ -426,6 +433,7 @@ def test_spread_is_bottom_anchored(landscape_page):
         assert abs(p["imgBottom"] - g["vh"]) < TOL, f"page not bottom-anchored: {p}"
 
 
+@pytest.mark.strip_only
 def test_current_spread_is_horizontally_centered(landscape_page):
     """A6 — 画面中央下端に配置."""
     page = landscape_page
@@ -435,6 +443,7 @@ def test_current_spread_is_horizontally_centered(landscape_page):
     assert abs((s["left"] + s["right"]) / 2 - g["vw"] / 2) < TOL, f"not centered: {s}"
 
 
+@pytest.mark.strip_only
 def test_inner_and_outer_gaps_are_preserved(landscape_page):
     """A7 — GAP_INNER=5 within a spread; the outer gap is GAP_OUTER=10 only when
     both neighbouring spreads exactly fill the viewport (leftover=0 on both
@@ -464,6 +473,7 @@ def test_inner_and_outer_gaps_are_preserved(landscape_page):
     assert abs(actual - expected) < 1, f"outer gap wrong: got {actual}, expected {expected}"
 
 
+@pytest.mark.strip_only
 def test_reading_order_is_right_to_left(landscape_page):
     """R3 — the lower page index is the RIGHT page (manga reading order)."""
     page = landscape_page
@@ -475,6 +485,7 @@ def test_reading_order_is_right_to_left(landscape_page):
     )
 
 
+@pytest.mark.strip_only
 def test_mixed_aspect_pages_share_height_but_differ_in_width(landscape_page):
     """A8 — the core regression: one global cell width cannot serve both pages."""
     page = landscape_page
@@ -485,6 +496,7 @@ def test_mixed_aspect_pages_share_height_but_differ_in_width(landscape_page):
     assert abs(wide["imgHeight"] - tall["imgHeight"]) < TOL, f"heights must match: {s}"
 
 
+@pytest.mark.strip_only
 def test_wide_double_page_spread_fits_within_viewport(landscape_page):
     """A9 — a 160x60 double-page scan shrinks to fit rather than overflowing."""
     page = landscape_page
@@ -499,6 +511,7 @@ def test_wide_double_page_spread_fits_within_viewport(landscape_page):
         assert p["imgHeight"] <= g["vh"] + TOL, p
 
 
+@pytest.mark.strip_only
 def test_neighbor_image_load_does_not_move_current_spread(landscape_page):
     """A10 — late-loading neighbours must not reflow the page being read."""
     page = landscape_page
@@ -519,6 +532,7 @@ def test_neighbor_image_load_does_not_move_current_spread(landscape_page):
     assert abs(early - late) < TOL, f"current spread shifted {late - early:.1f}px on neighbour load"
 
 
+@pytest.mark.strip_only
 def test_trailing_solo_page_is_centered(landscape_page):
     """A13 — an odd trailing page is a 1-page spread, centered like any other."""
     page = landscape_page
@@ -552,6 +566,7 @@ def test_first_open_of_padded_chapter_shows_its_first_page(page):
     assert img.evaluate("e => e.naturalWidth") > 0
 
 
+@pytest.mark.strip_only
 def test_chapter_boundary_uses_the_chapter_gap(landscape_page):
     """Issue #13's CHAPTER_GAP_PX=20. Opening a chapter with siblings concatenates
     them, and the seam between two chapters must be wider than the ordinary
@@ -652,6 +667,7 @@ def test_cross_chapter_concat_kanji_order(page):
     expect(page.locator("#folder-name")).to_contain_text("第十一話")
 
 
+@pytest.mark.strip_only
 def test_page_change_animates_the_track(landscape_page):
     """Turning a page must slide. Re-basing the anchor before animating cancels
     the movement -- the containers' `left` jumps while the transform stays put --
@@ -682,6 +698,7 @@ def test_page_change_animation_lands_on_the_right_place(landscape_page):
     assert abs(s["bottom"] - g["vh"]) < TOL, f"landed off the bottom: {s}"
 
 
+@pytest.mark.strip_only
 def test_tight_fit_neighbours_sit_flush_at_the_edges(landscape_page):
     """On a tight fit (iPad Air landscape, 1180x820) the leftover is only a few
     px per side. Since 監査 V3, gapBefore() widens every gap to at least the
@@ -707,6 +724,7 @@ def test_tight_fit_neighbours_sit_flush_at_the_edges(landscape_page):
     assert abs(prev["left"] - g["vw"]) < TOL, f"previous spread not flush with the right edge: left={prev['left']}"
 
 
+@pytest.mark.strip_only
 def test_resize_refits_spreads_and_keeps_them_centered(landscape_page):
     """R6 — every cached contain-fit must be invalidated when the viewport changes."""
     page = landscape_page
@@ -723,6 +741,7 @@ def test_resize_refits_spreads_and_keeps_them_centered(landscape_page):
         assert abs(p["cellWidth"] - p["imgWidth"]) < TOL, f"slack reappeared after resize: {p}"
 
 
+@pytest.mark.strip_only
 def test_landscape_single_page_is_centered(landscape_page):
     """A6 in 1P mode. A page narrower than the viewport (400px fit in a 900px
     view) must be centered, not left-aligned — the portrait case can't catch
@@ -739,6 +758,7 @@ def test_landscape_single_page_is_centered(landscape_page):
     assert abs(s["bottom"] - g["vh"]) < TOL, f"1P page not bottom-anchored: {s}"
 
 
+@pytest.mark.strip_only
 def test_portrait_keeps_single_page_layout(page):
     """A12 — portrait keeps single-page behaviour: one page per spread, centered."""
     open_folder(page, "simple_manga", expect_pages=5)
