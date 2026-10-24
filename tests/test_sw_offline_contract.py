@@ -37,9 +37,11 @@ def test_shell_precache_v2_count():
     assert m, "SHELL_ASSETS not found"
     entries = re.findall(r'"[^"]+"', m.group(1))
     # #77 added /static/viewer/navigation.js; #81 added viewer/pairModel.js +
-    # viewer/pairedView.js to the shell precache (offline parity for pairing).
-    assert len(entries) == 25, f"expected 25 SHELL_ASSETS, got {len(entries)}: {entries}"
+    # viewer/pairedView.js to the shell precache (offline parity for pairing);
+    # #84 adds pairTransport.js + pairClient.js + pairController.js.
+    assert len(entries) == 28, f"expected 28 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
+    assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
     assert "new Request" in text and "reload" in text, "install must use new Request with cache:reload"
 
 def test_static_swr_branch_order_and_guard():
