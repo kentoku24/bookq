@@ -93,9 +93,11 @@
               '<button id="pair-reject" type="button" class="pair-danger">拒否</button>' +
             '</div>' +
           '</div>' +
+          '<button id="pair-leader-cancel" type="button">キャンセル</button>' +
         '</div>' +
         '<div id="pair-sec-waiting" class="pair-sec" hidden>' +
           '<p id="pair-waiting-text" class="pair-note">承認を待っています…</p>' +
+          '<button id="pair-waiting-cancel" type="button">キャンセル</button>' +
         '</div>' +
         '<div id="pair-sec-session" class="pair-sec" hidden>' +
           '<p id="pair-session-info" class="pair-note"></p>' +
@@ -168,7 +170,9 @@
       joinRequest: _el('pair-join-request'),
       approve: _el('pair-approve'),
       reject: _el('pair-reject'),
+      leaderCancel: _el('pair-leader-cancel'),
       waitingText: _el('pair-waiting-text'),
+      waitingCancel: _el('pair-waiting-cancel'),
       sessionInfo: _el('pair-session-info'),
       swap: _el('pair-swap'),
       changeWork: _el('pair-change-work'),
@@ -368,6 +372,8 @@
     });
     els.approve.addEventListener('click', () => { if (ctl) ctl.approve(); });
     els.reject.addEventListener('click', () => { if (ctl) ctl.reject(); });
+    els.leaderCancel.addEventListener('click', () => { if (ctl) ctl.leave(); });
+    els.waitingCancel.addEventListener('click', () => { if (ctl) ctl.leave(); });
     els.swap.addEventListener('click', () => { if (ctl) ctl.swapSides(); });
     els.leave.addEventListener('click', () => { if (ctl) ctl.leave(); });
     // Optional extension point — S09 wires the real work picker; the mock

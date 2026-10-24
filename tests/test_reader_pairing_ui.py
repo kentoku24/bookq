@@ -365,6 +365,33 @@ def test_leave_calls_controller_and_shows_ended(page, server):
     _only_section_visible(page, "#pair-sec-choice")
 
 
+def test_leader_waiting_cancel_calls_leave(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    page.click("#pair-create")
+    _emit(page, "{status:'connecting', role:'leader', code:'654321'}")
+    _only_section_visible(page, "#pair-sec-leader")
+    page.click("#pair-leader-cancel")
+    assert page.evaluate("window.__pairCalls") == ["create", "leave"]
+    _emit(page, "{status:'ended'}")
+    _only_section_visible(page, "#pair-sec-choice")
+
+
+def test_follower_waiting_cancel_calls_leave(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    page.click("#pair-join-open")
+    page.locator("#pair-code-input").fill("777001")
+    page.click("#pair-join-submit")
+    _emit(page, "{status:'connecting', role:'follower'}")
+    _only_section_visible(page, "#pair-sec-waiting")
+    page.click("#pair-waiting-cancel")
+    assert page.evaluate("window.__pairCalls") == ["join:777001", "leave"]
+    _emit(page, "{status:'ended'}")
+    # joinView stays set — the follower returns to the code-entry form
+    _only_section_visible(page, "#pair-sec-join")
+
+
 # ── accessibility ──
 
 
