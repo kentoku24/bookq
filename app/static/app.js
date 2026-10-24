@@ -2666,6 +2666,10 @@
       if (idx !== currentIdx) return;
       if (cur.naturalWidth !== 0) return;
       const dIdx = dispIdx >= 0 ? dispIdx : idx;
+      // No images[dIdx]: the state array moved on (failed load, paired
+      // teardown) — there is no page left to warn about. Spacer entries DO
+      // exist in the array, so they keep the old src-compare path below.
+      if (!images[dIdx]) return;
       if (cur.getAttribute("src") !== getUrl(dIdx)) return;
       imgContainer.classList.remove("loading");
       spinner.style.display = "none";
