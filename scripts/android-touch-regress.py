@@ -70,7 +70,7 @@ def screenshot(serial, path):
 
 class CDP:
     def __init__(self, ws):
-        self.ws, self.next_id, self.events = ws, 0, []
+        self.ws, self.next_id, self.events, self.log_errors = ws, 0, [], []
     async def call(self, method, params=None):
         self.next_id += 1
         call_id = self.next_id
@@ -85,11 +85,18 @@ class CDP:
                 self.events.append(msg)
             elif msg.get("method") == "Log.entryAdded":
                 entry = msg.get("params", {}).get("entry", {})
+                if entry.get("level") != "error":
+                    continue
+                source = entry.get("source")
                 # Chrome "intervention" entries ("Ignored attempt to cancel a
                 # touchmove event with cancelable=false") are diagnostics of
-                # already-handled input races, not app faults — every normal
-                # adb swipe emits them and they would fail every run.
-                if entry.get("level") == "error" and entry.get("source") != "intervention":
+                # already-handled input races, and "network" entries are
+                # resource 404/5xx noise driven by data health (e.g. an
+                # un-generatable thumbnail) — neither is a fault in the input
+                # paths under test. Record both, fail on neither.
+                if source in ("intervention", "network"):
+                    self.log_errors.append(msg)
+                else:
                     self.events.append(msg)
     async def evaluate(self, expression):
         result = await self.call("Runtime.evaluate", {
@@ -200,6 +207,7 @@ async def run_checks(args, serial, out_dir):
         # Drain events queued during the final input/screenshot before deciding.
         await cdp.evaluate("1")
         result["console_exceptions"] = cdp.events
+        result["log_errors"] = cdp.log_errors
         if cdp.events:
             result["checks"].append({"name": "browser_console", "status": "failed", "reason": f"{len(cdp.events)} exception/log events"})
         result["status"] = "failed" if cdp.events else "passed"
