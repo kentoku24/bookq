@@ -4,7 +4,7 @@
  * - fetch: guard + cacheFirst (per-work) / networkFirst (api) / navigate fallback
  */
 const SHELL_CACHE = "bookq-shell-v2";
-const API_CACHE = "bookq-api-v1";
+const API_CACHE = "bookq-api-v2";
 const FALLBACK_CACHE = "bookq-images-fallback";
 const SHELL_ASSETS = ["/", "/static/offline.html", "/static/manifest.json", "/static/style.css", "/static/app.js", "/static/offline-core.js", "/static/browse/hash.js", "/static/browse/render.js", "/static/browse/scroll.js", "/static/search/facets.js", "/static/offline/storeAdapter.js", "/static/offline/tree-writer.js", "/static/thumbs/resolveCover.js", "/static/thumbs/prefetch.js", "/static/viewer/spread.js", "/static/viewer/gesture.js", "/static/viewer/zoom.js", "/static/viewer/overview.js", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/icons/icon-512-maskable.png"];
 
@@ -15,6 +15,15 @@ const SHELL_ASSETS = ["/", "/static/offline.html", "/static/manifest.json", "/st
 // resolves while offline (offline-core.js is in SHELL_ASSETS too).
 importScripts('/static/offline-core.js');
 const { cacheNameFor } = self.OfflineCore;
+
+// API responses may contain private library metadata. Clear them on logout or
+// when the server says the session is no longer authorized. The epoch prevents
+// in-flight requests started before a clear from repopulating the cache.
+let apiCacheEpoch = 0;
+async function clearApiCache() {
+  apiCacheEpoch += 1;
+  await caches.delete(API_CACHE).catch(() => {});
+}
 
 function perWorkCacheName(req) {
   try {
@@ -134,11 +143,19 @@ async function cacheFirst(req) {
 }
 
 async function networkFirst(req, cacheName) {
+  const cacheEpoch = apiCacheEpoch;
   try {
     const res = await fetch(req);
+    if (res.status === 401 || res.status === 403) {
+      await clearApiCache();
+      return res;
+    }
     if (res.ok) {
       const clone = res.clone();
-      (await caches.open(cacheName)).put(req, clone).catch(() => {});
+      const cache = await caches.open(cacheName);
+      if (cacheEpoch === apiCacheEpoch) await cache.put(req, clone).catch(() => {});
+      // A logout/session-expiry clear may race an already-running request.
+      if (cacheEpoch !== apiCacheEpoch) await caches.delete(cacheName).catch(() => {});
     }
     return res;
   } catch {
@@ -228,6 +245,23 @@ self.addEventListener("fetch", (event) => {
   if (request.method!=='GET' || request.headers.has('range')) return;
 
   const url = new URL(request.url);
+
+  // Logout is a privacy boundary: clear private API metadata before and after
+  // the request so a subsequent account/session cannot reuse the old cache.
+  if (url.pathname === '/auth/logout') {
+    event.respondWith((async () => {
+      await clearApiCache();
+      try {
+        const res = await fetch(request);
+        await clearApiCache();
+        return res;
+      } catch {
+        await clearApiCache();
+        return Response.error();
+      }
+    })());
+    return;
+  }
 
   // Online-check probe: network-only, no cache fallback — VPN disconnect must be detected
   if (url.pathname === '/api/health' && (url.search.includes('online_check') || request.headers.get('X-Online-Check'))) {
