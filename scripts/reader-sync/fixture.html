@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bookq reader-sync fixture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; font-family: -apple-system, sans-serif; background: #111; color: #eee; }
+  #fx-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; background: #1c1c22; }
+  #fx-bar button, #fx-bar input { min-height: 44px; min-width: 44px; font-size: 15px;
+    border: 1px solid #444; border-radius: 8px; background: #2a2a33; color: #eee; padding: 4px 10px; }
+  #fx-code-input { width: 110px; }
+  #fx-code { font-size: 22px; letter-spacing: 4px; align-self: center; padding: 0 8px; color: #ffd166; }
+  #fx-info { display: flex; gap: 12px; padding: 4px 8px; font-size: 12px; color: #9ab; background: #16161c; }
+  #fx-marker { flex: 1; display: flex; align-items: center; justify-content: center;
+    font-size: 34px; font-weight: 700; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.6);
+    min-height: 50vh; }
+  #fx-wrap { display: flex; flex-direction: column; height: 100%; }
+  #fx-status { font-size: 12px; padding: 3px 8px; color: #8f8; background: #101016; }
+</style>
+</head>
+<body>
+<div id="fx-wrap">
+  <div id="fx-bar">
+    <button id="fx-create" aria-label="fx-create">開始</button>
+    <input id="fx-code-input" aria-label="fx-code-input" inputmode="numeric"
+           maxlength="6" placeholder="code">
+    <button id="fx-join" aria-label="fx-join">参加</button>
+    <button id="fx-approve" aria-label="fx-approve">承認</button>
+    <button id="fx-prev" aria-label="fx-prev">◀ 前</button>
+    <button id="fx-next" aria-label="fx-next">次 ▶</button>
+    <button id="fx-swap" aria-label="fx-swap">左右交換</button>
+    <button id="fx-dc" aria-label="fx-dc">DC</button>
+    <button id="fx-leave" aria-label="fx-leave">解除</button>
+    <div id="fx-code">------</div>
+  </div>
+  <div id="fx-info">
+    <span>role=<b id="fx-role">?</b></span>
+    <span>side=<b id="fx-side">-</b></span>
+    <span>spread=<b id="fx-spread">-</b></span>
+    <span>rev=<b id="fx-rev">-</b></span>
+    <span>plane=<b id="fx-transport">-</b></span>
+    <span>srv=<b id="fx-srv">-</b></span>
+  </div>
+  <div id="fx-marker" data-page="" data-side="">—</div>
+  <div id="fx-status">boot</div>
+</div>
+
+<script>
+/* reader-sync two-client verification FIXTURE (#85 / S10).
+ *
+ * A runner-controlled client that drives the REAL production modules and
+ * wire path: app/static/viewer/pairTransport.js + pairModel.js loaded from
+ * the target origin, frames over the real /ws/reader-sync, and — for the
+ * webrtc-dc dimension — a real host-candidate RTCPeerConnection signaled
+ * through the server's SIGNAL relay.
+ *
+ * Pre-S05 stand-in (documented limitation): the server has no app-data
+ * relay and TURN/GOTO are unimplemented, so fixture control frames
+ * ("fxctl") ride the paired-members-only SIGNAL relay over server-ws
+ * (kind 'ice' with an opaque data payload the server forwards verbatim),
+ * or the real DataChannel when webrtc-dc is up. Turn SEQUENCING is done by
+ * the fixture leader — the same role the leader plays on the webrtc-dc
+ * plane per #75 §3.1. When S05 lands, the ops interpreter maps the same
+ * scenario declarations onto real TURN/GOTO requests; the declaration
+ * grammar does not change.
+ *
+ * The page is dumb about orchestration: the runner issues commands over a
+ * long-poll control channel and polls `state` until convergence. Pairing
+ * codes / resume tokens are NEVER reported back to the runner.
+ */
+'use strict';
+var FXC = __FX_CONFIG_JSON__;   // {id, role, wsUrl, ctrlBase, mods[]}
+(function () {
+
+var S = {
+  ws: null, wsOpen: false,
+  dc: null, dcOpen: false,
+  sig: null,
+  ctlPlane: 'ws',
+  member: null,            // {sessionId, memberId, role, resumeToken}
+  pendingMemberId: null,
+  table: null,             // shared spread table [{id,chapterFolder,right,left}]
+  committed: {index: -1, rev: 0, leaderSide: 'right'},
+  presence: {},
+  dataPlane: null,
+  serverRev: 0,
+  phase: 'idle',
+  faults: {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0, suppressIce: false},
+  trace: [],
+  connGen: 0,
+  pending: {},             // requestId -> {type,res,rej}
+  echoRes: null,
+  relayRes: null,
+  endRes: null,
+  visLog: [],
+};
+
+var TRACE_CAP = 500;
+
+function status(msg) { document.getElementById('fx-status').textContent = msg; }
+function trace(dir, ch, type, x) {
+  S.trace.push({t: Date.now(), dir: dir, ch: ch, type: type, x: x || {}});
+  if (S.trace.length > TRACE_CAP) S.trace.shift();
+}
+
+/* ── marker palette — MUST match verify_core.marker_rgb / BLANK_RGB ── */
+function fnv1a(t) {
+  var bytes = unescape(encodeURIComponent(t)), h = 0x811C9DC5 >>> 0;
+  for (var i = 0; i < bytes.length; i++) {
+    /* Math.imul: the naive * overflows float53 before >>>0 and diverges
+     * from verify_core.marker_rgb. */
+    h = Math.imul(h ^ bytes.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return h;
+}
+function hls2rgb(h, l, s) {                      // colorsys.hls_to_rgb
+  if (s === 0) return [l, l, l];
+  var m2 = l <= 0.5 ? l * (1 + s) : l + s - l * s;
+  var m1 = 2 * l - m2;
+  function hue(hh) {
+    hh = hh % 1; if (hh < 0) hh += 1;
+    if (hh * 6 < 1) return m1 + (m2 - m1) * hh * 6;
+    if (hh * 2 < 1) return m2;
+    if (hh * 3 < 2) return m1 + (m2 - m1) * (2 / 3 - hh) * 6;
+    return m1;
+  }
+  return [hue(h + 1 / 3), hue(h), hue(h - 1 / 3)];
+}
+function markerColor(name) {
+  var c = hls2rgb((fnv1a(name) % 360) / 360, 0.55, 0.68);
+  return [Math.round(c[0] * 255), Math.round(c[1] * 255), Math.round(c[2] * 255)];
+}
+
+/* ── wire send paths ── */
+function sendWire(frame) {
+  var send = function () { if (S.ws && S.wsOpen) S.ws.send(frame); };
+  var delay = S.faults.wsDelay ||
+    (frame.type === 'SIGNAL' ? S.faults.sigDelay : 0);
+  trace('out', 'ws', frame.type,
+        frame.type === 'SIGNAL' && frame.payload ? {kind: frame.payload.kind} : {});
+  if (S.faults.wsDrop && frame.type !== 'PING' && frame.type !== 'PONG') {
+    trace('note', 'ws', 'dropped:' + frame.type, {});   // app-frame loss;
+    return;                                             // heartbeat kept
+  }
+  if (delay > 0) setTimeout(send, delay); else send();
+  if (S.faults.wsDup && frame.type !== 'PONG' && frame.type !== 'PING') {
+    setTimeout(send, 8);                       // same requestId — real dup
+  }
+}
+function sendReq(type, payload, sessionId) {
+  var f = PairTransport.request(type, payload, {
+    sessionId: sessionId !== undefined ? sessionId
+                 : (S.member ? S.member.sessionId : null)});
+  return new Promise(function (res, rej) {
+    S.pending[f.requestId] = {type: type, res: res, rej: rej};
+    sendWire(f);
+    setTimeout(function () {
+      if (S.pending[f.requestId]) {
+        delete S.pending[f.requestId];
+        rej(new Error('ack-timeout:' + type));
+      }
+    }, 9000);
+  });
+}
+/* fixture-control plane: ws = SIGNAL relay between paired members;
+   dc = the real RTCDataChannel. */
+function sendCtl(frame) {
+  frame.fxctl = 1;
+  if (S.ctlPlane === 'dc' && S.dc && S.dcOpen) {
+    trace('out', 'dc', frame.op || 'ctl', {});
+    S.dc.send(frame);
+  } else {
+    trace('out', 'ws', 'ctl:' + (frame.op || '?'), {});
+    sendWire(PairTransport.request('SIGNAL',
+      {kind: 'ice', data: {fxctl: 1, frame: frame}},
+      {sessionId: S.member.sessionId}));
+  }
+}
+
+/* ── inbound frame dispatch ── */
+function onWsFrame(f) {
+  if (!f || typeof f !== 'object') return;
+  switch (f.type) {
+    case 'HELLO': return;
+    case 'PING':
+      if (S.wsOpen) S.ws.send({v: 1, type: 'PONG', seq: f.seq});
+      return;
+    case 'PONG': return;
+    case 'ACK': {
+      var p = S.pending[f.requestId];
+      if (p) { delete S.pending[f.requestId]; p.res(f); }
+      return;
+    }
+    case 'REJECT': {
+      var rp = S.pending[f.requestId];
+      if (rp) { delete S.pending[f.requestId]; rp.rej({reject: f}); }
+      trace('in', 'ws', 'REJECT', {reason: f.reason, request: f.request});
+      return;
+    }
+    case 'STATE': {
+      S.serverRev = f.revision;
+      S.presence = f.presence || {};
+      S.dataPlane = f.dataPlane || S.dataPlane;
+      S.phase = f.phase || S.phase;
+      trace('in', 'ws', 'STATE',
+            {revision: f.revision, phase: f.phase, dataPlane: f.dataPlane});
+      render();
+      return;
+    }
+    case 'JOIN_REQUEST':
+      S.pendingMemberId = f.memberId;
+      trace('in', 'ws', 'JOIN_REQUEST', {});
+      render();
+      return;
+    case 'SIGNAL': onSignal(f); return;
+    case 'TRANSPORT_STATE':
+      S.dataPlane = f.dataPlane;
+      trace('in', 'ws', 'TRANSPORT_STATE', {dataPlane: f.dataPlane});
+      render();
+      return;
+    case 'END':
+      S.phase = 'ended'; S.member = null; S.committed.index = -1;
+      S.ctlPlane = 'ws'; S.dc = null; S.dcOpen = false;
+      trace('in', 'ws', 'END', {reason: f.reason});
+      if (S.endRes) { var er = S.endRes; S.endRes = null; er(); }
+      render();
+      return;
+    default: trace('in', 'ws', '?' + f.type, {});
+  }
+}
+function onSignal(f) {
+  var d = f.data;
+  if (d && d.fxctl) { onCtl(d.frame || d); return; }   // fixture ctl relay
+  if (S.sig) S.sig.applySignal({kind: f.kind, data: d}); // real RTC signaling
+}
+function onCtl(fr) {
+  if (!fr || typeof fr !== 'object') return;
+  switch (fr.op) {
+    case 'intent':                                     // follower -> leader
+      if (S.member && S.member.role === 'leader') leaderSequence(fr);
+      return;
+    case 'commit': applyCommit(fr); return;
+    case 'echo':                                       // data-plane echo
+      sendCtl({op: 'echo-rx', seq: fr.seq, t0: fr.t0}); return;
+    case 'echo-rx':
+      if (S.echoRes) { var r = S.echoRes; S.echoRes = null; r(fr); }
+      return;
+    case 'relay-ping':                                 // SIGNAL-relay echo —
+      sendWire(PairTransport.request('SIGNAL',         // always over the
+        {kind: 'ice', data: {fxctl: 1,                 // wire path, even
+          frame: {op: 'relay-pong', tag: fr.tag, t0: fr.t0}}},   // while dc
+        {sessionId: S.member.sessionId}));             // is up
+      return;
+    case 'relay-pong':
+      if (S.relayRes) { var rr = S.relayRes; S.relayRes = null; rr(fr); }
+      return;
+  }
+}
+/* ctl frames arriving on the real DataChannel are already parsed objects */
+function onDcFrame(f) { onCtl(f); }
+
+/* ── session choreography ── */
+function connect() {
+  return new Promise(function (res, rej) {
+    var gen = ++S.connGen;
+    var done = false;
+    var t = PairTransport.createWebSocketTransport(FXC.wsUrl);
+    var to = setTimeout(function () {
+      if (!done) { done = true; rej(new Error('ws-hello-timeout')); }
+    }, 10000);
+    t.onopen = function () {};
+    t.onclose = function () {
+      if (gen !== S.connGen) return;
+      S.wsOpen = false;
+      if (S.member) { S.phase = 'disconnected'; }
+      trace('in', 'ws', 'CLOSE', {});
+      render();
+    };
+    t.onframe = function (f) {
+      if (gen !== S.connGen) return;
+      if (f && f.type === 'HELLO' && !done) {
+        done = true; clearTimeout(to);
+        S.ws = t; S.wsOpen = true; S.phase = 'connected';
+        t.onframe = onWsFrame;
+        render();
+        res({hello: true});
+        return;
+      }
+      onWsFrame(f);
+    };
+  });
+}
+function pair_create() {
+  return sendReq('CREATE', {}).then(function (ack) {
+    var d = ack.data;
+    S.member = {sessionId: d.sessionId, memberId: d.memberId,
+                role: 'leader', resumeToken: d.resumeToken};
+    S.code = d.code;                  // shown on THIS device only — never
+    document.getElementById('fx-code').textContent = d.code;   // reported
+    S.phase = 'waiting';
+    render();
+    return {role: 'leader', code: d.code};      // runner needs it once —
+  });                                           // evidence redacts it
+}
+function pair_join(code) {
+  return sendReq('JOIN', {code: code}).then(function (ack) {
+    var d = ack.data;
+    S.member = {sessionId: d.sessionId, memberId: d.memberId,
+                role: 'follower', resumeToken: d.resumeToken};
+    S.phase = 'joining';
+    render();
+    return {role: 'follower', sessionId: d.sessionId};
+  });
+}
+function pair_approve() {
+  return sendReq('APPROVE', {memberId: S.pendingMemberId})
+    .then(function () { return {approved: true}; });
+}
+function leave() {
+  if (!S.member) return Promise.resolve({left: true});
+  /* the server answers LEAVE with END (not an ACK) — sessions.py
+   * _end_session; wait for END, not an ack. */
+  return new Promise(function (res, rej) {
+    S.endRes = function () { res({left: true}); };
+    sendWire(PairTransport.request('LEAVE', {},
+                                   {sessionId: S.member.sessionId}));
+    setTimeout(function () {
+      if (S.endRes) { S.endRes = null; rej(new Error('end-timeout:LEAVE')); }
+    }, 9000);
+  });
+}
+
+/* ── spread commit / projection ── */
+function commitIndex(idx) {
+  if (!S.table) throw new Error('no spread table (open_work first)');
+  idx = PairModel.clampIndex(S.table, idx);
+  S.committed = {index: idx, rev: S.committed.rev + 1,
+                 leaderSide: S.committed.leaderSide};
+  renderMarker();
+  sendCtl({op: 'commit', index: idx, rev: S.committed.rev,
+           leaderSide: S.committed.leaderSide});
+}
+function applyCommit(fr) {
+  if (fr.rev < S.committed.rev) return;          // stale commit — drop
+  S.committed = {index: fr.index, rev: fr.rev,
+                 leaderSide: fr.leaderSide || S.committed.leaderSide};
+  renderMarker();
+}
+function leaderSequence(fr) {
+  if (fr.kind === 'turn') {
+    var idx = PairModel.turnIndex(S.table, S.committed.index, fr.delta, true);
+    commitIndex(idx);
+  } else if (fr.kind === 'goto') {
+    commitIndex(fr.index);
+  } else if (fr.kind === 'swap') {
+    S.committed.leaderSide = S.committed.leaderSide === 'right' ? 'left' : 'right';
+    commitIndex(S.committed.index);
+  }
+}
+function opTurn(delta) {
+  if (!S.member) throw new Error('not paired');
+  if (S.member.role === 'leader') {
+    var idx = PairModel.turnIndex(S.table, S.committed.index, delta, true);
+    commitIndex(idx);
+    return Promise.resolve({committed: S.committed});
+  }
+  sendCtl({op: 'intent', kind: 'turn', delta: delta});
+  return Promise.resolve({sent: 'intent'});
+}
+function opGoto(idx) {
+  if (!S.member) throw new Error('not paired');
+  if (S.member.role === 'leader') { commitIndex(idx); }
+  else { sendCtl({op: 'intent', kind: 'goto', index: idx}); }
+  return Promise.resolve({committed: S.committed});
+}
+function opSwap() {
+  if (!S.member) throw new Error('not paired');
+  if (S.member.role === 'leader') {
+    S.committed.leaderSide = S.committed.leaderSide === 'right' ? 'left' : 'right';
+    commitIndex(S.committed.index);
+  } else {
+    sendCtl({op: 'intent', kind: 'swap'});
+  }
+  return Promise.resolve({committed: S.committed});
+}
+
+/* ── render ── */
+function renderMarker() {
+  var m = document.getElementById('fx-marker');
+  if (!S.table || S.committed.index < 0 || S.committed.index >= S.table.length
+      || !S.member) {
+    m.style.background = 'rgb(51,51,58)'; m.textContent = '—';
+    m.setAttribute('data-page', ''); m.setAttribute('data-side', '');
+    return;
+  }
+  var proj = PairModel.projectSpread(
+    S.table[S.committed.index], S.member.role, S.committed.leaderSide);
+  var ref = proj.ref;
+  if (ref) {
+    var rgb = markerColor(ref.name);
+    m.style.background = 'rgb(' + rgb.join(',') + ')';
+    m.textContent = ref.name;
+    m.setAttribute('data-page', ref.name);
+  } else {
+    m.style.background = 'rgb(34,34,44)';
+    m.textContent = 'BLANK';
+    m.setAttribute('data-page', 'BLANK');
+  }
+  m.setAttribute('data-side', proj.side);
+}
+function render() {
+  document.getElementById('fx-role').textContent =
+    S.member ? S.member.role : FXC.role;
+  document.getElementById('fx-side').textContent =
+    document.getElementById('fx-marker').getAttribute('data-side') || '-';
+  document.getElementById('fx-spread').textContent =
+    (S.table && S.committed.index >= 0)
+      ? S.table[S.committed.index].id : '-';
+  document.getElementById('fx-rev').textContent = String(S.committed.rev);
+  document.getElementById('fx-transport').textContent =
+    S.dataPlane || S.ctlPlane;
+  var st = S.phase + (S.pendingMemberId ? '+pending' : '');
+  document.getElementById('fx-srv').textContent = st;
+  renderMarker();
+}
+function marker() {
+  var m = document.getElementById('fx-marker');
+  return {page: m.getAttribute('data-page'), side: m.getAttribute('data-side'),
+          text: m.textContent,
+          bg: m.style.background || ''};
+}
+
+/* ── WebRTC data channel ── */
+function signalSend(sig) {
+  if (S.faults.suppressIce && sig.kind === 'ice') return;   // ICE suppression
+  sendWire(PairTransport.request('SIGNAL', {kind: sig.kind, data: sig.data},
+                                 {sessionId: S.member.sessionId}));
+}
+function attachDc(dc) {
+  S.dc = PairTransport.createDataChannelTransport(dc);
+  S.dc.onframe = onDcFrame;
+  S.dc.onclose = function () { S.dcOpen = false; trace('in', 'dc', 'CLOSE', {}); };
+  var ready = function () {
+    S.dcOpen = true;
+    sendReq('TRANSPORT_STATE', {state: 'up'}).catch(function () {});
+    trace('note', 'dc', 'OPEN', {});
+  };
+  if (dc.readyState === 'open') ready();
+  else dc.onopen = ready;
+}
+function dcOpen(initiator) {
+  S.sig = PairTransport.createSignalingPeer({
+    initiator: !!initiator,
+    send: signalSend,
+    onChannel: attachDc,
+  });
+  S.sig.start();
+  return Promise.resolve({started: true});
+}
+function dcClose() {
+  if (S.dc) { S.dc.close(); }
+  S.dcOpen = false; S.ctlPlane = 'ws';
+  if (S.member) {
+    return sendReq('TRANSPORT_STATE', {state: 'down'})
+      .then(function () { return {closed: true}; });
+  }
+  return Promise.resolve({closed: true});
+}
+
+/* ── commands (runner -> fixture) ── */
+var CMD = {
+  connect: function () { return connect().then(function () { return {open: true}; }); },
+  create: function () { return pair_create().then(function (r) { return r; }); },
+  join: function (p) { return pair_join(p.code); },
+  approve: function () { return pair_approve(); },
+  leave: function () { return leave(); },
+  code: function () { return Promise.resolve({code: S.code}); },
+  state: function () {
+    var pres = {};
+    for (var k in S.presence) {
+      pres[k] = {role: S.presence[k].role, status: S.presence[k].status};
+    }
+    return Promise.resolve({
+      phase: S.phase, wsOpen: S.wsOpen, dcOpen: S.dcOpen,
+      sessionId: S.member ? S.member.sessionId : null,
+      role: S.member ? S.member.role : null,
+      pending: !!S.pendingMemberId,
+      presence: pres,
+      dataPlane: S.dataPlane, ctlPlane: S.ctlPlane,
+      serverRev: S.serverRev,
+      committed: S.committed,
+      spreadId: (S.table && S.committed.index >= 0)
+                  ? S.table[S.committed.index].id : null,
+      marker: marker(),
+      visLog: S.visLog.slice(-10),
+      hasRTC: typeof RTCPeerConnection !== 'undefined',
+    });
+  },
+  open_work: function (p) {
+    S.table = p.table;
+    S.committed = {index: p.startIndex || 0, rev: S.committed.rev + 1,
+                   leaderSide: 'right'};
+    render();
+    sendCtl({op: 'commit', index: S.committed.index, rev: S.committed.rev,
+             leaderSide: S.committed.leaderSide});
+    return Promise.resolve({spreads: S.table.length});
+  },
+  turn: function (p) { return opTurn(p.delta); },
+  goto: function (p) { return opGoto(p.index); },
+  swap: function () { return opSwap(); },
+  signal_ping: function (p) {
+    /* explicit SIGNAL relay round-trip over the wire (not the ctl plane) */
+    var tag = p.tag;
+    return new Promise(function (res, rej) {
+      var t0 = Date.now();
+      S.relayRes = function (fr) {
+        if (fr.tag === tag) res({rtt: Date.now() - t0, tag: tag});
+      };
+      sendWire(PairTransport.request('SIGNAL',
+        {kind: 'ice', data: {fxctl: 1, frame: {op: 'relay-ping', tag: tag, t0: t0}}},
+        {sessionId: S.member.sessionId}));
+      setTimeout(function () {
+        if (S.relayRes) { S.relayRes = null; rej(new Error('relay-timeout')); }
+      }, 8000);
+    });
+  },
+  echo: function (p) {          /* rtt probe over the ACTIVE data plane */
+    var n = p.samples || 5, out = [];
+    return new Promise(function (res, rej) {
+      var i = 0;
+      var step = function () {
+        if (i >= n) { res({samples: out}); return; }
+        i++;
+        var seq = i, t0 = Date.now();
+        S.echoRes = function (fr) {
+          if (fr.seq !== seq) return;
+          S.echoRes = null;
+          out.push(Date.now() - t0);
+          setTimeout(step, 30);
+        };
+        sendCtl({op: 'echo', seq: seq, t0: t0});
+        setTimeout(function () {
+          if (S.echoRes) { S.echoRes = null; rej(new Error('echo-timeout')); }
+        }, 8000);
+      };
+      step();
+    });
+  },
+  dc_open: function (p) { return dcOpen(p.initiator); },
+  dc_close: function () { return dcClose(); },
+  ctl_plane: function (p) { S.ctlPlane = p.plane; return Promise.resolve({plane: S.ctlPlane}); },
+  disconnect: function () {
+    if (S.ws) S.ws.close();
+    return Promise.resolve({closed: true});
+  },
+  resume: function () {
+    var m = S.member;
+    return connect().then(function () {
+      return sendReq('RESUME',
+        {memberId: m.memberId, resumeToken: m.resumeToken}, m.sessionId);
+    }).then(function () { return {resumed: true}; });
+  },
+  resume_bad: function (p) {
+    var m = S.member;
+    return connect().then(function () {
+      return sendReq('RESUME',
+        {memberId: m.memberId, resumeToken: p.token}, m.sessionId)
+        .then(function () { return {rejected: null}; })
+        .catch(function (e) {
+          if (e && e.reject) return {rejected: e.reject.reason};
+          throw e;
+        });
+    });
+  },
+  fault: function (p) {
+    if (p.type === 'ws_delay') S.faults.wsDelay = p.ms || 0;
+    else if (p.type === 'ws_dup') S.faults.wsDup = true;
+    else if (p.type === 'ws_drop') S.faults.wsDrop = true;
+    else if (p.type === 'sig_delay') S.faults.sigDelay = p.ms || 0;
+    else if (p.type === 'suppress_ice') S.faults.suppressIce = true;
+    else if (p.type === 'clear') S.faults = {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0, suppressIce: false};
+    return Promise.resolve({faults: S.faults});
+  },
+  set_activity: function (p) { return sendReq('SET_ACTIVITY', {state: p.state}).then(function () { return {sent: true}; }); },
+  last_tap: function () {
+    return Promise.resolve({tap: S.lastTap || null,
+                            vw: window.innerWidth, vh: window.innerHeight});
+  },
+  rect: function (p) {
+    var el = document.getElementById(p.id);
+    if (!el) return Promise.reject(new Error('no element: ' + p.id));
+    var r = el.getBoundingClientRect();
+    return Promise.resolve({x: r.x, y: r.y, w: r.width, h: r.height});
+  },
+  pull_trace: function () {
+    var t = S.trace; S.trace = [];
+    return Promise.resolve({trace: t});
+  },
+  noop: function () { return Promise.resolve({ok: true}); },
+};
+
+/* UI buttons drive the SAME commands the runner issues (tap path). */
+document.getElementById('fx-create').addEventListener('click', function () {
+  CMD.create().catch(function (e) { status('create:' + e); });
+});
+document.getElementById('fx-join').addEventListener('click', function () {
+  var v = document.getElementById('fx-code-input').value.trim();
+  CMD.join({code: v}).catch(function (e) { status('join:' + e); });
+});
+document.getElementById('fx-approve').addEventListener('click', function () {
+  CMD.approve().catch(function (e) { status('approve:' + e); });
+});
+document.getElementById('fx-prev').addEventListener('click', function () {
+  CMD.turn({delta: -1}).catch(function (e) { status('turn:' + e); });
+});
+document.getElementById('fx-next').addEventListener('click', function () {
+  CMD.turn({delta: 1}).catch(function (e) { status('turn:' + e); });
+});
+document.getElementById('fx-swap').addEventListener('click', function () {
+  CMD.swap().catch(function (e) { status('swap:' + e); });
+});
+document.getElementById('fx-dc').addEventListener('click', function () {
+  CMD.dc_open({initiator: FXC.role === 'leader'}).catch(function (e) { status('dc:' + e); });
+});
+document.getElementById('fx-leave').addEventListener('click', function () {
+  CMD.leave().catch(function (e) { status('leave:' + e); });
+});
+
+/* real-device taps land here (screen -> client calibration) */
+document.addEventListener('pointerdown', function (ev) {
+  S.lastTap = {x: ev.clientX, y: ev.clientY, t: Date.now()};
+}, true);
+
+document.addEventListener('visibilitychange', function () {
+  var hidden = document.hidden;
+  S.visLog.push({t: Date.now(), hidden: hidden});
+  trace('note', 'fx', hidden ? 'hidden' : 'visible', {});
+  if (S.member && S.wsOpen) {
+    sendReq('SET_ACTIVITY', {state: hidden ? 'suspended' : 'active'})
+      .catch(function () {});
+  }
+});
+
+/* ── control channel (long-poll) ── */
+function post(path, obj) {
+  return fetch(FXC.ctrlBase + path, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(obj),
+  });
+}
+function poll() {
+  fetch(FXC.ctrlBase + '/next?id=' + encodeURIComponent(FXC.id))
+    .then(function (r) { return r.json(); })
+    .then(function (cmd) {
+      if (cmd && cmd.seq) {
+        var fn = CMD[cmd.cmd];
+        var run = fn ? fn(cmd.params || {})
+                     : Promise.reject(new Error('unknown-cmd:' + cmd.cmd));
+        Promise.resolve(run).then(function (data) {
+          post('/result', {id: FXC.id, seq: cmd.seq, res: {ok: true, data: data}});
+        }).catch(function (e) {
+          var err = (e && e.reject) ? 'reject:' + e.reject.reason : String(e);
+          post('/result', {id: FXC.id, seq: cmd.seq, res: {ok: false, error: err}});
+        });
+      }
+      setTimeout(poll, 25);
+    })
+    .catch(function () { setTimeout(poll, 600); });
+}
+
+function loadScript(url) {
+  return new Promise(function (res, rej) {
+    var s = document.createElement('script');
+    s.src = url; s.onload = res;
+    s.onerror = function () { rej(new Error('load-fail:' + url)); };
+    document.head.appendChild(s);
+  });
+}
+
+Promise.all(FXC.mods.map(loadScript)).then(function () {
+  status('modules loaded');
+  return post('/hello', {
+    id: FXC.id, role: FXC.role, ua: navigator.userAgent,
+    hasRTC: typeof RTCPeerConnection !== 'undefined',
+    mods: !!(window.PairTransport && window.PairModel),
+  });
+}).then(function () {
+  status('ready');
+  poll();
+}).catch(function (e) {
+  status('boot-fail:' + e);
+  post('/hello', {id: FXC.id, role: FXC.role, ua: navigator.userAgent,
+                  hasRTC: false, mods: false, error: String(e)})
+    .finally(function () { poll(); });
+});
+})();
+</script>
+</body>
+</html>
