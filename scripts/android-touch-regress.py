@@ -58,8 +58,12 @@ class CDP:
                 if "error" in msg:
                     raise RuntimeError(f"CDP {method} failed: {msg['error']}")
                 return msg.get("result", {})
-            if msg.get("method") in ("Runtime.exceptionThrown", "Log.entryAdded"):
+            if msg.get("method") == "Runtime.exceptionThrown":
                 self.events.append(msg)
+            elif msg.get("method") == "Log.entryAdded":
+                entry = msg.get("params", {}).get("entry", {})
+                if entry.get("level") == "error":
+                    self.events.append(msg)
     async def evaluate(self, expression):
         result = await self.call("Runtime.evaluate", {
             "expression": expression, "returnByValue": True, "awaitPromise": True, "userGesture": True
