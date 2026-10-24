@@ -150,14 +150,21 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install Playwright browsers (chromium + webkit)
-        run: uv run --with playwright playwright install --with-deps chromium webkit
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
 
-      - name: Run bookq test gate (iOS)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
 
       - name: Swap label to ✅ done
         if: success()
@@ -217,14 +224,21 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install Playwright browsers (chromium + webkit)
-        run: uv run --with playwright playwright install --with-deps chromium webkit
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
 
-      - name: Run bookq test gate (iOS)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
 
       - name: Swap label to ✅ done
         if: success()
@@ -303,14 +317,21 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install Playwright browsers (chromium + webkit)
-        run: uv run --with playwright playwright install --with-deps chromium webkit
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
 
-      - name: Run bookq test gate (iOS)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
 
       - name: Branch, commit, push, open PR
         if: success()
@@ -419,14 +440,21 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install Playwright browsers (chromium + webkit)
-        run: uv run --with playwright playwright install --with-deps chromium webkit
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
 
-      - name: Run bookq test gate (iOS)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
 
       - name: Branch, commit, push, open PR
         if: success()
