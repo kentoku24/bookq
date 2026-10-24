@@ -468,3 +468,59 @@ body.landscape-single #spread-shift{display:none}
 @media (prefers-reduced-motion:reduce){
   .quota-modal-backdrop,.quota-modal{animation-duration:0.01ms !important}
 }
+
+/* ── dual-reader pairing UI (viewer/pairUI.js, #83/S08) ──
+   Launcher sits in #toolbar (same family as ☰/⊞); the status chip is a
+   non-interactive indicator (pointer-events:none — page-turn taps fall
+   through), the dialog is a centered modal like .quota-modal. */
+#pair-btn{background:none;border:none;color:#ccc;font-size:18px;cursor:pointer;padding:0;border-radius:4px;line-height:1;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
+#pair-btn:hover{background:rgba(255,255,255,.1)}
+#pair-btn:active{background:rgba(255,255,255,.15);transform:scale(0.95)}
+#pair-status{position:fixed;top:calc(104px + env(safe-area-inset-top,0px));right:12px;z-index:4;display:flex;flex-direction:column;align-items:flex-end;gap:3px;pointer-events:none;font-size:11px;letter-spacing:0.01em}
+#pair-status>span{display:block;background:rgba(20,24,32,.85);border:1px solid #39414f;border-radius:10px;padding:3px 8px;color:#aab3c2;white-space:nowrap}
+#pair-status>[hidden]{display:none}
+#pair-status[data-status="connected"] #pair-status-text{color:#8ab4f8;border-color:rgba(74,122,196,.6)}
+#pair-status[data-status="reconnecting"] #pair-status-text,
+#pair-status[data-status="peer-away"] #pair-status-text{color:#c9a24f;border-color:#6b5a2e}
+#pair-status[data-status="error"] #pair-status-text{color:#ffb4b4;border-color:#5c2a2a}
+#pair-side,#pair-transport{color:#8892a0}
+#pair-overlay{position:fixed;inset:0;z-index:58;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:12px;animation:quotaFadeIn .18s ease;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);touch-action:none}
+#pair-overlay.hidden{display:none}
+#pair-panel{width:100%;max-width:340px;max-height:calc(100vh - 48px);max-height:calc(100dvh - 48px);overflow-y:auto;-webkit-overflow-scrolling:touch;background:#151a21;border:1px solid #2a3240;border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.55);color:#dfe5ee;touch-action:pan-y}
+#pair-panel [hidden]{display:none}
+.pair-head{display:flex;align-items:center;justify-content:space-between;padding:10px 8px 10px 16px;border-bottom:1px solid #2a3240}
+#pair-title{font-size:15px;font-weight:600;color:#e8edf5}
+#pair-close{background:none;border:none;color:#8892a0;font-size:18px;cursor:pointer;padding:4px;line-height:1;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px}
+#pair-close:hover{background:rgba(255,255,255,.06);color:#dfe5ee}
+.pair-body{padding:14px 16px 18px;display:flex;flex-direction:column;gap:12px}
+.pair-sec{display:flex;flex-direction:column;gap:12px}
+.pair-row{display:flex;gap:10px}
+.pair-row>button{flex:1;min-width:0}
+#pair-panel button{min-height:44px;min-width:44px;border-radius:10px;font-size:14px;font-family:inherit;cursor:pointer;padding:10px 14px;border:1px solid #39414f;background:transparent;color:#dfe5ee;transition:background .15s,filter .15s}
+#pair-panel button:hover{background:rgba(255,255,255,.06)}
+#pair-panel button:active{background:rgba(255,255,255,.1)}
+#pair-panel button:disabled{opacity:.4;cursor:default}
+.pair-action{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left}
+.pair-action .pair-sub{display:block;font-size:11px;color:#8892a0;font-weight:400}
+#pair-panel .pair-primary{background:#4a7ac4;border-color:#4a7ac4;color:#fff}
+#pair-panel .pair-primary:hover{filter:brightness(1.12);background:#4a7ac4}
+#pair-panel .pair-danger{color:#ffb4b4;border-color:#5c2a2a}
+#pair-panel .pair-danger:hover{background:rgba(196,68,68,.12)}
+#pair-code-label{font-size:12px;color:#8892a0}
+#pair-code-input{width:100%;min-height:44px;padding:8px 12px;border-radius:10px;border:1px solid #39414f;background:#0f1319;color:#e8edf5;font-size:22px;letter-spacing:.3em;text-align:center;outline:none;font-variant-numeric:tabular-nums}
+#pair-code-input:focus{border-color:#4a7ac4}
+#pair-code-value{font-size:34px;font-weight:600;letter-spacing:.3em;text-align:center;color:#8ab4f8;padding:12px 0;font-variant-numeric:tabular-nums}
+.pair-note{font-size:12px;color:#8892a0;line-height:1.5;text-align:center}
+#pair-join-request{border-top:1px solid #2a3240;padding-top:12px;display:flex;flex-direction:column;gap:10px}
+#pair-join-request .pair-note{color:#c9a24f}
+#pair-session-info{text-align:center}
+@media(max-width:600px){
+  /* toolbar wraps to 2 rows here; keep the launcher on row 1 with the other
+     order:3 items (counter/overview) — default order:0 would jump it first */
+  #pair-btn{order:3}
+}
+@media (prefers-reduced-motion:reduce){
+  #pair-btn{transition-duration:0.01ms !important}
+  #pair-panel button{transition-duration:0.01ms !important}
+  #pair-overlay{animation-duration:0.01ms !important}
+}
