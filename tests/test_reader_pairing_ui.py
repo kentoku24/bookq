@@ -499,6 +499,32 @@ def test_modal_auto_closes_when_connected(page, server):
     _only_section_visible(page, "#pair-sec-session")
 
 
+def test_error_section_offers_leave(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'error', error:'apply_failed'}")
+    _only_section_visible(page, "#pair-sec-error")
+    expect(page.locator("#pair-error-text")).to_contain_text("apply_failed")
+    page.click("#pair-error-leave")
+    assert page.evaluate("window.__pairCalls") == ["leave"]
+    _emit(page, "{status:'ended'}")
+    _only_section_visible(page, "#pair-sec-choice")
+
+
+def test_pair_status_hides_with_toolbar(page, server):
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    cls = page.locator("#pair-status").get_attribute("class") or ""
+    assert "hidden" not in cls
+    page.evaluate("() => window.__toggleToolbarZone()")
+    assert "hidden" in page.locator("#toolbar").get_attribute("class")
+    cls = page.locator("#pair-status").get_attribute("class") or ""
+    assert "hidden" in cls
+    page.evaluate("() => window.__toggleToolbarZone()")
+    cls = page.locator("#pair-status").get_attribute("class") or ""
+    assert "hidden" not in cls
+
+
 # ── accessibility ──
 
 

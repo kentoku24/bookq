@@ -3261,6 +3261,7 @@
     // touchend classification for tests (CDP timing cannot force dt<=1).
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__classifyTouchEnd = classifyTouchEnd;
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__lastTouchEndVia = null;
+    if (window.__BOOKQ_TEST_MODE__ === 'true') window.__toggleToolbarZone = toggleToolbarZone;
   } catch(e) { console.warn(e); }
   // One resolver for "which zone is under x", shared by the touchend tap path
   // (instant) and the click handlers (mouse / keyboard activation, and the
@@ -3281,6 +3282,11 @@
     // needs one reliable way out of the zoom.
     if (window.Zoom.isActive()) { window.Zoom.reset(true); return; }
     toolbar.classList.toggle("hidden"); spreadControls.classList.toggle("hidden"); tapmodeControls.classList.toggle("hidden");
+    // pairUI owns #pair-status and may build it after the first hide —
+    // mirror the toolbar's state rather than blindly toggling so they can
+    // never drift apart.
+    const pairStatus = document.getElementById("pair-status");
+    if (pairStatus) pairStatus.classList.toggle("hidden", toolbar.classList.contains("hidden"));
   }
   function setTapForward(m, opts){
     tapForward = m;

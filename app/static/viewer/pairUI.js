@@ -115,7 +115,10 @@
         '</div>' +
         '<div id="pair-sec-error" class="pair-sec" hidden>' +
           '<p id="pair-error-text" class="pair-note"></p>' +
-          '<button id="pair-error-close" type="button">閉じる</button>' +
+          '<div class="pair-row">' +
+            '<button id="pair-error-close" type="button">閉じる</button>' +
+            '<button id="pair-error-leave" type="button" class="pair-danger">解除</button>' +
+          '</div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -190,6 +193,7 @@
       leave: _el('pair-leave'),
       errorText: _el('pair-error-text'),
       errorClose: _el('pair-error-close'),
+      errorLeave: _el('pair-error-leave'),
     };
     wireEvents();
   }
@@ -441,6 +445,7 @@
     els.btn.addEventListener('click', e => { e.stopPropagation(); open(); });
     els.close.addEventListener('click', close);
     els.errorClose.addEventListener('click', close);
+    els.errorLeave.addEventListener('click', () => { if (ctl) ctl.leave(); });
     // Backdrop tap dismisses like the other sheets do; a tap that lands on
     // the panel itself never reaches this branch.
     els.overlay.addEventListener('click', e => {
