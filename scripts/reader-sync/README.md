@@ -1,8 +1,9 @@
-# reader-sync verification runner (#85 S10 → #86 S11)
+# reader-sync verification runner (#85 S10 → #86 S11 → #87 S12)
 
 Automated integrated regression for the dual-reader feature (#75). One
-declarative scenario suite (`scenarios.json`), two interchangeable
-drivers (Chrome via Playwright, iOS Simulator via simctl+idb),
+declarative scenario suite (`scenarios.json`), three interchangeable
+drivers (Chrome via Playwright, iOS Simulator via simctl+idb, and
+**real physical devices** driven by a human for the S12 acceptance),
 deterministic assertions, reproducible evidence.
 
 > 「同じページ番号になった」だけでなく、2台が正しい左右画像を表示し
@@ -21,12 +22,19 @@ scripts/reader-sync/
 │                              evidence layout, redaction, marker palette
 ├── verify_ops.py            — the op interpreter both drivers share
 ├── verify_drivers.py        — ChromeDriver (Playwright 2 contexts),
-│                              SimulatorDriver (simctl + idb), BystanderPair
+│                              SimulatorDriver (simctl + idb),
+│                              RealDriver (human-operated phones, S12),
+│                              BystanderPair
 ├── verify_fixture_server.py — fixture page + long-poll control channel
-│                              (+ /manifest.json + /icon.png for PWA)
+│                              (+ /manifest.json + /icon.png for PWA,
+│                              /ctrl/event display probe, /r/<id> short URLs)
 ├── fixture.html             — runner-controlled client driving the REAL
 │                              production modules + wire path
 ├── scenarios.json           — THE declarative suite (single source of truth)
+├── scenarios-real.json      — S12 real-device acceptance set
+├── REAL-DEVICES.md          — S12 (#87) human runbook: exact commands,
+│                              13-scenario table, human form, latency
+│                              tables, issue-comment template
 ├── seq_probe.py             — protocol/sequence probe
 ├── ws_probe.py              — connectivity probe
 └── README.md
@@ -45,6 +53,13 @@ uv run --with websockets --with pillow \
     python scripts/reader-sync/verify.py --driver simulator \
     --leader-udid <UDID-A> --follower-udid <UDID-B> \
     --dev-env <name>
+
+# Real driver — two PHYSICAL devices a human opens the printed
+# fixture URLs on (S12/#87; see REAL-DEVICES.md for the runbook)
+uv run --with websockets \
+    python scripts/reader-sync/verify.py --driver real \
+    --dev-env <name> --scenarios scripts/reader-sync/scenarios-real.json \
+    --repeat 3
 
 # Useful flags
 --dev-env NAME      resolve URL via ./dev.sh url NAME
@@ -149,11 +164,15 @@ down; devices the run boots are shut down on exit (only those —
 `pair` (optionally `via:"taps"` — real DOM taps through the fixture's own
 開始/参加/承認 buttons), `open_work`, `turn`, `goto`, `swap_sides`,
 `set_offset`, `burst`, `concurrent`, `signal`, `rtt`, `latency`,
-`dc_open`, `dc_close`, `dc_restart`, `disconnect`, `resume`,
-`resume_bad`, `reload`, `bfcache`, `lifecycle`, `fault`, `img_fault`,
-`bystander_check`, `device_input` (tap/text/swipe/pinch/rotate/describe),
-`tap_element`, `ui_input`, `open_url`, `expect`, `background`,
-`foreground`, `pwa_install`, `wait`, `screenshot`, `leave`.
+`peer_latency` (intent→peer-decoded-display on the runner's single
+clock — the S12 spec measurement; upper bound incl. cmd delivery +
+sync path + peer decode + event return, per direction per transport
+into `peer:<transport>:<a>→<p>` keys), `dc_open`, `dc_close`,
+`dc_restart`, `disconnect`, `resume`, `resume_bad`, `reload`, `bfcache`,
+`lifecycle`, `fault`, `img_fault`, `bystander_check`, `device_input`
+(tap/text/swipe/pinch/rotate/describe), `tap_element`, `ui_input`,
+`open_url`, `expect`, `background`, `foreground`, `pwa_install`, `wait`,
+`screenshot`, `leave`.
 
 Op-level keys: `actor` (leader/follower), `requires` (capability gate),
 and **`optional`** — an `EnvError`/`UnsupportedError` on an optional op
@@ -161,12 +180,28 @@ is recorded as a visible `optional_<op>` note instead of aborting the
 scenario (used where the driver cannot reliably deliver an input kind;
 the gap stays readable in result.json).
 
-Scenario-level keys: `name`, `repeat`, `drivers` (default both),
+Scenario-level keys: `name`, `repeat`, `drivers` (default all three),
 `surface` (default fixture-only), `transports` (default `server-ws`;
 each entry produces a separate run; `webrtc-dc` splices `dc_open` after
 `pair`), `route` (any/tailnet/lan/loopback), `requires`
 (webrtc/device_inputs/pwa/ws_bystander/ui/server_restart), `clients`
 (per-role surface kind for simulator: safari/pwa), `work`, `ops`.
+
+## Real driver (#87 S12)
+
+`--driver real` automates nothing on the devices: `launch()` prints the
+leader/follower fixture URLs (plus typable `/r/leader`, `/r/follower`
+shortcuts) and the run gates on the humans' page loads (`hello` waits
+get the manual-step timeout). The fixture binds `0.0.0.0` + the Mac's
+route-appropriate IP so phones reach it over LAN or tailnet while the
+sync WS still targets `--url`; a loopback `--url` fails fast (exit 2).
+Driver methods needing device automation raise `UnsupportedError` —
+ops gated by `requires` classify `env_unavailable` honestly. `reload`
+is still real: the fixture `reload_page` cmd does `location.reload()`
+in the same browsing context, so the credential-RESUME path runs on
+physical Safari/WebKit. Physical actions (PWA install, rotate, lock,
+finger taps) are manual steps in `REAL-DEVICES.md`; the `standalone`
+hello flag records which surface each phone actually used.
 
 ## iOS Simulator known limitations (iOS 27)
 

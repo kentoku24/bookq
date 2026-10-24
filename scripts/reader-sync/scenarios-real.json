@@ -1,0 +1,217 @@
+{
+ "comment": "S12 (#87) real-iPhone acceptance set — the mechanical scenarios the human runs via `--driver real`. Every entry also declares chrome so the same file smoke-runs headlessly. Physical-action items (PWA install, rotate, lock, taps) are NOT here — they are manual steps in REAL-DEVICES.md. Works are discovered off the target env's own tree; only page names ever land in evidence. Run with --repeat 3 so each peer_latency block yields 100 ops x 3 runs per direction per transport.",
+ "scenarios": [
+  {
+   "name": "real_ws_acceptance",
+   "drivers": ["real", "chrome"],
+   "work": {
+    "discover": true,
+    "minPages": 8
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "turn",
+     "delta": -1,
+     "actor": "follower"
+    },
+    {
+     "op": "goto",
+     "index": 0
+    },
+    {
+     "op": "swap_sides"
+    },
+    {
+     "op": "swap_sides"
+    },
+    {
+     "op": "screenshot",
+     "label": "final",
+     "optional": true
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "real_work_change",
+   "drivers": ["real", "chrome"],
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work",
+     "work": {
+      "discover": true,
+      "minPages": 4
+     }
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "open_work",
+     "work": {
+      "discover": true,
+      "minPages": 4,
+      "index": 1
+     }
+    },
+    {
+     "op": "turn",
+     "delta": -1,
+     "actor": "follower"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "real_peer_latency_ws",
+   "drivers": ["real", "chrome"],
+   "work": {
+    "discover": true,
+    "minPages": 8
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "peer_latency",
+     "samples": 100,
+     "actor": "leader"
+    },
+    {
+     "op": "peer_latency",
+     "samples": 100,
+     "actor": "follower"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "real_peer_latency_dc",
+   "drivers": ["real", "chrome"],
+   "requires": ["webrtc"],
+   "transports": ["webrtc-dc"],
+   "work": {
+    "discover": true,
+    "minPages": 8
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "peer_latency",
+     "samples": 100,
+     "actor": "leader"
+    },
+    {
+     "op": "peer_latency",
+     "samples": 100,
+     "actor": "follower"
+    },
+    {
+     "op": "dc_close"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "real_disconnect_resume",
+   "drivers": ["real", "chrome"],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "disconnect",
+     "actor": "follower"
+    },
+    {
+     "op": "wait",
+     "ms": 800
+    },
+    {
+     "op": "resume",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "real_reload_resume",
+   "drivers": ["real", "chrome"],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "reload",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  }
+ ]
+}
