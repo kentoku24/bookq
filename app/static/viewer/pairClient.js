@@ -388,7 +388,7 @@
     }
 
     function _side() {
-      var ls = _lastState ? _lastState.leaderSide : 'right';
+      var ls = _lastState ? _lastState.leaderSide : 'left';
       var role = _member ? _member.role : _roleIntent;
       if (role === 'leader') return ls;
       if (role === 'follower') return ls === 'right' ? 'left' : 'right';
@@ -900,7 +900,7 @@
     }
 
     function swapSides() {
-      var cur = _lastState ? _lastState.leaderSide : 'right';
+      var cur = _lastState ? _lastState.leaderSide : 'left';
       return _sendIntentInternal({
         type: 'swapSides',
         leaderSide: cur === 'right' ? 'left' : 'right',

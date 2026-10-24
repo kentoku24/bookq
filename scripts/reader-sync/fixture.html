@@ -428,7 +428,7 @@ function ownProjection() {
     if (table[i].id === S.lastSnap.spreadId) {
       return {index: i, spread: table[i],
               proj: PairModel.projectSpread(
-                table[i], st.role, S.lastSnap.leaderSide || 'right')};
+                table[i], st.role, S.lastSnap.leaderSide || 'left')};
     }
   }
   return null;

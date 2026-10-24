@@ -89,8 +89,8 @@
           '<div id="pair-join-request" hidden>' +
             '<p class="pair-note">参加要求があります</p>' +
             '<div class="pair-row">' +
-              '<button id="pair-approve" type="button" class="pair-primary">承認</button>' +
               '<button id="pair-reject" type="button" class="pair-danger">拒否</button>' +
+              '<button id="pair-approve" type="button" class="pair-primary">承認</button>' +
             '</div>' +
           '</div>' +
           '<button id="pair-leader-cancel" type="button">キャンセル</button>' +

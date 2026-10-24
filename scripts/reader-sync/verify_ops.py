@@ -81,7 +81,7 @@ class RunCtx:
         self.latency: dict = {}
         self.scenario: dict = {}
         self._table: list | None = None   # summary spreads [{id,r,l}]
-        self._leader_side: str = "right"
+        self._leader_side: str = "left"
 
     # -- recording ----------------------------------------------------
 
@@ -291,7 +291,7 @@ def _assert_member_view(ctx: RunCtx, st: dict, role: str,
         return
     applied = st["applied"]
     exp = expected_page(ctx._table, applied["spreadId"], st["role"],
-                        applied.get("leaderSide") or "right")
+                        applied.get("leaderSide") or "left")
     want = exp["page"] or BLANK_LABEL
     m = st["marker"]
     ctx.note(f"marker_{role}",
@@ -977,7 +977,7 @@ def op_swap_sides(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
     _need_table(ctx, "swap_sides")
     cur = ctx.state(actor)["applied"].get("spreadId")
-    before = ctx.state(actor)["applied"].get("leaderSide") or "right"
+    before = ctx.state(actor)["applied"].get("leaderSide") or "left"
     want = "left" if before == "right" else "right"
     res = _send_move(ctx, op)
     if op.get("expect_reject"):
@@ -1768,7 +1768,7 @@ def op_screenshot(ctx: RunCtx, op: dict) -> None:
         if not sid:
             continue
         exp = expected_page(ctx._table, sid, st["role"],
-                            st["applied"].get("leaderSide") or "right")
+                            st["applied"].get("leaderSide") or "left")
         page = exp["page"]
         want_rgb = marker_rgb(page) if page else BLANK_RGB
         # layout-proof: the marker must dominate a real screen region
@@ -1844,7 +1844,7 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
     """Execute one scenario against the prepared clients. Returns the
     per-scenario result dict consumed by the result JSON."""
     ctx._table = None
-    ctx._leader_side = "right"
+    ctx._leader_side = "left"
     ctx.scenario = scenario
     result = {"name": scenario["name"], "transport": transport,
               "run": run_index,

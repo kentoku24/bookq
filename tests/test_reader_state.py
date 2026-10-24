@@ -798,16 +798,16 @@ def test_set_offset_rebuilds_manifest_and_keeps_position():
 def test_swap_sides_flips_projection():
     reg, sid, leader, follower = _reading_session()
     session = reg.sessions[sid]
-    assert session.leader_side == "right"
-    _send(reg, follower, _req("SWAP_SIDES", {"leaderSide": "left"},
+    assert session.leader_side == "left"
+    _send(reg, follower, _req("SWAP_SIDES", {"leaderSide": "right"},
                               session_id=sid, request_id="sw",
                               work_epoch=1, base_revision=session.revision))
-    assert session.leader_side == "left"
+    assert session.leader_side == "right"
     st = _one(follower.frames(), "STATE")
-    assert st["leaderSide"] == "left"
+    assert st["leaderSide"] == "right"
     # projection sanity via the S01 model
     s = session.plan[model.spread_index_by_id(session.plan, session.spread_id)]
-    assert model.assigned_ref(s, "leader", "left") == s.left
+    assert model.assigned_ref(s, "leader", "right") == s.right
     assert model.assigned_ref(s, "follower", "left") == s.right
 
 
