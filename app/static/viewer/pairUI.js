@@ -48,6 +48,11 @@
   let unsubscribe = null;
   let open_ = false;
   let joinView = false;   // local UI state: the code-entry form is showing
+  let scanView = false;   // local UI state: the QR camera scanner is showing
+  let scanStream = null;
+  let scanRAF = 0;
+  let scanCanvas = null;
+  let qrDrawnFor = null;  // last code painted into #pair-qr
   let lastFocus = null;
   let inertSnapshot = null; // [[el, hadInertAttr]]
   let built = false;
@@ -78,14 +83,22 @@
           '<input id="pair-code-input" type="text" inputmode="numeric" ' +
             'pattern="[0-9]*" maxlength="6" autocomplete="off" autocorrect="off" ' +
             'spellcheck="false" aria-labelledby="pair-code-label">' +
+          '<p id="pair-join-err" class="pair-note pair-err" hidden></p>' +
+          '<button id="pair-join-scan" type="button">カメラで読み取る</button>' +
           '<div class="pair-row">' +
-            '<button id="pair-join-submit" type="button" class="pair-primary" disabled>参加する</button>' +
             '<button id="pair-join-back" type="button">戻る</button>' +
+            '<button id="pair-join-submit" type="button" class="pair-primary" disabled>参加する</button>' +
           '</div>' +
+        '</div>' +
+        '<div id="pair-sec-scan" class="pair-sec" hidden>' +
+          '<video id="pair-scan-video" playsinline muted autoplay></video>' +
+          '<p id="pair-scan-status" class="pair-note">QRコードをかざしてください</p>' +
+          '<button id="pair-scan-cancel" type="button">キャンセル</button>' +
         '</div>' +
         '<div id="pair-sec-leader" class="pair-sec" hidden>' +
           '<p class="pair-note">相手の端末でこのコードを入力してください</p>' +
           '<div id="pair-code-value" aria-label="ペアリングコード">------</div>' +
+          '<canvas id="pair-qr" width="144" height="144" aria-label="ペアリングQRコード" hidden></canvas>' +
           '<div id="pair-join-request" hidden>' +
             '<p class="pair-note">参加要求があります</p>' +
             '<div class="pair-row">' +
@@ -166,7 +179,14 @@
       codeInput: _el('pair-code-input'),
       joinSubmit: _el('pair-join-submit'),
       joinBack: _el('pair-join-back'),
+      joinErr: _el('pair-join-err'),
+      joinScan: _el('pair-join-scan'),
+      secScan: _el('pair-sec-scan'),
+      scanVideo: _el('pair-scan-video'),
+      scanStatus: _el('pair-scan-status'),
+      scanCancel: _el('pair-scan-cancel'),
       codeValue: _el('pair-code-value'),
+      qr: _el('pair-qr'),
       joinRequest: _el('pair-join-request'),
       approve: _el('pair-approve'),
       reject: _el('pair-reject'),
@@ -205,7 +225,9 @@
     els.transport.hidden = !(trText && inSession);
 
     let sec;
-    if (status === 'idle' || status === 'ended') {
+    if (scanView) {
+      sec = els.secScan;
+    } else if (status === 'idle' || status === 'ended') {
       sec = joinView ? els.secJoin : els.secChoice;
     } else if (status === 'connecting') {
       sec = role === 'leader' ? els.secLeader : els.secWaiting;
@@ -214,13 +236,14 @@
     } else {
       sec = els.secSession;
     }
-    const secs = [els.secChoice, els.secJoin, els.secLeader,
+    const secs = [els.secChoice, els.secJoin, els.secScan, els.secLeader,
                   els.secWaiting, els.secSession, els.secError];
     for (const e of secs) show(e, e === sec);
 
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
       els.joinRequest.hidden = !s.joinRequest;
+      drawQR(s.code);
     } else if (sec === els.secWaiting) {
       els.waitingText.textContent =
         role === 'follower' ? '承認を待っています…' : '接続中…';
@@ -272,6 +295,7 @@
     if (!open_) return;
     open_ = false;
     joinView = false;
+    stopScan();
     els.overlay.classList.add('hidden');
     if (inertSnapshot) {
       for (const [el, was] of inertSnapshot) {
@@ -312,6 +336,104 @@
     const v = els.codeInput.value;
     if (!/^\d{6}$/.test(v) || !ctl) return;
     ctl.join(v);
+  }
+
+  // ── QR display (leader) ──
+
+  function drawQR(code) {
+    if (!els.qr) return;
+    if (!code || typeof window.qrcode !== 'function') {
+      els.qr.hidden = true;
+      qrDrawnFor = null;
+      return;
+    }
+    if (qrDrawnFor === code) { els.qr.hidden = false; return; }
+    const qr = window.qrcode(0, 'M');
+    qr.addData(code);
+    qr.make();
+    const n = qr.getModuleCount();
+    const cell = Math.max(1, Math.floor(els.qr.width / (n + 8)));  // +quiet zone
+    const off = Math.floor((els.qr.width - cell * n) / 2);
+    const c = els.qr.getContext('2d');
+    c.fillStyle = '#fff';
+    c.fillRect(0, 0, els.qr.width, els.qr.height);
+    c.fillStyle = '#000';
+    for (let r = 0; r < n; r++) {
+      for (let col = 0; col < n; col++) {
+        if (qr.isDark(r, col)) {
+          c.fillRect(off + col * cell, off + r * cell, cell, cell);
+        }
+      }
+    }
+    els.qr.hidden = false;
+    qrDrawnFor = code;
+  }
+
+  // ── QR scan (follower) ──
+
+  function joinError(msg) {
+    if (!els.joinErr) return;
+    els.joinErr.textContent = msg || '';
+    els.joinErr.hidden = !msg;
+  }
+
+  function startScan() {
+    joinError('');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
+        typeof window.jsQR !== 'function') {
+      joinError('この端末ではカメラ読み取りを使えません');
+      return;
+    }
+    scanView = true;
+    render();
+    navigator.mediaDevices.getUserMedia({
+      video: {facingMode: 'environment'}, audio: false,
+    }).then(stream => {
+      if (!scanView) { stream.getTracks().forEach(t => t.stop()); return; }
+      scanStream = stream;
+      els.scanVideo.srcObject = stream;
+      els.scanVideo.play().catch(() => {});
+      scanRAF = requestAnimationFrame(scanTick);
+    }).catch(() => {
+      stopScan();
+      joinError('カメラを起動できませんでした');
+    });
+  }
+
+  function scanTick() {
+    scanRAF = 0;
+    if (!scanView || !scanStream) return;
+    const v = els.scanVideo;
+    if (v.readyState >= 2 && v.videoWidth && v.videoHeight) {
+      if (!scanCanvas) scanCanvas = document.createElement('canvas');
+      scanCanvas.width = v.videoWidth;
+      scanCanvas.height = v.videoHeight;
+      const cx = scanCanvas.getContext('2d', {willReadFrequently: true});
+      cx.drawImage(v, 0, 0);
+      try {
+        const img = cx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+        const res = window.jsQR(img.data, img.width, img.height);
+        if (res && /^\d{6}$/.test(res.data)) {
+          const code = res.data;
+          stopScan();
+          els.codeInput.value = code;
+          sanitizeCode();
+          submitJoin();
+          return;
+        }
+      } catch (e) { /* decode errors are per-frame — keep scanning */ }
+    }
+    scanRAF = requestAnimationFrame(scanTick);
+  }
+
+  function stopScan() {
+    if (scanRAF) { cancelAnimationFrame(scanRAF); scanRAF = 0; }
+    if (scanStream) {
+      scanStream.getTracks().forEach(t => t.stop());
+      scanStream = null;
+    }
+    if (els.scanVideo) els.scanVideo.srcObject = null;
+    if (scanView) { scanView = false; render(); }
   }
 
   // ── events ──
@@ -365,6 +487,8 @@
       firstControl().focus();
     });
     els.joinSubmit.addEventListener('click', submitJoin);
+    els.joinScan.addEventListener('click', startScan);
+    els.scanCancel.addEventListener('click', () => { stopScan(); firstControl().focus(); });
     els.codeInput.addEventListener('input', sanitizeCode);
     els.codeInput.addEventListener('paste', onCodePaste);
     els.codeInput.addEventListener('keydown', e => {

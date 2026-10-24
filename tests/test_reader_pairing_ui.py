@@ -107,7 +107,7 @@ def _emit(page, patch):
 
 # Every render shows exactly one section — everything else is `hidden`.
 PAIR_SECTIONS = (
-    "#pair-sec-choice #pair-sec-join #pair-sec-leader "
+    "#pair-sec-choice #pair-sec-join #pair-sec-scan #pair-sec-leader "
     "#pair-sec-waiting #pair-sec-session #pair-sec-error"
 ).split()
 
@@ -389,6 +389,89 @@ def test_follower_waiting_cancel_calls_leave(page, server):
     assert page.evaluate("window.__pairCalls") == ["join:777001", "leave"]
     _emit(page, "{status:'ended'}")
     # joinView stays set — the follower returns to the code-entry form
+    _only_section_visible(page, "#pair-sec-join")
+
+
+# ── QR pairing (#106) ──
+
+
+def test_primary_action_buttons_on_the_right(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    page.click("#pair-join-open")
+    back = page.locator("#pair-join-back").bounding_box()
+    submit = page.locator("#pair-join-submit").bounding_box()
+    assert back["x"] < submit["x"]      # 戻る left, 参加する right
+    page.click("#pair-join-back")
+    _emit(page, "{status:'connecting', role:'leader', code:'123456', joinRequest:true}")
+    reject = page.locator("#pair-reject").bounding_box()
+    approve = page.locator("#pair-approve").bounding_box()
+    assert reject["x"] < approve["x"]   # 拒否 left, 承認 right
+
+
+def test_leader_code_renders_qr_canvas(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'connecting', role:'leader', code:'654321'}")
+    expect(page.locator("#pair-qr")).to_be_visible()
+    dark = page.evaluate(
+        """() => {
+          const c = document.getElementById('pair-qr');
+          const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          let n = 0;
+          for (let i = 0; i < d.length; i += 4) if (d[i] < 64) n++;
+          return n;
+        }""")
+    assert dark > 100, "QR canvas must contain dark modules"
+
+
+def test_qr_decode_roundtrip(page, server):
+    """The shipped vendor libs interoperate: qrcode-generator output must be
+    readable by jsQR — the exact produce/scan pair used on real devices."""
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
+    expect(page.locator("#pair-qr")).to_be_visible()
+    decoded = page.evaluate(
+        """() => {
+          const c = document.getElementById('pair-qr');
+          const img = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+          const r = window.jsQR(img.data, img.width, img.height);
+          return r ? r.data : null;
+        }""")
+    assert decoded == "042917"
+
+
+def test_join_scan_open_and_cancel(page, server):
+    _with_mock(page)
+    # Fake camera: an empty MediaStream keeps the scanner up without frames.
+    page.add_init_script(
+        "navigator.mediaDevices = navigator.mediaDevices || {};"
+        "navigator.mediaDevices.getUserMedia = () =>"
+        " Promise.resolve(new MediaStream());")
+    page.reload()
+    page.wait_for_selector("#pair-btn")
+    _open_ui(page)
+    page.click("#pair-join-open")
+    page.click("#pair-join-scan")
+    _only_section_visible(page, "#pair-sec-scan")
+    page.click("#pair-scan-cancel")
+    _only_section_visible(page, "#pair-sec-join")
+    assert page.evaluate("window.__pairCalls") == []
+
+
+def test_join_scan_unavailable_shows_error(page, server):
+    _with_mock(page)
+    page.add_init_script(
+        "navigator.mediaDevices = navigator.mediaDevices || {};"
+        "navigator.mediaDevices.getUserMedia ="
+        " () => Promise.reject(new DOMException('denied', 'NotAllowedError'));")
+    page.reload()
+    page.wait_for_selector("#pair-btn")
+    _open_ui(page)
+    page.click("#pair-join-open")
+    page.click("#pair-join-scan")
+    expect(page.locator("#pair-join-err")).to_be_visible()
     _only_section_visible(page, "#pair-sec-join")
 
 

@@ -518,6 +518,9 @@ body.landscape-single #spread-shift{display:none}
 .pair-note{font-size:12px;color:#8892a0;line-height:1.5;text-align:center}
 #pair-join-request{border-top:1px solid #2a3240;padding-top:12px;display:flex;flex-direction:column;gap:10px}
 #pair-join-request .pair-note{color:#c9a24f}
+#pair-qr{align-self:center;border-radius:8px}
+.pair-err{color:#ffb4b4}
+#pair-scan-video{width:100%;max-height:45vh;aspect-ratio:4/3;object-fit:cover;border-radius:10px;background:#000}
 #pair-session-info{text-align:center}
 @media(max-width:600px){
   /* toolbar wraps to 2 rows here; keep the launcher on row 1 with the other

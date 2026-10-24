@@ -38,8 +38,9 @@ def test_shell_precache_v2_count():
     entries = re.findall(r'"[^"]+"', m.group(1))
     # #77 added /static/viewer/navigation.js; #81 added viewer/pairModel.js +
     # viewer/pairedView.js to the shell precache (offline parity for pairing);
-    # #84 adds pairTransport.js + pairClient.js + pairController.js.
-    assert len(entries) == 28, f"expected 28 SHELL_ASSETS, got {len(entries)}: {entries}"
+    # #84 adds pairTransport.js + pairClient.js + pairController.js;
+    # #106 adds vendor/qrcode.min.js + vendor/jsQR.min.js (QR pairing).
+    assert len(entries) == 30, f"expected 30 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
     assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
     assert "new Request" in text and "reload" in text, "install must use new Request with cache:reload"
