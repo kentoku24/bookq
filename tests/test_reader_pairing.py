@@ -36,7 +36,6 @@ from app.reader_sync.sessions import (  # noqa: E402
     REASON_PEER_OFFLINE,
     REASON_RESUME_EXPIRED,
     REASON_RESUME_IN_USE,
-    REASON_UNIMPLEMENTED,
     REASON_WRONG_SESSION,
     RESUME_WINDOW_SECONDS,
     PeerLink,
@@ -446,7 +445,9 @@ def test_already_bound_cannot_create_or_join():
     assert rej["reason"] == REASON_ALREADY_BOUND
 
 
-def test_sequencing_requests_unimplemented_but_paired_only():
+def test_sequencing_requests_gated_until_work_loaded():
+    # S05 (#80): TURN et al. are real sequenced ops now — pre-manifest they
+    # reach the sequencer and are gated by phase ("no_work"), not deferred.
     clock = FakeClock()
     reg = _reg(clock)
     leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
@@ -454,7 +455,8 @@ def test_sequencing_requests_unimplemented_but_paired_only():
     _send(reg, follower, _request("TURN", {"delta": 1, "crossChapter": True, "fromChapter": None},
                                 session_id=sid))
     rej = _one(follower.frames(), "REJECT")
-    assert rej["reason"] == REASON_UNIMPLEMENTED
+    assert rej["reason"] == "no_work"
+    assert rej["snapshot"]["revision"] == reg.sessions[sid].revision
     assert len(reg.sessions[sid].members) == 2
 
 
