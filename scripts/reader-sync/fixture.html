@@ -2,7 +2,14 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- installable as a standalone Home Screen web app so the runner can drive
+     real Safari-vs-PWA surface combinations on the iOS Simulator (#86/S11). -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="__FX_MANIFEST_URL__">
+<link rel="apple-touch-icon" href="__FX_ICON_URL__">
 <title>bookq reader-sync fixture</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -10,14 +17,20 @@
   #fx-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; background: #1c1c22; }
   #fx-bar button, #fx-bar input { min-height: 44px; min-width: 44px; font-size: 15px;
     border: 1px solid #444; border-radius: 8px; background: #2a2a33; color: #eee; padding: 4px 10px; }
-  #fx-code-input { width: 110px; }
+  /* >=16px or iOS Safari auto-zooms on focus, which shifts the viewport and
+   * swallows the next calibrated tap's click (sim_pair_via_taps). */
+  #fx-code-input { width: 110px; font-size: 16px; }
   #fx-code { font-size: 22px; letter-spacing: 4px; align-self: center; padding: 0 8px; color: #ffd166; }
   #fx-info { display: flex; gap: 12px; padding: 4px 8px; font-size: 12px; color: #9ab; background: #16161c; }
   #fx-marker { flex: 1; display: flex; align-items: center; justify-content: center;
     font-size: 34px; font-weight: 700; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.6);
-    min-height: 50vh; }
+    min-height: 50vh; position: relative; }
   #fx-wrap { display: flex; flex-direction: column; height: 100%; }
   #fx-status { font-size: 12px; padding: 3px 8px; color: #8f8; background: #101016; }
+  #fx-imgbox { position: absolute; top: 6px; left: 6px; display: flex; align-items: center;
+    gap: 6px; background: rgba(0,0,0,.55); padding: 4px; border-radius: 6px; }
+  #fx-img { width: 56px; height: 56px; object-fit: contain; background: #222; }
+  #fx-img-badge { font-size: 10px; color: #ddd; }
 </style>
 </head>
 <body>
@@ -43,61 +56,74 @@
     <span>plane=<b id="fx-transport">-</b></span>
     <span>srv=<b id="fx-srv">-</b></span>
   </div>
-  <div id="fx-marker" data-page="" data-side="">—</div>
+  <div id="fx-marker" data-page="" data-side="" data-img-state="">
+    —
+    <div id="fx-imgbox"><img id="fx-img" alt=""><span id="fx-img-badge">-</span></div>
+  </div>
   <div id="fx-status">boot</div>
 </div>
 
 <script>
-/* reader-sync two-client verification FIXTURE (#85 / S10).
+/* reader-sync two-client verification FIXTURE (#85/S10 → #86/S11).
  *
- * A runner-controlled client that drives the REAL production modules and
- * wire path: app/static/viewer/pairTransport.js + pairModel.js loaded from
- * the target origin, frames over the real /ws/reader-sync, and — for the
- * webrtc-dc dimension — a real host-candidate RTCPeerConnection signaled
- * through the server's SIGNAL relay.
+ * A runner-controlled client that drives the REAL production client:
+ * app/static/viewer/pairTransport.js + pairModel.js + pairClient.js are
+ * loaded from the target origin and every pair / move / resume / transport
+ * operation goes through the real wire path (CREATE/JOIN/APPROVE/READY/
+ * TURN/GOTO/SET_OFFSET/SWAP_SIDES/OPEN_WORK/APPLIED/SET_ACTIVITY/RESUME/
+ * LEAVE + SIGNAL/TRANSPORT_STATE). Committed STATE frames are rendered as
+ * deterministic color markers derived from the assigned PageRef, and the
+ * assigned page image is fetched+decoded through the real /image/ route so
+ * "正しい左右画像を表示" is asserted on DOM marker AND pixel AND decode.
  *
- * Pre-S05 stand-in (documented limitation): the server has no app-data
- * relay and TURN/GOTO are unimplemented, so fixture control frames
- * ("fxctl") ride the paired-members-only SIGNAL relay over server-ws
- * (kind 'ice' with an opaque data payload the server forwards verbatim),
- * or the real DataChannel when webrtc-dc is up. Turn SEQUENCING is done by
- * the fixture leader — the same role the leader plays on the webrtc-dc
- * plane per #75 §3.1. When S05 lands, the ops interpreter maps the same
- * scenario declarations onto real TURN/GOTO requests; the declaration
- * grammar does not change.
- *
- * The page is dumb about orchestration: the runner issues commands over a
- * long-poll control channel and polls `state` until convergence. Pairing
- * codes / resume tokens are NEVER reported back to the runner.
+ * The transport factory handed to pairClient is fixture-wrapped, which is
+ * what gives the runner deterministic fault injection on the real wire
+ * path: outbound drop/dup/delay/base-rewrite, inbound drop/corrupt/inject,
+ * ICE suppression at the captured RTCPeerConnection, and link close for
+ * disconnect/resume. The page stays dumb about orchestration: commands
+ * arrive over the long-poll control channel; pairing codes and resume
+ * tokens are NEVER reported back to the runner.
  */
 'use strict';
-var FXC = __FX_CONFIG_JSON__;   // {id, role, wsUrl, ctrlBase, mods[]}
+var FXC = __FX_CONFIG_JSON__;   // {id, role, wsUrl, ctrlBase, imgBase, mods[], manifestUrl, iconUrl}
 (function () {
 
+var TRACE_CAP = 400;
+var SEQUENCED = {TURN: 1, GOTO: 1, SET_OFFSET: 1, SWAP_SIDES: 1,
+                 OPEN_WORK: 1, READY: 1, APPLIED: 1};
 var S = {
-  ws: null, wsOpen: false,
-  dc: null, dcOpen: false,
-  sig: null,
-  ctlPlane: 'ws',
-  member: null,            // {sessionId, memberId, role, resumeToken}
-  pendingMemberId: null,
-  table: null,             // shared spread table [{id,chapterFolder,right,left}]
-  committed: {index: -1, rev: 0, leaderSide: 'right'},
-  presence: {},
-  dataPlane: null,
-  serverRev: 0,
-  phase: 'idle',
-  faults: {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0, suppressIce: false},
-  trace: [],
-  connGen: 0,
-  pending: {},             // requestId -> {type,res,rej}
-  echoRes: null,
-  relayRes: null,
-  endRes: null,
+  client: null,
+  rawT: null,                 // current raw ws transport (disconnect/inject)
+  rawGen: 0,
+  lastSnap: null,             // last committed STATE applied via applyState
+  manifest: null,             // last manifest object handed to applyState
+  applyCount: 0,
+  applyLog: [],               // {rev, spreadId, t}
+  events: [],                 // recent event names from onEvent
+  eventLog: [],               // {t, type, data}
+  sentTypes: [],              // outbound frame types (ordered, capped)
+  seqSent: 0,                 // outbound sequenced op frames
+  rejected: [],               // inbound REJECT reasons
+  lastError: null,            // sticky: last 'error' event reason — the live
+                            // client error clears on the next applied STATE,
+                            // which races any runner-side poll
+  ackWait: {},                // requestId -> {res,t0}
+  faults: {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0,
+           suppressIce: false, staleBase: 0, dupNext: false,
+           inDropType: null, inDropCount: 0,
+           inCorruptType: null, inCorruptCount: 0, inInject: []},
+  imgFault: {mode: 'ok', ms: 0},
+  imgState: 'none',           // none|blank|loading|ok|error|faulted
   visLog: [],
+  evHandlers: {},
+  lastTap: null,
+  lastGesture: null,
+  trace: [],
+  latWait: null,
+  pcCap: null,
+  dcCap: null,
+  bootResumeTried: false,
 };
-
-var TRACE_CAP = 500;
 
 function status(msg) { document.getElementById('fx-status').textContent = msg; }
 function trace(dir, ch, type, x) {
@@ -105,7 +131,7 @@ function trace(dir, ch, type, x) {
   if (S.trace.length > TRACE_CAP) S.trace.shift();
 }
 
-/* ── marker palette — MUST match verify_core.marker_rgb / BLANK_RGB ── */
+/* marker palette — MUST match verify_core.marker_rgb / BLANK_RGB */
 function fnv1a(t) {
   var bytes = unescape(encodeURIComponent(t)), h = 0x811C9DC5 >>> 0;
   for (var i = 0; i < bytes.length; i++) {
@@ -133,459 +159,687 @@ function markerColor(name) {
   return [Math.round(c[0] * 255), Math.round(c[1] * 255), Math.round(c[2] * 255)];
 }
 
-/* ── wire send paths ── */
-function sendWire(frame) {
-  var send = function () { if (S.ws && S.wsOpen) S.ws.send(frame); };
-  var delay = S.faults.wsDelay ||
-    (frame.type === 'SIGNAL' ? S.faults.sigDelay : 0);
-  trace('out', 'ws', frame.type,
-        frame.type === 'SIGNAL' && frame.payload ? {kind: frame.payload.kind} : {});
-  if (S.faults.wsDrop && frame.type !== 'PING' && frame.type !== 'PONG') {
-    trace('note', 'ws', 'dropped:' + frame.type, {});   // app-frame loss;
-    return;                                             // heartbeat kept
-  }
-  if (delay > 0) setTimeout(send, delay); else send();
-  if (S.faults.wsDup && frame.type !== 'PONG' && frame.type !== 'PING') {
-    setTimeout(send, 8);                       // same requestId — real dup
-  }
+function encodePath(p) {
+  return p.split('/').map(encodeURIComponent).join('/');
 }
-function sendReq(type, payload, sessionId) {
-  var f = PairTransport.request(type, payload, {
-    sessionId: sessionId !== undefined ? sessionId
-                 : (S.member ? S.member.sessionId : null)});
-  return new Promise(function (res, rej) {
-    S.pending[f.requestId] = {type: type, res: res, rej: rej};
-    sendWire(f);
-    setTimeout(function () {
-      if (S.pending[f.requestId]) {
-        delete S.pending[f.requestId];
-        rej(new Error('ack-timeout:' + type));
-      }
-    }, 9000);
-  });
+function imgUrlFor(ref) {
+  return FXC.imgBase + '/' + encodePath(ref.folder + '/' + ref.name);
 }
-/* fixture-control plane: ws = SIGNAL relay between paired members;
-   dc = the real RTCDataChannel. */
-function sendCtl(frame) {
-  frame.fxctl = 1;
-  if (S.ctlPlane === 'dc' && S.dc && S.dcOpen) {
-    trace('out', 'dc', frame.op || 'ctl', {});
-    S.dc.send(frame);
+
+/* ── transport wrapper (fault injection on the REAL wire path) ── */
+function logSent(f) {
+  S.sentTypes.push(f.type);
+  if (S.sentTypes.length > 240) S.sentTypes.shift();
+  if (SEQUENCED[f.type]) S.seqSent++;
+}
+function fxSend(t, f) {
+  var fl = S.faults;
+  logSent(f);
+  trace('out', 'ws', f.type, {});
+  if (fl.wsDrop && f.type !== 'PING' && f.type !== 'PONG') {
+    trace('note', 'ws', 'DROP:' + f.type, {});
+    return true;
+  }
+  if (fl.staleBase && typeof f.baseRevision === 'number') {
+    /* baseRevision is TOP-LEVEL on the wire frame — optimistic concurrency
+     * lives outside the payload. Rewriting it backwards manufactures a
+     * stale_revision reject for exactly one request. */
+    f = {v: f.v, type: f.type, requestId: f.requestId,
+         sessionId: f.sessionId, workEpoch: f.workEpoch,
+         baseRevision: Math.max(0, f.baseRevision - fl.staleBase),
+         payload: f.payload};
+    fl.staleBase = 0;                 // one-shot
+  }
+  var delay = fl.wsDelay || (f.type === 'SIGNAL' ? fl.sigDelay : 0);
+  var dup = fl.wsDup && f.type !== 'PING' && f.type !== 'PONG';
+  var dupNext = fl.dupNext && f.requestId && SEQUENCED[f.type];
+  if (dupNext) fl.dupNext = false;
+  var doSend = function () {
+    try { t.send(f); } catch (e) { return false; }
+    if (dup || dupNext) { try { t.send(f); } catch (e) {} }
+    return true;
+  };
+  if (delay) { setTimeout(doSend, delay); return true; }
+  return doSend();
+}
+function inboundApply(f) {
+  var fl = S.faults, out = [];
+  if (fl.inDropType && f.type === fl.inDropType && fl.inDropCount > 0) {
+    fl.inDropCount--;
+    trace('note', 'in', 'DROP:' + f.type, {});
   } else {
-    trace('out', 'ws', 'ctl:' + (frame.op || '?'), {});
-    sendWire(PairTransport.request('SIGNAL',
-      {kind: 'ice', data: {fxctl: 1, frame: frame}},
-      {sessionId: S.member.sessionId}));
+    if (fl.inCorruptType && f.type === fl.inCorruptType &&
+        fl.inCorruptCount > 0) {
+      fl.inCorruptCount--;
+      f = corruptFrame(f);
+      trace('note', 'in', 'CORRUPT:' + f.type, {});
+    }
+    if (f.type === 'ACK' || f.type === 'REJECT') {
+      var w = S.ackWait[f.requestId];
+      if (w) {
+        delete S.ackWait[f.requestId];
+        w.res(f);
+      }
+      if (f.type === 'REJECT' && f.reason) S.rejected.push(f.reason);
+    }
+    out.push(f);
   }
+  if (fl.inInject && fl.inInject.length) {
+    var extra = fl.inInject;
+    fl.inInject = [];
+    for (var i = 0; i < extra.length; i++) {
+      trace('note', 'in', 'INJECT:' + extra[i].type, {});
+      out.push(extra[i]);
+    }
+  }
+  return out;
+}
+function corruptFrame(f) {
+  /* Flip bytes inside a MANIFEST chunk's data so the client-side digest
+   * verification fails — the pairClient manifest_error path, for real. */
+  var c = JSON.parse(JSON.stringify(f));
+  if (typeof c.data === 'string' && c.data.length) {
+    var ch = c.data.charCodeAt(0);
+    c.data = String.fromCharCode(ch === 65 ? 66 : 65) + c.data.slice(1);
+  }
+  return c;
+}
+function fxTransportFactory(url) {
+  var t = PairTransport.createWebSocketTransport(url);
+  var gen = ++S.rawGen;
+  var wrapped = {url: url, onopen: null, onclose: null};
+  var onframeFn = null;
+  Object.defineProperty(wrapped, 'onframe', {
+    get: function () { return onframeFn; },
+    set: function (f) { onframeFn = f; },
+  });
+  t.onopen = function () { if (wrapped.onopen) wrapped.onopen(); };
+  t.onclose = function () { if (wrapped.onclose) wrapped.onclose(); };
+  t.onframe = function (f) {
+    if (gen !== S.rawGen) return;
+    var frames = inboundApply(f);
+    for (var i = 0; i < frames.length; i++) {
+      trace('in', 'ws', frames[i].type, {});
+      if (onframeFn) onframeFn(frames[i]);
+    }
+  };
+  wrapped.send = function (f) { return fxSend(t, f); };
+  wrapped.close = function () { return t.close(); };
+  S.rawT = t;
+  return wrapped;
 }
 
-/* ── inbound frame dispatch ── */
-function onWsFrame(f) {
-  if (!f || typeof f !== 'object') return;
-  switch (f.type) {
-    case 'HELLO': return;
-    case 'PING':
-      if (S.wsOpen) S.ws.send({v: 1, type: 'PONG', seq: f.seq});
-      return;
-    case 'PONG': return;
-    case 'ACK': {
-      var p = S.pending[f.requestId];
-      if (p) { delete S.pending[f.requestId]; p.res(f); }
-      return;
+/* ── captured pc/dc for webrtc-dc control (real RTC, runner-visible) ── */
+function fxPcFactory() {
+  var pc = new RTCPeerConnection({iceServers: []});
+  S.pcCap = pc;
+  var origCreate = pc.createDataChannel.bind(pc);
+  pc.createDataChannel = function (label, o) {
+    var dc = origCreate(label, o);
+    S.dcCap = dc;
+    return dc;
+  };
+  /* Intercept event-handler assignment WITHOUT shadowing the WebIDL
+   * attribute: an own-property defineProperty replaces the registration
+   * path entirely, so a naive wrapper means the browser never fires the
+   * event. Route the WRAPPED handler through the prototype's real setter
+   * so the browser registers it at the IDL level. */
+  var proto = Object.getPrototypeOf(pc);
+  function wrapHandler(name, wrap) {
+    var desc = null, p = pc;
+    while (p && !desc) {
+      desc = Object.getOwnPropertyDescriptor(p, name);
+      p = Object.getPrototypeOf(p);
     }
-    case 'REJECT': {
-      var rp = S.pending[f.requestId];
-      if (rp) { delete S.pending[f.requestId]; rp.rej({reject: f}); }
-      trace('in', 'ws', 'REJECT', {reason: f.reason, request: f.request});
-      return;
-    }
-    case 'STATE': {
-      S.serverRev = f.revision;
-      S.presence = f.presence || {};
-      S.dataPlane = f.dataPlane || S.dataPlane;
-      S.phase = f.phase || S.phase;
-      trace('in', 'ws', 'STATE',
-            {revision: f.revision, phase: f.phase, dataPlane: f.dataPlane});
-      render();
-      return;
-    }
-    case 'JOIN_REQUEST':
-      S.pendingMemberId = f.memberId;
-      trace('in', 'ws', 'JOIN_REQUEST', {});
-      render();
-      return;
-    case 'SIGNAL': onSignal(f); return;
-    case 'TRANSPORT_STATE':
-      S.dataPlane = f.dataPlane;
-      trace('in', 'ws', 'TRANSPORT_STATE', {dataPlane: f.dataPlane});
-      render();
-      return;
-    case 'END':
-      S.phase = 'ended'; S.member = null; S.committed.index = -1;
-      S.ctlPlane = 'ws'; S.dc = null; S.dcOpen = false;
-      trace('in', 'ws', 'END', {reason: f.reason});
-      if (S.endRes) { var er = S.endRes; S.endRes = null; er(); }
-      render();
-      return;
-    default: trace('in', 'ws', '?' + f.type, {});
+    if (!desc || typeof desc.set !== 'function') return false;
+    Object.defineProperty(pc, name, {
+      configurable: true,
+      get: function () { return desc.get.call(pc); },
+      set: function (fn) { desc.set.call(pc, wrap(fn)); },
+    });
+    return true;
   }
-}
-function onSignal(f) {
-  var d = f.data;
-  if (d && d.fxctl) { onCtl(d.frame || d); return; }   // fixture ctl relay
-  if (S.sig) S.sig.applySignal({kind: f.kind, data: d}); // real RTC signaling
-}
-function onCtl(fr) {
-  if (!fr || typeof fr !== 'object') return;
-  switch (fr.op) {
-    case 'intent':                                     // follower -> leader
-      if (S.member && S.member.role === 'leader') leaderSequence(fr);
-      return;
-    case 'commit': applyCommit(fr); return;
-    case 'echo':                                       // data-plane echo
-      sendCtl({op: 'echo-rx', seq: fr.seq, t0: fr.t0}); return;
-    case 'echo-rx':
-      if (S.echoRes) { var r = S.echoRes; S.echoRes = null; r(fr); }
-      return;
-    case 'relay-ping':                                 // SIGNAL-relay echo —
-      sendWire(PairTransport.request('SIGNAL',         // always over the
-        {kind: 'ice', data: {fxctl: 1,                 // wire path, even
-          frame: {op: 'relay-pong', tag: fr.tag, t0: fr.t0}}},   // while dc
-        {sessionId: S.member.sessionId}));             // is up
-      return;
-    case 'relay-pong':
-      if (S.relayRes) { var rr = S.relayRes; S.relayRes = null; rr(fr); }
-      return;
-  }
-}
-/* ctl frames arriving on the real DataChannel are already parsed objects */
-function onDcFrame(f) { onCtl(f); }
-
-/* ── session choreography ── */
-function connect() {
-  return new Promise(function (res, rej) {
-    var gen = ++S.connGen;
-    var done = false;
-    var t = PairTransport.createWebSocketTransport(FXC.wsUrl);
-    var to = setTimeout(function () {
-      if (!done) { done = true; rej(new Error('ws-hello-timeout')); }
-    }, 10000);
-    t.onopen = function () {};
-    t.onclose = function () {
-      if (gen !== S.connGen) return;
-      S.wsOpen = false;
-      if (S.member) { S.phase = 'disconnected'; }
-      trace('in', 'ws', 'CLOSE', {});
-      render();
-    };
-    t.onframe = function (f) {
-      if (gen !== S.connGen) return;
-      if (f && f.type === 'HELLO' && !done) {
-        done = true; clearTimeout(to);
-        S.ws = t; S.wsOpen = true; S.phase = 'connected';
-        t.onframe = onWsFrame;
-        render();
-        res({hello: true});
+  wrapHandler('ondatachannel', function (fn) {
+    return function (ev) { S.dcCap = ev.channel; return fn(ev); };
+  });
+  wrapHandler('onicecandidate', function (fn) {
+    return function (ev) {
+      if (S.faults.suppressIce && ev.candidate) {
+        trace('note', 'dc', 'ICE-SUPPRESSED', {});
         return;
       }
-      onWsFrame(f);
+      return fn(ev);
     };
   });
-}
-function pair_create() {
-  return sendReq('CREATE', {}).then(function (ack) {
-    var d = ack.data;
-    S.member = {sessionId: d.sessionId, memberId: d.memberId,
-                role: 'leader', resumeToken: d.resumeToken};
-    S.code = d.code;                  // shown on THIS device only — never
-    document.getElementById('fx-code').textContent = d.code;   // reported
-    S.phase = 'waiting';
-    render();
-    return {role: 'leader', code: d.code};      // runner needs it once —
-  });                                           // evidence redacts it
-}
-function pair_join(code) {
-  return sendReq('JOIN', {code: code}).then(function (ack) {
-    var d = ack.data;
-    S.member = {sessionId: d.sessionId, memberId: d.memberId,
-                role: 'follower', resumeToken: d.resumeToken};
-    S.phase = 'joining';
-    render();
-    return {role: 'follower', sessionId: d.sessionId};
-  });
-}
-function pair_approve() {
-  return sendReq('APPROVE', {memberId: S.pendingMemberId})
-    .then(function () { return {approved: true}; });
-}
-function leave() {
-  if (!S.member) return Promise.resolve({left: true});
-  /* the server answers LEAVE with END (not an ACK) — sessions.py
-   * _end_session; wait for END, not an ack. */
-  return new Promise(function (res, rej) {
-    S.endRes = function () { res({left: true}); };
-    sendWire(PairTransport.request('LEAVE', {},
-                                   {sessionId: S.member.sessionId}));
-    setTimeout(function () {
-      if (S.endRes) { S.endRes = null; rej(new Error('end-timeout:LEAVE')); }
-    }, 9000);
-  });
+  return pc;
 }
 
-/* ── spread commit / projection ── */
-function commitIndex(idx) {
-  if (!S.table) throw new Error('no spread table (open_work first)');
-  idx = PairModel.clampIndex(S.table, idx);
-  S.committed = {index: idx, rev: S.committed.rev + 1,
-                 leaderSide: S.committed.leaderSide};
-  renderMarker();
-  sendCtl({op: 'commit', index: idx, rev: S.committed.rev,
-           leaderSide: S.committed.leaderSide});
+/* ── synthetic lifecycle injection (bfcache/lock/background) ──
+ * The fixture hands pairClient an events target that forwards REAL window
+ * events AND lets the runner inject semantic lifecycle transitions on
+ * demand — deterministic 'pagehide'/'pageshow' without browser support. */
+var realEv = null;
+var fxEvents = {
+  addEventListener: function (t, f) {
+    S.evHandlers[t] = f;
+    if (realEv) realEv.addEventListener(t, f);
+  },
+  removeEventListener: function (t, f) {
+    if (S.evHandlers[t] === f) delete S.evHandlers[t];
+    if (realEv) realEv.removeEventListener(t, f);
+  },
+};
+function fireLifecycle(type) {
+  S.visLog.push({t: Date.now(), type: type});
+  trace('note', 'fx', 'lifecycle:' + type, {});
+  var fn = S.evHandlers[type];
+  if (fn) fn();
+  return {fired: type, had: !!fn};
 }
-function applyCommit(fr) {
-  if (fr.rev < S.committed.rev) return;          // stale commit — drop
-  S.committed = {index: fr.index, rev: fr.rev,
-                 leaderSide: fr.leaderSide || S.committed.leaderSide};
-  renderMarker();
+
+/* ── client lifecycle ── */
+function ensureClient() {
+  if (S.client) return S.client;
+  realEv = PairClient.domEventTarget
+    ? PairClient.domEventTarget(window, document) : null;
+  S.client = PairClient.createClient({
+    url: FXC.wsUrl,
+    PairTransport: PairTransport,
+    transportFactory: fxTransportFactory,
+    applyState: fxApplyState,
+    onEvent: fxOnEvent,
+    storage: window.sessionStorage,
+    events: fxEvents,
+  });
+  return S.client;
 }
-function leaderSequence(fr) {
-  if (fr.kind === 'turn') {
-    var idx = PairModel.turnIndex(S.table, S.committed.index, fr.delta, true);
-    commitIndex(idx);
-  } else if (fr.kind === 'goto') {
-    commitIndex(fr.index);
-  } else if (fr.kind === 'swap') {
-    S.committed.leaderSide = S.committed.leaderSide === 'right' ? 'left' : 'right';
-    commitIndex(S.committed.index);
+/* A scenario ends with the client terminal (ended/error). The next
+ * scenario's pair must start from a virgin client + clean counters —
+ * faults, manifests, apply logs and wire counters all reset here. */
+function _freshSession() {
+  var st = clientState();
+  var dead = !S.client || st.status === 'ended' || st.status === 'error' ||
+             !!st.endReason;
+  if (!dead) return;
+  if (S.client && S.client.destroy) { try { S.client.destroy(); } catch (e) {} }
+  S.client = null;
+  S.rawT = null;
+  S.lastSnap = null;
+  S.manifest = null;
+  S.applyCount = 0;
+  S.applyLog = [];
+  S.events = [];
+  S.sentTypes = [];
+  S.seqSent = 0;
+  S.rejected = [];
+  S.lastError = null;
+  S.ackWait = {};
+  S.lastTap = null;
+  S.lastGesture = null;
+  S.dcCap = null;
+  S.pcCap = null;
+  S.imgState = 'none';
+  S.imgFault = {mode: 'ok', ms: 0};
+  S.faults = {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0,
+              suppressIce: false, staleBase: 0, dupNext: false,
+              inDropType: null, inDropCount: 0,
+              inCorruptType: null, inCorruptCount: 0, inInject: []};
+  if (S.latWait) { S.latWait = null; clearTimeout(S.latTimer); }
+}
+function fxOnEvent(e) {
+  if (e.type === 'error') S.lastError = e.reason || 'error';
+  S.events.push(e.type);
+  if (S.events.length > 60) S.events.shift();
+  S.eventLog.push({t: Date.now(), type: e.type});
+  if (S.eventLog.length > 200) S.eventLog.shift();
+  trace('note', 'fx', 'event:' + e.type, {});
+}
+function clientState() {
+  return S.client ? S.client.state
+                  : {status: 'disconnected', role: null, sessionId: null};
+}
+
+/* committed STATE → this member's assigned PageRef → marker + real image */
+function fxApplyState(snap, manifest, opts) {
+  if (manifest) S.manifest = manifest;
+  S.lastSnap = snap;
+  S.applyCount++;
+  S.applyLog.push({rev: snap.revision, spreadId: snap.spreadId,
+                   t: Date.now()});
+  if (S.applyLog.length > 120) S.applyLog.shift();
+  render();
+  if (S.latWait && snap.revision > S.latWait.rev0) {
+    var w = S.latWait; S.latWait = null;
+    clearTimeout(S.latTimer);
+    w.res(performance.now() - w.t0);
   }
 }
-function opTurn(delta) {
-  if (!S.member) throw new Error('not paired');
-  if (S.member.role === 'leader') {
-    var idx = PairModel.turnIndex(S.table, S.committed.index, delta, true);
-    commitIndex(idx);
-    return Promise.resolve({committed: S.committed});
+function ownProjection() {
+  var st = clientState();
+  if (!S.manifest || !S.lastSnap || !S.lastSnap.spreadId || !st.role) {
+    return null;
   }
-  sendCtl({op: 'intent', kind: 'turn', delta: delta});
-  return Promise.resolve({sent: 'intent'});
+  var table = S.manifest.spreadTable || [];
+  for (var i = 0; i < table.length; i++) {
+    if (table[i].id === S.lastSnap.spreadId) {
+      return {index: i, spread: table[i],
+              proj: PairModel.projectSpread(
+                table[i], st.role, S.lastSnap.leaderSide || 'right')};
+    }
+  }
+  return null;
 }
-function opGoto(idx) {
-  if (!S.member) throw new Error('not paired');
-  if (S.member.role === 'leader') { commitIndex(idx); }
-  else { sendCtl({op: 'intent', kind: 'goto', index: idx}); }
-  return Promise.resolve({committed: S.committed});
-}
-function opSwap() {
-  if (!S.member) throw new Error('not paired');
-  if (S.member.role === 'leader') {
-    S.committed.leaderSide = S.committed.leaderSide === 'right' ? 'left' : 'right';
-    commitIndex(S.committed.index);
+function setImg(state, url) {
+  S.imgState = state;
+  var img = document.getElementById('fx-img');
+  var badge = document.getElementById('fx-img-badge');
+  badge.textContent = state;
+  document.getElementById('fx-marker')
+    .setAttribute('data-img-state', state);
+  if (url) {
+    img.onerror = function () { setImg('error', null); };
+    img.onload = function () { setImg('ok', url); };
+    img.src = url;
   } else {
-    sendCtl({op: 'intent', kind: 'swap'});
+    img.removeAttribute('src');
   }
-  return Promise.resolve({committed: S.committed});
 }
-
-/* ── render ── */
 function renderMarker() {
   var m = document.getElementById('fx-marker');
-  if (!S.table || S.committed.index < 0 || S.committed.index >= S.table.length
-      || !S.member) {
-    m.style.background = 'rgb(51,51,58)'; m.textContent = '—';
-    m.setAttribute('data-page', ''); m.setAttribute('data-side', '');
+  var st = clientState();
+  var p = ownProjection();
+  if (st.error || st.endReason || st.status === 'error' ||
+      st.status === 'ended') {
+    m.style.background = 'rgb(70,22,26)';
+    m.firstChild.textContent = st.error ? 'ERR' : 'END';
+    m.setAttribute('data-page', '');
+    m.setAttribute('data-side', '');
+    setImg('none', null);
     return;
   }
-  var proj = PairModel.projectSpread(
-    S.table[S.committed.index], S.member.role, S.committed.leaderSide);
-  var ref = proj.ref;
+  if (!p || !p.proj) {
+    var loading = (st.phase === 'loading' || st.phase === 'reconnecting' ||
+                   st.status === 'connecting' || st.status === 'reconnecting');
+    m.style.background = 'rgb(51,51,58)';
+    m.firstChild.textContent = loading ? '…' : '—';
+    m.setAttribute('data-page', '');
+    m.setAttribute('data-side', '');
+    if (!loading) setImg('none', null);
+    return;
+  }
+  var ref = p.proj.ref;
+  m.setAttribute('data-side', p.proj.side);
   if (ref) {
     var rgb = markerColor(ref.name);
     m.style.background = 'rgb(' + rgb.join(',') + ')';
-    m.textContent = ref.name;
+    m.firstChild.textContent = ref.name;
     m.setAttribute('data-page', ref.name);
+    var mode = S.imgFault.mode;
+    if (mode === '404') {
+      setImg('loading', imgUrlFor({folder: ref.folder,
+                                 name: 'fx-missing-page.png'}));
+    } else if (mode === 'delay') {
+      setImg('loading', null);
+      var url = imgUrlFor(ref);
+      setTimeout(function () { setImg('loading', url); },
+                 S.imgFault.ms || 1500);
+    } else if (mode === 'off') {
+      setImg('loading', null);
+    } else {
+      setImg('loading', imgUrlFor(ref));
+    }
   } else {
     m.style.background = 'rgb(34,34,44)';
-    m.textContent = 'BLANK';
+    m.firstChild.textContent = 'BLANK';
     m.setAttribute('data-page', 'BLANK');
+    setImg('blank', null);
   }
-  m.setAttribute('data-side', proj.side);
 }
 function render() {
-  document.getElementById('fx-role').textContent =
-    S.member ? S.member.role : FXC.role;
+  var st = clientState();
+  document.getElementById('fx-role').textContent = st.role || FXC.role;
   document.getElementById('fx-side').textContent =
     document.getElementById('fx-marker').getAttribute('data-side') || '-';
   document.getElementById('fx-spread').textContent =
-    (S.table && S.committed.index >= 0)
-      ? S.table[S.committed.index].id : '-';
-  document.getElementById('fx-rev').textContent = String(S.committed.rev);
-  document.getElementById('fx-transport').textContent =
-    S.dataPlane || S.ctlPlane;
-  var st = S.phase + (S.pendingMemberId ? '+pending' : '');
-  document.getElementById('fx-srv').textContent = st;
+    (S.lastSnap && S.lastSnap.spreadId) || '-';
+  document.getElementById('fx-rev').textContent =
+    S.lastSnap ? String(S.lastSnap.revision) : '-';
+  document.getElementById('fx-transport').textContent = st.transport || '-';
+  document.getElementById('fx-srv').textContent =
+    st.phase || st.status || '-';
+  var code = st.code;
+  if (code) document.getElementById('fx-code').textContent = code;
   renderMarker();
 }
 function marker() {
   var m = document.getElementById('fx-marker');
   return {page: m.getAttribute('data-page'), side: m.getAttribute('data-side'),
-          text: m.textContent,
-          bg: m.style.background || ''};
+          text: m.firstChild ? m.firstChild.textContent : m.textContent,
+          bg: m.style.background || '',
+          imgState: m.getAttribute('data-img-state') || S.imgState};
+}
+function manifestSummary() {
+  if (!S.manifest) return null;
+  /* page names repeat across chapters (manga folder-per-chapter trees),
+   * so every entry also carries its pageRefs INDEX — the runner can
+   * address a page unambiguously without the folder name ever leaving
+   * the client. */
+  var refs = S.manifest.pageRefs || [];
+  var idxOf = function (ref) {
+    if (!ref) return -1;
+    for (var i = 0; i < refs.length; i++) {
+      if (refs[i].name === ref.name && refs[i].folder === ref.folder) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  var spreads = (S.manifest.spreadTable || []).map(function (s) {
+    return {id: s.id, r: s.right ? s.right.name : null,
+            l: s.left ? s.left.name : null,
+            ri: idxOf(s.right), li: idxOf(s.left)};
+  });
+  return {folder: 'sha256:redacted', offset: S.manifest.offset,
+          version: S.manifest.manifestVersion || null,
+          chapters: (S.manifest.chapters || []).length,
+          pages: refs.length,
+          spreads: spreads};
+}
+function pageByName(name, chapter) {
+  var refs = (S.manifest && S.manifest.pageRefs) || [];
+  for (var i = 0; i < refs.length; i++) {
+    if (refs[i].name === name &&
+        (!chapter || refs[i].folder === chapter)) {
+      return {folder: refs[i].folder, name: refs[i].name};
+    }
+  }
+  return null;
 }
 
-/* ── WebRTC data channel ── */
-function signalSend(sig) {
-  if (S.faults.suppressIce && sig.kind === 'ice') return;   // ICE suppression
-  sendWire(PairTransport.request('SIGNAL', {kind: sig.kind, data: sig.data},
-                                 {sessionId: S.member.sessionId}));
-}
-function attachDc(dc) {
-  S.dc = PairTransport.createDataChannelTransport(dc);
-  S.dc.onframe = onDcFrame;
-  S.dc.onclose = function () { S.dcOpen = false; trace('in', 'dc', 'CLOSE', {}); };
-  var ready = function () {
-    S.dcOpen = true;
-    sendReq('TRANSPORT_STATE', {state: 'up'}).catch(function () {});
-    trace('note', 'dc', 'OPEN', {});
-  };
-  if (dc.readyState === 'open') ready();
-  else dc.onopen = ready;
-}
-function dcOpen(initiator) {
-  S.sig = PairTransport.createSignalingPeer({
-    initiator: !!initiator,
-    send: signalSend,
-    onChannel: attachDc,
+/* ── wire helpers outside the client (probes + rtt) ── */
+function rawSendAndWaitAck(frame, timeoutMs) {
+  return new Promise(function (res, rej) {
+    S.ackWait[frame.requestId] = {res: res, t0: performance.now()};
+    if (!S.rawT) { delete S.ackWait[frame.requestId]; rej(new Error('no-link')); return; }
+    try { S.rawT.send(frame); } catch (e) {
+      delete S.ackWait[frame.requestId];
+      rej(new Error('send-fail:' + e));
+      return;
+    }
+    setTimeout(function () {
+      if (S.ackWait[frame.requestId]) {
+        delete S.ackWait[frame.requestId];
+        rej(new Error('ack-timeout:' + frame.type));
+      }
+    }, timeoutMs || 9000);
   });
-  S.sig.start();
-  return Promise.resolve({started: true});
 }
-function dcClose() {
-  if (S.dc) { S.dc.close(); }
-  S.dcOpen = false; S.ctlPlane = 'ws';
-  if (S.member) {
-    return sendReq('TRANSPORT_STATE', {state: 'down'})
-      .then(function () { return {closed: true}; });
-  }
-  return Promise.resolve({closed: true});
+function probeWs() {
+  return new Promise(function (res, rej) {
+    var t = PairTransport.createWebSocketTransport(FXC.wsUrl);
+    var to = setTimeout(function () { try { t.close(); } catch (e) {}
+                                    rej(new Error('probe-timeout')); }, 8000);
+    t.onopen = function () {};
+    t.onclose = function () {};
+    t.onframe = function (f) {
+      if (f.type === 'HELLO') { clearTimeout(to); res(t); }
+      if (f.type === 'PING') { try { t.send({v: 1, type: 'PONG', seq: f.seq}); } catch (e) {} }
+    };
+  });
+}
+
+/* ── latency probe: intent send → committed STATE applied ── */
+function latencyProbe(p) {
+  var n = p.samples || 8, out = [], delta = 1;
+  return new Promise(function (res, rej) {
+    var step = function () {
+      if (out.length >= n) return res({samples: out});
+      var st = clientState();
+      if (st.phase !== 'reading') return rej(new Error('latency: not reading'));
+      var rev0 = st.revision;
+      var t0 = performance.now();
+      var ok = S.client.sendIntent({type: 'turn', delta: delta,
+                                    crossChapter: true, fromChapter: null});
+      if (!ok) return rej(new Error('latency: sendIntent refused'));
+      delta = -delta;
+      S.latWait = {rev0: rev0, t0: t0, res: function (t1) {
+        out.push(t1 - t0);
+        S.latWait = null;
+        setTimeout(step, 40);
+      }};
+      S.latTimer = setTimeout(function () {
+        if (S.latWait) { S.latWait = null; rej(new Error('latency-timeout')); }
+      }, 9000);
+    };
+    step();
+  });
 }
 
 /* ── commands (runner -> fixture) ── */
 var CMD = {
-  connect: function () { return connect().then(function () { return {open: true}; }); },
-  create: function () { return pair_create().then(function (r) { return r; }); },
-  join: function (p) { return pair_join(p.code); },
-  approve: function () { return pair_approve(); },
-  leave: function () { return leave(); },
-  code: function () { return Promise.resolve({code: S.code}); },
+  connect: function () { ensureClient(); return Promise.resolve({open: true}); },
+  create: function () {
+    _freshSession();
+    var c = ensureClient();
+    return c.create().then(function () {
+      render();
+      return {code: c.state.code, role: c.state.role};
+    });
+  },
+  join: function (p) {
+    _freshSession();
+    var c = ensureClient();
+    return c.join(p.code).then(function () {
+      render();
+      return {role: c.state.role};
+    });
+  },
+  approve: function () {
+    return ensureClient().approve().then(function () { return {approved: true}; });
+  },
+  leave: function () {
+    if (!S.client) return Promise.resolve({left: true});
+    return S.client.leave().then(function () {
+      render();
+      return {left: true};
+    });
+  },
+  code: function () { return Promise.resolve({code: clientState().code}); },
   state: function () {
+    var st = clientState();
     var pres = {};
-    for (var k in S.presence) {
-      pres[k] = {role: S.presence[k].role, status: S.presence[k].status};
+    for (var k in (st.presence || {})) {
+      pres[k] = {role: st.presence[k].role, status: st.presence[k].status,
+                 ready: !!st.presence[k].ready};
     }
+    var p = ownProjection();
     return Promise.resolve({
-      phase: S.phase, wsOpen: S.wsOpen, dcOpen: S.dcOpen,
-      sessionId: S.member ? S.member.sessionId : null,
-      role: S.member ? S.member.role : null,
-      pending: !!S.pendingMemberId,
-      presence: pres,
-      dataPlane: S.dataPlane, ctlPlane: S.ctlPlane,
-      serverRev: S.serverRev,
-      committed: S.committed,
-      spreadId: (S.table && S.committed.index >= 0)
-                  ? S.table[S.committed.index].id : null,
+      status: st.status, phase: st.phase,
+      sessionId: st.sessionId, role: st.role, memberId: st.memberId,
+      side: st.side, transport: st.transport,
+      spreadId: st.spreadId, revision: st.revision,
+      workEpoch: st.workEpoch, manifestVersion: st.manifestVersion,
+      presence: pres, pending: !!st.joinRequest,
+      error: st.error || null, endReason: st.endReason || null,
+      lastError: S.lastError,
+      applied: {index: p ? p.index : -1,
+                spreadId: (p && p.spread.id) || null,
+                leaderSide: S.lastSnap ? S.lastSnap.leaderSide : null,
+                revision: S.lastSnap ? S.lastSnap.revision : 0},
       marker: marker(),
+      manifest: manifestSummary(),
+      applyCount: S.applyCount,
+      applyLog: S.applyLog.slice(-20),
+      sentTypes: S.sentTypes.slice(-40),
+      seqSent: S.seqSent,
+      rejected: S.rejected.slice(-20),
+      events: S.events.slice(-20),
+      dcOpen: !!(S.dcCap && S.dcCap.readyState === 'open'),
       visLog: S.visLog.slice(-10),
       hasRTC: typeof RTCPeerConnection !== 'undefined',
+      standalone: navigator.standalone === true ||
+        (window.matchMedia &&
+         window.matchMedia('(display-mode: standalone)').matches),
+      lastGesture: S.lastGesture,
     });
   },
   open_work: function (p) {
-    S.table = p.table;
-    S.committed = {index: p.startIndex || 0, rev: S.committed.rev + 1,
-                   leaderSide: 'right'};
-    render();
-    sendCtl({op: 'commit', index: S.committed.index, rev: S.committed.rev,
-             leaderSide: S.committed.leaderSide});
-    return Promise.resolve({spreads: S.table.length});
+    var c = ensureClient();
+    var intent = {type: 'openWork', folder: p.folder};
+    if (p.page) intent.page = p.page;
+    if (p.offset !== undefined && p.offset !== null) intent.offset = p.offset;
+    var ok = c.sendIntent(intent);
+    /* a local gate (phase/role/link) is an OBSERVABLE refusal, not a
+     * fixture error — the runner asserts on it either way. */
+    return Promise.resolve({sent: !!ok});
   },
-  turn: function (p) { return opTurn(p.delta); },
-  goto: function (p) { return opGoto(p.index); },
-  swap: function () { return opSwap(); },
-  signal_ping: function (p) {
-    /* explicit SIGNAL relay round-trip over the wire (not the ctl plane) */
-    var tag = p.tag;
-    return new Promise(function (res, rej) {
-      var t0 = Date.now();
-      S.relayRes = function (fr) {
-        if (fr.tag === tag) res({rtt: Date.now() - t0, tag: tag});
-      };
-      sendWire(PairTransport.request('SIGNAL',
-        {kind: 'ice', data: {fxctl: 1, frame: {op: 'relay-ping', tag: tag, t0: t0}}},
-        {sessionId: S.member.sessionId}));
-      setTimeout(function () {
-        if (S.relayRes) { S.relayRes = null; rej(new Error('relay-timeout')); }
-      }, 8000);
+  turn: function (p) {
+    var ok = ensureClient().sendIntent({
+      type: 'turn', delta: p.delta,
+      crossChapter: p.crossChapter !== false,
+      fromChapter: p.fromChapter || null,
     });
+    return Promise.resolve({sent: !!ok});
   },
-  echo: function (p) {          /* rtt probe over the ACTIVE data plane */
-    var n = p.samples || 5, out = [];
+  goto: function (p) {
+    var ref = p.page;
+    if (typeof p.pageIndex === 'number') {
+      /* exact-addressing path: pageRefs index — immune to the
+       * duplicate-page-name ambiguity pageByName can't resolve. */
+      ref = (S.manifest && S.manifest.pageRefs || [])[p.pageIndex] || null;
+      if (ref) ref = {folder: ref.folder, name: ref.name};
+    } else if (typeof ref === 'string') {
+      ref = pageByName(ref, p.chapter);
+    }
+    if (!ref) return Promise.reject(new Error('goto: unknown page'));
+    var ok = ensureClient().sendIntent({type: 'goto', page: ref});
+    return Promise.resolve({sent: !!ok});
+  },
+  swap: function () {
+    var ok = ensureClient().swapSides();
+    return Promise.resolve({sent: !!ok});
+  },
+  set_offset: function (p) {
+    var ok = ensureClient().sendIntent({type: 'setOffset', offset: p.offset});
+    return Promise.resolve({sent: !!ok});
+  },
+  /* client→server wire RTT via a raw SET_ACTIVITY on the member link */
+  rtt: function (p) {
+    var n = p.samples || 5, out = [], i = 0;
     return new Promise(function (res, rej) {
-      var i = 0;
       var step = function () {
-        if (i >= n) { res({samples: out}); return; }
+        if (i >= n) return res({samples: out});
         i++;
-        var seq = i, t0 = Date.now();
-        S.echoRes = function (fr) {
-          if (fr.seq !== seq) return;
-          S.echoRes = null;
-          out.push(Date.now() - t0);
+        var st = clientState();
+        var frame = {v: 1, type: 'SET_ACTIVITY',
+                     requestId: 'fx-rtt-' + FXC.id + '-' + i + '-' + Date.now(),
+                     sessionId: st.sessionId,
+                     workEpoch: st.workEpoch || 0,
+                     baseRevision: st.revision || 0,
+                     payload: {state: 'active'}};
+        var t0 = performance.now();
+        S.ackWait[frame.requestId] = {res: function () {
+          out.push(performance.now() - t0);
           setTimeout(step, 30);
-        };
-        sendCtl({op: 'echo', seq: seq, t0: t0});
+        }};
+        if (!S.rawT) return rej(new Error('rtt: no-link'));
+        try { S.rawT.send(frame); } catch (e) { return rej(new Error('rtt:' + e)); }
         setTimeout(function () {
-          if (S.echoRes) { S.echoRes = null; rej(new Error('echo-timeout')); }
-        }, 8000);
+          if (S.ackWait[frame.requestId]) {
+            delete S.ackWait[frame.requestId];
+            rej(new Error('rtt-timeout'));
+          }
+        }, 9000);
       };
       step();
     });
   },
-  dc_open: function (p) { return dcOpen(p.initiator); },
-  dc_close: function () { return dcClose(); },
-  ctl_plane: function (p) { S.ctlPlane = p.plane; return Promise.resolve({plane: S.ctlPlane}); },
+  latency: function (p) { return latencyProbe(p); },
+  dc_open: function () {
+    var c = ensureClient();
+    var ok = c.enableWebRTC({pcFactory: fxPcFactory});
+    return Promise.resolve({enabled: ok});
+  },
+  dc_close: function () {
+    if (S.dcCap) { try { S.dcCap.close(); } catch (e) {} }
+    return Promise.resolve({closed: true});
+  },
+  dc_restart: function () {
+    var ok = ensureClient().restartDataChannel();
+    return Promise.resolve({restarted: ok});
+  },
+  ctl_plane: function () { return Promise.resolve({plane: 'real'}); },
   disconnect: function () {
-    if (S.ws) S.ws.close();
+    if (S.rawT) { try { S.rawT.close(); } catch (e) {} }
     return Promise.resolve({closed: true});
   },
   resume: function () {
-    var m = S.member;
-    return connect().then(function () {
-      return sendReq('RESUME',
-        {memberId: m.memberId, resumeToken: m.resumeToken}, m.sessionId);
-    }).then(function () { return {resumed: true}; });
+    var c = ensureClient();
+    return c.resume().then(function () { return {resumed: true}; });
   },
+  /* bad RESUME probed on a SECOND anonymous link — the member's own link
+   * and client stay untouched so a real resume can still be asserted. */
   resume_bad: function (p) {
-    var m = S.member;
-    return connect().then(function () {
-      return sendReq('RESUME',
-        {memberId: m.memberId, resumeToken: p.token}, m.sessionId)
-        .then(function () { return {rejected: null}; })
-        .catch(function (e) {
-          if (e && e.reject) return {rejected: e.reject.reason};
-          throw e;
-        });
+    var st = clientState();
+    var mId = p.memberId || st.memberId;
+    var sId = p.sessionId || st.sessionId;
+    if (!mId || !sId) return Promise.reject(new Error('resume_bad: no member'));
+    return probeWs().then(function (t) {
+      return new Promise(function (res, rej) {
+        var to = setTimeout(function () {
+          try { t.close(); } catch (e) {}
+          rej(new Error('resume_bad-timeout'));
+        }, 8000);
+        t.onframe = function (f) {
+          if (f.type === 'PING') { try { t.send({v: 1, type: 'PONG', seq: f.seq}); } catch (e) {} }
+          if (f.type === 'ACK' || f.type === 'REJECT') {
+            clearTimeout(to);
+            try { t.close(); } catch (e) {}
+            res({type: f.type, reason: f.reason || null});
+          }
+        };
+        t.send({v: 1, type: 'RESUME',
+                requestId: 'fx-bad-' + Date.now(),
+                sessionId: sId,
+                workEpoch: st.workEpoch || 0,
+                baseRevision: st.revision || 0,
+                payload: {memberId: mId, resumeToken: p.token || 'fx-bad-token'}});
+      });
     });
   },
   fault: function (p) {
-    if (p.type === 'ws_delay') S.faults.wsDelay = p.ms || 0;
-    else if (p.type === 'ws_dup') S.faults.wsDup = true;
-    else if (p.type === 'ws_drop') S.faults.wsDrop = true;
-    else if (p.type === 'sig_delay') S.faults.sigDelay = p.ms || 0;
-    else if (p.type === 'suppress_ice') S.faults.suppressIce = true;
-    else if (p.type === 'clear') S.faults = {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0, suppressIce: false};
-    return Promise.resolve({faults: S.faults});
+    var f = S.faults;
+    if (p.type === 'ws_delay') f.wsDelay = p.ms || 0;
+    else if (p.type === 'ws_dup') f.wsDup = true;
+    else if (p.type === 'ws_drop') f.wsDrop = true;
+    else if (p.type === 'sig_delay') f.sigDelay = p.ms || 0;
+    else if (p.type === 'suppress_ice') f.suppressIce = true;
+    else if (p.type === 'stale_base') f.staleBase = p.sub || 1;
+    else if (p.type === 'dup_next') f.dupNext = true;
+    else if (p.type === 'in_drop') { f.inDropType = p.frame; f.inDropCount = p.count || 1; }
+    else if (p.type === 'in_corrupt') { f.inCorruptType = p.frame; f.inCorruptCount = p.count || 1; }
+    else if (p.type === 'in_inject') { f.inInject = (p.frames || []).slice(); }
+    else if (p.type === 'clear') {
+      S.faults = {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0,
+                  suppressIce: false, staleBase: 0, dupNext: false,
+                  inDropType: null, inDropCount: 0,
+                  inCorruptType: null, inCorruptCount: 0, inInject: []};
+    }
+    return Promise.resolve({faults: true});
   },
-  set_activity: function (p) { return sendReq('SET_ACTIVITY', {state: p.state}).then(function () { return {sent: true}; }); },
+  set_activity: function (p) {
+    var ok = ensureClient().setActivity(p.state);
+    return Promise.resolve({sent: ok});
+  },
+  lifecycle: function (p) { return Promise.resolve(fireLifecycle(p.type)); },
+  img_fault: function (p) {
+    S.imgFault = {mode: p.mode || 'ok', ms: p.ms || 0};
+    render();
+    return Promise.resolve({imgFault: S.imgFault.mode});
+  },
   last_tap: function () {
     return Promise.resolve({tap: S.lastTap || null,
+                            gesture: S.lastGesture,
                             vw: window.innerWidth, vh: window.innerHeight});
   },
   rect: function (p) {
@@ -593,6 +847,15 @@ var CMD = {
     if (!el) return Promise.reject(new Error('no element: ' + p.id));
     var r = el.getBoundingClientRect();
     return Promise.resolve({x: r.x, y: r.y, w: r.width, h: r.height});
+  },
+  value: function (p) {
+    /* input-field value probe — the tap-pair flow verifies typed text
+     * actually landed before tapping 参加 (a missed focus on iOS types
+     * into nothing and the JOIN silently never leaves). */
+    var el = document.getElementById(p.id);
+    if (!el) return Promise.reject(new Error('no element: ' + p.id));
+    return Promise.resolve({v: 'value' in el ? el.value : null,
+                            focused: document.activeElement === el});
   },
   pull_trace: function () {
     var t = S.trace; S.trace = [];
@@ -622,26 +885,68 @@ document.getElementById('fx-swap').addEventListener('click', function () {
   CMD.swap().catch(function (e) { status('swap:' + e); });
 });
 document.getElementById('fx-dc').addEventListener('click', function () {
-  CMD.dc_open({initiator: FXC.role === 'leader'}).catch(function (e) { status('dc:' + e); });
+  CMD.dc_open().catch(function (e) { status('dc:' + e); });
 });
 document.getElementById('fx-leave').addEventListener('click', function () {
   CMD.leave().catch(function (e) { status('leave:' + e); });
 });
 
-/* real-device taps land here (screen -> client calibration) */
+/* real-device input: still/drift taps, swipes, pinch, edge turns all map
+ * to real turn intents — the gesture semantics mirror the app's RTL rules
+ * (left third = next, right third = prev, horizontal swipe by direction). */
+var G = {pts: {}, pinch: false};
 document.addEventListener('pointerdown', function (ev) {
   S.lastTap = {x: ev.clientX, y: ev.clientY, t: Date.now()};
+  G.pts[ev.pointerId] = {x0: ev.clientX, y0: ev.clientY};
+  if (Object.keys(G.pts).length >= 2) G.pinch = true;
+}, true);
+document.addEventListener('pointerup', function (ev) {
+  var g = G.pts[ev.pointerId];
+  delete G.pts[ev.pointerId];
+  if (!g) return;
+  var dx = ev.clientX - g.x0, dy = ev.clientY - g.y0;
+  var adx = Math.abs(dx), ady = Math.abs(dy);
+  var w = window.innerWidth;
+  var kind, delta = 0;
+  if (G.pinch) {
+    kind = 'pinch';
+    if (Object.keys(G.pts).length === 0) G.pinch = false;
+  } else if (adx >= 60 && adx > ady * 1.5) {
+    kind = 'swipe'; delta = dx < 0 ? 1 : -1;
+  } else {
+    kind = adx < 12 && ady < 12 ? 'tap' : 'drift-tap';
+    var frac = ev.clientX / w;
+    if (frac < 0.30) delta = 1;
+    else if (frac > 0.70) delta = -1;
+  }
+  /* taps that land ON a control must not ALSO fire an edge-turn — the bar
+   * wraps on narrow screens so a button can sit inside the edge zone
+   * (sim_pair_via_taps double-turn bug). The gesture is still recorded. */
+  var onCtl = ev.target && ev.target.closest &&
+      !!ev.target.closest('#fx-bar, button, input, select, textarea, a');
+  S.lastGesture = {kind: kind, dx: dx, delta: delta, t: Date.now()};
+  if (delta !== 0 && !onCtl) {
+    CMD.turn({delta: delta}).catch(function (e) { status('g:' + e); });
+  }
+}, true);
+document.addEventListener('pointercancel', function (ev) {
+  delete G.pts[ev.pointerId];
+  if (Object.keys(G.pts).length === 0) G.pinch = false;
+}, true);
+
+/* iOS Safari reports multi-touch pinch through the legacy gesture events,
+ * not a second pointer — without these, a real device pinch is invisible
+ * to lastGesture (sim_device_inputs). */
+document.addEventListener('gesturestart', function (ev) {
+  S.lastGesture = {kind: 'pinch', dx: 0, delta: 0, t: Date.now()};
+}, true);
+document.addEventListener('gestureend', function (ev) {
+  S.lastGesture = {kind: 'pinch', dx: 0, delta: 0, t: Date.now()};
 }, true);
 
 document.addEventListener('visibilitychange', function () {
-  var hidden = document.hidden;
-  S.visLog.push({t: Date.now(), hidden: hidden});
-  trace('note', 'fx', hidden ? 'hidden' : 'visible', {});
-  if (S.member && S.wsOpen) {
-    sendReq('SET_ACTIVITY', {state: hidden ? 'suspended' : 'active'})
-      .catch(function () {});
-  }
-});
+  S.visLog.push({t: Date.now(), hidden: document.hidden});
+}, true);
 
 /* ── control channel (long-poll) ── */
 function post(path, obj) {
@@ -651,7 +956,14 @@ function post(path, obj) {
   });
 }
 function poll() {
-  fetch(FXC.ctrlBase + '/next?id=' + encodeURIComponent(FXC.id))
+  /* the server holds /next up to ~25s; if Safari stalls the fetch anyway
+   * (rotation/backgrounding can freeze in-flight requests) the control
+   * channel must not die with it — abort and repoll instead. */
+  var ctl = (typeof AbortController !== 'undefined') ? new AbortController()
+                                                     : null;
+  var to = ctl ? setTimeout(function () { ctl.abort(); }, 30000) : null;
+  fetch(FXC.ctrlBase + '/next?id=' + encodeURIComponent(FXC.id),
+        ctl ? {signal: ctl.signal} : {})
     .then(function (r) { return r.json(); })
     .then(function (cmd) {
       if (cmd && cmd.seq) {
@@ -667,7 +979,8 @@ function poll() {
       }
       setTimeout(poll, 25);
     })
-    .catch(function () { setTimeout(poll, 600); });
+    .catch(function () { setTimeout(poll, 600); })
+    .finally(function () { if (to) clearTimeout(to); });
 }
 
 function loadScript(url) {
@@ -684,10 +997,25 @@ Promise.all(FXC.mods.map(loadScript)).then(function () {
   return post('/hello', {
     id: FXC.id, role: FXC.role, ua: navigator.userAgent,
     hasRTC: typeof RTCPeerConnection !== 'undefined',
-    mods: !!(window.PairTransport && window.PairModel),
+    standalone: navigator.standalone === true ||
+      (window.matchMedia &&
+       window.matchMedia('(display-mode: standalone)').matches),
+    mods: !!(window.PairTransport && window.PairModel && window.PairClient),
   });
 }).then(function () {
   status('ready');
+  /* Reload-resume: stored member credentials mean this page load is a
+   * reload of a paired device — resume the pair exactly like the app's
+   * boot path does (PairController._boot). The key is pairClient's own
+   * STORAGE_KEY ('bookq.readerSync.v1'). */
+  try {
+    var raw = window.sessionStorage.getItem('bookq.readerSync.v1');
+    if (raw && !S.bootResumeTried) {
+      S.bootResumeTried = true;
+      ensureClient();
+      S.client.resume().catch(function (e) { status('boot-resume:' + e); });
+    }
+  } catch (e) {}
   poll();
 }).catch(function (e) {
   status('boot-fail:' + e);
