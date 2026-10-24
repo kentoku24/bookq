@@ -8,6 +8,7 @@ connection carries ``app.state`` exactly like a real HTTPConnection.
 """
 
 import json
+import os
 import struct
 import zlib
 import zipfile
@@ -16,10 +17,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import Settings
-from app.reader_sync import catalog, model, protocol
-from tests.helpers import drive, make_pdf
-from tests.fixtures.rar5 import make_rar5_store
+os.environ["BOOKQ_TEST_MODE"] = "true"
+
+from app.config import Settings  # noqa: E402
+from app.reader_sync import catalog, model, protocol  # noqa: E402
+from tests.helpers import drive, make_pdf  # noqa: E402
+from tests.fixtures.rar5 import make_rar5_store  # noqa: E402
 
 
 def _make_png(path: Path, rgb: tuple = (60, 120, 200)) -> None:
