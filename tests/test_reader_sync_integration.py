@@ -102,9 +102,8 @@ def _pair_now(pl, pf, timeout=15000):
     code = pl.evaluate("() => window.PairController.state.code")
     assert code and len(str(code)) == 6
     pf.evaluate("(c) => window.PairController.join(c)", code)
-    pl.wait_for_function("() => !!window.PairController.state.joinRequest",
-                         timeout=timeout)
-    pl.evaluate("() => window.PairController.approve()")
+    # #114: the leader controller auto-approves on joinRequest — the join
+    # alone must complete the handshake with no explicit approve() call.
     for p in (pl, pf):
         p.wait_for_function(
             "() => window.PairController.state.status === 'connected'"

@@ -1,5 +1,5 @@
-/* dual-reader pairing UI — code connect / approve / swap-sides / leave
- * (#83 / S08). Plain global script; exposes window.PairUI.
+/* dual-reader pairing UI — code connect / auto-approve / swap-sides / leave
+ * (#83 / S08, #114). Plain global script; exposes window.PairUI.
  *
  * Driven by an INJECTED controller — real sync wiring lands in S09 (#84).
  * Controller interface (parent issue #75 §3.3/§3.5):
@@ -10,7 +10,8 @@
  *          | 'peer-away' | 'loading' | 'error' | 'ended'
  *   role   : 'leader' | 'follower' | null
  *   code   : 6-digit string the leader shows while waiting for a join
- *   joinRequest : truthy while a follower waits for leader approval
+ *   joinRequest : truthy while a follower waits — approved automatically
+ *     by the controller (#114); this UI no longer surfaces the request
  *   side   : 'right' | 'left' | null — the half this device renders
  *   transport : 'server-ws' | 'webrtc-dc' | null — data-plane kind
  *   error  : message shown in the error view
@@ -94,13 +95,6 @@
           '<p class="pair-note">相手の端末でこのコードを入力してください</p>' +
           '<div id="pair-code-value" aria-label="ペアリングコード">------</div>' +
           '<canvas id="pair-qr" width="144" height="144" aria-label="ペアリングQRコード" hidden></canvas>' +
-          '<div id="pair-join-request" hidden>' +
-            '<p class="pair-note">参加要求があります</p>' +
-            '<div class="pair-row">' +
-              '<button id="pair-reject" type="button" class="pair-danger">拒否</button>' +
-              '<button id="pair-approve" type="button" class="pair-primary">承認</button>' +
-            '</div>' +
-          '</div>' +
           '<button id="pair-leader-cancel" type="button">キャンセル</button>' +
         '</div>' +
         '<div id="pair-sec-waiting" class="pair-sec" hidden>' +
@@ -181,9 +175,6 @@
       scanVideo: _el('pair-scan-video'),
       codeValue: _el('pair-code-value'),
       qr: _el('pair-qr'),
-      joinRequest: _el('pair-join-request'),
-      approve: _el('pair-approve'),
-      reject: _el('pair-reject'),
       leaderCancel: _el('pair-leader-cancel'),
       waitingText: _el('pair-waiting-text'),
       waitingCancel: _el('pair-waiting-cancel'),
@@ -236,7 +227,6 @@
 
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
-      els.joinRequest.hidden = !s.joinRequest;
       drawQR(s.code);
     } else if (sec === els.secWaiting) {
       els.waitingText.textContent =
@@ -499,8 +489,6 @@
     els.codeInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); submitJoin(); }
     });
-    els.approve.addEventListener('click', () => { if (ctl) ctl.approve(); });
-    els.reject.addEventListener('click', () => { if (ctl) ctl.reject(); });
     els.leaderCancel.addEventListener('click', () => { if (ctl) ctl.leave(); });
     els.waitingCancel.addEventListener('click', () => { if (ctl) ctl.leave(); });
     els.swap.addEventListener('click', () => { if (ctl) ctl.swapSides(); });
