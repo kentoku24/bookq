@@ -581,6 +581,8 @@
     chapterLabels = [];
     for (const k of Object.keys(spreadEls)) spreadEls[k].remove();
     spreadEls = {}; pageAR = {}; lastAR = 0.7; anchorSpread = 0;
+    for (const k of Object.keys(pairBlankCells)) pairBlankCells[k].remove();
+    pairBlankCells = {};
     track.style.transition = "none";
     track.style.transform = "translateX(0)";
   }
@@ -594,6 +596,14 @@
   // and restoreBrowse — any change to viewer teardown goes here. Does NOT
   // touch the #empty prompt or the URL.
   function teardownViewer(){
+    // Leaving the book ends any paired view: solo layout settings were never
+    // touched, so dropping the projection state is enough here.
+    if (pairStrip){
+      pairStrip = null;
+      window.PairedView.clear();
+      imgContainer.classList.remove("pair-mode");
+      imgContainer.classList.remove("pair-blank");
+    }
     resetStrip();
     currentFolder = null; images = []; chapterList = []; chapterBoundaries = []; currentIdx = 0;
     folderName.textContent = "";
@@ -729,6 +739,15 @@
   const SLIDE_MS = 300;  // matches the .3s transform transition in applyTrackTransform
   let lastTurnAt = -Infinity; // performance.now() of the last snapTo — turns within SLIDE_MS cut instantly (burst mode)
   let snapGen = 0;       // bumped to invalidate a pending slide (new snap, or a drag)
+
+  // ── paired (dual-reader) rendering state — S06 / #81 ──
+  // pairStrip is non-null while a committed paired snapshot is being shown
+  // and not left. `spreads`/`idxToSpread` then hold the SHARED spread table
+  // (idx-mapped, wire `id` preserved); renderPagesForSpread() projects each
+  // spread to the ONE page this device renders ([] = blank side). Solo mode
+  // keeps it null and every code path below is byte-for-byte pre-pair.
+  let pairStrip = null;      // {active, side, spreadId, renderSet:Set, solo:{...}}
+  let pairBlankCells = {};   // { spreadNo: HTMLDivElement.page-cell.pair-blank }
   // ?perf=1 page-turn profiler state. Declared HERE, with the rest of the
   // snapTo state, because snapTo reads it: a `const` declared further down the
   // IIFE is in its temporal dead zone until that line runs, and any synchronous
@@ -785,6 +804,38 @@
   function gapBefore(s){ return window.SpreadView.gapBefore(s); }
 
   function spreadLeft(s){ return window.SpreadView.spreadLeft(s); }
+
+  // The global page indices THIS device renders for spread s: the paired
+  // projection ([] on a blank side) or the plain spread pages solo.
+  // spread.js's spreadMetrics reads this through the window export.
+  function renderPagesForSpread(s){
+    const sp = spreads[s];
+    if (!sp) return [];
+    if (pairStrip && pairStrip.active){
+      const own = pairStrip.side === 'right' ? sp.rightIdx : sp.leftIdx;
+      return (typeof own === 'number' && own >= 0) ? [own] : [];
+    }
+    return sp.pages;
+  }
+  try { window.renderPagesForSpread = renderPagesForSpread; } catch(e) { console.warn(e); }
+
+  // The image index the reader actually looks at for anchor idx: this device's
+  // own page of the spread, or -1 when the assigned side is blank (no <img>).
+  function displayIdxFor(idx){
+    if (pairStrip && pairStrip.active){
+      const rp = renderPagesForSpread(spreadOf(idx));
+      return rp.length ? rp[0] : -1;
+    }
+    return idx;
+  }
+  // Overview/zoom's "page being read" hook: own page when rendered, the spread
+  // anchor when blank — a blank cell still sits at the spread's position.
+  try {
+    window.pairedDisplayIdx = (idx) => {
+      const d = displayIdxFor(idx);
+      return d >= 0 ? d : idx;
+    };
+  } catch(e) { console.warn(e); }
 
   function updateSpreadToggleLabel(){
     spreadToggle.textContent = pageMode === 'spread' ? "2P" : "1P";
@@ -868,6 +919,9 @@
 
   spreadShift.addEventListener("click", e => {
     e.stopPropagation();
+    // Paired: the offset is a shared-session property (SET_OFFSET, S05/S09) —
+    // a local shift would corrupt the projection; the button is inert here.
+    if (pairStrip && pairStrip.active) return;
     if (pageMode !== 'spread' || !images.length) return;
     // Offset change is a user movement request — one setOffset intent
     // through the navigation port (default handler applies it locally).
@@ -876,6 +930,8 @@
 
   spreadToggle.addEventListener("click", e => {
     e.stopPropagation();
+    // Paired: page grouping is the shared spread table, not a local mode.
+    if (pairStrip && pairStrip.active) return;
     if (viewW < viewH || !images.length) return; // only in landscape with images
     if (pageMode === 'spread'){
       // Switch to 1-page mode in landscape
@@ -931,11 +987,16 @@
     updateSpreadToggleLabel();
     const modeChanged = prevMode !== pageMode;
     if (!images.length) return;
-    if (modeChanged){
+    // Paired: rotation must not touch the shared spread table, the anchor, or
+    // the assigned PageRef — only re-fit sizes and re-snap the same spread.
+    const pairedNow = !!(pairStrip && pairStrip.active);
+    if (modeChanged && !pairedNow){
       if (pageMode === 'spread') currentIdx = Math.floor(currentIdx / 2) * 2;
     }
-    rebuildSpreads();
-    regroupCells();
+    if (!pairedNow){
+      rebuildSpreads();
+      regroupCells();
+    }
     updateStripPositions();
     syncChapterSlider(currentIdx, {resetMax:true});
     snapTo(currentIdx, false);
@@ -1880,6 +1941,14 @@
     }
     // 別の本を開いた＝ビューア復帰の文脈は切れた（一覧のアンカーには使わない）
     try { window.BrowseScroll.clearViewerReturn(); } catch(e) { console.warn(e); }
+    // Opening a different work ends a paired view (LEAVE-equivalent): the new
+    // book rebuilds the strip from scratch, so no solo-state restore needed.
+    if (pairStrip){
+      pairStrip = null;
+      window.PairedView.clear();
+      imgContainer.classList.remove("pair-mode");
+      imgContainer.classList.remove("pair-blank");
+    }
     currentFolder = fullPath;
     const myGen = ++urlRestoreGen;      // every loadImages invocation claims the newest restore token
     // A load starting while the overview is open (deep link, sidebar pick)
@@ -2121,7 +2190,10 @@
   function getUrl(idx){
     // Encode per path segment — image names may carry flattened "sub/dir/" prefixes.
     const img = images[idx];
-    if (img.isSpacer) return "";
+    // !img: a once-listener (load/error) on a pooled <img> can outlive the
+    // state array it indexed into — a paired teardown/loadImages that swaps
+    // `images` mid-flight must not turn the stale event into a TypeError.
+    if (!img || img.isSpacer) return "";
     return window.OfflineCore.readerUrl(img.folder, img.name);
   }
   try { window.getUrl = getUrl; } catch(e) { console.warn(e); }
@@ -2136,13 +2208,20 @@
       el.style.width = m.width + "px";
       el.style.height = m.height + "px";
       el.style.left = spreadLeft(s) + "px";
-      spread.pages.forEach((idx, i) => {
+      const renderPages = renderPagesForSpread(s);
+      renderPages.forEach((idx, i) => {
         const cell = stripCells[idx];
         if (cell){
           cell.style.width = m.pageWidths[i] + "px";
           cell.style.height = m.height + "px";
         }
       });
+      const blankCell = pairBlankCells[s];
+      if (blankCell){
+        blankCell.style.width = (m.pageWidths[0] || m.width) + "px";
+        blankCell.style.height = m.height + "px";
+      }
+      el.classList.toggle("pair-blank", !!(pairStrip && pairStrip.active && !renderPages.length));
     }
     // Chapter divider labels sit centred in the gap to the right of the
     // spread that opens the chapter (manga RTL: the previous chapter is to
@@ -2208,7 +2287,8 @@
   // right page after the left one), so insert by position rather than append.
   function placeCell(cell, idx){
     const s = spreadOf(idx);
-    const pos = spreads[s] ? spreads[s].pages.indexOf(idx) : 0;
+    // pos inside the spread = its RENDER position (paired: always 0 — one page).
+    const pos = spreads[s] ? Math.max(0, renderPagesForSpread(s).indexOf(idx)) : 0;
     cell.dataset.pos = String(pos);
     const el = ensureSpreadEl(s);
     let ref = null;
@@ -2226,6 +2306,31 @@
       delete spreadEls[k];
     }
     for (const k of Object.keys(stripCells)) placeCell(stripCells[k], Number(k));
+    // Blank cells live outside stripCells — re-home them the same way.
+    for (const k of Object.keys(pairBlankCells)){
+      const s = Number(k);
+      pairBlankCells[s].remove();
+      delete pairBlankCells[s];
+      ensureBlankCell(s);
+    }
+  }
+
+  // The blank-side placeholder: a distinguishable empty cell inside the spread
+  // container — zero <img>, zero src, not the spinner and not an image error.
+  // Paired only, and only for a spread this device renders nothing for.
+  function ensureBlankCell(s){
+    if (!(pairStrip && pairStrip.active)) return null;
+    if (pairBlankCells[s]) return pairBlankCells[s];
+    const cell = document.createElement("div");
+    cell.className = "page-cell pair-blank";
+    cell.dataset.pos = "0";
+    const el = ensureSpreadEl(s);
+    // A blank spread must never keep a leftover page cell beside it.
+    for (const child of el.querySelectorAll(".page-cell:not(.pair-blank)")) child.remove();
+    el.appendChild(cell);
+    el.classList.add("pair-blank");
+    pairBlankCells[s] = cell;
+    return cell;
   }
 
   // Returns true when the measured aspect differs from what layout assumed.
@@ -2245,6 +2350,10 @@
     // Spacers exist only to fix spread parity at a chapter boundary; they are
     // dropped from `spreads`, so they get no DOM node at all.
     if (imgData && imgData.isSpacer) return null;
+    // Paired: an index this device does not render (the peer's page, or any
+    // page of a spread whose assigned side is blank) must never get image DOM
+    // — that's what keeps the adjacent peer page off the viewport edge.
+    if (pairStrip && pairStrip.active && !pairStrip.renderSet.has(idx)) return null;
     if (stripImgs[idx]) return stripImgs[idx];
     const cell = document.createElement("div");
     cell.className = "page-cell";
@@ -2345,13 +2454,26 @@
     if (!images.length) return;
     const lo = Math.max(0, idx - PREFETCH_BEHIND);
     const hi = Math.min(images.length - 1, idx + PREFETCH_AHEAD);
-    for (let i = lo; i <= hi; i++) ensureStripImage(i);
+    for (let i = lo; i <= hi; i++){
+      if (pairStrip && pairStrip.active){
+        if (pairStrip.renderSet.has(i)){ ensureStripImage(i); continue; }
+        const s = spreadOf(i);
+        const sp = spreads[s];
+        // The anchor of a blank-for-me spread still gets its placeholder cell.
+        if (sp && sp.pages[0] === i && !renderPagesForSpread(s).length) ensureBlankCell(s);
+      } else {
+        ensureStripImage(i);
+      }
+    }
   }
 
   function evictStrip(idx){
     for (const k of Object.keys(stripImgs)){
       const i = Number(k);
-      if (i < idx - EVICT_BEHIND || i > idx + EVICT_AHEAD){
+      // Paired: also drop any cell for an index this device no longer renders
+      // (post-SWAP leftovers) — the old side's DOM/src must not linger.
+      const nonRendered = pairStrip && pairStrip.active && !pairStrip.renderSet.has(i);
+      if (i < idx - EVICT_BEHIND || i > idx + EVICT_AHEAD || nonRendered){
         const img = stripImgs[k];
         const cell = stripCells[k];
         if (cell) cell.remove();
@@ -2359,6 +2481,15 @@
         delete stripImgs[k];
         delete stripCells[k];
         // pageAR[i] is deliberately kept — scrolling back must not re-measure.
+      }
+    }
+    if (pairStrip && pairStrip.active){
+      const curS = spreadOf(idx);
+      for (const k of Object.keys(pairBlankCells)){
+        if (Math.abs(Number(k) - curS) > EVICT_AHEAD){
+          pairBlankCells[k].remove();
+          delete pairBlankCells[k];
+        }
       }
     }
     for (const k of Object.keys(spreadEls)){
@@ -2403,10 +2534,25 @@
   function snapTo(idx, animate=true){
     if (idx < 0 || idx >= images.length) return;
     if (window.Zoom.isActive()) window.Zoom.reset(true);
+    // Paired: idx is the spread ANCHOR; dispIdx is the page this device
+    // actually renders of it (-1 = the assigned side is blank → no <img>).
+    const dispIdx = displayIdxFor(idx);
     currentIdx = idx;
     syncChapterSlider(idx);
+    imgContainer.classList.toggle("pair-blank", !!(pairStrip && pairStrip.active && dispIdx < 0));
     // Chapter-aware counter and folder name
-    if (chapterList.length > 1) {
+    if (pairStrip && pairStrip.active){
+      // Paired counter tracks the DISPLAYED page — own ref's position in its
+      // chapter — and a blank side gets its own unmistakable marker (never
+      // the spinner, never the image-error ⚠).
+      const info = getCurrentChapterInfo(idx);
+      if (dispIdx >= 0){
+        counter.textContent = (dispIdx - chapterBoundaries[info.chapterIdx] + 1) + " / " + getChapterRealCount(info.chapterIdx);
+      } else {
+        counter.textContent = "空白";
+      }
+      folderName.textContent = info.chapterName || (currentFolder ? currentFolder.split("/").pop() : "");
+    } else if (chapterList.length > 1) {
       const realIdx = globalToRealIdx[idx] !== undefined ? globalToRealIdx[idx] : -1;
       if (realIdx >= 0) {
         const info = getCurrentChapterInfo(idx);
@@ -2438,8 +2584,14 @@
     // cell (so the strip has a frame to move to), and the move itself (rAF
     // below). Creating the rest of the prefetch window, evicting, and kicking
     // off image fetches happen after that first frame has been committed.
-    ensureStripImage(idx);
-    startDeferred(stripImgs[idx]);
+    // Only this device's assigned page gets image DOM; a blank side gets the
+    // placeholder cell (zero <img>, zero stale src) instead.
+    if (dispIdx >= 0){
+      ensureStripImage(dispIdx);
+      startDeferred(stripImgs[dispIdx]);
+    } else if (pairStrip && pairStrip.active){
+      ensureBlankCell(spreadOf(idx));
+    }
     const perfAfterWindow = perfOn ? performance.now() : 0;
     updateStripPositions();
     perfRecordTurn(idx, perfEntry, perfAfterWindow, perfOn ? performance.now() : 0);
@@ -2461,7 +2613,8 @@
       // only consumer is the next pinch, which cannot land in the same frame.
       // No `window.Overview &&` guard: it is a hard dependency loaded before
       // app.js (see test_offline_core_unit).
-      window.Overview.markCurrent(idx);
+      const dIdx = displayIdxFor(idx);
+      window.Overview.markCurrent(dIdx >= 0 ? dIdx : idx);
       if (window.__BOOKQ_TEST_MODE__ === 'true') window.__windowWorkDone = (window.__windowWorkDone || 0) + 1;
     }));
     // Burst mode: a turn that arrives while the previous slide is still in
@@ -2504,7 +2657,7 @@
       setTimeout(settle, 380);  // fallback: transitionend won't fire for a no-op move
     });
     // Hide spinner once current page image is decoded
-    const cur = stripImgs[idx];
+    const cur = dispIdx >= 0 ? stripImgs[dispIdx] : null;
     const onCurError = () => {
       // H7: a warning is only legitimate for a genuine load failure of the
       // CURRENT page's image. Recycled images fire stale `error` events from
@@ -2512,11 +2665,20 @@
       // bitmap is there, so those must not append ⚠.
       if (idx !== currentIdx) return;
       if (cur.naturalWidth !== 0) return;
-      if (cur.getAttribute("src") !== getUrl(currentIdx)) return;
+      const dIdx = dispIdx >= 0 ? dispIdx : idx;
+      // No images[dIdx]: the state array moved on (failed load, paired
+      // teardown) — there is no page left to warn about. Spacer entries DO
+      // exist in the array, so they keep the old src-compare path below.
+      if (!images[dIdx]) return;
+      if (cur.getAttribute("src") !== getUrl(dIdx)) return;
       imgContainer.classList.remove("loading");
       spinner.style.display = "none";
       let displayIdx, total;
-      if (chapterList.length > 1) {
+      if (pairStrip && pairStrip.active){
+        const info = getCurrentChapterInfo(idx);
+        displayIdx = dIdx - chapterBoundaries[info.chapterIdx] + 1;
+        total = getChapterRealCount(info.chapterIdx);
+      } else if (chapterList.length > 1) {
         const info = getCurrentChapterInfo(idx);
         displayIdx = getChapterLocalRealIdx(idx) + 1;
         total = getChapterRealCount(info.chapterIdx);
@@ -2526,7 +2688,12 @@
       }
       counter.textContent = displayIdx + " / " + total + " ⚠";
     };
-    if (cur){
+    if (pairStrip && pairStrip.active && dispIdx < 0){
+      // Blank side: nothing to decode — hide the spinner, keep the distinct
+      // .pair-blank state (never the ⚠ error or the spinner).
+      imgContainer.classList.remove("loading");
+      spinner.style.display = "none";
+    } else if (cur){
       const done = () => {
         if (idx === currentIdx){
           imgContainer.classList.remove("loading");
@@ -2677,15 +2844,23 @@
         else goPrev({crossChapter: intent.crossChapter});
         return;
       case "goto": {
-        const idx = navIndexForRef(intent.page);
+        let idx = navIndexForRef(intent.page);
         if (idx < 0) return;
+        // Paired: navigation moves by shared spread — normalize to the spread
+        // anchor; the display side renders this device's projected page.
+        if (pairStrip && pairStrip.active){
+          const sp = spreads[spreadOf(idx)];
+          if (sp && sp.pages.length) idx = sp.pages[0];
+        }
         // Overview's exit needs its thumbnail crossfade over the new page;
         // every other goto is a plain snap (animated unless told otherwise).
-        if (intent.via === "overview") { snapTo(idx, false); window.Overview.crossfade(idx); return; }
+        if (intent.via === "overview") { snapTo(idx, false); window.Overview.crossfade(window.pairedDisplayIdx(idx)); return; }
         snapTo(idx, intent.animate !== false);
         return;
       }
       case "setOffset":
+        // Paired: offset is session state (S05), never a local layout change.
+        if (pairStrip && pairStrip.active) return;
         spreadOffset = intent.offset;
         rebuildSpreads();
         regroupCells();
@@ -2722,11 +2897,224 @@
     }
   }
 
-  // applyCommittedState's display side: resolve the committed anchor to a
-  // local page index and snap there. §3.6: the anchor is the spread's
-  // first real page. Receives typed PageRef/Spread values — never a
-  // local globalIdx. Must never call request() (receive-only channel).
+  // ── paired rendering (dual-reader S06, #81) ──
+  // A committed paired snapshot swaps the strip's content tables for the
+  // shared manifest's: `spreads` becomes the wire spread table (idx-mapped,
+  // wire id preserved, anchor = pages[0] = the spread's first real page —
+  // the shared anchor), and renderPagesForSpread() projects each spread to
+  // this device's ONE page ([] for a blank side). The solo tables are
+  // snapshotted once on entry and restored verbatim by exitPairedToSolo —
+  // LEAVE must hand the reader back the exact pre-pair layout.
+
+  // The set of global page indices this device renders — recomputed on every
+  // committed apply so a SWAP flips it without touching the spread table.
+  function rebuildPairRenderSet(){
+    const set = new Set();
+    if (pairStrip && pairStrip.active){
+      for (const sp of spreads){
+        const own = pairStrip.side === "right" ? sp.rightIdx : sp.leftIdx;
+        if (typeof own === "number" && own >= 0) set.add(own);
+      }
+    }
+    pairStrip.renderSet = set;
+  }
+
+  // A swap (or a first apply with a stale window) can leave cells alive for
+  // indices this device no longer renders — drop them now rather than waiting
+  // for evictStrip, so the old side's DOM/src cannot linger on screen.
+  function purgeNonRenderedCells(){
+    if (!(pairStrip && pairStrip.active)) return;
+    for (const k of Object.keys(stripImgs)){
+      const i = Number(k);
+      if (!pairStrip.renderSet.has(i)){
+        const cell = stripCells[k];
+        if (cell) cell.remove();
+        const img = stripImgs[k];
+        if (img) imagePool.release(img);
+        delete stripImgs[k];
+        delete stripCells[k];
+      }
+    }
+  }
+
+  // Rebuild the strip's tables from the shared manifest. Wire spreads become
+  // idx-mapped spreads ({id, chapterFolder, rightIdx, leftIdx, pages,
+  // chapterStart}); images/chapterList come from the manifest, never a fetch.
+  function enterPairStrip(manifest, desc){
+    if (!pairStrip){
+      pairStrip = {
+        active: true, side: desc.side, spreadId: null, renderSet: new Set(),
+        solo: {
+          images: images, chapterList: chapterList, chapterBoundaries: chapterBoundaries,
+          spreads: spreads, idxToSpread: idxToSpread,
+          realToGlobalIdx: realToGlobalIdx, globalToRealIdx: globalToRealIdx,
+          spacerCount: spacerCount, realImageCount: realImageCount,
+          currentIdx: currentIdx, currentFolder: currentFolder,
+          pageMode: pageMode, landscapeSpread: landscapeSpread,
+          spreadOffset: spreadOffset, anchorSpread: anchorSpread,
+        },
+      };
+      imgContainer.classList.add("pair-mode");
+    }
+    pairStrip.active = true;
+    const wireSpreads = (manifest && (manifest.spreadTable || manifest.spreads)) || [];
+    let pageRefs = (manifest && Array.isArray(manifest.pageRefs)) ? manifest.pageRefs : null;
+    if (!pageRefs){
+      // Minimal manifests may carry only the spread table — derive the page
+      // list in spread order (right then left), deduplicated.
+      pageRefs = [];
+      const seen = new Set();
+      for (const ws of wireSpreads){
+        for (const r of [ws.right, ws.left]){
+          if (r){
+            const k = r.folder + "\x00" + r.name;
+            if (!seen.has(k)){ seen.add(k); pageRefs.push(r); }
+          }
+        }
+      }
+    }
+    const refIdx = new Map();
+    pageRefs.forEach((r, i) => refIdx.set(r.folder + "\x00" + r.name, i));
+    images = pageRefs.map(r => ({folder: r.folder, name: r.name}));
+    const manifestChapters = (manifest && Array.isArray(manifest.chapters) && manifest.chapters.length)
+      ? manifest.chapters : null;
+    chapterList = [];
+    chapterBoundaries = [];
+    let acc = 0;
+    if (manifestChapters){
+      for (const c of manifestChapters){
+        const pages = (c.pages || []).map(p => typeof p === "string"
+          ? {folder: c.folder, name: p}
+          : {folder: (p && p.folder !== undefined) ? p.folder : c.folder, name: p && p.name !== undefined ? p.name : p});
+        chapterList.push({
+          name: c.name || String(c.folder || "").split("/").pop(),
+          fullPath: c.folder,
+          images: pages,
+        });
+        chapterBoundaries.push(acc);
+        acc += pages.length;
+      }
+    } else {
+      // No chapter table: derive chapter runs from consecutive chapterFolder.
+      let cur = null;
+      for (const ws of wireSpreads){
+        if (!cur || cur.fullPath !== ws.chapterFolder){
+          cur = {name: String(ws.chapterFolder || "").split("/").pop(), fullPath: ws.chapterFolder, images: []};
+          chapterList.push(cur);
+          chapterBoundaries.push(acc);
+        }
+        for (const r of [ws.right, ws.left]) if (r){ cur.images.push({folder: r.folder, name: r.name}); acc++; }
+      }
+    }
+    realToGlobalIdx = [];
+    globalToRealIdx = [];
+    spacerCount = 0;
+    for (let i = 0; i < images.length; i++){ realToGlobalIdx.push(i); globalToRealIdx.push(i); }
+    realImageCount = images.length;
+    spreads = [];
+    idxToSpread = new Array(images.length);
+    wireSpreads.forEach((ws, si) => {
+      const rIdx = ws.right ? refIdx.get(ws.right.folder + "\x00" + ws.right.name) : -1;
+      const lIdx = ws.left ? refIdx.get(ws.left.folder + "\x00" + ws.left.name) : -1;
+      const pages = [];
+      if (typeof rIdx === "number" && rIdx >= 0) pages.push(rIdx);
+      if (typeof lIdx === "number" && lIdx >= 0) pages.push(lIdx);
+      for (const i of pages) idxToSpread[i] = si;
+      const prev = si > 0 ? wireSpreads[si - 1] : null;
+      spreads.push({
+        id: ws.id,
+        chapterFolder: ws.chapterFolder,
+        rightIdx: (typeof rIdx === "number" ? rIdx : -1),
+        leftIdx: (typeof lIdx === "number" ? lIdx : -1),
+        pages: pages,
+        chapterStart: !prev || prev.chapterFolder !== ws.chapterFolder,
+      });
+    });
+    if (manifest && typeof manifest.folder === "string" && manifest.folder) currentFolder = manifest.folder;
+    resetStrip();
+    imgContainer.classList.add("loading");
+    spinner.style.display = "block";
+    empty.style.display = "none";
+    pageSliderWrap.classList.add("visible");
+    closeSidebar();
+    window.Overview.close();
+    window.Overview.prebuild();
+  }
+
+  // The display side of a committed paired state: update the projection, then
+  // snap to the shared spread's anchor. Must never call request().
+  function applyPairedCommit(desc, manifest){
+    if (!pairStrip || !pairStrip.active || desc.manifestChanged){
+      enterPairStrip(manifest, desc);
+    }
+    pairStrip.side = desc.side;
+    pairStrip.spreadId = desc.spread.id;
+    rebuildPairRenderSet();
+    purgeNonRenderedCells();
+    const sp = spreads[desc.spreadIndex];
+    const anchorIdx = sp && sp.pages.length ? sp.pages[0] : -1;
+    if (anchorIdx < 0) return;   // unresolvable anchor: state recorded, no display move
+    if (dragActive) abortDrag(); // a commit supersedes a half-finished drag
+    snapTo(anchorIdx, false);
+    // Write location.hash NOW — snapTo only schedules the usual 200ms
+    // debounce, but a commit can land while boot is still inside its
+    // shallow→full loadFolders window. An applyUrlState (the boot's own
+    // post-load re-run, or a stray hashchange) that sees an EMPTY hash
+    // alongside live viewer state reads it as "no view" and resetToTop's
+    // teardown out from under the committed display. replaceViewerState is
+    // a replaceState write — no hashchange event, and snapTo's debounced
+    // re-write hits the same-URL early return.
+    if (typeof window.replaceViewerState === "function") window.replaceViewerState();
+  }
+
+  // LEAVE-equivalent: restore the pre-pair solo layout verbatim and resume
+  // normal rendering. Registered as PairedView's leave hook and also used
+  // for leave-kind committed applies ({paired:false} / phase 'ended').
+  function exitPairedToSolo(){
+    window.PairedView.clear();
+    imgContainer.classList.remove("pair-mode");
+    imgContainer.classList.remove("pair-blank");
+    if (!pairStrip) return;
+    const solo = pairStrip.solo;
+    pairStrip = null;
+    images = solo.images;
+    chapterList = solo.chapterList;
+    chapterBoundaries = solo.chapterBoundaries;
+    realToGlobalIdx = solo.realToGlobalIdx;
+    globalToRealIdx = solo.globalToRealIdx;
+    spacerCount = solo.spacerCount;
+    realImageCount = solo.realImageCount;
+    spreads = solo.spreads;
+    idxToSpread = solo.idxToSpread;
+    currentIdx = solo.currentIdx;
+    currentFolder = solo.currentFolder;
+    pageMode = solo.pageMode;
+    landscapeSpread = solo.landscapeSpread;
+    spreadOffset = solo.spreadOffset;
+    anchorSpread = solo.anchorSpread;
+    resetStrip();
+    if (images.length){
+      // updateOrientation rebuilds positions and re-snaps the restored page;
+      // it is also the single place that rewrites body.className for the
+      // current viewport, so the paired classes cannot linger anywhere.
+      updateOrientation(true);
+      pageSliderWrap.classList.add("visible");
+    } else {
+      teardownViewer();
+    }
+  }
+
+  // applyCommittedState's display side: a paired commit projects the shared
+  // spread to this device's ONE page (pairedView.js decides side/ref — no
+  // pairing recompute here); a plain commit resolves its anchor to a local
+  // page index and snaps there. §3.6: the anchor is the spread's first real
+  // page. Receives typed PageRef/Spread values — never a local globalIdx.
+  // Must never call request() (receive-only channel).
   function applyCommittedNav(snapshot, manifest, options){
+    const desc = window.PairedView.apply(snapshot, manifest, options);
+    if (desc.kind === "leave"){ exitPairedToSolo(); return; }
+    if (desc.kind === "paired"){ applyPairedCommit(desc, manifest); return; }
+    if (desc.kind === "error") return;   // malformed commit: gen bumped, no display move
     let ref = null;
     const sid = snapshot && snapshot.spreadId;
     const plan = manifest && manifest.spreads;
@@ -2746,6 +3134,9 @@
   try {
     window.ViewerNavigation.setDefaultHandler(soloNavHandler);
     window.ViewerNavigation.onCommittedState(applyCommittedNav);
+    // PairedView.leave() (LEAVE-equivalent, S09 wires the real trigger) routes
+    // here so the pre-pair solo layout comes back on screen.
+    window.PairedView.setHooks({ leave: exitPairedToSolo });
   } catch(e) { console.warn(e); }
 
   function showHint(){

@@ -195,6 +195,11 @@ body.portrait #img-track .spread-container{bottom:50%;transform:translateY(50%)}
 #img-track .page-cell{position:relative;flex:none;display:flex;align-items:flex-end;justify-content:center;pointer-events:none;background:#161616;box-shadow:inset 0 0 0 1px #262626}
 #img-track .page-cell img{display:block;width:100%;height:100%;pointer-events:none;-webkit-user-drag:none;user-select:none;opacity:0;transition:opacity .15s}
 #img-track .page-cell img.loaded{opacity:1}
+/* dual-reader blank side (S06): the device whose projected PageRef is null
+   gets this distinguishable empty cell — darker than a page cell, dashed
+   inset frame, zero <img>. Distinct from the spinner and the ⚠ error state. */
+#img-track .page-cell.pair-blank{background:#0b0b0d;box-shadow:inset 0 0 0 1px #2a2a33}
+#img-track .page-cell.pair-blank::after{content:"";position:absolute;inset:12%;border:1px dashed #333;border-radius:2px}
 .chapter-divider{position:absolute;top:50%;transform:translateY(-50%);font-size:11px;color:rgba(255,255,255,0.25);white-space:nowrap;pointer-events:none;writing-mode:vertical-rl;text-orientation:mixed;letter-spacing:0.05em;z-index:3}
 
 /* hint overlay (shown briefly on load) */
