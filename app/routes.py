@@ -1091,6 +1091,43 @@ async def refresh_index(request: Request, _user: dict = Depends(require_auth)):
     return {"status": "ok", "folders": len(index.comics)}
 
 
+def _list_folder_images(downloads_dir: Path, folder: str) -> list[str]:
+    """Synchronous enumeration core of ``/api/images`` — call off the event loop.
+
+    Shared with the dual-reader manifest builder (``app.reader_sync.catalog``)
+    so the manifest's fetch-path listing is the route's listing, not a second
+    implementation. Identical order and identical failures: containment first
+    (403), then archive-file / pdf-file / archive-inner-prefix / plain-dir
+    resolution, with 404 for a missing folder or an absent inner prefix.
+    """
+    folder_path = downloads_dir / folder
+
+    if not _is_within(downloads_dir, folder_path):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    folder_path = folder_path.resolve()
+    if is_archive_file(folder_path):
+        return list_archive_entries(folder_path)
+    if is_pdf_file(folder_path):
+        from app.archive_pdf import pdf_page_count, pdf_page_name
+
+        count = pdf_page_count(folder_path)
+        return [pdf_page_name(i) for i in range(count)]
+    resolved = _resolve_archive(downloads_dir, folder)
+    if resolved is not None:
+        archive, inner = resolved
+        if not _is_within(downloads_dir, archive):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        scoped = _list_archive_prefix(archive.resolve(), inner)
+        if not scoped:
+            raise HTTPException(status_code=404, detail=f"Folder not found: {folder}")
+        return scoped
+    if not folder_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Folder not found: {folder}")
+
+    return list_images(folder_path)
+
+
 @api_router.get("/api/images")
 async def api_images(
     request: Request,
@@ -1099,33 +1136,7 @@ async def api_images(
 ):
     """List images in a folder — or inside a ZIP/CBZ/PDF archive. Requires authentication."""
     downloads_dir = request.app.state.settings.downloads_path
-    folder_path = downloads_dir / folder
-
-    if not _is_within(downloads_dir, folder_path):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    folder_path = folder_path.resolve()
-    if is_archive_file(folder_path):
-        return await run_in_threadpool(list_archive_entries, folder_path)
-    if is_pdf_file(folder_path):
-        from app.archive_pdf import pdf_page_count, pdf_page_name
-
-        count = await run_in_threadpool(pdf_page_count, folder_path)
-        return [pdf_page_name(i) for i in range(count)]
-    resolved = _resolve_archive(downloads_dir, folder)
-    if resolved is not None:
-        archive, inner = resolved
-        if not _is_within(downloads_dir, archive):
-            raise HTTPException(status_code=403, detail="Forbidden")
-        scoped = await run_in_threadpool(_list_archive_prefix, archive.resolve(), inner)
-        if not scoped:
-            raise HTTPException(status_code=404, detail=f"Folder not found: {folder}")
-        return scoped
-    if not folder_path.is_dir():
-        raise HTTPException(status_code=404, detail=f"Folder not found: {folder}")
-
-    images = await run_in_threadpool(list_images, folder_path)
-    return images
+    return await run_in_threadpool(_list_folder_images, downloads_dir, folder)
 
 
 def _resolve_archive(downloads_dir: Path, path: str) -> tuple[Path, str] | None:
