@@ -156,7 +156,10 @@ async def lifespan(app: FastAPI):
     # reader-sync heartbeat ticker (#78/S03): one task drives every
     # time-based transition (PING cadence, no-response close, code/resume
     # expiry). Started before yield so links can attach immediately.
-    app.state.reader_sync.start()
+    # getattr: tests drive lifespan with a bare SimpleNamespace state.
+    _rs = getattr(app.state, "reader_sync", None)
+    if _rs is not None:
+        _rs.start()
     logger.info("起動完了 pid=%s", pid)
     # Shallow-warmup fill (plan shallow-warmup-fill T3): materialize opaque
     # archive nodes in the background, one at a time, pausing under request
@@ -172,10 +175,12 @@ async def lifespan(app: FastAPI):
     # reader-sync teardown (#78/S03): close every link/socket, cancel the
     # ticker and per-link drain tasks — zero reader-sync tasks or sessions
     # may survive app shutdown.
-    try:
-        await app.state.reader_sync.aclose()
-    except Exception as exc:
-        logger.warning("reader-sync shutdown error=%s pid=%s", exc, pid)
+    _rs = getattr(app.state, "reader_sync", None)
+    if _rs is not None:
+        try:
+            await _rs.aclose()
+        except Exception as exc:
+            logger.warning("reader-sync shutdown error=%s pid=%s", exc, pid)
 
 
 def create_app() -> FastAPI:

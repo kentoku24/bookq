@@ -194,6 +194,27 @@ def _pair(reg: SessionRegistry, leader: FakeLink, follower: FakeLink):
     return created["sessionId"], created, joined
 
 
+def _run(coro) -> None:
+    """Drive a coroutine on a fresh loop in a worker thread — earlier suite
+    tests may leave a running loop on the main thread, where asyncio.run
+    refuses to nest."""
+    import threading
+    box: dict = {}
+
+    def go():
+        try:
+            box["ok"] = asyncio.run(coro)
+        except BaseException as e:  # noqa: BLE001 — re-raise in test
+            box["err"] = e
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    if "err" in box:
+        raise box["err"]
+    assert not t.is_alive(), "coroutine did not finish within 10s"
+
+
 # ── happy path ─────────────────────────────────────────────────────
 
 
@@ -737,7 +758,7 @@ def test_aclose_leaves_no_tasks_links_or_sessions():
     async def go():
         await reg.aclose()
 
-    asyncio.run(go())
+    _run(go())
     assert not reg.sessions
     assert not reg.links
     assert reg.live_task_count() == 0
@@ -758,4 +779,4 @@ def test_ticker_start_and_shutdown():
         assert reg.live_task_count() == 0
         assert not reg.links
 
-    asyncio.run(go())
+    _run(go())
