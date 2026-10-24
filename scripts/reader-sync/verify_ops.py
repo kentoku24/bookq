@@ -658,14 +658,18 @@ def _resolve_work(ctx: RunCtx, decl) -> dict:
         raise UnsupportedError("work declaration must be an object")
     if decl.get("discover"):
         return _discover_work(ctx, int(decl.get("minPages", 6)),
-                              decl.get("offset"))
+                              decl.get("offset"),
+                              int(decl.get("index", 0)))
     return decl
 
 
-def _discover_work(ctx: RunCtx, min_pages: int, offset) -> dict:
+def _discover_work(ctx: RunCtx, min_pages: int, offset,
+                   index: int = 0) -> dict:
     """Find a folder with >= min_pages images on the target env. Leaf
-    folders sort naturally; the first qualifying one wins — deterministic
-    across runs of the same env without ever naming it in a declaration."""
+    folders sort naturally; the ``index``-th qualifying one wins —
+    deterministic across runs of the same env without ever naming it in
+    a declaration (``index`` 1+ lets a scenario switch to a DIFFERENT
+    work, the spec's leader作品変更, still without naming folders)."""
     # /api/folders rescans the target tree on every request — under load
     # or on a cold post-restart container a single 25s read can time out
     # transiently, which is NOT proof the environment is down. A few
@@ -712,9 +716,12 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset) -> dict:
                  for i in raw]
         names = [n for n in names if n]
         if len(names) >= min_pages:
-            return {"folder": folder,
-                    "page": {"folder": folder, "name": sorted(names)[0]},
-                    "offset": offset}
+            if index <= 0:
+                return {"folder": folder,
+                        "page": {"folder": folder,
+                                 "name": sorted(names)[0]},
+                        "offset": offset}
+            index -= 1
     raise EnvError(
         f"work discovery: no folder with >= {min_pages} pages on the "
         "target env")
@@ -1125,6 +1132,83 @@ def op_latency(ctx: RunCtx, op: dict) -> None:
     ctx.note("latency_samples", stats["n"] == n,
              f"{transport}: n={stats['n']} p50={stats['p50']}ms "
              f"p95={stats['p95']}ms")
+
+
+def op_peer_latency(ctx: RunCtx, op: dict) -> None:
+    """S12 (#87) — intent → PEER-decoded-display latency, one clock.
+
+    The spec's real measurement: the RUNNER's monotonic clock spans
+    t0 = intent-send cmd to `actor` → wire/DC path → server commit →
+    STATE → peer's fxApplyState → peer image decode → the peer's own
+    displayed-event POST back to the fixture server → t1. The sample
+    includes control-channel delivery and the event's return leg, so it
+    is an UPPER bound on the real user-visible latency — exactly what
+    the issue asks recorded, per direction per transport.
+
+    Timeouts and intent refusals count as failures; samples are never
+    dropped for being slow (spec: 遅いsampleを恣意的に削除しない).
+    ``actor`` may be "both" — directions interleave and record under
+    separate ``peer:<transport>:<actor>→<peer>`` keys."""
+    if ctx.surface != "fixture":
+        raise UnsupportedError("peer_latency needs the fixture surface")
+    _need_table(ctx, "peer_latency")
+    n = int(op.get("samples", 8))
+    actor = op.get("actor", "leader")
+    wait_s = float(op.get("timeout_ms", 15000)) / 1000.0
+    directions = ["leader", "follower"] if actor == "both" else [actor]
+    deltas = {d: 1 for d in directions}
+    box = {d: {"samples": [], "failures": 0} for d in directions}
+    transports = {}
+
+    for _i in range(n):
+        for d in directions:
+            peer = "follower" if d == "leader" else "leader"
+            cid = ctx.clients[peer].id
+            # stale-event hygiene: only an event caused by THIS turn may
+            # satisfy the wait — drain first, then demand rev > prev.
+            ctx.fx.drain_events(cid)
+            st = ctx.state(peer)
+            prev_rev = int(st["applied"]["revision"])
+            transports[d] = st.get("transport") or "server-ws"
+            dd = deltas[d]
+            deltas[d] = -dd              # ping-pong inside the table —
+                                         # warm, never edge-starved
+            t0 = time.monotonic()
+            try:
+                res = ctx.cmd(d, "turn",
+                              {"delta": dd, "crossChapter": True},
+                              timeout=max(15.0, wait_s))
+            except EnvError:
+                raise                    # control plane dead — env, not a sample
+            except AssertError:
+                box[d]["failures"] += 1  # command-level error = refusal
+                continue
+            if res and res.get("sent") is False:
+                box[d]["failures"] += 1  # client gate refused the intent
+                continue
+            try:
+                ctx.fx.wait_displayed(cid, prev_rev + 1, timeout=wait_s)
+                box[d]["samples"].append(
+                    (time.monotonic() - t0) * 1000.0)
+            except Exception:            # noqa: BLE001 — wait timeout
+                box[d]["failures"] += 1
+
+    for d in directions:
+        peer = "follower" if d == "leader" else "leader"
+        tr = transports.get(d) or "server-ws"
+        stats = rtt_stats(box[d]["samples"])
+        stats["failures"] = box[d]["failures"]
+        stats["method"] = ("runner-clock intent->peer-decoded-display "
+                           "upper bound (cmd delivery + sync path + peer "
+                           "decode + event return)")
+        key = f"peer:{tr}:{d}→{peer}"
+        ctx.latency[key] = stats
+        ctx.note(
+            f"peer_latency_{d}",
+            stats["n"] > 0 or stats["failures"] == 0,
+            f"{key}: n={stats['n']} p50={stats['p50']}ms "
+            f"p95={stats['p95']}ms max={stats['max']}ms "
+            f"failures={stats['failures']}")
 
 
 def op_rtt(ctx: RunCtx, op: dict) -> None:
@@ -1725,6 +1809,7 @@ OPS = {
     "concurrent": op_concurrent,
     "burst": op_burst,
     "latency": op_latency,
+    "peer_latency": op_peer_latency,
     "rtt": op_rtt,
     "expect": op_expect,
     "dc_open": op_dc_open,

@@ -629,6 +629,144 @@ class SimulatorDriver:
                 for cid, spec in clients.items()}
 
 
+# ─────────────────────────── real-device driver ─────────────────────
+# S12 (#87) — the human run: two PHYSICAL devices a person holds. The
+# driver automates nothing on the devices themselves; launch() prints
+# the fixture URLs and the run gates on the humans' page loads (fixture
+# hellos). Every method that would need device automation raises
+# UnsupportedError so ops declaring device-input capabilities classify
+# env_unavailable at plan time instead of crashing mid-run.
+
+
+class RealDriver:
+    """Physical devices operated by a human (S12 acceptance run)."""
+
+    name = "real"
+    # generous bound on human reaction time — opening a URL / installing
+    # a web clip by hand must not time out like a scripted device would.
+    MANUAL_TIMEOUT = 300.0
+
+    def __init__(self):
+        self._fx = None
+
+    # -- capability / preflight -------------------------------------
+
+    def preflight(self) -> dict:
+        return {"manual": True,
+                "note": "human opens the printed fixture URLs; "
+                        "the run gates on their hellos"}
+
+    @property
+    def caps(self) -> set:
+        # ws_bystander only — webrtc is added by the hello.hasRTC probe.
+        # NO device_inputs/pwa/ui/screenshot: physical actions stay
+        # honestly classified env_unavailable.
+        return {CAP_BYSTANDER}
+
+    # -- launch ------------------------------------------------------
+
+    def launch(self, clients: dict, urls: dict, fx=None) -> None:
+        self._fx = fx
+        bar = "=" * 74
+        print(f"\n[real] {bar}")
+        print("[real] Open these URLs in Safari on each PHYSICAL device")
+        print("[real] (share → Add to Home Screen instead for the PWA"
+              " pass):")
+        for cid, spec in clients.items():
+            spec.launch_url = urls[cid]
+            print(f"[real]   {spec.role.upper():>8}: {urls[cid]}")
+        if fx is not None:
+            for cid, spec in clients.items():
+                print(f"[real]   {spec.role.upper():>8} (short): "
+                      f"{fx.short_url(cid)}")
+        print("[real] The sync WebSocket still targets the --url env —")
+        print("[real] only this fixture/control page is LAN-served.")
+        print(f"[real] Waiting up to {int(self.MANUAL_TIMEOUT)}s for "
+              "each device hello…")
+        print(f"[real] {bar}\n")
+
+    def stop(self) -> None:
+        # nothing was launched — physical devices are never touched.
+        return
+
+    def devices(self, clients: dict) -> dict:
+        return {cid: {"kind": "real-device", "surface": spec.kind}
+                for cid, spec in clients.items()}
+
+    # -- mid-run surface switches (manual prompts) -------------------
+
+    def ensure_surface(self, spec: ClientSpec, kind: str, fx,
+                       client_id: str) -> None:
+        """A scenario ``clients`` switch the human performs by hand: the
+        new page load's hello (seq+1, standalone flag) is the proof."""
+        if spec.kind == kind:
+            return
+        seq = fx.hello_seq(client_id)
+        if kind == "pwa":
+            self._prompt(
+                f"{spec.role}: share → Add to Home Screen on the "
+                f"physical device, then LAUNCH the new web clip "
+                f"(waiting {int(self.MANUAL_TIMEOUT)}s for a "
+                "standalone hello)…")
+        elif kind == "safari":
+            self._prompt(
+                f"{spec.role}: open the fixture URL in Safari on the "
+                f"physical device: {spec.launch_url} "
+                f"(waiting {int(self.MANUAL_TIMEOUT)}s)…")
+        else:
+            raise UnsupportedError(f"client kind {kind!r}")
+        hello = fx.wait_hello(client_id, timeout=self.MANUAL_TIMEOUT,
+                              min_seq=seq + 1)
+        if kind == "pwa" and not hello.get("standalone"):
+            raise EnvError(
+                f"real client {client_id}: relaunched page is not "
+                "standalone (webclip did not take over)")
+        spec.kind = kind
+
+    def reload(self, spec: ClientSpec) -> None:
+        """Real navigation inside the same browsing context — the page
+        reloads itself on runner command; sessionStorage persists, so
+        the credential RESUME path is exercised exactly like a manual
+        pull-to-reload."""
+        if self._fx is None:
+            raise EnvError("real driver: no fixture server handle")
+        self._fx.cmd(spec.id, "reload_page", timeout=15)
+
+    # -- no device automation: every input path raises Unsupported ---
+
+    @staticmethod
+    def _prompt(msg: str) -> None:
+        print(f"\n[real] {'!' * 60}\n[real] MANUAL STEP — {msg}\n"
+              f"[real] {'!' * 60}\n")
+
+    def _noauto(self, what: str):
+        raise UnsupportedError(
+            f"real driver: {what} needs device automation — run it as a "
+            "manual step (see REAL-DEVICES.md)")
+
+    def screenshot(self, spec, path):
+        self._noauto("screenshot — capture the device screen by hand")
+
+    def tap(self, spec, x, y): self._noauto("tap")
+    def input_text(self, spec, text): self._noauto("input_text")
+
+    def swipe(self, spec, x1, y1, x2, y2, duration=0.15):
+        self._noauto("swipe")
+
+    def pinch(self, spec, x, y, scale): self._noauto("pinch")
+    def rotate(self, spec, orientation): self._noauto("rotate")
+    def button(self, spec, name): self._noauto("button")
+    def describe_all(self, spec): self._noauto("describe_all")
+    def screen_size(self, spec): self._noauto("screen_size")
+    def tap_element(self, spec, label): self._noauto("tap_element")
+    def background(self, spec): self._noauto("background")
+    def foreground(self, spec): self._noauto("foreground")
+    def close_ws(self, spec): self._noauto("close_ws")
+    def install_webapp(self, spec): self._noauto("install_webapp")
+    def launch_webclip(self, spec, timeout=30.0):
+        self._noauto("launch_webclip")
+
+
 _AX_MATCH_KEYS = ("AXUniqueId", "AXLabel", "label", "name", "identifier",
                   "title", "value")
 

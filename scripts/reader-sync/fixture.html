@@ -114,6 +114,9 @@ var S = {
            inCorruptType: null, inCorruptCount: 0, inInject: []},
   imgFault: {mode: 'ok', ms: 0},
   imgState: 'none',           // none|blank|loading|ok|error|faulted
+  imgRev: null,               // committed revision the latest image
+                              // transition belongs to (displayed-event
+                              // staleness guard, S12/#87)
   visLog: [],
   evHandlers: {},
   lastTap: null,
@@ -379,6 +382,7 @@ function _freshSession() {
   S.dcCap = null;
   S.pcCap = null;
   S.imgState = 'none';
+  S.imgRev = null;
   S.imgFault = {mode: 'ok', ms: 0};
   S.faults = {wsDelay: 0, wsDup: false, wsDrop: false, sigDelay: 0,
               suppressIce: false, staleBase: 0, dupNext: false,
@@ -429,19 +433,59 @@ function ownProjection() {
   }
   return null;
 }
+/* terminal display states a peer-side "the new committed spread is on
+ * glass" signal may be derived from — 'loading' is transient, 'none' is
+ * a non-display. S12 peer_latency keys on this (#87). */
+var IMG_TERMINAL = {ok: 1, blank: 1, error: 1, faulted: 1};
+
 function setImg(state, url) {
-  S.imgState = state;
+  /* the committed apply this transition belongs to — captured at EVERY
+   * transition start so a superseded apply's late onload/onerror can
+   * neither corrupt the current display nor emit a false displayed
+   * event (the handler compares against its own load's revision). */
+  S.imgRev = S.lastSnap ? S.lastSnap.revision : null;
   var img = document.getElementById('fx-img');
   var badge = document.getElementById('fx-img-badge');
+  if (url) {
+    if (img.__fxUrl === url) {
+      /* identical src — re-assigning src RE-FIRES onload on Chrome
+       * (verified), which would loop setImg('ok',url) -> src=url ->
+       * onload -> … forever and flood /ctrl/event (the loop existed
+       * silently before; the event post makes it fatal). If the image
+       * already decoded, the true terminal state is 'ok'. */
+      if (img.complete && img.naturalWidth > 0) state = 'ok';
+    } else {
+      /* staleness guard by URL, not revision: a superseded apply's load
+       * may only be applied while its URL is still the element's wanted
+       * one — a newer apply re-marking 'loading' for the SAME URL must
+       * not veto this load's completion (nothing else would resolve it,
+       * and the current apply IS displaying this very image). */
+      var loadUrl = url;
+      img.onerror = function () {
+        if (img.__fxUrl === loadUrl) setImg('error', null);
+      };
+      img.onload = function () {
+        if (img.__fxUrl === loadUrl) setImg('ok', url);
+      };
+      img.__fxUrl = url;
+      img.src = url;
+    }
+  } else {
+    img.__fxUrl = null;
+    img.removeAttribute('src');
+  }
+  S.imgState = state;
   badge.textContent = state;
   document.getElementById('fx-marker')
     .setAttribute('data-img-state', state);
-  if (url) {
-    img.onerror = function () { setImg('error', null); };
-    img.onload = function () { setImg('ok', url); };
-    img.src = url;
-  } else {
-    img.removeAttribute('src');
+  /* terminal display transition for the CURRENT apply -> runner event.
+   * The peer_latency op's single-clock sample ends here: intent-send on
+   * the actor -> wire -> this device's apply+decode -> this POST.
+   * Fire-and-forget: a dropped event post must not spam pageerror. */
+  if (IMG_TERMINAL[state] && S.imgRev !== null) {
+    post('/event', {id: FXC.id, type: 'displayed', rev: S.imgRev,
+                    imgState: state, at: performance.now()})
+      .catch(function () {});
   }
 }
 function renderMarker() {
@@ -832,6 +876,14 @@ var CMD = {
     return Promise.resolve({sent: ok});
   },
   lifecycle: function (p) { return Promise.resolve(fireLifecycle(p.type)); },
+  reload_page: function () {
+    /* result posts first, then a REAL navigation inside the same
+     * browsing context (Safari tab or installed web clip) — the runner
+     * waits on the post-reload hello (hello_seq+1), not on this return.
+     * How the real-device driver reloads without any device automation. */
+    setTimeout(function () { window.location.reload(); }, 400);
+    return Promise.resolve({reloading: true});
+  },
   img_fault: function (p) {
     S.imgFault = {mode: p.mode || 'ok', ms: p.ms || 0};
     render();
