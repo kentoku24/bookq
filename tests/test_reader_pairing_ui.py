@@ -516,6 +516,7 @@ def test_controls_fit_320px_no_overlap(browser, server):
 
 def test_pair_ui_taps_do_not_turn_pages(ios_page, server):
     page = ios_page
+    _with_mock(page)
     open_book(page, server, "long", 0, 30)
     page.wait_for_selector("#pair-btn")
     page.evaluate(
@@ -551,6 +552,7 @@ def test_pair_ui_taps_do_not_turn_pages(ios_page, server):
 
 
 def test_pair_ui_clicks_do_not_turn_pages(page, server):
+    _with_mock(page)
     open_book(page, server, "long", 0, 30)
     page.wait_for_selector("#pair-btn")
     page.evaluate(

@@ -17,6 +17,7 @@
  *   resume()                       — reattach with stored member creds
  *   leave()                        — immediate local teardown (+LEAVE if up)
  *   sendIntent(intent)             — navigation-port intents -> wire frames
+ *   setActivity(state)             — direct SET_ACTIVITY (browse observer, S09)
  *   swapSides() / changeWork()     — convenience wrappers used by the UI
  *   attachDataChannel(dc)          — plug a live RTCDataChannel
  *   subscribe(cb) -> unsubscribe   — state notifications (pairUI contract)
@@ -880,6 +881,19 @@
       return _sendIntentInternal(intent);
     }
 
+    /* Direct SET_ACTIVITY for the viewer-side browse observer (S09): the
+     * leader's sidebar open/close pauses/resumes the shared session without
+     * routing through an intent. 'browse' intents already map onto the same
+     * wire frame via _sendIntentInternal. */
+    function setActivity(state) {
+      if (state !== 'active' && state !== 'suspended' &&
+          state !== 'selecting') return false;
+      if (_destroyed || _term || _left || !_member || !_linkOpen()) {
+        return false;
+      }
+      return _ctlSend(_req('SET_ACTIVITY', {state: state}));
+    }
+
     function _seenMv() {
       return _lastState && _lastState.manifestVersion
         ? _lastState.manifestVersion : 0;
@@ -1430,6 +1444,7 @@
       resume: resume,
       leave: leave,
       sendIntent: sendIntent,
+      setActivity: setActivity,
       swapSides: swapSides,
       changeWork: changeWork,
       attachDataChannel: attachDataChannel,

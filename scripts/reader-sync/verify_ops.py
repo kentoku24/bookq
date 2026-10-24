@@ -192,7 +192,12 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     follower.evaluate("window.closeSidebar && window.closeSidebar()")
     leader.click("#pair-btn")
     leader.click("#pair-create")
-    leader.wait_for_selector("#pair-code-value:not(:empty)", timeout=15000)
+    # The leader section renders '------' as a placeholder the moment it
+    # appears — wait for an actual 6-digit code, not just non-emptiness.
+    leader.wait_for_function(
+        "() => /^\\d{6}$/.test((document.getElementById('pair-code-value')"
+        "  .textContent || '').trim())",
+        timeout=15000)
     code = leader.text_content("#pair-code-value").strip()
     follower.click("#pair-btn")
     follower.click("#pair-join-open")
