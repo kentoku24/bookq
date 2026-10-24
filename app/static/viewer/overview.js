@@ -477,18 +477,22 @@
 
   // `typeof … === 'function'`, not a bare truthiness check: a Service Worker
   // StaleWhileRevalidate can hand a browser THIS module next to a cached, older
-  // app.js that never published viewerSnapTo/suppressClickFor. Throwing there
-  // would leave the grid up with no way out; closing is the honest degradation.
-  // (The same guards are forbidden inside app.js — see
+  // app.js/navigation.js that never published the port or suppressClickFor.
+  // Throwing there would leave the grid up with no way out; closing is the
+  // honest degradation. (The same guards are forbidden inside app.js — see
   // test_app_js_has_no_module_fallback_bodies — but belong here.)
   function exitTo(gidx) {
     close();
     // The touchend that picked the cell also synthesises a click on whatever
     // is under the finger in the viewer we just uncovered — swallow it.
     if (typeof window.suppressClickFor === 'function') window.suppressClickFor(SUPPRESS_MS);
-    if (typeof window.viewerSnapTo !== 'function') return;
-    window.viewerSnapTo(gidx, false);
-    crossfade(gidx);
+    var im = images()[gidx];
+    if (!im || im.isSpacer) return;
+    // Picking a cell is a user movement request — a goto carrying a typed
+    // PageRef, never a local index. The default handler performs the snap +
+    // crossfade; a comm handler receives the same intent instead.
+    if (typeof window.ViewerNavigation !== 'object' || typeof window.ViewerNavigation.request !== 'function') return;
+    window.ViewerNavigation.request({type: 'goto', page: {folder: im.folder, name: im.name}, via: 'overview'});
   }
 
   function relayout() {
@@ -620,6 +624,9 @@
     markCurrent: markCurrent,
     syncPosition: syncPosition,
     relayout: relayout,
+    // Exported for app.js's default goto handler: the overview exit pairs
+    // its page snap with this thumbnail crossfade.
+    crossfade: crossfade,
     cellCenter: function () { return curCenter; },
     _finishFlight: null,
     _debug: {
