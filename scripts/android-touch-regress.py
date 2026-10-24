@@ -114,12 +114,16 @@ async def run_checks(args, serial, out_dir):
         await wait_until(cdp, "document.querySelector('#counter') && Number.isFinite(window.currentIdx)")
         initial = int(await cdp.evaluate("window.currentIdx"))
         check["before_idx"] = initial
-        run(adb_cmd := ["adb", "-s", serial, "shell", "input", "tap", str(round(width * .35)), str(round(height * .5))])
+        tap_result = run(["adb", "-s", serial, "shell", "input", "tap", str(round(width * .35)), str(round(height * .5))])
+        if tap_result.returncode:
+            raise RuntimeError(f"adb tap failed: {tap_result.stderr.strip()}")
         await wait_until(cdp, f"window.currentIdx === {initial + 1}", args.action_timeout)
         check["after_tap_idx"] = int(await cdp.evaluate("window.currentIdx"))
         screenshot(serial, out_dir / "reader-after-tap.png")
-        run(["adb", "-s", serial, "shell", "input", "swipe", str(round(width * .75)), str(round(height * .5)),
-             str(round(width * .25)), str(round(height * .5)), str(args.swipe_ms)])
+        swipe_result = run(["adb", "-s", serial, "shell", "input", "swipe", str(round(width * .75)), str(round(height * .5)),
+                            str(round(width * .25)), str(round(height * .5)), str(args.swipe_ms)])
+        if swipe_result.returncode:
+            raise RuntimeError(f"adb reader swipe failed: {swipe_result.stderr.strip()}")
         await wait_until(cdp, f"window.currentIdx === {initial}", args.action_timeout)
         check["after_swipe_idx"] = int(await cdp.evaluate("window.currentIdx"))
         check["status"] = "passed"
@@ -131,12 +135,16 @@ async def run_checks(args, serial, out_dir):
         await wait_until(cdp, "(()=>{const e=document.querySelector('#sidebar-scroll');return !!e && e.scrollHeight>e.clientHeight})()")
         before = float(await cdp.evaluate("document.querySelector('#sidebar-scroll').scrollTop"))
         check["before_scroll_top"] = before
-        run(["adb", "-s", serial, "shell", "input", "swipe", str(round(width * .5)), str(round(height * .82)),
-             str(round(width * .5)), str(round(height * .25)), str(args.flick_ms)])
+        flick_result = run(["adb", "-s", serial, "shell", "input", "swipe", str(round(width * .5)), str(round(height * .82)),
+                            str(round(width * .5)), str(round(height * .25)), str(args.flick_ms)])
+        if flick_result.returncode:
+            raise RuntimeError(f"adb browse flick failed: {flick_result.stderr.strip()}")
         await wait_until(cdp, f"document.querySelector('#sidebar-scroll').scrollTop > {before + args.min_scroll_px}", args.action_timeout)
         after = float(await cdp.evaluate("document.querySelector('#sidebar-scroll').scrollTop"))
         check.update({"after_scroll_top": after, "scroll_delta_px": after - before, "status": "passed"})
         screenshot(serial, out_dir / "browse-after-flick.png")
+        # Drain events queued during the final input/screenshot before deciding.
+        await cdp.evaluate("1")
         result["console_exceptions"] = cdp.events
         if cdp.events:
             result["checks"].append({"name": "browser_console", "status": "failed", "reason": f"{len(cdp.events)} exception/log events"})
