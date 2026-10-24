@@ -52,6 +52,7 @@ KNOWN_OPS = frozenset({
     "burst",            # N rapid-fire turns then converge (連打)
     "rtt",              # client->server wire RTT probe (SET_ACTIVITY ack)
     "latency",          # intent->committed-apply latency distribution
+    "peer_latency",     # intent->PEER-decoded-display latency (S12/#87)
     "expect",           # poll state for expected phase/spread/marker/…
     "dc_open",          # real WebRTC DataChannel via server-mediated signaling
     "dc_close",         # drop DC, TRANSPORT_STATE down, server-ws fallback
@@ -222,7 +223,7 @@ def _validate_scenario(sc: dict, i: int, seen: set) -> None:
         raise ScenarioError(f"duplicate scenario name: {name}")
     seen.add(name)
     for key, allowed in (
-        ("drivers", ("chrome", "simulator")),
+        ("drivers", ("chrome", "simulator", "real")),
         ("route", ("any",) + ROUTE_CLASSES),
         ("surface", ("fixture", "ui")),
         ("transports", ("server-ws", "webrtc-dc")),
@@ -287,6 +288,10 @@ def _validate_work(name: str, work) -> None:
         if not isinstance(mp, int) or mp < 2:
             raise ScenarioError(
                 f"scenario {name}: discover work needs minPages >= 2")
+        idx = work.get("index", 0)
+        if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
+            raise ScenarioError(
+                f"scenario {name}: discover work index must be int >= 0")
         if work.get("offset", 0) not in (0, 1):
             raise ScenarioError(f"scenario {name}: work.offset must be 0 or 1")
         return
@@ -365,6 +370,19 @@ def _validate_op(name: str, j: int, op: dict) -> None:
         if op.get("samples", 8) < 1:
             raise ScenarioError(
                 f"scenario {name} op[{j}]: latency needs samples >= 1")
+    elif t == "peer_latency":
+        if op.get("samples", 8) < 1:
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: peer_latency needs samples >= 1")
+        if op.get("actor", "leader") not in ("leader", "follower", "both"):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: peer_latency actor must be "
+                "leader|follower|both")
+        if op.get("timeout_ms") is not None and \
+                not isinstance(op["timeout_ms"], (int, float)):
+            raise ScenarioError(
+                f"scenario {name} op[{j}]: peer_latency timeout_ms must "
+                "be a number")
     elif t == "fault":
         if op.get("type") not in FAULT_TYPES:
             raise ScenarioError(
@@ -439,7 +457,7 @@ def resolve_plan(scenario_data: dict, *, driver: str, route: str,
         name = sc["name"]
         if only_set and name not in only_set:
             continue
-        drivers = sc.get("drivers") or ["chrome", "simulator"]
+        drivers = sc.get("drivers") or ["chrome", "simulator", "real"]
         if driver not in drivers:
             if only_set:
                 skipped.append({"name": name, "transport": None,
