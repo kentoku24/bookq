@@ -519,3 +519,320 @@ def test_expect_match_fields():
     assert not ops_mod._expect_match(st, {"phase": "loading"})
     assert not ops_mod._expect_match(st, {"rejected": "stale"})
     assert not ops_mod._expect_match(st, {"presence": "active"})
+
+
+# ── S12 (#87) — real driver + peer_latency + /ctrl/event ─────────────
+
+drivers_mod = runner_module("verify_drivers")
+
+
+def test_real_driver_surface():
+    """RealDriver: manual launch prints URLs, caps keep physical-action
+    ops honestly classified, and automation methods raise Unsupported."""
+    d = drivers_mod.RealDriver()
+    assert d.name == "real" and d.preflight()["manual"] is True
+    assert d.caps == {"ws_bystander"}
+    spec = drivers_mod.ClientSpec("leader", "leader")
+    for call in (lambda: d.tap(spec, 1, 1),
+                 lambda: d.swipe(spec, 0, 0, 1, 1),
+                 lambda: d.rotate(spec, "LANDSCAPE_LEFT"),
+                 lambda: d.screenshot(spec, "/tmp/x.png"),
+                 lambda: d.background(spec),
+                 lambda: d.screen_size(spec),
+                 lambda: d.tap_element(spec, "x")):
+        with pytest.raises(core.UnsupportedError):
+            call()
+    urls = {"leader": "http://192.168.1.5:9/fixture?id=leader",
+            "follower": "http://192.168.1.5:9/fixture?id=follower"}
+    clients = {"leader": spec,
+               "follower": drivers_mod.ClientSpec("follower", "follower")}
+    d.launch(clients, urls)                      # prints, no automation
+    devs = d.devices(clients)
+    assert devs["leader"]["kind"] == "real-device"
+    assert clients["leader"].launch_url == urls["leader"]
+    d.stop()
+
+
+def test_resolve_plan_real_driver():
+    """'real' is a first-class driver: ctl-plane scenarios plan on it,
+    device-input-requires classify env_unavailable (never unsupported,
+    never a mid-run crash)."""
+    data = {"scenarios": [
+        {"name": "real_ok", "ops": [{"op": "pair"}]},
+        {"name": "needs_hands", "ops": [{"op": "device_input",
+                                         "kind": "tap"}],
+         "requires": ["device_inputs"]},
+        {"name": "needs_rtc", "ops": [{"op": "peer_latency"}],
+         "requires": ["webrtc"]},
+        {"name": "chrome_only", "ops": [{"op": "pair"}],
+         "drivers": ["chrome"]},
+    ]}
+    real_caps = {"ws_bystander"}
+    plan, skipped = core.resolve_plan(data, driver="real", route="lan",
+                                      caps=real_caps, only=None)
+    names = [e["name"] for e in plan]
+    assert "real_ok" in names
+    assert "needs_hands" not in names and "needs_rtc" not in names
+    assert "chrome_only" not in names
+    sk = {s["name"]: s for s in skipped}
+    assert sk["needs_hands"]["status"] == "env_unavailable"
+    assert sk["needs_rtc"]["status"] == "env_unavailable"
+
+
+def test_bundled_real_scenarios_validate():
+    """scenarios-real.json parses + plans on BOTH real and chrome."""
+    data = core.load_scenarios(RUNNER_DIR / "scenarios-real.json")
+    names = {s["name"] for s in data["scenarios"]}
+    assert {"real_ws_acceptance", "real_peer_latency_ws",
+            "real_peer_latency_dc", "real_disconnect_resume",
+            "real_reload_resume", "real_work_change"} <= names
+    for drv in ("real", "chrome"):
+        plan, skipped = core.resolve_plan(
+            data, driver=drv, route="lan",
+            caps={"webrtc", "ws_bystander"}, repeat=1)
+        assert len(plan) == len(data["scenarios"]), (drv, skipped)
+        for e in plan:
+            assert "drivers" not in e["scenario"] or \
+                drv in e["scenario"]["drivers"]
+
+
+def test_peer_latency_validation(tmp_path):
+    def w(obj):
+        p = tmp_path / "sc.json"
+        p.write_text(json.dumps(obj))
+        return p
+    data = core.load_scenarios(w({"scenarios": [
+        {"name": "a", "ops": [{"op": "peer_latency", "samples": 100,
+                               "actor": "both"}]}]}))
+    assert data["scenarios"][0]["ops"][0]["actor"] == "both"
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "peer_latency", "samples": 0}]}]}))
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "peer_latency",
+                                   "actor": "ghost"}]}]}))
+
+
+# ── /ctrl/event + wait_displayed ──────────────────────────────────────
+
+
+def test_ctrl_event_wait_displayed(tmp_path):
+    """post a displayed event -> wait_displayed returns it; min_rev
+    filters; backlog arriving BEFORE the wait still matches."""
+    srv = fserver.FixtureServer(port=0)
+    srv.start()
+    try:
+        ctl = fx_control_client(srv, "leader")
+        # backlog-before-wait: event lands first, wait still sees it
+        ctl.post("/ctrl/event", {"id": "leader", "type": "displayed",
+                                 "rev": 3, "imgState": "ok", "at": 1.0})
+        ev = srv.wait_displayed("leader", min_rev=1, timeout=2)
+        assert ev["rev"] == 3 and ev["imgState"] == "ok"
+        # min_rev filtering: rev 3 must not satisfy rev>=4
+        with pytest.raises(fserver.CmdError):
+            srv.wait_displayed("leader", min_rev=4, timeout=0.4)
+        # a later event clears the gate
+        ctl.post("/ctrl/event", {"id": "leader", "type": "displayed",
+                                 "rev": 4, "imgState": "blank", "at": 2.0})
+        ev = srv.wait_displayed("leader", min_rev=4, timeout=2)
+        assert ev["rev"] == 4
+        # non-displayed events never satisfy
+        ctl.post("/ctrl/event", {"id": "leader", "type": "other",
+                                 "rev": 9})
+        with pytest.raises(fserver.CmdError):
+            srv.wait_displayed("leader", min_rev=5, timeout=0.4)
+        # drain drops the backlog so only fresh events count
+        srv.drain_events("leader")
+        with pytest.raises(fserver.CmdError):
+            srv.wait_displayed("leader", min_rev=1, timeout=0.4)
+        # async post while blocked wakes the waiter
+        def late():
+            time.sleep(0.15)
+            srv.post_event({"id": "leader", "type": "displayed",
+                            "rev": 8, "imgState": "ok", "at": 3.0})
+        threading.Thread(target=late, daemon=True).start()
+        assert srv.wait_displayed("leader", min_rev=5,
+                                  timeout=3)["rev"] == 8
+    finally:
+        srv.stop()
+
+
+def test_fixture_shortcut_redirects():
+    """/r/<client> 302s to the stored fixture URL; /r lists links."""
+    import urllib.request
+    import urllib.error
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    srv = fserver.FixtureServer(port=0)
+    srv.start()
+    try:
+        url = srv.fixture_url("leader", "leader", "ws://x/ws",
+                              "http://x", host="192.168.1.5")
+        assert srv.short_url("leader").endswith("/r/leader")
+        assert srv.short_url("leader").startswith("http://192.168.1.5:")
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            # dial the loopback bind — the stored URL itself is the LAN
+            # host a phone would reach, which this machine can't.
+            opener.open(srv.base_url() + "/r/leader", timeout=5)
+            assert False, "expected 302"
+        except urllib.error.HTTPError as e:
+            assert e.code == 302 and e.headers["Location"] == url
+        with urllib.request.urlopen(
+                srv.base_url() + "/r", timeout=5) as r:
+            assert b"/r/leader" in r.read()
+    finally:
+        srv.stop()
+
+
+# ── peer_latency op ───────────────────────────────────────────────────
+
+
+class _FakeFx:
+    """Stand-in fixture server for op-level tests: state comes from a
+    scripted map, wait_displayed consumes scripted events/timeouts."""
+
+    def __init__(self, peer_rev=0, events=None):
+        self.rev = peer_rev
+        self.drained = []
+        self.waits = []
+        self._events = list(events or [])
+
+    def drain_events(self, cid):
+        self.drained.append(cid)
+
+    def wait_displayed(self, cid, min_rev, timeout):
+        self.waits.append((cid, min_rev, timeout))
+        ev = self._events.pop(0) if self._events else None
+        if ev is None:
+            raise fserver.CmdError("env", "no displayed event")
+        return ev
+
+
+class _FakeSpec:
+    def __init__(self, cid, role):
+        self.id = cid
+        self.role = role
+
+
+class _FakeCtx:
+    def __init__(self, fx, states=None, cmd_map=None):
+        self.fx = fx
+        self.surface = "fixture"
+        self.clients = {"leader": _FakeSpec("leader", "leader"),
+                        "follower": _FakeSpec("follower", "follower")}
+        self._states = states or {}
+        self._cmd_map = cmd_map or {}
+        self._table = [{"id": "c0:s0"}, {"id": "c0:s1"}]
+        self.assertions = []
+        self.screenshots = []
+        self.rtt = {}
+        self.latency = {}
+
+    def note(self, name, ok, detail=""):
+        self.assertions.append({"name": name, "ok": bool(ok),
+                                "detail": str(detail)})
+        return ok
+
+    def state(self, role):
+        return self._states[role]
+
+    def cmd(self, role, name, params=None, timeout=30.0):
+        fn = self._cmd_map.get(name)
+        if fn:
+            return fn(role, params or {})
+        return {"sent": True}
+
+
+def _lat_ctx(events, rev=4, cmd_map=None):
+    fx = _FakeFx(events=events)
+    st = {"applied": {"revision": rev, "index": 0, "spreadId": "c0:s0"},
+          "transport": "server-ws", "phase": "reading",
+          "sessionId": "s", "workEpoch": 1}
+    ctx = _FakeCtx(fx, states={"leader": dict(st),
+                               "follower": dict(st)},
+                   cmd_map=cmd_map)
+    return ctx, fx
+
+
+def test_peer_latency_records_stats():
+    """Successful samples land under peer:<transport>:<a>→<p> with the
+    spec stat shape; waits demand rev >= prev+1 after a drain."""
+    ctx, fx = _lat_ctx(events=[{"rev": 5, "type": "displayed"}] * 8, rev=4)
+    ops_mod.op_peer_latency(ctx, {"op": "peer_latency", "samples": 8,
+                                  "actor": "leader"})
+    key = "peer:server-ws:leader→follower"
+    stats = ctx.latency[key]
+    assert stats["n"] == 8 and stats["failures"] == 0
+    assert stats["p50"] is not None and stats["p95"] is not None
+    assert stats["max"] is not None and "upper bound" in stats["method"]
+    # every wait: follower cid, rev >= prev_rev+1, after a drain
+    assert len(fx.drained) == 8 and fx.drained == ["follower"] * 8
+    assert all(w[0] == "follower" and w[1] == 5 for w in fx.waits)
+    note = ctx.assertions[-1]
+    assert note["name"] == "peer_latency_leader" and note["ok"]
+
+
+def test_peer_latency_timeouts_and_refusals_counted():
+    """Timeouts (no event) AND intent refusals (sent:false) land in
+    failures — never silently dropped, never deleted as 'slow'."""
+    events = [{"rev": 5, "type": "displayed"}, None,
+              {"rev": 5, "type": "displayed"}, {"rev": 5,
+                                              "type": "displayed"}]
+    sends = iter([{"sent": True}, {"sent": True},
+                  {"sent": False}, {"sent": True}])
+
+    def turn(role, params):
+        return next(sends)
+    ctx, fx = _lat_ctx(events=events, rev=4, cmd_map={"turn": turn})
+    ops_mod.op_peer_latency(ctx, {"op": "peer_latency", "samples": 4,
+                                  "actor": "leader"})
+    stats = ctx.latency["peer:server-ws:leader→follower"]
+    assert stats["n"] == 2 and stats["failures"] == 2
+
+
+def test_peer_latency_both_directions_separate_keys():
+    ctx, fx = _lat_ctx(events=[{"rev": 5, "type": "displayed"}] * 8, rev=4)
+    ops_mod.op_peer_latency(ctx, {"op": "peer_latency", "samples": 4,
+                                  "actor": "both"})
+    assert ctx.latency["peer:server-ws:leader→follower"]["n"] == 4
+    assert ctx.latency["peer:server-ws:follower→leader"]["n"] == 4
+    assert len(fx.waits) == 8
+    cids = {w[0] for w in fx.waits}
+    assert cids == {"leader", "follower"}
+
+
+def test_peer_latency_uses_live_transport_key():
+    """The stats key follows the peer's effective plane so webrtc-dc
+    runs record under the right transport."""
+    ctx, fx = _lat_ctx(events=[{"rev": 5, "type": "displayed"}] * 3, rev=4)
+    for st in ctx._states.values():
+        st["transport"] = "webrtc-dc"
+    ops_mod.op_peer_latency(ctx, {"op": "peer_latency", "samples": 3,
+                                  "actor": "leader"})
+    assert "peer:webrtc-dc:leader→follower" in ctx.latency
+
+
+def test_peer_latency_all_failed_is_a_bad_note():
+    """n=0 with failures means the run honestly reports a failed
+    assertion — never a fabricated zero-latency pass."""
+    ctx, fx = _lat_ctx(events=[], rev=4)
+    ops_mod.op_peer_latency(ctx, {"op": "peer_latency", "samples": 3,
+                                  "actor": "leader"})
+    stats = ctx.latency["peer:server-ws:leader→follower"]
+    assert stats["n"] == 0 and stats["failures"] == 3
+    assert ctx.assertions[-1]["ok"] is False
+
+
+def test_peer_latency_needs_table_and_fixture():
+    ctx, _ = _lat_ctx(events=[], rev=4)
+    ctx._table = None
+    with pytest.raises(core.UnsupportedError):
+        ops_mod.op_peer_latency(ctx, {"op": "peer_latency"})
+    ctx, _ = _lat_ctx(events=[], rev=4)
+    ctx.surface = "ui"
+    with pytest.raises(core.UnsupportedError):
+        ops_mod.op_peer_latency(ctx, {"op": "peer_latency"})
