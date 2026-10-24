@@ -12,10 +12,18 @@ A tiny threaded HTTP server the two device surfaces connect back to:
   and the runner can drive Safari-vs-PWA surface combinations (#86).
 - ``GET /ctrl/next?id=<client>`` — long-poll: the next queued command for
   that client (25 s hold, then ``{}``).
+- ``GET /r/<client>`` — 302 redirect to that client's full fixture URL;
+  ``GET /r`` — a link index. Typing one short path on a physical phone
+  beats transcribing the whole query string (S12 real-device runs).
 - ``POST /ctrl/hello`` — client boot report (ua, hasRTC, standalone,
   module status). ``hello_seq`` counts boots per client so a PWA relaunch
   (a fresh page load inside the web clip) is distinguishable.
 - ``POST /ctrl/result`` — command result (``{id, seq, res:{ok,data|error}}``).
+- ``POST /ctrl/event`` — fire-and-forget client event. The S12 latency
+  probe uses ``{type:'displayed', rev, imgState, at}`` — pushed the moment
+  the client's own image render reaches a terminal display state, which
+  lets the runner measure intent→peer-decoded-display on a single clock
+  (``wait_displayed``).
 
 The runner side uses ``cmd(client, name, **params)`` which returns the
 fixture's data payload or raises :class:`CmdError`. Pairing codes flow
@@ -30,6 +38,7 @@ import struct
 import threading
 import time
 import zlib
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -68,7 +77,9 @@ class FixtureServer:
         self.host = host
         self.port = self._httpd.server_address[1]
         self._lock = threading.Lock()
+        self._events_cv = threading.Condition(self._lock)
         self._clients: dict[str, dict] = {}
+        self._open_urls: dict[str, str] = {}
         self._seq = 0
         self._thread: threading.Thread | None = None
 
@@ -94,8 +105,30 @@ class FixtureServer:
     def fixture_url(self, client_id: str, role: str, ws_url: str,
                     base_url: str, host: str | None = None) -> str:
         base = self.base_url(host)
-        return (base + "/fixture?" + urlencode(
-            {"id": client_id, "role": role, "ws": ws_url, "base": base_url}))
+        url = (base + "/fixture?" + urlencode(
+            {"id": client_id, "role": role, "ws": ws_url,
+             "base": base_url}))
+        with self._lock:
+            self._open_urls[client_id] = url
+        return url
+
+    def short_url(self, client_id: str) -> str:
+        """Typable device-open URL — ``/r/<client>`` 302s to the full
+        fixture URL so a human never transcribes a query string. Uses
+        the same host the fixture URL was built with (a 0.0.0.0 bind's
+        own hostname would be useless on a phone)."""
+        with self._lock:
+            url = self._open_urls.get(client_id)
+        base = url.split("/fixture?")[0] if url else self.base_url()
+        return f"{base}/r/{client_id}"
+
+    def open_url(self, client_id: str) -> str | None:
+        with self._lock:
+            return self._open_urls.get(client_id)
+
+    def open_url_clients(self) -> list:
+        with self._lock:
+            return sorted(self._open_urls)
 
     def wait_hello(self, client_id: str, timeout: float = 30.0,
                    min_seq: int = 1) -> dict:
@@ -156,7 +189,8 @@ class FixtureServer:
     @staticmethod
     def _new_client() -> dict:
         return {"queue": queue.Queue(), "results": {}, "events": {},
-                "hello": None, "hello_seq": 0}
+                "hello": None, "hello_seq": 0,
+                "display_events": deque()}
 
     def _client(self, client_id: str) -> dict:
         with self._lock:
@@ -179,6 +213,51 @@ class FixtureServer:
             ev = c["events"].get(seq)
         if ev is not None:
             ev.set()
+
+    def post_event(self, payload: dict) -> None:
+        """Fire-and-forget client event (S12 display-completion probe).
+        Bounded per client; any waiter is woken under the condition."""
+        cid = str(payload.get("id") or "")
+        if not cid:
+            return
+        c = self._client(cid)
+        with self._events_cv:
+            c["display_events"].append(dict(payload))
+            if len(c["display_events"]) > 256:
+                c["display_events"].popleft()
+            self._events_cv.notify_all()
+
+    def drain_events(self, client_id: str) -> None:
+        """Drop the backlog — called before each latency sample so only
+        events caused by THIS measurement can satisfy the wait."""
+        with self._events_cv:
+            c = self._clients.get(client_id)
+            if c is not None:
+                c["display_events"].clear()
+
+    def wait_displayed(self, client_id: str, min_rev: int,
+                       timeout: float = 15.0) -> dict:
+        """First ``displayed`` event with ``rev >= min_rev``.
+
+        Scans the backlog first — the peer's event can land BEFORE the
+        runner starts waiting — then blocks on the condition. Raises
+        CmdError(env) on timeout; the ops layer counts that as a failed
+        sample, never a silent skip."""
+        deadline = time.monotonic() + timeout
+        with self._events_cv:
+            c = self._clients.setdefault(client_id, self._new_client())
+            while True:
+                for ev in c["display_events"]:
+                    if ev.get("type") == "displayed" and \
+                            isinstance(ev.get("rev"), int) and \
+                            ev["rev"] >= min_rev:
+                        return ev
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CmdError(
+                        "env", f"no displayed event rev>={min_rev} on "
+                               f"{client_id} within {timeout}s")
+                self._events_cv.wait(remaining)
 
     def next_command(self, client_id: str, timeout: float = 25.0) -> dict:
         c = self._client(client_id)
@@ -290,10 +369,34 @@ class _Handler(BaseHTTPRequestHandler):
             cmd = self.fx.next_command(cid, timeout=25.0)
             self._send(200, json.dumps(cmd).encode("utf-8"))
             return
+        if u.path == "/r" or u.path.startswith("/r/"):
+            self._handle_shortcut(u.path)
+            return
         if u.path == "/health":
             self._send(200, b'{"ok":true}')
             return
         self._send(404, b'{"error":"not found"}')
+
+    def _handle_shortcut(self, path: str) -> None:
+        """/r/<client> -> 302 to the stored device-open URL; /r -> index
+        page linking both (the human taps, never transcribes)."""
+        if path == "/r":
+            links = self.fx.open_url_clients()
+            body = ("<!DOCTYPE html><meta name=viewport content="
+                    "'width=device-width'><title>reader-sync fixture</title>"
+                    "<body style='font-size:2em;font-family:sans-serif'>"
+                    + "".join(
+                        f"<p><a href='/r/{cid}'>{cid}</a></p>"
+                        for cid in links)
+                    + "</body>").encode("utf-8")
+            self._send(200, body, ctype="text/html; charset=utf-8")
+            return
+        cid = path.split("/", 2)[2]
+        url = self.fx.open_url(cid)
+        if url:
+            self._send(302, b"", extra={"Location": url})
+        else:
+            self._send(404, b'{"error":"no url for client"}')
 
     def do_POST(self):  # noqa: N802
         u = urlparse(self.path)
@@ -303,6 +406,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if u.path == "/ctrl/result":
             self.fx.post_result(self._read_json())
+            self._send(200, b'{"ok":true}')
+            return
+        if u.path == "/ctrl/event":
+            self.fx.post_event(self._read_json())
             self._send(200, b'{"ok":true}')
             return
         self._send(404, b'{"error":"not found"}')
