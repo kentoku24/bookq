@@ -70,3 +70,20 @@ RECORD_VIDEO=1 RECORD_VIDEO_DIR=.omo/evidence BROWSER=webkit uv run --with pytes
 - GHA は `ubuntu-latest` 自動（`pytest tests/ -q`）+ Simulator を使う `macos` は手動 `workflow_dispatch` のみ。ローカル Mac では `bash scripts/open-simulator.sh verify` で一連検証（`check` → `boot` → `open https://example.com` → `screenshot`）。
 
 人間向けの1枚要約は `docs/ios-simulator.md`（スキルへの thin stub）。
+
+## Android 実機タッチ回帰（Tier 2 / ローカル）
+
+Android Chrome の既存タブに ADB + CDP で接続し、端末レベルの tap/swipe を実行します。ページ状態とグリッドの scrollTop をアサートし、JSON と各ステップのスクリーンショットを保存します。CDP 合成 touch event ではなく adb shell input を使うため、合成イベントだけのテストと区別できます。
+
+前提: Android 端末が unlock 済みで adb devices に1台だけ表示されること、端末 Chrome で bookq を開きリモートデバッグが有効なこと、PC から localhost:9222 の ADB forward が可能なこと。--url-match は既に開いているタブの URL に一意に一致する文字列を指定します。
+
+```bash
+uv run --with websockets python3 scripts/android-touch-regress.py \
+  --url-match dev-01.example.ts.net \
+  --reader-url 'https://dev-01.example.ts.net/#/view/long/book?p=0' \
+  --browse-url 'https://dev-01.example.ts.net/#/browse/long'
+```
+
+成功時は exit code 0、テスト失敗または環境未準備は exit code 2 です。実行結果は既定で .omo/evidence/android-touch-regress/<timestamp>/result.json に記録され、成功/失敗時のスクリーンショットも同じディレクトリに保存します。端末不在・ADB/CDP 接続不良は environment_unavailable として記録され、成功扱いしません。シナリオ URL は、複数ページの本と縦スクロール可能な十分な数のタイルを持つ browse フォルダを指定してください。
+
+この初版は reader の左ゾーン tap / 左向き swipe と browse の縦 flick を検証します。実指との相関、EventLatency、性能ベースライン比較はまだ対象外です。性能測定は既存の .claude/skills/tile-flick-fps を併用してください。
