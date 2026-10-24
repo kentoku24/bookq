@@ -2190,7 +2190,10 @@
   function getUrl(idx){
     // Encode per path segment — image names may carry flattened "sub/dir/" prefixes.
     const img = images[idx];
-    if (img.isSpacer) return "";
+    // !img: a once-listener (load/error) on a pooled <img> can outlive the
+    // state array it indexed into — a paired teardown/loadImages that swaps
+    // `images` mid-flight must not turn the stale event into a TypeError.
+    if (!img || img.isSpacer) return "";
     return window.OfflineCore.readerUrl(img.folder, img.name);
   }
   try { window.getUrl = getUrl; } catch(e) { console.warn(e); }
@@ -3049,6 +3052,15 @@
     if (anchorIdx < 0) return;   // unresolvable anchor: state recorded, no display move
     if (dragActive) abortDrag(); // a commit supersedes a half-finished drag
     snapTo(anchorIdx, false);
+    // Write location.hash NOW — snapTo only schedules the usual 200ms
+    // debounce, but a commit can land while boot is still inside its
+    // shallow→full loadFolders window. An applyUrlState (the boot's own
+    // post-load re-run, or a stray hashchange) that sees an EMPTY hash
+    // alongside live viewer state reads it as "no view" and resetToTop's
+    // teardown out from under the committed display. replaceViewerState is
+    // a replaceState write — no hashchange event, and snapTo's debounced
+    // re-write hits the same-URL early return.
+    if (typeof window.replaceViewerState === "function") window.replaceViewerState();
   }
 
   // LEAVE-equivalent: restore the pre-pair solo layout verbatim and resume

@@ -416,6 +416,42 @@ def test_render_path_emits_no_intents(page, server):
     assert page.evaluate("window.__navIntents") == []
 
 
+def test_apply_url_state_does_not_teardown_paired_view(page, server):
+    """Boot-window regression: a committed apply can land while the app is
+    still inside its shallow→full loadFolders window. The boot's unconditional
+    applyUrlState (or any stray empty-hash hashchange) must not treat the
+    live paired viewer as "no view" and resetToTop it out from under the
+    committed display — live dev env hit exactly this when the restore ran
+    inside scheduleUrlSync's 200ms debounce window."""
+    page.goto(server)
+    page.wait_for_selector(".tile")
+    man = _manifest("long", 30, 0)
+    _commit(page, _snapshot("c0:s0"), man, "leader")
+    # the viewer hash is written synchronously inside the commit — well
+    # before scheduleUrlSync's 200ms debounce — so a restore running in
+    # that window always sees #/view/, never ""
+    assert page.evaluate("location.hash").startswith("#/view/")
+    settle(page, 3)
+    _loaded_ready(page)
+    assert _visible_srcs(page) == ["/image/long/p001.png"]
+    assert _state(page)["active"] is True
+
+    # the boot-window killer: empty hash + live viewer state → was resetToTop
+    page.evaluate("history.replaceState(null,'',location.pathname)")
+    page.evaluate("window.applyUrlState()")
+    settle(page, 2)
+    assert _state(page)["active"] is True
+    assert _visible_srcs(page) == ["/image/long/p001.png"]
+    assert page.evaluate("window.currentIdx") == 0
+
+    # a stray browse-hash change mid-session is likewise inert (hashchange
+    # routes through the same applyUrlState listener)
+    page.evaluate("location.hash = '#/browse/'")
+    settle(page, 3)
+    assert _state(page)["active"] is True
+    assert _visible_srcs(page) == ["/image/long/p001.png"]
+
+
 def test_leave_restores_solo_layout(page, server):
     open_book(page, server, "long", 1, 30)     # solo reading p002
     man = _manifest("long", 30, 0)

@@ -403,6 +403,15 @@
     var cur = currentViewerState();
     if (!window.treeLoaded) return;
 
+    // A paired session renders the committed shared spread — the URL hash
+    // mirrors it (written synchronously by applyPairedCommit) but is NOT the
+    // source of truth. A stray empty/browse hashchange landing mid-session —
+    // the boot's post-full-load applyUrlState, a manual hash edit, Back —
+    // must not resetToTop/loadImages the committed display out from under
+    // the remote controller. Pairing ends only through the LEAVE-equivalent
+    // committed state / PairedView.leave() hook.
+    if (window.PairedView && window.PairedView.state && window.PairedView.state().active) return;
+
     // The URL is the source of truth for view mode: an explicit v=list|card
     // sets it, and its absence — including the bare/no-hash canonical root,
     // which is only ever written for root+tile (browseHash("", "tile") ===
