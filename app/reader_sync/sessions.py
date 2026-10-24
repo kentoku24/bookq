@@ -20,12 +20,14 @@ Design contract:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import secrets
 import time
 from dataclasses import dataclass, field
 
 from app.reader_sync import protocol
+from app.reader_sync import state as rstate
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,6 @@ REASON_BAD_RESUME = "bad_resume"            # unknown session/member/token
 REASON_RESUME_EXPIRED = "resume_expired"
 REASON_RESUME_IN_USE = "resume_in_use"      # member already has a live link
 REASON_PEER_OFFLINE = "peer_offline"
-REASON_UNIMPLEMENTED = "unimplemented"      # S05+ request types
 
 # ── END reasons ────────────────────────────────────────────────────
 END_REJECTED = "rejected"          # leader REJECTed the pending join
@@ -65,10 +66,15 @@ END_CODE_EXPIRED = "code_expired"  # nobody joined before the TTL
 END_RESUME_EXPIRED = "resume_expired"
 END_SHUTDOWN = "shutdown"
 
-# request types handled at session scope but not yet implemented (S05)
-_DEFERRED_TYPES = frozenset({
-    "TURN", "GOTO", "SET_OFFSET", "SWAP_SIDES", "OPEN_WORK", "READY", "APPLIED",
-})
+# S05 (#80): sequenced request types — the vocabulary the authoritative
+# sequencer/state layer owns (app/reader_sync/state.py).
+_SEQUENCED_TYPES = rstate.SEQUENCED_TYPES
+
+# requestId dedup retention: full outcomes for the last DEDUP_WINDOW keys,
+# evicted keys remembered as tombstones for the workEpoch's whole lifetime
+# ("dedup保持期間外の古い要求は再適用せず拒否" — §3.4).
+DEDUP_WINDOW = 256
+DEDUP_TOMBSTONE_MAX = 8192
 
 _TRANSPORT_REPORT = frozenset({"up", "down"})
 
@@ -98,6 +104,10 @@ class PeerLink:
         self.registry = registry
         self.id = _new_id()
         self.user: dict | None = None   # populated by the transport layer
+        self.connection = None          # transport's connection object (WS) —
+                                        # lets the work resolver reach
+                                        # connection.app.state without the
+                                        # registry importing starlette
         self.member: Member | None = None
         self.alive = True
         self.last_rx = registry._now()
@@ -146,6 +156,7 @@ class Member:
     status: str = "active"       # active | suspended | offline | pending
     offline_since: float | None = None
     dc_state: str = "down"       # reported webrtc-dc status: up | down
+    last_applied: dict | None = None  # last APPLIED report {requestId, revision}
 
 
 @dataclass
@@ -164,6 +175,17 @@ class PairSession:
     offset: int = 0
     leader_side: str = "right"
     data_plane: str = "server-ws"                  # server-ws | webrtc-dc
+    # ── S05 committed work state ────────────────────────────────────
+    manifest: dict | None = None        # committed shared manifest (S04 shape)
+    plan: list | None = None            # Spread objects parallel to manifest
+    ready: set = field(default_factory=set)      # member ids READY on manifest
+    dedup: dict = field(default_factory=dict)    # "role:requestId" -> response
+    dedup_seen: dict = field(default_factory=dict)  # evicted keys (tombstones)
+    load_seq: int = 0                   # generation counter for load jobs
+    pending_load: dict | None = None    # in-flight resolve job descriptor
+    selecting: bool = False             # leader is browsing the work list
+    apply_seq: int = 0                  # server-side apply-order counter
+    apply_log: list = field(default_factory=list)  # accepted-op records
 
     @property
     def paired(self) -> bool:
@@ -184,8 +206,13 @@ class SessionRegistry:
                  no_response_timeout: float = NO_RESPONSE_TIMEOUT,
                  code_ttl: float = CODE_TTL_SECONDS,
                  resume_window: float = RESUME_WINDOW_SECONDS,
-                 send_queue_max: int = SEND_QUEUE_MAX):
+                 send_queue_max: int = SEND_QUEUE_MAX,
+                 work_resolver=None):
         self._clock = clock or time.monotonic
+        # S05: OPEN_WORK / SET_OFFSET manifest resolution — a callable
+        # ``resolver(link, job) -> manifest dict | awaitable``. Injected so
+        # this module stays transport/IO-free; main.py wires catalog.
+        self.work_resolver = work_resolver
         self.heartbeat_interval = heartbeat_interval
         self.no_response_timeout = no_response_timeout
         self.code_ttl = code_ttl
@@ -257,8 +284,19 @@ class SessionRegistry:
             return
         member.status = "offline"
         member.offline_since = self._now()
+        # S05: a detached member must READY again after RESUME (manifest is
+        # re-sent unicast), and its dc report is dead with the link — a dead
+        # member may not hold the webrtc-dc plane up.
+        session.ready.discard(member.id)
+        member.dc_state = "down"
+        flipped = self._eval_data_plane(session)
         logger.debug("reader-sync link=%s member=%s offline", link.id, member.id)
         self._broadcast_state(session)
+        if flipped:
+            self._broadcast(session, {
+                "v": protocol.PROTOCOL_VERSION, "type": "TRANSPORT_STATE",
+                "sessionId": session.id, "dataPlane": session.data_plane,
+                "revision": session.revision})
 
     def close_link(self, link: PeerLink, reason: str, code: int = WS_CLOSE_POLICY) -> None:
         """Registry-initiated close: detach membership + ask transport to end."""
@@ -356,11 +394,11 @@ class SessionRegistry:
             self._signal(link, req, session, member)
         elif t == "TRANSPORT_STATE":
             self._transport_state(link, req, session, member)
-        elif t in _DEFERRED_TYPES:
+        elif t in _SEQUENCED_TYPES:
             if not session.paired:
                 self._reject(link, req, t, REASON_NOT_PAIRED)
             else:
-                self._reject(link, req, t, REASON_UNIMPLEMENTED)
+                self._sequenced_op(link, req, session, member)
         else:
             self._reject(link, req, t, REASON_MALFORMED)
 
@@ -484,18 +522,33 @@ class SessionRegistry:
             "sessionId": session.id, "memberId": member.id, "role": member.role,
             "resumeToken": member.resume_token}, session_id=session.id)
         self._broadcast_state(session)
+        # §3.3: the manifest is re-delivered on resume so the member can
+        # verify + READY against the committed workEpoch/manifestVersion.
+        if session.manifest is not None:
+            self._send_manifest(link, session)
         logger.info("reader-sync link=%s member=%s resumed", link.id, member.id)
         self._wake_ticker()
 
     def _set_activity(self, link: PeerLink, req: dict, session: PairSession,
                       member: Member) -> None:
         state = req["payload"].get("state")
-        if state not in ("active", "suspended"):
+        if state not in ("active", "suspended", "selecting"):
             self._reject(link, req, "SET_ACTIVITY", REASON_MALFORMED,
                          session_id=session.id)
             return
-        if member.status != "offline":
-            member.status = state
+        if state == "selecting":
+            # "selecting" is session phase control, not a member status — only
+            # the leader's browse flag drives it (#75 §3.6).
+            if member.role != "leader":
+                self._reject(link, req, "SET_ACTIVITY", REASON_NOT_LEADER,
+                             session_id=session.id)
+                return
+            session.selecting = True
+        else:
+            if member.status != "offline":
+                member.status = state
+            if member.role == "leader":
+                session.selecting = False
         self._ack(link, req, session_id=session.id)
         self._broadcast_state(session)
 
@@ -525,26 +578,315 @@ class SessionRegistry:
             return
         member.dc_state = state
         self._ack(link, req, session_id=session.id)
-        # Plane switch happens only at a revision boundary: recompute, and if
-        # it changed, the next STATE revision carries it for both members.
+        self._announce_plane_flip(session)
+
+    def _eval_data_plane(self, session: PairSession) -> bool:
+        """Recompute the data plane; returns True when it flipped."""
         new_plane = "webrtc-dc" if (
             session.paired
             and all(m.dc_state == "up" for m in session.members.values())) \
             else "server-ws"
         if new_plane != session.data_plane:
             session.data_plane = new_plane
+            return True
+        return False
+
+    def _announce_plane_flip(self, session: PairSession) -> None:
+        """Plane switch happens only at a revision boundary: when it changed,
+        the next STATE revision carries it for both members, followed by an
+        explicit TRANSPORT_STATE notification pinned to that revision."""
+        if self._eval_data_plane(session):
             self._broadcast_state(session)
             self._broadcast(session, {
                 "v": protocol.PROTOCOL_VERSION, "type": "TRANSPORT_STATE",
                 "sessionId": session.id, "dataPlane": session.data_plane,
                 "revision": session.revision})
-            logger.info("reader-sync member=%s transport=%s rev=%d",
-                        member.id, session.data_plane, session.revision)
+            logger.info("reader-sync session transport=%s rev=%d",
+                        session.data_plane, session.revision)
+
+    # ── sequenced ops (S05): validate -> apply -> commit ────────────
+
+    def _dedup_key(self, req: dict, role: str) -> str:
+        """requestId scoped by effective role — a resend keeps the same key
+        whether it arrives directly or relayed by the leader."""
+        return f"{role}:{req['requestId']}"
+
+    def _dedup_store(self, session: PairSession, key: str, frame: dict) -> None:
+        session.dedup[key] = frame
+        while len(session.dedup) > DEDUP_WINDOW:
+            oldest = next(iter(session.dedup))
+            if oldest == key:
+                break  # the just-stored entry is never evicted in-place
+            session.dedup.pop(oldest)
+            session.dedup_seen[oldest] = None
+            while len(session.dedup_seen) > DEDUP_TOMBSTONE_MAX:
+                session.dedup_seen.pop(next(iter(session.dedup_seen)))
+
+    def _reject_snapshot(self, link: PeerLink, req: dict, session: PairSession,
+                         role: str, reason: str) -> None:
+        """REJECT carrying the latest committed snapshot verbatim (§3.4:
+        stale requests get 'reject + latest snapshot'). Stored under the
+        dedup key so a resend replays the identical response."""
+        resp = {
+            "v": protocol.PROTOCOL_VERSION, "type": "REJECT",
+            "requestId": req["requestId"], "request": req["type"],
+            "reason": reason, "sessionId": session.id,
+            "snapshot": rstate.snapshot(session),
+        }
+        self._dedup_store(session, self._dedup_key(req, role), resp)
+        link.send_obj(resp)
+
+    def _sequenced_op(self, link: PeerLink, req: dict, session: PairSession,
+                      member: Member) -> None:
+        """One sequenced request. Order of checks (each reject leaves the
+        committed snapshot untouched): origin validity -> dedup -> epoch ->
+        manifestVersion -> baseRevision -> per-type handler."""
+        t = req["type"]
+        payload = req["payload"]
+
+        # Effective role / member: on the leader-sequenced plane the leader
+        # forwards follower-ordered requests verbatim with payload.origin —
+        # only a leader may carry the field, and only a session role name.
+        role = member.role
+        eff = member
+        origin = payload.get("origin")
+        if origin is not None:
+            if origin not in protocol.ROLES or member.role != "leader":
+                self._reject_snapshot(link, req, session, member.role,
+                                      rstate.REASON_BAD_ORIGIN)
+                return
+            role = origin
+            if role != member.role:
+                eff = next((m for m in session.members.values()
+                            if m.role == role), member)
+
+        dkey = self._dedup_key(req, role)
+        cached = session.dedup.get(dkey)
+        if cached is not None:
+            link.send_obj(cached)      # identical replay, no state change
+            return
+        if dkey in session.dedup_seen:
+            self._reject_snapshot(link, req, session, role,
+                                  rstate.REASON_STALE_REQUEST)
+            return
+
+        try:
+            rstate.check_epoch(session, req)
+            rstate.check_manifest_version(session, payload)
+            if t in rstate.ABSOLUTE_TYPES:
+                rstate.check_base(session, req)
+            self._apply_op(link, req, session, member, eff, role)
+        except rstate.Reject as e:
+            self._reject_snapshot(link, req, session, role, e.reason)
+
+    def _apply_op(self, link: PeerLink, req: dict, session: PairSession,
+                  member: Member, eff: Member, role: str) -> None:
+        """Dispatch one validated sequenced op. Raises rstate.Reject on any
+        validation failure — callers get a snapshot-carrying REJECT and the
+        session state is untouched."""
+        t = req["type"]
+        payload = req["payload"]
+        if t == "OPEN_WORK":
+            if role != "leader":
+                raise rstate.Reject(rstate.REASON_NOT_LEADER)
+            page = payload.get("page")
+            if page is None:
+                raise rstate.Reject(rstate.REASON_NO_INITIAL_PAGE)
+            offset = payload.get("offset", session.offset)
+            if offset not in (0, 1):
+                raise rstate.Reject(rstate.REASON_RANGE)
+            self._begin_load(link, req, session, role,
+                             folder=payload["folder"], page=page,
+                             offset=offset)
+            return
+        if t in ("TURN", "GOTO"):
+            gate = rstate.gate_page_turn(session)
+            if gate is not None:
+                raise rstate.Reject(gate)
+            if t == "TURN":
+                rstate.apply_turn(session, payload)
+            else:
+                rstate.apply_goto(session, payload)
+            self._commit_op(link, req, session, role)
+            return
+        if t == "SET_OFFSET":
+            if session.manifest is None:
+                raise rstate.Reject(rstate.REASON_NO_WORK)
+            offset = payload["offset"]
+            if offset == session.offset:
+                self._commit_op(link, req, session, role)   # accepted no-op
+                return
+            idx = rstate.current_index(session)
+            if idx < 0:
+                raise rstate.Reject(rstate.REASON_NO_WORK)
+            anchor = session.plan[idx].right   # right is always a PageRef
+            self._begin_load(link, req, session, role,
+                             folder=session.manifest["folder"],
+                             page={"folder": anchor.folder,
+                                   "name": anchor.name},
+                             offset=offset)
+            return
+        if t == "SWAP_SIDES":
+            rstate.apply_swap_sides(session, payload)
+            self._commit_op(link, req, session, role)
+            return
+        if t == "READY":
+            if session.manifest is None:
+                raise rstate.Reject(rstate.REASON_NO_WORK)
+            session.ready.add(eff.id)
+            self._commit_op(link, req, session, role)
+            return
+        if t == "APPLIED":
+            # client-side apply report: acknowledged, never a broadcast and
+            # never a state transition — applying state must not echo new
+            # client-visible requests.
+            eff.last_applied = {"requestId": payload.get("requestId"),
+                                "revision": req["baseRevision"]}
+            resp = {"v": protocol.PROTOCOL_VERSION, "type": "ACK",
+                    "requestId": req["requestId"], "request": "APPLIED",
+                    "sessionId": session.id, "data": {}}
+            self._dedup_store(session, self._dedup_key(req, role), resp)
+            link.send_obj(resp)
+            return
+        raise rstate.Reject(rstate.REASON_MALFORMED)
+
+    def _commit_op(self, link: PeerLink, req: dict, session: PairSession,
+                   role: str) -> None:
+        """Accepted sequenced op: one revision bump, apply-order log, ACK to
+        the requester, then APPLIED + STATE commit broadcast to both
+        members — applied order == sequencer receive order."""
+        session.apply_seq += 1
+        frame = self._state_frame(session)   # bumps revision, derives phase
+        session.apply_log.append({
+            "seq": session.apply_seq, "type": req["type"], "role": role,
+            "requestId": req["requestId"], "revision": frame["revision"],
+            "spreadId": frame["spreadId"]})
+        logger.info("reader-sync apply seq=%d rev=%d type=%s role=%s link=%s",
+                    session.apply_seq, frame["revision"], req["type"], role,
+                    link.id)
+        resp = {"v": protocol.PROTOCOL_VERSION, "type": "ACK",
+                "requestId": req["requestId"], "request": req["type"],
+                "sessionId": session.id, "data": {}}
+        self._dedup_store(session, self._dedup_key(req, role), resp)
+        link.send_obj(resp)
+        self._broadcast(session, {
+            "v": protocol.PROTOCOL_VERSION, "type": "APPLIED",
+            "sessionId": session.id, "requestId": req["requestId"],
+            "revision": frame["revision"], "by": role})
+        self._broadcast(session, frame)
+
+    # ── async work loading (OPEN_WORK / SET_OFFSET) ─────────────────
+
+    def _begin_load(self, link: PeerLink, req: dict, session: PairSession,
+                    role: str, *, folder: str, page: dict, offset: int) -> None:
+        """Accept a work change: new generation + loading STATE now, manifest
+        commit only once the resolver finishes (see _finish_load)."""
+        if self.work_resolver is None:
+            raise rstate.Reject(rstate.REASON_UNAVAILABLE)
+        session.load_seq += 1
+        job = {"seq": session.load_seq, "kind": req["type"].lower(),
+               "folder": folder, "page": page, "offset": offset,
+               "requestId": req["requestId"], "role": role}
+        session.pending_load = job
+        self._commit_op(link, req, session, role)
+        try:
+            result = self.work_resolver(link, job)
+        except Exception as e:
+            self._finish_load(session, job, error=e)
+            return
+        if inspect.isawaitable(result):
+            self._schedule_load(session, job, result)
+        else:
+            self._finish_load(session, job, manifest=result)
+
+    def _schedule_load(self, session: PairSession, job: dict, awaitable) -> None:
+        """Drive an awaitable resolver on the running loop (the WS receive
+        path always has one); in loop-less contexts (sync test rigs) run it
+        to completion inline rather than silently dropping it."""
+        async def runner():
+            try:
+                manifest = await awaitable
+            except Exception as e:
+                self._finish_load_by_id(session.id, job, error=e)
+            else:
+                self._finish_load_by_id(session.id, job, manifest=manifest)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(runner(), name="reader-sync-load")
+            self.track_task(task)
+        else:
+            asyncio.run(runner())
+
+    def _finish_load_by_id(self, session_id: str, job: dict, manifest=None,
+                           error=None) -> None:
+        session = self.sessions.get(session_id)
+        if session is not None:
+            self._finish_load(session, job, manifest=manifest, error=error)
+
+    def _finish_load(self, session: PairSession, job: dict, manifest=None,
+                     error=None) -> None:
+        """Resolve completion. Generation guard first: only the newest
+        accepted load may commit — a stale resolve finishing late is
+        discarded and can never roll back a newer epoch (#75 §3.4)."""
+        if session.pending_load is not job or job["seq"] != session.load_seq:
+            logger.info("reader-sync stale load discarded seq=%d", job["seq"])
+            return
+        session.pending_load = None
+        if error is not None:
+            code = getattr(error, "code", None) or "ERR_MALFORMED"
+            reason = rstate.MANIFEST_ERR_REASON.get(code, "malformed")
+            logger.info("reader-sync load failed code=%s", code)
+            self._broadcast(session, {
+                "v": protocol.PROTOCOL_VERSION, "type": "ERROR",
+                "sessionId": session.id, "code": reason})
+            self._broadcast_state(session)
+            return
+        # commit: new epoch + manifest for everyone, READY gate re-arms
+        session.work_epoch += 1
+        session.manifest_version += 1
+        session.manifest = manifest
+        session.plan = rstate.plan_from_manifest(manifest)
+        session.offset = manifest.get("offset", session.offset)
+        session.spread_id = (manifest.get("initial") or {}).get("spreadId")
+        session.ready.clear()
+        session.dedup.clear()
+        session.dedup_seen.clear()
+        session.selecting = False
+        self._send_manifest(None, session)
+        session.apply_seq += 1
+        frame = self._state_frame(session)
+        session.apply_log.append({
+            "seq": session.apply_seq, "type": "MANIFEST_COMMIT",
+            "role": "server", "requestId": job["requestId"],
+            "revision": frame["revision"], "spreadId": frame["spreadId"]})
+        logger.info("reader-sync apply seq=%d rev=%d type=MANIFEST_COMMIT",
+                    session.apply_seq, frame["revision"])
+        self._broadcast(session, frame)
+
+    def _send_manifest(self, link: PeerLink | None, session: PairSession) -> None:
+        """MANIFEST chunk frames for the committed manifest — broadcast when
+        link is None, unicast otherwise (the resume path, §3.3)."""
+        from app.reader_sync.catalog import split_manifest   # lazy import
+        for chunk in split_manifest(session.manifest):
+            frame = dict(chunk)
+            frame.update({"type": "MANIFEST", "sessionId": session.id,
+                          "workEpoch": session.work_epoch,
+                          "manifestVersion": session.manifest_version})
+            if link is None:
+                self._broadcast(session, frame)
+            else:
+                link.send_obj(frame)
 
     # ── broadcast / teardown ─────────────────────────────────────────
 
     def _state_frame(self, session: PairSession) -> dict:
         session.revision += 1
+        # phase is derived state, never an independent source (#80/S05)
+        session.phase = rstate.derive_phase(session)
         return {
             "v": protocol.PROTOCOL_VERSION, "type": "STATE",
             "sessionId": session.id, "revision": session.revision,
@@ -553,7 +895,8 @@ class SessionRegistry:
             "phase": session.phase, "spreadId": session.spread_id,
             "offset": session.offset, "leaderSide": session.leader_side,
             "presence": {
-                m.id: {"role": m.role, "status": m.status, "name": m.name}
+                m.id: {"role": m.role, "status": m.status, "name": m.name,
+                       "ready": m.id in session.ready}
                 for m in session.members.values()},
             "dataPlane": session.data_plane,
         }

@@ -19,6 +19,23 @@ from app.reader_sync.sessions import PeerLink, SessionRegistry, WS_CLOSE_POLICY
 logger = logging.getLogger(__name__)
 
 
+async def resolve_reader_work(link: PeerLink, job: dict) -> dict:
+    """S05 (#80) work resolver for SessionRegistry.work_resolver.
+
+    OPEN_WORK / SET_OFFSET become shared-manifest resolutions through the
+    requesting member's own connection (the S04 catalog consumes only
+    ``connection.app.state`` for the tree/index). Errors propagate to the
+    registry, which maps ManifestError codes to typed ERROR frames.
+    """
+    from app.reader_sync import catalog  # lazy: keeps transport importable alone
+    conn = getattr(link, "connection", None)
+    if conn is None:
+        raise catalog.ManifestError(catalog.ERR_MALFORMED,
+                                    "link has no connection")
+    return await catalog.resolve_work(
+        conn, job["folder"], job["page"], job["offset"])
+
+
 class WebSocketLink(PeerLink):
     """PeerLink over a starlette WebSocket.
 
@@ -30,6 +47,7 @@ class WebSocketLink(PeerLink):
     def __init__(self, websocket: WebSocket, registry: SessionRegistry, user: dict):
         super().__init__(registry)
         self.user = user
+        self.connection = websocket   # S05: resolver reads connection.app.state
         self._ws = websocket
         self._loop = asyncio.get_running_loop()
         self._drain: asyncio.Task | None = None

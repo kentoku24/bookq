@@ -15,7 +15,7 @@ from app.config import load_settings
 from app.auth import router as auth_router, init_oauth
 from app.routes import _background_fill, _warm_covers, api_router, warmup_metadata_index
 from app.reader_sync.sessions import SessionRegistry
-from app.reader_sync.transport import reader_sync_ws
+from app.reader_sync.transport import reader_sync_ws, resolve_reader_work
 from app.static_files import NoCacheStaticFiles
 
 logger = logging.getLogger(__name__)
@@ -213,9 +213,10 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(api_router)
 
-    # dual-reader sync endpoint (#78/S03). Session state lives only on
-    # app.state (single worker); torn down by lifespan.
-    app.state.reader_sync = SessionRegistry()
+    # dual-reader sync endpoint (#78/S03, #80/S05). Session state lives only
+    # on app.state (single worker); torn down by lifespan. work_resolver is
+    # the S04 catalog bridge used by OPEN_WORK / SET_OFFSET.
+    app.state.reader_sync = SessionRegistry(work_resolver=resolve_reader_work)
     app.add_api_websocket_route("/ws/reader-sync", reader_sync_ws)
 
     @app.exception_handler(401)
