@@ -86,9 +86,14 @@
     var spread=spreads[s];
     if(!spread) return {width:0,height:0,pageWidths:[]};
     var viewW=_getViewW(), viewH=_getViewH();
-    var ars=spread.pages.map(arOf);
+    // app.js's renderPagesForSpread projects each spread to what THIS device
+    // renders: solo = spread.pages; paired = the one assigned page ([] when
+    // the side is blank — the blank slot then sizes off the anchor page's AR).
+    var renderPages=(typeof window.renderPagesForSpread==='function')
+      ? window.renderPagesForSpread(s) : spread.pages;
+    var ars=(renderPages.length ? renderPages : spread.pages.slice(0,1)).map(arOf);
     var arSum=ars.reduce(function(a,b){return a+b;},0)||1;
-    var gaps=(spread.pages.length-1)*GAP_INNER;
+    var gaps=(ars.length-1)*GAP_INNER;
     var h=viewH; var w=arSum*h+gaps;
     if(w>viewW){ h=(viewW-gaps)/arSum; w=viewW; }
     var m={width:w,height:h,pageWidths: ars.map(function(a){return a*h;})};

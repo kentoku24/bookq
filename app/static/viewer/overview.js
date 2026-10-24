@@ -28,6 +28,15 @@
   function q(sel) { return document.querySelector(sel); }
   function images() { return window.images || []; }
   function chapters() { return window.chapterList || []; }
+  // Paired (S06): window.currentIdx is the shared spread ANCHOR, but the page
+  // this device actually displays may be the spread's other page. app.js's
+  // pairedDisplayIdx hook resolves it (own page, or the anchor when blank);
+  // solo mode is the identity — .cur must track the DISPLAYED PageRef.
+  function curReadingIdx() {
+    return (typeof window.pairedDisplayIdx === 'function')
+      ? window.pairedDisplayIdx(window.currentIdx || 0)
+      : (window.currentIdx || 0);
+  }
   function ensureEls() {
     if (!root) {
       root = q('#overview');
@@ -270,7 +279,7 @@
       // this check a 700-page book is built twice back-to-back. close()
       // empties the grid and nulls prebuiltFor, so a stale grid can never
       // pass here.
-      if (body.children.length && prebuiltFor === (window.currentIdx || 0)) return;
+      if (body.children.length && prebuiltFor === curReadingIdx()) return;
       // Stay hidden (display:none): a thousand-page grid kept laid out behind
       // the reader makes every forced full-document layout — the per-turn
       // track reflow, markCurrent reads — pay for thousands of cells on a
@@ -280,7 +289,7 @@
       // grid CSS by convention); show() re-applies real heights on open.
       root.classList.add('prebuilt');
       root.inert = true;
-      if (build(window.currentIdx || 0)) scrollCurToThird();
+      if (build(curReadingIdx())) scrollCurToThird();
       else { root.classList.remove('prebuilt'); }
     };
     if (window.requestIdleCallback) window.requestIdleCallback(run, { timeout: 1000 });
@@ -293,7 +302,7 @@
   // keyed by global index while the page is inside the prefetch window; a page
   // outside it (or a spacer) falls back to the first visible strip image.
   function currentPageImg() {
-    var pool = window.stripImgs || {}, el = pool[window.currentIdx || 0];
+    var pool = window.stripImgs || {}, el = pool[curReadingIdx()];
     if (el && el.isConnected) return el;
     var imgs = document.querySelectorAll('#img-track img');
     for (var i = 0; i < imgs.length; i++) {
@@ -376,7 +385,7 @@
 
   function show(opts) {
     if (open || !ensureEls() || !images().length) return;
-    var cur = window.currentIdx || 0;
+    var cur = curReadingIdx();
     var flySrc = (opts && opts.fly) ? flySource() : null;   // before Zoom.reset
     root.classList.remove('prebuilt');
     root.inert = false;
