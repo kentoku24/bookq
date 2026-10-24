@@ -65,10 +65,20 @@ class WebSocketLink(PeerLink):
             task = self._loop.create_task(self._safe_close(code, reason))
             self.registry.track_task(task)
 
+        # Prefer a direct task: on-loop callers (tick/dispatch/aclose) get the
+        # close tracked synchronously, so aclose()'s pending-task snapshot
+        # can't miss it. Off-loop callers fall back to a thread-safe schedule.
         try:
-            self._loop.call_soon_threadsafe(_begin)
+            running = asyncio.get_running_loop()
         except RuntimeError:
-            pass  # loop gone; nothing to close
+            running = None
+        if running is self._loop:
+            _begin()
+        else:
+            try:
+                self._loop.call_soon_threadsafe(_begin)
+            except RuntimeError:
+                pass  # loop gone; nothing to close
 
     async def _safe_close(self, code: int, reason: str) -> None:
         try:

@@ -70,7 +70,6 @@ _DEFERRED_TYPES = frozenset({
     "TURN", "GOTO", "SET_OFFSET", "SWAP_SIDES", "OPEN_WORK", "READY", "APPLIED",
 })
 
-_MEMBER_STATUS = frozenset({"active", "suspended", "offline"})
 _TRANSPORT_REPORT = frozenset({"up", "down"})
 
 
@@ -650,13 +649,15 @@ class SessionRegistry:
 
     async def _ticker_loop(self) -> None:
         while True:
+            # clear *before* tick: a registration landing mid-tick stays set
+            # and triggers an immediate re-evaluation next pass.
+            self._wake.clear()
             self.tick()
             try:
                 await asyncio.wait_for(self._wake.wait(),
                                        timeout=self.next_wakeup_delay())
             except asyncio.TimeoutError:
                 pass
-            self._wake.clear()
 
     async def aclose(self) -> None:
         """Teardown: cancel ticker, close every link, drop all sessions, then
@@ -685,14 +686,14 @@ class SessionRegistry:
         self._by_code.clear()
         pending = [t for t in self._tasks if t is not asyncio.current_task()]
         if pending:
-            done, _ = await asyncio.wait(pending, timeout=2.0)
+            done, still = await asyncio.wait(pending, timeout=2.0)
+            for t in still:
+                t.cancel()
+            if still:
+                await asyncio.gather(*still, return_exceptions=True)
             for t in done:
                 try:
                     t.result()
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in pending:
-                if not t.done():
-                    t.cancel()
             self._tasks.difference_update(pending)
-        self._tasks.discard(self._ticker)
