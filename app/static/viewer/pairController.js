@@ -34,6 +34,7 @@
   var _sideOpen = null;      // last observed .open state
   var _openWorkSent = false; // leader bootstrap OPEN_WORK already dispatched
   var _selIssued = false;    // a SET_ACTIVITY selecting is outstanding
+  var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
   var _heldCommit = null;    // newest suppressed commit while leader browses
   var _lastApply = null;     // newest committed args, for display re-arm
   var _resolveGen = 0;       // generation guard for async page resolution
@@ -313,6 +314,15 @@
 
   function _onClientState(st) {
     if (st && st.phase !== 'selecting') _selIssued = false;
+    // Auto-approve (#114): a JOIN reaching the leader is answered at once —
+    // there is no manual approve step in the UI. Edge-triggered so a pending
+    // request yields exactly one APPROVE; client.approve() is idempotent for
+    // explicit/programmatic callers.
+    var hasReq = !!(st && st.joinRequest && st.role === 'leader');
+    if (hasReq && !_sawJoinReq && _client) {
+      _client.approve().catch(function () { /* wire outcome lands via REJECT/STATE */ });
+    }
+    _sawJoinReq = hasReq;
     var bound = _memberBound(st) && _paired(st);
     if (bound && !_navUnuse) {
       _installNav();

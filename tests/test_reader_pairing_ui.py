@@ -209,7 +209,9 @@ def test_code_input_enter_submits(page, server):
 # ── leader flow ──
 
 
-def test_leader_code_then_join_request_then_approve(page, server):
+def test_leader_join_request_auto_approved_no_buttons(page, server):
+    """#114: a join request is auto-approved by the controller — the leader
+    UI surfaces no approve/reject controls while it waits."""
     _with_mock(page)
     _open_ui(page)
     page.click("#pair-create")
@@ -217,28 +219,28 @@ def test_leader_code_then_join_request_then_approve(page, server):
     _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
     expect(page.locator("#pair-code-value")).to_have_text("042917")
     _only_section_visible(page, "#pair-sec-leader")
-    # a join request arrives → notice + approve/reject
+    # a join request arrives → no manual approval step exists
     _emit(page, "{joinRequest:true}")
-    expect(page.locator("#pair-join-request")).to_be_visible()
-    page.click("#pair-approve")
-    assert "approve" in page.evaluate("window.__pairCalls")
-    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    expect(page.locator("#pair-approve")).to_have_count(0)
+    expect(page.locator("#pair-reject")).to_have_count(0)
+    expect(page.locator("#pair-join-request")).to_have_count(0)
+    _emit(page, "{status:'connected', role:'leader', side:'left', transport:'server-ws'}")
     # approval completes pairing → the modal gets out of the way
     expect(page.locator("#pair-overlay")).to_be_hidden()
     expect(page.locator("#pair-status")).to_contain_text("接続済")
 
 
-def test_leader_reject_hides_request_keeps_code(page, server):
+def test_leader_join_request_keeps_code_and_cancel(page, server):
+    """Pending approval still shows the code screen — the peer may be
+    mid-handshake, and キャンセル remains the way out."""
     _with_mock(page)
     _open_ui(page)
     page.click("#pair-create")
     _emit(page, "{status:'connecting', role:'leader', code:'123456'}")
     _emit(page, "{joinRequest:true}")
-    expect(page.locator("#pair-join-request")).to_be_visible()
-    page.click("#pair-reject")
-    assert "reject" in page.evaluate("window.__pairCalls")
+    expect(page.locator("#pair-code-value")).to_have_text("123456")
+    expect(page.locator("#pair-leader-cancel")).to_be_visible()
     _emit(page, "{joinRequest:false}")
-    expect(page.locator("#pair-join-request")).to_be_hidden()
     expect(page.locator("#pair-code-value")).to_have_text("123456")
 
 
@@ -404,11 +406,6 @@ def test_primary_action_buttons_on_the_right(page, server):
     back = page.locator("#pair-join-back").bounding_box()
     submit = page.locator("#pair-join-submit").bounding_box()
     assert back["x"] < submit["x"]      # 戻る left, 参加する right
-    page.click("#pair-join-back")
-    _emit(page, "{status:'connecting', role:'leader', code:'123456', joinRequest:true}")
-    reject = page.locator("#pair-reject").bounding_box()
-    approve = page.locator("#pair-approve").bounding_box()
-    assert reject["x"] < approve["x"]   # 拒否 left, 承認 right
 
 
 def test_leader_code_renders_qr_canvas(page, server):

@@ -293,6 +293,7 @@
     var _roleIntent = null;          // role shown while an entry op is in flight
     var _code = null;
     var _pendingMember = null;       // {memberId,name} awaiting leader approval
+    var _approvedMemberId = null;    // memberId an APPROVE was already sent for
     var _link = null;                // {t, open, gone, gen}
     var _gen = 0;
     var _connecting = false;         // transport opened, awaiting HELLO
@@ -701,6 +702,7 @@
       if (!keepRole) _roleIntent = null;
       _code = null;
       _pendingMember = null;
+      _approvedMemberId = null;
     }
 
     function _endReset() {
@@ -717,6 +719,7 @@
       _plane = 'server-ws';
       _reportedPlane = 'server-ws';
       _pendingMember = null;
+      _approvedMemberId = null;
     }
 
     function _startEntry(type, payload, sessionId) {
@@ -779,9 +782,11 @@
     }
 
     function approve() {
-      if (!_member || !_pendingMember || !_linkOpen()) {
+      if (!_member || !_pendingMember || !_linkOpen() ||
+          _approvedMemberId === _pendingMember.memberId) {
         return Promise.resolve({approved: false});
       }
+      _approvedMemberId = _pendingMember.memberId;
       return _track(_ctlSendTrack('APPROVE', {memberId: _pendingMember.memberId}),
                     'APPROVE');
     }
@@ -930,9 +935,11 @@
         case 'REJECT': _onReject(f); return;
         case 'JOIN_REQUEST':
           _pendingMember = {memberId: f.memberId, name: f.name};
+          _approvedMemberId = null;
           _notify(); return;
         case 'JOIN_CANCEL':
           _pendingMember = null;
+          _approvedMemberId = null;
           _notify(); return;
         case 'STATE': _onState(f); return;
         case 'MANIFEST': _onManifest(f); return;

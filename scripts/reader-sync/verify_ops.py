@@ -626,7 +626,7 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     follower.click("#pair-join-open")
     follower.fill("#pair-code-input", code)
     follower.click("#pair-join-submit")
-    leader.click("#pair-approve", timeout=15000)
+    # #114: the leader auto-approves on JOIN_REQUEST — no approve click.
     leader.wait_for_function(
         "() => document.getElementById('pair-status')"
         "  .dataset.status === 'connected'", timeout=15000)
