@@ -173,7 +173,7 @@ class PairSession:
     phase: str = "waiting"
     spread_id: str | None = None
     offset: int = 0
-    leader_side: str = "right"
+    leader_side: str = "left"
     data_plane: str = "server-ws"                  # server-ws | webrtc-dc
     # ── S05 committed work state ────────────────────────────────────
     manifest: dict | None = None        # committed shared manifest (S04 shape)

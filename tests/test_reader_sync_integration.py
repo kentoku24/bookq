@@ -186,11 +186,11 @@ def test_pair_establish_shares_leader_spread(devs):
 
     ls, fs = _pv(pl), _pv(pf)
     assert ls["active"] is True and fs["active"] is True
-    assert ls["side"] == "right" and fs["side"] == "left"   # leader-right
+    assert ls["side"] == "left" and fs["side"] == "right"   # leader-left default
     assert ls["spreadId"] == fs["spreadId"]
     # offset-0 pairing: p005 is right, p006 is left of spread c0:s2
-    assert ls["ref"]["name"] == "p005.png"
-    assert fs["ref"]["name"] == "p006.png"
+    assert ls["ref"]["name"] == "p006.png"
+    assert fs["ref"]["name"] == "p005.png"
     assert ls["anchorRef"]["name"] == "p005.png"
     assert fs["anchorRef"]["name"] == "p005.png"
     # Both devices render the leader's manifest, not the follower's progress.
@@ -363,18 +363,18 @@ def test_anchor_hash_and_progress_on_both_and_blank_side(devs):
     pl, pf = devs
     _open(pl, "simple_manga")
     _pair_now(pl, pf)
-    # Drive to the trailing spread (11.png right, blank left for follower).
+    # Drive to the trailing spread (11.png right, blank left for leader).
     pl.evaluate(
         "() => window.ViewerNavigation.request({type:'goto',"
         " page:{folder:'simple_manga', name:'11.png'}, via:'test'})")
-    pl.wait_for_function("() => window.PairedView.state().ref.name === '11.png'")
-    pf.wait_for_function("() => window.PairedView.state().ref === null")
+    pl.wait_for_function("() => window.PairedView.state().ref === null")
+    pf.wait_for_function("() => window.PairedView.state().ref.name === '11.png'")
 
-    fs = _pv(pf)
-    assert fs["blank"] is True or fs["ref"] is None
+    ls = _pv(pl)
+    assert ls["blank"] is True or ls["ref"] is None
     # Both URLs mirror the shared anchor, not each device's own side.
-    expect(pl.locator("#counter")).to_have_text("5 / 5")
-    expect(pf.locator("#counter")).to_have_text("空白")
+    expect(pf.locator("#counter")).to_have_text("5 / 5")
+    expect(pl.locator("#counter")).to_have_text("空白")
     pl.wait_for_function("() => location.hash.includes('simple_manga')")
     assert pl.evaluate("() => location.hash") == \
         pf.evaluate("() => location.hash")
@@ -393,16 +393,16 @@ def test_side_swap_keeps_anchor_and_projection(devs):
     pl, pf = devs
     _open(pl, "long", "p005.png")
     _pair_now(pl, pf)
-    assert _pv(pl)["ref"]["name"] == "p005.png"
+    assert _pv(pl)["ref"]["name"] == "p006.png"
 
     pl.evaluate("() => window.PairController.swapSides()")
-    pl.wait_for_function("() => window.PairedView.state().side === 'left'")
-    pf.wait_for_function("() => window.PairedView.state().side === 'right'")
+    pl.wait_for_function("() => window.PairedView.state().side === 'right'")
+    pf.wait_for_function("() => window.PairedView.state().side === 'left'")
     # Same shared spread/anchor — only the projection flips.
     assert _pv(pl)["spreadId"] == _pv(pf)["spreadId"]
     assert _pv(pl)["anchorRef"]["name"] == "p005.png"
-    assert _pv(pl)["ref"]["name"] == "p006.png"      # leader now shows left
-    assert _pv(pf)["ref"]["name"] == "p005.png"
+    assert _pv(pl)["ref"]["name"] == "p005.png"      # leader now shows right
+    assert _pv(pf)["ref"]["name"] == "p006.png"
 
 
 # ── session lifecycle ─────────────────────────────────────────────────────
@@ -446,7 +446,7 @@ def test_reload_resumes_into_active_pair(devs):
         "() => !!(window.PairedView && window.PairedView.state"
         " && window.PairedView.state().active)", timeout=20000)
     assert _pv(pf)["spreadId"] == committed
-    assert _pv(pf)["side"] == "left"
+    assert _pv(pf)["side"] == "right"
 
 
 # ── hash listener count + URL races ───────────────────────────────────────
