@@ -52,10 +52,11 @@ INSTRUMENT = """(() => {
 })()"""
 
 
-def _dev_page(browser, server):
+def _dev_page(browser, server, viewport=None):
     """A second-device window: fresh context + page landed on the app."""
-    ctx = browser.new_context(viewport={"width": 900, "height": 600},
-                              has_touch=True)
+    ctx = browser.new_context(
+        viewport=viewport or {"width": 900, "height": 600},
+        has_touch=True)
     ctx.add_init_script(INSTRUMENT)
     pg = ctx.new_page()
     pg.goto(server)
@@ -387,6 +388,43 @@ def test_anchor_hash_and_progress_on_both_and_blank_side(devs):
             "['simple_manga'] && JSON.parse(localStorage.getItem"
             "('bookq_progress'))['simple_manga'].page === 4",
             timeout=5000)
+
+
+def test_spread_shift_usable_in_paired_portrait(browser, server):
+    """#112: the ◀ spread-shift must be reachable in paired mode even on a
+    portrait device (spread-controls are otherwise landscape-only), while
+    the solo-only 2P toggle stays hidden."""
+    ctx_l, pl = _dev_page(browser, server)
+    ctx_f, pf = _dev_page(browser, server,
+                          viewport={"width": 390, "height": 844})
+    try:
+        _open(pl, "simple_manga")
+        _pair_now(pl, pf)
+        # portrait follower: shift visible via pair-mode, 2P toggle hidden
+        expect(pf.locator("#spread-shift")).to_be_visible()
+        expect(pf.locator("#spread-toggle")).to_be_hidden()
+        # a real click → setOffset intent → shared manifest bump on both
+        mv0 = _cstate(pf)["manifestVersion"]
+        n0 = len(_intents(pf, {"setOffset"}))
+        pf.locator("#spread-shift").click()
+        pf.wait_for_function(
+            f"() => (window.PairController._sentLog || [])"
+            f".filter(e => e.type === 'setOffset').length > {n0}")
+        assert _intents(pf, {"setOffset"})[-1]["ok"]
+        pf.wait_for_function(
+            "(v) => window.PairController.state.manifestVersion !== v",
+            arg=mv0)
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'reading'",
+                timeout=15000)
+        # the lit state mirrors the committed shared offset on both ends
+        for p in (pl, pf):
+            assert "active" in (
+                p.locator("#spread-shift").get_attribute("class") or "")
+    finally:
+        ctx_l.close()
+        ctx_f.close()
 
 
 def test_side_swap_keeps_anchor_and_projection(devs):
