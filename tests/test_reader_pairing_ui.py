@@ -107,7 +107,7 @@ def _emit(page, patch):
 
 # Every render shows exactly one section — everything else is `hidden`.
 PAIR_SECTIONS = (
-    "#pair-sec-choice #pair-sec-join #pair-sec-scan #pair-sec-leader "
+    "#pair-sec-choice #pair-sec-join #pair-sec-leader "
     "#pair-sec-waiting #pair-sec-session #pair-sec-error"
 ).split()
 
@@ -223,7 +223,8 @@ def test_leader_code_then_join_request_then_approve(page, server):
     page.click("#pair-approve")
     assert "approve" in page.evaluate("window.__pairCalls")
     _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
-    _only_section_visible(page, "#pair-sec-session")
+    # approval completes pairing → the modal gets out of the way
+    expect(page.locator("#pair-overlay")).to_be_hidden()
     expect(page.locator("#pair-status")).to_contain_text("接続済")
 
 
@@ -254,7 +255,8 @@ def test_follower_join_waits_then_established(page, server):
     _emit(page, "{status:'connecting', role:'follower'}")
     _only_section_visible(page, "#pair-sec-waiting")
     _emit(page, "{status:'connected', role:'follower', side:'left', transport:'server-ws'}")
-    _only_section_visible(page, "#pair-sec-session")
+    # approval resolves the wait → the modal steps aside
+    expect(page.locator("#pair-overlay")).to_be_hidden()
     expect(page.locator("#pair-status")).to_contain_text("接続済")
     expect(page.locator("#pair-status")).to_contain_text("follower")
 
@@ -442,7 +444,7 @@ def test_qr_decode_roundtrip(page, server):
     assert decoded == "042917"
 
 
-def test_join_scan_open_and_cancel(page, server):
+def test_join_view_autostarts_camera_scan(page, server):
     _with_mock(page)
     # Fake camera: an empty MediaStream keeps the scanner up without frames.
     page.add_init_script(
@@ -453,10 +455,18 @@ def test_join_scan_open_and_cancel(page, server):
     page.wait_for_selector("#pair-btn")
     _open_ui(page)
     page.click("#pair-join-open")
-    page.click("#pair-join-scan")
-    _only_section_visible(page, "#pair-sec-scan")
-    page.click("#pair-scan-cancel")
     _only_section_visible(page, "#pair-sec-join")
+    # camera preview goes live inside the join view with no extra button
+    expect(page.locator("#pair-scan-video")).to_be_visible()
+    assert page.evaluate(
+        "document.getElementById('pair-scan-video').srcObject instanceof MediaStream"
+    )
+    # back tears the stream down
+    page.click("#pair-join-back")
+    assert page.evaluate(
+        "document.getElementById('pair-scan-video').srcObject") is None
+    expect(page.locator("#pair-scan-video")).to_be_hidden()
+    _only_section_visible(page, "#pair-sec-choice")
     assert page.evaluate("window.__pairCalls") == []
 
 
@@ -470,9 +480,23 @@ def test_join_scan_unavailable_shows_error(page, server):
     page.wait_for_selector("#pair-btn")
     _open_ui(page)
     page.click("#pair-join-open")
-    page.click("#pair-join-scan")
+    # camera fails → manual entry stays usable with an inline note
     expect(page.locator("#pair-join-err")).to_be_visible()
+    expect(page.locator("#pair-scan-video")).to_be_hidden()
     _only_section_visible(page, "#pair-sec-join")
+
+
+def test_modal_auto_closes_when_connected(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'connecting', role:'follower'}")
+    _only_section_visible(page, "#pair-sec-waiting")
+    _emit(page, "{status:'connected', role:'follower', side:'right', transport:'server-ws'}")
+    expect(page.locator("#pair-overlay")).to_be_hidden()
+    # reopening while connected is the management UI — must NOT auto-close
+    page.click("#pair-btn")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    _only_section_visible(page, "#pair-sec-session")
 
 
 # ── accessibility ──
@@ -496,6 +520,8 @@ def test_controls_min_44px_and_accessible_names(page, server):
     for b in _visible_control_boxes(page):
         assert b["w"] >= 44 and b["h"] >= 44, b
     _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    # pending→connected auto-closes; reopen the management UI to measure it
+    page.click("#pair-btn")
     for b in _visible_control_boxes(page):
         assert b["w"] >= 44 and b["h"] >= 44, b
     # every control (dialog + launcher) exposes an accessible name

@@ -48,11 +48,11 @@
   let unsubscribe = null;
   let open_ = false;
   let joinView = false;   // local UI state: the code-entry form is showing
-  let scanView = false;   // local UI state: the QR camera scanner is showing
-  let scanStream = null;
+  let scanStream = null;  // live camera stream while the join view is open
   let scanRAF = 0;
   let scanCanvas = null;
   let qrDrawnFor = null;  // last code painted into #pair-qr
+  let lastStatus = null;  // status from the previous render (auto-close edge)
   let lastFocus = null;
   let inertSnapshot = null; // [[el, hadInertAttr]]
   let built = false;
@@ -79,21 +79,16 @@
             '<span class="pair-sub">相手のコードを入力</span></button>' +
         '</div>' +
         '<div id="pair-sec-join" class="pair-sec" hidden>' +
+          '<video id="pair-scan-video" playsinline muted autoplay hidden></video>' +
           '<label id="pair-code-label" for="pair-code-input">6桁のコードを入力</label>' +
           '<input id="pair-code-input" type="text" inputmode="numeric" ' +
             'pattern="[0-9]*" maxlength="6" autocomplete="off" autocorrect="off" ' +
             'spellcheck="false" aria-labelledby="pair-code-label">' +
           '<p id="pair-join-err" class="pair-note pair-err" hidden></p>' +
-          '<button id="pair-join-scan" type="button">カメラで読み取る</button>' +
           '<div class="pair-row">' +
             '<button id="pair-join-back" type="button">戻る</button>' +
             '<button id="pair-join-submit" type="button" class="pair-primary" disabled>参加する</button>' +
           '</div>' +
-        '</div>' +
-        '<div id="pair-sec-scan" class="pair-sec" hidden>' +
-          '<video id="pair-scan-video" playsinline muted autoplay></video>' +
-          '<p id="pair-scan-status" class="pair-note">QRコードをかざしてください</p>' +
-          '<button id="pair-scan-cancel" type="button">キャンセル</button>' +
         '</div>' +
         '<div id="pair-sec-leader" class="pair-sec" hidden>' +
           '<p class="pair-note">相手の端末でこのコードを入力してください</p>' +
@@ -180,11 +175,7 @@
       joinSubmit: _el('pair-join-submit'),
       joinBack: _el('pair-join-back'),
       joinErr: _el('pair-join-err'),
-      joinScan: _el('pair-join-scan'),
-      secScan: _el('pair-sec-scan'),
       scanVideo: _el('pair-scan-video'),
-      scanStatus: _el('pair-scan-status'),
-      scanCancel: _el('pair-scan-cancel'),
       codeValue: _el('pair-code-value'),
       qr: _el('pair-qr'),
       joinRequest: _el('pair-join-request'),
@@ -225,9 +216,7 @@
     els.transport.hidden = !(trText && inSession);
 
     let sec;
-    if (scanView) {
-      sec = els.secScan;
-    } else if (status === 'idle' || status === 'ended') {
+    if (status === 'idle' || status === 'ended') {
       sec = joinView ? els.secJoin : els.secChoice;
     } else if (status === 'connecting') {
       sec = role === 'leader' ? els.secLeader : els.secWaiting;
@@ -236,9 +225,10 @@
     } else {
       sec = els.secSession;
     }
-    const secs = [els.secChoice, els.secJoin, els.secScan, els.secLeader,
+    const secs = [els.secChoice, els.secJoin, els.secLeader,
                   els.secWaiting, els.secSession, els.secError];
     for (const e of secs) show(e, e === sec);
+    if (sec !== els.secJoin) stopScan();
 
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
@@ -262,6 +252,14 @@
     } else if (sec === els.secJoin) {
       els.joinSubmit.disabled = els.codeInput.value.length !== 6;
     }
+
+    // A pending→connected transition means pairing just succeeded (or a
+    // reconnect healed) — the modal's job is done, get out of the way.
+    // Reopening while already connected stays open (swap / leave UI).
+    const became = status === 'connected' &&
+      ['connecting', 'loading', 'reconnecting', 'peer-away'].indexOf(lastStatus) !== -1;
+    lastStatus = status;
+    if (became && open_) close();
   }
 
   // ── open / close with inert + focus management ──
@@ -379,30 +377,29 @@
 
   function startScan() {
     joinError('');
+    if (scanStream) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
         typeof window.jsQR !== 'function') {
       joinError('この端末ではカメラ読み取りを使えません');
       return;
     }
-    scanView = true;
-    render();
     navigator.mediaDevices.getUserMedia({
       video: {facingMode: 'environment'}, audio: false,
     }).then(stream => {
-      if (!scanView) { stream.getTracks().forEach(t => t.stop()); return; }
+      if (!joinView) { stream.getTracks().forEach(t => t.stop()); return; }
       scanStream = stream;
       els.scanVideo.srcObject = stream;
+      els.scanVideo.hidden = false;
       els.scanVideo.play().catch(() => {});
       scanRAF = requestAnimationFrame(scanTick);
     }).catch(() => {
-      stopScan();
       joinError('カメラを起動できませんでした');
     });
   }
 
   function scanTick() {
     scanRAF = 0;
-    if (!scanView || !scanStream) return;
+    if (!scanStream) return;
     const v = els.scanVideo;
     if (v.readyState >= 2 && v.videoWidth && v.videoHeight) {
       if (!scanCanvas) scanCanvas = document.createElement('canvas');
@@ -432,8 +429,10 @@
       scanStream.getTracks().forEach(t => t.stop());
       scanStream = null;
     }
-    if (els.scanVideo) els.scanVideo.srcObject = null;
-    if (scanView) { scanView = false; render(); }
+    if (els.scanVideo) {
+      els.scanVideo.srcObject = null;
+      els.scanVideo.hidden = true;
+    }
   }
 
   // ── events ──
@@ -478,17 +477,18 @@
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
       render();
-      els.codeInput.focus();
+      // Camera is the primary entry path here; no autofocus so the soft
+      // keyboard stays down over the live preview.
+      startScan();
     });
     els.joinBack.addEventListener('click', () => {
       joinView = false;
       els.codeInput.value = '';
+      stopScan();
       render();
       firstControl().focus();
     });
     els.joinSubmit.addEventListener('click', submitJoin);
-    els.joinScan.addEventListener('click', startScan);
-    els.scanCancel.addEventListener('click', () => { stopScan(); firstControl().focus(); });
     els.codeInput.addEventListener('input', sanitizeCode);
     els.codeInput.addEventListener('paste', onCodePaste);
     els.codeInput.addEventListener('keydown', e => {
