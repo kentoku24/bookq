@@ -21,7 +21,7 @@ info() { printf '   %s\n' "$*" >&2; }
 warn() { printf '⚠️  %s\n' "$*" >&2; }
 
 usage() {
-    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ============================================================ 共通: healthcheck
@@ -89,8 +89,9 @@ sidecar_dns_name() {
     printf '%s' "$dns"
 }
 
-# sidecar の netmap 上で fqdn/IP の peer がオンラインか。終了コード 0=online、
-# 1=offline/peer 不在/解析不能（offline 側に倒して削除判断は呼び出し側）。
+# sidecar の netmap 上で fqdn/IP の peer がオンラインか。終了コード
+# 0=online / 1=offline 確認 / 2=status 取得・解析失敗または peer 不在。
+# 2 のときは削除方向に倒さないこと（呼び出し側が区別する）。
 peer_online() {
     docker exec "$1" tailscale --socket=/var/run/tailscale/tailscaled.sock \
         status --json 2>/dev/null | python3 -c '
@@ -99,11 +100,36 @@ fqdn, ip = sys.argv[1], sys.argv[2]
 try:
     peers = json.load(sys.stdin).get("Peer") or {}
 except Exception:
-    sys.exit(1)
+    sys.exit(2)
 for p in peers.values():
     if (p.get("DNSName") or "").rstrip(".") == fqdn or ip in (p.get("TailscaleIPs") or []):
         sys.exit(0 if p.get("Online") else 1)
-sys.exit(1)' "$2" "$3"
+sys.exit(2)' "$2" "$3"
+}
+
+# メインのチェックアウト（.env が置いてある場所）。worktree から呼ばれても
+# メインを指す（dev.sh の同名関数と同じ解決）。
+main_checkout() {
+    local common
+    common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+    case "$common" in
+        /*) ;;
+        *) common="$SCRIPT_DIR/$common" ;;
+    esac
+    ( cd "$common/.." && pwd )
+}
+
+# .env から値を取り出す。worktree には .env が無いのでメインのチェックアウト
+# も見る（dev.sh の dotenv_value と同じ解決順）。
+dotenv_value() {
+    local key="$1" f v
+    for f in "$SCRIPT_DIR/.env" "$(main_checkout)/.env"; do
+        [ -f "$f" ] || continue
+        v="$(grep -E "^${key}=.+" "$f" 2>/dev/null | tail -1 | cut -d= -f2- \
+            | sed -e 's/\r$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")"
+        [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+    done
+    return 1
 }
 
 # admin API の認証。OAuth client 短命トークンを優先し、無ければ TS_API_KEY の
@@ -116,8 +142,7 @@ ts_admin_auth() {
         return 0
     fi
     api_key="${TS_API_KEY:-}"
-    [ -n "$api_key" ] || api_key="$(grep -E '^TS_API_KEY=' .env 2>/dev/null | tail -1 \
-        | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]' || true)"
+    [ -n "$api_key" ] || api_key="$(dotenv_value TS_API_KEY || true)"
     if [ -n "$api_key" ]; then
         TS_AUTH_ARGS=(-u "$api_key:")
         return 0
@@ -194,16 +219,21 @@ for d in devs:
         # netmap の Online 反映は数秒〜1分遅れる。死にたてのゴーストを「生存
         # 中」と誤認して放置しないよう、offline になるまで待ってから判定する。
         # それでも online なら本当に生存する別環境なので触らない。
-        if peer_online "$sidecar" "$expected" "$ip"; then
-            local waited=0
-            while peer_online "$sidecar" "$expected" "$ip" && [ "$waited" -lt 6 ]; do
-                sleep 10; waited=$((waited+1))
-            done
-            if peer_online "$sidecar" "$expected" "$ip"; then
-                warn "ゴースト $id ($expected) がオンラインのままです — 生存している別環境が名前を保持しています。自動削除しません。"
-                blocked=1; continue
-            fi
-        fi
+        # status 自体が取れない（tailscaled の一時不応答・netmap 未構築）場合や
+        # peer が見えない場合も online と区別できないため削除せず blocked に倒す。
+        local st=0 waited=0
+        while :; do
+            peer_online "$sidecar" "$expected" "$ip" || st=$?
+            [ "$st" -eq 0 ] && [ "$waited" -lt 6 ] || break
+            sleep 10; waited=$((waited+1))
+        done
+        case "$st" in
+            1) ;;  # offline 確認 → 削除へ進む
+            0) warn "ゴースト $id ($expected) がオンラインのままです — 生存している別環境が名前を保持しています。自動削除しません。"
+               blocked=1; continue ;;
+            *) warn "ゴースト $id のオンライン状態を確認できません（status 未取得または peer 不在）。安全のため自動削除しません。"
+               blocked=1; continue ;;
+        esac
         code="$(curl -s -o /dev/null -w '%{http_code}' -m 15 -X DELETE \
             "${TS_AUTH_ARGS[@]}" "https://api.tailscale.com/api/v2/device/$id" || true)"
         case "$code" in
@@ -343,7 +373,7 @@ deploy_prd() {
     # tailnet 登録名が BASE_URL とずれている（= 同名ゴースト残存で -1 付与）と
     # BASE_URL は offline ノードを指すので、verify_url 前に自動復旧を試みる。
     local expected_fqdn sidecar
-    expected_fqdn="$(printf '%s' "$base_url" | sed -E 's#^https?://##; s#/.*$##')"
+    expected_fqdn="$(printf '%s' "$base_url" | sed -E 's#^https?://##; s#/.*$##; s#:[0-9]+$##')"
     sidecar="$(docker compose -f docker-compose.yml -f docker-compose.prd-image.yml ps -q tailscale 2>/dev/null || true)"
     if [ -n "$sidecar" ]; then
         heal_fqdn_collision "$sidecar" "$expected_fqdn" || true
