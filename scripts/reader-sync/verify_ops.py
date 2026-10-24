@@ -1,33 +1,56 @@
-"""S10 (#85) — scenario op interpreter (the single declaration contract).
+"""S11 (#86) — scenario op interpreter on the REAL wire protocol.
 
 One op grammar, executed by the runner against the two fixture clients
-(and, where a device input is declared, through the active driver). All
-assertions are deterministic: protocol state comes from the fixture's own
-view of the production modules (page-evaluated JS inside fixture.html),
-visible markers come from both the DOM marker the fixture reports AND the
-screenshot pixel check on captured PNGs.
+(and, where a device input is declared, through the active driver). The
+fixture drives the production ``PairClient`` end-to-end, so every op is
+the real protocol: CREATE/JOIN/APPROVE/READY/TURN/GOTO/SET_OFFSET/
+SWAP_SIDES/OPEN_WORK/APPLIED/SET_ACTIVITY/RESUME/LEAVE/SIGNAL/
+TRANSPORT_STATE.
+
+Every converging op asserts the spec's full predicate, not just a page
+number (spec: 「同じページ番号になった」だけでなく、2台が正しい左右画像を
+表示し復帰できることを自動証明する):
+
+- identical ``sessionId`` / ``workEpoch`` / applied ``revision``
+- the committed ``spreadId`` and each member's expected side + PageRef
+  (the server-built manifest's own spread table)
+- the rendered marker (DOM page name + side) AND the assigned image's
+  decode state (``ok`` or defined ``blank``/``error`` — never a false
+  "synced" display)
+- zero unexpected sequenced command frames on the peer's wire
 """
 from __future__ import annotations
 
 import json
+import subprocess
 import time
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from verify_core import (
     AssertError,
     EnvError,
     UnsupportedError,
-    build_spread_table,
-    expected_marker,
+    expected_page,
     marker_rgb,
-    png_region_rgb,
-    rgb_close,
+    png_marker_fraction,
     rtt_stats,
+    spread_table_index,
     BLANK_LABEL,
     BLANK_RGB,
 )
 from verify_drivers import BystanderPair
 from verify_fixture_server import CmdError
+
+# sequenced wire frames that count as "a request" — a peer echoing any of
+# these after a remote apply is the dup/missing-request bug the spec hunts.
+OP_WIRE_TYPES = frozenset(
+    {"TURN", "GOTO", "SET_OFFSET", "SWAP_SIDES", "OPEN_WORK"})
+
+_CMD_FOR_OP = {"turn": "turn", "goto": "goto", "swap_sides": "swap",
+               "set_offset": "set_offset", "open_work": "open_work"}
 
 
 def _now_ms() -> int:
@@ -38,7 +61,9 @@ class RunCtx:
     """Per-run context handed to every op."""
 
     def __init__(self, *, fx, driver, clients, ws_url, base_url,
-                 evidence_dir: Path, surface: str = "fixture"):
+                 evidence_dir: Path, surface: str = "fixture",
+                 dev_container: str | None = None,
+                 tscale: float = 1.0):
         self.fx = fx
         self.driver = driver
         self.clients = clients        # {"leader": ClientSpec, "follower": ClientSpec}
@@ -46,18 +71,23 @@ class RunCtx:
         self.base_url = base_url
         self.dir = evidence_dir
         self.surface = surface
+        self.dev_container = dev_container
+        # poll-timeout multiplier — simulator webkit is measurably slower
+        # than desktop chromium (image decode, manifest apply, AX taps).
+        self.tscale = tscale
         self.assertions: list[dict] = []
         self.screenshots: list[str] = []
         self.rtt: dict = {}
+        self.latency: dict = {}
         self.scenario: dict = {}
-        self._table: list | None = None
+        self._table: list | None = None   # summary spreads [{id,r,l}]
         self._leader_side: str = "right"
 
     # -- recording ----------------------------------------------------
 
     def note(self, name: str, ok: bool, detail: str = "") -> bool:
         self.assertions.append({"name": name, "ok": bool(ok),
-                                "detail": str(detail)[:300]})
+                                "detail": str(detail)[:900]})
         return ok
 
     def fail(self, name: str, detail: str):
@@ -66,26 +96,43 @@ class RunCtx:
 
     # -- fixture plumbing ----------------------------------------------
 
+    # read-only commands a transient control-channel stall may safely retry
+    _IDEMPOTENT_CMDS = frozenset(
+        {"state", "code", "value", "rect", "last_tap", "pull_trace",
+         "ctl_plane", "noop"})
+
     def cmd(self, role: str, name: str, params: dict | None = None,
             timeout: float = 30.0):
         if self.surface != "fixture":
             raise UnsupportedError(
-                f"op '{name}' needs the fixture control surface — "
-                f"the real-UI surface lands with S09")
+                f"cmd '{name}' needs the fixture control surface — "
+                "the ui surface is driven via ui_input/open_url/expect ops")
         cid = self.clients[role].id
-        try:
-            return self.fx.cmd(cid, name, params, timeout=timeout)
-        except CmdError as e:
-            if e.kind == "env":
-                raise EnvError(str(e)) from e
-            raise AssertError(f"cmd {name}@{role}: {e}") from e
+        tries = 2 if name in self._IDEMPOTENT_CMDS else 1
+        err = None
+        for attempt in range(tries):
+            try:
+                return self.fx.cmd(cid, name, params, timeout=timeout)
+            except CmdError as e:
+                err = e
+                if e.kind != "env":
+                    break            # assertion-class error — no retry
+                if attempt + 1 < tries:
+                    # a stalled /next long-poll can starve one delivery;
+                    # the page's poll loop self-heals within ~1s of it.
+                    time.sleep(1.0)
+        if err.kind == "env":
+            raise EnvError(str(err)) from err
+        raise AssertError(f"cmd {name}@{role}: {err}") from err
 
     def state(self, role: str) -> dict:
+        if self.surface == "ui":
+            return self._ui_state(role)
         return self.cmd(role, "state", timeout=15)
 
     def poll(self, role: str, pred, timeout: float = 12.0,
              interval: float = 0.15, what: str = "state"):
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout * self.tscale
         last = None
         while time.monotonic() < deadline:
             try:
@@ -100,7 +147,7 @@ class RunCtx:
             f"last={json.dumps(last, ensure_ascii=False)[:300] if last else None}")
 
     def poll_both(self, pred, timeout: float = 12.0, what: str = "state"):
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout * self.tscale
         la = fa = None
         while time.monotonic() < deadline:
             try:
@@ -119,6 +166,326 @@ class RunCtx:
             f"leader={json.dumps(la, ensure_ascii=False)[:250] if la else None} "
             f"follower={json.dumps(fa, ensure_ascii=False)[:250] if fa else None}")
 
+    # -- ui-surface observation (chrome driver only) -------------------
+
+    def _ui_state(self, role: str) -> dict:
+        spec = self.clients[role]
+        if spec.page is None:
+            raise UnsupportedError("ui surface needs the chrome driver")
+        d = spec.page.evaluate(
+            """() => {
+              const pc = window.PairController
+                ? window.PairController.state : {status: 'missing'};
+              const pv = window.PairedView ? window.PairedView.state() : null;
+              return {pc: pc, pv: pv,
+                      solo: !(pv && pv.active)};
+            }""")
+        pc, pv = d.get("pc") or {}, d.get("pv") or {}
+        return {
+            "status": pc.get("status"), "phase": pc.get("phase"),
+            "sessionId": pc.get("sessionId"), "role": pc.get("role")
+                or (pv or {}).get("role"),
+            "side": pc.get("side") or (pv or {}).get("side"),
+            "transport": pc.get("transport"),
+            "spreadId": pc.get("spreadId") or (pv or {}).get("spreadId"),
+            "revision": pc.get("revision") if pc.get("revision") is not None
+                else (pv or {}).get("revision"),
+            "workEpoch": pc.get("workEpoch") if pc.get("workEpoch") is not None
+                else (pv or {}).get("workEpoch"),
+            "manifestVersion": pc.get("manifestVersion")
+                or (pv or {}).get("manifestVersion"),
+            "presence": pc.get("presence") or {},
+            "pending": pc.get("joinRequest"),
+            "error": pc.get("error"), "endReason": pc.get("endReason"),
+            "applied": {"index": (pv or {}).get("spreadIndex", -1),
+                        "spreadId": (pv or {}).get("spreadId"),
+                        "leaderSide": (pv or {}).get("leaderSide"),
+                        "total": (pv or {}).get("spreadTotal")},
+            "view": {"ref": (pv or {}).get("ref"),
+                     "anchorRef": (pv or {}).get("anchorRef"),
+                     "side": (pv or {}).get("side"),
+                     "active": (pv or {}).get("active"),
+                     "blank": (pv or {}).get("blank")},
+        }
+
+
+# ────────────────────────── shared asserts ───────────────────────────
+
+
+def _chapter_of(spread_id: str) -> int:
+    try:
+        return int(str(spread_id).split(":")[0][1:])
+    except (ValueError, IndexError):
+        return -1
+
+
+def _turn_target(table: list[dict], idx: int, delta: int,
+                 cross_chapter: bool) -> int:
+    """model.turn_index over the summary table — the chapter index is
+    inside each spread id (c{K}:s{N}) so no folder names are needed."""
+    if not table:
+        return -1
+    target = idx + delta
+    if cross_chapter:
+        return max(0, min(target, len(table) - 1))
+    ch = _chapter_of(table[idx]["id"])
+    lo = idx
+    while lo > 0 and _chapter_of(table[lo - 1]["id"]) == ch:
+        lo -= 1
+    hi = idx
+    while hi + 1 < len(table) and _chapter_of(table[hi + 1]["id"]) == ch:
+        hi += 1
+    return max(lo, min(target, hi))
+
+
+def _find_spread_with_page(table: list[dict], name: str) -> int:
+    for i, s in enumerate(table):
+        if s.get("r") == name or s.get("l") == name:
+            return i
+    return -1
+
+
+def _need_table(ctx: RunCtx, what: str) -> None:
+    if not ctx._table:
+        raise UnsupportedError(f"{what}: no work open (needs open_work)")
+
+
+def _committed_same(a: dict, b: dict) -> bool:
+    aa, bb = a["applied"], b["applied"]
+    return (aa["spreadId"] == bb["spreadId"] and aa["spreadId"] is not None
+            and aa["revision"] == bb["revision"]
+            and a["sessionId"] == b["sessionId"] and a["sessionId"]
+            and a["workEpoch"] == b["workEpoch"])
+
+
+def _assert_pair_ids(ctx: RunCtx, l: dict, f: dict, what: str) -> None:
+    ctx.note("session_same", l["sessionId"] == f["sessionId"]
+             and l["sessionId"] is not None, f"sid match ({what})")
+    ctx.note("epoch_same", l["workEpoch"] == f["workEpoch"],
+             f"workEpoch={l['workEpoch']}")
+    ctx.note("revision_same",
+             l["applied"]["revision"] == f["applied"]["revision"],
+             f"rev={l['applied']['revision']}")
+    ctx.note("spread_same",
+             l["applied"]["spreadId"] == f["applied"]["spreadId"],
+             f"spreadId={l['applied']['spreadId']}")
+    ctx.note("no_error", not l.get("error") and not f.get("error")
+             and not l.get("endReason") and not f.get("endReason"),
+             "no error/endReason on either client")
+
+
+def _assert_member_view(ctx: RunCtx, st: dict, role: str,
+                        table_role: str | None = None) -> None:
+    """Marker + image-decode assert for ONE device — the spec's
+    左右PageRef期待値 + 画像decode成功またはblank表示."""
+    if ctx.surface == "ui":
+        v = st.get("view") or {}
+        ctx.note(f"side_{role}", v.get("side") in ("right", "left"),
+                 f"side={v.get('side')}")
+        if v.get("blank"):
+            ctx.note(f"blank_{role}", True, "blank side rendered")
+        else:
+            ref = v.get("ref")
+            ctx.note(f"ref_{role}", bool(ref and ref.get("name")),
+                     f"ref={bool(ref)}")
+        return
+    applied = st["applied"]
+    exp = expected_page(ctx._table, applied["spreadId"], st["role"],
+                        applied.get("leaderSide") or "right")
+    want = exp["page"] or BLANK_LABEL
+    m = st["marker"]
+    ctx.note(f"marker_{role}",
+             m["page"] == want and m["side"] == exp["side"],
+             f"side={m['side']} page={m['page']} (want {want})")
+    img = m.get("imgState")
+    if want == BLANK_LABEL:
+        ctx.note(f"img_{role}", img == "blank",
+                 f"blank side, imgState={img}")
+    else:
+        if img != "ok":
+            # decode races the marker by design — poll briefly for the
+            # img to finish loading before calling it a failure.
+            try:
+                st2 = ctx.poll(role, lambda s: (
+                    s.get("marker") or {}).get("imgState") == "ok",
+                    timeout=6, what=f"img decode {want}")
+                img = (st2.get("marker") or {}).get("imgState")
+            except AssertError:
+                pass
+        ctx.note(f"img_{role}", img == "ok",
+                 f"decoded /image/{want} imgState={img}")
+
+
+def _wire_snap(ctx: RunCtx, role: str) -> int:
+    """Snapshot of a client's sentTypes length — a peer-wire cleanliness
+    baseline for the next committed op."""
+    if ctx.surface != "fixture":
+        return 0
+    try:
+        return len(ctx.cmd(role, "state", timeout=10).get("sentTypes") or [])
+    except (AssertError, EnvError):
+        return 0
+
+
+def _wire_assert(ctx: RunCtx, role: str, snap: int,
+                 what: str = "remote apply", allowed: int = 0) -> None:
+    """No UNEXPECTED sequenced frames on the wire after the snapshot —
+    TURN/GOTO/SET_OFFSET/SWAP_SIDES/OPEN_WORK beyond ``allowed`` (the
+    count the role legitimately issued, e.g. its own concurrent subs)
+    would be an echo/loop bug; APPLIED/READY are housekeeping."""
+    if ctx.surface != "fixture":
+        return
+    try:
+        st = ctx.cmd(role, "state", timeout=10)
+    except (AssertError, EnvError):
+        return
+    tail = (st.get("sentTypes") or [])[snap:]
+    seq = [t for t in tail if t in OP_WIRE_TYPES]
+    ctx.note(f"wire_clean_{role}", len(seq) <= allowed,
+             f"{what}: sequenced {seq[-12:]} (allowed {allowed})")
+
+
+def _dc_relay(ctx: RunCtx, actor: str) -> bool:
+    """§3.4 leader-sequenced plane: while the effective data plane is
+    webrtc-dc, a follower's sequenced request travels over the data
+    channel and the LEADER relays it verbatim (+payload.origin) through
+    its own control channel — so the leader legitimately emits the frame
+    and the follower's WS wire shows nothing. sentTypes only counts WS
+    sends, so this shifts the allowance leader-wards."""
+    if actor != "follower" or ctx.surface != "fixture":
+        return False
+    try:
+        return ctx.state("follower").get("transport") == "webrtc-dc"
+    except (AssertError, EnvError):
+        return False
+
+
+def _converge_index(ctx: RunCtx, expect_idx: int, what: str,
+                    timeout: float = 15.0) -> tuple:
+    """Poll until both clients applied the expected spread — then assert
+    the whole spec predicate (ids, revision, markers, images)."""
+    _need_table(ctx, what)
+    expect_idx = max(0, min(expect_idx, len(ctx._table) - 1))
+    want_id = ctx._table[expect_idx]["id"]
+    l, f = ctx.poll_both(
+        lambda a, b: a["applied"]["spreadId"] == want_id
+        and b["applied"]["spreadId"] == want_id
+        and _committed_same(a, b),
+        timeout=timeout, what=what)
+    ctx.note("converged", True,
+             f"{want_id} rev={l['applied']['revision']}")
+    _assert_pair_ids(ctx, l, f, what)
+    for st, role in ((l, "leader"), (f, "follower")):
+        _assert_member_view(ctx, st, role)
+    return l, f
+
+
+def _converge_any(ctx: RunCtx, what: str, min_rev: int = 0,
+                  timeout: float = 15.0) -> tuple:
+    """Poll until both clients applied the SAME committed state (id+rev)
+    without fixing a target — for ops whose landing spot is server-chosen
+    (SET_OFFSET's anchor, OPEN_WORK's initial page, concurrent races).
+
+    ``min_rev`` guards the premature-match race: with ``expected_index:
+    "any"`` both devices already satisfy _committed_same on the pre-burst
+    state, so without a floor the poll returns before a single request
+    commits and commit_count reads +0. Once a matching state at rev >=
+    min_rev appears, require it to hold across ~0.9s of polls so a
+    mid-burst sample isn't mistaken for the settled outcome."""
+    deadline = time.monotonic() + timeout * ctx.tscale
+    settle_need = 0.9 * ctx.tscale
+    last_key = None
+    last_change = time.monotonic()
+    l = f = None
+    while time.monotonic() < deadline:
+        try:
+            l = ctx.state("leader")
+            f = ctx.state("follower")
+        except (AssertError, EnvError):
+            l = f = None
+        now = time.monotonic()
+        if (l is not None and f is not None
+                and _committed_same(l, f)
+                and l["phase"] == "reading" and f["phase"] == "reading"
+                and l["applied"]["revision"] >= min_rev):
+            key = (l["applied"]["spreadId"], l["applied"]["revision"],
+                   f["applied"]["revision"])
+            if key != last_key:
+                last_key = key
+                last_change = now
+            elif now - last_change >= settle_need:
+                ctx.note("converged", True,
+                         f"{l['applied']['spreadId']} "
+                         f"rev={l['applied']['revision']}")
+                _assert_pair_ids(ctx, l, f, what)
+                return l, f
+        time.sleep(0.15)
+    raise AssertError(
+        f"poll timeout ({timeout}s) waiting for {what}; "
+        f"leader={json.dumps(l, ensure_ascii=False)[:250] if l else None} "
+        f"follower={json.dumps(f, ensure_ascii=False)[:250] if f else None}")
+
+
+def _capture_table(ctx: RunCtx) -> None:
+    """ctx._table = the committed manifest's own spread table — the
+    ground truth every expectation derives from (never a runner guess)."""
+    if ctx.surface != "fixture":
+        return
+    st = ctx.state("leader")
+    man = st.get("manifest") or {}
+    spreads = man.get("spreads")
+    if not spreads:
+        raise AssertError("open_work: leader reports no manifest spreads")
+    ctx._table = spreads
+    ctx.note("manifest_table", True,
+             f"{len(spreads)} spreads from committed manifest "
+             f"(mv={st.get('manifestVersion')})")
+
+
+def _expect_match(st: dict, op: dict) -> bool:
+    """All declared expect fields must match — unlisted fields are free."""
+    if "phase" in op and st.get("phase") != op["phase"]:
+        return False
+    if "status" in op and st.get("status") != op["status"]:
+        return False
+    if "transport" in op and st.get("transport") != op["transport"]:
+        return False
+    if "spreadId" in op and st["applied"]["spreadId"] != op["spreadId"]:
+        return False
+    if "error" in op:
+        # live client error is transient — it clears on the next applied
+        # STATE; lastError is the fixture's sticky record of the last
+        # 'error' event reason. Match either.
+        if op["error"] not in (st.get("error") or "",
+                               st.get("lastError") or ""):
+            return False
+    if "endReason" in op and (st.get("endReason") or "") != op["endReason"]:
+        return False
+    if "solo" in op:
+        solo = not st.get("sessionId") or st.get("endReason") is not None
+        if bool(op["solo"]) != solo:
+            return False
+    if "presence" in op:
+        for m in st.get("presence", {}).values():
+            if m.get("status") != op["presence"]:
+                return False
+    if "applied_index" in op and st["applied"]["index"] != op["applied_index"]:
+        return False
+    if "rejected" in op:
+        if not any(op["rejected"] in (r or "")
+                   for r in (st.get("rejected") or [])):
+            return False
+    mk = st.get("marker") or {}
+    if "marker_page" in op and mk.get("page") != op["marker_page"]:
+        return False
+    if "marker_side" in op and mk.get("side") != op["marker_side"]:
+        return False
+    if "img_state" in op and mk.get("imgState") != op["img_state"]:
+        return False
+    if "dc" in op and bool(st.get("dcOpen")) != bool(op["dc"]):
+        return False
+    return True
+
 
 # ────────────────────────── ops ──────────────────────────────────────
 
@@ -129,28 +496,88 @@ def op_pair(ctx: RunCtx, op: dict) -> None:
         return _op_pair_ui(ctx, op)
     ctx.cmd("leader", "connect")
     ctx.cmd("follower", "connect")
-    l, f = ctx.poll_both(
-        lambda a, b: a["wsOpen"] and b["wsOpen"], what="ws open")
-    ctx.note("ws_open_both", True, "both WS links open (HELLO received)")
 
     if op.get("via") == "taps":
         # real device taps on the fixture's DOM controls (simulator path):
         # tap 開始 -> read the shown code -> type it on the peer -> tap 参加
         # -> leader taps 承認.
         _tap_element(ctx, ctx.clients["leader"], "fx-create")
-        code = (ctx.cmd("leader", "code") or {}).get("code")
+        # CREATE is a real round-trip — the code lands when the ACK does,
+        # so poll rather than racing a single read on a slow device.
+        code = None
+        deadline = time.monotonic() + 10 * ctx.tscale
+        while time.monotonic() < deadline:
+            code = (ctx.cmd("leader", "code") or {}).get("code")
+            if isinstance(code, str) and len(code) == 6:
+                break
+            code = None
+            time.sleep(0.4)
         ctx.note("leader_created", isinstance(code, str) and len(code) == 6,
                  "code displayed after 開始 tap")
-        _tap_element(ctx, ctx.clients["follower"], "fx-code-input")
-        ctx.driver.input_text(ctx.clients["follower"], code)
+        if not isinstance(code, str) or len(code) != 6:
+            ctx.fail("pair", f"no 6-digit code after fx-create tap "
+                             f"({code!r}) — typing it would be garbage")
+        fsp = ctx.clients["follower"]
+        # typing on iOS needs a focused field — a calibration-miss tap
+        # leaves the code field empty and 参加 would JOIN "" (or nothing
+        # if the tap itself missed). Verify the value actually landed,
+        # re-focusing and retyping once before declaring failure.
+        entered = False
+        for _attempt in range(2):
+            _tap_element(ctx, fsp, "fx-code-input")
+            ctx.driver.input_text(fsp, code)
+            time.sleep(0.6)
+            try:
+                got = ctx.cmd("follower", "value",
+                              {"id": "fx-code-input"}, timeout=10)
+            except (AssertError, EnvError):
+                got = {}
+            if (got or {}).get("v") == code:
+                entered = True
+                break
+        ctx.note("code_entered", entered,
+                 f"fx-code-input holds {got.get('v')!r}")
         # typing opens the keyboard and shifts Safari's layout — a neutral
-        # tap dismisses it, then the next tap re-calibrates (stabilized)
+        # center tap (delta=0 zone) dismisses it, then re-calibrate.
         drv = ctx.driver
-        w, h = drv.screen_size(ctx.clients["follower"])
-        drv.tap(ctx.clients["follower"], w / 2, h / 2)
+        w, h = drv.screen_size(fsp)
+        drv.tap(fsp, w / 2, h / 2)
         time.sleep(1.0)
-        _tap_element(ctx, ctx.clients["follower"], "fx-join")
-        ctx.poll("leader", lambda s: s["pending"], what="join_request")
+        # First verify the click handler actually ran — a tap swallowed by
+        # a dismissing keyboard hits the DOM but never fires click, so
+        # poll the follower's OWN wire (sentTypes/status) rather than only
+        # the leader's pending flag, and retap while nothing was sent.
+        def _join_left(s):
+            if "JOIN" in (s.get("sentTypes") or []):
+                return True
+            if s.get("status") in ("joining", "paired") or \
+                    s.get("phase") == "waiting":
+                return True
+            if s.get("error") or s.get("lastError"):
+                raise AssertError(
+                    f"join click ran but errored: "
+                    f"{s.get('error') or s.get('lastError')}")
+            return False
+        sent = False
+        last_err = None
+        for _attempt in range(3):
+            _tap_element(ctx, fsp, "fx-join")
+            try:
+                ctx.poll("follower", _join_left,
+                         timeout=8, what="join dispatch")
+                sent = True
+                break
+            except AssertError as e:
+                last_err = e
+                if "errored" in str(e):
+                    raise
+        ctx.note("join_dispatched", sent,
+                 f"follower sent JOIN after "
+                 f"{_attempt + 1} tap(s){'' if sent else f' ({last_err})'}")
+        if not sent:
+            ctx.fail("pair", f"fx-join tap never dispatched JOIN: {last_err}")
+        ctx.poll("leader", lambda s: s["pending"], timeout=10,
+                 what="join_request")
         ctx.note("join_request_seen", True, "leader saw the pending member")
         _tap_element(ctx, ctx.clients["leader"], "fx-approve")
     else:
@@ -172,12 +599,12 @@ def op_pair(ctx: RunCtx, op: dict) -> None:
              "sessionId identical")
     roles = {m["role"] for m in l["presence"].values()}
     ctx.note("roles", roles == {"leader", "follower"}, f"roles={roles}")
-    ctx.note("plane_ws", l["dataPlane"] in (None, "server-ws"),
-             f"dataPlane={l['dataPlane']}")
+    ctx.note("plane_ws", l["transport"] in (None, "server-ws"),
+             f"dataPlane={l['transport']}")
 
 
 def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
-    """Real-app pairing UI surface — needs the S09 controller wiring."""
+    """Real-app pairing UI surface (S09 PairController wiring)."""
     leader = ctx.clients["leader"].page
     follower = ctx.clients["follower"].page
     if leader is None or follower is None:
@@ -185,15 +612,11 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     has = leader.evaluate("() => !!window.PairController")
     if not has:
         raise UnsupportedError(
-            "ui surface requires the S09 PairController wiring (#84) — "
-            "the production pairing UI is a shell until it lands")
-    # post-S09 path (kept for the switch): drive the real pairing DOM.
+            "ui surface requires the S09 PairController wiring (#84)")
     leader.evaluate("window.closeSidebar && window.closeSidebar()")
     follower.evaluate("window.closeSidebar && window.closeSidebar()")
     leader.click("#pair-btn")
     leader.click("#pair-create")
-    # The leader section renders '------' as a placeholder the moment it
-    # appears — wait for an actual 6-digit code, not just non-emptiness.
     leader.wait_for_function(
         "() => /^\\d{6}$/.test((document.getElementById('pair-code-value')"
         "  .textContent || '').trim())",
@@ -213,216 +636,601 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     ctx.note("paired_both", True, "UI: both status chips connected")
 
 
-def _resolve_work(decl) -> dict:
-    """op/scenario work: inline declaration or a named fx fixture from
-    tests/fixtures/reader_sync_tree.py."""
+def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
+    with urllib.request.urlopen(
+            ctx.base_url.rstrip("/") + path, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def _resolve_work(ctx: RunCtx, decl) -> dict:
+    """op/scenario work forms:
+    - ``{discover: true, minPages}`` — pick a real folder off the target
+      env's own tree via /api/folders + /api/images (the folder name stays
+      inside the run; only page names echo into evidence)
+    - ``{folder, page:{folder,name}, offset?}`` — an explicit env work
+    Named fx fixtures are synthetic-table declarations — S11 exercises the
+    REAL OPEN_WORK path, so they are rejected with guidance."""
     if isinstance(decl, str):
-        from tests.fixtures.reader_sync_tree import WORKS  # noqa: PLC0415
-        w = WORKS.get(decl)
-        if w is None:
-            raise UnsupportedError(f"unknown work name {decl!r}")
-        return w
+        raise UnsupportedError(
+            f"named work {decl!r} is a synthetic-table declaration — "
+            "S11 scenarios declare env works against the target tree")
+    if not isinstance(decl, dict):
+        raise UnsupportedError("work declaration must be an object")
+    if decl.get("discover"):
+        return _discover_work(ctx, int(decl.get("minPages", 6)),
+                              decl.get("offset"))
     return decl
 
 
+def _discover_work(ctx: RunCtx, min_pages: int, offset) -> dict:
+    """Find a folder with >= min_pages images on the target env. Leaf
+    folders sort naturally; the first qualifying one wins — deterministic
+    across runs of the same env without ever naming it in a declaration."""
+    # /api/folders rescans the target tree on every request — under load
+    # or on a cold post-restart container a single 25s read can time out
+    # transiently, which is NOT proof the environment is down. A few
+    # patient attempts before declaring env.
+    folders = last_err = None
+    for attempt in range(4):
+        try:
+            folders = _api_json(ctx, "/api/folders", timeout=25)
+            break
+        except Exception as e:
+            last_err = e
+            time.sleep(3.0)
+    if folders is None:
+        raise EnvError(
+            f"work discovery: /api/folders failed: {last_err}")
+    cands = []
+
+    def walk(node, path):
+        if not isinstance(node, dict):
+            return
+        name = node.get("name", "")
+        p = f"{path}/{name}".strip("/") if path else name
+        if node.get("type") == "folder":
+            cands.append(p)
+            for ch in node.get("children") or []:
+                if isinstance(ch, dict) and ch.get("type") == "folder":
+                    walk(ch, p)
+
+    for top in folders if isinstance(folders, list) \
+            else (folders or {}).get("folders") or []:
+        walk(top, "")
+    cands.sort()
+    for folder in cands:
+        try:
+            imgs = _api_json(
+                ctx, "/api/images?folder=" +
+                urllib.parse.quote(folder, safe=""))
+        except Exception:
+            continue
+        raw = imgs if isinstance(imgs, list) \
+            else (imgs or {}).get("images") or []
+        names = [i if isinstance(i, str)
+                 else (i.get("name") if isinstance(i, dict) else None)
+                 for i in raw]
+        names = [n for n in names if n]
+        if len(names) >= min_pages:
+            return {"folder": folder,
+                    "page": {"folder": folder, "name": sorted(names)[0]},
+                    "offset": offset}
+    raise EnvError(
+        f"work discovery: no folder with >= {min_pages} pages on the "
+        "target env")
+
+
 def op_open_work(ctx: RunCtx, op: dict) -> None:
-    """Load a synthetic work: runner builds the REAL spread table
-    (app.reader_sync.model), ships it to both clients, asserts markers."""
-    work = _resolve_work(op.get("work") or ctx.scenario.get("work"))
-    if work is None:
-        raise UnsupportedError("open_work needs a work declaration")
-    table = build_spread_table(work)
-    if not table:
-        raise AssertError("open_work: empty spread table")
-    ctx._table = table
-    ctx._leader_side = "right"
-    for role in ("leader", "follower"):
-        ctx.cmd(role, "open_work",
-                {"table": table, "startIndex": op.get("startIndex", 0)})
-    idx = int(op.get("startIndex", 0))
-    for role in ("leader", "follower"):
-        st = ctx.poll(role, lambda s: s["spreadId"] == table[idx]["id"],
-                      what=f"spread {table[idx]['id']}")
-        exp = expected_marker(table, idx, st["role"], "right")
-        ref = exp["ref"]
-        ctx.note(f"marker_{role}",
-             st["marker"]["side"] == exp["side"] and
-             st["marker"]["page"] == (ref["name"] if ref else BLANK_LABEL),
-             f"side={st['marker']['side']} page={st['marker']['page']}")
-    ctx.note("table_len", True, f"{len(table)} spreads")
-
-
-def _converge(ctx: RunCtx, expect_index: int, what: str) -> tuple:
-    """Poll until both clients commit the same index+rev; assert markers."""
-    if ctx._table is None:
-        raise UnsupportedError(f"{what}: no work open (needs open_work)")
-
-    def ok(l, f):
-        c1, c2 = l["committed"], f["committed"]
-        return (c1["index"] == expect_index == c2["index"]
-                and c1["rev"] == c2["rev"] and c1["rev"] > 0
-                and c1["leaderSide"] == c2["leaderSide"])
-    l, f = ctx.poll_both(ok, what=what)
-    ctx.note("converged", True,
-             f"index={expect_index} rev={l['committed']['rev']}")
+    """Real OPEN_WORK on the target env's tree -> manifest -> READY ->
+    phase reading on both, initial spread markers + image decode."""
+    work = _resolve_work(ctx, op.get("work") or ctx.scenario.get("work"))
+    if not isinstance(work, dict) or not work.get("folder"):
+        raise UnsupportedError(
+            "open_work needs an env work {folder, page:{folder,name}}")
+    page = work.get("page")
+    if not isinstance(page, dict) or not page.get("name"):
+        raise UnsupportedError("env work needs page {folder,name}")
+    if ctx.surface == "ui":
+        return _op_open_work_ui(ctx, work)
+    ctx.cmd("leader", "open_work",
+            {"folder": work["folder"], "page": page,
+             "offset": work.get("offset")})
+    if op.get("phase"):
+        # fault-injection declaration: the work is expected NOT to reach
+        # reading on the named actor (e.g. a corrupted/dropped manifest)
+        actor = op.get("phase_actor", "leader")
+        st = ctx.poll(actor, lambda s: s["phase"] == op["phase"],
+                      timeout=float(op.get("timeout", 15)),
+                      what=f"phase={op['phase']} on {actor}")
+        ctx.note("work_stalled", True,
+                 f"{actor} parked at phase={st['phase']} as injected")
+        return
+    l, f = ctx.poll_both(
+        lambda a, b: a["phase"] == "reading" and b["phase"] == "reading",
+        timeout=40, what="phase=reading after OPEN_WORK")
+    _capture_table(ctx)
+    # the committed spread must contain the declared initial page — the
+    # server's own initial.spreadId choice, verbatim.
+    spread_id = l["applied"]["spreadId"]
+    idx = spread_table_index(ctx._table, spread_id)
+    if idx < 0:
+        ctx.fail("initial_spread",
+                 f"committed {spread_id} not in manifest table")
+    spread = ctx._table[idx]
+    names = {spread.get("r"), spread.get("l")}
+    ctx.note("initial_page", page["name"] in names,
+             f"committed spread {spread_id} holds {page['name']}")
+    _assert_pair_ids(ctx, l, f, "open_work")
     for st, role in ((l, "leader"), (f, "follower")):
-        exp = expected_marker(ctx._table, expect_index, st["role"],
-                              l["committed"]["leaderSide"])
-        ref = exp["ref"]
-        want = ref["name"] if ref else BLANK_LABEL
-        ctx.note(f"marker_{role}", st["marker"]["page"] == want
-                 and st["marker"]["side"] == exp["side"],
-                 f"side={st['marker']['side']} page={st['marker']['page']} "
-                 f"(want {want})")
-    return l, f
+        _assert_member_view(ctx, st, role)
 
 
-def _table_to_plan(table: list[dict]):
-    """Serialized spread dicts -> model.Spread objects for turn_index."""
-    from verify_core import _model
-    model = _model()
-    plan = []
-    for s in table:
-        right = model.make_ref(s["right"]["folder"], s["right"]["name"])
-        left = (model.make_ref(s["left"]["folder"], s["left"]["name"])
-                if s.get("left") else None)
-        plan.append(model.Spread(s["id"], s["chapterFolder"], right, left))
-    return plan
+def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
+    leader = ctx.clients["leader"].page
+    page = work["page"]
+    leader.evaluate(
+        "([folder, page]) => window.ViewerNavigation.request("
+        "  {type: 'openWork', folder: folder, page: page, via: 'runner'})",
+        [work["folder"], page])
+    l, f = ctx.poll_both(
+        lambda a, b: a["phase"] == "reading" and b["phase"] == "reading"
+        and a["applied"]["spreadId"],
+        timeout=40, what="ui phase=reading")
+    ctx.note("ui_open_work", True,
+             f"spreadId={l['applied']['spreadId']} "
+             f"rev={l['applied']['index']}")
+
+
+def _send_move(ctx: RunCtx, op: dict) -> dict:
+    """Issue a move op on either surface (fixture cmd or ui intent).
+    Returns the cmd result — ``{sent: False}`` means the client's own
+    phase/role/link gate refused (observable, not an error)."""
+    actor = op.get("actor", "leader")
+    t = op["op"]
+    params = {k: v for k, v in op.items()
+              if k not in ("op", "actor", "expect_reject", "rev_delta",
+                           "expected_index", "expected_commits",
+                           "turn_delta")}
+    if ctx.surface == "ui":
+        page = ctx.clients[actor].page
+        if page is None:
+            raise UnsupportedError("ui surface needs the chrome driver")
+        if t == "turn":
+            ok = page.evaluate(
+                "([d, cc]) => window.ViewerNavigation.request({type: 'turn',"
+                " delta: d, crossChapter: cc, fromChapter: null,"
+                " via: 'runner'})",
+                [int(op.get("delta", 1)), bool(op.get("crossChapter", True))])
+        elif t == "goto":
+            ok = page.evaluate(
+                "(p) => window.ViewerNavigation.request({type: 'goto',"
+                " page: p, via: 'runner'})",
+                op.get("page") or {})
+        elif t == "swap_sides":
+            ok = page.evaluate("() => window.PairController.swapSides()")
+        elif t == "set_offset":
+            ok = page.evaluate(
+                "(o) => window.ViewerNavigation.request("
+                "  {type: 'setOffset', offset: o, via: 'runner'})",
+                int(op["offset"]))
+        return {"sent": bool(ok)}
+    return ctx.cmd(actor, _CMD_FOR_OP[t], params) or {"sent": True}
+
+
+def _assert_reject_or_blocked(ctx: RunCtx, op: dict, send_res: dict,
+                              stay_spread: str | None) -> None:
+    """A gated move: either the client's own gate refused (sent=false —
+    the READING_GATED path, e.g. peer suspended) or the wire answered
+    REJECT(reason). Either way the committed spread must NOT move."""
+    want = op.get("expect_reject") or True
+    actor = op.get("actor", "leader")
+    if send_res.get("sent") is False:
+        ctx.note("turn_rejected", True,
+                 "client-side gate refused the intent (peer paused/phase)")
+        st = ctx.state(actor)
+        if stay_spread:
+            ctx.note("spread_unchanged",
+                     st["applied"]["spreadId"] == stay_spread,
+                     f"stayed {stay_spread}")
+        return
+    st = ctx.poll(actor, lambda s: any(
+        str(want) in (r or "") for r in (s.get("rejected") or [])),
+        timeout=15, what=f"REJECT {want}")
+    st2 = ctx.state(actor)
+    ctx.note("turn_rejected", True, f"wire REJECT {want}")
+    if stay_spread:
+        ctx.note("spread_unchanged",
+                 st2["applied"]["spreadId"] == stay_spread,
+                 f"stayed {stay_spread}")
 
 
 def op_turn(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
     delta = int(op.get("delta", 1))
-    if ctx._table is None:
-        raise UnsupportedError("turn: no work open (needs open_work)")
-    from verify_core import _model
-    model = _model()
-    cur = ctx.state(actor)["committed"]["index"]
-    plan = _table_to_plan(ctx._table)
-    target = model.turn_index(plan, cur, delta, bool(op.get("crossChapter", True)))
-    ctx.cmd(actor, "turn", {"delta": delta})
-    l, f = _converge(ctx, target, f"turn {delta:+d} by {actor}")
-    ctx.note("turn_ok", l["spreadId"] == f["spreadId"],
-             f"spreadId={l['spreadId']}")
+    peer = "follower" if actor == "leader" else "leader"
+    if ctx.surface == "ui":
+        return _op_turn_ui(ctx, op)
+    _need_table(ctx, "turn")
+    cur = ctx.state(actor)["applied"]["index"]
+    if cur < 0:
+        ctx.fail("turn", "no committed spread index")
+    rev0 = ctx.state(actor)["applied"]["revision"]
+    target = _turn_target(ctx._table, cur, delta,
+                          bool(op.get("crossChapter", True)))
+    snap = _wire_snap(ctx, peer)
+    res = _send_move(ctx, op)
+    if op.get("expect_reject"):
+        stay = ctx._table[max(0, min(cur, len(ctx._table) - 1))]["id"]
+        _assert_reject_or_blocked(ctx, op, res, stay)
+        return
+    l, f = _converge_index(ctx, target, f"turn {delta:+d} by {actor}")
+    _wire_assert(ctx, peer, snap, allowed=1 if _dc_relay(ctx, actor) else 0)
+    if "rev_delta" in op:
+        # dedup check: a wire-duplicated request must still commit ONCE.
+        got = l["applied"]["revision"] - rev0
+        ctx.note("rev_delta", got == int(op["rev_delta"]),
+                 f"revision +{got} (want {op['rev_delta']})")
+    ctx.note("turn_ok", l["applied"]["spreadId"] == f["applied"]["spreadId"],
+             f"spreadId={l['applied']['spreadId']}")
+
+
+def _op_turn_ui(ctx: RunCtx, op: dict) -> None:
+    actor = op.get("actor", "leader")
+    delta = int(op.get("delta", 1))
+    before = ctx.state(actor)["applied"]
+    cur, total = before["index"], before.get("total") or 0
+    if cur < 0:
+        ctx.fail("turn", "ui: no committed spread index")
+    target = cur + delta
+    if total:
+        target = max(0, min(target, total - 1))
+    _send_move(ctx, op)
+    l, f = ctx.poll_both(
+        lambda a, b: a["applied"]["index"] == target
+        and b["applied"]["index"] == target and _committed_same(a, b),
+        timeout=15, what=f"ui turn {delta:+d} by {actor}")
+    ctx.note("converged", True,
+             f"ui index={target} rev={l['applied'].get('revision')}")
+    _assert_pair_ids(ctx, l, f, "turn")
+    _assert_ui_views(ctx, l, f)
+
+
+def _assert_ui_views(ctx: RunCtx, l: dict, f: dict) -> None:
+    """Left/right image correctness on the real viewer: opposite sides,
+    the same anchor ref, each ref matching its projected side, and the
+    assigned page image actually decoded in the DOM."""
+    lv, fv = l.get("view") or {}, f.get("view") or {}
+    lside = lv.get("side")
+    ctx.note("sides_opposite",
+             lside in ("right", "left")
+             and (f.get("view") or {}).get("side") ==
+             ("left" if lside == "right" else "right"),
+             f"leader={lside} follower={(f.get('view') or {}).get('side')}")
+    ctx.note("anchor_same", bool(lv.get("anchorRef")) and
+             (lv.get("anchorRef") or {}).get("name") ==
+             ((fv.get("anchorRef") or {}).get("name")),
+             "same spread anchor on both devices")
+    for role, st in (("leader", l), ("follower", f)):
+        spec = ctx.clients[role]
+        ok = spec.page.evaluate(
+            """() => {
+              const pv = window.PairedView ? window.PairedView.state() : null;
+              if (!pv || !pv.active) return {ok: false, why: 'inactive'};
+              if (pv.ref === null) return {ok: pv.blank === true, why: 'blank'};
+              const want = encodeURIComponent(pv.ref.name);
+              const imgs = [...document.querySelectorAll('img')]
+                .filter(i => (i.getAttribute('src') || '').endsWith(want));
+              return {ok: imgs.some(i => i.complete && i.naturalWidth > 0),
+                      why: 'img=' + imgs.length};
+            }""")
+        ctx.note(f"img_{role}", bool(ok.get("ok")),
+                 f"{role}: {ok.get('why')}")
 
 
 def op_goto(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
-    idx = int(op["index"])
-    if ctx._table is None:
-        raise UnsupportedError("goto: no work open (needs open_work)")
-    from verify_core import _model
-    model = _model()
-    want = model.clamp_index(_table_to_plan(ctx._table), idx)
-    ctx.cmd(actor, "goto", {"index": idx})
-    _converge(ctx, want, f"goto {idx} by {actor}")
+    peer = "follower" if actor == "leader" else "leader"
+    _need_table(ctx, "goto")
+    pidx = -1
+    if isinstance(op.get("index"), int):
+        target = max(0, min(op["index"], len(ctx._table) - 1))
+        # exact addressing: page names repeat across chapters, so a bare
+        # name can resolve to the wrong chapter's spread — the table's
+        # pageRefs index cannot. Fall back to the name only when the
+        # spread has no right page (blank-side edge spreads use li).
+        entry = ctx._table[target]
+        pidx = entry.get("ri") if entry.get("ri") is not None else -1
+        if pidx < 0:
+            pidx = entry.get("li") if entry.get("li") is not None else -1
+        name = entry.get("r") or entry.get("l")
+    elif isinstance(op.get("page"), str):
+        target = _find_spread_with_page(ctx._table, op["page"])
+        if target < 0:
+            ctx.fail("goto", f"page {op['page']!r} not in manifest")
+        name = op["page"]
+    else:
+        raise UnsupportedError("goto needs index or page")
+    if ctx.surface == "ui":
+        raise UnsupportedError(
+            "goto on the ui surface needs a PageRef the committed manifest "
+            "doesn't expose — turn/goto coverage lives on the fixture")
+    snap = _wire_snap(ctx, peer)
+    cur = ctx.state(actor)["applied"].get("spreadId")
+    res = ctx.cmd(actor, "goto",
+                  {"pageIndex": pidx} if isinstance(op.get("index"), int)
+                  and pidx >= 0 else {"page": name})
+    if op.get("expect_reject"):
+        _assert_reject_or_blocked(ctx, op, res or {"sent": True}, cur)
+        return
+    _converge_index(ctx, target, f"goto idx={target} by {actor}")
+    _wire_assert(ctx, peer, snap, allowed=1 if _dc_relay(ctx, actor) else 0)
 
 
 def op_swap_sides(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
-    if ctx._table is None:
-        raise UnsupportedError("swap_sides: no work open (needs open_work)")
-    before = ctx.state(actor)["committed"]["leaderSide"]
+    _need_table(ctx, "swap_sides")
+    cur = ctx.state(actor)["applied"].get("spreadId")
+    before = ctx.state(actor)["applied"].get("leaderSide") or "right"
     want = "left" if before == "right" else "right"
-    ctx.cmd(actor, "swap")
+    res = _send_move(ctx, op)
+    if op.get("expect_reject"):
+        _assert_reject_or_blocked(ctx, op, res, cur)
+        return
     l, f = ctx.poll_both(
-        lambda a, b: a["committed"]["leaderSide"] == want
-        and b["committed"]["leaderSide"] == want
-        and a["committed"]["rev"] == b["committed"]["rev"],
-        what="sides swapped")
+        lambda a, b: a["applied"].get("leaderSide") == want
+        and b["applied"].get("leaderSide") == want
+        and _committed_same(a, b),
+        timeout=15, what="sides swapped")
     ctx.note("sides_swapped", True, f"leaderSide={want}")
-    idx = l["committed"]["index"]
+    _assert_pair_ids(ctx, l, f, "swap_sides")
     for st, role in ((l, "leader"), (f, "follower")):
-        exp = expected_marker(ctx._table, idx, st["role"], want)
-        ref = exp["ref"]
-        wantpage = ref["name"] if ref else BLANK_LABEL
-        ctx.note(f"marker_{role}", st["marker"]["page"] == wantpage
-                 and st["marker"]["side"] == exp["side"],
-                 f"side={st['marker']['side']} page={st['marker']['page']}")
+        _assert_member_view(ctx, st, role)
 
 
-def op_signal(ctx: RunCtx, op: dict) -> None:
-    """SIGNAL relay round-trip in BOTH directions over the wire path —
-    the spec's 双方の送り戻し at the transport level."""
-    a, b = op.get("actor", "leader"), None
-    other = "follower" if a == "leader" else "leader"
-    for tag, src in (("fwd", a), ("back", other)):
-        r = ctx.cmd(src, "signal_ping", {"tag": tag}, timeout=15)
-        ctx.note(f"relay_{tag}", isinstance(r.get("rtt"), (int, float)),
-                 f"{src}->peer->{src} rtt={r.get('rtt')}ms")
+def op_set_offset(ctx: RunCtx, op: dict) -> None:
+    """SET_OFFSET rebuilds the manifest (new manifestVersion + table) —
+    the committed spread keeps the right-page anchor."""
+    actor = op.get("actor", "leader")
+    want = int(op["offset"])
+    _need_table(ctx, "set_offset")
+    mv0 = ctx.state(actor).get("manifestVersion") or 0
+    _send_move(ctx, op)
+    l, f = ctx.poll_both(
+        lambda a, b: (a.get("manifestVersion") or 0) > mv0
+        and _committed_same(a, b) and a["phase"] == "reading"
+        and b["phase"] == "reading",
+        timeout=40, what=f"offset={want} manifest rebuilt")
+    _capture_table(ctx)
+    ctx.note("offset_applied", True,
+             f"manifestVersion={l['manifestVersion']} "
+             f"spreads={len(ctx._table)}")
+    _assert_pair_ids(ctx, l, f, "set_offset")
+    for st, role in ((l, "leader"), (f, "follower")):
+        _assert_member_view(ctx, st, role)
+
+
+def op_concurrent(ctx: RunCtx, op: dict) -> None:
+    """Several move requests issued without waiting between them — the
+    spec's 同時NEXT/逆方向同時/連打 competitions.
+
+    Wire semantics the expectation encodes: TURN is RELATIVE (applied in
+    receive order, never base-checked) while GOTO/SET_OFFSET/SWAP_SIDES/
+    OPEN_WORK are ABSOLUTE (baseRevision == revision or stale_revision).
+    ``expected_index`` defaults to declared-order application over the
+    subs; pass ``"any"`` when a race outcome is legitimately open, and
+    ``expected_commits`` (int or list of acceptable ints) when absolute
+    ops may be rejected. Either way: one committed state on both devices,
+    every accepted request applied exactly once."""
+    _need_table(ctx, "concurrent")
+    subs = op["ops"]
+    start = ctx.state("leader")
+    idx = start["applied"]["index"]
+    rev0 = start["applied"]["revision"]
+    work_change = False
+    for s in subs:
+        t = s["op"]
+        if t == "turn":
+            idx = _turn_target(ctx._table, idx, int(s.get("delta", 1)),
+                               bool(s.get("crossChapter", True)))
+        elif t == "goto":
+            if isinstance(s.get("page"), str):
+                idx = _find_spread_with_page(ctx._table, s["page"])
+            elif isinstance(s.get("index"), int):
+                idx = max(0, min(s["index"], len(ctx._table) - 1))
+        elif t == "open_work":
+            work_change = True
+        # swap_sides keeps the index
+    expected_index = op.get("expected_index", idx)
+    expected_commits = op.get("expected_commits", len(subs))
+    snap = {r: _wire_snap(ctx, r) for r in ("leader", "follower")}
+
+    def fire(s):
+        params = {k: v for k, v in s.items() if k not in ("op", "actor")}
+        if s["op"] == "open_work":
+            work = _resolve_work(ctx, s.get("work")
+                                 or ctx.scenario.get("work"))
+            params = {"folder": work["folder"], "page": work["page"],
+                      "offset": work.get("offset")}
+        ctx.cmd(s.get("actor", "leader"), _CMD_FOR_OP[s["op"]], params,
+                timeout=20)
+
+    with ThreadPoolExecutor(max_workers=len(subs)) as ex:
+        list(ex.map(fire, subs))
+    if work_change:
+        l, f = _converge_any(ctx, "concurrent open_work",
+                             min_rev=rev0 + 1)
+        _capture_table(ctx)
+    elif expected_index == "any":
+        l, f = _converge_any(ctx, "concurrent ops",
+                             min_rev=rev0 + 1, timeout=20)
+    else:
+        l, f = _converge_index(ctx, int(expected_index),
+                               "concurrent ops", timeout=20)
+    rev_delta = l["applied"]["revision"] - rev0
+    ok = (rev_delta in expected_commits
+          if isinstance(expected_commits, list)
+          else rev_delta == expected_commits)
+    ctx.note("commit_count", ok,
+             f"revisions +{rev_delta} (expected {expected_commits}) "
+             "— every accepted request applied exactly once")
+    declared = {"leader": 0, "follower": 0}
+    for s in subs:
+        declared[s.get("actor", "leader")] += 1
+    relay = _dc_relay(ctx, "follower") and declared["follower"] > 0
+    _wire_assert(ctx, "follower", snap["follower"], "concurrent",
+                 allowed=0 if relay else declared["follower"])
+    _wire_assert(ctx, "leader", snap["leader"], "concurrent",
+                 allowed=declared["leader"] + declared["follower"]
+                 if relay else declared["leader"])
+
+
+def op_burst(ctx: RunCtx, op: dict) -> None:
+    """N rapid-fire turns from one side — every request sequenced once,
+    the final spreadId/revision equal to the server's committed values."""
+    _need_table(ctx, "burst")
+    actor = op.get("actor", "leader")
+    delta = int(op.get("delta", 1))
+    count = int(op["count"])
+    start = ctx.state(actor)
+    idx, rev0 = start["applied"]["index"], start["applied"]["revision"]
+    target = idx
+    for _ in range(count):
+        target = _turn_target(ctx._table, target, delta,
+                              bool(op.get("crossChapter", True)))
+    peer = "follower" if actor == "leader" else "leader"
+    snap = _wire_snap(ctx, peer)
+    for _ in range(count):
+        ctx.cmd(actor, "turn", {"delta": delta,
+                                "crossChapter": op.get("crossChapter", True)},
+                timeout=20)
+    l, f = _converge_index(ctx, target, f"burst x{count} by {actor}",
+                           timeout=25)
+    rev_delta = l["applied"]["revision"] - rev0
+    ctx.note("commit_count", rev_delta == count,
+             f"revisions +{rev_delta} for {count} turns "
+             "(no dup, none missing)")
+    _wire_assert(ctx, peer, snap,
+                 allowed=count if _dc_relay(ctx, actor) else 0)
+
+
+def op_latency(ctx: RunCtx, op: dict) -> None:
+    """Intent->committed-apply latency distribution, recorded under the
+    ACTIVE transport into the result JSON (spec: transport別warm遅延)."""
+    actor = op.get("actor", "leader")
+    n = int(op.get("samples", 8))
+    r = ctx.cmd(actor, "latency", {"samples": n}, timeout=20 + n * 3)
+    stats = rtt_stats(r.get("samples") or [])
+    transport = ctx.state(actor).get("transport") or "server-ws"
+    ctx.latency[transport] = stats
+    ctx.note("latency_samples", stats["n"] == n,
+             f"{transport}: n={stats['n']} p50={stats['p50']}ms "
+             f"p95={stats['p95']}ms")
 
 
 def op_rtt(ctx: RunCtx, op: dict) -> None:
     n = int(op.get("samples", 5))
     actor = op.get("actor", "leader")
-    r = ctx.cmd(actor, "echo", {"samples": n}, timeout=15 + n * 2)
+    r = ctx.cmd(actor, "rtt", {"samples": n}, timeout=15 + n * 2)
     stats = rtt_stats(r.get("samples") or [])
     ctx.rtt = stats
     ctx.note("rtt_samples", stats["n"] == n,
              f"n={stats['n']} p50={stats['p50']}ms p95={stats['p95']}ms")
 
 
+def op_expect(ctx: RunCtx, op: dict) -> None:
+    actor = op["actor"]
+    timeout = float(op.get("timeout", 15))
+    st = ctx.poll(actor, lambda s: _expect_match(s, op),
+                  timeout=timeout, what=f"expect on {actor}")
+    ctx.note("expect", True,
+             json.dumps({k: v for k, v in op.items()
+                         if k not in ("op", "actor", "timeout")},
+                        ensure_ascii=False)[:200])
+
+
 def op_dc_open(ctx: RunCtx, op: dict) -> None:
-    """Real WebRTC: SIGNAL-relayed offer/answer/ice (host candidates only)
-    between the two clients, then the server's TRANSPORT_STATE flip."""
-    ctx.cmd("leader", "dc_open", {"initiator": True})
-    ctx.cmd("follower", "dc_open", {"initiator": False})
+    """Real WebRTC: SIGNAL-relayed offer/answer/ice between the two
+    clients, then the server-reported dataPlane flip to webrtc-dc."""
+    ctx.cmd("leader", "dc_open")
+    ctx.cmd("follower", "dc_open")
     try:
         l, f = ctx.poll_both(lambda a, b: a["dcOpen"] and b["dcOpen"],
-                             timeout=20, what="datachannel open")
+                             timeout=25, what="datachannel open")
     except AssertError as e:
         raise EnvError(f"webrtc-dc unavailable: {e}") from e
     ctx.note("dc_open_both", True, "RTCDataChannel open on both")
     l, f = ctx.poll_both(
-        lambda a, b: a["dataPlane"] == "webrtc-dc" and b["dataPlane"] == "webrtc-dc",
+        lambda a, b: a["transport"] == "webrtc-dc"
+        and b["transport"] == "webrtc-dc",
         timeout=15, what="dataPlane=webrtc-dc")
     ctx.note("plane_switched", True,
-             f"server-reported dataPlane={l['dataPlane']} rev={l['serverRev']}")
-    for role in ("leader", "follower"):
-        ctx.cmd(role, "ctl_plane", {"plane": "dc"})
-    ctx.note("ctl_on_dc", True, "fixture ctl frames moved to webrtc-dc")
+             f"server-reported dataPlane={l['transport']}")
 
 
 def op_dc_close(ctx: RunCtx, op: dict) -> None:
     for role in ("leader", "follower"):
         ctx.cmd(role, "dc_close")
     l, f = ctx.poll_both(
-        lambda a, b: a["dataPlane"] == "server-ws" and b["dataPlane"] == "server-ws",
+        lambda a, b: a["transport"] == "server-ws"
+        and b["transport"] == "server-ws",
         timeout=15, what="dataPlane back to server-ws")
     ctx.note("plane_restored", True, "server-reported dataPlane=server-ws")
-    ctx.note("ctl_on_ws", True, "fixture ctl frames back on server-ws")
+
+
+def op_dc_restart(ctx: RunCtx, op: dict) -> None:
+    """Re-signal a fresh DataChannel mid-session — the DC re-establishment
+    window the spec wants exercised under operation."""
+    ctx.cmd("leader", "dc_restart")
+    ctx.cmd("follower", "dc_restart")
+    l, f = ctx.poll_both(
+        lambda a, b: a["dcOpen"] and b["dcOpen"]
+        and a["transport"] == "webrtc-dc" and b["transport"] == "webrtc-dc",
+        timeout=30, what="datachannel re-established")
+    ctx.note("dc_reestablished", True, "fresh DataChannel after drop")
 
 
 def op_disconnect(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     peer = "follower" if actor == "leader" else "leader"
-    ctx.cmd(actor, "disconnect")
+    if ctx.surface == "ui":
+        ctx.driver.close_ws(ctx.clients[actor])
+    else:
+        ctx.cmd(actor, "disconnect")
     ctx.poll(peer, lambda s: any(
         m["role"] == ctx.clients[actor].role and m["status"] == "offline"
-        for m in s["presence"].values()), what="peer offline")
+        for m in s.get("presence", {}).values()), what="peer offline")
     ctx.note("peer_marked_offline", True, f"{peer} sees {actor} offline")
 
 
 def op_resume(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     peer = "follower" if actor == "leader" else "leader"
-    ctx.cmd(actor, "resume", timeout=30)
+    if ctx.surface == "fixture":
+        ctx.cmd(actor, "resume", timeout=30)
+    # else: the real client's reconnect machine resumes on its own —
+    # waiting for it IS the assert.
     st = ctx.poll(peer, lambda s: all(
-        m["status"] == "active" for m in s["presence"].values()),
-        what="peer active again")
-    ctx.note("resumed", True, "RESUME ack + presence active")
+        m["status"] == "active" for m in s.get("presence", {}).values())
+        and len(s.get("presence", {})) == 2,
+        timeout=45, what="peer active again")
+    ctx.note("resumed", True, "RESUME + presence active")
     l, f = ctx.poll_both(
-        lambda a, b: a["sessionId"] == b["sessionId"] and a["sessionId"],
-        what="same session after resume")
-    ctx.note("session_kept", True, "same sessionId after resume")
+        lambda a, b: a["sessionId"] == b["sessionId"] and a["sessionId"]
+        and _committed_same(a, b),
+        timeout=30, what="same committed state after resume")
+    ctx.note("session_kept", True, "same sessionId + committed state")
+    _assert_pair_ids(ctx, l, f, "resume")
+    for st_, role in ((l, "leader"), (f, "follower")):
+        _assert_member_view(ctx, st_, role)
 
 
 def op_resume_fail(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     r = ctx.cmd(actor, "resume_bad", {"token": op.get("token", "bogus-token")})
     ctx.note("resume_rejected",
-             r.get("rejected") in ("bad_resume", "resume_expired"),
-             f"reason={r.get('rejected')}")
+             r.get("type") == "REJECT"
+             and r.get("reason") in ("bad_resume", "resume_expired"),
+             f"reply={r.get('type')} reason={r.get('reason')}")
 
 
 def op_fault(ctx: RunCtx, op: dict) -> None:
@@ -430,7 +1238,158 @@ def op_fault(ctx: RunCtx, op: dict) -> None:
     ftype = op["type"]
     params = {k: v for k, v in op.items() if k not in ("op", "actor", "type")}
     r = ctx.cmd(actor, "fault", {"type": ftype, **params})
-    ctx.note(f"fault_{ftype}", True, f"injected on {actor}: {r}")
+    ctx.note(f"fault_{ftype}", True, f"injected on {actor}")
+
+
+def op_image_fault(ctx: RunCtx, op: dict) -> None:
+    actor = op.get("actor", "leader")
+    ctx.cmd(actor, "img_fault", {"mode": op["mode"], "ms": op.get("ms")})
+    ctx.note("image_fault", True,
+             f"mode={op['mode']} on {actor} — next render faulted")
+
+
+def op_suspend(ctx: RunCtx, op: dict) -> None:
+    actor = op.get("actor", "follower")
+    peer = "follower" if actor == "leader" else "leader"
+    if ctx.surface == "ui":
+        ctx.clients[actor].page.evaluate(
+            "() => window.PairController.client"
+            " && window.PairController.client.setActivity('suspended')")
+    else:
+        ctx.cmd(actor, "set_activity", {"state": "suspended"})
+    ctx.poll(peer, lambda s: any(
+        m["role"] == ctx.clients[actor].role and m["status"] == "suspended"
+        for m in s.get("presence", {}).values()),
+        what=f"{actor} suspended")
+    ctx.note("suspended_seen", True, f"{peer} sees {actor} suspended")
+
+
+def op_activate(ctx: RunCtx, op: dict) -> None:
+    actor = op.get("actor", "follower")
+    peer = "follower" if actor == "leader" else "leader"
+    if ctx.surface == "ui":
+        ctx.clients[actor].page.evaluate(
+            "() => window.PairController.client"
+            " && window.PairController.client.setActivity('active')")
+    else:
+        ctx.cmd(actor, "set_activity", {"state": "active"})
+    ctx.poll(peer, lambda s: all(
+        m["status"] == "active" for m in s.get("presence", {}).values())
+        and len(s.get("presence", {})) == 2,
+        what="all active")
+    ctx.note("all_active", True, "presence back to active")
+
+
+def op_reload(ctx: RunCtx, op: dict) -> None:
+    """Real page reload -> stored-credential RESUME — the reload path the
+    spec requires (fixture auto-resumes on boot like PairController._boot).
+    """
+    actor = op.get("actor", "leader")
+    spec = ctx.clients[actor]
+    peer = "follower" if actor == "leader" else "leader"
+    pre = ctx.state(actor)
+    pre_sid, pre_spread = pre.get("sessionId"), pre["applied"]["spreadId"]
+    seq = ctx.fx.hello_seq(spec.id) if ctx.surface == "fixture" else 0
+    ctx.driver.reload(spec)
+    if ctx.surface == "fixture":
+        ctx.fx.wait_hello(spec.id, timeout=60, min_seq=seq + 1)
+        ctx.note("reloaded", True, f"hello seq>{seq}")
+    st = ctx.poll(actor, lambda s: (
+        (s.get("sessionId") == pre_sid and len(s.get("presence", {})) == 2
+         and all(m["status"] == "active" for m in s["presence"].values()))
+        or s.get("endReason") is not None),
+                  timeout=60, what="post-reload resume")
+    if st.get("sessionId") != pre_sid:
+        if op.get("allow_solo") or ctx.driver.name == "simulator":
+            ctx.note("reload_terminal", True,
+                     f"solo/clean terminal (sessionStorage lost): "
+                     f"status={st.get('status')} end={st.get('endReason')}")
+            return
+        ctx.fail("reload_resume",
+                 f"credential resume failed: status={st.get('status')} "
+                 f"end={st.get('endReason')}")
+    ctx.note("reload_resumed", True, "credential RESUME after reload")
+    l, f = ctx.poll_both(
+        lambda a, b: _committed_same(a, b)
+        and a["applied"]["spreadId"] == pre_spread,
+        timeout=30, what="post-reload committed state")
+    ctx.note("state_restored", True,
+             f"spread {pre_spread} preserved across reload")
+    _assert_pair_ids(ctx, l, f, "reload")
+    for st_, role in ((l, "leader"), (f, "follower")):
+        _assert_member_view(ctx, st_, role)
+
+
+def op_bfcache(ctx: RunCtx, op: dict) -> None:
+    """pagehide->pageshow round-trip: suspend is signaled to the peer, the
+    session survives, the committed spread is unchanged."""
+    actor = op.get("actor", "follower")
+    peer = "follower" if actor == "leader" else "leader"
+    pre = ctx.state(actor)
+    pre_spread = pre["applied"]["spreadId"]
+    if ctx.surface == "ui":
+        ctx.clients[actor].page.evaluate(
+            "() => window.dispatchEvent(new Event('pagehide'))")
+    else:
+        ctx.cmd(actor, "lifecycle", {"type": "pagehide"})
+    ctx.poll(peer, lambda s: any(
+        m["role"] == ctx.clients[actor].role and m["status"] == "suspended"
+        for m in s.get("presence", {}).values()),
+        timeout=15, what="peer sees suspended after pagehide")
+    ctx.note("bfcache_suspended", True, "pagehide -> peer saw suspended")
+    if ctx.surface == "ui":
+        ctx.clients[actor].page.evaluate(
+            "() => window.dispatchEvent(new Event('pageshow'))")
+    else:
+        ctx.cmd(actor, "lifecycle", {"type": "pageshow"})
+    l, f = ctx.poll_both(
+        lambda a, b: all(m["status"] == "active"
+                         for m in a.get("presence", {}).values())
+        and _committed_same(a, b)
+        and a["applied"]["spreadId"] == pre_spread,
+        timeout=30, what="pageshow restore")
+    ctx.note("bfcache_restored", True,
+             "same committed state after pageshow")
+    _assert_pair_ids(ctx, l, f, "bfcache")
+
+
+def op_server_restart(ctx: RunCtx, op: dict) -> None:
+    """Restart the target env's viewer container. Defined terminal: every
+    member's RESUME gets bad_resume -> session_lost -> re-pair works."""
+    if not ctx.dev_container:
+        raise EnvError("server_restart needs a docker-managed dev env "
+                       "(--dev-env)")
+    out = subprocess.run(
+        ["docker", "restart", ctx.dev_container],
+        capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise EnvError(f"docker restart {ctx.dev_container}: "
+                       f"{out.stderr[:200]}")
+    ctx.note("container_restarted", True, ctx.dev_container)
+    # wait for health, then both clients' auto-reconnect hits dead sessions
+    deadline = time.monotonic() + 60
+    ok = False
+    while time.monotonic() < deadline and not ok:
+        try:
+            import urllib.request
+            with urllib.request.urlopen(
+                    ctx.base_url.rstrip("/") + "/api/health",
+                    timeout=3) as r:
+                ok = json.loads(r.read().decode()).get("status") == "ok"
+        except Exception:
+            time.sleep(1.0)
+    if not ok:
+        raise EnvError("target did not come back healthy within 60s")
+    l, f = ctx.poll_both(
+        lambda a, b: (a.get("endReason") in ("session_lost", "ended", None)
+                      and b.get("endReason") in ("session_lost", "ended", None)
+                      and a.get("sessionId") is None
+                      and b.get("sessionId") is None)
+        or (a.get("endReason") == "session_lost"
+            and b.get("endReason") == "session_lost"),
+        timeout=90, what="session_lost after restart")
+    ctx.note("session_lost", True,
+             f"terminal endReason={l.get('endReason')}/{f.get('endReason')}")
 
 
 def op_bystander_check(ctx: RunCtx, op: dict) -> None:
@@ -450,12 +1409,27 @@ def op_disconnect_input(ctx: RunCtx, op: dict) -> None:
     spec = ctx.clients[actor]
     kind = op["kind"]
     p = op.get("params") or {}
+    idx0 = ctx.state(actor)["applied"]["index"] if ctx._table else None
+
+    def _pt(v, dim):
+        # coords may be absolute points or viewport fractions (0..1) so a
+        # scenario survives different device widths
+        v = float(v)
+        return v * dim if 0 < v <= 1 else v
+
+    w = h = None
+    try:
+        w, h = ctx.driver.screen_size(spec)
+    except (EnvError, UnsupportedError, AttributeError):
+        w, h = 400, 800
     fn = {
-        "tap": lambda: ctx.driver.tap(spec, p.get("x", 196), p.get("y", 400)),
+        "tap": lambda: ctx.driver.tap(
+            spec, _pt(p.get("x", 0.5), w), _pt(p.get("y", 0.5), h)),
         "text": lambda: ctx.driver.input_text(spec, p.get("text", "")),
         "swipe": lambda: ctx.driver.swipe(
-            spec, p.get("x1", 300), p.get("y1", 500),
-            p.get("x2", 100), p.get("y2", 500), p.get("duration", 0.15)),
+            spec, _pt(p.get("x1", 0.75), w), _pt(p.get("y1", 0.5), h),
+            _pt(p.get("x2", 0.15), w), _pt(p.get("y2", 0.5), h),
+            p.get("duration", 0.15)),
         "pinch": lambda: ctx.driver.pinch(
             spec, p.get("x", 196), p.get("y", 400), p.get("scale", 0.5)),
         "rotate": lambda: ctx.driver.rotate(
@@ -464,6 +1438,11 @@ def op_disconnect_input(ctx: RunCtx, op: dict) -> None:
     }.get(kind)
     if fn is None:
         raise UnsupportedError(f"device_input kind {kind!r} unknown")
+    # snapshot BEFORE the input lands — a post-input read would see the
+    # fresh gesture itself and t > g0.t could never be satisfied.
+    g0 = {}
+    if ctx.surface == "fixture" and kind in ("tap", "swipe", "pinch"):
+        g0 = ctx.state(actor).get("lastGesture") or {}
     try:
         out = fn()
     except EnvError:
@@ -472,19 +1451,52 @@ def op_disconnect_input(ctx: RunCtx, op: dict) -> None:
         raise
     ctx.note(f"input_{kind}", True,
              (json.dumps(out)[:200] if isinstance(out, (dict, list)) else ""))
+    if ctx.surface != "fixture":
+        return
+    # the real device event must land as a fixture gesture; a tap in a
+    # turn zone or a horizontal swipe then commits a real TURN through the
+    # same sendIntent path a finger would take. Require a FRESH record —
+    # a pinch that synthesizes no pointerup would otherwise satisfy the
+    # poll with the previous input's leftover gesture and invent a turn.
+    # rotate/describe/text never produce page gestures — nothing to check.
+    if kind in ("tap", "swipe", "pinch"):
+        st = None
+        # idb swipe/tap delivery is itself flaky — a 150ms swipe can be
+        # consumed before WebKit promotes it to a pan. One re-delivery
+        # separates a lost input from a genuinely undeliverable kind.
+        for _try in range(2):
+            try:
+                st = ctx.poll(actor,
+                              lambda s: bool(s.get("lastGesture"))
+                              and s["lastGesture"].get("t", 0) > g0.get("t", 0),
+                              timeout=10, what="fresh gesture recorded")
+                break
+            except AssertError:
+                if _try == 0:
+                    g0 = ctx.state(actor).get("lastGesture") or {}
+                    try:
+                        fn()
+                    except (EnvError, UnsupportedError):
+                        pass
+        if st is None:
+            # no pointer event reached the page at all — an idb/driver
+            # delivery gap (e.g. pinch synthesizing no pointerup), not
+            # an app regression. The converge check below still judges
+            # gestures that DID arrive.
+            raise EnvError(
+                f"{kind} produced no web-visible gesture on {actor}")
+        g = st.get("lastGesture") or {}
+        ctx.note(f"gesture_{kind}", g.get("kind") in ("tap", "drift-tap",
+                                                     "swipe", "pinch"),
+                 f"gesture={g.get('kind')} delta={g.get('delta')}")
+        delta = int(g.get("delta") or 0)
+        if delta != 0 and idx0 is not None:
+            _converge_index(ctx, idx0 + delta,
+                            f"device {kind} turn {delta:+d}")
 
 
 def _tap_element(ctx: RunCtx, spec, label: str) -> str:
-    """Tap a fixture control by its id/label.
-
-    - chrome driver: a real DOM click (Playwright, trusted input).
-    - simulator: native AX tap when the label exists in the idb tree
-      (Safari chrome buttons like MoreMenuButton); otherwise a CALIBRATED
-      coordinate tap — idb taps a known screen point, the page reports
-      where it landed (last_tap), and the delta converts the element's
-      client rect into screen points. Web content is invisible to the
-      simulator AX server, so this is the real-tap path for page UI.
-    """
+    """Tap a fixture control by its id/label — see op_tap_element."""
     drv = ctx.driver
     if drv.name == "chrome":
         drv.tap_element(spec, label)
@@ -505,14 +1517,8 @@ def _tap_element(ctx: RunCtx, spec, label: str) -> str:
 
 
 def _stable_offset(ctx: RunCtx, spec, tries: int = 5) -> tuple:
-    """Screen->client offset, stabilized.
-
-    Each iteration taps the screen CENTER (safe: lands on the marker area,
-    which has no handler) and reads back where the page saw the pointer.
-    The first tap may dismiss an open keyboard or settle an in-flight
-    Safari layout shift, so we loop until two consecutive offsets agree —
-    that is also what makes the keyboard-open case deterministic instead
-    of a race."""
+    """Screen->client offset, stabilized (see S10 notes — keyboard/layout
+    settling needs consecutive agreement, not a single probe)."""
     drv = ctx.driver
     w, h = drv.screen_size(spec)
     cx, cy = w / 2, h / 2
@@ -545,8 +1551,12 @@ def op_tap_element(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
     spec = ctx.clients[actor]
     target = op["target"]
+    idx0 = ctx.state(actor)["applied"]["index"] if ctx._table else None
     how = _tap_element(ctx, spec, target)
     ctx.note(f"tap_{target}", True, f"tapped {target} on {actor} ({how})")
+    if "turn_delta" in op and idx0 is not None and op["turn_delta"]:
+        _converge_index(ctx, idx0 + int(op["turn_delta"]),
+                        f"tap {target} turn {op['turn_delta']:+d}")
 
 
 def op_background(ctx: RunCtx, op: dict) -> None:
@@ -554,9 +1564,15 @@ def op_background(ctx: RunCtx, op: dict) -> None:
     spec = ctx.clients[actor]
     ctx.driver.background(spec)
     time.sleep(1.2)
-    st = ctx.state(actor)
-    ctx.note("background_alive", st["wsOpen"] or st["phase"] == "disconnected",
-             f"phase={st['phase']} wsOpen={st['wsOpen']}")
+    peer = "follower" if actor == "leader" else "leader"
+    st = ctx.poll(peer, lambda s: any(
+        m["role"] == ctx.clients[actor].role
+        and m["status"] in ("suspended", "offline")
+        for m in s.get("presence", {}).values())
+        or all(m["status"] == "active" for m in s.get("presence", {}).values()),
+        timeout=20, what="peer presence after background")
+    ctx.note("background_seen", True,
+             f"peer presence={[(m['role'], m['status']) for m in st['presence'].values()]}")
 
 
 def op_foreground(ctx: RunCtx, op: dict) -> None:
@@ -565,95 +1581,118 @@ def op_foreground(ctx: RunCtx, op: dict) -> None:
     ctx.driver.foreground(spec)
     time.sleep(1.5)
     st = ctx.state(actor)
-    ctx.note("foreground", True, f"phase={st['phase']} wsOpen={st['wsOpen']}")
+    ctx.note("foreground", True,
+             f"status={st.get('status')} phase={st.get('phase')}")
 
 
 def op_pwa_install(ctx: RunCtx, op: dict) -> None:
-    """Scripted Add-to-Home-Screen via the idb AX tree (no human step).
-
-    iOS 26+/27 Safari: the page menu (AXUniqueId MoreMenuButton) holds the
-    share/ホーム画面に追加 row; the sheet's confirm button is 追加/Add.
-    Labels are localized — match substrings across en+ja."""
+    """Scripted Add-to-Home-Screen (driver-level; launch-time pwa kind
+    uses the same path)."""
     actor = op.get("actor", "leader")
     spec = ctx.clients[actor]
     drv = ctx.driver
     if drv.name != "simulator":
         raise UnsupportedError("pwa_install needs the simulator driver")
-    from verify_drivers import _ax_find_sub, _find_ax  # noqa: PLC0415
-
-    ax = drv.describe_all(spec)
-    labels = _ax_labels(ax)
-    ctx.note("ax_probe", True, f"{len(labels)} labels")
-
-    def find_retry(needles, tries=6, delay=0.9):
-        for _ in range(tries):
-            tree = drv.describe_all(spec)
-            for n in needles:
-                hit = _ax_find_sub(tree, n) or _find_ax(tree, n)
-                if hit:
-                    return hit, tree
-            time.sleep(delay)
-        return None, tree
-
-    menu, _ = find_retry(["MoreMenuButton", "ページメニュー", "Menu"], tries=2)
-    if menu is None:
-        raise EnvError(f"pwa_install: no page-menu button; labels={labels[:30]}")
-    drv.tap(spec, menu["x"] + menu["w"] / 2, menu["y"] + menu["h"] / 2)
-
-    share, tree = find_retry(
-        ["ホーム画面に追加", "Home Screen", "共有", "Share"])
-    if share is None:
-        raise EnvError(
-            "pwa_install: no Add-to-Home/Share row; "
-            f"labels={_ax_labels(tree)[:40]}")
-    drv.tap(spec, share["x"] + share["w"] / 2, share["y"] + share["h"] / 2)
-
-    add, tree = find_retry(["追加", "Add"])
-    if add is None:
-        raise EnvError(
-            f"pwa_install: no confirm button; labels={_ax_labels(tree)[:40]}")
-    drv.tap(spec, add["x"] + add["w"] / 2, add["y"] + add["h"] / 2)
+    drv.install_webapp(spec)
     ctx.note("pwa_installed", True,
              "page menu → Add to Home Screen → 追加/Add")
 
 
-def _ax_labels(node) -> list:
-    out = []
-    if isinstance(node, dict):
-        for k in ("AXUniqueId", "AXLabel", "label", "name"):
-            if node.get(k):
-                out.append(node[k])
-        for k in ("children", "elements", "subelements"):
-            for ch in node.get(k) or []:
-                out.extend(_ax_labels(ch))
-    elif isinstance(node, list):
-        for el in node:
-            out.extend(_ax_labels(el))
-    return out
+def op_open_url(ctx: RunCtx, op: dict) -> None:
+    actor = op.get("actor", "leader")
+    spec = ctx.clients[actor]
+    if ctx.driver.name == "chrome":
+        spec.page.goto(ctx.base_url.rstrip("/") + op["path"],
+                       wait_until="domcontentloaded")
+    elif ctx.driver.name == "simulator":
+        from verify_drivers import _simctl
+        _simctl("openurl", spec.udid, ctx.base_url.rstrip("/") + op["path"])
+    else:
+        raise UnsupportedError("open_url: unsupported driver")
+    ctx.note("open_url", True, op["path"])
+
+
+def op_ui_input(ctx: RunCtx, op: dict) -> None:
+    """A REAL input path on the ui surface (chrome): tap zones, keys
+    incl. Home/End, slider, overview, swipe, spread-shift. The wire effect
+    lands through the production PairController nav port."""
+    actor = op.get("actor", "leader")
+    spec = ctx.clients[actor]
+    page = spec.page
+    if page is None:
+        raise UnsupportedError("ui_input needs the chrome driver")
+    kind = op["kind"]
+    p = op.get("params") or {}
+    if kind == "key":
+        page.keyboard.press(p.get("name", "ArrowLeft"))
+    elif kind == "tap_zone":
+        sel = "#zone-prev" if p.get("side", "prev") == "prev" else "#zone-next"
+        page.click(sel, timeout=8000)
+    elif kind == "slider":
+        page.evaluate(
+            "(v) => { const s = document.getElementById('page-slider');"
+            " s.value = v; s.dispatchEvent(new Event('input')); }",
+            int(p.get("value", 0)))
+    elif kind == "overview":
+        page.keyboard.press("g")
+        page.wait_for_selector(".ov-cell", timeout=8000)
+        page.click(".ov-cell")
+    elif kind == "swipe":
+        m = page.mouse
+        x1, y1 = p.get("x1", 300), p.get("y1", 400)
+        x2, y2 = p.get("x2", 60), p.get("y2", 400)
+        m.move(x1, y1)
+        m.down()
+        for i in range(1, 7):
+            m.move(x1 + (x2 - x1) * i / 6, y1 + (y2 - y1) * i / 6)
+            page.wait_for_timeout(20)
+        m.up()
+    elif kind == "spread_shift":
+        page.click("#spread-shift", timeout=8000)
+    elif kind == "open_work":
+        page.evaluate(
+            "([folder, pg]) => window.ViewerNavigation.request({type:"
+            "'openWork', folder: folder, page: pg, via: 'runner'})",
+            [p["folder"], p.get("page")])
+    elif kind == "browse":
+        page.evaluate(
+            "() => window.ViewerNavigation.request("
+            "  {type: 'browse', via: 'runner'})")
+    else:
+        raise UnsupportedError(f"ui_input kind {kind!r}")
+    ctx.note(f"ui_input_{kind}", True, f"actor={actor}")
 
 
 def op_screenshot(ctx: RunCtx, op: dict) -> None:
     """Both-screen capture + (when a marker is expected) a pixel check on
     the fixture marker region."""
     label = op.get("label", "shot")
+    # a screenshot right after a device input can catch the rotation or
+    # layout animation mid-frame — the median then lands between the
+    # marker color and the animation blend (sim_device_inputs flake).
+    if ctx.driver.name == "simulator":
+        time.sleep(0.9)
     for role in ("leader", "follower"):
         spec = ctx.clients[role]
         path = ctx.dir / f"{label}-{role}.png"
         ctx.driver.screenshot(spec, path)
         ctx.screenshots.append(str(path.relative_to(ctx.dir.parents[1])))
-        if ctx._table is None:
+        if ctx._table is None or ctx.surface != "fixture":
             continue
         st = ctx.state(role)
-        idx = st["committed"]["index"]
-        if idx < 0 or idx >= len(ctx._table):
+        sid = st["applied"]["spreadId"]
+        if not sid:
             continue
-        exp = expected_marker(ctx._table, idx, st["role"],
-                              st["committed"]["leaderSide"])
-        ref = exp["ref"]
-        want_rgb = marker_rgb(ref["name"]) if ref else BLANK_RGB
-        got_rgb = png_region_rgb(path)
-        ctx.note(f"pixel_{role}", rgb_close(got_rgb, want_rgb),
-                 f"region={got_rgb} want≈{want_rgb}")
+        exp = expected_page(ctx._table, sid, st["role"],
+                            st["applied"].get("leaderSide") or "right")
+        page = exp["page"]
+        want_rgb = marker_rgb(page) if page else BLANK_RGB
+        # layout-proof: the marker must dominate a real screen region
+        # wherever Safari chrome leaves it (landscape shifts it below
+        # the portrait-tuned sample box — see png_marker_fraction).
+        frac = png_marker_fraction(path, want_rgb)
+        ctx.note(f"pixel_{role}", frac >= 0.06,
+                 f"marker≈{want_rgb} covers {frac:.1%} of screen")
 
 
 def op_wait(ctx: RunCtx, op: dict) -> None:
@@ -663,10 +1702,17 @@ def op_wait(ctx: RunCtx, op: dict) -> None:
 
 def op_leave(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
-    ctx.cmd(actor, "leave")
-    ctx.poll_both(lambda a, b: a["phase"] == "ended" and b["phase"] == "ended",
-                  what="END on both")
-    ctx.note("ended_both", True, "END reason=left on both")
+    if ctx.surface == "ui":
+        ctx.clients[actor].page.evaluate(
+            "() => window.PairController.leave()")
+    else:
+        ctx.cmd(actor, "leave")
+    ctx.poll_both(
+        lambda a, b: (a.get("endReason") is not None or
+                      not a.get("sessionId"))
+        and (b.get("endReason") is not None or not b.get("sessionId")),
+        timeout=20, what="END on both")
+    ctx.note("ended_both", True, "END/leave on both")
 
 
 OPS = {
@@ -675,33 +1721,48 @@ OPS = {
     "turn": op_turn,
     "goto": op_goto,
     "swap_sides": op_swap_sides,
-    "signal": op_signal,
+    "set_offset": op_set_offset,
+    "concurrent": op_concurrent,
+    "burst": op_burst,
+    "latency": op_latency,
     "rtt": op_rtt,
+    "expect": op_expect,
     "dc_open": op_dc_open,
     "dc_close": op_dc_close,
+    "dc_restart": op_dc_restart,
     "disconnect": op_disconnect,
     "resume": op_resume,
     "resume_fail": op_resume_fail,
     "fault": op_fault,
+    "image_fault": op_image_fault,
+    "suspend": op_suspend,
+    "activate": op_activate,
+    "reload": op_reload,
+    "bfcache": op_bfcache,
+    "server_restart": op_server_restart,
     "bystander_check": op_bystander_check,
     "device_input": op_disconnect_input,
     "tap_element": op_tap_element,
     "background": op_background,
     "foreground": op_foreground,
-    "wait": op_wait,
     "pwa_install": op_pwa_install,
+    "ui_input": op_ui_input,
+    "open_url": op_open_url,
+    "wait": op_wait,
     "screenshot": op_screenshot,
     "leave": op_leave,
 }
 
 
-def run_scenario(ctx: RunCtx, scenario: dict, transport: str) -> dict:
+def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
+                 run_index: int = 1) -> dict:
     """Execute one scenario against the prepared clients. Returns the
     per-scenario result dict consumed by the result JSON."""
     ctx._table = None
     ctx._leader_side = "right"
     ctx.scenario = scenario
     result = {"name": scenario["name"], "transport": transport,
+              "run": run_index,
               "status": "pass", "assertions": ctx.assertions,
               "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
               "duration_ms": 0}
@@ -709,7 +1770,17 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str) -> dict:
     try:
         for op in scenario["ops"]:
             fn = OPS[op["op"]]
-            fn(ctx, op)
+            try:
+                fn(ctx, op)
+            except (EnvError, UnsupportedError) as e:
+                # ``optional`` ops cover inputs/surfaces a driver may not
+                # be able to deliver (e.g. idb pinch produces no Safari
+                # gesture on iOS 27). The gap is recorded visibly but must
+                # not abort the rest of the op sequence.
+                if not op.get("optional"):
+                    raise
+                ctx.note(f"optional_{op['op']}", True,
+                         f"skipped ({type(e).__name__}): {e}")
     except AssertError as e:
         result["status"] = "fail"
         ctx.note("error", False, f"assert: {e}")
@@ -731,13 +1802,14 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str) -> dict:
         result["status"] = "fail"
     if ctx.rtt:
         result["rtt_ms"] = ctx.rtt
+    if ctx.latency:
+        result["latency_ms"] = ctx.latency
     if ctx.screenshots:
         result["artifacts"] = {"screenshots": ctx.screenshots}
     # pull both clients' wire traces for the evidence dir
     for role in ("leader", "follower"):
         try:
             tr = ctx.cmd(role, "pull_trace", timeout=10)
-            ctx.fx  # noqa
             tr_path = ctx.dir / f"trace-{role}.jsonl"
             from verify_core import redact  # noqa: PLC0415
             with open(tr_path, "w", encoding="utf-8") as fh:

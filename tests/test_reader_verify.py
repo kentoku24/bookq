@@ -363,3 +363,159 @@ def test_cli_bad_scenarios_file(tmp_path):
     rc = verify.main(["--driver", "chrome", "--scenarios", str(bad),
                       "--url", "http://127.0.0.1:1"])
     assert rc == core.EXIT_UNSUPPORTED
+
+
+# ── S11 (#86) additions ──────────────────────────────────────────────
+
+ops_mod = runner_module("verify_ops")
+
+
+def _summary_table():
+    """The fixture-reported manifest summary shape {id,r,l} — what every
+    expectation normalizes over (page names only, never folders)."""
+    return [
+        {"id": "c0:s0", "r": "p001.png", "l": "p002.png"},
+        {"id": "c0:s1", "r": "p003.png", "l": "p004.png"},
+        {"id": "c1:s0", "r": "q001.png", "l": "q002.png"},
+        {"id": "c1:s1", "r": "q003.png", "l": None},
+    ]
+
+
+def test_expected_page_summary_shape():
+    t = _summary_table()
+    e = core.expected_page(t, "c0:s0", "leader", "right")
+    assert e["side"] == "right" and e["page"] == "p001.png" and e["index"] == 0
+    e = core.expected_page(t, "c0:s0", "follower", "right")
+    assert e["side"] == "left" and e["page"] == "p002.png"
+    # swapped leader side flips the projection
+    e = core.expected_page(t, "c0:s1", "leader", "left")
+    assert e["side"] == "left" and e["page"] == "p004.png"
+    # blank side: page None -> BLANK marker
+    e = core.expected_page(t, "c1:s1", "follower", "right")
+    assert e["side"] == "left" and e["page"] is None
+    assert core.spread_table_index(t, "nope") == -1
+
+
+def test_turn_target_chapter_clamp():
+    t = _summary_table()
+    # cross-chapter clamp = global
+    assert ops_mod._turn_target(t, 0, 1, True) == 1
+    assert ops_mod._turn_target(t, 3, 1, True) == 3      # at end
+    assert ops_mod._turn_target(t, 1, -1, True) == 0
+    # chapter-limited stays inside the c{K} of the spread id
+    assert ops_mod._turn_target(t, 1, 1, False) == 1     # c0 hi bound
+    assert ops_mod._turn_target(t, 2, 1, False) == 3     # c1 can move
+    assert ops_mod._turn_target(t, 2, -1, False) == 2    # c0->c1 denied
+    assert ops_mod._turn_target(t, 0, -1, False) == 0
+    assert ops_mod._chapter_of("c1:s3") == 1
+
+
+def test_discover_work_validation(tmp_path):
+    def w(obj):
+        p = tmp_path / "sc.json"
+        p.write_text(json.dumps(obj))
+        return p
+    # discover works are legal declarations
+    data = core.load_scenarios(w({"scenarios": [
+        {"name": "a", "ops": [{"op": "open_work"}],
+         "work": {"discover": True, "minPages": 4}}]}))
+    assert data["scenarios"][0]["work"]["discover"] is True
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "open_work"}],
+             "work": {"discover": True, "minPages": 1}}]}))
+
+
+def test_repeat_and_clients_validation(tmp_path):
+    def w(obj):
+        p = tmp_path / "sc.json"
+        p.write_text(json.dumps(obj))
+        return p
+    data = core.load_scenarios(w({"scenarios": [
+        {"name": "a", "repeat": 3, "ops": [{"op": "pair"}],
+         "clients": {"leader": "safari", "follower": "pwa"}}]}))
+    plan, _ = core.resolve_plan(data, driver="simulator", route="lan",
+                                caps={"pwa"})
+    assert [e["run"] for e in plan] == [1, 2, 3]
+    plan2, _ = core.resolve_plan(data, driver="simulator", route="lan",
+                                 caps={"pwa"}, repeat=1)
+    assert len(plan2) == 1
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "pair"}],
+             "clients": {"leader": "electron"}}]}))
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "pair"}], "repeat": 0}]}))
+
+
+def test_concurrent_and_ui_input_validation(tmp_path):
+    def w(obj):
+        p = tmp_path / "sc.json"
+        p.write_text(json.dumps(obj))
+        return p
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "concurrent", "ops": []}]}]}))
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "concurrent", "ops": [
+                {"op": "dc_open"}]}]}]}))
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "ui_input", "kind": "warp"}]}]}))
+    with pytest.raises(core.ScenarioError):
+        core.load_scenarios(w({"scenarios": [
+            {"name": "a", "ops": [{"op": "pair", "via": "smoke"}]}]}))
+
+
+def test_redact_folder_keys():
+    wire = {"type": "OPEN_WORK",
+            "payload": {"folder": "実フォルダ/第1巻",
+                        "page": {"folder": "実フォルダ/第1巻",
+                                 "name": "p001.png"},
+                        "code": "123456"}}
+    r = core.redact(wire)
+    assert r["payload"]["folder"].startswith("sha256:")
+    assert "実フォルダ" not in json.dumps(r, ensure_ascii=False)
+    assert r["payload"]["page"]["name"] == "p001.png"   # page names stay
+    assert r["payload"]["code"] == "<redacted>"
+
+
+def test_leak_scan_in_self_check(tmp_path):
+    ev = core.EvidenceWriter("t-leak", tmp_path)
+    ev.write_json(ev.dir / "result.json", mini_result())
+    (ev.dir / "trace-leader.jsonl").write_text(
+        json.dumps({"type": "GOTO",
+                    "payload": {"page": {"folder": "SecretShelf",
+                                         "name": "p1.png"}}}) + "\n")
+    chk = core.self_check(ev, mini_result(), ["result.json"])
+    assert not chk["passed"] and chk["leaks"]
+    # redacted trace passes the scan
+    (ev.dir / "trace-leader.jsonl").write_text(
+        json.dumps(core.redact({"type": "GOTO", "payload": {
+            "page": {"folder": "SecretShelf", "name": "p1.png"}}}),
+            ensure_ascii=False) + "\n")
+    chk = core.self_check(ev, mini_result(), ["result.json"])
+    assert chk["passed"] and chk["leaks"] == []
+
+
+def test_expect_match_fields():
+    st = {"phase": "reading", "status": "connected",
+          "transport": "server-ws", "applied": {"index": 3,
+                                              "spreadId": "c0:s3"},
+          "rejected": ["peer_offline"],
+          "presence": {"a": {"status": "suspended"},
+                       "b": {"status": "suspended"}},
+          "marker": {"page": "p001.png", "side": "right",
+                     "imgState": "ok"},
+          "error": None, "endReason": None, "sessionId": "s"}
+    assert ops_mod._expect_match(st, {"phase": "reading",
+                                      "applied_index": 3})
+    assert ops_mod._expect_match(st, {"rejected": "peer_offline"})
+    assert ops_mod._expect_match(st, {"presence": "suspended"})
+    assert ops_mod._expect_match(st, {"img_state": "ok",
+                                      "marker_page": "p001.png"})
+    assert not ops_mod._expect_match(st, {"phase": "loading"})
+    assert not ops_mod._expect_match(st, {"rejected": "stale"})
+    assert not ops_mod._expect_match(st, {"presence": "active"})

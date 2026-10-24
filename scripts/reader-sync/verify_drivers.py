@@ -35,14 +35,36 @@ class ClientSpec:
     def __init__(self, client_id: str, role: str):
         self.id = client_id
         self.role = role
+        self.kind = "web"       # 'web' chrome | 'safari'|'pwa' simulator
         self.page = None        # chrome driver handle
         self.udid = None        # simulator driver handle
+        self.launch_url = None  # the URL the device opened (reload path)
 
     def __repr__(self):  # pragma: no cover
         return f"<ClientSpec {self.id}/{self.role}>"
 
 
 # ─────────────────────────── chrome driver ────────────────────────────
+
+
+# Injected before every page script: records live WebSockets so a scenario
+# can hard-drop the client's own socket from the runner side (the real
+# disconnect/resume path — not a synthetic flag).
+_WS_SPY = """(() => {
+  window.__wsConns = window.__wsConns || [];
+  if (window.WebSocket && window.WebSocket.__fxspied) return;
+  const Orig = window.WebSocket;
+  const Wrapped = function (url, protos) {
+    const ws = protos === undefined ? new Orig(url) : new Orig(url, protos);
+    window.__wsConns.push(ws);
+    return ws;
+  };
+  Wrapped.__fxspied = true;
+  Wrapped.prototype = Orig.prototype;
+  Wrapped.CONNECTING = 0; Wrapped.OPEN = 1;
+  Wrapped.CLOSING = 2; Wrapped.CLOSED = 3;
+  window.WebSocket = Wrapped;
+})();"""
 
 
 class ChromeDriver:
@@ -71,7 +93,7 @@ class ChromeDriver:
 
     # -- launch ------------------------------------------------------
 
-    def launch(self, clients: dict, urls: dict) -> None:
+    def launch(self, clients: dict, urls: dict, fx=None) -> None:
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
         try:
@@ -81,8 +103,10 @@ class ChromeDriver:
         for cid, spec in clients.items():
             ctx = self._browser.new_context(
                 viewport={"width": 390, "height": 844})
+            ctx.add_init_script(_WS_SPY)
             page = ctx.new_page()
             spec.page = page
+            spec.launch_url = urls[cid]
             self._contexts.append(ctx)
             page.goto(urls[cid], wait_until="domcontentloaded")
 
@@ -161,6 +185,16 @@ class ChromeDriver:
 
     def foreground(self, spec: ClientSpec) -> None:
         spec.page.evaluate("() => window.dispatchEvent(new Event('pageshow'))")
+
+    def close_ws(self, spec: ClientSpec) -> None:
+        """Hard-drop every live WebSocket this page owns — the real
+        disconnect path (client sees onclose, not a flag)."""
+        spec.page.evaluate(
+            "() => (window.__wsConns || []).forEach(w => {"
+            "  try { w.close(); } catch (e) {} })")
+
+    def reload(self, spec: ClientSpec) -> None:
+        spec.page.reload(wait_until="domcontentloaded")
 
     def devices(self, clients: dict) -> dict:
         return {cid: {"kind": "chromium-context",
@@ -248,14 +282,28 @@ class SimulatorDriver:
             time.sleep(1.0)
         raise EnvError(f"simulator {udid} did not boot in {timeout}s")
 
-    def launch(self, clients: dict, urls: dict) -> None:
+    def launch(self, clients: dict, urls: dict, fx=None) -> None:
         for cid, spec in clients.items():
             udid = self.udids[spec.role]
             spec.udid = udid
+            spec.launch_url = urls[cid]
             if udid not in self._pre_booted:
                 _simctl("boot", udid, check=False)   # already-booted → rc!=0
             self._wait_booted(udid)
-            _simctl("openurl", udid, urls[cid])
+        for cid, spec in clients.items():
+            _simctl("openurl", spec.udid, urls[cid])
+            if spec.kind == "pwa":
+                if fx is None:
+                    raise EnvError(
+                        "pwa client kind needs the fixture server")
+                fx.wait_hello(cid, timeout=60)          # Safari bootstrap
+                self.install_webapp(spec)
+                self.launch_webclip(spec)
+                hello = fx.wait_hello(cid, timeout=90, min_seq=2)
+                if not hello.get("standalone"):
+                    raise EnvError(
+                        f"pwa client {cid}: relaunched page is not "
+                        "standalone (webclip did not take over)")
 
     def stop(self) -> None:
         for udid, proc in list(self._recorders.items()):
@@ -349,8 +397,235 @@ class SimulatorDriver:
     def foreground(self, spec: ClientSpec) -> None:
         _simctl("launch", spec.udid, self.SAFARI)
 
+    # -- PWA web clip (#86: Safari×Safari / PWA×PWA / Safari×PWA) -----
+
+    WEBCLIP_LABELS = ("bookq reader-sync fixture", "reader-sync", "fx-")
+
+    def describe_point(self, spec: ClientSpec, x: float, y: float) -> dict:
+        """AX hit-test at a screen point. Unlike describe-all this sees
+        OUT-OF-PROCESS UI — the share sheet (UIActivityViewController) and
+        the Add-to-Home confirm panel never appear in the app's own tree,
+        but describe-point resolves them."""
+        out = _idb("ui", "describe-point", str(int(x)), str(int(y)),
+                   "--udid", spec.udid, "--json", timeout=30, check=False)
+        try:
+            return json.loads(out.stdout) if out.stdout else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _probe_point_label(self, spec: ClientSpec, needles,
+                           xs, ys, exact: bool = False) -> tuple | None:
+        """Scan a grid of screen points; return (x, y, label) of the first
+        hit whose element label contains (or, with exact, IS) any needle —
+        case-insensitive. exact matters for short labels like '追加':
+        substring matching also claims the sheet TITLE 'ホーム画面に追加'
+        and taps the title instead of the real Add button."""
+        for y in ys:
+            for x in xs:
+                el = self.describe_point(spec, x, y)
+                vals = [str(el.get(k)).strip() for k in _AX_MATCH_KEYS
+                        if isinstance(el.get(k), str)]
+                for n in needles:
+                    for v in vals:
+                        if (v.lower() == n.lower() if exact
+                                else n.lower() in v.lower()):
+                            return (x, y, v)
+        return None
+
+    def install_webapp(self, spec: ClientSpec) -> None:
+        """Scripted Add-to-Home-Screen via the idb AX tree (no human step).
+
+        iOS 26+/27 Safari flow (verified by hand on iPhone 17 sim):
+        page menu (MoreMenuButton) → 共有/Share → out-of-process share
+        sheet → expand the actions ('表示を増やす') → vertical action
+        list → 'ホーム画面に追加' → confirm '追加' top-right.
+        The share sheet is another process — only describe-point sees it,
+        so rows are located by scanning probe points, never by tree."""
+        def find_retry(needles, tries=6, delay=0.9):
+            tree = None
+            for _ in range(tries):
+                tree = self.describe_all(spec)
+                for n in needles:
+                    hit = _ax_find_sub(tree, n) or _find_ax(tree, n)
+                    if hit:
+                        return hit, tree
+                time.sleep(delay)
+            return None, tree
+
+        # Safari must be foreground on the fixture URL before the page
+        # menu exists — a mid-run surface switch can find SpringBoard or
+        # another app in the AX tree instead. openurl refocuses Safari on
+        # the right page (a duplicate tab is harmless for install).
+        _simctl("openurl", spec.udid, spec.launch_url)
+        time.sleep(2.0)
+        menu, _ = find_retry(["MoreMenuButton", "ページメニュー", "Menu"],
+                             tries=6)
+        if menu is None:
+            raise EnvError("pwa install: no page-menu button in AX tree")
+        self.tap(spec, menu["x"] + menu["w"] / 2, menu["y"] + menu["h"] / 2)
+        time.sleep(1.0)
+
+        # fast path: some iOS versions expose the Add-to-Home row directly
+        # in the page menu — tap it and skip the share sheet entirely.
+        direct, tree = find_retry(
+            ["ホーム画面に追加", "Add to Home Screen"], tries=2, delay=0.4)
+        if direct is not None:
+            self.tap(spec, direct["x"] + direct["w"] / 2,
+                     direct["y"] + direct["h"] / 2)
+        else:
+            share, _tree = find_retry(
+                ["共有", "Share", "ShareButton"], tries=4)
+            if share is None:
+                raise EnvError(
+                    "pwa install: no Add-to-Home/Share row in page menu")
+            self.tap(spec, share["x"] + share["w"] / 2,
+                     share["y"] + share["h"] / 2)
+            time.sleep(2.0)
+            self._share_add_to_home(spec)
+
+        # confirm sheet: 追加/Add sits top-right — describe-point scan.
+        # exact match: '追加' substring also matches the sheet title
+        # 'ホーム画面に追加' — that bug tapped the title and installed
+        # nothing while reporting success.
+        w, h = self.screen_size(spec)
+        hit = None
+        for _try in range(8):
+            hit = self._probe_point_label(
+                spec, ["追加", "Add"],
+                xs=[w * f / 8 for f in (5, 6, 7)],
+                ys=[h * f / 16 for f in (1, 2, 3)],
+                exact=True)
+            if hit:
+                break
+            time.sleep(0.8)
+        if hit is None:
+            raise EnvError("pwa install: no confirm button")
+        self.tap(spec, hit[0], hit[1])
+        time.sleep(1.5)   # webclip materializes on SpringBoard
+
+    _ADD_HOME_NEEDLES = ("ホーム画面に追加", "Add to Home Screen",
+                         "Add to Home")
+    _EXPAND_NEEDLES = ("表示を増やす", "Show More", "More Actions",
+                       "アクションを編集", "Edit Actions")
+
+    def _share_add_to_home(self, spec: ClientSpec) -> None:
+        """Inside the out-of-process share sheet: expand the action list
+        if needed, scroll it until ホーム画面に追加 is hit-testable, tap
+        it. Everything here is describe_point probing — the sheet has no
+        describe-all tree."""
+        w, h = self.screen_size(spec)
+        # 1) the row may already be visible in the expanded activity list
+        hit = self._probe_point_label(
+            spec, self._ADD_HOME_NEEDLES,
+            xs=[w / 2], ys=[h * f / 20 for f in range(11, 19)])
+        if hit is None:
+            # 2) expand the favorites action row ('表示を増やす') — it
+            #    turns into a vertically scrollable list of every action.
+            exp = self._probe_point_label(
+                spec, self._EXPAND_NEEDLES,
+                xs=[w * f / 8 for f in range(1, 8)],
+                ys=[h * f / 20 for f in range(14, 19)])
+            if exp:
+                self.tap(spec, exp[0], exp[1])
+                time.sleep(1.2)
+            # 3) scroll the action list upward until the row appears —
+            #    it sits deep below the favorites.
+            for _scroll in range(6):
+                hit = self._probe_point_label(
+                    spec, self._ADD_HOME_NEEDLES,
+                    xs=[w / 2], ys=[h * f / 20 for f in range(10, 19)])
+                if hit:
+                    break
+                self.swipe(spec, w / 2, h * 0.85, w / 2, h * 0.5,
+                           duration=0.5)
+                time.sleep(0.8)
+        if hit is None:
+            raise EnvError("pwa install: ホーム画面に追加 row not found "
+                           "in share sheet")
+        self.tap(spec, hit[0], hit[1])
+        time.sleep(1.5)
+
+    def _find_webclip(self, spec: ClientSpec):
+        """The installed web clip's icon on SpringBoard."""
+        tree = self.describe_all(spec)
+        for needle in self.WEBCLIP_LABELS:
+            hit = _ax_find_sub(tree, needle)
+            if hit:
+                return hit
+        return None
+
+    def launch_webclip(self, spec: ClientSpec,
+                       timeout: float = 30.0) -> None:
+        """Home → find the fixture web clip icon → tap it (a REAL
+        standalone PWA launch, navigator.standalone == true inside)."""
+        self.background(spec)
+        deadline = time.monotonic() + timeout
+        hit = None
+        while time.monotonic() < deadline and hit is None:
+            hit = self._find_webclip(spec)
+            if hit is None:
+                time.sleep(1.0)
+        if hit is None:
+            raise EnvError("pwa webclip icon not found on SpringBoard")
+        self.tap(spec, hit["x"] + hit["w"] / 2, hit["y"] + hit["h"] / 2)
+
+    def ensure_surface(self, spec: ClientSpec, kind: str, fx,
+                     client_id: str) -> None:
+        """Switch this client's surface between safari and pwa mid-run —
+        the spec's Safari×Safari / PWA×PWA / Safari×PWA matrix (#86).
+        pwa: install + webclip launch; safari: re-open the fixture URL in
+        Safari. Either way a NEW page load posts a new hello."""
+        if spec.kind == kind:
+            return
+        if kind == "pwa":
+            self.install_webapp(spec)
+            seq = fx.hello_seq(client_id)
+            self.launch_webclip(spec)
+            hello = fx.wait_hello(client_id, timeout=90, min_seq=seq + 1)
+            if not hello.get("standalone"):
+                raise EnvError(
+                    f"pwa client {client_id}: relaunch not standalone")
+        elif kind == "safari":
+            seq = fx.hello_seq(client_id)
+            _simctl("terminate", spec.udid, self.SAFARI, check=False)
+            time.sleep(1.0)
+            _simctl("openurl", spec.udid, spec.launch_url)
+            fx.wait_hello(client_id, timeout=90, min_seq=seq + 1)
+        else:
+            raise UnsupportedError(f"client kind {kind!r}")
+        spec.kind = kind
+
+    # -- reload --------------------------------------------------------
+
+    def reload(self, spec: ClientSpec) -> None:
+        """Reload the page under test.
+
+        Safari surface: tap the toolbar reload button when it is in the AX
+        tree (same tab → sessionStorage persists → credential resume path).
+        PWA surface: relaunch the web clip (a defined terminal either way —
+        web-clip storage may or may not restore credentials, and the ops
+        layer asserts the terminal reached)."""
+        if spec.kind == "pwa":
+            self.launch_webclip(spec, timeout=10.0)
+            return
+        tree = self.describe_all(spec)
+        hit = None
+        for needle in ("再読み込み", "Reload", "Reload Page", "更新"):
+            hit = _ax_find_sub(tree, needle)
+            if hit:
+                break
+        if hit is not None:
+            self.tap(spec, hit["x"] + hit["w"] / 2, hit["y"] + hit["h"] / 2)
+            return
+        # fallback: terminate + reopen — sessionStorage is gone, so the
+        # client lands at the defined solo/credentials_lost terminal.
+        _simctl("terminate", spec.udid, self.SAFARI, check=False)
+        time.sleep(1.0)
+        _simctl("openurl", spec.udid, spec.launch_url)
+
     def devices(self, clients: dict) -> dict:
-        return {cid: {"kind": "ios-simulator", "udid": spec.udid}
+        return {cid: {"kind": "ios-simulator", "udid": spec.udid,
+                      "surface": spec.kind}
                 for cid, spec in clients.items()}
 
 

@@ -1,208 +1,1242 @@
 {
-  "version": 1,
-  "scenarios": [
+ "comment": "S11 (#86) integrated regression suite — real PairClient wire path. Works are discovered off the target env's own tree; only page names ever land in evidence.",
+ "scenarios": [
+  {
+   "name": "normal_ws_navigation",
+   "repeat": 3,
+   "work": {
+    "discover": true,
+    "minPages": 8
+   },
+   "ops": [
     {
-      "name": "pair_and_signal",
-      "description": "CREATE/JOIN/APPROVE over real WS + SIGNAL relay in both directions + server RTT",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws", "webrtc-dc"],
-      "ops": [
-        {"op": "pair"},
-        {"op": "signal"},
-        {"op": "rtt", "samples": 6},
-        {"op": "screenshot", "label": "paired"},
-        {"op": "leave"}
-      ]
+     "op": "pair"
     },
     {
-      "name": "turn_convergence",
-      "description": "spread turns initiated by both sides; markers + committed index converge",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws", "webrtc-dc"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "screenshot", "label": "opened"},
-        {"op": "turn", "actor": "leader", "delta": 1},
-        {"op": "turn", "actor": "follower", "delta": 1},
-        {"op": "turn", "actor": "follower", "delta": -1},
-        {"op": "screenshot", "label": "turned"},
-        {"op": "swap_sides", "actor": "leader"},
-        {"op": "screenshot", "label": "swapped"},
-        {"op": "rtt", "samples": 5},
-        {"op": "leave"}
-      ]
+     "op": "open_work"
     },
     {
-      "name": "chapter_boundaries",
-      "description": "two-chapter work: turns never cross spread/chapter edges; blank side asserted",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws"],
-      "work": "fx_two_chapters",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "turn", "actor": "leader", "delta": -1},
-        {"op": "goto", "actor": "leader", "index": 1},
-        {"op": "turn", "actor": "follower", "delta": 1},
-        {"op": "screenshot", "label": "boundary"},
-        {"op": "goto", "actor": "leader", "index": 99},
-        {"op": "leave"}
-      ]
+     "op": "turn",
+     "delta": 1
     },
     {
-      "name": "work_change",
-      "description": "work switch mid-session: new spread table applies on both clients",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "turn", "actor": "leader", "delta": 1},
-        {"op": "open_work", "work": "fx5"},
-        {"op": "screenshot", "label": "work-switched"},
-        {"op": "turn", "actor": "follower", "delta": 1},
-        {"op": "leave"}
-      ]
+     "op": "turn",
+     "delta": 1
     },
     {
-      "name": "disconnect_resume",
-      "description": "follower drops the WS (peer sees offline), resumes, both keep the same spread",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "disconnect", "actor": "follower"},
-        {"op": "resume", "actor": "follower"},
-        {"op": "turn", "actor": "leader", "delta": 1},
-        {"op": "screenshot", "label": "resumed"},
-        {"op": "leave"}
-      ]
+     "op": "turn",
+     "delta": -1,
+     "actor": "follower"
     },
     {
-      "name": "resume_reject",
-      "description": "bad resume token is rejected (RESUME_REJECTED), then the real resume succeeds",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws"],
-      "ops": [
-        {"op": "pair"},
-        {"op": "disconnect", "actor": "follower"},
-        {"op": "resume_fail", "actor": "follower", "token": "bogus-token"},
-        {"op": "resume", "actor": "follower"},
-        {"op": "leave"}
-      ]
+     "op": "goto",
+     "index": 0
     },
     {
-      "name": "fault_injection_isolation",
-      "description": "dup+delay+drop injection on the fixture session only; a second bystander session on the same env is unaffected",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "fault", "actor": "leader", "type": "ws_dup"},
-        {"op": "turn", "actor": "leader", "delta": 1},
-        {"op": "fault", "actor": "leader", "type": "clear"},
-        {"op": "fault", "actor": "leader", "type": "ws_delay", "ms": 120},
-        {"op": "turn", "actor": "follower", "delta": 1},
-        {"op": "fault", "actor": "leader", "type": "clear"},
-        {"op": "fault", "actor": "leader", "type": "sig_delay", "ms": 150},
-        {"op": "turn", "actor": "leader", "delta": -1},
-        {"op": "fault", "actor": "leader", "type": "clear"},
-        {"op": "fault", "actor": "leader", "type": "ws_drop"},
-        {"op": "wait", "ms": 2500},
-        {"op": "fault", "actor": "leader", "type": "clear"},
-        {"op": "wait", "ms": 600},
-        {"op": "turn", "actor": "leader", "delta": -1},
-        {"op": "bystander_check"},
-        {"op": "leave"}
-      ]
+     "op": "swap_sides"
     },
     {
-      "name": "transport_switch",
-      "description": "SIGNAL-brokered datachannel: plane flips to webrtc-dc at a revision boundary, falls back on close",
-      "drivers": ["chrome", "simulator"],
-      "transports": ["server-ws"],
-      "requires": ["webrtc"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "dc_open"},
-        {"op": "turn", "actor": "leader", "delta": 1},
-        {"op": "turn", "actor": "follower", "delta": -1},
-        {"op": "dc_close"},
-        {"op": "turn", "actor": "leader", "delta": -1},
-        {"op": "leave"}
-      ]
+     "op": "swap_sides"
     },
     {
-      "name": "device_inputs",
-      "description": "simulator-only: real taps/text/swipe/pinch/rotate via idb; pairing driven through DOM buttons",
-      "drivers": ["simulator"],
-      "transports": ["server-ws"],
-      "requires": ["device_inputs"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair", "via": "taps"},
-        {"op": "open_work"},
-        {"op": "device_input", "actor": "leader", "kind": "swipe",
-         "params": {"x1": 320, "y1": 600, "x2": 60, "y2": 600, "duration": 0.2}},
-        {"op": "device_input", "actor": "follower", "kind": "pinch",
-         "params": {"x": 196, "y": 500, "scale": 0.6}},
-        {"op": "device_input", "actor": "leader", "kind": "rotate",
-         "params": {"orientation": "LANDSCAPE_LEFT"}},
-        {"op": "device_input", "actor": "leader", "kind": "rotate",
-         "params": {"orientation": "PORTRAIT"}},
-        {"op": "background", "actor": "follower"},
-        {"op": "foreground", "actor": "follower"},
-        {"op": "screenshot", "label": "inputs"},
-        {"op": "leave"}
-      ]
+     "op": "latency",
+     "samples": 6
     },
     {
-      "name": "pwa_install",
-      "description": "simulator-only: scripted Share -> Add to Home Screen -> Add via the idb AX tree",
-      "drivers": ["simulator"],
-      "transports": ["server-ws"],
-      "requires": ["pwa"],
-      "ops": [
-        {"op": "pair"},
-        {"op": "pwa_install", "actor": "leader"},
-        {"op": "screenshot", "label": "pwa"},
-        {"op": "leave"}
-      ]
+     "op": "screenshot",
+     "label": "final"
     },
     {
-      "name": "tailnet_ws",
-      "description": "tailnet-route marker: WS pairing across the tailscale serve proxy",
-      "drivers": ["chrome", "simulator"],
-      "route": "tailnet",
-      "transports": ["server-ws"],
-      "ops": [
-        {"op": "pair"},
-        {"op": "signal"},
-        {"op": "leave"}
-      ]
-    },
-    {
-      "name": "lan_direct",
-      "description": "lan-route marker: direct LAN env (./dev.sh up --local --fixture --port) over ws://",
-      "drivers": ["chrome", "simulator"],
-      "route": "lan",
-      "transports": ["server-ws"],
-      "work": "fx6",
-      "ops": [
-        {"op": "pair"},
-        {"op": "open_work"},
-        {"op": "turn", "actor": "leader", "delta": 1},
-        {"op": "leave"}
-      ]
+     "op": "leave"
     }
-  ]
+   ]
+  },
+  {
+   "name": "normal_dc_navigation",
+   "transports": [
+    "webrtc-dc"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "turn",
+     "delta": -1,
+     "actor": "follower"
+    },
+    {
+     "op": "swap_sides"
+    },
+    {
+     "op": "latency",
+     "samples": 6
+    },
+    {
+     "op": "dc_close"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "offset_rebuild",
+   "work": {
+    "discover": true,
+    "minPages": 5
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "set_offset",
+     "offset": 1
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "set_offset",
+     "offset": 0
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "offset1_initial_blank",
+   "work": {
+    "discover": true,
+    "minPages": 5,
+    "offset": 1
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "screenshot",
+     "label": "blank"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "edge_clamps",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": -1
+    },
+    {
+     "op": "goto",
+     "index": 1000
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "turn",
+     "delta": -1,
+     "actor": "follower"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "rapid_burst",
+   "work": {
+    "discover": true,
+    "minPages": 14
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "burst",
+     "count": 10,
+     "delta": 1
+    },
+    {
+     "op": "screenshot",
+     "label": "after-burst"
+    },
+    {
+     "op": "burst",
+     "count": 6,
+     "delta": -1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "concurrent_moves",
+   "work": {
+    "discover": true,
+    "minPages": 8
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "concurrent",
+     "ops": [
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "leader"
+      },
+      {
+       "op": "turn",
+       "delta": -1,
+       "actor": "follower"
+      },
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "leader"
+      }
+     ],
+     "expected_index": "any",
+     "expected_commits": [
+      2,
+      3
+     ]
+    },
+    {
+     "op": "concurrent",
+     "ops": [
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "leader"
+      },
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "follower"
+      },
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "follower"
+      }
+     ]
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "concurrent_absolute_race",
+   "work": {
+    "discover": true,
+    "minPages": 8
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "concurrent",
+     "expected_commits": [
+      2,
+      3
+     ],
+     "ops": [
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "leader"
+      },
+      {
+       "op": "swap_sides",
+       "actor": "leader"
+      },
+      {
+       "op": "turn",
+       "delta": 1,
+       "actor": "follower"
+      }
+     ]
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "leader_and_follower",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1,
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1,
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": -1,
+     "actor": "leader"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "suspend_gates_turn",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "suspend",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1,
+     "expect_reject": "peer_offline"
+    },
+    {
+     "op": "activate",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "disconnect_resume",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "disconnect",
+     "actor": "follower"
+    },
+    {
+     "op": "wait",
+     "ms": 800
+    },
+    {
+     "op": "resume",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "leader_disconnect_resume",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "disconnect",
+     "actor": "leader"
+    },
+    {
+     "op": "wait",
+     "ms": 800
+    },
+    {
+     "op": "resume",
+     "actor": "leader"
+    },
+    {
+     "op": "turn",
+     "delta": 1,
+     "actor": "follower"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "reload_resume",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "reload",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "reload_leader",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "reload",
+     "actor": "leader"
+    },
+    {
+     "op": "turn",
+     "delta": -1,
+     "actor": "follower"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "bfcache_roundtrip",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "bfcache",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "resume_bad_rejected",
+   "work": {
+    "discover": true,
+    "minPages": 4
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "resume_fail",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "stale_base_reject",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "fault",
+     "type": "stale_base",
+     "sub": 1,
+     "actor": "leader"
+    },
+    {
+     "op": "swap_sides",
+     "expect_reject": "stale_revision"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "dup_request_dedup",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "fault",
+     "type": "dup_next",
+     "actor": "leader"
+    },
+    {
+     "op": "turn",
+     "delta": 1,
+     "rev_delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "ws_dup_frames",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "fault",
+     "type": "ws_dup",
+     "actor": "leader"
+    },
+    {
+     "op": "turn",
+     "delta": 1,
+     "rev_delta": 1
+    },
+    {
+     "op": "fault",
+     "type": "clear",
+     "actor": "leader"
+    },
+    {
+     "op": "turn",
+     "delta": -1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "manifest_corrupt_recover",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "fault",
+     "type": "in_corrupt",
+     "frame": "MANIFEST",
+     "count": 1,
+     "actor": "leader"
+    },
+    {
+     "op": "open_work",
+     "phase": "loading",
+     "phase_actor": "leader",
+     "timeout": 20
+    },
+    {
+     "op": "expect",
+     "actor": "leader",
+     "error": "manifest_error",
+     "timeout": 10
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "manifest_drop_recover",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "fault",
+     "type": "in_drop",
+     "frame": "MANIFEST",
+     "count": 1,
+     "actor": "leader"
+    },
+    {
+     "op": "open_work",
+     "phase": "loading",
+     "phase_actor": "leader",
+     "timeout": 20
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "image_fault_visible",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "image_fault",
+     "mode": "404",
+     "actor": "leader"
+    },
+    {
+     "op": "expect",
+     "actor": "leader",
+     "img_state": "error"
+    },
+    {
+     "op": "expect",
+     "actor": "follower",
+     "img_state": "ok"
+    },
+    {
+     "op": "screenshot",
+     "label": "faulted"
+    },
+    {
+     "op": "image_fault",
+     "mode": "ok",
+     "actor": "leader"
+    },
+    {
+     "op": "expect",
+     "actor": "leader",
+     "img_state": "ok"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "image_fault_loading",
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "image_fault",
+     "mode": "off",
+     "actor": "follower"
+    },
+    {
+     "op": "expect",
+     "actor": "follower",
+     "img_state": "loading"
+    },
+    {
+     "op": "expect",
+     "actor": "leader",
+     "img_state": "ok"
+    },
+    {
+     "op": "image_fault",
+     "mode": "ok",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "signal_delay_dc",
+   "requires": [
+    "webrtc"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "fault",
+     "type": "sig_delay",
+     "ms": 400,
+     "actor": "leader"
+    },
+    {
+     "op": "fault",
+     "type": "sig_delay",
+     "ms": 400,
+     "actor": "follower"
+    },
+    {
+     "op": "dc_open"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "dc_restart"
+    },
+    {
+     "op": "turn",
+     "delta": -1
+    },
+    {
+     "op": "dc_close"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "fault_isolation_bystander",
+   "requires": [
+    "ws_bystander"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "fault",
+     "type": "ws_delay",
+     "ms": 300,
+     "actor": "leader"
+    },
+    {
+     "op": "fault",
+     "type": "ws_dup",
+     "actor": "leader"
+    },
+    {
+     "op": "bystander_check"
+    },
+    {
+     "op": "fault",
+     "type": "clear",
+     "actor": "leader"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "server_restart_repair",
+   "requires": [
+    "server_restart"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "server_restart"
+    },
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "sim_device_inputs",
+   "drivers": [
+    "simulator"
+   ],
+   "requires": [
+    "device_inputs"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "device_input",
+     "kind": "tap",
+     "params": {
+      "x": 0.08,
+      "y": 0.5
+     }
+    },
+    {
+     "op": "device_input",
+     "kind": "tap",
+     "params": {
+      "x": 0.92,
+      "y": 0.5
+     }
+    },
+    {
+     "op": "device_input",
+     "kind": "swipe",
+     "params": {
+      "x1": 0.8,
+      "x2": 0.2,
+      "y1": 0.5,
+      "y2": 0.5
+     },
+     "optional": true
+    },
+    {
+     "op": "device_input",
+     "kind": "pinch",
+     "params": {
+      "x": 0.5,
+      "y": 0.5,
+      "scale": 0.5
+     },
+     "optional": true
+    },
+    {
+     "op": "device_input",
+     "kind": "rotate",
+     "params": {
+      "orientation": "LANDSCAPE_LEFT"
+     }
+    },
+    {
+     "op": "screenshot",
+     "label": "rotated"
+    },
+    {
+     "op": "device_input",
+     "kind": "rotate",
+     "params": {
+      "orientation": "PORTRAIT"
+     }
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "sim_pair_via_taps",
+   "drivers": [
+    "simulator"
+   ],
+   "requires": [
+    "device_inputs"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair",
+     "via": "taps"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "tap_element",
+     "target": "fx-next",
+     "actor": "leader",
+     "turn_delta": 1
+    },
+    {
+     "op": "tap_element",
+     "target": "fx-prev",
+     "actor": "follower",
+     "turn_delta": -1
+    },
+    {
+     "op": "tap_element",
+     "target": "fx-swap",
+     "actor": "leader"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "sim_background_suspend",
+   "drivers": [
+    "simulator"
+   ],
+   "requires": [
+    "device_inputs"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "background",
+     "actor": "follower"
+    },
+    {
+     "op": "foreground",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "pwa_pair",
+   "drivers": [
+    "simulator"
+   ],
+   "requires": [
+    "pwa",
+    "device_inputs"
+   ],
+   "clients": {
+    "leader": "safari",
+    "follower": "pwa"
+   },
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "reload",
+     "actor": "follower"
+    },
+    {
+     "op": "screenshot",
+     "label": "pwa"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "pwa_both",
+   "drivers": [
+    "simulator"
+   ],
+   "requires": [
+    "pwa"
+   ],
+   "clients": {
+    "leader": "pwa",
+    "follower": "pwa"
+   },
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "ui_pair_and_inputs",
+   "drivers": [
+    "chrome"
+   ],
+   "surface": "ui",
+   "requires": [
+    "ui"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "ui_input",
+     "kind": "key",
+     "params": {
+      "name": "ArrowLeft"
+     }
+    },
+    {
+     "op": "expect",
+     "actor": "leader",
+     "phase": "reading"
+    },
+    {
+     "op": "ui_input",
+     "kind": "key",
+     "params": {
+      "name": "ArrowRight"
+     }
+    },
+    {
+     "op": "expect",
+     "actor": "follower",
+     "phase": "reading"
+    },
+    {
+     "op": "screenshot",
+     "label": "ui"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  }
+ ]
 }
