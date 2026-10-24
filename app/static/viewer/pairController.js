@@ -147,28 +147,20 @@
     var imgs = window.images || [];
     var i = typeof window.currentIdx === 'number' ? window.currentIdx : 0;
     for (var d = 0; d < imgs.length; d++) {
-      if (d === 0 && i >= 0 && i < imgs.length) {
-        var im = imgs[i];
-        if (im && !im.isSpacer && typeof im.name === 'string') {
-          return {folder: im.folder, name: im.name};
-        }
-      }
       var lo = i - d, hi = i + d;
-      if (d > 0) {
-        if (lo >= 0) {
-          var a = imgs[lo];
-          if (a && !a.isSpacer && typeof a.name === 'string') {
-            return {folder: a.folder, name: a.name};
-          }
+      if (lo >= 0) {
+        var a = imgs[lo];
+        if (a && !a.isSpacer && typeof a.name === 'string') {
+          return {folder: a.folder, name: a.name};
         }
-        if (hi < imgs.length) {
-          var b = imgs[hi];
-          if (b && !b.isSpacer && typeof b.name === 'string') {
-            return {folder: b.folder, name: b.name};
-          }
-        }
-        if (lo < 0 && hi >= imgs.length) break;
       }
+      if (d > 0 && hi < imgs.length) {
+        var b = imgs[hi];
+        if (b && !b.isSpacer && typeof b.name === 'string') {
+          return {folder: b.folder, name: b.name};
+        }
+      }
+      if (lo < 0 && hi >= imgs.length) break;
     }
     return null;
   }
