@@ -19,6 +19,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 oauth = OAuth()
 
 _TEST_MODE = os.getenv("BOOKQ_TEST_MODE", "").lower() == "true"
+_BOOKQ_ENV = os.getenv("BOOKQ_ENV", "").strip().lower()
+
+# Test mode bypasses authentication completely. The production deployment
+# sets BOOKQ_ENV explicitly so a leaked/misconfigured test flag fails closed
+# before the application starts serving requests.
+if _TEST_MODE and _BOOKQ_ENV == "production":
+    raise RuntimeError(
+        "BOOKQ_TEST_MODE=true is forbidden when BOOKQ_ENV=production; refusing to start"
+    )
 
 
 def init_oauth(settings: Settings):
