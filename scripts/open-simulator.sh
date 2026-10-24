@@ -3,23 +3,25 @@ set -euo pipefail
 # Usage: ./scripts/open-simulator.sh https://dev-xxx.<your-tailnet>.ts.net
 #       ./scripts/open-simulator.sh http://127.0.0.1:8080   # ./dev.sh up --local の環境
 #       SIMULATOR_DEVICE="iPad Pro 13-inch (M4) (16GB)" ./scripts/open-simulator.sh https://dev-xxx.<your-tailnet>.ts.net
-#       ./scripts/open-simulator.sh check | list | screenshot [path] | shutdown | verify | tap <x> <y> [--udid <udid>] | swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <udid>]
+#       ./scripts/open-simulator.sh check | list | screenshot [path] [--udid <udid>] | shutdown [--udid <udid>] | verify | open <url> [--udid <udid>] | tap <x> <y> [--udid <udid>] | swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <udid>]
 # iOS Simulator の Safari で URL を開くヘルパー
 # Supports both bare https:// URL and subcommands for backward compatibility
+# --udid を受け付ける subcommand は複数台同時起動 (#85 2台検証) でも対象を一意化する
 
 DEVICE=${SIMULATOR_DEVICE:-"iPhone 17"}
 [ -z "$DEVICE" ] && DEVICE="iPhone 17"
 
 usage() {
-  echo "Usage: $0 <dev-url> | $0 {check|list|screenshot [path]|shutdown|verify|tap <x> <y> [--udid <udid>]|swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <udid>]}" >&2
+  echo "Usage: $0 <dev-url> | $0 {check|list|screenshot [path] [--udid <u>]|shutdown [--udid <u>]|verify|open <url> [--udid <u>]|tap <x> <y> [--udid <u>]|swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <u>]}" >&2
   echo "  <dev-url>              https://... または http://127.0.0.1[:port] を Simulator の Safari で開く (?touch=1 を自動付与、recordVideoで赤丸表示)" >&2
   echo "  check                  Xcode / simctl / Runtime 前提チェック (idb 有無も表示)" >&2
   echo "  list                   利用可能な Simulator デバイス一覧" >&2
-  echo "  screenshot [path]      booted Simulator のスクリーンショット (default: /tmp/sim.png)" >&2
-  echo "  shutdown               booted Simulator を shutdown" >&2
+  echo "  screenshot [path] [--udid <u>]  Simulator のスクリーンショット (default: /tmp/sim.png; --udid省略時はbooted)" >&2
+  echo "  shutdown [--udid <u>]  Simulator を shutdown (--udid省略時はbooted)" >&2
   echo "  verify                 check → boot → open https://example.com → screenshot の一連検証" >&2
-  echo "  tap <x> <y> [--udid <udid>]  座標タップ (idb ui tap, --udid省略時はbooted UDIDを自動取得)" >&2
-  echo "  swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <udid>]  スワイプ (idb ui swipe, ?touch=1 前提で赤丸が追従)" >&2
+  echo "  open <url> [--udid <u>]  指定デバイスでURLを開く (デバイス名/UDID; --udid省略時はbooted解決)" >&2
+  echo "  tap <x> <y> [--udid <u>]  座標タップ (idb ui tap, --udid省略時はbooted UDIDを自動取得)" >&2
+  echo "  swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <u>]  スワイプ (idb ui swipe, ?touch=1 前提で赤丸が追従)" >&2
 }
 
 linux_skip() {
@@ -71,17 +73,45 @@ cmd_screenshot() {
   if ! command -v xcrun >/dev/null 2>&1; then
     linux_skip
   fi
-  local dest="${1:-/tmp/sim.png}"
-  xcrun simctl io booted screenshot "$dest"
-  echo "Screenshot saved to $dest"
+  local dest="/tmp/sim.png"
+  local udid="booted"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --udid)
+        if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+          echo "Error: --udid requires a value" >&2; exit 1
+        fi
+        udid="$2"; shift 2 ;;
+      --help|-h|help)
+        echo "Usage: $0 screenshot [path] [--udid <udid>]" >&2; exit 0 ;;
+      *)
+        dest="$1"; shift ;;
+    esac
+  done
+  xcrun simctl io "$udid" screenshot "$dest"
+  echo "Screenshot saved to $dest (device: $udid)"
 }
 
 cmd_shutdown() {
   if ! command -v xcrun >/dev/null 2>&1; then
     linux_skip
   fi
-  xcrun simctl shutdown booted
-  echo "Simulator shutdown (booted)"
+  local udid="booted"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --udid)
+        if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+          echo "Error: --udid requires a value" >&2; exit 1
+        fi
+        udid="$2"; shift 2 ;;
+      --help|-h|help)
+        echo "Usage: $0 shutdown [--udid <udid>]" >&2; exit 0 ;;
+      *)
+        echo "Error: unknown shutdown option: $1" >&2; exit 1 ;;
+    esac
+  done
+  xcrun simctl shutdown "$udid"
+  echo "Simulator shutdown ($udid)"
 }
 
 cmd_tap() {
@@ -222,8 +252,11 @@ with_touch_url() {
   fi
 }
 
-open_url() {
-  local url="$1"
+# open_url_on <url> <target> — target is a device name OR an explicit UDID.
+# With a UDID, openurl targets that device exactly — the ambiguity the
+# 'booted' alias has under two concurrently booted simulators (#85) is gone.
+open_url_on() {
+  local url="$1" target="$2"
   url="$(with_touch_url "$url")"
   # https:// は tailnet の dev-XX、http://127.0.0.1|localhost は ./dev.sh up --local。
   # Simulator は host network を共有するので loopback にそのまま到達でき、
@@ -237,31 +270,75 @@ open_url() {
     linux_skip
   fi
   # 既boot時は boot をskip（失敗は無視）
-  xcrun simctl boot "$DEVICE" 2>/dev/null || true
+  xcrun simctl boot "$target" 2>/dev/null || true
   open -a Simulator 2>/dev/null || true
   # Simulator の起動待ち — sleep 2 固定ではなく bootstatus でポーリング（最大30秒）
   local ready=0
   for _ in $(seq 1 30); do
-    if xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1; then ready=1; break; fi
+    if xcrun simctl bootstatus "$target" -b >/dev/null 2>&1; then ready=1; break; fi
     # booted エイリアスでも確認（DEVICE名解決が不安定な環境向けフォールバック）
-    if xcrun simctl bootstatus booted -b >/dev/null 2>&1; then ready=1; break; fi
+    if [ "$target" = "$DEVICE" ] && xcrun simctl bootstatus booted -b >/dev/null 2>&1; then ready=1; break; fi
     sleep 1
   done
   if [ "$ready" -eq 0 ]; then
-    echo "Error: timed out waiting for Simulator ($DEVICE) to boot (30s). Check 'xcrun simctl list | grep Booted'." >&2
+    echo "Error: timed out waiting for Simulator ($target) to boot (30s). Check 'xcrun simctl list | grep Booted'." >&2
     exit 1
   fi
-  if ! xcrun simctl openurl booted "$url"; then
-    echo "Error: failed to open $url in Simulator ($DEVICE). Check 'xcrun simctl list | grep Booted' if multiple simulators are booted." >&2
+  if ! xcrun simctl openurl "$target" "$url"; then
+    echo "Error: failed to open $url in Simulator ($target)." >&2
     exit 1
   fi
+  echo "Opened $url in Simulator ($target)"
+}
+
+open_url() {
+  local url="$1"
+  if ! command -v xcrun >/dev/null 2>&1; then
+    linux_skip
+  fi
+  open_url_on "$url" "$DEVICE"
   # 複数台 boot 時の警告（booted はいずれか1台に解決される）
   local booted_count
   booted_count=$(xcrun simctl list devices booted 2>/dev/null | grep -c "Booted" || true)
   if [ "${booted_count:-0}" -gt 1 ]; then
-    echo "Note: multiple simulators are booted ($booted_count). 'booted' opened on one of them; check 'xcrun simctl list | grep Booted'." >&2
+    echo "Note: multiple simulators are booted ($booted_count). For an unambiguous target use '$0 open <url> --udid <UDID>'." >&2
   fi
-  echo "Opened $url in Simulator ($DEVICE)"
+}
+
+# open <url> [--udid <udid>] — explicit-device variant for multi-sim runs.
+cmd_open() {
+  if ! command -v xcrun >/dev/null 2>&1; then
+    linux_skip
+  fi
+  local url="" udid=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --udid)
+        if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+          echo "Error: --udid requires a value" >&2; exit 1
+        fi
+        udid="$2"; shift 2 ;;
+      --help|-h|help)
+        echo "Usage: $0 open <url> [--udid <udid>]" >&2; exit 0 ;;
+      http://*|https://*)
+        url="$1"; shift ;;
+      *)
+        echo "Error: unknown open option: $1" >&2; exit 1 ;;
+    esac
+  done
+  if [ -z "$url" ]; then
+    echo "Error: open requires a URL" >&2
+    echo "Usage: $0 open <url> [--udid <udid>]" >&2
+    exit 1
+  fi
+  if [ -z "$udid" ]; then
+    udid=$(xcrun simctl list devices booted -j 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((dev['udid'] for runtimes in d.get('devices',{}).values() for dev in runtimes if dev.get('state')=='Booted'), ''))" 2>/dev/null || true)
+    if [ -z "$udid" ]; then
+      echo "Error: no booted Simulator and no --udid given." >&2
+      exit 1
+    fi
+  fi
+  open_url_on "$url" "$udid"
 }
 
 cmd_verify() {
@@ -298,10 +375,16 @@ case "$1" in
     cmd_list
     ;;
   screenshot)
-    cmd_screenshot "${2:-}"
+    shift
+    cmd_screenshot "$@"
     ;;
   shutdown)
-    cmd_shutdown
+    shift
+    cmd_shutdown "$@"
+    ;;
+  open)
+    shift
+    cmd_open "$@"
     ;;
   verify)
     cmd_verify
