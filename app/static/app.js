@@ -869,14 +869,9 @@
   spreadShift.addEventListener("click", e => {
     e.stopPropagation();
     if (pageMode !== 'spread' || !images.length) return;
-    spreadOffset = spreadOffset === 0 ? 1 : 0;
-    rebuildSpreads();
-    regroupCells();
-    updateStripPositions();
-    syncChapterSlider(currentIdx, {resetMax:true});
-    snapTo(currentIdx, false);
-    updateShiftButtonStyle();
-    scheduleUrlSync();
+    // Offset change is a user movement request — one setOffset intent
+    // through the navigation port (default handler applies it locally).
+    window.ViewerNavigation.request({type: "setOffset", offset: spreadOffset === 0 ? 1 : 0, via: "spread-shift"});
   });
 
   spreadToggle.addEventListener("click", e => {
@@ -986,10 +981,11 @@
     if (sidebar.classList.contains("open")) {
       updateResumeButton();
       if (currentFolder) {
-        // Opening the sidebar over a reader returns to the browse level (and
-        // its #/browse/… URL) instead of leaving a stale #/view/… hash while
-        // the browse grid is on screen.
-        returnToBrowse();
+        // Opening the sidebar over a reader is a "back to the folder list"
+        // request — it goes through the navigation port (default handler
+        // returns to the browse level and its #/browse/… URL, which keeps
+        // a stale #/view/… hash off screen while the grid is up).
+        window.ViewerNavigation.request({type: "browse", via: "sidebar"});
       } else {
         if (searchMode) window.BrowseRender.renderBrowse({mode: 'list', results: searchResults});
         else window.BrowseRender.renderBrowse({mode: viewMode, results: null});
@@ -1310,9 +1306,7 @@
         if(!el || !tileGrid.contains(el)) return;
         if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
         if(el.dataset.readChild === "1" || el.dataset.readSelf === "1"){
-          currentFolder = el.dataset.path;
-          closeSidebar();
-          loadImages(el.dataset.path);
+          navOpenWork(el.dataset.path, "tile");
           return;
         }
         const path = el.dataset.path;
@@ -1323,9 +1317,7 @@
           if(node && m && (path in m)) hasOnly = !!m[path];
           else hasOnly = folderHasOnlyImages(node);
           if (node && hasOnly){
-            currentFolder = path;
-            closeSidebar();
-            loadImages(path);
+            navOpenWork(path, "tile");
           } else {
             navigateToFolder(path);
           }
@@ -1343,9 +1335,7 @@
         if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
         const path = el.dataset.path;
         if (!path) return;
-        currentFolder = path;
-        closeSidebar();
-        loadImages(path);
+        navOpenWork(path, "search");
         searchInput.value = "";
         searchMode = false;
         searchResults = [];
@@ -2602,6 +2592,162 @@
     snapTo(spreads[t].pages[0]);
   }
 
+  // ── navigation port (viewer/navigation.js — dual-reader S02) ──
+  // Every user movement below is a typed intent handed to
+  // ViewerNavigation.request(). soloNavHandler is the DEFAULT handler:
+  // it reproduces the pre-port behaviour byte-for-byte, so an installed
+  // comm/pairing handler receives the identical intents a solo session
+  // would have applied locally. Committed remote state returns through
+  // ViewerNavigation.applyCommittedState → applyCommittedNav — never
+  // through request(), so it can never echo as a fresh user intent.
+  // Intent payloads carry PageRef {folder, name} values — no DOM nodes,
+  // no local globalIdx.
+  function navFromChapter(){
+    if (!images.length || !chapterList.length) return null;
+    const ch = chapterList[getCurrentChapterInfo(currentIdx).chapterIdx];
+    return ch ? ch.fullPath : (currentFolder || null);
+  }
+  function navPageRefAt(idx){
+    const im = images[idx];
+    return (im && !im.isSpacer) ? {folder: im.folder, name: im.name} : null;
+  }
+  function navIndexForRef(ref){
+    if (!ref || typeof ref !== "object") return -1;
+    for (let i = 0; i < images.length; i++){
+      const im = images[i];
+      if (im && !im.isSpacer && im.folder === ref.folder && im.name === ref.name) return i;
+    }
+    return -1;
+  }
+  function navTurn(delta, crossChapter, via){
+    window.ViewerNavigation.request({type: "turn", delta: delta, crossChapter: crossChapter, fromChapter: navFromChapter(), via: via});
+  }
+  function navGotoIdx(idx, via, opts){
+    const page = navPageRefAt(idx);
+    if (!page) return;
+    window.ViewerNavigation.request(Object.assign({type: "goto", page: page, via: via}, opts));
+  }
+  function navOpenWork(folder, via){
+    window.ViewerNavigation.request({type: "openWork", folder: folder, via: via});
+  }
+
+  // The swipe-commit display path: the strip is already dragged under the
+  // finger, so a committed turn animates from the dragged position and the
+  // real snap lands on a deferred finalizer. The finalizer is generation-
+  // guarded — a remote committed state (applyCommittedState) supersedes it.
+  function commitSwipeTurn(delta){
+    const curSpread = spreadOf(currentIdx);
+    const maxSpread = Math.max(0, spreads.length - 1);
+    let newSpread = Math.max(0, Math.min(curSpread + delta, maxSpread));
+    if (spreads.length) {
+      const cr = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx);
+      newSpread = Math.max(cr.lo, Math.min(newSpread, cr.hi));
+    }
+    const newIdx = spreads[newSpread] ? spreads[newSpread].pages[0] : currentIdx;
+    if (newIdx === currentIdx) { snapTo(newIdx); return; }  // clamped at a chapter/book edge: bounce-back
+    // Animate the track smoothly to the target page's position using the
+    // CURRENT base coordinate system — then re-base invisibly.
+    ensureWindow(newIdx);
+    scheduleDeferredFetches(newIdx); // ensureStripImage judged "near" against the OLD currentIdx
+    const targetOffset = pageOffsetPx(newIdx);
+    track.style.transition = "transform .25s cubic-bezier(0.25,0.1,0.25,1.0)";
+    track.offsetHeight; // force reflow so transition applies from current position
+    track.style.transform = "translateX(" + targetOffset + "px)";
+    const navTok = window.ViewerNavigation.generation();
+    let finalized = false;
+    const finalize = () => {
+      if (finalized) return;
+      finalized = true;
+      track.removeEventListener("transitionend", finalize);
+      if (navTok !== window.ViewerNavigation.generation()) return; // superseded by a committed state
+      track.style.transition = "none";
+      snapTo(newIdx, false);
+    };
+    track.addEventListener("transitionend", finalize);
+    setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
+  }
+
+  // The default (solo) request handler — the same code that used to run
+  // inline at each input site, dispatched by intent.
+  function soloNavHandler(intent){
+    switch (intent.type) {
+      case "turn":
+        if (intent.via === "swipe") { commitSwipeTurn(intent.delta); return; }
+        if (intent.delta > 0) goNext({crossChapter: intent.crossChapter});
+        else goPrev({crossChapter: intent.crossChapter});
+        return;
+      case "goto": {
+        const idx = navIndexForRef(intent.page);
+        if (idx < 0) return;
+        // Overview's exit needs its thumbnail crossfade over the new page;
+        // every other goto is a plain snap (animated unless told otherwise).
+        if (intent.via === "overview") { snapTo(idx, false); window.Overview.crossfade(idx); return; }
+        snapTo(idx, intent.animate !== false);
+        return;
+      }
+      case "setOffset":
+        spreadOffset = intent.offset;
+        rebuildSpreads();
+        regroupCells();
+        updateStripPositions();
+        syncChapterSlider(currentIdx, {resetMax:true});
+        snapTo(currentIdx, false);
+        updateShiftButtonStyle();
+        scheduleUrlSync();
+        return;
+      case "openWork": {
+        const folder = intent.folder;
+        if (intent.via === "resume") {
+          // Continue-reading: a saved folder that is no longer a leaf steps
+          // out to its browse parent first, then opens on a beat (unchanged
+          // resume behaviour).
+          const node = getNodeAt(folder);
+          if (!(node && folderHasOnlyImages(node))) {
+            currentBrowsePath = browseParentOf(folder);
+            updateBrowseHeader();
+            renderView();
+            writeBrowseState();
+            setTimeout(() => { currentFolder = folder; closeSidebar(); loadImages(folder); }, 100);
+            return;
+          }
+        }
+        currentFolder = folder;
+        closeSidebar();
+        loadImages(folder);
+        return;
+      }
+      case "browse":
+        returnToBrowse();
+        return;
+    }
+  }
+
+  // applyCommittedState's display side: resolve the committed anchor to a
+  // local page index and snap there. §3.6: the anchor is the spread's
+  // first real page. Receives typed PageRef/Spread values — never a
+  // local globalIdx. Must never call request() (receive-only channel).
+  function applyCommittedNav(snapshot, manifest, options){
+    let ref = null;
+    const sid = snapshot && snapshot.spreadId;
+    const plan = manifest && manifest.spreads;
+    if (sid && Array.isArray(plan)){
+      for (let i = 0; i < plan.length; i++){
+        const s = plan[i];
+        if (s && s.id === sid) { ref = s.right || s.left || null; break; }
+      }
+    }
+    if (!ref && manifest && manifest.page) ref = manifest.page;
+    const idx = navIndexForRef(ref);
+    if (idx < 0) return;              // unresolvable commit: gen bumped, no display move
+    if (dragActive) abortDrag();      // a commit supersedes a half-finished drag
+    snapTo(idx, false);
+  }
+
+  try {
+    window.ViewerNavigation.setDefaultHandler(soloNavHandler);
+    window.ViewerNavigation.onCommittedState(applyCommittedNav);
+  } catch(e) { console.warn(e); }
+
   function showHint(){
     hint.classList.add("show");
     clearTimeout(hintTimer);
@@ -2697,8 +2843,11 @@
   // dormant twins and turn nothing.
   try {
     window.suppressClickFor = suppressClickFor;
-    window.viewerGoNext = () => goNext({crossChapter:true});
-    window.viewerGoPrev = () => goPrev({crossChapter:true});
+    // viewer/zoom.js drives the page turn at the pan clamp edge — it is a
+    // user movement request like the tap zones (crossChapter), so it goes
+    // through the navigation port rather than calling goNext/goPrev.
+    window.viewerGoNext = () => { if (images.length) navTurn(1, true, "edge"); };
+    window.viewerGoPrev = () => { if (images.length) navTurn(-1, true, "edge"); };
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__suppressClickActive = () => suppressClickNow();
     if (window.__BOOKQ_TEST_MODE__ === 'true') window.__tapForward = () => tapForward;
     // classifyTouchEnd is a hoisted declaration below (tap-vs-swipe line) —
@@ -2715,8 +2864,8 @@
     if (!images.length) return;
     const rect = imgContainer.getBoundingClientRect();
     const frac = (clientX - rect.left) / Math.max(1, rect.width);
-    if (frac < 0.30){ if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); }
-    else if (frac > 0.70){ if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); }
+    if (frac < 0.30){ if (tapForward === 'left') navTurn(1, true, "tap"); else navTurn(-1, true, "tap"); }
+    else if (frac > 0.70){ if (tapForward === 'left') navTurn(-1, true, "tap"); else navTurn(1, true, "tap"); }
     else toggleToolbarZone();
   }
   function toggleToolbarZone(){
@@ -2750,7 +2899,7 @@
   tapmodeLeft.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); setTapForward('left'); });
   tapmodeRight.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); setTapForward('right'); });
   setTapForward('left', {notify:false});
-  zonePrev.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') goNext({crossChapter:true}); else goPrev({crossChapter:true}); });
+  zonePrev.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') navTurn(1, true, "tap"); else navTurn(-1, true, "tap"); });
   zoneToggle.addEventListener("click", e => {
     e.stopPropagation();
     // toggleToolbarZone owns the zoomed branch (and the reason it must ignore
@@ -2758,14 +2907,14 @@
     if (suppressClickNow() && !window.Zoom.isActive()) return;
     toggleToolbarZone();
   });
-  zoneNext.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') goPrev({crossChapter:true}); else goNext({crossChapter:true}); });
+  zoneNext.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') navTurn(-1, true, "tap"); else navTurn(1, true, "tap"); });
 
   // ── keyboard ──
   document.addEventListener("keydown", e => {
     if (e.target.tagName === "INPUT") return;
     switch(e.key){
-      case "ArrowRight": goPrev(); break;
-      case "ArrowLeft": goNext(); break;
+      case "ArrowRight": if (images.length) navTurn(-1, false, "key"); break;
+      case "ArrowLeft": if (images.length) navTurn(1, false, "key"); break;
       case "f": case "F":
   sidebar.classList.toggle("open");
   viewer.classList.toggle("sidebar-open");
@@ -2780,8 +2929,8 @@
     hideResumeBtn();
   }
   break;
-      case "Home": if(images.length && spreads.length){ const r = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx); snapTo(spreads[r.lo].pages[0], false); } break;
-      case "End": if(images.length && spreads.length){ const r = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx); snapTo(spreads[r.hi].pages[0]); } break;
+      case "Home": if(images.length && spreads.length){ const r = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx); navGotoIdx(spreads[r.lo].pages[0], "key", {animate:false}); } break;
+      case "End": if(images.length && spreads.length){ const r = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx); navGotoIdx(spreads[r.hi].pages[0], "key"); } break;
     }
   });
 
@@ -2789,7 +2938,7 @@
     if (!images.length) return;
     const sliderVal = Number(pageSlider.value);
     const newIdx = chapterSliderToIdx(currentChapterIdx, sliderVal);
-    snapTo(newIdx);
+    navGotoIdx(newIdx, "slider");
   });
 
   let hDragState = 'idle';
@@ -3381,25 +3530,14 @@
     }
     const newIdx = spreads[newSpread] ? spreads[newSpread].pages[0] : currentIdx;
 
+    if (advanced !== 0) {
+      // One committed swipe = one turn request. The display work (slide to
+      // the target page + the deferred snapTo finalizer) runs inside the
+      // navigation handler; a remote committed state can still supersede
+      // that finalizer via ViewerNavigation.generation().
+      window.ViewerNavigation.request({type: "turn", delta: advanced, crossChapter: false, fromChapter: navFromChapter(), via: "swipe"});
+    }
     if (newIdx !== currentIdx) {
-      // Page change: animate the track smoothly to the target page's position
-      // using the CURRENT base coordinate system — then re-base invisibly.
-      ensureWindow(newIdx);
-      scheduleDeferredFetches(newIdx); // ensureStripImage judged "near" against the OLD currentIdx
-      const targetOffset = pageOffsetPx(newIdx);
-      track.style.transition = "transform .25s cubic-bezier(0.25,0.1,0.25,1.0)";
-      track.offsetHeight; // force reflow so transition applies from current position
-      track.style.transform = "translateX(" + targetOffset + "px)";
-      let finalized = false;
-      const finalize = () => {
-        if (finalized) return;
-        finalized = true;
-        track.removeEventListener("transitionend", finalize);
-        track.style.transition = "none";
-        snapTo(newIdx, false);
-      };
-      track.addEventListener("transitionend", finalize);
-      setTimeout(finalize, 260);  // fallback if transitionend doesn't fire
       e.preventDefault();
       dropTapFocus();
       dismissOutsidePopovers();
@@ -3409,7 +3547,10 @@
       // and turn the page after the reader cancelled — preventDefault ends that.
       e.preventDefault();
       dismissOutsidePopovers();
-      snapTo(newIdx);   // same page: bounce-back animation
+      if (advanced === 0) snapTo(newIdx);   // same page: bounce-back animation
+      // advanced !== 0 clamped at a chapter/book edge lands here too — the
+      // handler's commitSwipeTurn already ran the same bounce-back inside
+      // request() above.
     }
   });
 
@@ -3463,24 +3604,7 @@
     const bookName = folderPath.split("/").pop();
     resumeBtnText.textContent = `📖 続きから: ${truncateMiddle(bookName)} p.${data.page + 1}`;
     showResumeBtn();
-    resumeBtn.onclick = () => {
-      const node = getNodeAt(folderPath);
-      if (node && folderHasOnlyImages(node)) {
-        currentFolder = folderPath;
-        closeSidebar();
-        loadImages(folderPath);
-      } else {
-        currentBrowsePath = browseParentOf(folderPath);
-        updateBrowseHeader();
-        renderView();
-        writeBrowseState();
-        setTimeout(() => {
-          currentFolder = folderPath;
-          closeSidebar();
-          loadImages(folderPath);
-        }, 100);
-      }
-    };
+    resumeBtn.onclick = () => navOpenWork(folderPath, "resume");
   }
 
   // ── save progress on tab visibility change ──
