@@ -284,6 +284,11 @@ body.overview-open #toolbar>*,body.overview-open #spread-controls>*,body.overvie
 #spread-toggle:active{background:rgba(60,60,60,.9)}
 #spread-toggle.hidden{opacity:0;pointer-events:none}
 body.landscape #spread-controls,body.landscape-single #spread-controls{display:flex}
+/* Paired dual-reader: the ◀ shift (SET_OFFSET) is the only spread control
+   that still means something — show it in any orientation and drop the 2P
+   toggle, which is a local solo layout switch. */
+#img-container.pair-mode ~ #spread-controls{display:flex}
+#img-container.pair-mode ~ #spread-controls #spread-toggle{display:none}
 /* spread-shift button: shifts page pairing in landscape 2P mode */
 #spread-shift{display:inline-flex;align-items:center;justify-content:center;background:rgba(30,30,30,0.6);color:#bbb;border:1px solid #555;border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer;transition:opacity .25s,background .15s;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);min-width:44px;min-height:44px}
 #spread-shift:hover{background:rgba(40,40,40,.8);color:#ddd}

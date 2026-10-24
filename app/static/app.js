@@ -912,6 +912,13 @@
 
   function updateShiftButtonStyle(){
     if (!spreadShift) return;
+    // Paired: the lit state tracks the shared session offset, not local
+    // solo layout.
+    if (pairStrip && pairStrip.active){
+      if (pairStrip.offset === 1) spreadShift.classList.add("active");
+      else spreadShift.classList.remove("active");
+      return;
+    }
     if (pageMode === 'spread' && spreadOffset === 1) spreadShift.classList.add("active");
     else spreadShift.classList.remove("active");
   }
@@ -2965,6 +2972,7 @@
     // The session's shared offset rides the manifest — the ◀ control reads
     // it to ask for the toggle (SET_OFFSET), never a local rebuild.
     pairStrip.offset = (manifest && typeof manifest.offset === "number") ? manifest.offset : 0;
+    updateShiftButtonStyle();
     const wireSpreads = (manifest && (manifest.spreadTable || manifest.spreads)) || [];
     let pageRefs = (manifest && Array.isArray(manifest.pageRefs)) ? manifest.pageRefs : null;
     if (!pageRefs){
