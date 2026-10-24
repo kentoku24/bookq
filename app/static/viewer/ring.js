@@ -155,7 +155,7 @@
       }
     }
     function layout() {
-      if (config.isMoving()) { layoutDirty = true; return; }
+      if (config.isMoving()) { layoutDirty = true; scheduleIdleLayout(); return; }
       layoutDirty = false;
       if (slots) for (var sl of slots) positionSlot(sl);
       flushPrefetch();
