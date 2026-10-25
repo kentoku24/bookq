@@ -758,6 +758,19 @@
       return _startEntry('JOIN', {code: code}, null);
     }
 
+    /* One-tap pairing: the server binds the caller as follower when a
+     * fresh waiting session exists, else as a waiting leader. Resolves
+     * {ambiguous, candidates} when several sessions wait — the caller
+     * picks one through the classic join(code). Resolves {unsupported}
+     * when the peer's server predates MATCH, so the UI can fall back. */
+    function match() {
+      if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
+      _teardownLink();
+      _resetSession();
+      // role decided by the server — no _roleIntent yet
+      return _startEntry('MATCH', {}, null);
+    }
+
     function resume() {
       if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
       if (_member && _linkOpen()) {
@@ -998,9 +1011,17 @@
       _unlater('attempt');
       if (p === _entry) {
         _entry = null;
-        _bindFromAck(f.data || {});
+        var d = f.data || {};
+        if (p.type === 'MATCH' && d.ambiguous) {
+          // several waiting sessions — unbound; caller picks via join(code)
+          try { p.res(d); } catch (e) {}
+          _teardownLink();
+          _notify();
+          return;
+        }
+        _bindFromAck(d);
         if (p.type === 'RESUME') _event('resumed', {});
-        p.res(f.data || {});
+        p.res(d);
       } else {
         p.res(f.data || {});
       }
@@ -1027,6 +1048,14 @@
           }
           p.rej(_err('ERR_REJECTED', reason));
           _terminate('ended', end);
+          return;
+        }
+        if (p.type === 'MATCH') {
+          // pre-MATCH server — resolve so the caller falls back to the
+          // classic choice instead of surfacing a dead-end error.
+          try { p.res({unsupported: reason}); } catch (e) {}
+          _teardownLink();
+          _notify();
           return;
         }
         _roleIntent = null;
@@ -1469,6 +1498,7 @@
     var api = {
       create: create,
       join: join,
+      match: match,
       approve: approve,
       reject: reject,
       resume: resume,

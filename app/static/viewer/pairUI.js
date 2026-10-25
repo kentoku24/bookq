@@ -3,8 +3,14 @@
  *
  * Driven by an INJECTED controller — real sync wiring lands in S09 (#84).
  * Controller interface (parent issue #75 §3.3/§3.5):
- *   { create(), join(code), approve(), reject(), leave(), swapSides(),
- *     subscribe(cb) -> unsubscribe, state }
+ *   { create(), join(code), connect(), approve(), reject(), leave(),
+ *     swapSides(), subscribe(cb) -> unsubscribe, state }
+ * connect() is the one-tap MATCH op: tap the launcher while idle and the
+ * server binds this device as follower of a fresh waiting session or as a
+ * new waiting leader. It resolves {ambiguous, candidates} when several
+ * sessions wait (picker → classic join(code)) and {unsupported} on a
+ * pre-MATCH server (classic choice remains). Controllers without
+ * connect() keep the legacy 開始/参加 choice on launcher tap.
  * state shape this UI renders (all fields optional except status):
  *   status : 'idle' | 'connecting' | 'connected' | 'reconnecting'
  *          | 'peer-away' | 'loading' | 'error' | 'ended'
@@ -19,9 +25,10 @@
  * Injection: set window.PairController before this script evaluates
  * (defer order), or call window.PairUI.init({controller}) / .attach(c).
  * With no controller the UI still opens and shows 未接続; controller calls
- * no-op. The UI NEVER calls the controller on open/close alone — only on
- * explicit button activation — and pairing-UI gestures are stopped before
- * they can reach the viewer's page-turn / toolbar / keyboard paths.
+ * no-op. The idle launcher tap IS the pairing gesture — it fires
+ * connect() immediately; open/close beyond that never call the
+ * controller, and pairing-UI gestures are stopped before they can reach
+ * the viewer's page-turn / toolbar / keyboard paths.
  */
 (function () {
   'use strict';
@@ -49,6 +56,8 @@
   let unsubscribe = null;
   let open_ = false;
   let joinView = false;   // local UI state: the code-entry form is showing
+  let joinPending = false; // a join() is in flight from the join view
+  let pickList = null;    // ambiguous MATCH candidates awaiting a pick
   let scanStream = null;  // live camera stream while the join view is open
   let scanRAF = 0;
   let scanCanvas = null;
@@ -92,10 +101,16 @@
           '</div>' +
         '</div>' +
         '<div id="pair-sec-leader" class="pair-sec" hidden>' +
-          '<p class="pair-note">相手の端末でこのコードを入力してください</p>' +
+          '<p class="pair-note">もう1台が接続ボタンを押すと自動でつながります</p>' +
           '<div id="pair-code-value" aria-label="ペアリングコード">------</div>' +
           '<canvas id="pair-qr" width="144" height="144" aria-label="ペアリングQRコード" hidden></canvas>' +
+          '<button id="pair-leader-join" type="button" class="pair-link">コードで参加する</button>' +
           '<button id="pair-leader-cancel" type="button">キャンセル</button>' +
+        '</div>' +
+        '<div id="pair-sec-picker" class="pair-sec" hidden>' +
+          '<p class="pair-note">接続先を選んでください</p>' +
+          '<div id="pair-picker-list"></div>' +
+          '<button id="pair-picker-back" type="button">キャンセル</button>' +
         '</div>' +
         '<div id="pair-sec-waiting" class="pair-sec" hidden>' +
           '<p id="pair-waiting-text" class="pair-note">承認を待っています…</p>' +
@@ -121,15 +136,18 @@
     if (built) return;
     built = true;
 
-    // Launcher lives in the viewer toolbar — same affordance family as ☰/⊞.
-    const btn = document.createElement('button');
-    btn.id = 'pair-btn';
-    btn.type = 'button';
-    btn.title = '2台で見開き';
-    btn.setAttribute('aria-label', '2台で見開き');
-    btn.textContent = '🔗';
-    const toolbar = _el('toolbar');
-    (toolbar || document.body).appendChild(btn);
+    // Launcher lives statically in the tile/sidebar header (index.html);
+    // fall back to a JS twin when the shell predates it.
+    let btn = _el('pair-btn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'pair-btn';
+      btn.type = 'button';
+      btn.title = '2台で見開き';
+      btn.setAttribute('aria-label', '2台で見開き');
+      btn.textContent = '🔗';
+      (_el('sidebar-header') || document.body).appendChild(btn);
+    }
 
     // Persistent status chip — THE state indicator. role=status makes it the
     // aria-live region for every state change (polite, atomic).
@@ -175,7 +193,11 @@
       scanVideo: _el('pair-scan-video'),
       codeValue: _el('pair-code-value'),
       qr: _el('pair-qr'),
+      leaderJoin: _el('pair-leader-join'),
       leaderCancel: _el('pair-leader-cancel'),
+      secPicker: _el('pair-sec-picker'),
+      pickerList: _el('pair-picker-list'),
+      pickerBack: _el('pair-picker-back'),
       waitingText: _el('pair-waiting-text'),
       waitingCancel: _el('pair-waiting-cancel'),
       sessionInfo: _el('pair-session-info'),
@@ -201,7 +223,14 @@
     let label = STATUS_LABEL[status] || status;
     if (status === 'connected' && role) label += '（' + role + '）';
     els.status.dataset.status = status;
+    // The strip only exists while a session is (or is becoming) real —
+    // solo reading never sees it. Tap → the session panel.
+    els.status.hidden = status === 'idle' || status === 'ended';
     els.statusText.textContent = label;
+    if (els.btn) {
+      els.btn.dataset.status = status;
+      els.btn.dataset.role = role || '';
+    }
 
     const sideText = SIDE_LABEL[s.side] || '';
     els.side.textContent = sideText;
@@ -212,7 +241,7 @@
 
     let sec;
     if (status === 'idle' || status === 'ended') {
-      sec = joinView ? els.secJoin : els.secChoice;
+      sec = pickList ? els.secPicker : (joinView ? els.secJoin : els.secChoice);
     } else if (status === 'connecting') {
       sec = role === 'leader' ? els.secLeader : els.secWaiting;
     } else if (status === 'error') {
@@ -221,9 +250,24 @@
       sec = els.secSession;
     }
     const secs = [els.secChoice, els.secJoin, els.secLeader,
-                  els.secWaiting, els.secSession, els.secError];
+                  els.secWaiting, els.secSession, els.secError, els.secPicker];
     for (const e of secs) show(e, e === sec);
     if (sec !== els.secJoin) stopScan();
+
+    if (sec === els.secPicker) {
+      els.pickerList.innerHTML = '';
+      for (const c of pickList || []) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pair-pick';
+        b.textContent = (c.leaderName ? c.leaderName + ' — ' : '') + c.code;
+        b.addEventListener('click', () => {
+          pickList = null;
+          if (ctl) ctl.join(c.code);
+        });
+        els.pickerList.appendChild(b);
+      }
+    }
 
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
@@ -260,7 +304,7 @@
 
   function firstControl() {
     const secs = [els.secJoin, els.secLeader, els.secWaiting,
-                  els.secSession, els.secError, els.secChoice];
+                  els.secSession, els.secError, els.secPicker, els.secChoice];
     const sec = secs.find(e => e && !e.hidden);
     const t = sec && sec.querySelector('input, button:not([disabled])');
     return t || els.close;
@@ -287,6 +331,7 @@
     if (!open_) return;
     open_ = false;
     joinView = false;
+    pickList = null;
     stopScan();
     els.overlay.classList.add('hidden');
     if (inertSnapshot) {
@@ -312,6 +357,7 @@
     const v = els.codeInput.value.replace(/\D/g, '').slice(0, 6);
     if (v !== els.codeInput.value) els.codeInput.value = v;
     els.joinSubmit.disabled = v.length !== 6;
+    if (v.length === 6) submitJoin();   // no extra tap: 6th digit submits
   }
 
   function onCodePaste(e) {
@@ -326,7 +372,8 @@
 
   function submitJoin() {
     const v = els.codeInput.value;
-    if (!/^\d{6}$/.test(v) || !ctl) return;
+    if (!/^\d{6}$/.test(v) || !ctl || joinPending) return;
+    joinPending = true;   // cleared when the join view re-opens
     ctl.join(v);
   }
 
@@ -341,7 +388,9 @@
     }
     if (qrDrawnFor === code) { els.qr.hidden = false; return; }
     const qr = window.qrcode(0, 'M');
-    qr.addData(code);
+    // URL-QR: any camera app deep-links straight into join — the code is
+    // in the fragment so it never reaches access logs or cache keys.
+    qr.addData(location.origin + '/#/join/' + code);
     qr.make();
     const n = qr.getModuleCount();
     const cell = Math.max(1, Math.floor(els.qr.width / (n + 8)));  // +quiet zone
@@ -404,13 +453,16 @@
       try {
         const img = cx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
         const res = window.jsQR(img.data, img.width, img.height);
-        if (res && /^\d{6}$/.test(res.data)) {
-          const code = res.data;
-          stopScan();
-          els.codeInput.value = code;
-          sanitizeCode();
-          submitJoin();
-          return;
+        if (res) {
+          // accept both a bare 6-digit code and the #/join/ deep-link URL
+          const code = /^\d{6}$/.test(res.data) ? res.data
+            : (res.data.match(/#\/join\/(\d{6})/) || [])[1];
+          if (code) {
+            stopScan();
+            els.codeInput.value = code;
+            sanitizeCode();   // auto-submits at 6 digits
+            return;
+          }
         }
       } catch (e) { /* decode errors are per-frame — keep scanning */ }
     }
@@ -432,7 +484,33 @@
   // ── events ──
 
   function wireEvents() {
-    els.btn.addEventListener('click', e => { e.stopPropagation(); open(); });
+    // The idle launcher tap is the whole pairing gesture: fire connect()
+    // (server-side MATCH) and show the panel tracking its outcome. A
+    // controller without connect() gets the legacy 開始/参加 choice.
+    els.btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const s = st();
+      if ((s.status !== 'idle' && s.status !== 'ended') ||
+          !ctl || typeof ctl.connect !== 'function') {
+        open();
+        return;
+      }
+      open();
+      let res;
+      try { res = ctl.connect(); } catch (err) { res = null; }
+      if (res && typeof res.then === 'function') {
+        res.then(r => {
+          if (r && r.ambiguous && Array.isArray(r.candidates) &&
+              r.candidates.length) {
+            pickList = r.candidates;
+            if (open_) render(); else open();
+          } else if (open_) {
+            render();
+          }
+        }).catch(() => {});
+      }
+    });
+    els.status.addEventListener('click', e => { e.stopPropagation(); open(); });
     els.close.addEventListener('click', close);
     els.errorClose.addEventListener('click', close);
     els.errorLeave.addEventListener('click', () => { if (ctl) ctl.leave(); });
@@ -471,6 +549,7 @@
     els.create.addEventListener('click', () => { if (ctl) ctl.create(); });
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
+      joinPending = false;
       render();
       // Camera is the primary entry path here; no autofocus so the soft
       // keyboard stays down over the live preview.
@@ -484,6 +563,19 @@
       firstControl().focus();
     });
     els.joinSubmit.addEventListener('click', submitJoin);
+    // The waiting leader can still join someone else's code — leave the
+    // own waiting session first so it does not linger orphaned.
+    els.leaderJoin.addEventListener('click', () => {
+      if (ctl) ctl.leave();
+      joinView = true;
+      joinPending = false;
+      render();
+      startScan();
+    });
+    els.pickerBack.addEventListener('click', () => {
+      pickList = null;
+      render();
+    });
     els.codeInput.addEventListener('input', sanitizeCode);
     els.codeInput.addEventListener('paste', onCodePaste);
     els.codeInput.addEventListener('keydown', e => {

@@ -397,6 +397,19 @@
   }
 
   function applyUrlState() {
+    // #/join/<6桁> — pairing deep link (URL-QR): consumed ONCE via
+    // replaceState. It is a join input, never a view/browse state, so it
+    // must not reach the parsers below or pollute the url stack.
+    var jm = (location.hash || '').match(/^#\/join\/(\d{6})$/);
+    if (jm) {
+      try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+      try { urlStackReplace(location.pathname + location.search); } catch (e) {}
+      var pc = window.PairController;
+      if (pc && typeof pc.join === 'function') {
+        try { pc.join(jm[1]); } catch (e) {}
+      }
+      return;
+    }
     reconcileUrlStack();
     var st = parseViewerHash();
     var bs = parseBrowseHash();
