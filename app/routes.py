@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -1467,7 +1468,12 @@ def _validate_position_payload(body) -> dict:
     ts = body.get("ts")
     if ts is None:
         ts = int(time.time() * 1000)
-    elif isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts < 0:
+    elif (
+        isinstance(ts, bool)
+        or not isinstance(ts, (int, float))
+        or not math.isfinite(ts)  # json.loads accepts NaN/Infinity; int() would 500
+        or ts < 0
+    ):
         raise HTTPException(status_code=400, detail="invalid ts")
     return {"folder": folder, "page": page, "total": total, "ts": int(ts)}
 
@@ -1476,6 +1482,8 @@ def _validate_position_payload(body) -> dict:
 async def get_reading_position(request: Request, user: dict = Depends(require_auth)):
     """Return the caller's single latest reading position (null when unset)."""
     rec = _positions(request).get(_position_user_key(user))
+    if rec and rec.get("tombstone"):
+        rec = None  # wiped slot reads as empty; the tombstone only rejects PUTs
     return JSONResponse(
         content={"position": rec},
         headers={"Cache-Control": "no-store"},
@@ -1484,7 +1492,15 @@ async def get_reading_position(request: Request, user: dict = Depends(require_au
 
 @api_router.put("/api/reading-position")
 async def put_reading_position(request: Request, user: dict = Depends(require_auth)):
-    """Store the caller's latest reading position. Last-writer-wins, one slot."""
+    """Store the caller's latest reading position — newest client ts wins.
+
+    Arrival order alone can't express "this PUT left its device before the
+    stored record was written" (retry backlogs, keepalive retransmits,
+    cross-device writes), so a stored record rejects strictly-older PUTs.
+    A tombstone (left by DELETE) also rejects the wiped record itself — the
+    wiped ts is still "equal", not newer — so another device's self-heal
+    can't resurrect a wiped position.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -1493,6 +1509,12 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
     rec["updated_at"] = time.time()
     positions = _positions(request)
     key = _position_user_key(user)
+    stored = positions.get(key)
+    if stored:
+        threshold = stored.get("ts", 0)
+        stale = rec["ts"] <= threshold if stored.get("tombstone") else rec["ts"] < threshold
+        if stale:
+            return {"status": "stale"}
     if key not in positions and len(positions) >= _POSITION_MAX_USERS:
         # Bound the map under a misconfigured deployment — the email
         # allowlist keeps this unreachable in practice.
@@ -1503,7 +1525,29 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
 
 
 @api_router.delete("/api/reading-position")
-async def delete_reading_position(request: Request, user: dict = Depends(require_auth)):
-    """Clear the caller's stored reading position (harness 全消去)."""
-    _positions(request).pop(_position_user_key(user), None)
+async def delete_reading_position(
+    request: Request, hard: bool = False, user: dict = Depends(require_auth)
+):
+    """Clear the caller's stored reading position (harness 全消去).
+
+    Leaves a tombstone carrying the wiped record's ts: PUTs at-or-older
+    than it are rejected, so a stale in-flight write or another device's
+    boot self-heal of the same record can't resurrect the position. A
+    genuinely newer read always lands.
+
+    ``?hard=1`` (test mode only) removes the slot entirely — the conftest
+    reset fixture needs a truly clean slate, since a tombstone would
+    legitimately reject the next test's freshly-written record.
+    """
+    positions = _positions(request)
+    key = _position_user_key(user)
+    if hard and auth_module._TEST_MODE:
+        positions.pop(key, None)
+        return {"status": "ok"}
+    prev = positions.get(key)
+    positions[key] = {
+        "tombstone": True,
+        "ts": (prev or {}).get("ts", 0),
+        "updated_at": time.time(),
+    }
     return {"status": "ok"}
