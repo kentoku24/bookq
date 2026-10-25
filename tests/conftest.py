@@ -318,6 +318,28 @@ def server(downloads_tree: Path) -> str:
     proc.wait(timeout=5)
 
 
+@pytest.fixture(autouse=True)
+def _reset_reading_position(request):
+    """Clear the session server's in-memory resume point before each test.
+
+    `server` is session-scoped, so app.state.reading_positions survives across
+    tests: a page turn's debounced PUT in one test would leak into the NEXT
+    test's boot pull, merge into its fresh localStorage, and steer the opened
+    page off "1 / N". Every UI fixture funnels through `server` (it's a
+    transitive fixturename), so the check covers all browser tests while pure
+    unit tests skip the HTTP call entirely. Autouse at function scope runs
+    before the `page` fixture's goto — the reset always lands first.
+    """
+    if "server" not in request.fixturenames:
+        return
+    try:
+        base_url = request.getfixturevalue("server")
+        req = urllib.request.Request(base_url + "/api/reading-position", method="DELETE")
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception:
+        pass  # best-effort — a dead server fails the test properly later
+
+
 @pytest.fixture(scope="session")
 def browser():
     with sync_playwright() as p:
