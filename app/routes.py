@@ -1422,6 +1422,10 @@ async def serve_thumb_sprite(
 # folder path is opaque data: it is never resolved against the filesystem
 # here, only echoed back, so no containment check applies.
 _POSITION_MAX_USERS = 100
+# How far into the future a client ts may reach before being clamped.
+# 5 minutes tolerates ordinary clock drift while bounding a wrong-clock
+# write's damage to the same window.
+_POSITION_TS_FUTURE_SLACK_MS = 300_000
 
 
 def _positions(request: Request) -> dict:
@@ -1506,6 +1510,16 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     rec = _validate_position_payload(body)
+    # Reject far-future ts: one wrong-clock device must not poison the
+    # slot — an unchecked future ts would reject every honest PUT as
+    # stale, and even the DELETE tombstone would inherit it. Clamping is
+    # NOT a fix: a continuously-writing skewed device would keep its
+    # record ~slack ahead of real time and block honest writes forever.
+    # Dropping (400) leaves the honest record in place; the client treats
+    # non-retryable 4xx as a drop, so a wrong-clock device simply doesn't
+    # sync until its clock is fixed.
+    if rec["ts"] > int(time.time() * 1000) + _POSITION_TS_FUTURE_SLACK_MS:
+        raise HTTPException(status_code=400, detail="ts too far in the future")
     rec["updated_at"] = time.time()
     positions = _positions(request)
     key = _position_user_key(user)
