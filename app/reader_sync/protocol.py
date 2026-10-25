@@ -125,6 +125,11 @@ def _validate_payload(t: str, p: dict) -> None:
     elif t == "SWAP_SIDES":
         if p.get("leaderSide") not in SIDES:
             _fail(ERR_RANGE, "SWAP_SIDES.leaderSide must be right|left")
+    elif t == "MATCH":
+        pick = p.get("pick")
+        if pick is not None and (
+                not isinstance(pick, str) or not (1 <= len(pick) <= 64)):
+            _fail(ERR_MALFORMED, "MATCH.pick must be a token str")
     elif t == "JOIN":
         code = p.get("code")
         if not isinstance(code, str) or len(code) != 6 or not code.isdigit():

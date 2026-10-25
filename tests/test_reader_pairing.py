@@ -850,19 +850,81 @@ def test_match_excludes_paired_and_pending_sessions():
     assert data2["sessionId"] != data["sessionId"]
 
 
-def test_match_ambiguous_returns_candidates_and_stays_unbound():
+def test_match_never_hijacks_a_create_session():
+    """A CREATE waiting room belongs to whoever the code was shown to —
+    one-tap MATCH must not poach it, even while it is fresh."""
     clock = FakeClock()
     reg = _reg(clock)
-    a, b, c = _connect(reg, "a"), _connect(reg, "b"), _connect(reg, "c")
-    ca, _ = _create_session(reg, a)
-    cb, _ = _create_session(reg, b)
+    a = _connect(reg, "a")
+    created, _ = _create_session(reg, a)
+    b = _connect(reg, "b")
+    data = _match(reg, b)
+    assert data["role"] == "leader"
+    assert data["sessionId"] != created["sessionId"]
+    # the code holder still joins the CREATE session normally
+    c = _connect(reg, "c")
+    joined = _join(reg, c, created["code"])
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"] == joined["memberId"]
+
+
+def test_match_ambiguous_returns_tokens_and_stays_unbound():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    # Two 'match'-origin waiters can only coexist through a leader
+    # outage: B's MATCH runs while A's leader link is dead, then A
+    # resumes on a fresh link — two eligible candidates.
+    ca = _match(reg, a)
+    reg.detach_link(a)
+    cb = _match(reg, b)
+    assert cb["role"] == "leader" and cb["sessionId"] != ca["sessionId"]
+    back = _connect(reg, "a2")
+    _send(reg, back, _request(
+        "RESUME",
+        {"memberId": ca["memberId"], "resumeToken": ca["resumeToken"]},
+        session_id=ca["sessionId"]))
+    assert _one(back.frames(), "ACK")["request"] == "RESUME"
+
+    c = _connect(reg, "c")
     data = _match(reg, c)
     assert data["ambiguous"] is True
-    assert {x["code"] for x in data["candidates"]} == {ca["code"], cb["code"]}
+    assert len(data["candidates"]) == 2
+    # candidates carry an opaque pick token and NEVER the human code —
+    # leaking it would let a picker consume the code a real partner is
+    # still typing.
+    assert all("code" not in cand for cand in data["candidates"])
+    assert all(isinstance(cand["id"], str) and cand["id"]
+               for cand in data["candidates"])
+    assert {cand["leaderName"] for cand in data["candidates"]} == {"a", "b"}
     assert c.member is None
-    # classic join still pairs with the picked code
-    _join(reg, c, ca["code"])
-    assert _one(a.frames(), "JOIN_REQUEST")["memberId"] == c.member.id
+
+    # the picker re-MATCHes with the chosen token
+    pick = data["candidates"][0]["id"]   # oldest first == session A
+    _send(reg, c, _request("MATCH", {"pick": pick}, request_id="m2"))
+    ack = _one(c.frames(), "ACK")
+    assert ack["request"] == "MATCH"
+    assert ack["data"]["role"] == "follower"
+    assert ack["data"]["sessionId"] == ca["sessionId"]
+    assert _one(back.frames(), "JOIN_REQUEST")["memberId"] == c.member.id
+
+
+def test_match_pick_rejects_unknown_or_gone_token():
+    clock = FakeClock()
+    reg = _reg(clock)
+    c = _connect(reg, "c")
+    _send(reg, c, _request("MATCH", {"pick": "no-such-token"}, request_id="m1"))
+    rej = _one(c.frames(), "REJECT")
+    assert rej["reason"] == REASON_BAD_CODE
+
+    # a token for a session that got paired in the meantime is stale
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    ca = _match(reg, a)
+    _match(reg, b)   # pairs with A
+    _send(reg, c, _request(
+        "MATCH", {"pick": reg.sessions[ca["sessionId"]].match_token},
+        request_id="m2"))
+    rej = _one(c.frames(), "REJECT")
+    assert rej["reason"] == REASON_BAD_CODE
 
 
 def test_match_excludes_session_with_dead_leader():

@@ -1053,7 +1053,8 @@ def test_match_sends_match_and_binds_acked_role(pc_page):
 
 def test_match_ambiguous_resolves_candidates_and_stays_unbound(pc_page):
     """Several waiting sessions -> {ambiguous, candidates}, no member bind;
-    the picked code goes out as a normal JOIN."""
+    a pick goes back out as MATCH{pick:token} — the human code never
+    leaves the waiting leader's own screen."""
     res = pc_page.evaluate(
         """async () => {
           const rig = window.__mkRig();
@@ -1063,25 +1064,26 @@ def test_match_ambiguous_resolves_candidates_and_stays_unbound(pc_page):
           s.fire({v: 1, type: 'HELLO', link: 'l1'});
           const req = s.sent[s.sent.length - 1];
           s.fire(rig.ack(req, {ambiguous: true, candidates: [
-            {code: '111111', leaderName: 'A', ageSec: 3},
-            {code: '222222', leaderName: 'B', ageSec: 7}]}));
+            {id: 'tok-a', leaderName: 'A', ageSec: 3},
+            {id: 'tok-b', leaderName: 'B', ageSec: 7}]}));
           const data = await pr;
           const midStatus = c.state.status;
-          const jpr = c.join('222222');
+          const mpr = c.match('tok-b');
           const s2 = rig.sockets[rig.sockets.length - 1];
           s2.fire({v: 1, type: 'HELLO', link: 'l2'});
-          const jreq = s2.sent[s2.sent.length - 1];
-          s2.fire(rig.ack(jreq, {sessionId: 'S2', memberId: 'mF',
+          const mreq = s2.sent[s2.sent.length - 1];
+          s2.fire(rig.ack(mreq, {sessionId: 'S2', memberId: 'mF',
                                  role: 'follower', resumeToken: 't'}));
-          await jpr;
-          return {data, midStatus, jtype: jreq.type, jcode: jreq.payload.code,
+          await mpr;
+          return {data, midStatus, mtype: mreq.type, pick: mreq.payload.pick,
                   role: c.state.role, socketCount: rig.sockets.length};
         }"""
     )
     assert res["data"]["ambiguous"] is True
-    assert [c["code"] for c in res["data"]["candidates"]] == ["111111", "222222"]
+    assert [c["id"] for c in res["data"]["candidates"]] == ["tok-a", "tok-b"]
+    assert all("code" not in c for c in res["data"]["candidates"])
     assert res["midStatus"] == "idle"
-    assert res["jtype"] == "JOIN" and res["jcode"] == "222222"
+    assert res["mtype"] == "MATCH" and res["pick"] == "tok-b"
     assert res["role"] == "follower"
     assert res["socketCount"] == 2          # ambiguous ack closed the first link
 
@@ -1106,3 +1108,27 @@ def test_match_reject_resolves_unsupported_for_fallback(pc_page):
     assert res["data"]["unsupported"] == "malformed"
     assert res["status"] == "idle"
     assert res["evlog"] == []
+
+
+def test_match_non_malformed_reject_is_a_real_error(pc_page):
+    """Only 'malformed' means a pre-MATCH server; any other MATCH reject
+    (bad pick, already bound…) is a real failure — it must reject the
+    promise and surface 'error', never silently fall back to choice."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const pr = c.match();
+          const s = rig.sockets[rig.sockets.length - 1];
+          s.fire({v: 1, type: 'HELLO', link: 'l1'});
+          const req = s.sent[s.sent.length - 1];
+          s.fire(rig.rej(req, 'bad_code'));
+          let err = null;
+          try { await pr; } catch (e) { err = e.code || String(e); }
+          return {err, status: c.state.status, error: c.state.error,
+                  evlog: rig.evlog.filter(e => e.indexOf('rejected') === 0)};
+        }"""
+    )
+    assert res["err"] == "ERR_REJECTED"
+    assert res["status"] == "error" and res["error"] == "bad_code"
+    assert res["evlog"] == ["rejected:bad_code"]

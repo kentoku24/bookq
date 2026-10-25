@@ -761,14 +761,15 @@
     /* One-tap pairing: the server binds the caller as follower when a
      * fresh waiting session exists, else as a waiting leader. Resolves
      * {ambiguous, candidates} when several sessions wait — the caller
-     * picks one through the classic join(code). Resolves {unsupported}
-     * when the peer's server predates MATCH, so the UI can fall back. */
-    function match() {
+     * then picks one via match(candidate.id). Resolves {unsupported}
+     * only for a pre-MATCH server (malformed reject) so the UI falls
+     * back; any other rejection stays a normal error. */
+    function match(pick) {
       if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
       _teardownLink();
       _resetSession();
       // role decided by the server — no _roleIntent yet
-      return _startEntry('MATCH', {}, null);
+      return _startEntry('MATCH', pick ? {pick: pick} : {}, null);
     }
 
     function resume() {
@@ -1050,9 +1051,10 @@
           _terminate('ended', end);
           return;
         }
-        if (p.type === 'MATCH') {
+        if (p.type === 'MATCH' && reason === 'malformed') {
           // pre-MATCH server — resolve so the caller falls back to the
-          // classic choice instead of surfacing a dead-end error.
+          // classic choice. Other MATCH rejects (bad pick, already
+          // bound…) are real errors and surface normally.
           try { p.res({unsupported: reason}); } catch (e) {}
           _teardownLink();
           _notify();

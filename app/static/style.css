@@ -30,11 +30,14 @@ body{position:fixed;inset:0}
 	#sidebar.open{transform:translateX(0)}
 		#sidebar-header{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 12px;box-shadow:0 1px 0 rgba(255,255,255,0.04),0 4px 12px rgba(0,0,0,0.3)}
 		#sidebar-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:auto;touch-action:pan-y;display:flex;flex-direction:column}
-		#sidebar-header h1{font-size:16px;font-weight:600;color:#e0e0e0;white-space:nowrap;flex-shrink:0;letter-spacing:-0.01em;line-height:1.2;max-width:calc(50% - 32px);overflow:hidden;text-overflow:ellipsis}
-		/* pair launcher is centered in the tile header (2台見開き entry) */
+		#sidebar-header h1{font-size:16px;font-weight:600;color:#e0e0e0;white-space:nowrap;flex-shrink:0;letter-spacing:-0.01em;line-height:1.2;max-width:calc(50% - 32px);min-width:0;overflow:hidden;text-overflow:ellipsis}
+		/* pair launcher is centered in the tile header (2台見開き entry);
+		 * the right cluster stays above it so a tap near the edge still
+		 * hits フィルタ/オンライン status, never a stray MATCH. */
 		#sidebar-header #pair-btn{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
 		#sidebar-header #pair-btn:active{transform:translate(-50%,-50%) scale(0.95)}
-		#sidebar-header #filter-btn{margin-left:auto}
+		#sidebar-header #filter-btn{margin-left:auto;position:relative;z-index:1}
+		#sidebar-header #offline-status{position:relative;z-index:1}
 		#offline-status{font-size:11px;color:#8ab4f8;white-space:nowrap;margin-left:0;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;min-height:44px;padding:0 8px;margin:-12px 0}
 		#offline-status:visited{color:#8ab4f8}
 		#offline-status:hover{color:#a8c4ff;text-decoration:underline}

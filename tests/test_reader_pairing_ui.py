@@ -805,8 +805,8 @@ def test_open_close_has_no_peer_side_effects(browser, server):
 # path. __pairConnectResult steers its resolved value per test.
 CONNECT_JS = MOCK_JS.replace(
     "create() { window.__pairCalls.push('create'); },",
-    """connect() {
-      window.__pairCalls.push('connect');
+    """connect(pick) {
+      window.__pairCalls.push(pick ? 'connect:' + pick : 'connect');
       return Promise.resolve(window.__pairConnectResult || null);
     },
     create() { window.__pairCalls.push('create'); },""")
@@ -826,19 +826,23 @@ def test_idle_tap_fires_connect_when_supported(page, server):
     expect(page.locator("#pair-code-value")).to_have_text("042917")
 
 
-def test_ambiguous_match_shows_picker_then_joins(page, server):
+def test_ambiguous_match_shows_picker_then_picks_token(page, server):
+    """Candidates carry an opaque token (never the 6-digit code); picking
+    one re-MATCHes with connect(id), so the human code stays private."""
     _with_mock(page, js=CONNECT_JS)
     page.evaluate(
         """window.__pairConnectResult = {ambiguous:true, candidates:[
-             {code:'111111', leaderName:'A', ageSec:3},
-             {code:'222222', leaderName:'B', ageSec:7}]}""")
+             {id:'tok-a', leaderName:'A', ageSec:3},
+             {id:'tok-b', leaderName:'B', ageSec:7}]}""")
     _ensure_sidebar_open(page)
     page.click("#pair-btn")
     _only_section_visible(page, "#pair-sec-picker")
     picks = page.locator(".pair-pick")
     assert picks.count() == 2
+    # the waiter's age disambiguates same-name candidates
+    assert "3秒前" in picks.nth(0).text_content()
     picks.nth(0).click()
-    assert page.evaluate("window.__pairCalls") == ["connect", "join:111111"]
+    assert page.evaluate("window.__pairCalls") == ["connect", "connect:tok-a"]
 
 
 def test_unsupported_match_keeps_classic_choice(page, server):
@@ -859,6 +863,48 @@ def test_join_deep_link_consumes_hash_and_joins(page, server):
     page.wait_for_function("location.hash === ''")
     page.wait_for_function(
         "(window.__pairCalls || []).indexOf('join:314159') !== -1")
+
+
+def test_join_deep_link_never_hijacks_an_active_pair(page, server):
+    """#/join/<code> while paired only surfaces the session panel — a
+    blind join() would drop the link without LEAVE and strand the
+    partner in 'peer-away' for the whole resume window."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'follower'}")
+    page.evaluate("location.hash = '#/join/314159'")
+    page.wait_for_function("location.hash === ''")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    _only_section_visible(page, "#pair-sec-session")
+    assert page.evaluate("window.__pairCalls") == []
+
+
+def test_join_retry_after_cancel_is_possible(page, server):
+    """joinPending must not strand the form: a cancelled join returns to
+    the code entry, and typing a new code submits again."""
+    _with_mock(page)
+    _open_ui(page)
+    page.click("#pair-join-open")
+    page.locator("#pair-code-input").fill("777001")
+    _emit(page, "{status:'connecting', role:'follower'}")
+    page.click("#pair-waiting-cancel")
+    _emit(page, "{status:'ended'}")
+    page.locator("#pair-code-input").fill("111222")
+    assert page.evaluate("window.__pairCalls") == [
+        "join:777001", "leave", "join:111222"]
+
+
+def test_ended_flashes_the_strip_before_hiding(page, server):
+    """A pair ending while the reader is up flashes '解除済' briefly —
+    otherwise nothing in the viewer surface tells the reader."""
+    _with_mock(page)
+    strip = page.locator("#pair-status")
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    expect(strip).to_be_visible()
+    _emit(page, "{status:'ended'}")
+    expect(strip).to_be_visible()
+    assert "解除済" in strip.text_content()
+    page.wait_for_timeout(3200)
+    expect(strip).to_be_hidden()
 
 
 def test_session_strip_hidden_at_idle_and_tappable(page, server):

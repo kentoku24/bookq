@@ -3,12 +3,12 @@
  *
  * Driven by an INJECTED controller — real sync wiring lands in S09 (#84).
  * Controller interface (parent issue #75 §3.3/§3.5):
- *   { create(), join(code), connect(), approve(), reject(), leave(),
+ *   { create(), join(code), connect(pick?), approve(), reject(), leave(),
  *     swapSides(), subscribe(cb) -> unsubscribe, state }
  * connect() is the one-tap MATCH op: tap the launcher while idle and the
  * server binds this device as follower of a fresh waiting session or as a
  * new waiting leader. It resolves {ambiguous, candidates} when several
- * sessions wait (picker → classic join(code)) and {unsupported} on a
+ * sessions wait (picker → connect(candidate.id)) and {unsupported} on a
  * pre-MATCH server (classic choice remains). Controllers without
  * connect() keep the legacy 開始/参加 choice on launcher tap.
  * state shape this UI renders (all fields optional except status):
@@ -51,6 +51,13 @@
   // States in which the session section (swap / change-work / leave) and the
   // side+transport indicators are meaningful.
   const SESSION_STATES = ['connected', 'reconnecting', 'peer-away', 'loading'];
+  // One-tap MATCH eligibility window — must mirror MATCH_WINDOW_SEC in
+  // app/reader_sync/sessions.py (120). Past it, a waiting leader can only
+  // be reached via the code/QR it still shows.
+  const MATCH_WINDOW_MS = 120000;
+  // How long the strip stays after 'ended' so a reader notices the pair
+  // dropped (the strip is the only in-viewer surface).
+  const END_FLASH_MS = 3000;
 
   let ctl = null;
   let unsubscribe = null;
@@ -63,6 +70,10 @@
   let scanCanvas = null;
   let qrDrawnFor = null;  // last code painted into #pair-qr
   let lastStatus = null;  // status from the previous render (auto-close edge)
+  let leaderSince = 0;    // when the leader-waiting view first showed
+  let leaderNoteTimer = null;
+  let endFlashUntil = 0;  // strip stays visible on 'ended' until this
+  let endFlashTimer = null;
   let lastFocus = null;
   let inertSnapshot = null; // [[el, hadInertAttr]]
   let built = false;
@@ -101,9 +112,9 @@
           '</div>' +
         '</div>' +
         '<div id="pair-sec-leader" class="pair-sec" hidden>' +
-          '<p class="pair-note">もう1台が接続ボタンを押すと自動でつながります</p>' +
+          '<p id="pair-leader-note" class="pair-note"></p>' +
           '<div id="pair-code-value" aria-label="ペアリングコード">------</div>' +
-          '<canvas id="pair-qr" width="144" height="144" aria-label="ペアリングQRコード" hidden></canvas>' +
+          '<canvas id="pair-qr" width="168" height="168" aria-label="ペアリングQRコード" hidden></canvas>' +
           '<button id="pair-leader-join" type="button" class="pair-link">コードで参加する</button>' +
           '<button id="pair-leader-cancel" type="button">キャンセル</button>' +
         '</div>' +
@@ -193,6 +204,7 @@
       scanVideo: _el('pair-scan-video'),
       codeValue: _el('pair-code-value'),
       qr: _el('pair-qr'),
+      leaderNote: _el('pair-leader-note'),
       leaderJoin: _el('pair-leader-join'),
       leaderCancel: _el('pair-leader-cancel'),
       secPicker: _el('pair-sec-picker'),
@@ -219,13 +231,30 @@
     const status = s.status || 'idle';
     const role = s.role || null;
     const inSession = SESSION_STATES.indexOf(status) !== -1;
+    // A join submit is in flight only while the client is connecting;
+    // any settled state (error / idle / ended / connected) re-arms the
+    // form so a failed or cancelled join can be retried.
+    if (status !== 'connecting') joinPending = false;
+    // Flash the strip on 'ended' so a reader mid-book sees the pair
+    // dropped — status transitions to 'ended' leave no surface otherwise.
+    if (status === 'ended' && lastStatus && lastStatus !== 'idle' &&
+        lastStatus !== 'ended') {
+      endFlashUntil = Date.now() + END_FLASH_MS;
+    }
+    const flashing = status === 'ended' && Date.now() < endFlashUntil;
+    if (flashing && !endFlashTimer) {
+      endFlashTimer = setTimeout(() => {
+        endFlashTimer = null;
+        render();
+      }, endFlashUntil - Date.now() + 20);
+    }
 
     let label = STATUS_LABEL[status] || status;
     if (status === 'connected' && role) label += '（' + role + '）';
     els.status.dataset.status = status;
     // The strip only exists while a session is (or is becoming) real —
     // solo reading never sees it. Tap → the session panel.
-    els.status.hidden = status === 'idle' || status === 'ended';
+    els.status.hidden = status === 'idle' || (status === 'ended' && !flashing);
     els.statusText.textContent = label;
     if (els.btn) {
       els.btn.dataset.status = status;
@@ -260,10 +289,14 @@
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'pair-pick';
-        b.textContent = (c.leaderName ? c.leaderName + ' — ' : '') + c.code;
+        // Candidates carry an opaque server token, never the 6-digit
+        // code — a picked row re-MATCHes with connect(id) so the human
+        // code stays private to the waiting leader's own screen.
+        b.textContent = (c.leaderName || '待機中の端末') +
+          (typeof c.ageSec === 'number' ? ' — ' + c.ageSec + '秒前' : '');
         b.addEventListener('click', () => {
           pickList = null;
-          if (ctl) ctl.join(c.code);
+          if (ctl) ctl.connect(c.id);
         });
         els.pickerList.appendChild(b);
       }
@@ -272,23 +305,41 @@
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
       drawQR(s.code);
-    } else if (sec === els.secWaiting) {
-      els.waitingText.textContent =
-        role === 'follower' ? '承認を待っています…' : '接続中…';
-    } else if (sec === els.secSession) {
-      const bits = [];
-      if (role) bits.push(role);
-      if (sideText) bits.push(sideText);
-      if (trText) bits.push(trText);
-      els.sessionInfo.textContent = bits.join(' · ');
-      // 作品変更 is a leader privilege (#75 §3.3: OPEN_WORK is leader-only);
-      // followers never see an enabled control for it.
-      els.changeWork.hidden = role !== 'leader';
-      els.changeWork.disabled = role !== 'leader';
-    } else if (sec === els.secError) {
-      els.errorText.textContent = s.error || 'エラーが発生しました';
-    } else if (sec === els.secJoin) {
-      els.joinSubmit.disabled = els.codeInput.value.length !== 6;
+      // Past the match window nobody can find this session via 🔗 —
+      // say so instead of promising a join that can no longer happen.
+      if (!leaderSince) leaderSince = Date.now();
+      const left = MATCH_WINDOW_MS - (Date.now() - leaderSince);
+      els.leaderNote.textContent = left > 0
+        ? 'もう1台が接続ボタンを押すと自動でつながります'
+        : '自動接続の受付は終了しました。コードまたはQRで参加できます';
+      if (leaderNoteTimer) { clearTimeout(leaderNoteTimer); leaderNoteTimer = null; }
+      if (left > 0) {
+        leaderNoteTimer = setTimeout(() => {
+          leaderNoteTimer = null;
+          render();
+        }, left + 20);
+      }
+    } else {
+      leaderSince = 0;
+      if (leaderNoteTimer) { clearTimeout(leaderNoteTimer); leaderNoteTimer = null; }
+      if (sec === els.secWaiting) {
+        els.waitingText.textContent =
+          role === 'follower' ? '承認を待っています…' : '接続中…';
+      } else if (sec === els.secSession) {
+        const bits = [];
+        if (role) bits.push(role);
+        if (sideText) bits.push(sideText);
+        if (trText) bits.push(trText);
+        els.sessionInfo.textContent = bits.join(' · ');
+        // 作品変更 is a leader privilege (#75 §3.3: OPEN_WORK is leader-only);
+        // followers never see an enabled control for it.
+        els.changeWork.hidden = role !== 'leader';
+        els.changeWork.disabled = role !== 'leader';
+      } else if (sec === els.secError) {
+        els.errorText.textContent = s.error || 'エラーが発生しました';
+      } else if (sec === els.secJoin) {
+        els.joinSubmit.disabled = els.codeInput.value.length !== 6;
+      }
     }
 
     // A pending→connected transition means pairing just succeeded (or a
@@ -387,7 +438,9 @@
       return;
     }
     if (qrDrawnFor === code) { els.qr.hidden = false; return; }
-    const qr = window.qrcode(0, 'M');
+    // 'L' keeps module count low for the longer URL payload so cells
+    // stay scannable on a ~170px canvas.
+    const qr = window.qrcode(0, 'L');
     // URL-QR: any camera app deep-links straight into join — the code is
     // in the fragment so it never reaches access logs or cache keys.
     qr.addData(location.origin + '/#/join/' + code);
