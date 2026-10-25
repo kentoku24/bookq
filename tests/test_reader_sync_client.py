@@ -918,6 +918,135 @@ def test_pong_answers_server_heartbeat(pc_page):
     assert res["last"]["type"] == "PONG" and res["last"]["seq"] == 7
 
 
+# ── UI_SYNC ephemeral browse-mirror relay ────────────────────────────────
+
+
+def test_send_ui_sync_writes_ctl_frame(pc_page):
+    """Paired member -> one UI_SYNC frame on the control channel, verbatim
+    browse payload; no _pending tracking (fire-and-forget)."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          const pre = s.sent.length;
+          const ok = c.sendUiSync({view: 'browse', path: 'group/ep',
+                                   top: 120.5, viewH: 600, mode: 'list'});
+          const f = s.sent[s.sent.length - 1];
+          return {ok, sentCount: s.sent.length - pre, f};
+        }"""
+    )
+    assert res["ok"] is True and res["sentCount"] == 1
+    f = res["f"]
+    assert f["type"] == "UI_SYNC" and f["sessionId"] == "S1"
+    assert f["payload"] == {"view": "browse", "path": "group/ep",
+                            "top": 120.5, "viewH": 600, "mode": "list"}
+
+
+def test_send_ui_sync_gating_and_shape(pc_page):
+    """Unpaired, bad payload shapes, and a dead link all refuse to send."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          // not even member-bound yet
+          const idle = c.sendUiSync({view: 'browse', path: null, top: 0,
+                                     viewH: 100});
+          const s = await rig.pairLeader(c);
+          const base = s.sent.length;
+          const badView = c.sendUiSync({view: 'overview', top: 0, viewH: 1});
+          const badTop = c.sendUiSync({view: 'browse', top: -1, viewH: 1});
+          const badH = c.sendUiSync({view: 'browse', top: 0, viewH: 0});
+          const noView = c.sendUiSync({path: 'x', top: 0, viewH: 1});
+          const nan = c.sendUiSync({view: 'browse', top: NaN, viewH: 1});
+          const sentAfterBad = s.sent.length - base;
+          // minimal payload: path null, no mode
+          const minOk = c.sendUiSync({view: 'browse', path: null, top: 0,
+                                      viewH: 480});
+          const minF = s.sent[s.sent.length - 1];
+          // unpaired again: presence drops to 1 member
+          s.fire(rig.st('S1', 3, {phase: 'selecting',
+                                  presence: rig.presence(1)}));
+          const unpaired = c.sendUiSync({view: 'browse', path: null, top: 0,
+                                         viewH: 1});
+          s.fire(rig.st('S1', 4, {phase: 'selecting',
+                                  presence: rig.presence(2)}));
+          s.fireClose();                       // link down
+          const down = c.sendUiSync({view: 'browse', path: null, top: 0,
+                                     viewH: 1});
+          const uiTypes = s.sent.filter(f => f.type === 'UI_SYNC').length;
+          return {idle, badView, badTop, badH, noView, nan, sentAfterBad,
+                  minOk, minF, unpaired, down, uiTypes};
+        }"""
+    )
+    assert res["idle"] is False
+    for k in ("badView", "badTop", "badH", "noView", "nan"):
+        assert res[k] is False, k
+    assert res["sentAfterBad"] == 0
+    assert res["minOk"] is True
+    assert res["minF"]["payload"] == {"view": "browse", "path": None,
+                                      "top": 0, "viewH": 480}
+    assert res["unpaired"] is False and res["down"] is False
+    assert res["uiTypes"] == 1
+
+
+def test_inbound_ui_sync_fires_ui_sync_event(pc_page):
+    """A peer UI_SYNC frame surfaces as a verbatim 'ui-sync' event with the
+    sender role attached; it never touches committed-state application."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const events = [];
+          const c = rig.mkClient({
+            onEvent: function (e) { events.push(JSON.parse(JSON.stringify(e))); },
+          });
+          const s = await rig.pairLeader(c);
+          const applied0 = rig.applied.length;
+          s.fire({v: 1, type: 'UI_SYNC', sessionId: 'S1', from: 'follower',
+                  payload: {view: 'browse', path: 'g', top: 77, viewH: 600}});
+          return {events, applied0, appliedNow: rig.applied.length};
+        }"""
+    )
+    ui = [e for e in res["events"] if e["type"] == "ui-sync"]
+    assert len(ui) == 1
+    assert ui[0]["from"] == "follower"
+    assert ui[0]["payload"] == {"view": "browse", "path": "g", "top": 77,
+                                "viewH": 600}
+    assert res["appliedNow"] == res["applied0"]   # never an applyState call
+
+
+def test_ui_sync_survives_dc_plane_switch(pc_page):
+    """UI_SYNC stays on the control channel even after the data plane flips
+    to webrtc-dc — a follower send never takes the leader-relay path."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairFollower(c);
+          // DC comes up -> TRANSPORT_STATE up on both -> plane flips
+          const dc = rig.dcChannel();
+          c.attachDataChannel(dc);
+          dc.fireOpen();
+          s.fire(rig.st('S1', 3, {phase: 'selecting',
+                                  presence: rig.presence(2),
+                                  dataPlane: 'webrtc-dc'}));
+          s.fire({v: 1, type: 'TRANSPORT_STATE', sessionId: 'S1',
+                  dataPlane: 'webrtc-dc', revision: 3});
+          const dcSent0 = dc._rec.sent.length;
+          const wsSent0 = s.sent.length;
+          const ok = c.sendUiSync({view: 'browse', path: 'g', top: 5,
+                                   viewH: 400});
+          return {ok,
+                  dcUi: dc._rec.sent.filter(f => f.type === 'UI_SYNC').length,
+                  wsUi: s.sent.filter(f => f.type === 'UI_SYNC').length,
+                  plane: c.state.transport};
+        }"""
+    )
+    assert res["plane"] == "webrtc-dc"
+    assert res["ok"] is True
+    assert res["dcUi"] == 0 and res["wsUi"] == 1
+
+
 # ── real-server integration: actual WebSocket against the live app ────────
 
 

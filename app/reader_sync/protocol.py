@@ -6,6 +6,7 @@ over server-ws or webrtc-dc. Images/binary never ride the data plane.
 from __future__ import annotations
 
 import json
+import math
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 64 * 1024            # 64KiB per normal frame
@@ -21,12 +22,15 @@ REQUEST_TYPES = frozenset({
     "CREATE", "JOIN", "APPROVE", "REJECT", "RESUME", "LEAVE", "MATCH",
     "TURN", "GOTO", "SET_OFFSET", "SWAP_SIDES", "OPEN_WORK",
     "SET_ACTIVITY", "READY", "PING", "APPLIED",
-    "SIGNAL", "TRANSPORT_STATE",
+    "SIGNAL", "TRANSPORT_STATE", "UI_SYNC",
 })
 PHASES = frozenset({"waiting", "loading", "reading", "selecting", "paused", "ended"})
 ROLES = frozenset({"leader", "follower"})
 SIDES = frozenset({"right", "left"})
 SIGNAL_KINDS = frozenset({"offer", "answer", "ice"})
+UI_VIEWS = frozenset({"browse"})
+UI_MODES = frozenset({"tile", "list", "card"})
+MAX_UI_PATH_CHARS = 4096
 
 _REQUEST_KEYS = ("requestId", "sessionId", "workEpoch", "baseRevision", "type", "payload")
 _STATE_KEYS = ("sessionId", "revision", "workEpoch", "manifestVersion",
@@ -145,6 +149,35 @@ def _validate_payload(t: str, p: dict) -> None:
     elif t == "APPLIED":
         if not isinstance(p.get("requestId"), str):
             _fail(ERR_MALFORMED, "APPLIED.requestId must be str")
+    elif t == "UI_SYNC":
+        _validate_ui_sync(p)
+
+
+def _validate_ui_sync(p: dict) -> None:
+    """Ephemeral mirrored-UI payload (browse scroll/position).
+
+    Relayed peer-to-peer like SIGNAL — never sequenced, so it must not
+    carry reader state. ``top``/``viewH`` are px in the sender's scroller;
+    the receiver derives its own target from them (e.g. follower shows
+    ``top + viewH``).
+    """
+    if p.get("view") not in UI_VIEWS:
+        _fail(ERR_TYPE, "UI_SYNC.view must be 'browse'")
+    path = p.get("path")
+    if path is not None and (not isinstance(path, str)
+                             or len(path) > MAX_UI_PATH_CHARS):
+        _fail(ERR_MALFORMED, "UI_SYNC.path must be str|null")
+    top = p.get("top")
+    if (not isinstance(top, (int, float)) or isinstance(top, bool)
+            or not math.isfinite(top) or top < 0):
+        _fail(ERR_RANGE, "UI_SYNC.top must be finite >= 0")
+    view_h = p.get("viewH")
+    if (not isinstance(view_h, (int, float)) or isinstance(view_h, bool)
+            or not math.isfinite(view_h) or view_h <= 0 or view_h > 100000):
+        _fail(ERR_RANGE, "UI_SYNC.viewH must be finite 0<h<=100000")
+    mode = p.get("mode")
+    if mode is not None and mode not in UI_MODES:
+        _fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card")
 
 
 def validate_state(raw) -> dict:

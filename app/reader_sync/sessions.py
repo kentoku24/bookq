@@ -79,6 +79,12 @@ DEDUP_TOMBSTONE_MAX = 8192
 
 _TRANSPORT_REPORT = frozenset({"up", "down"})
 
+# UI_SYNC is an ephemeral high-frequency peer relay (browse scroll). Cap it
+# per member so a buggy sender can't fill the peer's bounded outq (queue-full
+# closes the *recipient's* link) — excess frames are dropped silently.
+UI_SYNC_WINDOW_SEC = 1.0
+UI_SYNC_RATE_MAX = 50
+
 
 def _new_id() -> str:
     return secrets.token_hex(8)
@@ -158,6 +164,8 @@ class Member:
     offline_since: float | None = None
     dc_state: str = "down"       # reported webrtc-dc status: up | down
     last_applied: dict | None = None  # last APPLIED report {requestId, revision}
+    ui_sync_window_start: float = 0.0  # 1s rate window for UI_SYNC relay
+    ui_sync_count: int = 0
 
 
 @dataclass
@@ -403,6 +411,8 @@ class SessionRegistry:
             self._set_activity(link, req, session, member)
         elif t == "SIGNAL":
             self._signal(link, req, session, member)
+        elif t == "UI_SYNC":
+            self._ui_sync(link, req, session, member)
         elif t == "TRANSPORT_STATE":
             self._transport_state(link, req, session, member)
         elif t in _SEQUENCED_TYPES:
@@ -645,6 +655,35 @@ class SessionRegistry:
             "sessionId": session.id, "from": member.role,
             "kind": req["payload"]["kind"], "data": req["payload"].get("data")})
         self._ack(link, req, session_id=session.id)
+
+    def _ui_sync(self, link: PeerLink, req: dict, session: PairSession,
+                 member: Member) -> None:
+        """Ephemeral mirrored-UI relay (browse scroll/position). Same shape
+        as SIGNAL — forwarded verbatim to the peer, never sequenced or
+        stored, and fire-and-forget: no ACK on success (the sender never
+        tracks or consumes it) and no response when the peer is offline
+        (transient state, and a REJECT per scroll frame would spam client
+        notifications). NOT_PAIRED still rejects — it is a real misuse.
+        A silent 1s-window cap keeps a runaway sender from filling the
+        peer's outq (overflow would close the *recipient's* link)."""
+        if not session.paired:
+            self._reject(link, req, "UI_SYNC", REASON_NOT_PAIRED,
+                         session_id=session.id)
+            return
+        other = next((m for m in session.members.values() if m is not member), None)
+        if other is None or other.link is None or not other.link.alive:
+            return
+        now = self._now()
+        if now - member.ui_sync_window_start >= UI_SYNC_WINDOW_SEC:
+            member.ui_sync_window_start = now
+            member.ui_sync_count = 0
+        member.ui_sync_count += 1
+        if member.ui_sync_count > UI_SYNC_RATE_MAX:
+            return
+        other.link.send_obj({
+            "v": protocol.PROTOCOL_VERSION, "type": "UI_SYNC",
+            "sessionId": session.id, "from": member.role,
+            "payload": req["payload"]})
 
     def _transport_state(self, link: PeerLink, req: dict, session: PairSession,
                          member: Member) -> None:

@@ -1046,24 +1046,27 @@
   function showResumeBtn(){ resumeBtn.classList.remove("hidden"); setInert(resumeBtn, false); sidebar.classList.add("has-resume"); }
   function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); syncSidebarA11y(); }
   try { window.closeSidebar = closeSidebar; window.setInert = setInert; window.syncSidebarA11y = syncSidebarA11y; } catch(e) { console.warn(e); }
-  function toggleSidebar(){
-    sidebar.classList.toggle("open");
-    viewer.classList.toggle("sidebar-open");
+  // The visual side of opening the drawer — shared with browse/pairSync.js
+  // (paired scroll-mirror opens the follower's sidebar without a nav intent).
+  function openSidebar(){
+    sidebar.classList.add("open");
+    viewer.classList.add("sidebar-open");
     syncSidebarA11y();
-    if (sidebar.classList.contains("open")) {
-      updateResumeButton();
-      if (currentFolder) {
-        // Opening the sidebar over a reader is a "back to the folder list"
-        // request — it goes through the navigation port (default handler
-        // returns to the browse level and its #/browse/… URL, which keeps
-        // a stale #/view/… hash off screen while the grid is up).
-        window.ViewerNavigation.request({type: "browse", via: "sidebar"});
-      } else {
-        if (searchMode) window.BrowseRender.renderBrowse({mode: 'list', results: searchResults});
-        else window.BrowseRender.renderBrowse({mode: viewMode, results: null});
-      }
+    updateResumeButton();
+  }
+  try { window.openSidebar = openSidebar; } catch(e) { console.warn(e); }
+  function toggleSidebar(){
+    if (sidebar.classList.contains("open")) { closeSidebar(); return; }
+    openSidebar();
+    if (currentFolder) {
+      // Opening the sidebar over a reader is a "back to the folder list"
+      // request — it goes through the navigation port (default handler
+      // returns to the browse level and its #/browse/… URL, which keeps
+      // a stale #/view/… hash off screen while the grid is up).
+      window.ViewerNavigation.request({type: "browse", via: "sidebar"});
     } else {
-      hideResumeBtn();
+      if (searchMode) window.BrowseRender.renderBrowse({mode: 'list', results: searchResults});
+      else window.BrowseRender.renderBrowse({mode: viewMode, results: null});
     }
   }
   menuBtn.addEventListener("click", toggleSidebar);
@@ -3336,17 +3339,14 @@
       case "ArrowRight": if (images.length) navTurn(-1, false, "key"); break;
       case "ArrowLeft": if (images.length) navTurn(1, false, "key"); break;
       case "f": case "F":
-  sidebar.classList.toggle("open");
-  viewer.classList.toggle("sidebar-open");
-  syncSidebarA11y();
   if (sidebar.classList.contains("open")) {
-    updateResumeButton();
+    closeSidebar();
+  } else {
+    openSidebar();
     if (searchMode) window.SearchFacets.renderSearchList();
     else if (viewMode === 'tile') window.BrowseRender.renderTiles();
     else if (viewMode === 'list') window.BrowseRender.renderList();
     else if (viewMode === 'card') window.BrowseRender.renderCards();
-  } else {
-    hideResumeBtn();
   }
   break;
       case "Home": if(images.length && spreads.length){ const r = getChapterSpreadRange(getCurrentChapterInfo(currentIdx).chapterIdx); navGotoIdx(spreads[r.lo].pages[0], "key", {animate:false}); } break;

@@ -1,0 +1,419 @@
+/* bookq browse/pairSync — ペアモード中のブラウズ一覧ミラー (#75 系)。
+ * Plain global script. index.html で pairController.js の後、app.js の前に読む
+ * （実行時はすべて window.* 経由の遅延解決なので、DOMContentLoaded で init する）。
+ *
+ * 何をするか:
+ *   leader がブラウズ一覧（#sidebar-scroll / #tile-grid）を開くと pair の phase が
+ *   'selecting' になる（pairController の sidebar observer → SET_ACTIVITY）。
+ *   armed = live pair && phase==='selecting' の間、自分の {path, scrollTop,
+ *   viewH, viewMode} を ephemeral frame UI_SYNC で peer へ中継する。受信側は
+ *   不変式「followerTop = leaderTop + leaderClientHeight」で scrollTop を導く:
+ *
+ *     follower <- leader : scrollTop = msg.top + msg.viewH     （1画面分下）
+ *     leader   <- follower: scrollTop = msg.top - 自分の clientHeight
+ *
+ *   path / mode が違えば先にローカル遷移（scrollPositions 保存 →
+ *   currentBrowsePath + viewMode + renderView({scrollAnchor:null}) +
+ *   writeBrowseStateReplace — URL hash も実階層に追従させるが replaceState
+ *   限定: push/history.go は hashchange→applyUrlState の二重適用になる）。
+ *   結果、スクロール・フォルダ潜り・戻る・表示モード変更は双方向で伝搬する。
+ *
+ *   UI_SYNC は committed reader state ではない（revision/apply_log/dedup を
+ *   汚さない SIGNAL 同型の ephemeral 中継）。searchMode 中は送受信とも停止
+ *   （検索結果の同期はスコープ外）。順序は単一 WS link が保証するので
+ *   seq は持たない。
+ *
+ *   follower のミラー sidebar は最初の有効 frame で自動的に開き、disarm
+ *   （phase 離脱 / session 終了）で自分が開いた分だけ畳む。armed 中に
+ *   ユーザーが閉じた場合はその arm 期間中は開き直さない（_userClosed）。
+ *
+ *   echo/逆変換の保護:
+ *   - remote 適用直後 SUPPRESS_MS 間は scroll send を窓明けへ defer する
+ *     （drop しない — 窓内のローカル操作が失われるのを防ぐ）。
+ *   - _appliedHold: 適用直後の位置と同じ path/top/mode に居る間は送信しない。
+ *     clamp で目標に届かなかった位置（例: 末尾で maxTop に貼り付く）を再送
+ *     すると peer が逆変換で約1画面戻されるのを防ぐ。ユーザーが実際に
+ *     動かした時点（top が変わる）で解除される。
+ */
+(function () {
+  'use strict';
+
+  var SEND_MIN_MS = 60;      // scroll 送信の最小間隔（leading edge）
+  var SEND_TRAIL_MS = 120;   // 最終位置を必ず送る trailing デバウンス
+  var SUPPRESS_MS = 400;     // remote 適用直後の echo 抑止窓
+  var PENDING_TTL_MS = 2000; // 未適用 frame の賞味期限（古い stash は捨てる）
+
+  var _armed = false;        // ミラー有効（live pair && phase==='selecting'）
+  var _unlocked = false;     // 送信解禁 — leader は arm 即時、follower は初適用後
+  var _lastSendTs = -1e9;
+  var _lastSentSig = null;
+  var _appliedHold = null;   // 直近に適用した remote 由来 state {path,top,mode}
+  var _trailT = null;
+  var _suppressUntil = 0;    // echo 抑止の期限（Date.now ベース）
+  var _pendingMsg = null;    // 未適用の最新 remote {msg, at}（未 arm/searchMode 等）
+  var _mirrorOpened = false; // このモジュールが開いた sidebar か（disarm で畳む対象）
+  var _userClosed = false;   // armed 中にユーザーがミラー sidebar を閉じた
+  var _prevPresenceSig = '';
+  var _inited = false;
+  var _subs = [];            // PairController から外した購読（解除用）
+
+  function _w() { return window; }
+  function _pc() { return _w().PairController || null; }
+  function _scroller() {
+    return (_w().BrowseScroll && _w().BrowseScroll.scroller)
+      ? _w().BrowseScroll.scroller()
+      : document.getElementById('sidebar-scroll');
+  }
+  function _sidebar() { return document.getElementById('sidebar'); }
+  function _sidebarOpen() {
+    var s = _sidebar();
+    return !!(s && s.classList && s.classList.contains('open'));
+  }
+  function _searchMode() { return !!_w().searchMode; }
+  function _paired(st) {
+    var p = st && st.presence;
+    return !!p && Object.keys(p).length >= 2;
+  }
+  /* 'ended'/'error'/'idle' は presence が残っていてもミラー対象外 —
+   * controller._memberBound と同じ live 判定。 */
+  function _live(st) {
+    return !!st && !!st.sessionId && st.status !== 'idle' &&
+      st.status !== 'ended' && st.status !== 'error';
+  }
+  function _presenceSig(st) {
+    var p = st && st.presence;
+    if (!p) return '';
+    var keys = Object.keys(p).sort();
+    var out = [];
+    for (var i = 0; i < keys.length; i++) {
+      var m = p[keys[i]] || {};
+      out.push(keys[i] + ':' + m.status + ':' + m.role);
+    }
+    return out.join(',');
+  }
+  function _role() {
+    var pc = _pc();
+    var st = pc && pc.state;
+    return st ? st.role : null;
+  }
+
+  /* ── pending（未適用 frame の短期 stash）── */
+
+  function _stashPending(msg, at) {
+    _pendingMsg = {msg: msg, at: at || Date.now()};
+  }
+  /* 取り出して消費。TTL 切れは捨てる — 古い位置（別 arm・別フォルダ由来）を
+   * 後の arm-edge で適用してユーザー位置を強制移動させないため。 */
+  function _takePending() {
+    var p = _pendingMsg; _pendingMsg = null;
+    if (!p) return null;
+    return (Date.now() - p.at <= PENDING_TTL_MS) ? p : null;
+  }
+
+  /* ── arm / disarm ── */
+
+  function _onCtlState(st) {
+    var armed = _live(st) && _paired(st) && st.phase === 'selecting';
+    if (armed && !_armed) {
+      _armed = true;
+      _prevPresenceSig = _presenceSig(st);
+      // arm 前に届いた frame（relay が STATE 反映を追い越す競合）をここで
+      // 適用する — 捨てると leader の arm-edge 一発を逃して follower が
+      // 永久に開かない。TTL 切れの stash は捨てる。
+      var pm = _takePending();
+      if (pm) _applyRemote(pm.msg, pm.at);
+      // leader は開いている側 — すぐ共有を始める。follower は remote を待つ
+      // （まだ stale 位置を送ると leader を巻き込む）。
+      if (st.role === 'leader') {
+        _unlocked = true;
+        _lastSentSig = null;
+        _requestSend();
+      }
+      return;
+    }
+    if (!armed && _armed) {
+      _armed = false;
+      _unlocked = false;
+      _lastSentSig = null;
+      _appliedHold = null;
+      _pendingMsg = null;
+      _userClosed = false;
+      _suppressUntil = 0;
+      if (_trailT) { clearTimeout(_trailT); _trailT = null; }
+      // 自分が開いたミラー用サイドバーだけ畳む — role を見ると 'ended' で
+      // null 化した後に leader の手動 sidebar まで畳んでしまう。
+      if (_mirrorOpened && _sidebarOpen()) {
+        try { _w().closeSidebar && _w().closeSidebar(); }
+        catch (e) { console.warn(e); }
+      }
+      _mirrorOpened = false;
+      return;
+    }
+    if (armed) {
+      // presence 変化（peer の復帰等）は両方向で現在値を再送する —
+      // 内容不変でも送る必要があるので dedup を解除してから要求する。
+      var sig = _presenceSig(st);
+      if (sig !== _prevPresenceSig) {
+        _prevPresenceSig = sig;
+        _lastSentSig = null;
+        _requestSend();
+      }
+    }
+  }
+
+  function _onCtlEvent(e) {
+    if (e && e.type === 'ui-sync') _applyRemote(e.payload);
+  }
+
+  /* ── 送信 ── */
+
+  function _sendGate() {
+    return _armed && _unlocked && _sidebarOpen() && !_searchMode() &&
+      !!_scroller() && !!_pc();
+  }
+
+  function _payload() {
+    var sc = _scroller();
+    return {
+      view: 'browse',
+      path: _w().currentBrowsePath || null,
+      top: sc.scrollTop,
+      viewH: sc.clientHeight,
+      mode: _w().viewMode || 'tile',
+    };
+  }
+
+  function _sigOf(p) {
+    return (p.path || '') + '|' + Math.round(p.top) + '|' +
+      Math.round(p.viewH) + '|' + p.mode;
+  }
+
+  /* remote 適用直後の位置に留まっている間は送信しない。clamp で目標に届か
+   * なかった値を peer に返すと、逆変換（top - leaderViewH）で peer を約
+   * 1画面戻してしまうため。viewH は比較しない — resize（iOS ツールバー
+   * 伸縮等）で clamp 値が漏れないようにする。 */
+  function _holdMatch(p) {
+    var h = _appliedHold;
+    return !!h && (p.path || null) === h.path &&
+      Math.abs(p.top - h.top) <= 1 && (p.mode || 'tile') === h.mode;
+  }
+
+  function _sendNow() {
+    if (!_sendGate()) return;
+    var now = Date.now();
+    if (_suppressUntil > now) {
+      // 抑止窓内の send は「捨てる」ではなく窓の終わりへ defer する —
+      // remote 適用直後のローカル操作（nav/scroll）が永久に失われるのを防ぐ。
+      // 内容が適用値のままなら _appliedHold が窓明けで止めるので echo もない。
+      _deferSend(_suppressUntil - now + 20);
+      return;
+    }
+    var p = _payload();
+    var sig = _sigOf(p);
+    if (_holdMatch(p)) return;
+    _appliedHold = null;              // 適用位置から実際に動いた — hold 解除
+    if (sig === _lastSentSig) return;
+    _lastSendTs = now;
+    var ok = false;
+    try { ok = _pc().sendUiSync(p) !== false; }
+    catch (e) { console.warn(e); }
+    // 未送信（リンク不通等）で _lastSentSig は進めない — 次のイベントで
+    // 同じ内容を再送できるようにする。
+    if (ok) _lastSentSig = sig;
+  }
+
+  function _deferSend(ms) {
+    if (_trailT) clearTimeout(_trailT);
+    _trailT = setTimeout(function () {
+      _trailT = null;
+      _requestSend();
+    }, ms);
+  }
+
+  /* scroll/observer 起点: 連続スクロールは SEND_MIN_MS 間隔 + 最後に必ず
+   * trailing 送信。抑止窓中は窓明けへ defer（drop しない）。 */
+  function _requestSend() {
+    if (!_sendGate()) return;
+    var now = Date.now();
+    if (_suppressUntil <= now && now - _lastSendTs >= SEND_MIN_MS) {
+      _sendNow();
+      return;
+    }
+    _deferSend(Math.max(SEND_TRAIL_MS, _suppressUntil - now + 20));
+  }
+
+  /* ── 受信適用 ── */
+
+  function _ensureSidebarOpen() {
+    if (_userClosed || _role() === 'leader' || _sidebarOpen()) return;
+    try {
+      // 正規の open 経路（app.js toggleSidebar と同じ visual open）を共有 —
+      // 手書き class 付与だと tile-full 等のレイアウトが欠けて scrollHeight
+      // が peer と食い違う。
+      if (_w().openSidebar) { _w().openSidebar(); _mirrorOpened = true; return; }
+    } catch (e) { console.warn(e); }
+    var s = _sidebar();
+    var v = document.getElementById('viewer');
+    if (!s) return;
+    s.classList.add('open');
+    if (v) v.classList.add('sidebar-open');
+    try { if (_w().syncSidebarA11y) _w().syncSidebarA11y(); }
+    catch (e2) { console.warn(e2); }
+    _mirrorOpened = true;
+  }
+
+  /* path がローカル tree で解決できるか。null=ルートは常に可。 */
+  function _pathResolvable(path) {
+    if (path === null || path === undefined) return true;
+    try {
+      return !!(_w().getNodeAt && _w().getNodeAt(path));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function _applyRemote(msg, at) {
+    if (!msg || msg.view !== 'browse') return;
+    if (!_armed) {
+      // relay が STATE(phase=selecting) の反映を追い越す競合では未 arm —
+      // 捨てずに短期保持し、_onCtlState の arm-edge で適用する。
+      _stashPending(msg, at);
+      return;
+    }
+    if (_searchMode() || !_pathResolvable(msg.path)) {
+      // 最新のみ保持 — searchMode 解除後 / tree 到着後に observer・次 msg で再適用。
+      _stashPending(msg, at);
+      return;
+    }
+    _pendingMsg = null;
+    _suppressUntil = Date.now() + SUPPRESS_MS;
+
+    var sc = _scroller();
+    if (!sc) return;
+    _ensureSidebarOpen();
+
+    var target;
+    var myTop = sc.scrollTop;
+    var targetPath = (msg.path === undefined) ? null : msg.path;
+    var navNeeded = (targetPath || null) !== (_w().currentBrowsePath || null);
+    var modeNeeded = !!msg.mode && _w().viewMode !== msg.mode;
+
+    if (navNeeded || modeNeeded) {
+      try {
+        // 離れる階層の位置保存は navigateToFolder と同じく — disarm 後の
+        // ローカル復帰が正しい位置に戻れるようにする。
+        var gk = _w().getScrollKey, sps = _w().scrollPositions;
+        if (gk && sps) sps[gk(_w().currentBrowsePath)] = myTop;
+        if (navNeeded) _w().currentBrowsePath = targetPath || null;
+        if (modeNeeded) _w().viewMode = msg.mode;
+        if (_w().updateBrowseHeader) _w().updateBrowseHeader();
+        // scrollAnchor:null は「位置を決める」render（上端）— 直後に remote
+        // 値で上書きする。saved/decide 経路は経由しない（決定的）。
+        if (_w().renderView) _w().renderView({scrollAnchor: null});
+        // URL hash は実階層に追従させる — replaceState 限定。push すると
+        // remote 操作がこちらの履歴に積まれ、Back/history.go 由来の
+        // hashchange→applyUrlState が二重に走る。browse path/mode は
+        // ローカル状態（ペア情報を URL に書かない §3.6 とは別）。
+        if (_w().writeBrowseStateReplace) _w().writeBrowseStateReplace();
+      } catch (e) { console.warn(e); }
+      sc = _scroller();          // render で参照が変わっていても再解決
+      if (!sc) return;
+    }
+
+    if (_role() === 'follower') target = msg.top + msg.viewH;
+    else target = msg.top - sc.clientHeight;
+    sc.scrollTop = Math.max(0, target);
+    // 適用後の local state を記録 — この位置（clamp 後の値を含む）に居る間の
+    // 送信は抑止し、peer を逆変換で戻さない。
+    _appliedHold = {
+      path: _w().currentBrowsePath || null, top: sc.scrollTop,
+      mode: _w().viewMode || 'tile',
+    };
+    if (_role() === 'follower' && !_unlocked) _unlocked = true;
+  }
+
+  /* tile-grid の childList 変化 = renderView 系の全再描画（潜り/戻る/
+   * mode/件数更新）。ローカル nav は live 値が送られるのでここで拾えば
+   * 新規リスナを増やさずに済む。pending のリトライも兼ねる。 */
+  function _onGridMutated() {
+    var pm = _takePending();
+    if (pm) _applyRemote(pm.msg, pm.at);
+    _requestSend();
+  }
+
+  /* ── init ── */
+
+  function _init() {
+    if (_inited) return;
+    _inited = true;
+    var pc = _pc();
+    if (!pc) return;                             // solo: 無タッチ
+    var ss = document.getElementById('sidebar-scroll');
+    if (ss) {
+      ss.addEventListener('scroll', function () {
+        _requestSend();   // 抑止/defer の判定は _requestSend 側で一元化
+      }, {passive: true});
+    }
+    if (typeof MutationObserver === 'function') {
+      var tg = document.getElementById('tile-grid');
+      if (tg) {
+        try {
+          new MutationObserver(_onGridMutated).observe(tg, {childList: true});
+        } catch (e) { console.warn(e); }
+      }
+      var sb = _sidebar();
+      if (sb) {
+        // armed 中にミラー sidebar が閉じられた = ユーザーが自分で閉じた
+        // （このモジュールが閉じるのは disarm のみで、その時点では
+        // _armed=false）。次の受信 frame で開き直すとちらつくので、その
+        // arm 期間中は開き直さない。
+        var wasOpen = sb.classList.contains('open');
+        try {
+          new MutationObserver(function () {
+            var open = sb.classList.contains('open');
+            if (open === wasOpen) return;
+            wasOpen = open;
+            if (!_armed) return;
+            _userClosed = !open;
+          }).observe(sb, {attributes: true, attributeFilter: ['class']});
+        } catch (e) { console.warn(e); }
+      }
+    }
+    window.addEventListener('resize', function () { _requestSend(); },
+                            {passive: true});
+    if (typeof pc.subscribe === 'function') _subs.push(pc.subscribe(_onCtlState));
+    if (typeof pc.onEvent === 'function') _subs.push(pc.onEvent(_onCtlEvent));
+    // subscribe は即時通知しない — 起動時点の状態で arm 判定する
+    // （ペア中のリロードが selecting の途中で戻るケース）。
+    _onCtlState(pc.state);
+  }
+
+  if (window.__BOOKQ_TEST_MODE__ === 'true') {
+    window.__pairBrowseSync = {
+      get armed() { return _armed; },
+      get unlocked() { return _unlocked; },
+      get lastSentSig() { return _lastSentSig; },
+      get appliedHold() { return _appliedHold; },
+      get userClosed() { return _userClosed; },
+      get suppressUntil() { return _suppressUntil; },
+      get pending() { return _pendingMsg; },
+      flush: function () {
+        if (_trailT) { clearTimeout(_trailT); _trailT = null; }
+        _suppressUntil = 0;
+        var pm = _takePending();
+        if (pm) _applyRemote(pm.msg, pm.at);
+        _lastSendTs = -1e9;
+        _sendNow();
+      },
+      applyRemote: _applyRemote,
+      onState: _onCtlState,
+    };
+  }
+
+  if (typeof document !== 'undefined' &&
+      document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _init);
+  } else if (typeof document !== 'undefined') {
+    _init();
+  }
+})();

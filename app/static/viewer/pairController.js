@@ -29,6 +29,7 @@
 
   var _client = null;
   var _subs = [];            // PairUI subscribers (unsub via returned fn)
+  var _eventSubs = [];       // client event subscribers (ui-sync relay etc.)
   var _navUnuse = null;      // installed ViewerNavigation handler's unuse()
   var _sideObs = null;       // MutationObserver on #sidebar class
   var _sideOpen = null;      // last observed .open state
@@ -372,6 +373,12 @@
         catch (x) { /* notice is best-effort */ }
       }
     }
+    _eventSubs.slice().forEach(function (cb) {
+      try { cb(e); } catch (x) { /* subscriber isolation */ }
+    });
+    // 'ui-sync' frames carry no state change — notifying every state
+    // subscriber per scroll frame is pure waste.
+    if (e && e.type === 'ui-sync') return;
     _notify();
   }
 
@@ -454,6 +461,25 @@
     sendIntent: function (intent) {
       return _client ? _client.sendIntent(intent) : false;
     },
+    /* Ephemeral mirrored-UI relay (browse scroll mirror). Fire-and-forget
+     * boolean — the companion onEvent('ui-sync') subscription receives
+     * peer frames verbatim. */
+    sendUiSync: function (payload) {
+      return _client && typeof _client.sendUiSync === 'function'
+        ? _client.sendUiSync(payload) : false;
+    },
+    /* Raw client-event subscription (same shape as PairClient's onEvent
+     * sink). Unlike subscribe() — which notifies with the public state —
+     * this delivers events verbatim; PairBrowseSync consumes 'ui-sync'
+     * frames through it. */
+    onEvent: function (cb) {
+      if (typeof cb !== 'function') throw new Error('subscriber must be a function');
+      _eventSubs.push(cb);
+      return function () {
+        var i = _eventSubs.indexOf(cb);
+        if (i >= 0) _eventSubs.splice(i, 1);
+      };
+    },
     attachDataChannel: function (dc) {
       if (_client && typeof _client.attachDataChannel === 'function') {
         _client.attachDataChannel(dc);
@@ -470,6 +496,7 @@
     destroy: function () {
       _teardown();
       _subs = [];
+      _eventSubs = [];
       if (_client) {
         try { _client.destroy(); } catch (e) { /* idempotent */ }
         _client = null;

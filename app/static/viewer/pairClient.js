@@ -18,6 +18,7 @@
  *   leave()                        — immediate local teardown (+LEAVE if up)
  *   sendIntent(intent)             — navigation-port intents -> wire frames
  *   setActivity(state)             — direct SET_ACTIVITY (browse observer, S09)
+ *   sendUiSync(payload)            — ephemeral UI_SYNC relay (browse scroll)
  *   swapSides() / changeWork()     — convenience wrappers used by the UI
  *   attachDataChannel(dc)          — plug a live RTCDataChannel
  *   subscribe(cb) -> unsubscribe   — state notifications (pairUI contract)
@@ -913,6 +914,31 @@
       return _ctlSend(_req('SET_ACTIVITY', {state: state}));
     }
 
+    /* Ephemeral mirrored-UI relay (browse scroll/position). Fire-and-forget
+     * on the control channel — no _track, no ACK is consumed; the payload is
+     * never sequenced reader state, so a dropped frame just converges on the
+     * next send. Ordering is the WS link's own — no seq field. Always
+     * _ctlSend (never _dataSend): frames arriving over the DC get relayed
+     * through the leader with payload.origin attached, which this payload
+     * must not take. */
+    function sendUiSync(payload) {
+      if (_destroyed || _term || _left || !_member || !_linkOpen() ||
+          !_paired()) return false;
+      if (!payload || payload.view !== 'browse') return false;
+      var top = payload.top, vh = payload.viewH;
+      if (typeof top !== 'number' || !isFinite(top) || top < 0) return false;
+      if (typeof vh !== 'number' || !isFinite(vh) || vh <= 0) return false;
+      var p = {
+        view: 'browse',
+        path: (payload.path === undefined || payload.path === null)
+          ? null : String(payload.path),
+        top: top, viewH: vh,
+      };
+      if (payload.mode === 'tile' || payload.mode === 'list' ||
+          payload.mode === 'card') p.mode = payload.mode;
+      return _ctlSend(_req('UI_SYNC', p));
+    }
+
     function _seenMv() {
       return _lastState && _lastState.manifestVersion
         ? _lastState.manifestVersion : 0;
@@ -973,6 +999,9 @@
           _notify(); return;
         case 'SIGNAL':
           if (_sig) _sig.applySignal({kind: f.kind, data: f.data});
+          return;
+        case 'UI_SYNC':
+          _event('ui-sync', {payload: f.payload, from: f.from});
           return;
         case 'TRANSPORT_STATE': _onPlane(f); return;
         default: return;
@@ -1507,6 +1536,7 @@
       leave: leave,
       sendIntent: sendIntent,
       setActivity: setActivity,
+      sendUiSync: sendUiSync,
       swapSides: swapSides,
       changeWork: changeWork,
       attachDataChannel: attachDataChannel,
