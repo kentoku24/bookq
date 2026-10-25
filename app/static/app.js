@@ -494,21 +494,22 @@
     },
     get(folderPath) { return this.getAll()[folderPath] || null; },
     save(folderPath, page, total) {
-      const all = this.getAll();
       const ts = Date.now();
-      all[folderPath] = { page, total, ts };
-      const keys = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
-      for (let i = 50; i < keys.length; i++) delete all[keys[i]];
-      localStorage.setItem(this.KEY, JSON.stringify(all));
+      this._store(folderPath, page, total, ts);
       // Mirror the latest position server-side (single slot, LWW). push() is
       // fire-and-forget with its own 2s trailing debounce — the turn path
       // never awaits it, so burst turning stays free of added latency.
-      window.ProgressSync.push({ folder: folderPath, page, total, ts });
+      // Guarded: a stale precached `/` can pair an old shell (no sync.js)
+      // with a newer app.js pulled from the network.
+      if (window.ProgressSync) window.ProgressSync.push({ folder: folderPath, page, total, ts });
     },
     // A server-held position pulled at boot lands here: same write + cap as
     // save() but keeps the remote ts verbatim and never re-pushes (no echo
     // loop — a pulled record must not immediately write itself back).
     mergeRemote(folderPath, page, total, ts) {
+      this._store(folderPath, page, total, ts);
+    },
+    _store(folderPath, page, total, ts) {
       const all = this.getAll();
       all[folderPath] = { page, total, ts };
       const keys = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
@@ -4052,8 +4053,15 @@
   // mid-render still reaches the pill via updateResumeButton below and the
   // tile bar via a guarded renderView.
   async function _syncRemoteProgress() {
-    let pos = null;
-    try { pos = await window.ProgressSync.pull(); } catch(e) { console.warn(e); }
+    if (!window.ProgressSync) return;
+    let res = null;
+    try { res = await window.ProgressSync.pull(); } catch(e) { console.warn(e); }
+    // pull() distinguishes "server empty" from "fetch failed" — only a
+    // confirmed-empty server gets the local newest pushed back up. Pushing
+    // blind after a failed GET would clobber a newer record another
+    // device wrote (the server also ts-compares as a backstop).
+    if (!res || !res.ok) return;
+    const pos = res.position;
     const all = ReadingProgress.getAllSafe();
     let merged = false;
     if (pos) {
@@ -4074,33 +4082,40 @@
     }
     if (merged) {
       updateResumeButton();
-      if (!currentFolder && sidebar.classList.contains("open")) renderView();
+      if (!currentFolder && tree.length && sidebar.classList.contains("open")) renderView();
     }
   }
 
   // ── save progress on tab visibility change ──
+  // save() only queues a 2s trailing-edge PUT, which dies with the page —
+  // flush() sends it immediately (keepalive outlives the document). This
+  // must run AFTER our own save: ProgressSync's self-registered listeners
+  // fire earlier (document-level + defer order), so they can only flush
+  // whatever was already pending.
+  function _saveCurrentPosition() {
+    if (!currentFolder || !images.length) return;
+    if (chapterList.length > 1) {
+      const info = getCurrentChapterInfo(currentIdx);
+      const chapter = chapterList[info.chapterIdx];
+      if (chapter) ReadingProgress.save(chapter.fullPath, info.localIdx, chapter.images.length);
+    } else {
+      ReadingProgress.save(currentFolder, currentIdx, images.length);
+    }
+    if (window.ProgressSync) window.ProgressSync.flush();
+  }
   window.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && currentFolder && images.length) {
-      if (chapterList.length > 1) {
-        const info = getCurrentChapterInfo(currentIdx);
-        const chapter = chapterList[info.chapterIdx];
-        if (chapter) ReadingProgress.save(chapter.fullPath, info.localIdx, chapter.images.length);
-      } else {
-        ReadingProgress.save(currentFolder, currentIdx, images.length);
-      }
+    if (document.visibilityState === 'hidden') {
+      _saveCurrentPosition();
+    } else if (document.visibilityState === 'visible') {
+      // Back in the foreground: another device may have moved the shared
+      // slot while we were away — merge it BEFORE any further save here
+      // can assert a stale position.
+      _syncRemoteProgress();
     }
   });
-  window.addEventListener('pagehide', () => {
-    if (currentFolder && images.length) {
-      if (chapterList.length > 1) {
-        const info = getCurrentChapterInfo(currentIdx);
-        const chapter = chapterList[info.chapterIdx];
-        if (chapter) ReadingProgress.save(chapter.fullPath, info.localIdx, chapter.images.length);
-      } else {
-        ReadingProgress.save(currentFolder, currentIdx, images.length);
-      }
-    }
-  });
+  window.addEventListener('pagehide', _saveCurrentPosition);
+  // bfcache restore: same re-pull as returning to the foreground.
+  window.addEventListener('pageshow', (e) => { if (e.persisted) _syncRemoteProgress(); });
 
   // hash listener owned by browse/hash.js — do not add second listener here
 
