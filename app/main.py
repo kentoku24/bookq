@@ -219,6 +219,10 @@ def create_app() -> FastAPI:
     app.state.reader_sync = SessionRegistry(work_resolver=resolve_reader_work)
     app.add_api_websocket_route("/ws/reader-sync", reader_sync_ws)
 
+    # Server-held "続きから" resume point: one latest record per user email,
+    # in-memory only (a container restart loses it — accepted trade-off).
+    app.state.reading_positions = {}
+
     @app.exception_handler(401)
     async def unauthorized_handler(request: Request, exc: Exception):
         return JSONResponse(status_code=401, content={"error": "Not authenticated"})

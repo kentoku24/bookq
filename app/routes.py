@@ -1409,3 +1409,101 @@ async def serve_thumb_sprite(
 
     request.app.state.last_request_at = time.time()
     return await handle_thumb_sprite(request)
+
+
+# ── Reading position (server-held, one latest record per user) ─────────
+#
+# The "続きから" pill mirrors its newest localStorage entry here so a fresh
+# device (or a browser restart) can resume where another device left off.
+# One record per user, last-writer-wins, held only in memory on app.state —
+# single worker assumed (production runs one hypercorn worker), and a
+# container restart losing the record is an accepted trade-off. The stored
+# folder path is opaque data: it is never resolved against the filesystem
+# here, only echoed back, so no containment check applies.
+_POSITION_MAX_USERS = 100
+
+
+def _positions(request: Request) -> dict:
+    """Return the per-user position map, lazily created on app.state.
+
+    getattr-first so SimpleNamespace stub states (tests) work the same as
+    the real Starlette State.
+    """
+    state = request.app.state
+    pos = getattr(state, "reading_positions", None)
+    if not isinstance(pos, dict):
+        pos = {}
+        try:
+            state.reading_positions = pos
+        except Exception:
+            pass
+    return pos
+
+
+def _position_user_key(user: dict) -> str:
+    email = user.get("email") if isinstance(user, dict) else None
+    return str(email or "unknown").lower()
+
+
+def _validate_position_payload(body) -> dict:
+    """Validate a PUT body, returning the normalized record. Raises 400."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected JSON object")
+    folder = body.get("folder")
+    if (
+        not isinstance(folder, str)
+        or not folder
+        or len(folder) > 2048
+        or folder.startswith("/")
+        or "\x00" in folder
+    ):
+        raise HTTPException(status_code=400, detail="invalid folder")
+    page = body.get("page")
+    if not isinstance(page, int) or isinstance(page, bool) or page < 0:
+        raise HTTPException(status_code=400, detail="invalid page")
+    total = body.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+        raise HTTPException(status_code=400, detail="invalid total")
+    ts = body.get("ts")
+    if ts is None:
+        ts = int(time.time() * 1000)
+    elif isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts < 0:
+        raise HTTPException(status_code=400, detail="invalid ts")
+    return {"folder": folder, "page": page, "total": total, "ts": int(ts)}
+
+
+@api_router.get("/api/reading-position")
+async def get_reading_position(request: Request, user: dict = Depends(require_auth)):
+    """Return the caller's single latest reading position (null when unset)."""
+    rec = _positions(request).get(_position_user_key(user))
+    return JSONResponse(
+        content={"position": rec},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@api_router.put("/api/reading-position")
+async def put_reading_position(request: Request, user: dict = Depends(require_auth)):
+    """Store the caller's latest reading position. Last-writer-wins, one slot."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    rec = _validate_position_payload(body)
+    rec["updated_at"] = time.time()
+    positions = _positions(request)
+    key = _position_user_key(user)
+    if key not in positions and len(positions) >= _POSITION_MAX_USERS:
+        # Bound the map under a misconfigured deployment — the email
+        # allowlist keeps this unreachable in practice.
+        stalest = min(positions, key=lambda k: positions[k].get("updated_at", 0))
+        del positions[stalest]
+    positions[key] = rec
+    return {"status": "ok"}
+
+
+@api_router.delete("/api/reading-position")
+async def delete_reading_position(request: Request, user: dict = Depends(require_auth)):
+    """Clear the caller's stored reading position (harness 全消去)."""
+    _positions(request).pop(_position_user_key(user), None)
+    return {"status": "ok"}
