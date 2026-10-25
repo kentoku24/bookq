@@ -929,8 +929,7 @@ def test_send_ui_sync_writes_ctl_frame(pc_page):
           const s = await rig.pairLeader(c);
           const pre = s.sent.length;
           const ok = c.sendUiSync({view: 'browse', path: 'group/ep',
-                                   top: 120.5, viewH: 600, mode: 'list',
-                                   seq: 3});
+                                   top: 120.5, viewH: 600, mode: 'list'});
           const f = s.sent[s.sent.length - 1];
           return {ok, sentCount: s.sent.length - pre, f};
         }"""
@@ -939,8 +938,7 @@ def test_send_ui_sync_writes_ctl_frame(pc_page):
     f = res["f"]
     assert f["type"] == "UI_SYNC" and f["sessionId"] == "S1"
     assert f["payload"] == {"view": "browse", "path": "group/ep",
-                            "top": 120.5, "viewH": 600, "mode": "list",
-                            "seq": 3}
+                            "top": 120.5, "viewH": 600, "mode": "list"}
 
 
 def test_send_ui_sync_gating_and_shape(pc_page):
@@ -960,7 +958,7 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           const noView = c.sendUiSync({path: 'x', top: 0, viewH: 1});
           const nan = c.sendUiSync({view: 'browse', top: NaN, viewH: 1});
           const sentAfterBad = s.sent.length - base;
-          // minimal payload: path null, no mode/seq
+          // minimal payload: path null, no mode
           const minOk = c.sendUiSync({view: 'browse', path: null, top: 0,
                                       viewH: 480});
           const minF = s.sent[s.sent.length - 1];

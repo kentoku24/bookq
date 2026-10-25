@@ -173,10 +173,6 @@ def _validate_ui_sync(p: dict) -> None:
     mode = p.get("mode")
     if mode is not None and mode not in UI_MODES:
         _fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card")
-    seq = p.get("seq")
-    if seq is not None and (not isinstance(seq, int) or isinstance(seq, bool)
-                            or seq < 0):
-        _fail(ERR_RANGE, "UI_SYNC.seq must be int >= 0")
 
 
 def validate_state(raw) -> dict:

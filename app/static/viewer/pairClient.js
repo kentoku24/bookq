@@ -901,11 +901,12 @@
     }
 
     /* Ephemeral mirrored-UI relay (browse scroll/position). Fire-and-forget
-     * on the control channel — no _track, the ACK is never consumed; the
-     * payload is never sequenced reader state, so a dropped frame just
-     * converges on the next send. Always _ctlSend (never _dataSend): frames
-     * arriving over the DC get relayed through the leader with
-     * payload.origin attached, which this payload must not take. */
+     * on the control channel — no _track, no ACK is consumed; the payload is
+     * never sequenced reader state, so a dropped frame just converges on the
+     * next send. Ordering is the WS link's own — no seq field. Always
+     * _ctlSend (never _dataSend): frames arriving over the DC get relayed
+     * through the leader with payload.origin attached, which this payload
+     * must not take. */
     function sendUiSync(payload) {
       if (_destroyed || _term || _left || !_member || !_linkOpen() ||
           !_paired()) return false;
@@ -921,8 +922,6 @@
       };
       if (payload.mode === 'tile' || payload.mode === 'list' ||
           payload.mode === 'card') p.mode = payload.mode;
-      if (typeof payload.seq === 'number' && isFinite(payload.seq) &&
-          payload.seq >= 0) p.seq = Math.floor(payload.seq);
       return _ctlSend(_req('UI_SYNC', p));
     }
 

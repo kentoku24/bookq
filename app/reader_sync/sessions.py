@@ -591,16 +591,18 @@ class SessionRegistry:
                  member: Member) -> None:
         """Ephemeral mirrored-UI relay (browse scroll/position). Same shape
         as SIGNAL — forwarded verbatim to the peer, never sequenced or
-        stored. A silent 1s-window cap keeps a runaway sender from filling
-        the peer's outq (overflow would close the *recipient's* link)."""
+        stored, and fire-and-forget: no ACK on success (the sender never
+        tracks or consumes it) and no response when the peer is offline
+        (transient state, and a REJECT per scroll frame would spam client
+        notifications). NOT_PAIRED still rejects — it is a real misuse.
+        A silent 1s-window cap keeps a runaway sender from filling the
+        peer's outq (overflow would close the *recipient's* link)."""
         if not session.paired:
             self._reject(link, req, "UI_SYNC", REASON_NOT_PAIRED,
                          session_id=session.id)
             return
         other = next((m for m in session.members.values() if m is not member), None)
         if other is None or other.link is None or not other.link.alive:
-            self._reject(link, req, "UI_SYNC", REASON_PEER_OFFLINE,
-                         session_id=session.id)
             return
         now = self._now()
         if now - member.ui_sync_window_start >= UI_SYNC_WINDOW_SEC:
@@ -613,7 +615,6 @@ class SessionRegistry:
             "v": protocol.PROTOCOL_VERSION, "type": "UI_SYNC",
             "sessionId": session.id, "from": member.role,
             "payload": req["payload"]})
-        self._ack(link, req, session_id=session.id)
 
     def _transport_state(self, link: PeerLink, req: dict, session: PairSession,
                          member: Member) -> None:

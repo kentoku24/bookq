@@ -686,7 +686,7 @@ def test_signal_requires_pair_and_live_peer():
 
 def _ui_payload(**kw):
     p = {"view": "browse", "path": "group/episodes", "top": 120.5,
-         "viewH": 600, "mode": "tile", "seq": 3}
+         "viewH": 600, "mode": "tile"}
     p.update(kw)
     return p
 
@@ -704,7 +704,8 @@ def test_ui_sync_relayed_between_paired_members():
     assert ui["from"] == "leader"
     assert ui["payload"] == _ui_payload()
     assert ui["sessionId"] == sid
-    assert _one(leader.frames(), "ACK")["requestId"] == "u1"
+    # fire-and-forget: the sender never consumes an ACK, so none is sent
+    assert _of_type(leader.frames(), "ACK") == []
 
     # the relay is bidirectional — follower's scroll reaches the leader too
     _send(reg, follower, _request(
@@ -730,10 +731,11 @@ def test_ui_sync_requires_pair_and_live_peer():
                                 session_id=created["sessionId"]))
     leader.frames(); f1.frames()
     reg.detach_link(f1)
+    # peer offline is transient for an ephemeral scroll frame — dropped
+    # silently rather than spamming a REJECT + client notification per frame
     _send(reg, leader, _request(
         "UI_SYNC", _ui_payload(), session_id=created["sessionId"]))
-    rej = _one(leader.frames(), "REJECT")
-    assert rej["reason"] == REASON_PEER_OFFLINE
+    assert _of_type(leader.frames(), "REJECT") == []
 
 
 def test_ui_sync_malformed_payloads_rejected():
@@ -751,8 +753,6 @@ def test_ui_sync_malformed_payloads_rejected():
         _ui_payload(viewH=0),                    # must be > 0
         _ui_payload(viewH=-4),
         _ui_payload(mode="grid"),                # unknown mode
-        _ui_payload(seq=-1),                     # negative seq
-        _ui_payload(seq=1.5),                    # seq must be int
     )
     for i, payload in enumerate(bad):
         _send(reg, leader, _request(
@@ -765,7 +765,7 @@ def test_ui_sync_malformed_payloads_rejected():
 
 
 def test_ui_sync_optional_fields_and_root_path():
-    """path null (root) and omitted mode/seq are valid minimal frames."""
+    """path null (root) and omitted mode are valid minimal frames."""
     clock = FakeClock()
     reg = _reg(clock)
     leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
@@ -785,13 +785,13 @@ def test_ui_sync_rate_cap_silently_drops_burst():
 
     for i in range(UI_SYNC_RATE_MAX + 30):
         _send(reg, leader, _request(
-            "UI_SYNC", _ui_payload(top=i, seq=i),
+            "UI_SYNC", _ui_payload(top=i),
             session_id=sid, request_id=f"b{i}"))
     relayed = _of_type(follower.frames(), "UI_SYNC")
     assert len(relayed) == UI_SYNC_RATE_MAX
-    # ACKed frames stop at the cap too — drops are fully silent
+    # no ACKs at all — UI_SYNC is fire-and-forget on both directions
     acks = _of_type(leader.frames(), "ACK")
-    assert len(acks) == UI_SYNC_RATE_MAX
+    assert acks == []
 
     # a new 1s window relays again
     clock.advance(1.1)

@@ -354,6 +354,9 @@
     _eventSubs.slice().forEach(function (cb) {
       try { cb(e); } catch (x) { /* subscriber isolation */ }
     });
+    // 'ui-sync' frames carry no state change — notifying every state
+    // subscriber per scroll frame is pure waste.
+    if (e && e.type === 'ui-sync') return;
     _notify();
   }
 
