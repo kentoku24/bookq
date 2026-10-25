@@ -11,11 +11,11 @@
       <stop offset="0.6" stop-color="#1373E6" stop-opacity="0.18"/>
       <stop offset="1" stop-color="#1373E6" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="inkB" gradientUnits="userSpaceOnUse" x1="8" y1="8" x2="11.6" y2="15.5">
+    <linearGradient id="inkB" gradientUnits="userSpaceOnUse" x1="20.2" y1="8" x2="23.7" y2="15.5">
       <stop offset="0" stop-color="#FEFEF7"/>
       <stop offset="1" stop-color="#FBF6EA"/>
     </linearGradient>
-    <linearGradient id="inkQ" gradientUnits="userSpaceOnUse" x1="20.2" y1="17" x2="23.7" y2="26">
+    <linearGradient id="inkQ" gradientUnits="userSpaceOnUse" x1="8" y1="17" x2="11.6" y2="26">
       <stop offset="0" stop-color="#FFEECB"/>
       <stop offset="0.55" stop-color="#FED398"/>
       <stop offset="1" stop-color="#FE9962"/>
@@ -23,11 +23,11 @@
   </defs>
   <rect width="32" height="32" rx="7.8" fill="url(#bg)"/>
   <rect width="32" height="32" rx="7.8" fill="url(#glow)"/>
-  <!-- Diagonal bq monogram: the b bowl sits upper-left; the q bowl lower-right. -->
+  <!-- Diagonal bq monogram: the q bowl sits upper-right; the b bowl lower-left. -->
   <g fill="none" stroke-linecap="round">
-    <circle cx="11.2" cy="11.8" r="4.05" stroke="url(#inkB)" stroke-width="2.65"/>
-    <line x1="7.25" y1="4.2" x2="7.25" y2="11.8" stroke="url(#inkB)" stroke-width="3.0"/>
-    <circle cx="20.4" cy="20.1" r="4.05" stroke="url(#inkQ)" stroke-width="2.65"/>
-    <line x1="24.2" y1="20.1" x2="24.2" y2="27.0" stroke="url(#inkQ)" stroke-width="2.9"/>
+    <circle cx="20.4" cy="11.8" r="4.05" stroke="url(#inkQ)" stroke-width="2.65"/>
+    <line x1="24.2" y1="4.2" x2="24.2" y2="11.8" stroke="url(#inkQ)" stroke-width="3.0"/>
+    <circle cx="11.2" cy="20.1" r="4.05" stroke="url(#inkB)" stroke-width="2.65"/>
+    <line x1="7.25" y1="20.1" x2="7.25" y2="27.0" stroke="url(#inkB)" stroke-width="2.9"/>
   </g>
 </svg>
