@@ -586,9 +586,11 @@
     els.swap.addEventListener('click', () => { if (ctl) ctl.swapSides(); });
     els.leave.addEventListener('click', () => { if (ctl) ctl.leave(); });
     // Optional extension point — S09 wires the real work picker; the mock
-    // may or may not implement it.
+    // may or may not implement it. A successful call opens the browse list
+    // under this dialog — close so the lid does not block the picker.
     els.changeWork.addEventListener('click', () => {
-      if (ctl && typeof ctl.changeWork === 'function') ctl.changeWork();
+      if (ctl && typeof ctl.changeWork === 'function' &&
+          ctl.changeWork() !== false) close();
     });
   }
 

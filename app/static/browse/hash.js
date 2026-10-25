@@ -406,7 +406,14 @@
       try { urlStackReplace(location.pathname + location.search); } catch (e) {}
       var pc = window.PairController;
       if (pc && typeof pc.join === 'function') {
-        try { pc.join(jm[1]); } catch (e) {}
+        try {
+          var jr = pc.join(jm[1]);
+          if (jr && typeof jr.catch === 'function') jr.catch(function () {});
+          // surface the outcome — waiting / connected / error
+          if (window.PairUI && typeof window.PairUI.open === 'function') {
+            window.PairUI.open();
+          }
+        } catch (e) {}
       }
       return;
     }
