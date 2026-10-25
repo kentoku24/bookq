@@ -356,9 +356,20 @@ def _reset_reading_position(request):
 
         _delete()
         deadline = time.time() + 3.0
-        while not _empty() and time.time() < deadline:
-            _delete()
-            time.sleep(0.15)
+        empty_since = None
+        while time.time() < deadline:
+            if _empty():
+                # Stably empty for ~300ms — a teardown keepalive PUT from
+                # the previous test would have landed by now (it typically
+                # travels well under 100ms), so returning here is safe.
+                if empty_since is not None and time.time() - empty_since >= 0.3:
+                    break
+                if empty_since is None:
+                    empty_since = time.time()
+            else:
+                empty_since = None
+                _delete()
+            time.sleep(0.05)
     except Exception:
         pass  # best-effort — a dead server fails the test properly later
 

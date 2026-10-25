@@ -148,6 +148,21 @@ def test_delete_tombstone_blocks_resurrection(server):
     assert _get_position(server)["page"] == 9
 
 
+def test_put_future_ts_rejected(server):
+    """A far-future ts is a 400, not a poisoned slot — an unchecked one
+    would reject every honest PUT as stale and survive even DELETE."""
+    future = int(time.time() * 1000) + 365 * 86400 * 1000
+    status, _ = _req(server, "PUT", "/api/reading-position",
+                     {"folder": "wrong/clock", "page": 3, "total": 30, "ts": future})
+    assert status == 400
+    assert _get_position(server) is None
+    # Within-slack drift (~minutes) is still accepted — NTP isn't perfect.
+    status, _ = _req(server, "PUT", "/api/reading-position",
+                     {"folder": "f/b", "page": 1, "total": 30,
+                      "ts": int(time.time() * 1000) + 60_000})
+    assert status == 200
+
+
 # ── e2e: two devices ─────────────────────────────────────────────────
 
 
@@ -272,10 +287,29 @@ def test_pagehide_flush_sends_current_position(page, server):
     assert pos, "pagehide did not flush the final save promptly"
 
 
+def test_visibilitychange_flush_sends_current_position(page, server):
+    """The iOS-reliable path: visibilitychange(hidden) must also flush —
+    it fires on document while app.js saves on window, so ordering is
+    the thing under test."""
+    page.locator('.tile[data-path="long"]').click()
+    expect(page.locator("#counter")).to_have_text("1 / 30")
+    page.keyboard.press("ArrowLeft")
+    page.evaluate(
+        """() => {
+            Object.defineProperty(document, 'visibilityState',
+                { get: () => 'hidden', configurable: true });
+            document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+        }"""
+    )
+    pos = _wait_position(server, lambda p: p.get("page") == 1, timeout=1.5)
+    assert pos, "visibilitychange(hidden) did not flush the final save promptly"
+
+
 def test_boot_pull_merges_newer_remote(page, server):
     """A strictly-newer remote record lands in localStorage and drives the pill."""
     _req(server, "PUT", "/api/reading-position",
-         {"folder": "series/vol1", "page": 1, "total": 2, "ts": 9999999999999})
+         {"folder": "series/vol1", "page": 1, "total": 2,
+          "ts": int(time.time() * 1000)})
     page.evaluate(
         "localStorage.setItem('bookq_progress', "
         "JSON.stringify({'long': {page: 0, total: 30, ts: 1}}))"
@@ -298,7 +332,8 @@ def test_boot_pushes_newer_local_to_server(page, server):
          {"folder": "long", "page": 1, "total": 30, "ts": 1})
     page.evaluate(
         "localStorage.setItem('bookq_progress', "
-        "JSON.stringify({'series/vol1': {page: 0, total: 2, ts: 9999999999999}}))"
+        "JSON.stringify({'series/vol1': {page: 0, total: 2, ts: %d}}))"
+        % int(time.time() * 1000)
     )
     page.reload()
     page.wait_for_selector(".tile")
