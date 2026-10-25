@@ -11,30 +11,23 @@
       <stop offset="0.6" stop-color="#1373E6" stop-opacity="0.18"/>
       <stop offset="1" stop-color="#1373E6" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="inkB" gradientUnits="userSpaceOnUse" x1="7.7" y1="8" x2="11.6" y2="22">
+    <linearGradient id="inkB" gradientUnits="userSpaceOnUse" x1="8" y1="8" x2="11.6" y2="15.5">
       <stop offset="0" stop-color="#FEFEF7"/>
       <stop offset="1" stop-color="#FBF6EA"/>
     </linearGradient>
-    <linearGradient id="inkQ" gradientUnits="userSpaceOnUse" x1="20" y1="11" x2="23" y2="26">
+    <linearGradient id="inkQ" gradientUnits="userSpaceOnUse" x1="20.2" y1="17" x2="23.7" y2="26">
       <stop offset="0" stop-color="#FFEECB"/>
       <stop offset="0.55" stop-color="#FED398"/>
       <stop offset="1" stop-color="#FE9962"/>
     </linearGradient>
-    <clipPath id="weaveClip"><circle cx="15.84" cy="18.4" r="3.0"/></clipPath>
   </defs>
   <rect width="32" height="32" rx="7.8" fill="url(#bg)"/>
   <rect width="32" height="32" rx="7.8" fill="url(#glow)"/>
-  <!-- bq ligature — single-stroke geometry traced from bq-icon.png (tile 1238px → 32u, ÷38.7):
-       rings r4.06/4.12 stroke 2.68; b stem x7.69 (w3.05) top y8.9; q tail x23.91 (w2.9) to y23.56.
-       Ink colors fitted from PNG: b near-white; q warms downward (cream → peach). -->
+  <!-- Diagonal bq monogram: the b bowl sits upper-left; the q bowl lower-right. -->
   <g fill="none" stroke-linecap="round">
-    <circle cx="20.03" cy="16.75" r="4.12" stroke="url(#inkQ)" stroke-width="2.68"/>
-    <line x1="23.91" y1="16.75" x2="23.91" y2="23.56" stroke="url(#inkQ)" stroke-width="2.9"/>
-    <circle cx="11.64" cy="16.7" r="4.06" stroke="url(#inkB)" stroke-width="2.68"/>
-    <line x1="7.69" y1="8.9" x2="7.69" y2="16.7" stroke="url(#inkB)" stroke-width="3.05"/>
-    <!-- weave: q ring re-drawn over b at the lower crossing (upper crossing keeps b on top) -->
-    <g clip-path="url(#weaveClip)">
-      <circle cx="20.03" cy="16.75" r="4.12" stroke="url(#inkQ)" stroke-width="2.68"/>
-    </g>
+    <circle cx="11.2" cy="11.8" r="4.05" stroke="url(#inkB)" stroke-width="2.65"/>
+    <line x1="7.25" y1="4.2" x2="7.25" y2="11.8" stroke="url(#inkB)" stroke-width="3.0"/>
+    <circle cx="20.4" cy="20.1" r="4.05" stroke="url(#inkQ)" stroke-width="2.65"/>
+    <line x1="24.2" y1="20.1" x2="24.2" y2="27.0" stroke="url(#inkQ)" stroke-width="2.9"/>
   </g>
 </svg>
