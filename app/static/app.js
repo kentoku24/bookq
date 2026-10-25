@@ -4052,7 +4052,17 @@
   // most per boot. Fires in parallel with loadFolders; a remote landing
   // mid-render still reaches the pill via updateResumeButton below and the
   // tile bar via a guarded renderView.
-  async function _syncRemoteProgress() {
+  // Single-flight: bfcache restore fires BOTH pageshow(persisted) and
+  // visibilitychange(visible) — without the guard two pulls (and two
+  // merge/render passes) run side by side.
+  let _syncInFlight = null;
+  function _syncRemoteProgress() {
+    if (_syncInFlight) return _syncInFlight;
+    _syncInFlight = _syncRemoteProgressRun()
+      .finally(() => { _syncInFlight = null; });
+    return _syncInFlight;
+  }
+  async function _syncRemoteProgressRun() {
     if (!window.ProgressSync) return;
     let res = null;
     try { res = await window.ProgressSync.pull(); } catch(e) { console.warn(e); }
@@ -4094,12 +4104,24 @@
   // whatever was already pending.
   function _saveCurrentPosition() {
     if (!currentFolder || !images.length) return;
+    let path, page, total;
     if (chapterList.length > 1) {
       const info = getCurrentChapterInfo(currentIdx);
       const chapter = chapterList[info.chapterIdx];
-      if (chapter) ReadingProgress.save(chapter.fullPath, info.localIdx, chapter.images.length);
+      if (!chapter) { if (window.ProgressSync) window.ProgressSync.flush(); return; }
+      path = chapter.fullPath; page = info.localIdx; total = chapter.images.length;
     } else {
-      ReadingProgress.save(currentFolder, currentIdx, images.length);
+      path = currentFolder; page = currentIdx; total = images.length;
+    }
+    // An unchanged position must NOT be re-saved: save() would restamp the
+    // localStorage ts to now, and after a reload (in-memory dedup gone) the
+    // boot self-heal would push this stale view over another device's newer
+    // record. Skipping the save also keeps the pulled remote entry ahead in
+    // the local recency sort. flush() still runs so a real pending send
+    // (e.g. an armed debounce from the last turn) goes out now.
+    const prev = ReadingProgress.get(path);
+    if (!prev || prev.page !== page || prev.total !== total) {
+      ReadingProgress.save(path, page, total);
     }
     if (window.ProgressSync) window.ProgressSync.flush();
   }

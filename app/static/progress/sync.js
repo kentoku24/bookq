@@ -27,9 +27,12 @@
  * genuinely different page turn always sends.
  *
  * Failure policy: a failed PUT requeues its record and retries on an
- * exponential backoff (2s→4s→…→60s cap) — never a hot retry loop against
- * a dead server or offline radio. Non-retryable 4xx (everything except
- * 408/429 — poison payloads, expired sessions) drop the record instead.
+ * exponential backoff (4s→8s→…→60s cap) — never a hot retry loop against
+ * a dead server or offline radio, and push() during backoff only swaps
+ * _pending (the armed retry timer stands) so reading through an outage
+ * can't re-arm each failed send down to 2s. Non-retryable 4xx (everything
+ * except 408/429 — poison payloads, expired sessions) drop the record
+ * instead.
  * Requeued records keep their ORIGINAL ts so a stale re-save can't
  * leapfrog a newer remote record; the server also compares ts and
  * tombstones wipes, so stale PUTs land as {"status":"stale"} harmlessly.
@@ -115,6 +118,10 @@
     } else {
       _pending = { folder: rec.folder, page: rec.page, total: rec.total, ts: rec.ts };
     }
+    // During retry backoff a timer is already armed (or the in-flight
+    // send's post-handler will arm one) — re-arming to 2s here would
+    // defeat the backoff when the user keeps turning pages offline.
+    if (_retryDelay > 0 && (_timer || _inFlight)) return;
     _armTimer(DEBOUNCE_MS);
   }
 
