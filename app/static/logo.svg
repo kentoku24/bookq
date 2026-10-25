@@ -11,29 +11,26 @@
       <stop offset="0.6" stop-color="#1373E6" stop-opacity="0.18"/>
       <stop offset="1" stop-color="#1373E6" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="inkB" gradientUnits="userSpaceOnUse" x1="7.7" y1="8" x2="11.6" y2="22">
+    <linearGradient id="inkB" gradientUnits="userSpaceOnUse" x1="8" y1="8" x2="11.6" y2="15.5">
       <stop offset="0" stop-color="#FEFEF7"/>
       <stop offset="1" stop-color="#FBF6EA"/>
     </linearGradient>
-    <linearGradient id="inkQ" gradientUnits="userSpaceOnUse" x1="20" y1="11" x2="23" y2="26">
+    <linearGradient id="inkQ" gradientUnits="userSpaceOnUse" x1="20.2" y1="17" x2="23.7" y2="26">
       <stop offset="0" stop-color="#FFEECB"/>
       <stop offset="0.55" stop-color="#FED398"/>
       <stop offset="1" stop-color="#FE9962"/>
     </linearGradient>
-    <clipPath id="weaveClip"><circle cx="15.84" cy="18.4" r="3.0"/></clipPath>
   </defs>
 
-  <!-- App tile — same mark as favicon.svg, scaled 32 → 120 (factor 3.75) -->
+  <!-- App tile — same diagonal bq mark as favicon.svg, scaled 32 → 120 (factor 3.75) -->
   <rect x="60" width="120" height="120" rx="29" fill="url(#bg)"/>
   <rect x="60" width="120" height="120" rx="29" fill="url(#glow)"/>
   <g transform="translate(60,0) scale(3.75)" fill="none" stroke-linecap="round">
-    <circle cx="20.03" cy="16.75" r="4.12" stroke="url(#inkQ)" stroke-width="2.68"/>
-    <line x1="23.91" y1="16.75" x2="23.91" y2="23.56" stroke="url(#inkQ)" stroke-width="2.9"/>
-    <circle cx="11.64" cy="16.7" r="4.06" stroke="url(#inkB)" stroke-width="2.68"/>
-    <line x1="7.69" y1="8.9" x2="7.69" y2="16.7" stroke="url(#inkB)" stroke-width="3.05"/>
-    <g clip-path="url(#weaveClip)">
-      <circle cx="20.03" cy="16.75" r="4.12" stroke="url(#inkQ)" stroke-width="2.68"/>
-    </g>
+    <circle cx="11.2" cy="11.8" r="4.05" stroke="url(#inkB)" stroke-width="2.65"/>
+    <line x1="7.25" y1="4.2" x2="7.25" y2="11.8" stroke="url(#inkB)" stroke-width="3.0"/>
+    <circle cx="20.4" cy="20.1" r="4.05" stroke="url(#inkQ)" stroke-width="2.65"/>
+    <line x1="24.2" y1="20.1" x2="24.2" y2="27.0" stroke="url(#inkQ)" stroke-width="2.9"/>
+  </g>
   </g>
 
   <text x="120" y="180" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="42" font-weight="200" fill="#e0e0e0" text-anchor="middle" letter-spacing="-0.03em">bookq</text>
