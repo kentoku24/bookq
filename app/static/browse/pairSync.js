@@ -219,6 +219,11 @@
     if (v) v.classList.add('sidebar-open');
     try { if (_w().syncSidebarA11y) _w().syncSidebarA11y(); }
     catch (e) { console.warn(e); }
+    // 正規の open 経路と同じレイアウトに揃える — class 直書きだけだと
+    // tile-full が付かずタイルが縮小描画され、scrollHeight が peer と
+    // 食い違ってオフセット適用が maxTop に clamp される。
+    try { if (_w().renderView) _w().renderView(); }
+    catch (e) { console.warn(e); }
   }
 
   /* path がローカル tree で解決できるか。null=ルートは常に可。 */
