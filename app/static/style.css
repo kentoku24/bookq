@@ -493,7 +493,7 @@ body.landscape-single #spread-shift{display:none}
  * session is (or is becoming) real — idle/ended hide it via [hidden] */
 #pair-status{position:fixed;top:calc(104px + env(safe-area-inset-top,0px));right:12px;z-index:4;display:flex;flex-direction:row;align-items:center;gap:0;font-size:11px;letter-spacing:0.01em;transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0);cursor:pointer}
 #pair-status[hidden]{display:none}
-#pair-status.hidden{opacity:0}
+#pair-status.hidden{opacity:0;pointer-events:none}
 #pair-status>span{display:inline-block;background:rgba(20,24,32,.85);border:1px solid #39414f;color:#aab3c2;white-space:nowrap}
 #pair-status>span:first-child{border-radius:10px 0 0 10px;padding:3px 6px 3px 8px;border-right:none}
 #pair-status>span:last-child{border-radius:0 10px 10px 0;padding:3px 8px 3px 6px;border-left:none}
