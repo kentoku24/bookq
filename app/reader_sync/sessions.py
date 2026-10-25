@@ -36,6 +36,7 @@ HEARTBEAT_INTERVAL = 5.0       # server PING cadence
 NO_RESPONSE_TIMEOUT = 15.0     # silence -> disconnect
 CODE_TTL_SECONDS = 300.0       # pairing code lifetime
 RESUME_WINDOW_SECONDS = 300.0  # member may reattach within this window
+MATCH_WINDOW_SECONDS = 120.0   # only sessions this fresh are auto-joinable
 SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
 CODE_DIGITS = 6
 
@@ -164,6 +165,7 @@ class PairSession:
     id: str
     code: str
     code_expires_at: float
+    created_at: float = 0.0
     code_consumed: bool = False
     members: dict = field(default_factory=dict)   # member_id -> Member
     pending: Member | None = None                  # joined, awaiting APPROVE
@@ -207,6 +209,7 @@ class SessionRegistry:
                  code_ttl: float = CODE_TTL_SECONDS,
                  resume_window: float = RESUME_WINDOW_SECONDS,
                  send_queue_max: int = SEND_QUEUE_MAX,
+                 match_window: float = MATCH_WINDOW_SECONDS,
                  work_resolver=None):
         self._clock = clock or time.monotonic
         # S05: OPEN_WORK / SET_OFFSET manifest resolution — a callable
@@ -218,6 +221,7 @@ class SessionRegistry:
         self.code_ttl = code_ttl
         self.resume_window = resume_window
         self.send_queue_max = send_queue_max
+        self.match_window = match_window
 
         self.sessions: dict[str, PairSession] = {}
         self.links: dict[str, PeerLink] = {}
@@ -355,7 +359,7 @@ class SessionRegistry:
         t = req["type"]
         member = link.member
 
-        if t in ("CREATE", "JOIN", "RESUME"):
+        if t in ("CREATE", "JOIN", "RESUME", "MATCH"):
             if member is not None:
                 self._reject(link, req, t, REASON_ALREADY_BOUND)
                 return
@@ -363,6 +367,8 @@ class SessionRegistry:
                 self._create(link, req)
             elif t == "JOIN":
                 self._join(link, req)
+            elif t == "MATCH":
+                self._match(link, req)
             else:
                 self._resume(link, req)
             return
@@ -433,7 +439,8 @@ class SessionRegistry:
             code = _new_code()
         session = PairSession(
             id=_new_id(), code=code,
-            code_expires_at=self._now() + self.code_ttl)
+            code_expires_at=self._now() + self.code_ttl,
+            created_at=self._now())
         user = link.user or {}
         member = Member(id=_new_id(), role="leader",
                         name=user.get("name") or "", resume_token=_new_token(),
@@ -464,6 +471,10 @@ class SessionRegistry:
             self._reject(link, req, "JOIN", REASON_CODE_EXPIRED,
                          session_id=session.id)
             return
+        self._bind_follower(link, req, session)
+
+    def _bind_follower(self, link: PeerLink, req: dict,
+                       session: PairSession) -> None:
         user = link.user or {}
         member = Member(id=_new_id(), role="follower",
                         name=user.get("name") or "", resume_token=_new_token(),
@@ -471,17 +482,49 @@ class SessionRegistry:
         session.pending = member
         session.code_consumed = True   # single-use on success
         link.member = member
+        leader = session.leader()
         self._ack(link, req, {
             "sessionId": session.id, "memberId": member.id,
-            "role": "follower", "resumeToken": member.resume_token},
+            "role": "follower", "resumeToken": member.resume_token,
+            "leaderName": leader.name if leader else ""},
             session_id=session.id)
-        leader = session.leader()
         if leader is not None and leader.link is not None:
             leader.link.send_obj({
                 "v": protocol.PROTOCOL_VERSION, "type": "JOIN_REQUEST",
                 "sessionId": session.id, "memberId": member.id,
                 "name": member.name})
         logger.info("reader-sync link=%s member=%s pending join", link.id, member.id)
+
+    def _match(self, link: PeerLink, req: dict) -> None:
+        """One-tap pairing: join a fresh waiting session if exactly one is
+        eligible, else become a waiting leader. Runs on the registry's
+        single-threaded dispatch so the find-or-create is atomic — the
+        earlier tapper wins the leader role."""
+        now = self._now()
+        candidates = []
+        for s in self.sessions.values():
+            if s.pending is not None or len(s.members) != 1 or s.code_consumed:
+                continue
+            if now >= s.code_expires_at or now - s.created_at > self.match_window:
+                continue
+            leader = s.leader()
+            if leader is None or leader.link is None or not leader.link.alive:
+                continue
+            candidates.append(s)
+        if not candidates:
+            self._create(link, req)
+            return
+        candidates.sort(key=lambda s: s.created_at)
+        if len(candidates) > 1:
+            self._ack(link, req, {
+                "ambiguous": True,
+                "candidates": [{
+                    "code": s.code,
+                    "leaderName": s.leader().name,
+                    "ageSec": int(now - s.created_at),
+                } for s in candidates[:8]]})
+            return
+        self._bind_follower(link, req, candidates[0])
 
     def _approve_or_reject(self, link: PeerLink, req: dict, session: PairSession,
                            member: Member, *, approve: bool) -> None:

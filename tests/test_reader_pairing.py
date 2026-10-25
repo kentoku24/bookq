@@ -22,6 +22,7 @@ from app.reader_sync.sessions import (  # noqa: E402
     END_REJECTED,
     END_RESUME_EXPIRED,
     HEARTBEAT_INTERVAL,
+    MATCH_WINDOW_SECONDS,
     NO_RESPONSE_TIMEOUT,
     REASON_ALREADY_BOUND,
     REASON_BAD_CODE,
@@ -782,3 +783,102 @@ def test_ticker_start_and_shutdown():
         assert not reg.links
 
     _run(go())
+
+
+# ── MATCH (one-tap pairing) ────────────────────────────────────────
+
+
+def _match(reg: SessionRegistry, link: FakeLink, request_id="m1") -> dict:
+    _send(reg, link, _request("MATCH", request_id=request_id))
+    ack = _one(link.frames(), "ACK")
+    assert ack["request"] == "MATCH"
+    return ack["data"]
+
+
+def test_match_becomes_waiting_leader_when_nobody_waits():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    data = _match(reg, a)
+    assert data["role"] == "leader"
+    assert data["code"].isdigit() and len(data["code"]) == 6
+    assert len(reg.sessions) == 1
+    # the waiting session still exposes its code — JOIN/QR fallback works
+    b = _connect(reg, "b")
+    _join(reg, b, data["code"])
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"]
+
+
+def test_match_joins_fresh_waiting_session():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    created = _match(reg, a)
+    joined = _match(reg, b)
+    assert joined["role"] == "follower"
+    assert joined["sessionId"] == created["sessionId"]
+    assert joined["leaderName"]
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"] == joined["memberId"]
+
+
+def test_match_ignores_session_older_than_window():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    created = _match(reg, a)
+    _keepalive(reg, clock, a, MATCH_WINDOW_SECONDS + 5)
+    b = _connect(reg, "b")
+    joined = _match(reg, b)
+    assert joined["role"] == "leader"
+    assert joined["sessionId"] != created["sessionId"]
+
+
+def test_match_excludes_paired_and_pending_sessions():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b, c = _connect(reg, "a"), _connect(reg, "b"), _connect(reg, "c")
+    sid, _, _ = _pair(reg, a, b)
+    d = _connect(reg, "d")
+    data = _match(reg, d)
+    assert data["role"] == "leader"
+    assert data["sessionId"] != sid
+    # a session with a pending (unapproved) join is not a candidate either
+    _join(reg, c, data["code"])
+    e = _connect(reg, "e")
+    data2 = _match(reg, e)
+    assert data2["role"] == "leader"
+    assert data2["sessionId"] != data["sessionId"]
+
+
+def test_match_ambiguous_returns_candidates_and_stays_unbound():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b, c = _connect(reg, "a"), _connect(reg, "b"), _connect(reg, "c")
+    ca, _ = _create_session(reg, a)
+    cb, _ = _create_session(reg, b)
+    data = _match(reg, c)
+    assert data["ambiguous"] is True
+    assert {x["code"] for x in data["candidates"]} == {ca["code"], cb["code"]}
+    assert c.member is None
+    # classic join still pairs with the picked code
+    _join(reg, c, ca["code"])
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"] == c.member.id
+
+
+def test_match_excludes_session_with_dead_leader():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    _match(reg, a)
+    reg.detach_link(a)
+    b = _connect(reg, "b")
+    assert _match(reg, b)["role"] == "leader"
+
+
+def test_match_rejected_when_already_bound():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    sid, _, _ = _pair(reg, a, b)
+    _send(reg, a, _request("MATCH", request_id="m", session_id=sid))
+    assert _one(a.frames(), "REJECT")["reason"] == REASON_ALREADY_BOUND
