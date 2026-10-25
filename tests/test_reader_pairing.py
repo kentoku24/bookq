@@ -38,6 +38,7 @@ from app.reader_sync.sessions import (  # noqa: E402
     REASON_RESUME_IN_USE,
     REASON_WRONG_SESSION,
     RESUME_WINDOW_SECONDS,
+    UI_SYNC_RATE_MAX,
     PeerLink,
     SessionRegistry,
     WS_CLOSE_TOO_BIG,
@@ -678,6 +679,126 @@ def test_signal_requires_pair_and_live_peer():
         "SIGNAL", {"kind": "ice", "data": {}}, session_id=created["sessionId"]))
     rej = _one(leader.frames(), "REJECT")
     assert rej["reason"] == REASON_PEER_OFFLINE
+
+
+# ── UI_SYNC ephemeral browse-mirror relay ──────────────────────────
+
+
+def _ui_payload(**kw):
+    p = {"view": "browse", "path": "group/episodes", "top": 120.5,
+         "viewH": 600, "mode": "tile", "seq": 3}
+    p.update(kw)
+    return p
+
+
+def test_ui_sync_relayed_between_paired_members():
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+
+    _send(reg, leader, _request(
+        "UI_SYNC", _ui_payload(), session_id=sid, request_id="u1"))
+    fframes = follower.frames()
+    ui = _one(fframes, "UI_SYNC")
+    assert ui["from"] == "leader"
+    assert ui["payload"] == _ui_payload()
+    assert ui["sessionId"] == sid
+    assert _one(leader.frames(), "ACK")["requestId"] == "u1"
+
+    # the relay is bidirectional — follower's scroll reaches the leader too
+    _send(reg, follower, _request(
+        "UI_SYNC", _ui_payload(top=700), session_id=sid, request_id="u2"))
+    lframes = leader.frames()
+    ui2 = _one(lframes, "UI_SYNC")
+    assert ui2["from"] == "follower" and ui2["payload"]["top"] == 700
+
+
+def test_ui_sync_requires_pair_and_live_peer():
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)
+    _send(reg, leader, _request(
+        "UI_SYNC", _ui_payload(), session_id=created["sessionId"]))
+    rej = _one(leader.frames(), "REJECT")
+    assert rej["reason"] == REASON_NOT_PAIRED
+
+    f1 = _connect(reg, "f1")
+    _join(reg, f1, created["code"])
+    _send(reg, leader, _request("APPROVE", {"memberId": f1.member.id},
+                                session_id=created["sessionId"]))
+    leader.frames(); f1.frames()
+    reg.detach_link(f1)
+    _send(reg, leader, _request(
+        "UI_SYNC", _ui_payload(), session_id=created["sessionId"]))
+    rej = _one(leader.frames(), "REJECT")
+    assert rej["reason"] == REASON_PEER_OFFLINE
+
+
+def test_ui_sync_malformed_payloads_rejected():
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+
+    bad = (
+        _ui_payload(view="overview"),            # unknown view
+        _ui_payload(path=123),                   # path must be str|null
+        _ui_payload(top=-1),                     # negative scroll
+        _ui_payload(top="10"),                   # top must be a number
+        _ui_payload(top=float("nan")),           # non-finite
+        _ui_payload(viewH=0),                    # must be > 0
+        _ui_payload(viewH=-4),
+        _ui_payload(mode="grid"),                # unknown mode
+        _ui_payload(seq=-1),                     # negative seq
+        _ui_payload(seq=1.5),                    # seq must be int
+    )
+    for i, payload in enumerate(bad):
+        _send(reg, leader, _request(
+            "UI_SYNC", payload, session_id=sid, request_id=f"m{i}"))
+        rej = _one(leader.frames(), "REJECT")
+        assert rej["reason"] == REASON_MALFORMED, payload
+        assert rej["requestId"] == f"m{i}"
+    # none of them reached the peer
+    assert _of_type(follower.frames(), "UI_SYNC") == []
+
+
+def test_ui_sync_optional_fields_and_root_path():
+    """path null (root) and omitted mode/seq are valid minimal frames."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+    _send(reg, leader, _request(
+        "UI_SYNC", {"view": "browse", "path": None, "top": 0, "viewH": 800},
+        session_id=sid))
+    ui = _one(follower.frames(), "UI_SYNC")
+    assert ui["payload"]["path"] is None and ui["payload"]["top"] == 0
+
+
+def test_ui_sync_rate_cap_silently_drops_burst():
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+
+    for i in range(UI_SYNC_RATE_MAX + 30):
+        _send(reg, leader, _request(
+            "UI_SYNC", _ui_payload(top=i, seq=i),
+            session_id=sid, request_id=f"b{i}"))
+    relayed = _of_type(follower.frames(), "UI_SYNC")
+    assert len(relayed) == UI_SYNC_RATE_MAX
+    # ACKed frames stop at the cap too — drops are fully silent
+    acks = _of_type(leader.frames(), "ACK")
+    assert len(acks) == UI_SYNC_RATE_MAX
+
+    # a new 1s window relays again
+    clock.advance(1.1)
+    _send(reg, leader, _request(
+        "UI_SYNC", _ui_payload(top=999), session_id=sid, request_id="after"))
+    ui = _one(follower.frames(), "UI_SYNC")
+    assert ui["payload"]["top"] == 999
 
 
 def test_transport_switch_at_revision_boundary():

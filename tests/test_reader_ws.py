@@ -185,6 +185,20 @@ def test_signal_relay_over_ws(server):
         assert sig["data"] == {"sdp": "x"}
 
 
+def test_ui_sync_relay_over_ws(server):
+    with _ws(server) as ws_a, _ws(server) as ws_b:
+        _recv(ws_a); _recv(ws_b)
+        sid, *_ = _full_pair(ws_a, ws_b)
+        payload = {"view": "browse", "path": "group", "top": 42,
+                   "viewH": 700, "mode": "tile", "seq": 1}
+        ws_a.send(_request("UI_SYNC", payload, session_id=sid, request_id="u"))
+        ui = _expect(ws_b, "UI_SYNC")
+        assert ui["from"] == "leader" and ui["payload"] == payload
+        # scroll bursts must not wedge the link — heartbeat still answers
+        ws_a.send(_request("PING", {"seq": 9}))
+        assert _expect(ws_a, "PONG")["seq"] == 9
+
+
 def test_oversized_frame_closed(server):
     with _ws(server) as ws:
         _recv(ws)
