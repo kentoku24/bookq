@@ -340,9 +340,11 @@ def test_pair_client_file_and_surface(pc_page):
           const rig = window.__mkRig();
           const c = rig.mkClient();
           const keys = {};
-          for (const k of ['create', 'join', 'approve', 'reject', 'resume',
-                           'leave', 'sendIntent', 'swapSides', 'subscribe',
-                           'destroy', 'attachDataChannel']) keys[k] = typeof c[k];
+          for (const k of ['create', 'join', 'match', 'approve', 'reject',
+                           'resume', 'leave', 'sendIntent', 'swapSides',
+                           'subscribe', 'destroy', 'attachDataChannel',
+                           'enableWebRTC', 'restartDataChannel',
+                           'changeWork', 'setActivity']) keys[k] = typeof c[k];
           c.destroy();
           return {keys, hasState: typeof c.state === 'object',
                   statusEnum: window.PairClient.STATUS,
@@ -1020,3 +1022,87 @@ def test_pair_client_over_real_ws(server, any_browser):
         assert res["lStatus"] == res["fStatus"] == "connected"
     finally:
         context.close()
+
+
+def test_match_sends_match_and_binds_acked_role(pc_page):
+    """MATCH binds whichever role the server assigns — follower here."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const pr = c.match();
+          const s = rig.sockets[rig.sockets.length - 1];
+          s.fire({v: 1, type: 'HELLO', link: 'l1'});
+          const req = s.sent[s.sent.length - 1];
+          const wire = {type: req.type, sessionId: req.sessionId,
+                        payload: req.payload};
+          s.fire(rig.ack(req, {sessionId: 'S1', memberId: 'mF',
+                               role: 'follower', resumeToken: 'tok',
+                               leaderName: 'A'}));
+          const data = await pr;
+          s.fire(rig.st('S1', 1, {phase: 'selecting',
+                                  presence: rig.presence(2)}));
+          return {wire, data, status: c.state.status, role: c.state.role};
+        }"""
+    )
+    assert res["wire"] == {"type": "MATCH", "sessionId": None, "payload": {}}
+    assert res["data"]["role"] == "follower"
+    assert res["role"] == "follower"
+    assert res["status"] == "connected"
+
+
+def test_match_ambiguous_resolves_candidates_and_stays_unbound(pc_page):
+    """Several waiting sessions -> {ambiguous, candidates}, no member bind;
+    the picked code goes out as a normal JOIN."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const pr = c.match();
+          const s = rig.sockets[rig.sockets.length - 1];
+          s.fire({v: 1, type: 'HELLO', link: 'l1'});
+          const req = s.sent[s.sent.length - 1];
+          s.fire(rig.ack(req, {ambiguous: true, candidates: [
+            {code: '111111', leaderName: 'A', ageSec: 3},
+            {code: '222222', leaderName: 'B', ageSec: 7}]}));
+          const data = await pr;
+          const midStatus = c.state.status;
+          const jpr = c.join('222222');
+          const s2 = rig.sockets[rig.sockets.length - 1];
+          s2.fire({v: 1, type: 'HELLO', link: 'l2'});
+          const jreq = s2.sent[s2.sent.length - 1];
+          s2.fire(rig.ack(jreq, {sessionId: 'S2', memberId: 'mF',
+                                 role: 'follower', resumeToken: 't'}));
+          await jpr;
+          return {data, midStatus, jtype: jreq.type, jcode: jreq.payload.code,
+                  role: c.state.role, socketCount: rig.sockets.length};
+        }"""
+    )
+    assert res["data"]["ambiguous"] is True
+    assert [c["code"] for c in res["data"]["candidates"]] == ["111111", "222222"]
+    assert res["midStatus"] == "idle"
+    assert res["jtype"] == "JOIN" and res["jcode"] == "222222"
+    assert res["role"] == "follower"
+    assert res["socketCount"] == 2          # ambiguous ack closed the first link
+
+
+def test_match_reject_resolves_unsupported_for_fallback(pc_page):
+    """A pre-MATCH server REJECTs the frame — the client resolves
+    {unsupported} instead of surfacing a dead-end error."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const pr = c.match();
+          const s = rig.sockets[rig.sockets.length - 1];
+          s.fire({v: 1, type: 'HELLO', link: 'l1'});
+          const req = s.sent[s.sent.length - 1];
+          s.fire(rig.rej(req, 'malformed'));
+          const data = await pr;
+          return {data, status: c.state.status,
+                  evlog: rig.evlog.filter(e => e.indexOf('rejected') === 0)};
+        }"""
+    )
+    assert res["data"]["unsupported"] == "malformed"
+    assert res["status"] == "idle"
+    assert res["evlog"] == []
