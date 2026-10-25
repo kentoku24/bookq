@@ -404,6 +404,11 @@
   var api = {
     create: function () { return _ensureClient().create(); },
     join: function (code) { return _ensureClient().join(code); },
+    /* One-tap connect: server-side MATCH — follower if a fresh session is
+     * waiting, waiting leader otherwise. connect(pickId) binds a chosen
+     * ambiguous candidate. Resolves {ambiguous|candidates} or
+     * {unsupported} for UI fallback handling. */
+    connect: function (pick) { return _ensureClient().match(pick); },
     approve: function () {
       return _client ? _client.approve() : Promise.resolve({approved: false});
     },

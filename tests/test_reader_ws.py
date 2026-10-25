@@ -258,3 +258,41 @@ def test_two_different_logged_in_emails_can_pair(auth_server):
         ws_b.send(_request("LEAVE", session_id=sid, request_id="l"))
         assert _expect(ws_a, "END")["reason"] == "left"
         assert _expect(ws_b, "END")["reason"] == "left"
+
+
+# ── MATCH over real WS ─────────────────────────────────────────────
+
+
+def test_match_first_becomes_leader_second_becomes_follower(server):
+    with _ws(server) as ws_a, _ws(server) as ws_b:
+        assert _recv(ws_a)["type"] == "HELLO"
+        assert _recv(ws_b)["type"] == "HELLO"
+        ws_a.send(_request("MATCH", request_id="m1"))
+        a = _expect(ws_a, "ACK")
+        assert a["request"] == "MATCH" and a["data"]["role"] == "leader"
+        assert len(a["data"]["code"]) == 6
+        ws_b.send(_request("MATCH", request_id="m2"))
+        b = _expect(ws_b, "ACK")
+        assert b["request"] == "MATCH" and b["data"]["role"] == "follower"
+        assert b["data"]["sessionId"] == a["data"]["sessionId"]
+        # the join went through the normal pending path — leader notified
+        assert _expect(ws_a, "JOIN_REQUEST")["memberId"] == b["data"]["memberId"]
+
+
+def test_match_never_hijacks_create_waiters(server):
+    """A CREATE waiting room is reserved for its code holder — MATCH
+    spawns an independent leader instead of cutting in line."""
+    with _ws(server) as ws_a, _ws(server) as ws_b:
+        assert _recv(ws_a)["type"] == "HELLO"
+        assert _recv(ws_b)["type"] == "HELLO"
+        ws_a.send(_request("CREATE", request_id="c1"))
+        ca = _expect(ws_a, "ACK")["data"]
+        ws_b.send(_request("MATCH", request_id="m"))
+        b = _expect(ws_b, "ACK")
+        assert b["data"]["role"] == "leader"
+        assert b["data"]["sessionId"] != ca["sessionId"]
+        # the CREATE session still takes its intended joiner via code
+        with _ws(server) as ws_c:
+            assert _recv(ws_c)["type"] == "HELLO"
+            ws_c.send(_request("JOIN", {"code": ca["code"]}, request_id="j"))
+            assert _expect(ws_c, "ACK")["data"]["role"] == "follower"

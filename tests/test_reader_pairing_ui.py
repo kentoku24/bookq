@@ -93,10 +93,25 @@ def _with_mock(page, js=MOCK_JS):
     page.wait_for_selector("#pair-btn")
 
 
+def _ensure_sidebar_open(page):
+    """The pair launcher lives in the sidebar header — the sidebar must be
+    open to reach it. classList-only (not toggleSidebar): the real toggle
+    also navigates back to browse, which would invalidate viewer-state
+    assertions in tests that have a book loaded."""
+    page.evaluate(
+        """var s = document.getElementById('sidebar');
+           if (!s.classList.contains('open')) {
+             s.classList.add('open');
+             document.getElementById('viewer').classList.add('sidebar-open');
+             if (window.syncSidebarA11y) window.syncSidebarA11y();
+           }""")
+
+
 def _open_ui(page):
-    """Close the covering sidebar and open the pairing dialog."""
+    """Open the sidebar (the launcher lives in its header) and open the
+    pairing dialog."""
     page.wait_for_function("typeof window.closeSidebar === 'function'")
-    page.evaluate("window.closeSidebar()")
+    _ensure_sidebar_open(page)
     page.click("#pair-btn")
     expect(page.locator("#pair-overlay")).to_be_visible()
 
@@ -108,7 +123,7 @@ def _emit(page, patch):
 # Every render shows exactly one section — everything else is `hidden`.
 PAIR_SECTIONS = (
     "#pair-sec-choice #pair-sec-join #pair-sec-leader "
-    "#pair-sec-waiting #pair-sec-session #pair-sec-error"
+    "#pair-sec-waiting #pair-sec-session #pair-sec-error #pair-sec-picker"
 ).split()
 
 
@@ -438,7 +453,8 @@ def test_qr_decode_roundtrip(page, server):
           const r = window.jsQR(img.data, img.width, img.height);
           return r ? r.data : null;
         }""")
-    assert decoded == "042917"
+    # URL-QR: the code rides a #/join/ deep link so any camera app pairs
+    assert decoded == f"{server}/#/join/042917"
 
 
 def test_join_view_autostarts_camera_scan(page, server):
@@ -584,7 +600,6 @@ def test_esc_closes_dialog(page, server):
 
 def test_background_inert_while_open(page, server):
     _with_mock(page)
-    page.evaluate("window.closeSidebar()")
     pre = page.evaluate(
         """() => ({
             viewer: document.getElementById('viewer').hasAttribute('inert'),
@@ -634,10 +649,7 @@ def test_controls_fit_320px_no_overlap(browser, server):
         page.add_init_script(MOCK_JS)
         page.goto(server)
         page.wait_for_selector("#pair-btn")
-        page.wait_for_function("typeof window.closeSidebar === 'function'")
-        page.evaluate("window.closeSidebar()")
-        page.click("#pair-btn")
-        expect(page.locator("#pair-overlay")).to_be_visible()
+        _open_ui(page)
         # walk a couple of sections so more controls get measured
         _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
         for b in _visible_control_boxes(page):
@@ -688,6 +700,7 @@ def test_pair_ui_taps_do_not_turn_pages(ios_page, server):
           wrap('viewerGoNext'); wrap('viewerGoPrev'); wrap('viewerSnapTo');
         }"""
     )
+    _ensure_sidebar_open(page)
     page.click("#pair-btn")
     expect(page.locator("#pair-overlay")).to_be_visible()
     s = touch_session(page)
@@ -772,6 +785,7 @@ def test_open_close_has_no_peer_side_effects(browser, server):
 
         before = peer_snapshot(pb)
         # open + close on A must not emit anything to the peer nor touch B's UI
+        _ensure_sidebar_open(pa)
         pa.click("#pair-btn")
         expect(pa.locator("#pair-overlay")).to_be_visible()
         pa.keyboard.press("Escape")
@@ -783,3 +797,125 @@ def test_open_close_has_no_peer_side_effects(browser, server):
         assert pb.evaluate("window.__pairRx.length") == rx_before
     finally:
         ctx.close()
+
+
+# ── MATCH (one-tap connect) ────────────────────────────────────────
+
+# Mock variant whose controller implements connect() — the one-tap MATCH
+# path. __pairConnectResult steers its resolved value per test.
+CONNECT_JS = MOCK_JS.replace(
+    "create() { window.__pairCalls.push('create'); },",
+    """connect(pick) {
+      window.__pairCalls.push(pick ? 'connect:' + pick : 'connect');
+      return Promise.resolve(window.__pairConnectResult || null);
+    },
+    create() { window.__pairCalls.push('create'); },""")
+
+
+def test_idle_tap_fires_connect_when_supported(page, server):
+    """The launcher IS the pairing gesture: one idle tap → connect()."""
+    _with_mock(page, js=CONNECT_JS)
+    page.evaluate("window.__pairConnectResult = "
+                  "{sessionId:'S1', code:'042917', role:'leader'}")
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    assert page.evaluate("window.__pairCalls") == ["connect"]
+    _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
+    _only_section_visible(page, "#pair-sec-leader")
+    expect(page.locator("#pair-code-value")).to_have_text("042917")
+
+
+def test_ambiguous_match_shows_picker_then_picks_token(page, server):
+    """Candidates carry an opaque token (never the 6-digit code); picking
+    one re-MATCHes with connect(id), so the human code stays private."""
+    _with_mock(page, js=CONNECT_JS)
+    page.evaluate(
+        """window.__pairConnectResult = {ambiguous:true, candidates:[
+             {id:'tok-a', leaderName:'A', ageSec:3},
+             {id:'tok-b', leaderName:'B', ageSec:7}]}""")
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    _only_section_visible(page, "#pair-sec-picker")
+    picks = page.locator(".pair-pick")
+    assert picks.count() == 2
+    # the waiter's age disambiguates same-name candidates
+    assert "3秒前" in picks.nth(0).text_content()
+    picks.nth(0).click()
+    assert page.evaluate("window.__pairCalls") == ["connect", "connect:tok-a"]
+
+
+def test_unsupported_match_keeps_classic_choice(page, server):
+    """A pre-MATCH server resolves {unsupported} — 開始/参加 stays usable."""
+    _with_mock(page, js=CONNECT_JS)
+    page.evaluate("window.__pairConnectResult = {unsupported:'malformed'}")
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    _only_section_visible(page, "#pair-sec-choice")
+    page.click("#pair-create")
+    assert page.evaluate("window.__pairCalls") == ["connect", "create"]
+
+
+def test_join_deep_link_consumes_hash_and_joins(page, server):
+    """#/join/<6桁> is a one-shot input: it joins, then leaves the URL."""
+    _with_mock(page)
+    page.goto(f"{server}/#/join/314159")
+    page.wait_for_function("location.hash === ''")
+    page.wait_for_function(
+        "(window.__pairCalls || []).indexOf('join:314159') !== -1")
+
+
+def test_join_deep_link_never_hijacks_an_active_pair(page, server):
+    """#/join/<code> while paired only surfaces the session panel — a
+    blind join() would drop the link without LEAVE and strand the
+    partner in 'peer-away' for the whole resume window."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'follower'}")
+    page.evaluate("location.hash = '#/join/314159'")
+    page.wait_for_function("location.hash === ''")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    _only_section_visible(page, "#pair-sec-session")
+    assert page.evaluate("window.__pairCalls") == []
+
+
+def test_join_retry_after_cancel_is_possible(page, server):
+    """joinPending must not strand the form: a cancelled join returns to
+    the code entry, and typing a new code submits again."""
+    _with_mock(page)
+    _open_ui(page)
+    page.click("#pair-join-open")
+    page.locator("#pair-code-input").fill("777001")
+    _emit(page, "{status:'connecting', role:'follower'}")
+    page.click("#pair-waiting-cancel")
+    _emit(page, "{status:'ended'}")
+    page.locator("#pair-code-input").fill("111222")
+    assert page.evaluate("window.__pairCalls") == [
+        "join:777001", "leave", "join:111222"]
+
+
+def test_ended_flashes_the_strip_before_hiding(page, server):
+    """A pair ending while the reader is up flashes '解除済' briefly —
+    otherwise nothing in the viewer surface tells the reader."""
+    _with_mock(page)
+    strip = page.locator("#pair-status")
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    expect(strip).to_be_visible()
+    _emit(page, "{status:'ended'}")
+    expect(strip).to_be_visible()
+    assert "解除済" in strip.text_content()
+    page.wait_for_timeout(3200)
+    expect(strip).to_be_hidden()
+
+
+def test_session_strip_hidden_at_idle_and_tappable(page, server):
+    _with_mock(page)
+    strip = page.locator("#pair-status")
+    expect(strip).to_be_hidden()                      # solo: no noise
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    expect(strip).to_be_visible()
+    assert "接続済" in strip.text_content()
+    assert "右側担当" in strip.text_content()
+    page.evaluate("window.closeSidebar()")   # strip lives on the reader face
+    strip.click()
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    _only_section_visible(page, "#pair-sec-session")

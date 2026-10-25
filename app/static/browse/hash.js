@@ -397,6 +397,38 @@
   }
 
   function applyUrlState() {
+    // #/join/<6桁> — pairing deep link (URL-QR): consumed ONCE via
+    // replaceState. It is a join input, never a view/browse state, so it
+    // must not reach the parsers below or pollute the url stack.
+    var jm = (location.hash || '').match(/^#\/join\/(\d{6})$/);
+    if (jm) {
+      try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+      try { urlStackReplace(location.pathname + location.search); } catch (e) {}
+      var pc = window.PairController;
+      var pst = (pc && pc.state) || null;
+      // Already in a session: joining here would tear the link down
+      // without a LEAVE, leaving the partner in 'peer-away' for the whole
+      // resume window. Just surface the current session panel instead —
+      // leaving an active pair is an explicit gesture, never a link click.
+      if (pst && pst.status && pst.status !== 'idle' &&
+          pst.status !== 'ended' && pst.status !== 'error') {
+        if (window.PairUI && typeof window.PairUI.open === 'function') {
+          window.PairUI.open();
+        }
+        return;
+      }
+      if (pc && typeof pc.join === 'function') {
+        try {
+          var jr = pc.join(jm[1]);
+          if (jr && typeof jr.catch === 'function') jr.catch(function () {});
+          // surface the outcome — waiting / connected / error
+          if (window.PairUI && typeof window.PairUI.open === 'function') {
+            window.PairUI.open();
+          }
+        } catch (e) {}
+      }
+      return;
+    }
     reconcileUrlStack();
     var st = parseViewerHash();
     var bs = parseBrowseHash();

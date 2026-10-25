@@ -22,6 +22,7 @@ from app.reader_sync.sessions import (  # noqa: E402
     END_REJECTED,
     END_RESUME_EXPIRED,
     HEARTBEAT_INTERVAL,
+    MATCH_WINDOW_SECONDS,
     NO_RESPONSE_TIMEOUT,
     REASON_ALREADY_BOUND,
     REASON_BAD_CODE,
@@ -782,3 +783,164 @@ def test_ticker_start_and_shutdown():
         assert not reg.links
 
     _run(go())
+
+
+# ── MATCH (one-tap pairing) ────────────────────────────────────────
+
+
+def _match(reg: SessionRegistry, link: FakeLink, request_id="m1") -> dict:
+    _send(reg, link, _request("MATCH", request_id=request_id))
+    ack = _one(link.frames(), "ACK")
+    assert ack["request"] == "MATCH"
+    return ack["data"]
+
+
+def test_match_becomes_waiting_leader_when_nobody_waits():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    data = _match(reg, a)
+    assert data["role"] == "leader"
+    assert data["code"].isdigit() and len(data["code"]) == 6
+    assert len(reg.sessions) == 1
+    # the waiting session still exposes its code — JOIN/QR fallback works
+    b = _connect(reg, "b")
+    _join(reg, b, data["code"])
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"]
+
+
+def test_match_joins_fresh_waiting_session():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    created = _match(reg, a)
+    joined = _match(reg, b)
+    assert joined["role"] == "follower"
+    assert joined["sessionId"] == created["sessionId"]
+    assert joined["leaderName"]
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"] == joined["memberId"]
+
+
+def test_match_ignores_session_older_than_window():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    created = _match(reg, a)
+    _keepalive(reg, clock, a, MATCH_WINDOW_SECONDS + 5)
+    b = _connect(reg, "b")
+    joined = _match(reg, b)
+    assert joined["role"] == "leader"
+    assert joined["sessionId"] != created["sessionId"]
+
+
+def test_match_excludes_paired_and_pending_sessions():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b, c = _connect(reg, "a"), _connect(reg, "b"), _connect(reg, "c")
+    sid, _, _ = _pair(reg, a, b)
+    d = _connect(reg, "d")
+    data = _match(reg, d)
+    assert data["role"] == "leader"
+    assert data["sessionId"] != sid
+    # a session with a pending (unapproved) join is not a candidate either
+    _join(reg, c, data["code"])
+    e = _connect(reg, "e")
+    data2 = _match(reg, e)
+    assert data2["role"] == "leader"
+    assert data2["sessionId"] != data["sessionId"]
+
+
+def test_match_never_hijacks_a_create_session():
+    """A CREATE waiting room belongs to whoever the code was shown to —
+    one-tap MATCH must not poach it, even while it is fresh."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    created, _ = _create_session(reg, a)
+    b = _connect(reg, "b")
+    data = _match(reg, b)
+    assert data["role"] == "leader"
+    assert data["sessionId"] != created["sessionId"]
+    # the code holder still joins the CREATE session normally
+    c = _connect(reg, "c")
+    joined = _join(reg, c, created["code"])
+    assert _one(a.frames(), "JOIN_REQUEST")["memberId"] == joined["memberId"]
+
+
+def test_match_ambiguous_returns_tokens_and_stays_unbound():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    # Two 'match'-origin waiters can only coexist through a leader
+    # outage: B's MATCH runs while A's leader link is dead, then A
+    # resumes on a fresh link — two eligible candidates.
+    ca = _match(reg, a)
+    reg.detach_link(a)
+    cb = _match(reg, b)
+    assert cb["role"] == "leader" and cb["sessionId"] != ca["sessionId"]
+    back = _connect(reg, "a2")
+    _send(reg, back, _request(
+        "RESUME",
+        {"memberId": ca["memberId"], "resumeToken": ca["resumeToken"]},
+        session_id=ca["sessionId"]))
+    assert _one(back.frames(), "ACK")["request"] == "RESUME"
+
+    c = _connect(reg, "c")
+    data = _match(reg, c)
+    assert data["ambiguous"] is True
+    assert len(data["candidates"]) == 2
+    # candidates carry an opaque pick token and NEVER the human code —
+    # leaking it would let a picker consume the code a real partner is
+    # still typing.
+    assert all("code" not in cand for cand in data["candidates"])
+    assert all(isinstance(cand["id"], str) and cand["id"]
+               for cand in data["candidates"])
+    assert {cand["leaderName"] for cand in data["candidates"]} == {"a", "b"}
+    assert c.member is None
+
+    # the picker re-MATCHes with the chosen token
+    pick = data["candidates"][0]["id"]   # oldest first == session A
+    _send(reg, c, _request("MATCH", {"pick": pick}, request_id="m2"))
+    ack = _one(c.frames(), "ACK")
+    assert ack["request"] == "MATCH"
+    assert ack["data"]["role"] == "follower"
+    assert ack["data"]["sessionId"] == ca["sessionId"]
+    assert _one(back.frames(), "JOIN_REQUEST")["memberId"] == c.member.id
+
+
+def test_match_pick_rejects_unknown_or_gone_token():
+    clock = FakeClock()
+    reg = _reg(clock)
+    c = _connect(reg, "c")
+    _send(reg, c, _request("MATCH", {"pick": "no-such-token"}, request_id="m1"))
+    rej = _one(c.frames(), "REJECT")
+    assert rej["reason"] == REASON_BAD_CODE
+
+    # a token for a session that got paired in the meantime is stale
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    ca = _match(reg, a)
+    _match(reg, b)   # pairs with A
+    _send(reg, c, _request(
+        "MATCH", {"pick": reg.sessions[ca["sessionId"]].match_token},
+        request_id="m2"))
+    rej = _one(c.frames(), "REJECT")
+    assert rej["reason"] == REASON_BAD_CODE
+
+
+def test_match_excludes_session_with_dead_leader():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a = _connect(reg, "a")
+    _match(reg, a)
+    reg.detach_link(a)
+    b = _connect(reg, "b")
+    assert _match(reg, b)["role"] == "leader"
+
+
+def test_match_rejected_when_already_bound():
+    clock = FakeClock()
+    reg = _reg(clock)
+    a, b = _connect(reg, "a"), _connect(reg, "b")
+    sid, _, _ = _pair(reg, a, b)
+    _send(reg, a, _request("MATCH", request_id="m", session_id=sid))
+    assert _one(a.frames(), "REJECT")["reason"] == REASON_ALREADY_BOUND

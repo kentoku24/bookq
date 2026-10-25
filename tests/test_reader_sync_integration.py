@@ -173,6 +173,58 @@ def test_solo_opens_no_socket_and_pair_idle(browser, server):
 
 # ── pairing establishment ─────────────────────────────────────────────────
 
+def test_match_one_tap_pairs_two_devices(devs):
+    timeout = 15000
+    """The 🔗 launcher IS the pairing gesture — one real tap on each
+    device: the first MATCHes into a waiting leader, the second MATCHes
+    onto it as follower, auto-approve runs, and a leader work pick then
+    lands the shared spread on both."""
+    pl, pf = devs
+    # sidebar is open on boot → the header launcher is a real click target
+    pl.locator("#pair-btn").click()
+    pl.wait_for_function(
+        "() => window.PairController.state.role === 'leader'",
+        timeout=timeout)
+    code = pl.evaluate("() => window.PairController.state.code")
+    assert code and len(str(code)) == 6
+    expect(pl.locator("#pair-sec-leader")).to_be_visible()
+    pf.locator("#pair-btn").click()
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.status === 'connected'"
+            " || window.PairController.state.status === 'loading'",
+            timeout=timeout)
+    # exactly one MATCH left each device; nothing else rode the wire
+    assert len(_sent(pl, ["MATCH"])) == 1
+    assert len(_sent(pf, ["MATCH"])) == 1
+    assert _sent(pf, ["JOIN", "CREATE"]) == []
+    # leader picks a work → shared spread lands on both devices
+    _open(pl, "long")
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.phase === 'reading'",
+            timeout=timeout)
+    _synced(pl, pf)
+
+
+def test_match_without_a_waiter_leaves_a_joinable_code(devs):
+    timeout = 15000
+    """The MATCH-created waiting session still exposes its code — the
+    classic JOIN stays a working fallback on the very same session."""
+    pl, pf = devs
+    pl.locator("#pair-btn").click()
+    pl.wait_for_function(
+        "() => window.PairController.state.role === 'leader'"
+        " && !!window.PairController.state.code", timeout=timeout)
+    code = pl.evaluate("() => window.PairController.state.code")
+    pf.evaluate("(c) => window.PairController.join(c)", code)
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.status === 'connected'"
+            " || window.PairController.state.status === 'loading'",
+            timeout=timeout)
+
+
 def test_pair_establish_shares_leader_spread(devs):
     """The shared spread contains the leader's current PageRef; the
     follower's saved ReadingProgress has no say in the placement."""
