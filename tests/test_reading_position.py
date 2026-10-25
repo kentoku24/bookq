@@ -105,9 +105,47 @@ def test_put_validation(server):
         {"folder": "f", "page": 0, "total": 0},             # zero total
         {"folder": "f", "page": 0, "total": "x"},           # non-int total
         {"folder": "f", "page": 0, "total": 1, "ts": -5},   # negative ts
+        # json.loads accepts NaN/Infinity — int() would 500, must be 400
+        {"folder": "f", "page": 0, "total": 1, "ts": float("nan")},
+        {"folder": "f", "page": 0, "total": 1, "ts": float("inf")},
     ):
         status, _ = _req(server, "PUT", "/api/reading-position", body)
         assert status == 400, body
+
+
+def test_put_stale_ts_rejected(server):
+    """The server compares client ts — an older PUT can't clobber newer."""
+    base = int(time.time() * 1000)
+    _req(server, "PUT", "/api/reading-position",
+         {"folder": "newer", "page": 5, "total": 30, "ts": base})
+    status, _ = _req(server, "PUT", "/api/reading-position",
+                     {"folder": "older", "page": 0, "total": 30, "ts": base - 1000})
+    assert status == 200
+    pos = _get_position(server)
+    assert pos["folder"] == "newer" and pos["page"] == 5
+    # Equal-or-newer still lands (idempotent resends, genuinely newer reads).
+    status, _ = _req(server, "PUT", "/api/reading-position",
+                     {"folder": "newest", "page": 1, "total": 30, "ts": base + 1000})
+    assert status == 200
+    assert _get_position(server)["folder"] == "newest"
+
+
+def test_delete_tombstone_blocks_resurrection(server):
+    """DELETE leaves a tombstone: the wiped record can't come back."""
+    base = int(time.time() * 1000)
+    _req(server, "PUT", "/api/reading-position",
+         {"folder": "long", "page": 2, "total": 30, "ts": base})
+    _req(server, "DELETE", "/api/reading-position")
+    assert _get_position(server) is None
+    # The same record (another device's boot self-heal) and anything older
+    # are both rejected — only a genuinely newer read lands.
+    for stale_ts in (base, base - 1000):
+        _req(server, "PUT", "/api/reading-position",
+             {"folder": "long", "page": 2, "total": 30, "ts": stale_ts})
+        assert _get_position(server) is None, f"ts={stale_ts} resurrected the wipe"
+    _req(server, "PUT", "/api/reading-position",
+         {"folder": "long", "page": 9, "total": 30, "ts": base + 5000})
+    assert _get_position(server)["page"] == 9
 
 
 # ── e2e: two devices ─────────────────────────────────────────────────
@@ -147,7 +185,11 @@ def test_resume_position_syncs_across_contexts(browser, server):
 
 
 def test_turn_burst_coalesces_puts(page, server):
-    """10 rapid turns → coalesced PUTs, not one per turn."""
+    """Multiple SAVES inside the 2s push window still send only once.
+
+    Turns are spaced 650ms apart — past the 500ms saveDebounce — so each
+    one really calls push(); the trailing-edge timer must coalesce them.
+    """
     puts = []
 
     def on_route(route):
@@ -158,11 +200,76 @@ def test_turn_burst_coalesces_puts(page, server):
     page.route("**/api/reading-position", on_route)
     page.locator('.tile[data-path="long"]').click()
     expect(page.locator("#counter")).to_have_text("1 / 30")
-    for _ in range(10):
+    baseline = len(puts)
+    for _ in range(5):
         page.keyboard.press("ArrowLeft")
-    expect(page.locator("#counter")).to_have_text("11 / 30")
-    page.wait_for_timeout(5000)  # save debounce (0.5s) + push debounce (2s) + margin
-    assert 1 <= len(puts) <= 3, f"expected coalesced PUTs, got {len(puts)}"
+        page.wait_for_timeout(650)
+    expect(page.locator("#counter")).to_have_text("6 / 30")
+    page.wait_for_timeout(4500)  # last save (0.5s) + push debounce (2s) + margin
+    sent = len(puts) - baseline
+    assert sent == 1, f"expected 1 coalesced PUT, got {sent}"
+
+
+def test_put_failure_retries_with_backoff(page, server):
+    """A failing PUT must not hot-loop — retries are bounded by backoff."""
+    puts = []
+
+    def on_route(route):
+        if route.request.method == "PUT" and "/api/reading-position" in route.request.url:
+            puts.append(route.request.url)
+            route.fulfill(status=500)
+        else:
+            route.continue_()
+
+    page.route("**/api/reading-position", on_route)
+    page.locator('.tile[data-path="long"]').click()
+    expect(page.locator("#counter")).to_have_text("1 / 30")
+    page.keyboard.press("ArrowLeft")
+    # Sends: ~2.5s (open debounce) then exponential backoff (4s+).
+    # Without backoff this loop produces hundreds of PUTs per second.
+    page.wait_for_timeout(6500)
+    assert 1 <= len(puts) <= 4, f"PUT retries should be bounded, got {len(puts)}"
+
+
+def test_failed_pull_never_selfheals(page, server):
+    """A failed boot pull must not push local state up over a remote record."""
+    base = int(time.time() * 1000)
+    _req(server, "PUT", "/api/reading-position",
+         {"folder": "remote/book", "page": 7, "total": 30, "ts": base})
+    puts = []
+
+    def on_route(route):
+        if "/api/reading-position" not in route.request.url:
+            route.continue_()
+            return
+        if route.request.method == "GET":
+            route.fulfill(status=500)
+        else:
+            puts.append(route.request.url)
+            route.continue_()
+
+    page.route("**/api/reading-position", on_route)
+    page.evaluate(
+        "localStorage.setItem('bookq_progress', "
+        "JSON.stringify({'local/book': {page: 0, total: 10, ts: %d}}))" % (base + 1000)
+    )
+    page.reload()
+    page.wait_for_selector(".tile")
+    page.wait_for_timeout(3000)
+    pos = _get_position(server)
+    assert pos and pos["folder"] == "remote/book", "failed pull clobbered the remote record"
+    assert not puts, "a blind self-heal PUT fired despite the failed GET"
+
+
+def test_pagehide_flush_sends_current_position(page, server):
+    """The last save on pagehide flushes immediately — the 2s timer dies
+    with the page, so the final position must not depend on it."""
+    page.locator('.tile[data-path="long"]').click()
+    expect(page.locator("#counter")).to_have_text("1 / 30")
+    page.keyboard.press("ArrowLeft")   # still inside the 500ms saveDebounce
+    page.evaluate("() => window.dispatchEvent(new Event('pagehide'))")
+    pos = _wait_position(server, lambda p: p.get("page") == 1, timeout=1.5)
+    assert pos, "pagehide did not flush the final save promptly"
 
 
 def test_boot_pull_merges_newer_remote(page, server):

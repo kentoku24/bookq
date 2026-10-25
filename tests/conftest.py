@@ -6,6 +6,7 @@ Run:
 (First time: uv run --with playwright playwright install chromium)
 """
 
+import json
 import os
 import socket
 import struct
@@ -325,17 +326,39 @@ def _reset_reading_position(request):
     `server` is session-scoped, so app.state.reading_positions survives across
     tests: a page turn's debounced PUT in one test would leak into the NEXT
     test's boot pull, merge into its fresh localStorage, and steer the opened
-    page off "1 / N". Every UI fixture funnels through `server` (it's a
-    transitive fixturename), so the check covers all browser tests while pure
-    unit tests skip the HTTP call entirely. Autouse at function scope runs
+    page off "1 / N". Worse, the previous test's teardown (context.close →
+    pagehide → keepalive PUT) can land AFTER the reset, so this polls until
+    the slot reads stably empty rather than deleting once. ``?hard=1`` also
+    drops the wipe tombstone, which would otherwise reject this test's
+    fresh record (the tombstone legitimately outlives plain PUTs).
+
+    Every UI fixture funnels through `server` (it's a transitive
+    fixturename), so the check covers all browser tests while pure unit
+    tests skip the HTTP call entirely. Autouse at function scope runs
     before the `page` fixture's goto — the reset always lands first.
     """
     if "server" not in request.fixturenames:
         return
     try:
         base_url = request.getfixturevalue("server")
-        req = urllib.request.Request(base_url + "/api/reading-position", method="DELETE")
-        urllib.request.urlopen(req, timeout=5).read()
+
+        def _delete():
+            req = urllib.request.Request(
+                base_url + "/api/reading-position?hard=1", method="DELETE"
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+
+        def _empty():
+            with urllib.request.urlopen(
+                base_url + "/api/reading-position", timeout=5
+            ) as resp:
+                return json.loads(resp.read()).get("position") is None
+
+        _delete()
+        deadline = time.time() + 3.0
+        while not _empty() and time.time() < deadline:
+            _delete()
+            time.sleep(0.15)
     except Exception:
         pass  # best-effort — a dead server fails the test properly later
 
