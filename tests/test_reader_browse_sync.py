@@ -536,6 +536,27 @@ def test_clamped_remote_position_is_not_echoed(browser, server):
         ctx.close()
 
 
+def test_shell_watchdog_marks_healthy_and_stale(browser, server):
+    """Deploy-consistency watchdog: a page running this deploy's full shell
+    reports healthy; deleting any marker the new html requires reports stale
+    (the new-html + old-js mix that killed pair browse-sync after #122)."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        assert pg.evaluate("() => window.__shellStale()") is False
+        # an old bundle lacks these markers — simulate each one missing
+        assert pg.evaluate(
+            "() => { delete window.openSidebar; return window.__shellStale(); }"
+        ) is True
+        assert pg.evaluate(
+            "() => { window.BOOKQ_BROWSE_SYNC = false;"
+            "        return window.__shellStale(); }"
+        ) is True
+    finally:
+        ctx.close()
+
+
 def test_mirror_needs_tree_level_scrollable(browser, server):
     """Precondition guard: the fixture's root level must actually scroll at
     the small viewports used here — otherwise the offset tests above can
