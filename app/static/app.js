@@ -495,7 +495,22 @@
     get(folderPath) { return this.getAll()[folderPath] || null; },
     save(folderPath, page, total) {
       const all = this.getAll();
-      all[folderPath] = { page, total, ts: Date.now() };
+      const ts = Date.now();
+      all[folderPath] = { page, total, ts };
+      const keys = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
+      for (let i = 50; i < keys.length; i++) delete all[keys[i]];
+      localStorage.setItem(this.KEY, JSON.stringify(all));
+      // Mirror the latest position server-side (single slot, LWW). push() is
+      // fire-and-forget with its own 2s trailing debounce — the turn path
+      // never awaits it, so burst turning stays free of added latency.
+      window.ProgressSync.push({ folder: folderPath, page, total, ts });
+    },
+    // A server-held position pulled at boot lands here: same write + cap as
+    // save() but keeps the remote ts verbatim and never re-pushes (no echo
+    // loop — a pulled record must not immediately write itself back).
+    mergeRemote(folderPath, page, total, ts) {
+      const all = this.getAll();
+      all[folderPath] = { page, total, ts };
       const keys = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
       for (let i = 50; i < keys.length; i++) delete all[keys[i]];
       localStorage.setItem(this.KEY, JSON.stringify(all));
@@ -4027,6 +4042,42 @@
     resumeBtn.onclick = () => navOpenWork(folderPath, "resume");
   }
 
+  // ── server-held resume point: pull once at boot, merge by ts (LWW) ──
+  // The server keeps ONE record per user. A record newer than the matching
+  // local entry lands in localStorage (the pill and that tile's progress bar
+  // both read the map, and loadImages resumes from it). A strictly newer
+  // LOCAL newest (read while offline, or after a server restart wiped the
+  // in-memory map) is pushed up so the server catches up — one extra PUT at
+  // most per boot. Fires in parallel with loadFolders; a remote landing
+  // mid-render still reaches the pill via updateResumeButton below and the
+  // tile bar via a guarded renderView.
+  async function _syncRemoteProgress() {
+    let pos = null;
+    try { pos = await window.ProgressSync.pull(); } catch(e) { console.warn(e); }
+    const all = ReadingProgress.getAllSafe();
+    let merged = false;
+    if (pos) {
+      const local = all[pos.folder];
+      if (!local || (local.ts || 0) < (pos.ts || 0)) {
+        try {
+          ReadingProgress.mergeRemote(pos.folder, pos.page, pos.total || 0, pos.ts || 0);
+          merged = true;
+        } catch(e) { console.warn(e); }
+      }
+    }
+    const entries = Object.entries(all);
+    if (entries.length) {
+      const [newestPath, newestData] = entries.sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))[0];
+      if (newestData && typeof newestData.page === "number" && (!pos || (newestData.ts || 0) > (pos.ts || 0))) {
+        window.ProgressSync.push({ folder: newestPath, page: newestData.page, total: newestData.total, ts: newestData.ts });
+      }
+    }
+    if (merged) {
+      updateResumeButton();
+      if (!currentFolder && sidebar.classList.contains("open")) renderView();
+    }
+  }
+
   // ── save progress on tab visibility change ──
   window.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && currentFolder && images.length) {
@@ -4124,4 +4175,8 @@
   sessionStorage.removeItem("bookq_return_hash");
   loadFolders().then(()=>{ applyUrlState(); tryAutoSync(); });
   loadFacets();
+  // Server-held resume point: pull + merge in parallel with the tree load —
+  // a deep-linked viewer already open is untouched (the merge only writes
+  // localStorage), and the pill/tile refresh is guarded by merged.
+  _syncRemoteProgress();
 })();
