@@ -23,11 +23,10 @@
   </defs>
   <rect width="32" height="32" rx="7.8" fill="url(#bg)"/>
   <rect width="32" height="32" rx="7.8" fill="url(#glow)"/>
-  <!-- b lower-left and q upper-right; bowls meet tangentially at the center, with no crossing. -->
-  <g fill="none" stroke-linecap="round" stroke-width="2.5">
-    <circle cx="11.5" cy="20.5" r="6.364" stroke="url(#inkB)"/>
-    <line x1="5.2" y1="14.2" x2="5.2" y2="20.5" stroke="url(#inkB)"/>
-    <circle cx="20.5" cy="11.5" r="6.364" stroke="url(#inkQ)"/>
-    <line x1="26.8" y1="11.5" x2="26.8" y2="18.0" stroke="url(#inkQ)"/>
+  <g fill="none" stroke-linecap="round" stroke-width="2.9">
+    <line x1="6.4" y1="12.3" x2="6.4" y2="20" stroke="url(#inkB)"/>
+    <line x1="25.6" y1="12" x2="25.6" y2="19.7" stroke="url(#inkQ)"/>
+    <circle cx="12" cy="20" r="5.6" stroke="url(#inkB)"/>
+    <circle cx="20" cy="12" r="5.6" stroke="url(#inkQ)"/>
   </g>
 </svg>
