@@ -100,7 +100,7 @@ Known gap, covered by a characterization test: a folder holding *both* images an
 
 ### Frontend: one template, thirteen plain scripts
 
-`app/templates/index.html` (~160 lines) holds the markup only. Behaviour lives in `app/static/app.js` plus twelve global-script modules loaded before it in `defer` order (`offline-core`, `thumbs/resolveCover`, `browse/hash`, `browse/render`, `browse/scroll`, `search/facets`, `offline/storeAdapter`, `thumbs/prefetch`, `viewer/spread`, `viewer/gesture`, `viewer/zoom`, `viewer/overview`). No build step, no external assets. Load order is a contract: `sw.js` SHELL_ASSETS must list the same files.
+`app/templates/index.html` (~213 lines) holds the markup plus one inline script: a stale-shell watchdog that must live in the document itself (navigations are NetworkFirst so the html is always fresh, while `/static/*` is StaleWhileRevalidate and can lag a deploy behind — a watchdog inside a swappable asset could never detect its own staleness). It asserts the globals this deploy's scripts export; on a miss it deletes `bookq-shell-v2`, nudges the SW update, and reloads once per tab session (sessionStorage guard). All other behaviour lives in `app/static/app.js` plus global-script modules loaded before it in `defer` order (`offline-core`, `thumbs/resolveCover`, `browse/hash`, `browse/render`, `browse/scroll`, `search/facets`, `offline/storeAdapter`, `thumbs/prefetch`, `viewer/spread`, `viewer/gesture`, `viewer/zoom`, `viewer/overview`). No build step, no external assets. Load order is a contract: `sw.js` SHELL_ASSETS must list the same files.
 
 `app/routes.py` keeps one module-level `jinja2.Environment(auto_reload=True, cache_size=0)`, so template edits apply without a restart.
 
