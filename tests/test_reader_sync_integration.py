@@ -409,6 +409,97 @@ def test_follower_work_change_leaves_pair(devs):
     assert pl.evaluate("() => window.images[window.currentIdx].name") == "p005.png"
 
 
+def _kill_ws(pg):
+    """Sever this page's sync transport permanently: close the live socket
+    and poison WebSocket so the client's reconnect loop cannot revive it —
+    the server marks the member offline and the peer sees 'peer-away'."""
+    pg.evaluate("""() => {
+      const Dead = function () { throw new Error('offline'); };
+      Dead.prototype = window.WebSocket.prototype;
+      window.WebSocket = Dead;
+      window.__wsConns.forEach((ws) => { try { ws.close(); } catch (e) {} });
+    }""")
+
+
+def _await_peer_away(pg, timeout=15000):
+    pg.wait_for_function(
+        "() => window.PairController.state.status === 'peer-away'"
+        " && window.PairController.state.phase === 'paused'",
+        timeout=timeout)
+
+
+def test_peer_away_leader_browse_stays_on_tile_list(devs):
+    """相手不在: ☰ on the leader must open the tile list and KEEP it open.
+    The peer-away session derives phase 'paused' (not 'selecting'), so the
+    selecting→paused echo used to apply over the torn-down pair strip and
+    slam the sidebar shut again. Picking a work still applies the commit,
+    closing the list and re-entering the shared display."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    _kill_ws(pf)                       # follower unreachable, stays dead
+    _await_peer_away(pl)
+
+    rev0 = pl.evaluate("() => window.PairController.state.revision")
+    pl.eval_on_selector("#menu-btn", "el => el.click()")
+    pl.wait_for_function(
+        "() => document.getElementById('sidebar').classList.contains('open')")
+    # Wait for the selecting→paused echo to round-trip — that is the commit
+    # the regression let through.
+    pl.wait_for_function(
+        "(r) => window.PairController.state.revision > r",
+        arg=rev0, timeout=15000)
+    pl.wait_for_timeout(300)
+    assert pl.evaluate(
+        "() => document.getElementById('sidebar')"
+        ".classList.contains('open')")
+    assert pl.locator("#tile-grid .tile").count() > 0
+
+    # A work pick is a display-changing commit: it applies, closes the
+    # sidebar and re-enters the shared view on the new manifest.
+    pl.eval_on_selector(
+        ".tile[data-path='simple_manga']", "el => el.click()")
+    pl.wait_for_function(
+        "() => !document.getElementById('sidebar')"
+        ".classList.contains('open')", timeout=15000)
+    pl.wait_for_function(
+        "() => (window.images[0] || {}).folder === 'simple_manga'",
+        timeout=15000)
+    assert pl.evaluate(
+        "() => window.PairedView.state().active") is True
+
+
+def test_peer_away_follower_browse_opens_tile_list(devs):
+    """相手不在 on the follower: ☰ opens the tile list locally (browse never
+    touches the wire for followers) and a pick LEAVEs into a solo open."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _open(pf, "series/vol1")
+    _pair_now(pl, pf)
+
+    _kill_ws(pl)                       # leader unreachable, stays dead
+    _await_peer_away(pf)
+
+    pf.eval_on_selector("#menu-btn", "el => el.click()")
+    pf.wait_for_function(
+        "() => document.getElementById('sidebar').classList.contains('open')")
+    pf.wait_for_timeout(300)
+    assert pf.evaluate(
+        "() => document.getElementById('sidebar')"
+        ".classList.contains('open')")
+    assert pf.locator("#tile-grid .tile").count() > 0
+
+    pf.eval_on_selector(
+        ".tile[data-path='simple_manga']", "el => el.click()")
+    pf.wait_for_function(
+        "() => window.PairController.state.status === 'ended'"
+        " || window.PairController.state.status === 'idle'",
+        timeout=15000)
+    pf.wait_for_function(
+        "() => window.currentFolder === 'simple_manga'", timeout=15000)
+
+
 # ── shared anchor: URL hash + ReadingProgress on both devices ─────────────
 
 def test_anchor_hash_and_progress_on_both_and_blank_side(devs):

@@ -37,6 +37,7 @@
   var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
   var _heldCommit = null;    // newest suppressed commit while leader browses
   var _lastApply = null;     // newest committed args, for display re-arm
+  var _appliedKey = null;    // display key of the newest APPLIED commit
   var _resolveGen = 0;       // generation guard for async page resolution
   var _sent = [];            // intent audit log (tests: 1 op = 1 request)
 
@@ -63,18 +64,33 @@
 
   /* ── committed-state sink ── */
 
+  /* What the display actually shows for a commit — phase/presence flaps
+   * (selecting/active/paused activity echoes) don't move it, but a work
+   * pick or a remote turn does. */
+  function _displayKey(snap) {
+    if (!snap) return '';
+    return [snap.manifestVersion, snap.spreadId, snap.offset,
+            snap.leaderSide].join('|');
+  }
+
   function _applyCommitted(snap, manifest, o) {
     _lastApply = {snap: snap, manifest: manifest, o: o};
     var leader = !!(o && o.role === 'leader');
-    var phase = snap ? snap.phase : null;
-    if (leader && _sidebarOpen() && phase === 'selecting') {
-      // Leader is browsing the shared-work list: holding the commit keeps
-      // the grid in front; the newest held commit replays on close. Work
-      // picks (phase leaves 'selecting') apply immediately and close it.
+    if (leader && _sidebarOpen() && _displayKey(snap) === _appliedKey) {
+      // Leader is browsing the shared-work list: an echo that changes
+      // nothing on screen must not rip the grid away — hold it; the
+      // newest held commit replays on close. This has to key on display
+      // state, not phase: a dead member pins the derived phase at
+      // 'paused' even while the leader selects, so a peer-away STATE
+      // would otherwise apply, re-enter the torn-down pair strip and
+      // slam the sidebar shut. Real display moves (work pick, remote
+      // turn) still apply immediately and close the list.
       _heldCommit = _lastApply;
       return;
     }
-    return _VN().applyCommittedState(snap, manifest, o);
+    var ret = _VN().applyCommittedState(snap, manifest, o);
+    _appliedKey = _displayKey(snap);
+    return ret;
   }
 
   /* ── sidebar observer: leader browse pauses/resumes the session ── */
@@ -105,13 +121,17 @@
       if (_heldCommit) {
         var c = _heldCommit;
         _heldCommit = null;
-        try { _VN().applyCommittedState(c.snap, c.manifest, c.o); }
-        catch (e) { /* display replays are best-effort */ }
+        try {
+          _VN().applyCommittedState(c.snap, c.manifest, c.o);
+          _appliedKey = _displayKey(c.snap);
+        } catch (e) { /* display replays are best-effort */ }
       } else if (_lastApply && pv && typeof pv.isActive === 'function' &&
                  !pv.isActive()) {
         var d = _lastApply;
-        try { _VN().applyCommittedState(d.snap, d.manifest, d.o); }
-        catch (e2) { /* idem */ }
+        try {
+          _VN().applyCommittedState(d.snap, d.manifest, d.o);
+          _appliedKey = _displayKey(d.snap);
+        } catch (e2) { /* idem */ }
       }
       if (st.role === 'leader' && (_selIssued || st.phase === 'selecting')) {
         _selIssued = false;
@@ -303,6 +323,7 @@
     _selIssued = false;
     _heldCommit = null;
     _lastApply = null;
+    _appliedKey = null;
     _resolveGen++;
     if (_sideObs) { try { _sideObs.disconnect(); } catch (e) {} _sideObs = null; }
     _sideOpen = null;
@@ -335,6 +356,7 @@
       _sideObs = null;
       _sideOpen = null;
       _heldCommit = null;
+      _appliedKey = null;
     }
     if (bound) _maybeBootstrapWork(st);
     _notify();
