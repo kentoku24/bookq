@@ -18,6 +18,13 @@
  *   限定: push/history.go は hashchange→applyUrlState の二重適用になる）。
  *   結果、スクロール・フォルダ潜り・戻る・表示モード変更は双方向で伝搬する。
  *
+ *   tile受信時のスクロール適用は、受信毎の scrollTop 書き換えではなく
+ *   「追従ドライブ」（後述）が行う: 目標 = 直近実測位置 or 送信側が実
+ *   scrollイベントからフィットしたフリング終端予測 pred、表示 = 目標への
+ *   2段一次遅れフィルタ — 受信間を毎フレーム連続描画し、静的目標に
+ *   オーバーシュートしない（補正由来の巻き戻し・再加速が構造上出ない）。
+ *   list/card・階層遷移・初回適用は従来どおり即時適用。
+ *
  *   UI_SYNC は committed reader state ではない（revision/apply_log/dedup を
  *   汚さない SIGNAL 同型の ephemeral 中継）。searchMode 中は送受信とも停止
  *   （検索結果の同期はスコープ外）。順序は単一 WS link が保証するので
@@ -318,6 +325,11 @@
     var mx = Math.max(0, sc.scrollHeight - sc.clientHeight);
     return Math.min(Math.max(0, t), mx);
   }
+  /* peer の scrollTop をローカル座標に写す（1画面分オフセット + clamp） */
+  function _remoteTop(sc, top, viewH) {
+    var t = (_role() === 'follower') ? top + viewH : top - sc.clientHeight;
+    return _clampTop(sc, t);
+  }
   function _reducedMotion() {
     try {
       return !!(window.matchMedia &&
@@ -366,13 +378,24 @@
       c.sc === ctx.sc;
   }
 
-  function _seedFollow(sc, ctx) {
-    var t = _perfNow();
-    var top = sc.scrollTop;
-    _follow = {sc: sc, hist: [],
-      model: {t0: t, y: top, v: 0, dir: 0, pred: null},
-      F: top, X: top, lastTick: t, tMax: -1e18, tMin: 1e18,
+  /* ── 追従ドライブ ──
+   * tile受信時の scrollTop を段階書き換えせず、受信ストリームから作る
+   * 移動目標へ2段一次遅れフィルタで毎フレーム追従する。層は:
+   *   計測 _followEstimate  → 受理 _followSample（stream更新）
+   *   目標 _targetAt        → 実測 or 送信側終端予測 pred（単調hold付）
+   *   追従 _integrate       → 厳密積分 F/X — 位置・速度とも連続で、
+   *                           静的目標にオーバーシュートしない
+   *   書き込み _writeFollow → DOM + 出所記録（echo防止・端re-anchor）
+   * 駆動は _followTick（rAF）、継続条件は _followEligible。 */
+
+  function _newFollow(sc, top, t) {
+    return {sc: sc, hist: [],
+      stream: {t0: t, top: top, vel: 0, dir: 0, pred: null},
+      s1: top, pos: top, lastTick: t, tMax: -1e18, tMin: 1e18,
       active: false};
+  }
+  function _seedFollow(sc, ctx) {
+    _follow = _newFollow(sc, sc.scrollTop, _perfNow());
     _followCtx = ctx;
   }
   function _applyImmediate(sc, target, ctx) {
@@ -388,84 +411,14 @@
                      top: actual, mode: _w().viewMode || 'tile'};
     var t = _perfNow();
     _followCtx = ctx;
-    _follow = {sc: sc, hist: [{t: t, top: actual}],
-      model: {t0: t, y: actual, v: 0, dir: 0, pred: null},
-      F: actual, X: actual, lastTick: t, tMax: -1e18, tMin: 1e18,
-      active: false};
+    _follow = _newFollow(sc, actual, t);
+    _follow.hist.push({t: t, top: actual});
   }
 
-  function _targetAt(f, t) {
-    var m = f.model;
-    var T = m.y;
-    if (t - m.t0 < STALE_MS) {
-      if (m.pred !== null && m.pred !== undefined) T = m.pred;
-      if (m.dir > 0) { if (T > f.tMax) f.tMax = T; T = f.tMax; }
-      else if (m.dir < 0) { if (T < f.tMin) f.tMin = T; T = f.tMin; }
-    }
-    return T;
-  }
-
-  function _ensureRaf() {
-    if (_rafId || !_follow || !_follow.active) return;
-    _rafId = requestAnimationFrame(_followTick);
-  }
-  function _writeFollow(pos, vel, t) {
-    var f = _follow, sc = f.sc;
-    sc.scrollTop = pos;
-    var actual = sc.scrollTop;
-    _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
-                    mode: _w().viewMode || 'tile'};
-    _lastWriteTop = {sc: sc, path: _w().currentBrowsePath || null,
-                     top: actual, mode: _w().viewMode || 'tile'};
-    if (Math.abs(actual - pos) > 1) {
-      f.X = actual;
-      f.F = actual;
-      if ((pos - actual) * (f.model.y - actual) > 0) f.model.y = actual;
-    }
-    return actual;
-  }
-  function _followTick(t) {
-    _rafId = 0;
-    var f = _follow;
-    if (!f || !f.active || !_followCtx) { _resetFollow(); return; }
-    var sc = f.sc;
-    var st = _pc() && _pc().state;
-    if (!sc || sc !== _scroller() || !_armed || !st ||
-        st.phase !== 'selecting' || st.sessionId !== _followCtx.sid ||
-        _role() !== _followCtx.role || _searchMode() ||
-        document.hidden || !_sidebarOpen() || _reducedMotion() ||
-        (_w().viewMode || 'tile') !== _followCtx.mode ||
-        (_w().currentBrowsePath || null) !== _followCtx.path) {
-      _resetFollow();
-      return;
-    }
-    var ts = (typeof t === 'number') ? t : _perfNow();
-    var dt = ts - f.lastTick;
-    f.lastTick = ts;
-    if (dt < 0) dt = 0;
-    if (dt > 500) dt = 500;
-    var T = _targetAt(f, ts);
-    var e = Math.exp(-dt / TARGET_TAU_MS);
-    var A = T - f.F, B = T - f.X;
-    f.F = T - A * e;
-    f.X = T - (B + A * dt / TARGET_TAU_MS) * e;
-    _tracePush({t: ts, k: 'w', x: f.X,
-                w: _writeFollow(f.X, (f.F - f.X) / TARGET_TAU_MS, ts), T: T});
-    var m = f.model;
-    if ((m.v === 0 || ts - m.t0 >= STALE_MS) &&
-        Math.abs(f.X - m.y) < POSITION_EPS_PX &&
-        Math.abs(f.F - f.X) < POSITION_EPS_PX) {
-      f.X = m.y;
-      f.F = m.y;
-      _writeFollow(m.y, 0, ts);
-      f.active = false;
-      return;
-    }
-    _ensureRaf();
-  }
-
-  function _followSample(top, pred) {
-    var f = _follow;
+  /* 計測 — 直近3サンプルから速度・進行方向を推定する。
+   * ジッターの混じる到着間隔に対し、減速が一貫する場合のみ前回速度を
+   * 1/4 混ぜて平滑化する。 */
+  function _followEstimate(f, top) {
     var t = _perfNow();
     var h = f.hist, last = h.length ? h[h.length - 1] : null;
     var v = 0, stop = false;
@@ -502,16 +455,114 @@
     var cap = VEL_CAP_SCREENS_S * f.sc.clientHeight / 1000;
     if (v > cap) v = cap;
     else if (v < -cap) v = -cap;
+    return {t: t, v: v};
+  }
+
+  function _validPred(f, top, dir, pred) {
+    if (typeof pred !== 'number' || dir === 0) return null;
+    if ((pred - top) * dir <= 0) return null;
+    if (Math.abs(pred - top) > 6 * f.sc.clientHeight) return null;
+    return pred;
+  }
+
+  /* 受理 — 新しい実測でストリーム状態を更新する。フィルタ状態（s1/pos）
+   * は触れない — 表示は連続したまま新しい目標へ向き直る。 */
+  function _followSample(top, pred) {
+    var f = _follow;
+    var est = _followEstimate(f, top);
+    var t = est.t, v = est.v;
     var dir = v > 0 ? 1 : (v < 0 ? -1 : 0);
-    if (dir !== f.model.dir) { f.tMax = -1e18; f.tMin = 1e18; }
-    var P = null;
-    if (typeof pred === 'number' && dir !== 0 &&
-        (pred - top) * dir > 0 &&
-        Math.abs(pred - top) <= 6 * f.sc.clientHeight) P = pred;
-    f.model = {t0: t, y: top, v: v, dir: dir, pred: P};
+    if (dir !== f.stream.dir) { f.tMax = -1e18; f.tMin = 1e18; }
+    var P = _validPred(f, top, dir, pred);
+    f.stream = {t0: t, top: top, vel: v, dir: dir, pred: P};
     f.lastTick = t;
     _tracePush({t: t, k: 'r', recv: top, v: v, pred: P});
     f.active = true;
+    _ensureRaf();
+  }
+
+  /* 目標決定 — ストリームが新鮮な間は pred（あれば）を採用し、
+   * 進行方向への単調holdで目標の逆走を抑える。stale後は最後の
+   * 実測位置へ戻して収束させる。 */
+  function _targetAt(f, t) {
+    var m = f.stream;
+    var T = m.top;
+    if (t - m.t0 < STALE_MS) {
+      if (m.pred !== null && m.pred !== undefined) T = m.pred;
+      if (m.dir > 0) { if (T > f.tMax) f.tMax = T; T = f.tMax; }
+      else if (m.dir < 0) { if (T < f.tMin) f.tMin = T; T = f.tMin; }
+    }
+    return T;
+  }
+
+  /* 追従 — 同一τの2段一次遅れを閉形式で積分する。
+   * X(t) = T - (B + A·s/τ)·e^{-s/τ}（A=T-F0, B=T-X0）。
+   * s1 は X より先に動く第1段 — 表示位置 pos が pos を超えて進むことは
+   * なく、速度 (s1-pos)/τ も常に連続。 */
+  function _integrate(f, T, dt) {
+    var e = Math.exp(-dt / TARGET_TAU_MS);
+    var A = T - f.s1, B = T - f.pos;
+    f.s1 = T - A * e;
+    f.pos = T - (B + A * dt / TARGET_TAU_MS) * e;
+  }
+
+  function _writeFollow(pos, t) {
+    var f = _follow, sc = f.sc;
+    sc.scrollTop = pos;
+    var actual = sc.scrollTop;
+    _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
+                    mode: _w().viewMode || 'tile'};
+    _lastWriteTop = {sc: sc, path: _w().currentBrowsePath || null,
+                     top: actual, mode: _w().viewMode || 'tile'};
+    if (Math.abs(actual - pos) > 1) {
+      f.pos = actual;
+      f.s1 = actual;
+      if ((pos - actual) * (f.stream.top - actual) > 0) {
+        f.stream.top = actual;
+      }
+    }
+    return actual;
+  }
+
+  /* 継続条件 — 追従の文脈（session/role/path/mode/scroller/表示状態）が
+   * 生成時と一致している間だけ描画する。 */
+  function _followEligible(f) {
+    var c = _followCtx;
+    var st = _pc() && _pc().state;
+    return !!(f.sc && c && f.sc === _scroller() && _armed && st &&
+      st.phase === 'selecting' && st.sessionId === c.sid &&
+      _role() === c.role && !_searchMode() &&
+      !document.hidden && _sidebarOpen() && !_reducedMotion() &&
+      (_w().viewMode || 'tile') === c.mode &&
+      (_w().currentBrowsePath || null) === c.path);
+  }
+
+  function _ensureRaf() {
+    if (_rafId || !_follow || !_follow.active) return;
+    _rafId = requestAnimationFrame(_followTick);
+  }
+  function _followTick(t) {
+    _rafId = 0;
+    var f = _follow;
+    if (!f || !f.active || !_followEligible(f)) { _resetFollow(); return; }
+    var ts = (typeof t === 'number') ? t : _perfNow();
+    var dt = ts - f.lastTick;
+    f.lastTick = ts;
+    if (dt < 0) dt = 0;
+    if (dt > 500) dt = 500;
+    var T = _targetAt(f, ts);
+    _integrate(f, T, dt);
+    _tracePush({t: ts, k: 'w', x: f.pos, w: _writeFollow(f.pos, ts), T: T});
+    var s = f.stream;
+    if ((s.vel === 0 || ts - s.t0 >= STALE_MS) &&
+        Math.abs(f.pos - s.top) < POSITION_EPS_PX &&
+        Math.abs(f.s1 - f.pos) < POSITION_EPS_PX) {
+      f.pos = s.top;
+      f.s1 = s.top;
+      _writeFollow(s.top, ts);
+      f.active = false;
+      return;
+    }
     _ensureRaf();
   }
 
@@ -622,14 +673,10 @@
       if (!sc) return;
     }
 
-    if (_role() === 'follower') target = msg.top + msg.viewH;
-    else target = msg.top - sc.clientHeight;
-    target = _clampTop(sc, target);
+    var target = _remoteTop(sc, msg.top, msg.viewH);
     var predT = null;
     if (typeof msg.pred === 'number' && isFinite(msg.pred)) {
-      predT = (_role() === 'follower')
-        ? msg.pred + msg.viewH : msg.pred - sc.clientHeight;
-      predT = _clampTop(sc, predT);
+      predT = _remoteTop(sc, msg.pred, msg.viewH);
     }
 
     var ctx = _ctxOf(sc, msg);
@@ -795,13 +842,13 @@
       get smoothing() {
         var f = _follow;
         var t = _perfNow();
-        var m = f && f.model;
+        var s = f && f.stream;
         return {
           active: !!(f && f.active),
-          displayTop: f ? f.X : 0,
-          displayVel: f ? (f.F - f.X) / TARGET_TAU_MS : 0,
+          displayTop: f ? f.pos : 0,
+          displayVel: f ? (f.s1 - f.pos) / TARGET_TAU_MS : 0,
           modelTop: f ? _targetAt(f, t) : 0,
-          modelVel: m ? m.v : 0,
+          modelVel: s ? s.vel : 0,
           history: f ? f.hist.length : 0,
           local: _localBusy(),
         };
