@@ -264,7 +264,7 @@ def test_receiver_moves_on_raf_between_samples(pair_page):
     max_top = pg.evaluate(
         f"() => ({_SC}).scrollHeight - ({_SC}).clientHeight")
     assert st > pos0, \
-        f"predicted motion must draw between samples: {pos0} -> {st}"
+        f"smoothed motion must draw between samples: {pos0} -> {st}"
     assert st <= pos0 + 64, \
         f"frame step must be a bounded move, not a jump: {pos0} -> {st}"
     assert 0 <= st <= max_top
@@ -415,7 +415,7 @@ def test_direct_input_cancels_receiver_animation(pair_page):
         "touchdown alone must not echo a position back"
 
 
-def test_known_deceleration_blends_velocity_and_decays(pair_page):
+def test_known_deceleration_estimates_blended_velocity(pair_page):
     pg = pair_page
     _arm_follower(pg)
     _apply(pg, 100)
@@ -482,7 +482,7 @@ def test_same_time_burst_gap_jitter_stay_sane(pair_page):
     assert hook["active"] is False
 
 
-def test_deadline_crossings_keep_display_c1(pair_page):
+def test_display_stays_c1_across_stale_boundary(pair_page):
     pg = pair_page
     _arm_follower(pg)
     _apply(pg, 100)
@@ -493,7 +493,7 @@ def test_deadline_crossings_keep_display_c1(pair_page):
     pg.evaluate("() => window.__clock.frame(1)")
     h2 = _hook(pg)
     assert h2["displayVel"] == pytest.approx(h1["displayVel"], abs=0.5), \
-        "velocity must be continuous across the prediction cutoff"
+        "velocity must be continuous across the first boundary"
     assert h2["displayTop"] == pytest.approx(h1["displayTop"], abs=4)
     h3 = _hook(pg)
     pg.evaluate("() => window.__clock.frame(59)")
@@ -830,7 +830,7 @@ def test_no_resident_raf_or_timers_after_converge(pair_page):
     assert pg.evaluate("() => window.__clock.timersPending()") == 0
 
 
-def test_forward_jump_converges_after_prediction(pair_page):
+def test_forward_jump_converges_after_retarget(pair_page):
     pg = pair_page
     _arm_follower(pg)
     _apply(pg, 100)

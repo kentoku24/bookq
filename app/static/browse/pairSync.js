@@ -370,7 +370,7 @@
     var t = _perfNow();
     var top = sc.scrollTop;
     _follow = {sc: sc, hist: [],
-      model: {t0: t, y: top, v: 0, dir: 0, staleAt: t, pred: null},
+      model: {t0: t, y: top, v: 0, dir: 0, pred: null},
       F: top, X: top, lastTick: t, tMax: -1e18, tMin: 1e18,
       active: false};
     _followCtx = ctx;
@@ -389,7 +389,7 @@
     var t = _perfNow();
     _followCtx = ctx;
     _follow = {sc: sc, hist: [{t: t, top: actual}],
-      model: {t0: t, y: actual, v: 0, dir: 0, staleAt: t, pred: null},
+      model: {t0: t, y: actual, v: 0, dir: 0, pred: null},
       F: actual, X: actual, lastTick: t, tMax: -1e18, tMin: 1e18,
       active: false};
   }
@@ -508,8 +508,7 @@
     if (typeof pred === 'number' && dir !== 0 &&
         (pred - top) * dir > 0 &&
         Math.abs(pred - top) <= 6 * f.sc.clientHeight) P = pred;
-    f.model = {t0: t, y: top, v: v, dir: dir,
-               staleAt: t + STALE_MS, pred: P};
+    f.model = {t0: t, y: top, v: v, dir: dir, pred: P};
     f.lastTick = t;
     _tracePush({t: t, k: 'r', recv: top, v: v, pred: P});
     f.active = true;
