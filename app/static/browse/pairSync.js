@@ -85,6 +85,7 @@
   var _lastLocalIntent = -1e9;
   var _sndHist = [];
   var _trace = null;
+  var _longtasks = null;
 
   function _w() { return window; }
   function _pc() { return _w().PairController || null; }
@@ -397,8 +398,17 @@
     return {sc: sc, hist: [],
       stream: {t0: t, top: top, vel: 0, dir: 0, pred: null},
       s1: top, pos: top, lastTick: t, lead: null,
+      starve: 0, wrNo: 0,
       active: false};
   }
+
+  /* remote スクロールの活動時刻 — render.js の _interacting() が参照し、
+   * remote 書き込み駆動のスクロール中も deferred job（fill-poll の
+   * JSON.parse・offline map 再構築・img gate）を待たせる。受信・
+   * 追従フレーム・即時適用の3箇所で更新する（受信のみだと駐車中の
+   * ストリーム存続を表せず、書き込みのみだとスロットル間引き中に
+   * 400ms 窓を抜ける）。 */
+  function _noteRemoteScroll(t) { _w().browseRemoteScrollTs = t; }
   function _seedFollow(sc, ctx) {
     _follow = _newFollow(sc, sc.scrollTop, _perfNow());
     _followCtx = ctx;
@@ -413,6 +423,7 @@
     _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
                     mode: _w().viewMode || 'tile'};
     var t = _perfNow();
+    _noteRemoteScroll(t);
     _followCtx = ctx;
     _follow = _newFollow(sc, actual, t);
     _follow.hist.push({t: t, top: actual});
@@ -491,6 +502,7 @@
     // 受信までの経過が積分から落ち、rAF の時刻が受信より前なら dt=0 で
     // そのフレームが止まる（受信周期のカクつき）。
     if (!f.active) f.lastTick = t;
+    _noteRemoteScroll(t);
     _tracePush({t: t, k: 'r', recv: top, v: v, pred: P});
     f.active = true;
     _ensureRaf();
@@ -579,9 +591,19 @@
     if (gap > CHASE_GAP_PX) T = f.pos + CHASE_GAP_PX;
     else if (gap < -CHASE_GAP_PX) T = f.pos - CHASE_GAP_PX;
     _integrate(f, T, dt);
+    _noteRemoteScroll(ts);
+    /* 適応書き込みスロットル — rAF が 34ms 超のフレームが連続する弱い
+     * 端末では、scrollTop 書き込み（レイアウト/ペイント/scroll event
+     * 起動の入口）を隔フレームに間引く。積分は毎フレーム行い位置だけ
+     * 書き込みを飛ばすので軌跡は連続のまま — 60fps を狙ってバースト
+     * 停滞するより実効30Hzの方が滑らか。2フレーム連続の悪化で発動し、
+     * 連続する良好フレームで解除する（単発のGC hiccup では発動しない）。 */
+    f.starve = (dt > 34) ? Math.min(6, (f.starve || 0) + 2)
+      : Math.max(0, (f.starve || 0) - 1);
+    var skip = f.starve >= 4 && ((f.wrNo = (f.wrNo || 0) + 1) % 2 === 0);
     var x = f.pos;
-    var w = _writeFollow(x);
-    if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T,
+    var w = skip ? f.sc.scrollTop : _writeFollow(x);
+    if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T, s: skip ? 1 : 0,
                            g: dt, c: _trace ? _perfNow() - ts : 0});
     var s = f.stream;
     if ((s.vel === 0 || ts - s.t0 >= STALE_MS) &&
@@ -859,6 +881,24 @@
 
   if (window.__BOOKQ_TEST_MODE__ === 'true') {
     _trace = [];
+    // 追従中の長時間タスク観測 — 未対応環境では stats.longtasks が空のまま。
+    // 受信ギャップと時系列を突き合わせて停滞の正体（decode/deferred job/
+    // GC）を特定するための調査用。
+    try {
+      if (typeof PerformanceObserver === 'function' &&
+          PerformanceObserver.supportedEntryTypes &&
+          PerformanceObserver.supportedEntryTypes.indexOf('longtask') >= 0) {
+        _longtasks = [];
+        new PerformanceObserver(function (list) {
+          var es = list.getEntries();
+          for (var i = 0; i < es.length; i++) {
+            _longtasks.push({t: Math.round(es[i].startTime),
+                             d: Math.round(es[i].duration)});
+            if (_longtasks.length > 200) _longtasks.shift();
+          }
+        }).observe({entryTypes: ['longtask']});
+      }
+    } catch (e) {}
     window.__pairBrowseSync = {
       get armed() { return _armed; },
       get unlocked() { return _unlocked; },
@@ -907,15 +947,18 @@
           vel.push({t: w[i].t, dx: +(w[i].w - w[i - 1].w).toFixed(1),
                     gap: d});
         }
-        var staleArr = 0, recvGapMax = 0;
+        var staleArr = 0, recvGapMax = 0, skips = 0;
         for (i = 1; i < r.length; i++) {
           d = r[i].t - r[i - 1].t;
           if (d > recvGapMax) recvGapMax = d;
           if (d > STALE_MS) staleArr++;
         }
-        return {writes: w.length, recvs: r.length, frameGaps: gaps,
+        for (i = 0; i < w.length; i++) if (w[i].s) skips++;
+        return {writes: w.length, skippedWrites: skips, recvs: r.length,
+                frameGaps: gaps,
                 staleArrivals: staleArr, recvGapMax: recvGapMax,
                 costAvg: nC ? +(sumC / nC).toFixed(2) : 0, costMax: maxC,
+                longtasks: _longtasks ? _longtasks.slice(-40) : [],
                 vel: vel.slice(-80)};
       },
       get fps() {

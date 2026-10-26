@@ -1068,3 +1068,44 @@ def test_reduced_motion_still_rejects_while_input_held(pair_page):
     _apply(pg, 200)
     assert _scroll(pg) == pytest.approx(600, abs=2)
     pg.evaluate("() => window.__setReduce(false)")
+
+
+def test_starved_frames_throttle_writes_but_converge(pair_page):
+    # Weak devices whose rAF keeps missing frames get every other scrollTop
+    # write skipped — the integration still runs per frame, so the final
+    # landing position stays exact while scroll-event/layout work halves.
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    _apply(pg, 2600)
+    pg.evaluate("() => window.__clock.frames(14, 60)")
+    st = pg.evaluate("() => window.__pairBrowseSync.stats")
+    assert st["skippedWrites"] >= 2, \
+        f"sustained slow frames should throttle writes: {st}"
+    # consecutive healthy frames disengage the throttle mid-follow
+    pg.evaluate("() => window.__clock.frames(12, 16)")
+    tr = pg.evaluate("() => window.__pairBrowseSync.trace")
+    wtail = [e for e in tr if e.get("k") == "w"][-6:]
+    assert all(not e.get("s") for e in wtail), \
+        f"healthy frames should resume every-frame writes: {wtail}"
+    pg.evaluate("() => window.__clock.frames(120, 16)")
+    assert _scroll(pg) == pytest.approx(3000, abs=2)
+
+
+def test_remote_activity_marks_browse_interaction(pair_page):
+    # render.js defers fill-poll parse / offline-map rebuilds / img gating on
+    # window.browseRemoteScrollTs — receives and follow frames must stamp it
+    # so remote-driven scrolling counts as interaction, not idle time.
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    now = pg.evaluate("() => window.__clock.now()")
+    ts = pg.evaluate("() => window.browseRemoteScrollTs")
+    assert ts is not None and now - ts <= 0, \
+        f"receiving remote scroll must stamp activity: ts={ts} now={now}"
+    _apply(pg, 900)
+    pg.evaluate("() => window.__clock.frames(3, 16)")
+    now2 = pg.evaluate("() => window.__clock.now()")
+    ts2 = pg.evaluate("() => window.browseRemoteScrollTs")
+    assert now2 - ts2 <= 16, \
+        f"every active follow frame must stamp activity: ts={ts2} now={now2}"

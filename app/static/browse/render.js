@@ -298,13 +298,20 @@
   // (touch held, a fling coasting right after release, or a wheel tick) —
   // programmatic scrollTop writes during load/render must not trip this or
   // first-load applies get deferred behind a window with no user at all.
+  // Exception: pairSync stamps window.browseRemoteScrollTs while it is
+  // actively writing this same scroller from the peer — remote-driven
+  // scroll is real motion, and a deferred multi-MB job (fill-poll parse,
+  // offline map rebuild) landing mid-follow is a ~1s main-thread stall on
+  // weak devices (measured as ws recv gaps up to ~957ms on iPhone 6s).
   // Exposed for app.js consumers (refreshOfflineMap) that live outside this
   // IIFE but share the same scroller.
   function _interacting(){
     var now = performance.now();
+    var rts = window.browseRemoteScrollTs || 0;
     return _touchesDown > 0
         || (now - _lastScrollTs) < 400
-        || (now - _wheelTs) < 400;
+        || (now - _wheelTs) < 400
+        || (now - rts) < 400;
   }
   window.browseInteracting = _interacting;
   // Resolve once the gesture has settled (or after ~12s regardless — a user
@@ -328,9 +335,9 @@
       _imgTimer = 0;
       // Never hydrate mid-drag: the src-set → decode burst it triggers lands
       // inside the finger's own gesture and stalls it (worst ~240-330ms
-      // measured). While a touch is active just re-arm; touchend schedules
-      // the real pass.
-      if (_touchesDown > 0) { _scheduleImgGate(); return; }
+      // measured). While any interaction is active — touch, fling, wheel,
+      // or remote pair scroll — just re-arm; settle schedules the real pass.
+      if (_interacting()) { _scheduleImgGate(); return; }
       _refreshImgGate();
     }, 250);
   }
