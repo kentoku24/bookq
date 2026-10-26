@@ -58,7 +58,6 @@
   var POSITION_EPS_PX = 1;
   var EST_MIN_MS = 30;
   var EST_MAX_MS = 200;
-  var VEL_CAP_SCREENS_S = 8;
   var LOCAL_SETTLE_MS = 400;
 
   var _armed = false;        // ミラー有効（live pair && phase==='selecting'）
@@ -452,9 +451,6 @@
       }
     }
     if (stop) v = 0;
-    var cap = VEL_CAP_SCREENS_S * f.sc.clientHeight / 1000;
-    if (v > cap) v = cap;
-    else if (v < -cap) v = -cap;
     return {t: t, v: v};
   }
 
