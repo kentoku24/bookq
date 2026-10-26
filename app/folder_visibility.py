@@ -62,6 +62,20 @@ def visibility_owner(user_key: str, secret_key: str) -> str:
     ).hexdigest()
 
 
+def covered_by_roots(path: object, roots) -> bool:
+    """``path == K`` or ``path`` under ``K + "/"`` for any non-empty string K
+    in *roots* — the same covering rule the client's hiddenMatch uses, so a
+    flattened key like ``wrap/work`` covers its whole subtree. Used by the
+    metadata endpoints to keep hidden works out of facets/search server-side.
+    """
+    if not isinstance(path, str) or not path:
+        return False
+    for k in roots or ():
+        if isinstance(k, str) and k and (path == k or path.startswith(k + "/")):
+            return True
+    return False
+
+
 def validate_root(root: object) -> str:
     """Return *root* unchanged, or raise ``ValueError`` for an invalid value.
 

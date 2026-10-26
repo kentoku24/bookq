@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.folder_visibility import DB_FILENAME
+
 
 @dataclass
 class Settings:
@@ -29,7 +31,7 @@ class Settings:
             base = Path(self.state_dir).expanduser()
         else:
             base = Path.home() / ".local" / "share" / "bookq"
-        return base / "folder-visibility.sqlite3"
+        return base / DB_FILENAME
 
     @property
     def allowed_emails_set(self) -> set[str]:

@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from app.archive import ARCHIVE_EXTENSIONS
+from app.folder_visibility import covered_by_roots
 from app.scanner import PDF_EXTENSIONS, natural_key
 
 _ARCHIVE_SUFFIXES = ARCHIVE_EXTENSIONS | PDF_EXTENSIONS
@@ -102,6 +103,7 @@ class MetadataIndex:
         q: str = "",
         filters: dict | None = None,
         sort: str = "relevance",
+        exclude_roots=(),
     ) -> list[dict]:
         """Search the index and return matching comics as dicts.
 
@@ -123,12 +125,19 @@ class MetadataIndex:
         list[dict]
             Serialised :class:`ComicMetadata` matching the query.
         """
+        roots = tuple(r for r in (exclude_roots or ()) if isinstance(r, str) and r)
+        # Per-user exclusion: comics under a hidden root never appear in
+        # results (client filtering alone would still ship them in the body).
+        comics = (
+            [c for c in self.comics if not covered_by_roots(c.folder_path, roots)]
+            if roots else self.comics
+        )
         if not q or not q.strip():
             # No query — return all (but still apply filters)
-            candidates = [(0.0, c) for c in self.comics]
+            candidates = [(0.0, c) for c in comics]
         else:
             candidates = []
-            for comic in self.comics:
+            for comic in comics:
                 score = _calculate_relevance(q.strip(), comic)
                 if score <= 0:
                     continue
@@ -154,13 +163,14 @@ class MetadataIndex:
 
         return [comic.to_dict() for _, comic in candidates]
 
-    def facets_for(self, path: str) -> dict[str, list[str]]:
+    def facets_for(self, path: str, exclude_roots=()) -> dict[str, list[str]]:
         """Return facets scoped to *path*'s subtree (``""`` = whole library).
 
-        The subset build does not clobber :attr:`facets` — callers needing
-        the whole-library set must pass an empty path.
+        *exclude_roots* drops comics covered by those hidden roots before
+        aggregating. The subset build does not clobber :attr:`facets` —
+        callers needing the whole-library set must pass an empty path.
         """
-        return _facets_for(self.comics, path, self.facets)
+        return _facets_for(self.comics, path, self.facets, exclude_roots)
 
     def subtree_facets(self) -> dict[str, dict[str, list[str]]]:
         """path -> aggregate facets of every comic in that subtree (path = any ancestor prefix of a comic's folder_path).

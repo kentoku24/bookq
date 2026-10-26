@@ -50,6 +50,16 @@ def _store(request: Request):
     return store
 
 
+async def hidden_roots_for_request(request: Request, user: dict) -> tuple[str, ...]:
+    """The session user's hidden roots — same 403/503 posture as the
+    visibility GET. Shared by routes.py's metadata endpoints so a failed
+    read fails CLOSED (never serves an unfiltered facet/search list).
+    """
+    user_key = _user_key(user)
+    snap = await _store_call(_store(request).read, user_key)
+    return snap.hidden_roots
+
+
 async def _store_call(fn, *args):
     """Run one store operation off the event loop; failures -> generic 503.
 
