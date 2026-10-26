@@ -331,6 +331,21 @@
         if (vst && vst.folder) BS.noteViewerReturn(path, vst.folder);
       } catch(e) { console.warn(e); }
     }
+    // 直接呼び出しでも同じ拒否: 通常モードで非表示配下ならトップへ。
+    // 判定不能（loading / error 無snapshot）は teardown せずキューだけ —
+    // navigateToFolder が _pendingNav に積み、復旧後の drain が潜り直す。
+    var _FV = window.FolderVisibility;
+    if (_FV && !_FV.showAll){
+      var _g = _FV.guardPath(path);
+      if (_g === "pending"){
+        if (typeof window.navigateToFolder === "function") window.navigateToFolder(path);
+        return;
+      }
+      if (_g === "hidden" && typeof window.redirectHiddenToTop === "function"){
+        window.redirectHiddenToTop();
+        return;
+      }
+    }
     // Bump token first so in-flight loadImages cannot overwrite
     try { ++window.urlRestoreGen; window.urlRestoring = false; } catch(e) { console.warn(e); }
     _teardownViewer();
@@ -434,6 +449,37 @@
     var bs = parseBrowseHash();
     var cur = currentViewerState();
     if (!window.treeLoaded) return;
+    // 設定GETの判断が着くまでは URL 復元を進めない — intent をキューへ
+    // 退避し、hash は保留のまま（error・snapshot 無しも同じ扱い）。
+    // positive hidden だけトップへ戻す — ペア早期 return より前。
+    var _FV = window.FolderVisibility;
+    if (_FV){
+      var _vTarget = st ? st.folder : (bs ? bs.path : null);
+      var _vGuard = _FV.guardPath(_vTarget);
+      if (_vGuard === "pending"){
+        try {
+          if (st && st.folder){
+            try { window.urlRestoring = true; } catch(e2) { console.warn(e2); }
+            if (typeof window.loadImages === "function") window.loadImages(st.folder);
+          } else if (bs && typeof window.navigateToFolder === "function"){
+            // 保留中の drain は現在 viewMode で browse hash を書き直す —
+            // URL の ?v= を先に反映しないと tile で上書きされる。
+            var _nextMode = bs.v ? bs.v : "tile";
+            if (window.viewMode !== _nextMode){
+              window.viewMode = _nextMode;
+              if (window.updateFooterBtn) window.updateFooterBtn();
+            }
+            window.navigateToFolder(bs.path);
+          }
+          if (typeof window.renderView === "function") window.renderView();
+        } catch(e) { console.warn(e); }
+        return;
+      }
+      if (_vGuard === "hidden" && typeof window.redirectHiddenToTop === "function"){
+        window.redirectHiddenToTop();
+        return;
+      }
+    }
 
     // A paired session renders the committed shared spread — the URL hash
     // mirrors it (written synchronously by applyPairedCommit) but is NOT the

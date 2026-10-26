@@ -1,5 +1,7 @@
 """Facet aggregation helpers."""
 
+from app.folder_visibility import covered_by_roots
+
 from .models import ComicMetadata
 
 __all__ = ["_build_facets", "_facets_for", "_subtree_facets"]
@@ -31,9 +33,14 @@ _FACETS_FOR_MEMO_MAX_GENS = 8
 _FACETS_FOR_MEMO: dict[int, tuple[list[ComicMetadata], dict[str, dict[str, list[str]]]]] = {}
 
 
-def _facets_for(comics: list[ComicMetadata], path: str, whole_facets: dict[str, list[str]]) -> dict[str, list[str]]:
-    """Return facets scoped to *path*'s subtree (``""`` = whole library)."""
-    if not path:
+def _facets_for(comics: list[ComicMetadata], path: str, whole_facets: dict[str, list[str]], exclude_roots=()) -> dict[str, list[str]]:
+    """Return facets scoped to *path*'s subtree (``""`` = whole library).
+
+    *exclude_roots* drops comics covered by a hidden root — the caller's
+    own roots, so per-user sets never share the unfiltered aggregate.
+    """
+    roots = tuple(sorted(r for r in (exclude_roots or ()) if isinstance(r, str) and r))
+    if not path and not roots:
         return whole_facets
     gen = id(comics)
     entry = _FACETS_FOR_MEMO.get(gen)
@@ -43,14 +50,23 @@ def _facets_for(comics: list[ComicMetadata], path: str, whole_facets: dict[str, 
         entry = (comics, {})
         _FACETS_FOR_MEMO[gen] = entry
     per_path = entry[1]
-    if path not in per_path:
-        prefix = path.rstrip("/") + "/"
-        subset = [
-            c for c in comics
-            if c.folder_path == path or c.folder_path.startswith(prefix)
-        ]
-        per_path[path] = _build_facets(subset)
-    return per_path[path]
+    key = (path, roots)
+    if key not in per_path:
+        if not path:
+            # Whole library: every comic is in scope; only hidden-root
+            # coverage narrows it (path prefixing would drop all of them —
+            # "" + "/" never prefixes a relative folder_path).
+            subset = [c for c in comics
+                      if not covered_by_roots(c.folder_path, roots)]
+        else:
+            prefix = path.rstrip("/") + "/"
+            subset = [
+                c for c in comics
+                if (c.folder_path == path or c.folder_path.startswith(prefix))
+                and not covered_by_roots(c.folder_path, roots)
+            ]
+        per_path[key] = _build_facets(subset)
+    return per_path[key]
 
 
 def _subtree_facets(comics: list[ComicMetadata]) -> dict[str, dict[str, list[str]]]:

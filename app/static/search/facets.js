@@ -18,6 +18,34 @@
 
   // Single escaper, from offline-core.js (loaded first in index.html).
   var _escapeHtml = window.OfflineCore.escapeHtml;
+  // Visibility: raw searchResults are never trimmed — every render re-filters
+  // by folder_path so late responses and mode switches stay consistent.
+  function _visibleResults(raw){
+    var FV = window.FolderVisibility;
+    if (!FV || FV.showAll || typeof FV.isVisible !== "function") return raw || [];
+    var out = [];
+    for (var i = 0; i < (raw || []).length; i++){
+      try { if (FV.isVisible(raw[i].folder_path)) out.push(raw[i]); } catch(e){}
+    }
+    return out;
+  }
+  // 表示プレゼンテーションは browse/render.js と同じ共有 impl
+  // （FV.uiPresentation — showAll 門・isTopLevel の editable 自動導出込み）。
+  function _vis(path, editable){
+    var FV = window.FolderVisibility;
+    return (FV && typeof FV.uiPresentation === "function")
+      ? FV.uiPresentation(path, editable) : null;
+  }
+  // Same no-snapshot gate the browse renderers use — a search paint must
+  // never expose an unfiltered list while the visibility judgment is out.
+  function _visBlocked(){
+    var FV = window.FolderVisibility;
+    return (FV && typeof FV.blockedGridHtml === "function") ? FV.blockedGridHtml() : null;
+  }
+  // Late-arriving search responses must not repopulate the grid after a
+  // clear/redirect — bump to invalidate.
+  var _searchGen = 0;
+  function invalidateSearch(){ _searchGen++; }
   function _offlineControlsHtml(path) {
     if (typeof window.offlineControlsHtml === 'function') return window.offlineControlsHtml(path);
     return '';
@@ -85,9 +113,15 @@
     if(path && typeof path === 'object' && path.fetch){ deps = path; path = deps.path || ""; }
     var _d = _resolveDeps(deps);
     var myGen = _incFacetGen();
-    var q = path ? ("?path=" + encodeURIComponent(path)) : "";
+    var qp = new URLSearchParams();
+    if (path) qp.set("path", path);
+    // 全表示: ask the server for the owner's full facet set — hidden works'
+    // artists/tags must be selectable while browsing everything.
+    var _FVf = window.FolderVisibility;
+    if (_FVf && _FVf.showAll) qp.set("include_hidden", "1");
+    var qs = qp.toString();
     try {
-      var res = await _d.fetch("/api/metadata/facets" + q);
+      var res = await _d.fetch("/api/metadata/facets" + (qs ? "?" + qs : ""));
       if (myGen !== _getFacetGenVal()) return;
       if (!res.ok) throw new Error("facets HTTP " + res.status);
       _setFacets(await res.json());
@@ -97,6 +131,7 @@
 
   async function doSearch(deps) {
     var _d = _resolveDeps(deps);
+    var myGen = ++_searchGen;
     var searchInput = document.getElementById("search-input");
     var q = searchInput ? searchInput.value.trim() : "";
     if (!q) {
@@ -112,10 +147,18 @@
     if (activeFilters.artist && activeFilters.artist.length) params.set('artist', activeFilters.artist.join(','));
     if (activeFilters.tag && activeFilters.tag.length) params.set('tag', activeFilters.tag.join(','));
     params.set('sort', activeFilters.sort || 'relevance');
+    // 全表示: the server's hidden-root exclusion is the owner's own set —
+    // opt out so hidden works come back (with badges) in show-all mode.
+    var _FVs = window.FolderVisibility;
+    if (_FVs && _FVs.showAll) params.set('include_hidden', '1');
     try {
       var res = await _d.fetch('/api/search?' + params.toString());
+      if (myGen !== _searchGen) return;
       if (!res.ok) throw new Error("search HTTP " + res.status);
       var data = await res.json();
+      // The body parse is itself an await — a newer search may have bumped
+      // the generation while it resolved; re-check before committing.
+      if (myGen !== _searchGen) return;
       _setSearchResults(data.results || []);
       _setSearchMode(true);
       try { if (window.refreshOfflineMap) await window.refreshOfflineMap(); } catch(e) { console.warn(e); }
@@ -136,7 +179,7 @@
       if (!window.searchMode) return;
       var el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
       if (!el || !tileGrid.contains(el)) return;
-      if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
+      if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
       var path = el.dataset.path;
       if (!path) return;
       window.currentFolder = path;
@@ -158,13 +201,15 @@
   function renderSearchTiles() {
     var tileGrid = document.getElementById("tile-grid");
     if (!tileGrid) return;
-    var searchResults = _getSearchResults() || [];
+    var _blk = _visBlocked(); if (_blk !== null){ tileGrid.innerHTML = _blk; return; }
+    var searchResults = _visibleResults(_getSearchResults() || []);
     var ctx = _buildSearchCtx(searchResults.map(function(r){ return r.folder_path; }));
     var html = "";
     var nodeByPath = _buildNodeMap();
     for (var r of searchResults) {
       var imgHtml;
       var node = nodeByPath.get(r.folder_path);
+      var svis = _vis(r.folder_path);
       var url = node ? _coverUrl(node, _coverW()) : null;
       if (url) imgHtml = '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">';
       else imgHtml = '<div class="tile-placeholder">\uD83D\uDCC1</div>';
@@ -175,22 +220,25 @@
         if (artistBadges || tagBadges) metaHtml = '<div class="tile-metadata">' + artistBadges + tagBadges + '</div>';
       }
       var offlineHtml = _searchOfflineHtml(ctx, r.folder_path);
-      html += '<div class="tile" data-path="' + _escapeHtml(r.folder_path) + '" tabindex="0" role="button">' + imgHtml + '<div class="tile-name">' + window.BrowseRender.nameHtml(r.folder_name) + '</div>' + metaHtml + offlineHtml + '</div>';
+      html += '<div class="tile' + ((svis && svis.className) ? " " + svis.className : "") + '" data-path="' + _escapeHtml(r.folder_path) + '" tabindex="0" role="button">' + (svis?svis.buttonHtml:"") + imgHtml + '<div class="tile-name">' + (svis?svis.badgeHtml:"") + window.BrowseRender.nameHtml(r.folder_name) + '</div>' + metaHtml + offlineHtml + '</div>';
     }
     tileGrid.innerHTML = html || '<div style="color:#555;text-align:center;padding:20px;font-size:13px">一致する結果がありません</div>';
     _bindSearchClicks(".tile");
+    var sc=document.getElementById("folder-count"); if(sc) sc.textContent=searchResults.length+" 件";
   }
 
   function renderSearchList() {
     var tileGrid = document.getElementById("tile-grid");
     if (!tileGrid) return;
-    var searchResults = _getSearchResults() || [];
+    var _blk = _visBlocked(); if (_blk !== null){ tileGrid.innerHTML = _blk; return; }
+    var searchResults = _visibleResults(_getSearchResults() || []);
     var ctx = _buildSearchCtx(searchResults.map(function(r){ return r.folder_path; }));
     var html = "";
     for (var r of searchResults) {
       var saved = ctx.progressAll[r.folder_path] || null;
       var progress = window.progressBarHtml ? window.progressBarHtml(saved) : {inlineBarHtml:''};
       var badge = progress.inlineBarHtml || '';
+      var lvis = _vis(r.folder_path);
       var metaHtml = "";
       if (r.has_metadata) {
         var badges = [];
@@ -199,22 +247,25 @@
         metaHtml = '<div class="meta">' + badges.join('') + '</div>';
       }
       var offlineHtml = _searchOfflineHtml(ctx, r.folder_path);
-      html += '<div class="item folder search-result" data-path="' + _escapeHtml(r.folder_path) + '" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">' + _escapeHtml(r.folder_name) + badge + '</span>' + metaHtml + offlineHtml + '</div>';
+      html += '<div class="item folder search-result' + ((lvis && lvis.className) ? " " + lvis.className : "") + '" data-path="' + _escapeHtml(r.folder_path) + '" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span>' + (lvis?lvis.buttonHtml:"") + '<span class="name">' + _escapeHtml(r.folder_name) + badge + (lvis?lvis.badgeHtml:"") + '</span>' + metaHtml + offlineHtml + '</div>';
     }
     tileGrid.innerHTML = html || '<div class="item" style="color:#555">一致する結果がありません</div>';
     _bindSearchClicks(".item[data-path]");
+    var lc=document.getElementById("folder-count"); if(lc) lc.textContent=searchResults.length+" 件";
   }
 
   function renderSearchCards() {
     var tileGrid = document.getElementById("tile-grid");
     if (!tileGrid) return;
-    var searchResults = _getSearchResults() || [];
+    var _blk = _visBlocked(); if (_blk !== null){ tileGrid.innerHTML = _blk; return; }
+    var searchResults = _visibleResults(_getSearchResults() || []);
     var ctx = _buildSearchCtx(searchResults.map(function(r){ return r.folder_path; }));
     var html = "";
     var nodeByPath = _buildNodeMap();
     for (var r of searchResults) {
       var imgHtml;
       var node = nodeByPath.get(r.folder_path);
+      var cvis = _vis(r.folder_path);
       var url = node ? _coverUrl(node) : null;
       if (url) imgHtml = '<img class="card-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">';
       else imgHtml = '<div class="tile-placeholder" style="aspect-ratio:16/9">\uD83D\uDCC1</div>';
@@ -225,10 +276,11 @@
         if (r.tags && r.tags.length) metaRows += '<div class="meta-row"><span class="label">\uD83C\uDFF7\uFE0F</span> ' + r.tags.slice(0, 5).map(function(t){return _escapeHtml(t);}).join(', ') + '</div>';
       }
       var offlineHtml = _searchOfflineHtml(ctx, r.folder_path);
-      html += '<div class="card" data-path="' + _escapeHtml(r.folder_path) + '" tabindex="0" role="button">' + imgHtml + '<div class="card-content"><div class="card-title">' + _escapeHtml(title) + '</div><div class="card-meta">' + metaRows + '</div></div>' + offlineHtml + '</div>';
+      html += '<div class="card' + ((cvis && cvis.className) ? " " + cvis.className : "") + '" data-path="' + _escapeHtml(r.folder_path) + '" tabindex="0" role="button">' + (cvis?cvis.buttonHtml:"") + imgHtml + '<div class="card-content"><div class="card-title">' + (cvis?cvis.badgeHtml:"") + _escapeHtml(title) + '</div><div class="card-meta">' + metaRows + '</div></div>' + offlineHtml + '</div>';
     }
     tileGrid.innerHTML = html || '<div style="color:#555;text-align:center;padding:20px;font-size:14px">一致する結果がありません</div>';
     _bindSearchClicks(".card");
+    var cc=document.getElementById("folder-count"); if(cc) cc.textContent=searchResults.length+" 件";
   }
 
   // ── Filter chips / Facet options ──
@@ -359,5 +411,5 @@
   window.renderSearchCards = renderSearchCards;
   window.openFilterSheet = openFilterSheet;
   window.closeFilterSheet = closeFilterSheet;
-  window.SearchFacets = { loadFacets, doSearch, renderFacetOptions, updateFilterChips, renderSearchTiles, renderSearchList, renderSearchCards, openFilterSheet, closeFilterSheet };
+  window.SearchFacets = { loadFacets, doSearch, renderFacetOptions, updateFilterChips, renderSearchTiles, renderSearchList, renderSearchCards, openFilterSheet, closeFilterSheet, invalidateSearch };
 })();

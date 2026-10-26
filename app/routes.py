@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from app import auth as auth_module
 from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
+from app.folder_visibility import user_key_for_email, visibility_owner
 from app.metadata import MetadataIndex
 from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
@@ -742,13 +743,48 @@ async def index(request: Request):
     # No Vary: User-Agent — the SW precaches '/' via a header-less Request, so a
     # varying response would never match a real navigation's cache lookup.
     ua_android = "android" in request.headers.get("user-agent", "").lower()
-    context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android}
+    visibility_user_key = (
+        user_key_for_email(user.get("email")) if isinstance(user, dict) else None
+    )
+    visibility_owner_value = (
+        visibility_owner(visibility_user_key, request.app.state.settings.secret_key)
+        if visibility_user_key
+        else None
+    )
+    # Embed the caller's visibility snapshot so the first paint is already
+    # filtered — the client still runs its GET afterwards (re-sync only).
+    # Store failure -> None embed -> the client's normal loading gate.
+    visibility_snapshot = None
+    if visibility_owner_value is not None:
+        _vis_store = getattr(request.app.state, "folder_visibility", None)
+        if _vis_store is not None:
+            try:
+                _vis_snap = await run_in_threadpool(_vis_store.read, visibility_user_key)
+                visibility_snapshot = {
+                    "owner": visibility_owner_value,
+                    "revision": _vis_snap.revision,
+                    "hiddenRoots": list(_vis_snap.hidden_roots),
+                }
+            except Exception:
+                visibility_snapshot = None
+    context = {
+        "user": user,
+        "test_mode": auth_module._TEST_MODE,
+        "ua_android": ua_android,
+        "visibility_owner": visibility_owner_value,
+        "visibility_snapshot": visibility_snapshot,
+    }
     if thumb_perf:
         context["thumbnail_perf"] = True
         context["thumbnail_probe"] = (
             Path(__file__).parent / "perf" / "thumbnail-probe.js"
         ).read_text(encoding="utf-8")
     response = render_template(request, "index.html", context)
+    # The viewer page embeds per-user data (owner + snapshot) — never let a
+    # shared/heuristic cache serve it to another account. Not "no-store":
+    # the SW precaches "/" via cache.put(), which rejects no-store responses,
+    # and the offline navigate fallback depends on that precache entry.
+    response.headers["Cache-Control"] = "private, no-cache"
     if thumb_perf:
         response.headers["Cache-Control"] = "no-store"
     return response
@@ -1028,6 +1064,18 @@ async def api_folders(
     return Response(content=body, media_type="application/json", headers=headers)
 
 
+async def _visibility_hidden_roots(request: Request, user: dict) -> tuple[str, ...]:
+    """Caller's hidden roots for metadata exclusion.
+
+    Shares the visibility route's own user-key/store helpers (same 403/503
+    posture) — a failed read fails CLOSED, never serving an unfiltered list.
+    Lazy import: folder_visibility_routes already depends on this module's
+    tree/index helpers.
+    """
+    from app.folder_visibility_routes import hidden_roots_for_request
+    return await hidden_roots_for_request(request, user)
+
+
 @api_router.get("/api/search")
 async def search(
     request: Request,
@@ -1035,10 +1083,20 @@ async def search(
     artist: str = Query("", description="Artist filter"),
     tag: str = Query("", description="Tags (comma-separated)"),
     sort: str = Query("relevance", description="Sort: relevance"),
+    include_hidden: bool = Query(False, description="全表示 mode: do not exclude the caller's hidden roots"),
     _user: dict = Depends(require_auth),
 ):
-    """Search comics by text and facet filters. Requires authentication."""
+    """Search comics by text and facet filters. Requires authentication.
+
+    Comics under the caller's hidden roots are excluded server-side —
+    shipping them and filtering client-side would still leak them in the
+    response body. ``include_hidden`` opts out for the owner's own 全表示
+    mode (the caller's own hidden set — never another user's).
+    """
     index = await _ensure_index(request)
+    hidden = await _visibility_hidden_roots(request, _user)
+    if include_hidden:
+        hidden = ()
 
     filters: dict[str, list[str]] = {}
     if artist:
@@ -1046,7 +1104,7 @@ async def search(
     if tag:
         filters["tags"] = [t.strip() for t in tag.split(",") if t.strip()]
 
-    results = index.search(q=q, filters=filters, sort=sort)
+    results = index.search(q=q, filters=filters, sort=sort, exclude_roots=hidden)
     return {"query": q, "total": len(results), "results": results}
 
 
@@ -1054,14 +1112,22 @@ async def search(
 async def get_facets(
     request: Request,
     path: str = Query("", description="Subtree path relative to downloads dir (empty = whole library)"),
+    include_hidden: bool = Query(False, description="全表示 mode: do not exclude the caller's hidden roots"),
     _user: dict = Depends(require_auth),
 ):
     """Return available facet filter options. Requires authentication.
 
+    Hidden roots are excluded server-side — a facet value existing only on
+    hidden works must never surface. ``include_hidden`` opts out for the
+    owner's own 全表示 mode (the caller's own hidden set — never another's).
+
     Contract: returns {artists, tags} only (no parodies key).
     """
     index = await _ensure_index(request)
-    return index.facets_for(path)
+    hidden = await _visibility_hidden_roots(request, _user)
+    if include_hidden:
+        hidden = ()
+    return index.facets_for(path, exclude_roots=hidden)
 
 
 @api_router.post("/api/refresh")

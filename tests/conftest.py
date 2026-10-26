@@ -41,6 +41,26 @@ def pytest_configure(config):
         pass
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _bookq_state_dir_sandbox(tmp_path_factory):
+    """Point BOOKQ_STATE_DIR at a throwaway dir for the whole test session.
+
+    Without it, in-process TestClients and helper-spawned uvicorn servers
+    would write folder-visibility state into the real ~/.local/share/bookq.
+    Restored on teardown.
+    """
+    prev = os.environ.get("BOOKQ_STATE_DIR")
+    sandbox = tmp_path_factory.mktemp("bookq-state")
+    os.environ["BOOKQ_STATE_DIR"] = str(sandbox)
+    try:
+        yield sandbox
+    finally:
+        if prev is None:
+            os.environ.pop("BOOKQ_STATE_DIR", None)
+        else:
+            os.environ["BOOKQ_STATE_DIR"] = prev
+
+
 def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -> None:
     """Write a minimal solid-color RGB PNG without external deps."""
 
@@ -291,6 +311,7 @@ def server(downloads_tree: Path) -> str:
     env = os.environ.copy()
     env["BOOKQ_TEST_MODE"] = "true"
     env["DOWNLOADS_DIR"] = str(downloads_tree)
+    env["BOOKQ_STATE_DIR"] = os.environ["BOOKQ_STATE_DIR"]
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],

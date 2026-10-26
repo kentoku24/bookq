@@ -35,12 +35,16 @@ services:
       # env を call time に読むので、この env + volume の組だけで有効になる
       #（code 変更不要）。thumbs/ と sprites/ の両 namespace が同 root 配下。
       - thumb-cache:/var/cache/bookq-thumbs
+      # ユーザー別の永続設定 (folder-visibility): cache volume と分離し、
+      # project prefix 付きでスロットごとに自動分離される（warmup と同型）。
+      - user-state:/var/lib/bookq
 
     environment:
       # OAuth を丸ごとバイパス（app/auth.py が import 時に一度だけ読む）。
       - BOOKQ_TEST_MODE=true
       - BOOKQ_CACHE_DIR=/var/cache/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
+      - BOOKQ_STATE_DIR=/var/lib/bookq
       - SECRET_KEY=dev-not-a-secret
 
     # dev.sh はこのラベルだけを情報源にする（状態ファイルを持たない）。
@@ -95,3 +99,4 @@ volumes:
     name: bookq-dev-pool-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}_tailscale-state
   warmup-cache:
   thumb-cache:
+  user-state:

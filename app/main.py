@@ -13,6 +13,8 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.compression import ApiGZipMiddleware
 from app.config import load_settings
 from app.auth import router as auth_router, init_oauth
+from app.folder_visibility import FolderVisibilityStore
+from app.folder_visibility_routes import router as folder_visibility_router
 from app.routes import _background_fill, _warm_covers, api_router, warmup_metadata_index
 from app.reader_sync.sessions import SessionRegistry
 from app.reader_sync.transport import reader_sync_ws, resolve_reader_work
@@ -212,6 +214,8 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(api_router)
+    app.include_router(folder_visibility_router)
+    app.state.folder_visibility = FolderVisibilityStore(settings.state_path)
 
     # dual-reader sync endpoint (#78/S03, #80/S05). Session state lives only
     # on app.state (single worker); torn down by lifespan. work_resolver is
@@ -225,7 +229,11 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(401)
     async def unauthorized_handler(request: Request, exc: Exception):
-        return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Not authenticated"},
+            headers={"Cache-Control": "private, no-store", "Vary": "Cookie"},
+        )
 
     return app
 

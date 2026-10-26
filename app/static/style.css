@@ -551,3 +551,38 @@ body.landscape-single #spread-shift{display:none}
   #pair-panel button{transition-duration:0.01ms !important}
   #pair-overlay{animation-duration:0.01ms !important}
 }
+
+/* ── folder visibility (非表示) — mode row, per-tile toggle, badges ── */
+/* The mode row leaves NO trace in normal mode: it only exists while
+   body.fv-showall is set (entered via the root-icon swipe gesture). */
+#visibility-row{display:none;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 12px 6px;font-size:11px;color:#9a9a9a;border-bottom:1px solid rgba(255,255,255,0.04)}
+body.fv-showall #visibility-row{display:flex}
+/* Root 📁 icon — swipe target for the hidden mode entry; red while in
+   full-display mode (emoji glyphs ignore color, so hue-rotate does it). */
+#browse-root-icon{display:inline-block;touch-action:none;user-select:none;-webkit-user-select:none}
+body.fv-showall #browse-root-icon{filter:hue-rotate(300deg) saturate(1.5)}
+#visibility-label{color:#888;white-space:nowrap}
+#visibility-normal,#visibility-all{min-width:44px;min-height:44px;padding:4px 10px;border-radius:8px;border:1px solid #333;background:transparent;color:#aaa;font-size:12px;cursor:pointer;font-family:inherit;transition:background .15s,color .15s,border-color .15s}
+#visibility-normal:hover,#visibility-all:hover{background:#1e1e1e;color:#ccc}
+#visibility-normal.active,#visibility-all.active{background:rgba(74,122,196,.25);border-color:rgba(74,122,196,.5);color:#8ab4f8}
+#visibility-status{margin-left:auto;font-size:11px;color:#c9a24f;min-height:44px;display:inline-flex;align-items:center;gap:4px}
+#visibility-status:empty{min-height:0}
+#visibility-retry,.fv-grid-retry{min-height:28px;padding:2px 10px;border-radius:6px;border:1px solid #555;background:transparent;color:#ccc;font-size:11px;cursor:pointer;font-family:inherit}
+#visibility-retry:hover,.fv-grid-retry:hover{background:#222;border-color:#777}
+/* toggle button: top-LEFT on tile/card (right side belongs to .offline-btn);
+   a plain flex item in list rows. */
+.visibility-toggle{position:absolute;top:4px;left:4px;width:44px;height:44px;padding:0;border:none;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.65);color:#fff;cursor:pointer;transition:background-color .18s ease,transform .12s ease}
+.visibility-toggle:hover{filter:brightness(1.18)}
+.visibility-toggle:active{transform:scale(0.95)}
+.visibility-toggle[aria-pressed="true"]{color:#ffb4b4}
+#tile-grid.list-mode .visibility-toggle{position:static;flex:none;order:0;margin-right:2px}
+#tile-grid.vis-busy .visibility-toggle{opacity:.45;pointer-events:none;cursor:wait}
+/* hidden states: dim the artwork only — reading/offline/toggle controls
+   stay usable in 全表示 mode. */
+.tile.is-hidden .tile-img,.tile.is-hidden .tile-multi,
+.tile.is-hidden-descendant .tile-img,.tile.is-hidden-descendant .tile-multi,
+.card.is-hidden .card-img,.card.is-hidden-descendant .card-img{opacity:.45;filter:grayscale(.45)}
+#tile-grid.list-mode .item.is-hidden .thumb,#tile-grid.list-mode .item.is-hidden-descendant .thumb{opacity:.4}
+#tile-grid.list-mode .item.is-hidden .name,#tile-grid.list-mode .item.is-hidden-descendant .name{color:#777}
+.visibility-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;line-height:1.4;background:rgba(196,68,68,.18);color:#ffb4b4;border:1px solid rgba(196,68,68,.4);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+#tile-grid.list-mode .item .visibility-badge{margin-left:6px;flex:none}

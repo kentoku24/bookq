@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.folder_visibility import DB_FILENAME
+
 
 @dataclass
 class Settings:
@@ -13,6 +15,7 @@ class Settings:
     base_url: str = ""
     allowed_emails: list[str] = field(default_factory=list)
     downloads_dir: str = ""
+    state_dir: str = ""
     version: str = "2.0.0"
     git_sha: str = field(default_factory=lambda: os.getenv("BOOKQ_GIT_SHA", "unknown"))
     build_date: str = field(default_factory=lambda: os.getenv("BOOKQ_BUILD_DATE", "unknown"))
@@ -21,6 +24,14 @@ class Settings:
     def downloads_path(self) -> Path:
         path = Path(self.downloads_dir) if self.downloads_dir else (Path(__file__).parent.parent / "downloads")
         return path.resolve()
+
+    @property
+    def state_path(self) -> Path:
+        if self.state_dir.strip():
+            base = Path(self.state_dir).expanduser()
+        else:
+            base = Path.home() / ".local" / "share" / "bookq"
+        return base / DB_FILENAME
 
     @property
     def allowed_emails_set(self) -> set[str]:
@@ -42,4 +53,5 @@ def load_settings() -> Settings:
         base_url=os.getenv("BASE_URL", ""),
         allowed_emails=[e.strip() for e in allowed_raw.split(",") if e.strip()],
         downloads_dir=os.getenv("DOWNLOADS_DIR", ""),
+        state_dir=os.getenv("BOOKQ_STATE_DIR", ""),
     )

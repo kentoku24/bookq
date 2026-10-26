@@ -623,6 +623,24 @@
 
   function _applyRemote(msg, at) {
     if (!msg || msg.view !== 'browse') return;
+    // 通常モードで非表示 root 配下への remote path は拒否 — pending に
+    // stash しない（禁止対象を再適用可能にしない）し currentBrowsePath にも
+    // 代入しない。同期を解除してトップへ戻す。表示設定やモードは
+    // UI_SYNC へ混ぜない（§8: モードは端末ローカル）。
+    var FV = _w().FolderVisibility;
+    if (FV && FV.readyState === 'error' && !FV.hasSnapshot){
+      // 判定不能（error・snapshot 無し）— 反映も解除もしない。未適用と
+      // して stash し、次 frame・grid 変化・復旧後の再判定に委ねる。
+      _stashPending(msg, at);
+      return;
+    }
+    if (FV && FV.readyState !== 'loading' && !FV.showAll &&
+        msg.path && typeof FV.isHidden === 'function' &&
+        FV.isHidden(msg.path) &&
+        typeof _w().redirectHiddenToTop === 'function') {
+      _w().redirectHiddenToTop();
+      return;
+    }
     if (!_armed) {
       // relay が STATE(phase=selecting) の反映を追い越す競合では未 arm —
       // 捨てずに短期保持し、_onCtlState の arm-edge で適用する。

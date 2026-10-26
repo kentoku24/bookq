@@ -550,13 +550,13 @@
   // arrival. While true: facet filtering stays off (shallow nodes carry no
   // subtree_facets), treeLoaded stays false (no prefetch/applyUrlState leak),
   // and drill-down/viewer opens queue until the full tree lands.
-  // _pendingBrowsePath/_pendingViewFolder record click-queued navigation from
-  // the shallow window; URL deep-links need no record — applyUrlState
-  // early-returns while !treeLoaded, so the current hash is still pending and
-  // is applied once, after full arrival.
+  // _pendingNav records the single latest click-queued navigation
+  // ({kind:'browse'|'view', path}) from the shallow window or a pending
+  // visibility judgment — last write wins. URL deep-links need no record —
+  // applyUrlState early-returns while !treeLoaded, so the current hash is
+  // still pending and is applied once, after full arrival.
   let _shallowMode = false;
-  let _pendingBrowsePath = null;
-  let _pendingViewFolder = null;
+  let _pendingNav = null;
   // Delegated aliases — hash.js loads first (defer order) so window.* exist
   // when this IIFE executes. Fall back to no-ops if not yet loaded (should not happen).
   const VIEWER_HASH_PREFIX = (window.VIEWER_HASH_PREFIX || "#/view/");
@@ -1209,7 +1209,9 @@
     }
     return {step: step, map: map, singles: singles, full: full};
   }
-  function _publishIndex(nodes, b){
+  var _indexProvisional = false;   // 公開済み index が暫定（shallow）ツリー由来か
+  function _publishIndex(nodes, b, provisional){
+    _indexProvisional = !!provisional;
     _nodeMapCache = b.map;
     _indexedTreeRef = nodes;
     _thumbSingleListCache = b.singles;
@@ -1217,20 +1219,36 @@
     try {
       if (typeof window !== "undefined") window.__cc_thumbIndex = {tree:nodes, single:b.singles, full:b.full};
     } catch(e) { console.warn(e); }
+    // トップ階層ノードの _fullPath を FolderVisibility へ — 非表示キー
+    // （flatten 名は / を含む）と editable 判定の両方がここを見る。暫定
+    // （shallow）ツリーでは公開しない: 生の dir 名を editable 集合に混ぜると
+    // PUT すると 404 になるトグルが出てしまう。前回の authoritative set は
+    // 維持する（cold boot では空のまま＝トグル無し）。
+    try {
+      var _fv = (typeof window !== "undefined") ? window.FolderVisibility : null;
+      if (!provisional && _fv && typeof _fv.setTopLevelPaths === "function"){
+        var _tops = [];
+        for (var _ti = 0; nodes && _ti < nodes.length; _ti++){
+          var _tn = nodes[_ti];
+          if (_tn && _tn.type === "folder" && _tn._fullPath) _tops.push(_tn._fullPath);
+        }
+        _fv.setTopLevelPaths(_tops);
+      }
+    } catch(e) { console.warn(e); }
   }
   // Sync build+publish WITHOUT superseding: callers that only need a map for
   // the current tree (buildNodeMap read/repair) must not cancel an in-flight
   // async build. setFullPathsAndIndex keeps the generation bump — an explicit
   // public replacement still supersedes.
-  function _buildIndexSync(nodes){
+  function _buildIndexSync(nodes, provisional){
     const b = _indexBuilder(nodes);
     while (!b.step()) {}
-    _publishIndex(nodes, b);
+    _publishIndex(nodes, b, provisional);
     return b.map;
   }
-  function setFullPathsAndIndex(nodes){
+  function setFullPathsAndIndex(nodes, provisional){
     _indexGen++;
-    return _buildIndexSync(nodes);
+    return _buildIndexSync(nodes, provisional);
   }
   function setFullPathsAndIndexAsync(nodes){
     const gen = ++_indexGen;
@@ -1240,7 +1258,7 @@
         if (gen !== _indexGen){ resolve(null); return; }
         if (b.step()){
           if (gen !== _indexGen){ resolve(null); return; }
-          _publishIndex(nodes, b);
+          _publishIndex(nodes, b, false);
           resolve(b.map);
           return;
         }
@@ -1293,6 +1311,13 @@
       if (!node || !node.children) return [];
       children = node.children.filter(n => n.type === "folder");
     }
+    // 非表示適用はファセット絞り込み・shallow 早期 return より先 — raw tree
+    // は削らず、ここで表示側だけを絞る。snapshot 無しの loading/error は
+    // render 側の blockedGridHtml 門が一覧自体を出さないので、ここでは
+    // isVisible の fail-closed だけ見ればよい。FV 無しの stale shell では
+    // 絞らない（watchdog が修復する）。
+    var FV = window.FolderVisibility;
+    if (FV && !FV.showAll) children = children.filter(n => FV.isVisible(n._fullPath));
     if (filtersActive()){
       // Shallow window: nodes carry no subtree_facets, so nodeMatchesFilters
       // would false out everything — never filter, show all + 読込中 badge.
@@ -1306,7 +1331,7 @@
     const h = document.getElementById("browse-header");
     if (!h) return;
     if (!currentBrowsePath){
-      h.innerHTML = "📁 フォルダ";
+      h.innerHTML = '<span id="browse-root-icon">📁</span> フォルダ';
       h.style.cursor = "default";
       h.onclick = null;
     } else {
@@ -1346,11 +1371,19 @@
   }
 
   function navigateToFolder(path){
+    var FV = window.FolderVisibility;
+    if (FV){
+      // guardPath: 判定不能（idle/loading / error 無snapshot）はキューだけ、
+      // hidden はトップへ、それ以外は通常通り潜る。
+      var _g = FV.guardPath(path);
+      if (_g === "pending"){ _pendingNav = {kind: "browse", path: path}; return; }
+      if (_g === "hidden"){ redirectHiddenToTop(); return; }
+    }
     if (_shallowMode){
       // Shallow window: target children==[] — queue the drill-down in the URL
       // (pushState fires no hashchange; applyUrlState runs once post-full) and
       // show the existing waiting style until the full tree lands.
-      _pendingBrowsePath = path;
+      _pendingNav = {kind: "browse", path: path};
       try { writeBrowseStateWith(path); } catch(e) { console.warn(e); }
       const tg = document.getElementById("tile-grid");
       if (tg) tg.innerHTML = '<div style="color:#555;text-align:center;padding:20px;font-size:13px">読込中…</div>';
@@ -1379,7 +1412,9 @@
     // uses the non-superseding helper — a pending async full-index build
     // must still finish and publish.
     if (_indexedTreeRef === tree && _nodeMapCache) return _nodeMapCache;
-    return _buildIndexSync(tree);
+    // 修復 walk は現在の暫定フラグを維持 — shallow tree の repair が
+    // authoritative topLevel 公開のふりをしないよう引き継ぐ。
+    return _buildIndexSync(tree, _indexProvisional);
   }
   // Todo 4: single delegated #tile-grid listener + closest() — replaces the
   // per-tile addEventListener loops (N listeners → 1). The selector arg is
@@ -1395,7 +1430,7 @@
         if(window.searchMode) return;
         const el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
         if(!el || !tileGrid.contains(el)) return;
-        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
+        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
         if(el.dataset.readChild === "1" || el.dataset.readSelf === "1"){
           navOpenWork(el.dataset.path, "tile");
           return;
@@ -1423,7 +1458,7 @@
         if(!window.searchMode) return;
         const el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
         if(!el || !tileGrid.contains(el)) return;
-        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
+        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
         const path = el.dataset.path;
         if (!path) return;
         navOpenWork(path, "search");
@@ -1479,7 +1514,7 @@
       if (_loadGen !== _loadFoldersGen) return false;
       if (shallow){
         tree = data;
-        setFullPathsAndIndex(tree);
+        setFullPathsAndIndex(tree, true);
         treeLoaded = false;
       } else {
         const map = await setFullPathsAndIndexAsync(data);
@@ -1506,14 +1541,21 @@
       if (shallow) return true;
       if (_loadGen !== _loadFoldersGen) return false;
       markTreeReady();
-      // Drain the shallow-window queue: clicks stashed a view folder; URL
-      // deep-links (#/browse drill-down, #/view open) stayed pending because
-      // applyUrlState early-returns while !treeLoaded — one re-run now that
-      // the full tree resolves them.
-      const queuedView = _pendingViewFolder; _pendingViewFolder = null;
-      _pendingBrowsePath = null;
-      if (queuedView) { loadImages(queuedView); }
+      // Drain the shallow-window queue: clicks stashed the single latest
+      // nav (kind view|browse — last write wins); URL deep-links (#/browse
+      // drill-down, #/view open) stayed pending because applyUrlState
+      // early-returns while !treeLoaded — one re-run now that the full
+      // tree resolves them.
+      const queuedNav = _pendingNav; _pendingNav = null;
+      if (queuedNav && queuedNav.kind === "view") { loadImages(queuedNav.path); }
       else if (typeof location !== "undefined" && location.hash) { applyUrlState(); }
+      if (queuedNav && queuedNav.kind === "browse" && _pendingNav === null &&
+          !(typeof location !== "undefined" && location.hash)){
+        // visibility-pending browse queue (no URL written for it) — keep it
+        // stashed for the ready-edge drain instead of dropping it; a hash
+        // always wins (URL is the canonical queue for deep-links).
+        _pendingNav = queuedNav;
+      }
       return true;
     }
     // Stage 1: shallow first paint (direct children only, no facets).
@@ -1656,7 +1698,7 @@
     // .offline-btn and .ux-pop buttons are real <button>s inside the tile:
     // let their native Enter/Space activation fire the click (delegated
     // listener / popover handlers) instead of re-clicking the whole tile.
-    if(e.target.closest && e.target.closest('.offline-btn, .ux-pop')) return;
+    if(e.target.closest && e.target.closest('.offline-btn, .ux-pop, .visibility-toggle')) return;
     const item = e.target.closest(".tile, .card, .item[data-path]");
     if (!item) return;
     e.preventDefault(); // every repeat too, or held Space scrolls the page
@@ -1836,6 +1878,8 @@
   // null = 上端、path = そのタイルを上端に。指定できるのは
   // navigateToFolder / restoreBrowse / resetToTop の 3 経路だけ（設計 §3.1）。
   function renderView(opts){
+    // 判定不能（loading / error 無snapshot）の一覧ブロックは renderer 内の
+    // blockedGridHtml 門が担う — renderBrowse 直叩き経路も同じ門を通る。
     tileGrid.classList.remove("list-mode", "card-mode");
     sidebar.classList.remove("tile-full");
     viewer.classList.remove("tile-full");
@@ -1959,12 +2003,62 @@
     renderView();
   }
 
+  // 非表示対象への移動・閲覧要求の共通拒否: トップへ静かに戻す。
+  // 理由表示・全表示への誘導は出さない。
+  function redirectHiddenToTop(){
+    // 1) in-flight の非同期ロード・復元を世代で無効化
+    try { urlRestoreGen++; urlRestoring = false; } catch(e){}
+    try { window.facetLoadGen++; } catch(e){}
+    try { if (window.SearchFacets && typeof window.SearchFacets.invalidateSearch === "function") window.SearchFacets.invalidateSearch(); } catch(e){}
+    // 2) shallow/判定待ちキュー・検索状態をクリア
+    _pendingNav = null;
+    searchMode = false; searchResults = [];
+    clearTimeout(searchTimer);
+    if (searchInput) searchInput.value = "";
+    // 3) viewer を先に teardown — PairedView の solo 復元 hook が解除時に
+    //    隠した画像を再生成しないよう pairStrip を先に捨てる
+    teardownViewer();
+    // 4) ペアがあれば通常の LEAVE 経路で解除（資格情報削除・pending 解除は既存処理）
+    try { if (window.PairController && typeof window.PairController.leave === "function") window.PairController.leave(); } catch(e){}
+    // 5) 既存 resetToTop でトップ一覧・上端スクロールへ
+    resetToTop();
+    // 6) URL を canonical なトップへ replace（history entry は増やさない）。
+    //    list/card 中に裸 URL へ戻すと mode と URL がずれる — browseHash で
+    //    現在 viewMode の suffix を維持する（tile では空文字＝従来通り）。
+    try {
+      var _topUrl = location.pathname + location.search + browseHash("", viewMode);
+      history.replaceState(null, "", _topUrl);
+      urlStackReplace(_topUrl);
+    } catch(e){}
+    // 7) ペア解除がサイドバー状態を触る可能性があるため最終状態をここで確定
+    sidebar.classList.add("open"); viewer.classList.add("sidebar-open");
+    syncSidebarA11y();
+  }
+  try { window.redirectHiddenToTop = redirectHiddenToTop; } catch(e) { console.warn(e); }
+
   async function loadImages(fullPath){
+    var FV = window.FolderVisibility;
+    if (FV){
+      // 判定不能（loading / error 無snapshot）は open をキュー — ready/
+      // readonly 遷移時に drain される。error も同じく保留する（隠れて
+      // いるかもしれない本を開かない）。hidden だけ静かにトップへ。
+      var _g = FV.guardPath(fullPath);
+      if (_g === "pending"){
+        _pendingNav = {kind: "view", path: fullPath};
+        const _emp = document.getElementById("empty");
+        if (_emp){
+          _emp.innerHTML = (FV.readyState === "error") ? "<p>取得失敗 — 再試行してください</p>" : "<p>読込中…</p>";
+          _emp.style.display = "flex";
+        }
+        return;
+      }
+      if (_g === "hidden"){ redirectHiddenToTop(); return; }
+    }
     if (_shallowMode){
       // Contract: never run on a children==[] shallow node — queue until the
       // full tree lands (the hash stays the queue for deep-links; clicks
       // stash here) and reuse the existing #empty waiting div.
-      _pendingViewFolder = fullPath;
+      _pendingNav = {kind: "view", path: fullPath};
       const _empty = document.getElementById("empty");
       if (_empty){ _empty.innerHTML = "<p>読込中…</p>"; _empty.style.display = "flex"; }
       return;
@@ -2094,6 +2188,9 @@
         chapterBoundaries = [0];
       }
 
+      // await 後の再判定: 取得中に通常モードで禁止対象になった本は開かない
+      // （positive hidden のみ — error/unknown では既に開いた読書を壊さない）
+      if (FV && !FV.showAll && FV.isHidden(fullPath)){ redirectHiddenToTop(); return; }
       // Build spacer-mapping arrays
       realToGlobalIdx = [];
       globalToRealIdx = [];
@@ -2902,6 +2999,9 @@
         return;
       case "openWork": {
         const folder = intent.folder;
+        var FV = window.FolderVisibility;
+        // positive hidden のみ拒否 — 判定不能時は loadImages 自身がキューする
+        if (FV && FV.readyState !== "loading" && !FV.showAll && folder && FV.isHidden(folder)){ redirectHiddenToTop(); return; }
         if (intent.via === "resume") {
           // Continue-reading: a saved folder that is no longer a leaf steps
           // out to its browse parent first, then opens on a beat (unchanged
@@ -3118,7 +3218,15 @@
     imgContainer.classList.remove("pair-blank");
     if (!pairStrip) return;
     const solo = pairStrip.solo;
+    // 全表示で開いていた solo 作品は通常モードでは非表示対象 — 復元せず
+    // トップへ。pairStrip は先に捨てる（redirect → leave hook の再入防止）。
     pairStrip = null;
+    var _fvs = window.FolderVisibility;
+    if (_fvs && !_fvs.showAll && solo.currentFolder &&
+        typeof _fvs.isHidden === "function" && _fvs.isHidden(solo.currentFolder)){
+      redirectHiddenToTop();
+      return;
+    }
     images = solo.images;
     chapterList = solo.chapterList;
     chapterBoundaries = solo.chapterBoundaries;
@@ -3153,6 +3261,24 @@
   // page. Receives typed PageRef/Spread values — never a local globalIdx.
   // Must never call request() (receive-only channel).
   function applyCommittedNav(snapshot, manifest, options){
+    // 非表示 root の commit は通常モードで反映しない — PairedView.apply /
+    // DOM 反映より前に、PairController._applyCommitted と同じ O(1) 判定で
+    // 同期を解除してトップへ戻す（redirectHiddenToTop が teardown → leave →
+    // resetToTop の順を担う）。folder を解決できない manifest は拒否しない。
+    var FV = window.FolderVisibility;
+    if (FV && !FV.showAll &&
+        (FV.readyState === "loading" || !FV.hasSnapshot)){
+      // 判定不能（idle/loading/error 無snapshot — guardPath の pending と
+      // 同じ条件）— commit を適用も拒否もしない。PairController._applyCommitted
+      // が最新1件を保持し、ready/readonly エッジでこの同じ経路へ戻す。
+      return;
+    }
+    if (FV && FV.readyState !== "loading" &&
+        typeof FV.committedFolderHidden === "function" &&
+        FV.committedFolderHidden(manifest, snapshot)){
+      redirectHiddenToTop();
+      return;
+    }
     const desc = window.PairedView.apply(snapshot, manifest, options);
     if (desc.kind === "leave"){ exitPairedToSolo(); return; }
     if (desc.kind === "paired"){ applyPairedCommit(desc, manifest); return; }
@@ -4031,7 +4157,10 @@
       return;
     }
     const all = ReadingProgress.getAll();
-    const entries = Object.entries(all).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
+    // 通常モードでは非表示 root の履歴を候補から外す（履歴データ自体は消さない）。
+    const FV = window.FolderVisibility;
+    const visOk = (FV && !FV.showAll) ? (p) => FV.isVisible(p) : () => true;
+    const entries = Object.entries(all).filter(e => visOk(e[0])).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
     if (entries.length === 0) {
       hideResumeBtn();
       return;
@@ -4210,7 +4339,66 @@
   const savedHash = (savedStash && Date.now() - savedStash.ts < 10 * 60 * 1000) ? savedStash.hash : null;
   if (savedHash && !location.hash) history.replaceState(null, "", location.pathname + location.search + savedHash);
   sessionStorage.removeItem("bookq_return_hash");
-  loadFolders().then(()=>{ applyUrlState(); tryAutoSync(); });
+
+  // ── folder visibility (非表示トップ root) wiring ──
+  // onChange: 同じ snapshot/モードのまま再描画し、通常モードで現在の閲覧・
+  // 待機中の移動が禁止対象になったらトップへ戻す。判断が ready/readonly
+  // へ立つたびに drain する — 起動時だけでなく error→ready の復旧や
+  // 再同期でも、キューした遷移をここで解放する（drain 先は各ガードを
+  // 再評価するので hidden 対象はその先で拒否される）。
+  function _visibilityOnChange(){
+    try {
+      var FV = window.FolderVisibility;
+      if (FV){
+        var _st = FV.readyState;
+        if (_st === "ready" || _st === "readonly"){
+          var qn = _pendingNav; _pendingNav = null;
+          if (qn){
+            if (qn.kind === "view"){ loadImages(qn.path); }
+            else { navigateToFolder(qn.path); }
+          }
+          // pending-nav drain の後: 判定待ちで保持した pair commit も同じ
+          // エッジで再適用（deny/適用は _applyCommitted が再評価する）。
+          try {
+            if (window.PairController &&
+                typeof window.PairController.retryPendingCommit === "function")
+              window.PairController.retryPendingCommit();
+          } catch(e2){ console.warn(e2); }
+          if (qn) return;
+        }
+        if (!FV.showAll && _st !== "loading"){
+          var targets = [(_pendingNav && _pendingNav.path), currentFolder, currentBrowsePath];
+          for (var i = 0; i < targets.length; i++){
+            var p = targets[i];
+            if (p && FV.isHidden(p)) { redirectHiddenToTop(); return; }
+          }
+        }
+        // 検索結果はサーバ側で hidden roots を除いている — モード/スナップ
+        // ショットの切替で一覧が変わるので検索中は再取得する（doSearch が
+        // 自身で renderView まで行う）。
+        if (searchMode && typeof doSearch === "function"){
+          try { doSearch(); return; } catch(e2){ console.warn(e2); }
+        }
+      }
+      renderView();
+    } catch(e){ console.warn(e); }
+  }
+  if (window.FolderVisibility){
+    window.FolderVisibility.init({ owner: window.__BOOKQ_VISIBILITY_OWNER__, snapshot: window.__BOOKQ_VISIBILITY_SNAPSHOT__, onChange: _visibilityOnChange });
+    window.FolderVisibility.ready().then(function(){
+      // 設定GET待ちに溜めた移動・復元を解放し、読込中表示を実グリッドへ置換
+      var qn = _pendingNav; _pendingNav = null;
+      if (qn){
+        if (qn.kind === "view"){ loadImages(qn.path); }
+        else { navigateToFolder(qn.path); }
+      }
+      renderView();
+    });
+    // wiring 完了の結合マーカー（watchdog の混在検査対象）
+    window.__BOOKQ_VISIBILITY = true;
+  }
+
+  loadFolders().then(()=>{ (window.FolderVisibility ? window.FolderVisibility.ready() : Promise.resolve()).then(()=>{ applyUrlState(); tryAutoSync(); }); });
   loadFacets();
   // Server-held resume point: pull + merge in parallel with the tree load —
   // a deep-linked viewer already open is untouched (the merge only writes

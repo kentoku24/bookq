@@ -37,6 +37,7 @@
   var _selIssued = false;    // a SET_ACTIVITY selecting is outstanding
   var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
   var _heldCommit = null;    // newest suppressed commit while leader browses
+  var _pendingCommit = null; // newest commit held while visibility is pending
   var _lastApply = null;     // newest committed args, for display re-arm
   var _appliedKey = null;    // display key of the newest APPLIED commit
   var _resolveGen = 0;       // generation guard for async page resolution
@@ -63,6 +64,44 @@
     return !!(el && el.classList && el.classList.contains('open'));
   }
 
+  /* ── FolderVisibility gates (hidden top-level roots) ──
+   * No socket opens before the settings judgment resolves (create/join/
+   * connect/resume and the _boot rejoin all wait on ready()); a picked or
+   * committed work whose root is hidden in normal mode is denied locally —
+   * the pair is left and the user lands on the top list via the shared
+   * redirectHiddenToTop. Module absent (stale-shell mix) ⇒ everything
+   * passes through as before; the watchdog repairs. */
+
+  function _visReady() {
+    try {
+      var FV = window.FolderVisibility;
+      if (FV && typeof FV.ready === 'function') {
+        return Promise.resolve(FV.ready());
+      }
+    } catch (e) { /* fall through */ }
+    return Promise.resolve();
+  }
+
+  /* Send-side judgment for an intent folder — same convention as the solo
+   * navigation guards: while the first judgment is still loading, don't
+   * deny (the navigation layer queues instead). */
+  function _visBlocksFolder(folder) {
+    var FV = window.FolderVisibility;
+    // positive hidden のみ拒否 — error/unknown では通さない対象を
+    // 「非表示扱い」にしない（ナビ層がキューするのと同じ約束）。
+    return !!(FV && FV.readyState !== 'loading' && !FV.showAll &&
+              typeof FV.isHidden === 'function' && folder &&
+              FV.isHidden(folder));
+  }
+
+  function _denyHiddenWork() {
+    try {
+      if (typeof window.redirectHiddenToTop === 'function') {
+        window.redirectHiddenToTop();
+      }
+    } catch (e) { /* denial must never throw back into the client */ }
+  }
+
   /* ── committed-state sink ── */
 
   /* What the display actually shows for a commit — phase/presence flaps
@@ -75,6 +114,26 @@
   }
 
   function _applyCommitted(snap, manifest, o) {
+    // A committed work whose root is hidden in normal mode is never
+    // applied — the pair is released before any image renders, and the
+    // denial records nothing in _lastApply/_heldCommit so the sidebar-close
+    // replay paths cannot resurrect it.
+    var FV = window.FolderVisibility;
+    if (FV && !FV.showAll &&
+        (FV.readyState === 'loading' || !FV.hasSnapshot)) {
+      // 判定不能（idle/loading/error・snapshot 無し — guardPath の pending
+      // と同じ条件）— 適用も拒否もせず最新 1 件だけ保持する。ready /
+      // readonly への遷移エッジで retryPendingCommit がこの同じ経路へ戻し、
+      // hidden かどうかはその時点で再評価される。
+      _pendingCommit = {snap: snap, manifest: manifest, o: o};
+      return;
+    }
+    if (FV && FV.readyState !== 'loading' &&
+        typeof FV.committedFolderHidden === 'function' &&
+        FV.committedFolderHidden(manifest, snap)) {
+      _denyHiddenWork();
+      return;
+    }
     _lastApply = {snap: snap, manifest: manifest, o: o};
     var leader = !!(o && o.role === 'leader');
     if (leader && _sidebarOpen() && _displayKey(snap) === _appliedKey) {
@@ -235,6 +294,13 @@
   function _leaderOpenWork(intent) {
     var gen = ++_resolveGen;
     function emit(page) {
+      // A leader pick of a hidden work (incl. one whose root was hidden
+      // while the async page-ref resolve was in flight) never reaches the
+      // wire — same denial as the solo pick, and _sent stays clean.
+      if (_visBlocksFolder(intent.folder)) {
+        _denyHiddenWork();
+        return true;
+      }
       if (!page || typeof page.folder !== 'string' ||
           typeof page.name !== 'string') {
         _record({type: 'openWork', via: intent.via, folder: intent.folder,
@@ -272,6 +338,12 @@
         return ok;
       }
       case 'openWork':
+        // 通常モードでの禁止作品 pick — wire に出さず同期を解除してトップへ。
+        // (_leaderOpenWork re-checks at emit time for the async resolve.)
+        if (_visBlocksFolder(intent.folder)) {
+          _denyHiddenWork();
+          return true;
+        }
         return st.role === 'leader' ? _leaderOpenWork(intent)
                                     : _bailToSolo(intent);
       case 'browse':
@@ -311,6 +383,9 @@
     var folder = window.currentFolder;
     var page = _currentPageRef();
     if (typeof folder !== 'string' || !folder || !page) return;
+    // The open book is a hidden root in normal mode — never send it as the
+    // shared work; deny like a solo open of the same folder.
+    if (_visBlocksFolder(folder)) { _denyHiddenWork(); return; }
     var ok = _client.sendIntent({type: 'openWork', folder: folder, page: page});
     _record({type: 'openWork', via: 'pair-bootstrap', folder: folder,
              page: page}, ok);
@@ -323,6 +398,7 @@
     _openWorkSent = false;
     _selIssued = false;
     _heldCommit = null;
+    _pendingCommit = null;
     _lastApply = null;
     _appliedKey = null;
     _resolveGen++;
@@ -357,6 +433,7 @@
       _sideObs = null;
       _sideOpen = null;
       _heldCommit = null;
+      _pendingCommit = null;
       _appliedKey = null;
     }
     if (bound) _maybeBootstrapWork(st);
@@ -425,26 +502,48 @@
 
   function _boot() {
     if (!_readCreds()) return;
-    try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+    var FV = window.FolderVisibility;
+    if (!FV || typeof FV.ready !== 'function') {
+      // Module absent (stale shell): keep the old immediate rejoin — the
+      // watchdog repairs the mixed deploy.
+      try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+      return;
+    }
+    FV.ready().then(function () {
+      // The credential rejoin waits for the settings judgment — a hidden
+      // shared work is then denied by _applyCommitted before it can render.
+      if (!_readCreds()) return;   // a leave during the wait dropped the creds
+      try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+    });
   }
 
   /* ── public controller surface (PairUI contract + S09 additions) ── */
 
   var api = {
-    create: function () { return _ensureClient().create(); },
-    join: function (code) { return _ensureClient().join(code); },
+    /* Socket-opening entry points wait on FolderVisibility.ready() — no
+     * socket exists before the settings judgment lands. */
+    create: function () {
+      return _visReady().then(function () { return _ensureClient().create(); });
+    },
+    join: function (code) {
+      return _visReady().then(function () { return _ensureClient().join(code); });
+    },
     /* One-tap connect: server-side MATCH — follower if a fresh session is
      * waiting, waiting leader otherwise. connect(pickId) binds a chosen
      * ambiguous candidate. Resolves {ambiguous|candidates} or
      * {unsupported} for UI fallback handling. */
-    connect: function (pick) { return _ensureClient().match(pick); },
+    connect: function (pick) {
+      return _visReady().then(function () { return _ensureClient().match(pick); });
+    },
     approve: function () {
       return _client ? _client.approve() : Promise.resolve({approved: false});
     },
     reject: function () {
       return _client ? _client.reject() : Promise.resolve({rejected: false});
     },
-    resume: function () { return _ensureClient().resume(); },
+    resume: function () {
+      return _visReady().then(function () { return _ensureClient().resume(); });
+    },
     leave: function () {
       return _client ? _client.leave() : Promise.resolve({left: false});
     },
@@ -502,6 +601,16 @@
         _client = null;
       }
     },
+    /* 判定 pending 中に保持した commit の再適用 — app.js の visibility
+     * onChange が ready/readonly エッジで呼ぶ。保持は最新 1 件のみで、
+     * deny/適用の再評価は _applyCommitted 自身が行う。 */
+    retryPendingCommit: function () {
+      var c = _pendingCommit;
+      _pendingCommit = null;
+      if (!c) return;
+      try { _applyCommitted(c.snap, c.manifest, c.o); }
+      catch (e) { /* replay is best-effort */ }
+    },
     get client() { return _client; },
     get state() {
       return _client ? _client.state : {status: 'idle'};
@@ -511,6 +620,13 @@
 
   /* Test seam: an injected controller (test_reader_pairing_ui.py installs
    * window.PairController before defer scripts run) always wins. */
+  if (window.__BOOKQ_TEST_MODE__ === 'true') {
+    window.__pairCtlTest = {
+      applyCommitted: _applyCommitted,
+      get pendingCommit() { return _pendingCommit; },
+      get heldCommit() { return _heldCommit; },
+    };
+  }
   if (!globalThis.PairController) {
     globalThis.PairController = api;
     if (typeof document !== 'undefined' &&
