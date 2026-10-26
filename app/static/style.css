@@ -577,12 +577,7 @@ body.fv-showall #browse-root-icon{filter:hue-rotate(300deg) saturate(1.5)}
 .visibility-toggle[aria-pressed="true"]{color:#ffb4b4}
 #tile-grid.list-mode .visibility-toggle{position:static;flex:none;order:0;margin-right:2px}
 #tile-grid.vis-busy .visibility-toggle{opacity:.45;pointer-events:none;cursor:wait}
-/* hidden states: dim the artwork only — reading/offline/toggle controls
-   stay usable in 全表示 mode. */
-.tile.is-hidden .tile-img,.tile.is-hidden .tile-multi,
-.tile.is-hidden-descendant .tile-img,.tile.is-hidden-descendant .tile-multi,
-.card.is-hidden .card-img,.card.is-hidden-descendant .card-img{opacity:.45;filter:grayscale(.45)}
-#tile-grid.list-mode .item.is-hidden .thumb,#tile-grid.list-mode .item.is-hidden-descendant .thumb{opacity:.4}
-#tile-grid.list-mode .item.is-hidden .name,#tile-grid.list-mode .item.is-hidden-descendant .name{color:#777}
+/* hidden states: artwork keeps normal brightness — the badge and
+   unhide toggle stay usable in 全表示 mode. */
 .visibility-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;line-height:1.4;background:rgba(196,68,68,.18);color:#ffb4b4;border:1px solid rgba(196,68,68,.4);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 #tile-grid.list-mode .item .visibility-badge{margin-left:6px;flex:none}
