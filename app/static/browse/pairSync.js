@@ -50,6 +50,7 @@
   var SUPPRESS_MS = 400;     // remote 適用直後の echo 抑止窓
   var PENDING_TTL_MS = 2000; // 未適用 frame の賞味期限（古い stash は捨てる）
   var STALE_MS = 180;
+  var STALE_BLEED_MS = 250;
   var TARGET_TAU_MS = 55;
   var REVISE_MAX_PX = 40;
   var CHASE_GAP_PX = 240;
@@ -495,14 +496,22 @@
     _ensureRaf();
   }
 
-  /* 目標決定 — ストリームが新鮮な間は lead（直近の終端推定）を採用し、
-   * 実測位置より手前には下げない。stale後は最後の実測位置へ戻して
-   * 収束させる。lead 自体の改訂は受理（_followSample）で行う。 */
+  /* 目標決定 — lead（直近の終端推定）の実測に対する進行方向の超過分を
+   * 目標に足す。fresh な間はそのまま、stale 後は超過分を STALE_BLEED_MS
+   * かけて線形に放出する — 弱い端末では ws メッセージ配送がまとめられて
+   * 受信が間欠するため、stale のたびに実測へ落とすと「停止→再加速」の
+   * ガクつきになる。放出中に着信が再開すれば改訂として再採用される。 */
   function _targetAt(f, t) {
     var m = f.stream;
     var T = m.top;
-    if (t - m.t0 < STALE_MS && f.lead !== null && m.dir !== 0) {
-      T = (m.dir > 0) ? Math.max(m.top, f.lead) : Math.min(m.top, f.lead);
+    if (f.lead !== null && f.lead !== undefined && m.dir !== 0) {
+      var surplus = f.lead - m.top;
+      if (surplus * m.dir > 0) {
+        var age = t - m.t0;
+        var k = (age < STALE_MS) ? 1
+          : Math.max(0, 1 - (age - STALE_MS) / STALE_BLEED_MS);
+        T = m.top + surplus * k;
+      }
     }
     return T;
   }
@@ -572,7 +581,8 @@
     _integrate(f, T, dt);
     var x = f.pos;
     var w = _writeFollow(x);
-    if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T});
+    if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T,
+                           g: dt, c: _trace ? _perfNow() - ts : 0});
     var s = f.stream;
     if ((s.vel === 0 || ts - s.t0 >= STALE_MS) &&
         Math.abs(f.pos - s.top) < POSITION_EPS_PX &&
@@ -872,6 +882,42 @@
         };
       },
       get trace() { return _trace ? _trace.slice() : []; },
+      /* 実機ジャンク調査用 — 直近の書き込み間隔・処理コスト・受信ギャップ・
+       * 速度波形を集計する。長いフレーム間隔が多い=フォロワー側の処理落ち、
+       * 受信間隔>180msが多い=パケット到着の遅延（ネットワーク/送信側）。 */
+      get stats() {
+        var tr = _trace || [];
+        var w = [], r = [], i, d;
+        for (i = 0; i < tr.length; i++) {
+          if (tr[i].k === 'w') w.push(tr[i]);
+          else if (tr[i].k === 'r') r.push(tr[i]);
+        }
+        var gaps = {ok: 0, g34: 0, g60: 0, g120: 0};
+        var maxC = 0, sumC = 0, nC = 0;
+        var vel = [];
+        for (i = 1; i < w.length; i++) {
+          d = w[i].t - w[i - 1].t;
+          if (d < 34) gaps.ok++;
+          else if (d < 60) gaps.g34++;
+          else if (d < 120) gaps.g60++;
+          else gaps.g120++;
+          var c = w[i].c || 0;
+          sumC += c; nC++;
+          if (c > maxC) maxC = c;
+          vel.push({t: w[i].t, dx: +(w[i].w - w[i - 1].w).toFixed(1),
+                    gap: d});
+        }
+        var staleArr = 0, recvGapMax = 0;
+        for (i = 1; i < r.length; i++) {
+          d = r[i].t - r[i - 1].t;
+          if (d > recvGapMax) recvGapMax = d;
+          if (d > STALE_MS) staleArr++;
+        }
+        return {writes: w.length, recvs: r.length, frameGaps: gaps,
+                staleArrivals: staleArr, recvGapMax: recvGapMax,
+                costAvg: nC ? +(sumC / nC).toFixed(2) : 0, costMax: maxC,
+                vel: vel.slice(-80)};
+      },
       get fps() {
         var w = (_trace || []).filter(function (e) { return e.k === 'w'; });
         if (w.length < 2) return null;
