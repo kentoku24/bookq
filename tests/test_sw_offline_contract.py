@@ -42,7 +42,9 @@ def test_shell_precache_v2_count():
     # #106 adds vendor/qrcode.min.js + vendor/jsQR.min.js (QR pairing);
     # browse/pairSync.js (dual-reader browse scroll mirror) joins the shell
     # precache for offline parity with the rest of the paired-reader chain.
-    assert len(entries) == 31, f"expected 31 SHELL_ASSETS, got {len(entries)}: {entries}"
+    # progress/sync.js (server-held "続きから" resume point) is precached too —
+    # the boot pull must exist in the same shell as app.js that calls it.
+    assert len(entries) == 32, f"expected 32 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
     assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
     assert "new Request" in text and "reload" in text, "install must use new Request with cache:reload"

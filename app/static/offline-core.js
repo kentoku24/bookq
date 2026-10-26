@@ -550,6 +550,12 @@
     for (const k of WIPE_SESSION_KEYS) {
       try { if (sessionStorage.getItem(k) !== null) { sessionStorage.removeItem(k); deleted.keys.push(k); } } catch (e) {}
     }
+    // Server-held resume point: without this a wiped device would resurrect
+    // another device's "続きから" on the next boot pull. progress/sync.js is
+    // absent in the SW importScripts context — typeof guard, not window.X &&.
+    if (typeof ProgressSync !== "undefined" && ProgressSync.remove) {
+      try { deleted.server = await ProgressSync.remove(); } catch (e) { console.warn(e); }
+    }
     return deleted;
   }
 

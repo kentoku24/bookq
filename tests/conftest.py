@@ -6,6 +6,7 @@ Run:
 (First time: uv run --with playwright playwright install chromium)
 """
 
+import json
 import os
 import socket
 import struct
@@ -316,6 +317,61 @@ def server(downloads_tree: Path) -> str:
 
     proc.terminate()
     proc.wait(timeout=5)
+
+
+@pytest.fixture(autouse=True)
+def _reset_reading_position(request):
+    """Clear the session server's in-memory resume point before each test.
+
+    `server` is session-scoped, so app.state.reading_positions survives across
+    tests: a page turn's debounced PUT in one test would leak into the NEXT
+    test's boot pull, merge into its fresh localStorage, and steer the opened
+    page off "1 / N". Worse, the previous test's teardown (context.close →
+    pagehide → keepalive PUT) can land AFTER the reset, so this polls until
+    the slot reads stably empty rather than deleting once. ``?hard=1`` also
+    drops the wipe tombstone, which would otherwise reject this test's
+    fresh record (the tombstone legitimately outlives plain PUTs).
+
+    Every UI fixture funnels through `server` (it's a transitive
+    fixturename), so the check covers all browser tests while pure unit
+    tests skip the HTTP call entirely. Autouse at function scope runs
+    before the `page` fixture's goto — the reset always lands first.
+    """
+    if "server" not in request.fixturenames:
+        return
+    try:
+        base_url = request.getfixturevalue("server")
+
+        def _delete():
+            req = urllib.request.Request(
+                base_url + "/api/reading-position?hard=1", method="DELETE"
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+
+        def _empty():
+            with urllib.request.urlopen(
+                base_url + "/api/reading-position", timeout=5
+            ) as resp:
+                return json.loads(resp.read()).get("position") is None
+
+        _delete()
+        deadline = time.time() + 3.0
+        empty_since = None
+        while time.time() < deadline:
+            if _empty():
+                # Stably empty for ~300ms — a teardown keepalive PUT from
+                # the previous test would have landed by now (it typically
+                # travels well under 100ms), so returning here is safe.
+                if empty_since is not None and time.time() - empty_since >= 0.3:
+                    break
+                if empty_since is None:
+                    empty_since = time.time()
+            else:
+                empty_since = None
+                _delete()
+            time.sleep(0.05)
+    except Exception:
+        pass  # best-effort — a dead server fails the test properly later
 
 
 @pytest.fixture(scope="session")

@@ -494,8 +494,24 @@
     },
     get(folderPath) { return this.getAll()[folderPath] || null; },
     save(folderPath, page, total) {
+      const ts = Date.now();
+      this._store(folderPath, page, total, ts);
+      // Mirror the latest position server-side (single slot, LWW). push() is
+      // fire-and-forget with its own 2s trailing debounce — the turn path
+      // never awaits it, so burst turning stays free of added latency.
+      // Guarded: a stale precached `/` can pair an old shell (no sync.js)
+      // with a newer app.js pulled from the network.
+      if (window.ProgressSync) window.ProgressSync.push({ folder: folderPath, page, total, ts });
+    },
+    // A server-held position pulled at boot lands here: same write + cap as
+    // save() but keeps the remote ts verbatim and never re-pushes (no echo
+    // loop — a pulled record must not immediately write itself back).
+    mergeRemote(folderPath, page, total, ts) {
+      this._store(folderPath, page, total, ts);
+    },
+    _store(folderPath, page, total, ts) {
       const all = this.getAll();
-      all[folderPath] = { page, total, ts: Date.now() };
+      all[folderPath] = { page, total, ts };
       const keys = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
       for (let i = 50; i < keys.length; i++) delete all[keys[i]];
       localStorage.setItem(this.KEY, JSON.stringify(all));
@@ -4027,29 +4043,101 @@
     resumeBtn.onclick = () => navOpenWork(folderPath, "resume");
   }
 
+  // ── server-held resume point: pull once at boot, merge by ts (LWW) ──
+  // The server keeps ONE record per user. A record newer than the matching
+  // local entry lands in localStorage (the pill and that tile's progress bar
+  // both read the map, and loadImages resumes from it). A strictly newer
+  // LOCAL newest (read while offline, or after a server restart wiped the
+  // in-memory map) is pushed up so the server catches up — one extra PUT at
+  // most per boot. Fires in parallel with loadFolders; a remote landing
+  // mid-render still reaches the pill via updateResumeButton below and the
+  // tile bar via a guarded renderView.
+  // Single-flight: bfcache restore fires BOTH pageshow(persisted) and
+  // visibilitychange(visible) — without the guard two pulls (and two
+  // merge/render passes) run side by side.
+  let _syncInFlight = null;
+  function _syncRemoteProgress() {
+    if (_syncInFlight) return _syncInFlight;
+    _syncInFlight = _syncRemoteProgressRun()
+      .finally(() => { _syncInFlight = null; });
+    return _syncInFlight;
+  }
+  async function _syncRemoteProgressRun() {
+    if (!window.ProgressSync) return;
+    let res = null;
+    try { res = await window.ProgressSync.pull(); } catch(e) { console.warn(e); }
+    // pull() distinguishes "server empty" from "fetch failed" — only a
+    // confirmed-empty server gets the local newest pushed back up. Pushing
+    // blind after a failed GET would clobber a newer record another
+    // device wrote (the server also ts-compares as a backstop).
+    if (!res || !res.ok) return;
+    const pos = res.position;
+    const all = ReadingProgress.getAllSafe();
+    let merged = false;
+    if (pos) {
+      const local = all[pos.folder];
+      if (!local || (local.ts || 0) < (pos.ts || 0)) {
+        try {
+          ReadingProgress.mergeRemote(pos.folder, pos.page, pos.total || 0, pos.ts || 0);
+          merged = true;
+        } catch(e) { console.warn(e); }
+      }
+    }
+    const entries = Object.entries(all);
+    if (entries.length) {
+      const [newestPath, newestData] = entries.sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))[0];
+      if (newestData && typeof newestData.page === "number" && (!pos || (newestData.ts || 0) > (pos.ts || 0))) {
+        window.ProgressSync.push({ folder: newestPath, page: newestData.page, total: newestData.total, ts: newestData.ts });
+      }
+    }
+    if (merged) {
+      updateResumeButton();
+      if (!currentFolder && tree.length && sidebar.classList.contains("open")) renderView();
+    }
+  }
+
   // ── save progress on tab visibility change ──
+  // save() only queues a 2s trailing-edge PUT, which dies with the page —
+  // flush() sends it immediately (keepalive outlives the document). This
+  // must run AFTER our own save: ProgressSync's self-registered listeners
+  // fire earlier (document-level + defer order), so they can only flush
+  // whatever was already pending.
+  function _saveCurrentPosition() {
+    if (!currentFolder || !images.length) return;
+    let path, page, total;
+    if (chapterList.length > 1) {
+      const info = getCurrentChapterInfo(currentIdx);
+      const chapter = chapterList[info.chapterIdx];
+      if (!chapter) { if (window.ProgressSync) window.ProgressSync.flush(); return; }
+      path = chapter.fullPath; page = info.localIdx; total = chapter.images.length;
+    } else {
+      path = currentFolder; page = currentIdx; total = images.length;
+    }
+    // An unchanged position must NOT be re-saved: save() would restamp the
+    // localStorage ts to now, and after a reload (in-memory dedup gone) the
+    // boot self-heal would push this stale view over another device's newer
+    // record. Skipping the save also keeps the pulled remote entry ahead in
+    // the local recency sort. flush() still runs so a real pending send
+    // (e.g. an armed debounce from the last turn) goes out now.
+    const prev = ReadingProgress.get(path);
+    if (!prev || prev.page !== page || prev.total !== total) {
+      ReadingProgress.save(path, page, total);
+    }
+    if (window.ProgressSync) window.ProgressSync.flush();
+  }
   window.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && currentFolder && images.length) {
-      if (chapterList.length > 1) {
-        const info = getCurrentChapterInfo(currentIdx);
-        const chapter = chapterList[info.chapterIdx];
-        if (chapter) ReadingProgress.save(chapter.fullPath, info.localIdx, chapter.images.length);
-      } else {
-        ReadingProgress.save(currentFolder, currentIdx, images.length);
-      }
+    if (document.visibilityState === 'hidden') {
+      _saveCurrentPosition();
+    } else if (document.visibilityState === 'visible') {
+      // Back in the foreground: another device may have moved the shared
+      // slot while we were away — merge it BEFORE any further save here
+      // can assert a stale position.
+      _syncRemoteProgress();
     }
   });
-  window.addEventListener('pagehide', () => {
-    if (currentFolder && images.length) {
-      if (chapterList.length > 1) {
-        const info = getCurrentChapterInfo(currentIdx);
-        const chapter = chapterList[info.chapterIdx];
-        if (chapter) ReadingProgress.save(chapter.fullPath, info.localIdx, chapter.images.length);
-      } else {
-        ReadingProgress.save(currentFolder, currentIdx, images.length);
-      }
-    }
-  });
+  window.addEventListener('pagehide', _saveCurrentPosition);
+  // bfcache restore: same re-pull as returning to the foreground.
+  window.addEventListener('pageshow', (e) => { if (e.persisted) _syncRemoteProgress(); });
 
   // hash listener owned by browse/hash.js — do not add second listener here
 
@@ -4124,4 +4212,8 @@
   sessionStorage.removeItem("bookq_return_hash");
   loadFolders().then(()=>{ applyUrlState(); tryAutoSync(); });
   loadFacets();
+  // Server-held resume point: pull + merge in parallel with the tree load —
+  // a deep-linked viewer already open is untouched (the merge only writes
+  // localStorage), and the pill/tile refresh is guarded by merged.
+  _syncRemoteProgress();
 })();
