@@ -591,6 +591,109 @@ def test_shell_watchdog_marks_healthy_and_stale(browser, server):
         ctx.close()
 
 
+def test_remote_stream_over_suppression_sends_no_echo(browser, server):
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        n0 = len(_ui_syncs(pf))
+        for top in (120, 200, 300, 240):
+            _set_scroll(pl, top)
+            time.sleep(0.15)
+        _wait_follower_offset(pl, pf)
+        time.sleep(0.6)
+        assert len(_ui_syncs(pf)) == n0, \
+            f"follower echoed remote applies: {len(_ui_syncs(pf))} frames"
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_follower_direct_input_beats_incoming_remote(browser, server):
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        sc = "document.getElementById('sidebar-scroll')"
+        pf.evaluate(
+            f"() => {{ ({sc}).dispatchEvent(new PointerEvent('pointerdown',"
+            " {bubbles: true, isPrimary: true, pointerId: 1,"
+            " pointerType: 'touch'}));"
+            f" ({sc}).dispatchEvent(new Event('touchstart',"
+            " {bubbles: true})); }")
+        st0 = _scroll(pf)
+        _set_scroll(pl, 300)
+        time.sleep(0.8)
+        assert _scroll(pf) == st0, \
+            "remote must not move the list while the follower holds a finger"
+        pf.evaluate(
+            f"() => {{ ({sc}).dispatchEvent(new Event('touchend',"
+            " {bubbles: true}));"
+            f" ({sc}).dispatchEvent(new PointerEvent('pointerup',"
+            " {bubbles: true, isPrimary: true, pointerId: 1,"
+            " pointerType: 'touch'})); }")
+        time.sleep(0.7)
+        _set_scroll(pl, 140)
+        _wait_follower_offset(pl, pf)
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_leader_reversal_converges_without_snap(browser, server):
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        _set_scroll(pl, 600)
+        time.sleep(0.3)
+        _set_scroll(pl, 80)
+        deadline = time.time() + 2.0
+        saw_follow = False
+        while time.time() < deadline:
+            sm = pf.evaluate("() => window.__pairBrowseSync.smoothing")
+            if sm and sm["active"]:
+                saw_follow = True
+                break
+            time.sleep(0.02)
+        assert saw_follow, \
+            "reversal must retarget through the follow animation, not snap"
+        _wait_follower_offset(pl, pf)
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_list_mode_remote_scroll_stays_immediate(browser, server):
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        pl.eval_on_selector("#footer-refresh-btn", "el => el.click()")
+        for p in (pl, pf):
+            p.wait_for_function("() => window.viewMode === 'list'",
+                                timeout=10000)
+        _set_scroll(pl, 20)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            sm = pf.evaluate("() => window.__pairBrowseSync.smoothing")
+            assert not (sm and sm["active"]), \
+                "list-mode remote must stay an immediate apply"
+            time.sleep(0.02)
+        _wait_follower_offset(pl, pf)
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
 def test_mirror_needs_tree_level_scrollable(browser, server):
     """Precondition guard: the fixture's root level must actually scroll at
     the small viewports used here — otherwise the offset tests above can
