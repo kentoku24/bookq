@@ -42,6 +42,17 @@
   var SEND_TRAIL_MS = 120;   // 最終位置を必ず送る trailing デバウンス
   var SUPPRESS_MS = 400;     // remote 適用直後の echo 抑止窓
   var PENDING_TTL_MS = 2000; // 未適用 frame の賞味期限（古い stash は捨てる）
+  var STALE_MS = 180;
+  var TARGET_TAU_MS = 55;
+  var FLING_HIST_MS = 300;
+  var FLING_TAU_DEF_MS = 250;
+  var FLING_TAU_MIN_MS = 80;
+  var FLING_TAU_MAX_MS = 800;
+  var POSITION_EPS_PX = 1;
+  var EST_MIN_MS = 30;
+  var EST_MAX_MS = 200;
+  var VEL_CAP_SCREENS_S = 8;
+  var LOCAL_SETTLE_MS = 400;
 
   var _armed = false;        // ミラー有効（live pair && phase==='selecting'）
   var _unlocked = false;     // 送信解禁 — leader は arm 即時、follower は初適用後
@@ -56,6 +67,16 @@
   var _prevPresenceSig = '';
   var _inited = false;
   var _subs = [];            // PairController から外した購読（解除用）
+  var _follow = null;
+  var _followCtx = null;
+  var _rafId = 0;
+  var _touchActive = false;
+  var _pointerActive = false;
+  var _lastLocalMove = -1e9;
+  var _lastLocalIntent = -1e9;
+  var _lastWriteTop = null;
+  var _sndHist = [];
+  var _trace = null;
 
   function _w() { return window; }
   function _pc() { return _w().PairController || null; }
@@ -139,6 +160,10 @@
       _pendingMsg = null;
       _userClosed = false;
       _suppressUntil = 0;
+      _resetFollow();
+      _releaseInput();
+      _lastLocalMove = -1e9;
+      _lastLocalIntent = -1e9;
       if (_trailT) { clearTimeout(_trailT); _trailT = null; }
       // 自分が開いたミラー用サイドバーだけ畳む — role を見ると 'ended' で
       // null 化した後に leader の手動 sidebar まで畳んでしまう。
@@ -150,6 +175,10 @@
       return;
     }
     if (armed) {
+      if (_followCtx && (_followCtx.sid !== st.sessionId ||
+          _followCtx.role !== st.role || st.status === 'reconnecting')) {
+        _resetFollow();
+      }
       // presence 変化（peer の復帰等）は両方向で現在値を再送する —
       // 内容不変でも送る必要があるので dedup を解除してから要求する。
       var sig = _presenceSig(st);
@@ -198,6 +227,34 @@
       Math.abs(p.top - h.top) <= 1 && (p.mode || 'tile') === h.mode;
   }
 
+  /* 直近のローカル scroll event 列から指数減衰をフィットし、フリング中は
+   * 予測停止点を返す。減速が一貫しない区間（ドラッグ中・加速・段差）は
+   * null — その場合 pred は送らず受信側は実測追従のみ行う。 */
+  function _flingPred() {
+    var h = _sndHist, t = _perfNow();
+    while (h.length && t - h[0].t > FLING_HIST_MS) h.shift();
+    var n = h.length;
+    if (n < 3) return null;
+    var p0 = h[n - 3], p1 = h[n - 2], p2 = h[n - 1];
+    if (p0.path !== p2.path || p1.path !== p2.path ||
+        p0.mode !== p2.mode || p1.mode !== p2.mode) return null;
+    var dt1 = p1.t - p0.t, dt2 = p2.t - p1.t;
+    if (dt1 < 8 || dt2 < 8 || dt1 > 100 || dt2 > 100) return null;
+    var v1 = (p1.top - p0.top) / dt1, v2 = (p2.top - p1.top) / dt2;
+    if (v1 * v2 <= 0) return null;
+    var r = v2 / v1;
+    if (r <= 0 || r > 1) return null;
+    var tau = FLING_TAU_DEF_MS;
+    if (r < 0.95 && r > 0.3) {
+      tau = -((dt1 + dt2) / 2) / Math.log(r);
+      if (tau < FLING_TAU_MIN_MS) tau = FLING_TAU_MIN_MS;
+      else if (tau > FLING_TAU_MAX_MS) tau = FLING_TAU_MAX_MS;
+    }
+    var sc = _scroller();
+    var pred = p2.top + v2 * tau;
+    return Math.round(sc ? _clampTop(sc, pred) : pred);
+  }
+
   function _sendNow() {
     if (!_sendGate()) return;
     var now = Date.now();
@@ -214,6 +271,8 @@
     _appliedHold = null;              // 適用位置から実際に動いた — hold 解除
     if (sig === _lastSentSig) return;
     _lastSendTs = now;
+    var pred = _flingPred();
+    if (pred !== null) p.pred = pred;
     var ok = false;
     try { ok = _pc().sendUiSync(p) !== false; }
     catch (e) { console.warn(e); }
@@ -234,6 +293,7 @@
    * trailing 送信。抑止窓中は窓明けへ defer（drop しない）。 */
   function _requestSend() {
     if (!_sendGate()) return;
+    if (_holdMatch(_payload())) return;
     var now = Date.now();
     if (_suppressUntil <= now && now - _lastSendTs >= SEND_MIN_MS) {
       _sendNow();
@@ -243,6 +303,249 @@
   }
 
   /* ── 受信適用 ── */
+
+  function _perfNow() {
+    try { return performance.now(); }
+    catch (e) { return Date.now(); }
+  }
+  function _tracePush(o) {
+    if (_trace) {
+      _trace.push(o);
+      if (_trace.length > 240) _trace.shift();
+    }
+  }
+  function _clampTop(sc, t) {
+    var mx = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    return Math.min(Math.max(0, t), mx);
+  }
+  function _reducedMotion() {
+    try {
+      return !!(window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    } catch (e) { return false; }
+  }
+
+  function _localBusy() {
+    if (_touchActive || _pointerActive) return true;
+    var n = Date.now();
+    return n - _lastLocalMove < LOCAL_SETTLE_MS ||
+      n - _lastLocalIntent < LOCAL_SETTLE_MS;
+  }
+  function _releaseInput() {
+    _touchActive = false;
+    _pointerActive = false;
+  }
+  function _beginLocalInput() {
+    if (!_armed || !_sidebarOpen()) return;
+    _lastLocalIntent = Date.now();
+    _cancelFollowKeepCtx();
+  }
+
+  function _cancelFollowKeepCtx() {
+    if (_rafId) { cancelAnimationFrame(_rafId); _rafId = 0; }
+    _follow = null;
+  }
+  function _resetFollow() {
+    _cancelFollowKeepCtx();
+    _followCtx = null;
+  }
+
+  function _ctxOf(sc, msg) {
+    var st = _pc() && _pc().state;
+    return {path: _w().currentBrowsePath || null,
+            mode: _w().viewMode || 'tile',
+            viewH: msg && msg.viewH || 0,
+            sid: st ? st.sessionId : null,
+            role: _role(),
+            sc: sc};
+  }
+  function _sameFollowCtx(ctx) {
+    var c = _followCtx;
+    return !!c && c.path === ctx.path && c.mode === ctx.mode &&
+      c.viewH === ctx.viewH && c.sid === ctx.sid && c.role === ctx.role &&
+      c.sc === ctx.sc;
+  }
+
+  function _seedFollow(sc, ctx) {
+    var t = _perfNow();
+    var top = sc.scrollTop;
+    _follow = {sc: sc, hist: [],
+      model: {t0: t, y: top, v: 0, dir: 0, staleAt: t, pred: null},
+      F: top, X: top, lastTick: t, tMax: -1e18, tMin: 1e18,
+      active: false};
+    _followCtx = ctx;
+  }
+  function _applyImmediate(sc, target, ctx) {
+    _resetFollow();
+    sc.scrollTop = target;
+    var actual = sc.scrollTop;
+    _suppressUntil = Date.now() + SUPPRESS_MS;
+    // 適用後の local state を記録 — この位置（clamp 後の値を含む）に居る間の
+    // 送信は抑止し、peer を逆変換で戻さない。
+    _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
+                    mode: _w().viewMode || 'tile'};
+    _lastWriteTop = {sc: sc, path: _w().currentBrowsePath || null,
+                     top: actual, mode: _w().viewMode || 'tile'};
+    var t = _perfNow();
+    _followCtx = ctx;
+    _follow = {sc: sc, hist: [{t: t, top: actual}],
+      model: {t0: t, y: actual, v: 0, dir: 0, staleAt: t, pred: null},
+      F: actual, X: actual, lastTick: t, tMax: -1e18, tMin: 1e18,
+      active: false};
+  }
+
+  function _targetAt(f, t) {
+    var m = f.model;
+    var T = m.y;
+    if (t - m.t0 < STALE_MS) {
+      if (m.pred !== null && m.pred !== undefined) T = m.pred;
+      if (m.dir > 0) { if (T > f.tMax) f.tMax = T; T = f.tMax; }
+      else if (m.dir < 0) { if (T < f.tMin) f.tMin = T; T = f.tMin; }
+    }
+    return T;
+  }
+
+  function _ensureRaf() {
+    if (_rafId || !_follow || !_follow.active) return;
+    _rafId = requestAnimationFrame(_followTick);
+  }
+  function _writeFollow(pos, vel, t) {
+    var f = _follow, sc = f.sc;
+    sc.scrollTop = pos;
+    var actual = sc.scrollTop;
+    _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
+                    mode: _w().viewMode || 'tile'};
+    _lastWriteTop = {sc: sc, path: _w().currentBrowsePath || null,
+                     top: actual, mode: _w().viewMode || 'tile'};
+    if (Math.abs(actual - pos) > 1) {
+      f.X = actual;
+      f.F = actual;
+      if ((pos - actual) * (f.model.y - actual) > 0) f.model.y = actual;
+    }
+    return actual;
+  }
+  function _followTick(t) {
+    _rafId = 0;
+    var f = _follow;
+    if (!f || !f.active || !_followCtx) { _resetFollow(); return; }
+    var sc = f.sc;
+    var st = _pc() && _pc().state;
+    if (!sc || sc !== _scroller() || !_armed || !st ||
+        st.phase !== 'selecting' || st.sessionId !== _followCtx.sid ||
+        _role() !== _followCtx.role || _searchMode() ||
+        document.hidden || !_sidebarOpen() || _reducedMotion() ||
+        (_w().viewMode || 'tile') !== _followCtx.mode ||
+        (_w().currentBrowsePath || null) !== _followCtx.path) {
+      _resetFollow();
+      return;
+    }
+    var ts = (typeof t === 'number') ? t : _perfNow();
+    var dt = ts - f.lastTick;
+    f.lastTick = ts;
+    if (dt < 0) dt = 0;
+    if (dt > 500) dt = 500;
+    var T = _targetAt(f, ts);
+    var e = Math.exp(-dt / TARGET_TAU_MS);
+    var A = T - f.F, B = T - f.X;
+    f.F = T - A * e;
+    f.X = T - (B + A * dt / TARGET_TAU_MS) * e;
+    _tracePush({t: ts, k: 'w', x: f.X,
+                w: _writeFollow(f.X, (f.F - f.X) / TARGET_TAU_MS, ts), T: T});
+    var m = f.model;
+    if ((m.v === 0 || ts - m.t0 >= STALE_MS) &&
+        Math.abs(f.X - m.y) < POSITION_EPS_PX &&
+        Math.abs(f.F - f.X) < POSITION_EPS_PX) {
+      f.X = m.y;
+      f.F = m.y;
+      _writeFollow(m.y, 0, ts);
+      f.active = false;
+      return;
+    }
+    _ensureRaf();
+  }
+
+  function _followSample(top, pred) {
+    var f = _follow;
+    var t = _perfNow();
+    var h = f.hist, last = h.length ? h[h.length - 1] : null;
+    var v = 0, stop = false;
+    if (last && t === last.t) {
+      last.top = top;
+    } else if (last && (t - last.t < EST_MIN_MS || t - last.t > EST_MAX_MS)) {
+      h.length = 0;
+      h.push({t: t, top: top});
+    } else {
+      if (last && Math.abs(top - last.top) <= POSITION_EPS_PX) stop = true;
+      h.push({t: t, top: top});
+      if (h.length > 3) h.shift();
+    }
+    var n = h.length;
+    if (!stop && n >= 2) {
+      var p2 = h[n - 1], p1 = h[n - 2];
+      var dt2 = p2.t - p1.t;
+      if (dt2 > 0) {
+        var v2 = (p2.top - p1.top) / dt2;
+        v = v2;
+        if (n >= 3) {
+          var p0 = h[n - 3];
+          var dt1 = p1.t - p0.t, v1 = (p1.top - p0.top) / dt1;
+          var r = dt1 > 0 ? dt2 / dt1 : 0;
+          if (dt1 > 0 && v1 * v2 > 0 &&
+              Math.abs(v2) >= 0.5 * Math.abs(v1) &&
+              r >= 0.5 && r <= 2) {
+            v = 0.75 * v2 + 0.25 * v1;
+          }
+        }
+      }
+    }
+    if (stop) v = 0;
+    var cap = VEL_CAP_SCREENS_S * f.sc.clientHeight / 1000;
+    if (v > cap) v = cap;
+    else if (v < -cap) v = -cap;
+    var dir = v > 0 ? 1 : (v < 0 ? -1 : 0);
+    if (dir !== f.model.dir) { f.tMax = -1e18; f.tMin = 1e18; }
+    var P = null;
+    if (typeof pred === 'number' && dir !== 0 &&
+        (pred - top) * dir > 0 &&
+        Math.abs(pred - top) <= 6 * f.sc.clientHeight) P = pred;
+    f.model = {t0: t, y: top, v: v, dir: dir,
+               staleAt: t + STALE_MS, pred: P};
+    f.lastTick = t;
+    _tracePush({t: t, k: 'r', recv: top, v: v, pred: P});
+    f.active = true;
+    _ensureRaf();
+  }
+
+  function _writeMatch(sc, p) {
+    var w = _lastWriteTop;
+    return !!w && w.sc === sc && (p.path || null) === w.path &&
+      Math.abs(p.top - w.top) <= POSITION_EPS_PX &&
+      (p.mode || 'tile') === w.mode;
+  }
+
+  function _onScrollEvent() {
+    var sc = _scroller();
+    var p = sc && {
+      path: _w().currentBrowsePath || null,
+      top: sc.scrollTop,
+      mode: _w().viewMode || 'tile',
+    };
+    if (p && (_holdMatch(p) || _writeMatch(sc, p))) return;
+    _tracePush({t: _perfNow(), k: 's', top: p ? p.top : 0});
+    if (p) {
+      _sndHist.push({t: _perfNow(), top: p.top,
+                     path: p.path, mode: p.mode});
+      if (_sndHist.length > 4) _sndHist.shift();
+    }
+    if (_appliedHold) _appliedHold = null;
+    _lastWriteTop = null;
+    if (_armed) {
+      _suppressUntil = 0;
+      _lastLocalMove = Date.now();
+      _cancelFollowKeepCtx();
+    }
+    _requestSend();
+  }
 
   function _ensureSidebarOpen() {
     if (_userClosed || _role() === 'leader' || _sidebarOpen()) return;
@@ -282,11 +585,11 @@
     }
     if (_searchMode() || !_pathResolvable(msg.path)) {
       // 最新のみ保持 — searchMode 解除後 / tree 到着後に observer・次 msg で再適用。
+      _resetFollow();
       _stashPending(msg, at);
       return;
     }
     _pendingMsg = null;
-    _suppressUntil = Date.now() + SUPPRESS_MS;
 
     var sc = _scroller();
     if (!sc) return;
@@ -322,13 +625,30 @@
 
     if (_role() === 'follower') target = msg.top + msg.viewH;
     else target = msg.top - sc.clientHeight;
-    sc.scrollTop = Math.max(0, target);
-    // 適用後の local state を記録 — この位置（clamp 後の値を含む）に居る間の
-    // 送信は抑止し、peer を逆変換で戻さない。
-    _appliedHold = {
-      path: _w().currentBrowsePath || null, top: sc.scrollTop,
-      mode: _w().viewMode || 'tile',
-    };
+    target = _clampTop(sc, target);
+    var predT = null;
+    if (typeof msg.pred === 'number' && isFinite(msg.pred)) {
+      predT = (_role() === 'follower')
+        ? msg.pred + msg.viewH : msg.pred - sc.clientHeight;
+      predT = _clampTop(sc, predT);
+    }
+
+    var ctx = _ctxOf(sc, msg);
+    if (navNeeded || modeNeeded) {
+      _applyImmediate(sc, target, ctx);
+    } else if (ctx.mode === 'tile' && _sidebarOpen() &&
+               !document.hidden && _localBusy()) {
+      return;
+    } else if (ctx.mode !== 'tile' || _reducedMotion() ||
+               !_sidebarOpen() || document.hidden) {
+      _applyImmediate(sc, target, ctx);
+    } else if (!_sameFollowCtx(ctx)) {
+      _applyImmediate(sc, target, ctx);
+    } else {
+      if (!_follow) _seedFollow(sc, ctx);
+      _suppressUntil = Date.now() + SUPPRESS_MS;
+      _followSample(target, predT);
+    }
     if (_role() === 'follower' && !_unlocked) _unlocked = true;
   }
 
@@ -336,6 +656,8 @@
    * mode/件数更新）。ローカル nav は live 値が送られるのでここで拾えば
    * 新規リスナを増やさずに済む。pending のリトライも兼ねる。 */
   function _onGridMutated() {
+    _resetFollow();
+    _releaseInput();
     var pm = _takePending();
     if (pm) _applyRemote(pm.msg, pm.at);
     _requestSend();
@@ -351,9 +673,67 @@
     var ss = document.getElementById('sidebar-scroll');
     if (ss) {
       ss.addEventListener('scroll', function () {
-        _requestSend();   // 抑止/defer の判定は _requestSend 側で一元化
+        _onScrollEvent(); // 抑止/defer の判定は _requestSend 側で一元化
+      }, {passive: true});
+      ss.addEventListener('pointerdown', function (e) {
+        if (!_armed || (e && e.isPrimary === false)) return;
+        if (!_pointerActive) {
+          _pointerActive = true;
+          _beginLocalInput();
+        }
+      }, {passive: true});
+      ss.addEventListener('touchstart', function () {
+        if (!_armed) return;
+        if (!_touchActive) {
+          _touchActive = true;
+          _beginLocalInput();
+        }
+      }, {passive: true});
+      var touchEnd = function (e) {
+        if (!_touchActive) return;
+        _touchActive = !!(e && e.touches && e.touches.length > 0);
+        if (!_touchActive) _lastLocalIntent = Date.now();
+      };
+      ss.addEventListener('touchend', touchEnd, {passive: true});
+      ss.addEventListener('touchcancel', touchEnd, {passive: true});
+      ss.addEventListener('wheel', function () {
+        _beginLocalInput();
       }, {passive: true});
     }
+    var pointerEnd = function () {
+      if (_pointerActive) {
+        _pointerActive = false;
+        _lastLocalIntent = Date.now();
+      }
+    };
+    document.addEventListener('pointerup', pointerEnd,
+                            {passive: true, capture: true});
+    document.addEventListener('pointercancel', pointerEnd,
+                            {passive: true, capture: true});
+    var scrollKeys = {ArrowUp: 1, ArrowDown: 1, PageUp: 1, PageDown: 1,
+                      Home: 1, End: 1, ' ': 1};
+    document.addEventListener('keydown', function (e) {
+      if (!_armed || !_sidebarOpen()) return;
+      var t = e && e.target;
+      var sb = _sidebar();
+      if (!sb || !t || !sb.contains(t)) return;
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+          t.isContentEditable) return;
+      if (scrollKeys[e.key]) _beginLocalInput();
+    }, {passive: true});
+    window.addEventListener('blur', function () {
+      _releaseInput();
+    }, {passive: true});
+    window.addEventListener('pagehide', function () {
+      _releaseInput();
+      _resetFollow();
+    });
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        _releaseInput();
+        _resetFollow();
+      }
+    });
     if (typeof MutationObserver === 'function') {
       var tg = document.getElementById('tile-grid');
       if (tg) {
@@ -375,12 +755,18 @@
             wasOpen = open;
             if (!_armed) return;
             _userClosed = !open;
+            if (!open) {
+              _resetFollow();
+              _releaseInput();
+            }
           }).observe(sb, {attributes: true, attributeFilter: ['class']});
         } catch (e) { console.warn(e); }
       }
     }
-    window.addEventListener('resize', function () { _requestSend(); },
-                            {passive: true});
+    window.addEventListener('resize', function () {
+      _resetFollow();
+      _requestSend();
+    }, {passive: true});
     var ctlOk = typeof pc.subscribe === 'function' &&
       typeof pc.onEvent === 'function';
     if (ctlOk) {
@@ -398,6 +784,7 @@
   }
 
   if (window.__BOOKQ_TEST_MODE__ === 'true') {
+    _trace = [];
     window.__pairBrowseSync = {
       get armed() { return _armed; },
       get unlocked() { return _unlocked; },
@@ -406,6 +793,35 @@
       get userClosed() { return _userClosed; },
       get suppressUntil() { return _suppressUntil; },
       get pending() { return _pendingMsg; },
+      get smoothing() {
+        var f = _follow;
+        var t = _perfNow();
+        var m = f && f.model;
+        return {
+          active: !!(f && f.active),
+          displayTop: f ? f.X : 0,
+          displayVel: f ? (f.F - f.X) / TARGET_TAU_MS : 0,
+          modelTop: f ? _targetAt(f, t) : 0,
+          modelVel: m ? m.v : 0,
+          history: f ? f.hist.length : 0,
+          local: _localBusy(),
+        };
+      },
+      get trace() { return _trace ? _trace.slice() : []; },
+      get fps() {
+        var w = (_trace || []).filter(function (e) { return e.k === 'w'; });
+        if (w.length < 2) return null;
+        var min = 1e9, max = 0, sum = 0, n = w.length - 1;
+        for (var i = 1; i < w.length; i++) {
+          var d = w[i].t - w[i - 1].t;
+          sum += d;
+          if (d < min) min = d;
+          if (d > max) max = d;
+        }
+        var avg = sum / n;
+        return {writes: w.length, avgMs: avg, minMs: min, maxMs: max,
+                avgFps: 1000 / avg, worstFps: 1000 / max};
+      },
       flush: function () {
         if (_trailT) { clearTimeout(_trailT); _trailT = null; }
         _suppressUntil = 0;
