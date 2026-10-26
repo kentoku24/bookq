@@ -190,7 +190,7 @@ def test_ui_sync_relay_over_ws(server):
         _recv(ws_a); _recv(ws_b)
         sid, *_ = _full_pair(ws_a, ws_b)
         payload = {"view": "browse", "path": "group", "top": 42,
-                   "viewH": 700, "mode": "tile"}
+                   "viewH": 700, "scrollH": 3600, "mode": "tile"}
         ws_a.send(_request("UI_SYNC", payload, session_id=sid, request_id="u"))
         ui = _expect(ws_b, "UI_SYNC")
         assert ui["from"] == "leader" and ui["payload"] == payload

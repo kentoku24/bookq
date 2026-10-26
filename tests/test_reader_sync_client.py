@@ -931,7 +931,8 @@ def test_send_ui_sync_writes_ctl_frame(pc_page):
           const s = await rig.pairLeader(c);
           const pre = s.sent.length;
           const ok = c.sendUiSync({view: 'browse', path: 'group/ep',
-                                   top: 120.5, viewH: 600, mode: 'list'});
+                                   top: 120.5, viewH: 600, scrollH: 2400,
+                                   pred: 900, mode: 'list'});
           const f = s.sent[s.sent.length - 1];
           return {ok, sentCount: s.sent.length - pre, f};
         }"""
@@ -940,7 +941,8 @@ def test_send_ui_sync_writes_ctl_frame(pc_page):
     f = res["f"]
     assert f["type"] == "UI_SYNC" and f["sessionId"] == "S1"
     assert f["payload"] == {"view": "browse", "path": "group/ep",
-                            "top": 120.5, "viewH": 600, "mode": "list"}
+                            "top": 120.5, "viewH": 600, "scrollH": 2400,
+                            "pred": 900, "mode": "list"}
 
 
 def test_send_ui_sync_gating_and_shape(pc_page):
@@ -959,6 +961,12 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           const badH = c.sendUiSync({view: 'browse', top: 0, viewH: 0});
           const noView = c.sendUiSync({path: 'x', top: 0, viewH: 1});
           const nan = c.sendUiSync({view: 'browse', top: NaN, viewH: 1});
+          const badSh = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                      scrollH: 0});
+          const badShT = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                       scrollH: 'x'});
+          const badPred = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                        pred: -3});
           const sentAfterBad = s.sent.length - base;
           // minimal payload: path null, no mode
           const minOk = c.sendUiSync({view: 'browse', path: null, top: 0,
@@ -975,12 +983,14 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           const down = c.sendUiSync({view: 'browse', path: null, top: 0,
                                      viewH: 1});
           const uiTypes = s.sent.filter(f => f.type === 'UI_SYNC').length;
-          return {idle, badView, badTop, badH, noView, nan, sentAfterBad,
+          return {idle, badView, badTop, badH, noView, nan, badSh, badShT,
+                  badPred, sentAfterBad,
                   minOk, minF, unpaired, down, uiTypes};
         }"""
     )
     assert res["idle"] is False
-    for k in ("badView", "badTop", "badH", "noView", "nan"):
+    for k in ("badView", "badTop", "badH", "noView", "nan",
+              "badSh", "badShT", "badPred"):
         assert res[k] is False, k
     assert res["sentAfterBad"] == 0
     assert res["minOk"] is True

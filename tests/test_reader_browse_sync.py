@@ -3,15 +3,24 @@
 Two real browser contexts over the real ``/ws/reader-sync`` transport.
 While the leader browses the work/folder list (session phase 'selecting'),
 ``browse/pairSync.js`` on each device relays its own ``{path, scrollTop,
-viewH, viewMode}`` as ephemeral UI_SYNC frames; the peer applies them under
-the invariant ``followerTop == leaderTop + leaderClientHeight`` — the
-follower always shows exactly one leader-screen below the leader.
+clientHeight, scrollHeight, viewMode}`` as ephemeral UI_SYNC frames; the
+peer applies them under the progress-mirror invariant — same scroll
+progress on both sides:
 
-Covered: follower sidebar auto-open + path/scroll adoption, the +viewH
-offset with unequal device viewport heights, bidirectional scroll AND
-bidirectional folder nav, leader-close disarm (follower returns to the
-shared reader), leader-search suspend, follower work pick = LEAVE + solo,
-and the absence of a send/apply echo storm.
+    progress = scrollTop / (scrollHeight - clientHeight)
+    own.scrollTop = peerProgress * own maxScrollTop
+
+Mapping by progress (not px) keeps both devices at the same fraction of
+the list even when the tile grid's column count differs across screen
+widths (the tablet-divergence fix). A frame without ``scrollH`` falls
+back to the legacy px transform (``followerTop = top + viewH``).
+
+Covered: follower sidebar auto-open + path/scroll adoption, progress
+convergence with unequal viewport heights AND unequal tile column counts,
+bidirectional scroll AND bidirectional folder nav, leader-close disarm
+(follower returns to the shared reader), leader-search suspend, follower
+work pick = LEAVE + solo, the legacy no-scrollH fallback, and the absence
+of a send/apply echo storm.
 """
 
 import sys
@@ -30,12 +39,24 @@ _SB = "document.getElementById('sidebar')"
 
 
 def _devs_diff_heights(browser, server):
-    """Two 'devices' with DIFFERENT viewport heights — proves the offset is
-    the leader's viewH, not a shared constant or the follower's own."""
+    """Two 'devices' with DIFFERENT viewport heights — same tile column
+    count (equal scrollHeight) but unequal maxScrollTop, so progress and
+    px mappings predict different positions."""
     ctx_l, pl = _dev_page(browser, server,
                           viewport={"width": 390, "height": 620})
     ctx_f, pf = _dev_page(browser, server,
                           viewport={"width": 390, "height": 460})
+    return ctx_l, pl, ctx_f, pf
+
+
+def _devs_diff_widths(browser, server):
+    """Two 'devices' with DIFFERENT viewport widths — the tile grid lays
+    out with different column counts (2 vs 6), so scrollHeight itself
+    differs: the tablet-divergence case this change fixes."""
+    ctx_l, pl = _dev_page(browser, server,
+                          viewport={"width": 390, "height": 620})
+    ctx_f, pf = _dev_page(browser, server,
+                          viewport={"width": 900, "height": 620})
     return ctx_l, pl, ctx_f, pf
 
 
@@ -99,28 +120,45 @@ def _start_browse(pl, pf, timeout=20000):
         timeout=timeout)
 
 
+def _geom(pg):
+    """{top, viewH, scrollH} of the device's browse scroller."""
+    return {"top": _scroll(pg), "viewH": _view_h(pg),
+            "scrollH": _scroll_h(pg)}
+
+
+def _expected_top(src, dst):
+    """Map src's scroll progress onto dst's scroll range — the invariant."""
+    s, d = _geom(src), _geom(dst)
+    smax = s["scrollH"] - s["viewH"]
+    dmax = max(0.0, d["scrollH"] - d["viewH"])
+    if smax <= 0:
+        return 0.0
+    return min(1.0, s["top"] / smax) * dmax
+
+
 def _wait_follower_offset(pl, pf, timeout=10000):
-    """follower.scrollTop converges to leader.scrollTop + leader.clientHeight."""
+    """follower's scroll progress converges to the leader's."""
     pl.wait_for_function(
         "() => !!window.__pairBrowseSync", timeout=timeout)
     pf.wait_for_function(
         "() => !!window.__pairBrowseSync", timeout=timeout)
-    # converge: sample leader's current values, then wait for follower to hit
-    # exactly top+viewH (the invariant), allowing a small float tolerance.
+    # converge: sample leader's current progress, then wait for follower to
+    # land on the same progress mapped onto its own scroll range.
     deadline = time.time() + timeout / 1000.0
-    lt = lh = ft = 0
+    lt = ft = expected = 0
     while time.time() < deadline:
         lt = _scroll(pl)
-        lh = _view_h(pl)
         ft = _scroll(pf)
-        if abs(ft - (lt + lh)) <= 2:
-            return lt, lh, ft
+        expected = _expected_top(pl, pf)
+        if abs(ft - expected) <= 2:
+            return lt, ft, expected
         time.sleep(0.05)
     raise AssertionError(
-        f"follower scrollTop {ft} never reached leader top {lt} + viewH {lh}")
+        f"follower scrollTop {ft} never reached leader progress "
+        f"(expected {expected})")
 
 
-def test_mirror_open_adopts_leader_view_at_plus_viewH(browser, server):
+def test_mirror_open_adopts_leader_progress(browser, server):
     ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
     try:
         _open(pl, "long", "p005.png")
@@ -129,11 +167,11 @@ def test_mirror_open_adopts_leader_view_at_plus_viewH(browser, server):
 
         _start_browse(pl, pf)
 
-        # The leader sits on the root list; the follower mirrors path and the
-        # +viewH offset from the leader's own scroller geometry.
+        # The leader sits on the root list; the follower mirrors path and
+        # the leader's scroll progress on its own scroll range.
         assert _browse_path(pf) == _browse_path(pl)
-        lt, lh, ft = _wait_follower_offset(pl, pf)
-        assert ft >= 0 and lt + lh >= 0
+        lt, ft, expected = _wait_follower_offset(pl, pf)
+        assert ft >= 0 and expected >= 0
         assert _ui_syncs(pl), "leader must emit UI_SYNC"
         assert pf.evaluate("() => window.__pairBrowseSync.unlocked") is True
         # the mirrored sidebar is fully interactive (tiles exist to tap)
@@ -143,7 +181,7 @@ def test_mirror_open_adopts_leader_view_at_plus_viewH(browser, server):
         ctx_l.close(); ctx_f.close()
 
 
-def test_leader_scroll_tracks_with_leader_viewH(browser, server):
+def test_leader_scroll_tracks_progress(browser, server):
     ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
     try:
         _open(pl, "long", "p005.png")
@@ -153,17 +191,17 @@ def test_leader_scroll_tracks_with_leader_viewH(browser, server):
 
         for top in (150, 420, 60):
             _set_scroll(pl, top)
-            lt, lh, ft = _wait_follower_offset(pl, pf)
+            lt, ft, expected = _wait_follower_offset(pl, pf)
             assert lt == top
-            assert ft == pytest.approx(top + lh, abs=2), \
-                f"follower must sit exactly one leader-screen below: {ft} vs {top}+{lh}"
+            assert ft == pytest.approx(expected, abs=2), \
+                f"follower must mirror leader progress: {ft} vs {expected}"
     finally:
         ctx_l.close(); ctx_f.close()
 
 
-def test_follower_scroll_drives_leader_minus_viewH(browser, server):
+def test_follower_scroll_drives_leader_progress(browser, server):
     """Bidirectional: a follower-originated scroll moves the leader too —
-    the leader lands one screen ABOVE the follower."""
+    the leader lands on the same scroll progress."""
     ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
     try:
         _open(pl, "long", "p005.png")
@@ -171,15 +209,16 @@ def test_follower_scroll_drives_leader_minus_viewH(browser, server):
         _start_browse(pl, pf)
         _wait_follower_offset(pl, pf)
 
-        lh = _view_h(pl)
-        target_f = lh + 300            # inside the follower's scroll range
+        fmax = _scroll_h(pf) - _view_h(pf)
+        target_f = min(fmax - 10, _view_h(pl) + 300)  # inside the range
         _set_scroll(pf, target_f)
         pf.wait_for_function(
             f"() => Math.abs(({_SC}).scrollTop - {target_f}) <= 2",
             timeout=5000)
-        # leader converges to follower.top - leader.clientHeight
+        # leader converges to the follower's progress on its own range
+        expected = _expected_top(pf, pl)
         pl.wait_for_function(
-            f"() => Math.abs(({_SC}).scrollTop - ({target_f} - {_view_h(pl)})) <= 2",
+            f"() => Math.abs(({_SC}).scrollTop - {expected}) <= 2",
             timeout=10000)
         assert _ui_syncs(pf), "follower must emit UI_SYNC back to the leader"
     finally:
@@ -279,8 +318,8 @@ def test_search_mode_suspends_mirror(browser, server):
         pl.wait_for_function("() => window.searchMode === false",
                              timeout=10000)
         _set_scroll(pl, 90)
-        lt, lh, ft = _wait_follower_offset(pl, pf)
-        assert ft == pytest.approx(lt + lh, abs=2)
+        lt, ft, expected = _wait_follower_offset(pl, pf)
+        assert ft == pytest.approx(expected, abs=2)
     finally:
         ctx_l.close(); ctx_f.close()
 
@@ -412,7 +451,8 @@ def test_stale_pending_frame_dropped_on_rearm(browser, server):
         # in-flight frame stashes on disarm — backdate past the 2s TTL
         pg.evaluate(
             """() => window.__pairBrowseSync.applyRemote(
-                 {view: 'browse', path: 'group', top: 100, viewH: 500},
+                 {view: 'browse', path: 'group', top: 100, viewH: 500,
+                  scrollH: 3000},
                  Date.now() - 5000)""")
         pg.evaluate("() => window.__arm()")
         time.sleep(0.3)
@@ -422,7 +462,8 @@ def test_stale_pending_frame_dropped_on_rearm(browser, server):
         pg.evaluate("() => window.__disarm()")
         pg.evaluate(
             """() => window.__pairBrowseSync.applyRemote(
-                 {view: 'browse', path: 'series', top: 50, viewH: 500})""")
+                 {view: 'browse', path: 'series', top: 50, viewH: 500,
+                  scrollH: 3000})""")
         pg.evaluate("() => window.__arm()")
         pg.wait_for_function(
             "() => window.currentBrowsePath === 'series'", timeout=5000)
@@ -442,7 +483,8 @@ def test_remote_nav_updates_url_and_scroll_positions(browser, server):
         assert _solo_armed(pg, "follower") is True
         pg.evaluate(
             """() => window.__pairBrowseSync.applyRemote(
-                 {view: 'browse', path: null, top: 0, viewH: 500})""")
+                 {view: 'browse', path: null, top: 0, viewH: 500,
+                  scrollH: 3000})""")
         pg.wait_for_function(
             "() => document.getElementById('sidebar')"
             ".classList.contains('open')", timeout=5000)
@@ -452,7 +494,8 @@ def test_remote_nav_updates_url_and_scroll_positions(browser, server):
         assert sat > 0
         pg.evaluate(
             """() => window.__pairBrowseSync.applyRemote(
-                 {view: 'browse', path: 'group', top: 0, viewH: 500})""")
+                 {view: 'browse', path: 'group', top: 0, viewH: 500,
+                  scrollH: 3000})""")
         pg.wait_for_function(
             "() => window.currentBrowsePath === 'group'", timeout=5000)
         assert pg.evaluate("() => location.hash") == "#/browse/group"
@@ -489,7 +532,8 @@ def test_user_closed_sidebar_stays_closed_until_next_arm(browser, server):
                  {view: 'browse', path: null, top: 80, viewH: 500})""")
         time.sleep(0.3)
         assert not _sidebar_open(pg)
-        # state still applies — follower transform is top + leader viewH
+        # state still applies — this frame carries NO scrollH, so it goes
+        # through the legacy px fallback (follower transform top + viewH)
         assert _scroll(pg) == 580
         # a new arm clears the flag — mirroring resumes normally
         pg.evaluate("() => window.__disarm()")
@@ -505,8 +549,8 @@ def test_user_closed_sidebar_stays_closed_until_next_arm(browser, server):
 
 
 def test_clamped_remote_position_is_not_echoed(browser, server):
-    """A target beyond maxTop clamps scrollTop; the clamped value must never
-    echo back — the peer's reverse transform would yank it ~1 screen up."""
+    """A progress beyond 1.0 clamps scrollTop; the clamped value must never
+    echo back — the peer's reverse transform would drag it upward."""
     ctx, pg = _dev_page(browser, server,
                         viewport={"width": 390, "height": 460})
     try:
@@ -514,7 +558,8 @@ def test_clamped_remote_position_is_not_echoed(browser, server):
         assert _solo_armed(pg, "follower") is True
         pg.evaluate(
             """() => window.__pairBrowseSync.applyRemote(
-                 {view: 'browse', path: null, top: 1e7, viewH: 500})""")
+                 {view: 'browse', path: null, top: 1e7, viewH: 500,
+                  scrollH: 2000})""")
         pg.wait_for_function(
             "() => document.getElementById('sidebar')"
             ".classList.contains('open')", timeout=5000)
@@ -692,6 +737,48 @@ def test_list_mode_remote_scroll_stays_immediate(browser, server):
         _wait_follower_offset(pl, pf)
     finally:
         ctx_l.close(); ctx_f.close()
+
+
+def test_progress_ratio_spans_unequal_column_layouts(browser, server):
+    """Core scenario: phone-width leader (2 tile columns) vs tablet-width
+    follower (6 columns) — scrollHeights differ, so only a progress map
+    can put the follower at the same fraction of the list."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_widths(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        assert _scroll_h(pl) != _scroll_h(pf), \
+            "precondition: column counts must differ across widths"
+        for top in (120, 400, 250):
+            _set_scroll(pl, top)
+            lt, ft, expected = _wait_follower_offset(pl, pf)
+            assert lt == top
+            assert ft == pytest.approx(expected, abs=2)
+            # px copy would land elsewhere — this is what the fix prevents
+            if abs(expected - (top + _view_h(pl))) > 4:
+                assert ft != pytest.approx(top + _view_h(pl), abs=2)
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_ui_sync_payload_carries_scroll_height(browser, server):
+    """Outbound frames must carry the sender's scrollHeight — it is what
+    lets the peer map progress instead of copying px."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        pg.evaluate("() => window.openSidebar()")
+        assert _solo_armed(pg, "leader") is True
+        sent = pg.evaluate("() => window.__uiSent")
+        assert sent, "leader arm-edge must emit its position"
+        assert sent[-1]["scrollH"] == pytest.approx(_scroll_h(pg), abs=1)
+        assert sent[-1]["viewH"] == pytest.approx(_view_h(pg), abs=1)
+    finally:
+        ctx.close()
 
 
 def test_mirror_needs_tree_level_scrollable(browser, server):
