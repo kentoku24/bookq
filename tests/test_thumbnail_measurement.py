@@ -72,6 +72,74 @@ def test_probe_broken_complete_image_is_not_success(browser):
         context.close()
 
 
+def test_probe_waits_for_load_before_decoding(browser):
+    extra = """<script>
+      window.__imageReady = false;
+      window.__earlyDecodeCalls = 0;
+      window.__decodeCalls = 0;
+      const img = document.querySelector("img");
+      Object.defineProperty(img, "complete", {
+        get: () => window.__imageReady,
+      });
+      const decode = img.decode.bind(img);
+      img.decode = () => {
+        window.__decodeCalls++;
+        if (!img.complete) {
+          window.__earlyDecodeCalls++;
+          return Promise.reject(new DOMException("Pending image", "EncodingError"));
+        }
+        return decode();
+      };
+    </script>"""
+    context, page = _start(browser, extra=extra)
+    try:
+        page.wait_for_function("() => window.__thumbnailProbe.visible_images === 1")
+        assert page.evaluate("() => window.__earlyDecodeCalls") == 0
+        assert not page.evaluate("() => window.__thumbnailProbe.done")
+        page.evaluate("() => { window.__imageReady = true; }")
+        result = _result(page)
+        assert result["status"] == "ok"
+        assert result["decoded_images"] == 1
+        assert result["broken_images"] == 0
+        assert page.evaluate("() => window.__decodeCalls") == 1
+    finally:
+        context.close()
+
+
+def test_probe_samples_current_time_not_frame_timestamp(browser):
+    extra = """<script>
+      const raf = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = callback => raf(t => callback(t - 1000));
+    </script>"""
+    context, page = _start(browser, ready=False, extra=extra)
+    try:
+        page.wait_for_function("() => window.__thumbnailProbe.decoded_images === 1")
+        ready_at = page.evaluate(
+            "() => { window.treeLoaded = true; return performance.now(); }"
+        )
+        result = _result(page)
+        assert result["status"] == "ok"
+        assert result["visible_ready_ms"] >= ready_at
+    finally:
+        context.close()
+
+
+def test_probe_decode_failure_is_not_success(browser):
+    extra = """<script>
+      document.querySelector("img").decode = () =>
+        Promise.reject(new DOMException("Invalid image", "EncodingError"));
+    </script>"""
+    context, page = _start(browser, extra=extra, timeout_ms=500)
+    try:
+        result = _result(page)
+        assert result["status"] == "broken_images"
+        assert result["decoded_images"] == 0
+        assert result["broken_images"] == 1
+        assert result["visible_ready_ms"] is None
+    finally:
+        context.close()
+
+
 def test_probe_excludes_images_outside_scrollport(browser):
     extra = (
         '<div class="tile" data-path="off" style="margin-top:200px">'
