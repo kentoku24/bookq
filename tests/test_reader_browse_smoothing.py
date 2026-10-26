@@ -955,6 +955,102 @@ def test_tick_gate_stops_writes_without_new_frames(pair_page):
         assert _hook(pg)["active"] is False, trigger
 
 
+def test_receive_between_frames_keeps_integration_time(pair_page):
+    pg = pair_page
+    _arm_follower(pg)
+
+    def run(extra):
+        _rearm(pg)
+        _apply(pg, 100)
+        pg.evaluate("() => window.__clock.advance(60)")
+        _apply(pg, 200)
+        pg.evaluate("() => window.__clock.frame(16)")
+        pg.evaluate("() => window.__clock.advance(8)")
+        if extra:
+            _apply(pg, 200)
+        pg.evaluate("() => window.__clock.frame(8)")
+        return _hook(pg)["displayTop"]
+
+    assert run(True) == pytest.approx(run(False), abs=1e-6), \
+        "a receive between frames must not drop elapsed time from the filter"
+
+
+def test_burst_arrival_keeps_direction_and_pred(pair_page):
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    pg.evaluate("() => window.__clock.advance(60)")
+    _apply(pg, 160, pred=300)
+    assert _hook(pg)["modelTop"] == pytest.approx(700, abs=1)
+    pg.evaluate("() => window.__clock.advance(12)")
+    _apply(pg, 170, pred=300)
+    assert _hook(pg)["modelTop"] == pytest.approx(700, abs=1), \
+        "a jitter burst must not drop the target back to the measured position"
+    prev = _scroll(pg)
+    for _ in range(8):
+        pg.evaluate("() => window.__clock.frame(16)")
+        cur = _scroll(pg)
+        assert cur >= prev - 0.01, f"display must not retreat: {prev} -> {cur}"
+        prev = cur
+
+
+def test_drag_sends_no_pred(pair_page):
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 50)
+    pg.evaluate("() => window.__fireInput('touchstart')")
+    for top in (100, 180, 220):
+        pg.evaluate(f"() => ({_SC}).scrollTop = {top}")
+        pg.wait_for_timeout(25)
+        pg.evaluate("() => window.__clock.advance(30)")
+    pg.evaluate("() => window.__clock.advance(150)")
+    pg.wait_for_timeout(30)
+    sent = pg.evaluate("() => window.__uiSent")
+    assert sent
+    assert not [s for s in sent if "pred" in s], \
+        "a finger drag is not a fling — no endpoint may be extrapolated"
+
+
+def test_trailing_send_after_stop_sends_no_pred(pair_page):
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 50)
+    for top, adv in ((100, 30), (180, 20), (220, 0)):
+        pg.evaluate(f"() => ({_SC}).scrollTop = {top}")
+        pg.wait_for_timeout(25)
+        pg.evaluate(f"() => window.__clock.advance({adv})")
+    pg.evaluate("() => window.__clock.advance(200)")
+    pg.wait_for_timeout(30)
+    sent = pg.evaluate("() => window.__uiSent")
+    assert [s["top"] for s in sent] == [100, 220]
+    assert "pred" not in sent[-1], \
+        "the trailing send fires after motion stopped — no stale endpoint"
+
+
+def test_first_frame_applies_during_local_input(pair_page):
+    pg = pair_page
+    _arm_follower(pg)
+    pg.evaluate("() => window.__fireInput('touchstart')")
+    _apply(pg, 100)
+    assert _scroll(pg) == pytest.approx(500, abs=2), \
+        "the first frame after arm must land so the follower unlocks"
+    assert pg.evaluate("() => window.__pairBrowseSync.unlocked") is True
+
+
+def test_space_on_button_does_not_cancel_follow(pair_page):
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    pg.evaluate("() => window.__clock.advance(60)")
+    _apply(pg, 200)
+    pg.evaluate("() => window.__clock.frame(16)")
+    pg.evaluate(
+        "() => { var b = document.createElement('button');"
+        " document.getElementById('sidebar').appendChild(b);"
+        " window.__fireKeyOn(b, ' '); }")
+    assert _hook(pg)["active"] is True
+
+
 def test_reduced_motion_still_rejects_while_input_held(pair_page):
     pg = pair_page
     _arm_follower(pg)

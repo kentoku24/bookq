@@ -80,7 +80,6 @@
   var _pointerActive = false;
   var _lastLocalMove = -1e9;
   var _lastLocalIntent = -1e9;
-  var _lastWriteTop = null;
   var _sndHist = [];
   var _trace = null;
 
@@ -235,13 +234,17 @@
 
   /* 直近のローカル scroll event 列から指数減衰をフィットし、フリング中は
    * 予測停止点を返す。減速が一貫しない区間（ドラッグ中・加速・段差）は
-   * null — その場合 pred は送らず受信側は実測追従のみ行う。 */
+   * null — その場合 pred は送らず受信側は実測追従のみ行う。指が触れて
+   * いる間（ドラッグ）と、最後の scroll event から間が空いた送信（trailing
+   * 等 = 既に停止）も null — 古い速度から外挿すると受信側が行き過ぎる。 */
   function _flingPred() {
+    if (_touchActive || _pointerActive) return null;
     var h = _sndHist, t = _perfNow();
     while (h.length && t - h[0].t > FLING_HIST_MS) h.shift();
     var n = h.length;
     if (n < 3) return null;
     var p0 = h[n - 3], p1 = h[n - 2], p2 = h[n - 1];
+    if (t - p2.t > 100) return null;
     if (p0.path !== p2.path || p1.path !== p2.path ||
         p0.mode !== p2.mode || p1.mode !== p2.mode) return null;
     var dt1 = p1.t - p0.t, dt2 = p2.t - p1.t;
@@ -406,8 +409,6 @@
     // 送信は抑止し、peer を逆変換で戻さない。
     _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
                     mode: _w().viewMode || 'tile'};
-    _lastWriteTop = {sc: sc, path: _w().currentBrowsePath || null,
-                     top: actual, mode: _w().viewMode || 'tile'};
     var t = _perfNow();
     _followCtx = ctx;
     _follow = _newFollow(sc, actual, t);
@@ -416,14 +417,16 @@
 
   /* 計測 — 直近3サンプルから速度・進行方向を推定する。
    * ジッターの混じる到着間隔に対し、減速が一貫する場合のみ前回速度を
-   * 1/4 混ぜて平滑化する。 */
+   * 1/4 混ぜて平滑化する。EST_MIN_MS 未満に詰まった到着は直前サンプルへ
+   * 合流させる — 履歴を捨てると方向を失い、pred と単調holdが外れて目標が
+   * 実測へ逆走する。 */
   function _followEstimate(f, top) {
     var t = _perfNow();
     var h = f.hist, last = h.length ? h[h.length - 1] : null;
     var v = 0, stop = false;
-    if (last && t === last.t) {
+    if (last && t - last.t < EST_MIN_MS) {
       last.top = top;
-    } else if (last && (t - last.t < EST_MIN_MS || t - last.t > EST_MAX_MS)) {
+    } else if (last && t - last.t > EST_MAX_MS) {
       h.length = 0;
       h.push({t: t, top: top});
     } else {
@@ -471,7 +474,10 @@
     if (dir !== f.stream.dir) { f.tMax = -1e18; f.tMin = 1e18; }
     var P = _validPred(f, top, dir, pred);
     f.stream = {t0: t, top: top, vel: v, dir: dir, pred: P};
-    f.lastTick = t;
+    // 起動時だけ時計を合わせる — rAF 稼働中に上書きすると前フレームから
+    // 受信までの経過が積分から落ち、rAF の時刻が受信より前なら dt=0 で
+    // そのフレームが止まる（受信周期のカクつき）。
+    if (!f.active) f.lastTick = t;
     _tracePush({t: t, k: 'r', recv: top, v: v, pred: P});
     f.active = true;
     _ensureRaf();
@@ -493,7 +499,7 @@
 
   /* 追従 — 同一τの2段一次遅れを閉形式で積分する。
    * X(t) = T - (B + A·s/τ)·e^{-s/τ}（A=T-F0, B=T-X0）。
-   * s1 は X より先に動く第1段 — 表示位置 pos が pos を超えて進むことは
+   * s1 は X より先に動く第1段 — 表示位置 pos が目標 T を超えて進むことは
    * なく、速度 (s1-pos)/τ も常に連続。 */
   function _integrate(f, T, dt) {
     var e = Math.exp(-dt / TARGET_TAU_MS);
@@ -502,14 +508,12 @@
     f.pos = T - (B + A * dt / TARGET_TAU_MS) * e;
   }
 
-  function _writeFollow(pos, t) {
+  function _writeFollow(pos) {
     var f = _follow, sc = f.sc;
     sc.scrollTop = pos;
     var actual = sc.scrollTop;
     _appliedHold = {path: _w().currentBrowsePath || null, top: actual,
                     mode: _w().viewMode || 'tile'};
-    _lastWriteTop = {sc: sc, path: _w().currentBrowsePath || null,
-                     top: actual, mode: _w().viewMode || 'tile'};
     if (Math.abs(actual - pos) > 1) {
       f.pos = actual;
       f.s1 = actual;
@@ -548,25 +552,20 @@
     if (dt > 500) dt = 500;
     var T = _targetAt(f, ts);
     _integrate(f, T, dt);
-    _tracePush({t: ts, k: 'w', x: f.pos, w: _writeFollow(f.pos, ts), T: T});
+    var x = f.pos;
+    var w = _writeFollow(x);
+    if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T});
     var s = f.stream;
     if ((s.vel === 0 || ts - s.t0 >= STALE_MS) &&
         Math.abs(f.pos - s.top) < POSITION_EPS_PX &&
         Math.abs(f.s1 - f.pos) < POSITION_EPS_PX) {
       f.pos = s.top;
       f.s1 = s.top;
-      _writeFollow(s.top, ts);
+      _writeFollow(s.top);
       f.active = false;
       return;
     }
     _ensureRaf();
-  }
-
-  function _writeMatch(sc, p) {
-    var w = _lastWriteTop;
-    return !!w && w.sc === sc && (p.path || null) === w.path &&
-      Math.abs(p.top - w.top) <= POSITION_EPS_PX &&
-      (p.mode || 'tile') === w.mode;
   }
 
   function _onScrollEvent() {
@@ -576,7 +575,9 @@
       top: sc.scrollTop,
       mode: _w().viewMode || 'tile',
     };
-    if (p && (_holdMatch(p) || _writeMatch(sc, p))) return;
+    // 自分の remote 由来の書き込み（_applyImmediate/_writeFollow が
+    // _appliedHold に記録）が起こした event は送らない。
+    if (p && _holdMatch(p)) return;
     _tracePush({t: _perfNow(), k: 's', top: p ? p.top : 0});
     if (p) {
       _sndHist.push({t: _perfNow(), top: p.top,
@@ -584,7 +585,6 @@
       if (_sndHist.length > 4) _sndHist.shift();
     }
     if (_appliedHold) _appliedHold = null;
-    _lastWriteTop = null;
     if (_armed) {
       _suppressUntil = 0;
       _lastLocalMove = Date.now();
@@ -641,7 +641,6 @@
     if (!sc) return;
     _ensureSidebarOpen();
 
-    var target;
     var myTop = sc.scrollTop;
     var targetPath = (msg.path === undefined) ? null : msg.path;
     var navNeeded = (targetPath || null) !== (_w().currentBrowsePath || null);
@@ -676,9 +675,12 @@
     }
 
     var ctx = _ctxOf(sc, msg);
+    // 未解禁 follower の初回 frame はローカル操作中でも適用する — 捨てると
+    // _unlocked が立たず、leader が動くまで自分の操作も共有されない。
+    var firstApply = _role() === 'follower' && !_unlocked;
     if (navNeeded || modeNeeded) {
       _applyImmediate(sc, target, ctx);
-    } else if (ctx.mode === 'tile' && _sidebarOpen() &&
+    } else if (!firstApply && ctx.mode === 'tile' && _sidebarOpen() &&
                !document.hidden && _localBusy()) {
       return;
     } else if (ctx.mode !== 'tile' || _reducedMotion() ||
@@ -760,7 +762,9 @@
       var sb = _sidebar();
       if (!sb || !t || !sb.contains(t)) return;
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
-          t.isContentEditable) return;
+          t.tagName === 'SELECT' || t.isContentEditable) return;
+      // フォーカスされた button 上の Space は押下（.offline-btn 等）でスクロールしない
+      if (e.key === ' ' && t.tagName === 'BUTTON') return;
       if (scrollKeys[e.key]) _beginLocalInput();
     }, {passive: true});
     window.addEventListener('blur', function () {
