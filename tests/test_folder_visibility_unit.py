@@ -507,3 +507,211 @@ def test_show_all_never_persisted(vpage):
     assert vpage.evaluate("window.FolderVisibility.showAll") is True
     assert vpage.evaluate("window.FolderVisibility.isVisible('hide_me/x')") is True
     assert vpage.evaluate("location.hash") == ""
+
+
+# ── review round 2 ─────────────────────────────────────────────────────
+
+
+def test_ready_pends_until_first_judgment(vpage):
+    """ready() taken BEFORE init() must still wait for the first GET/PUT
+    judgment — pair _boot runs while visibility.js's module is evaluated
+    but before app.js calls init()."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "return new Promise(res=>{(window.__held=window.__held||[]).push(res)});}",
+    )
+    # A pre-init caller gets the module-scope promise — still pending.
+    vpage.evaluate(
+        "(()=>{window.__readyFlag=false;"
+        "window.FolderVisibility.ready().then(()=>{window.__readyFlag=true;});})()"
+    )
+    vpage.evaluate(
+        "window.FolderVisibility.init({owner:'ownA',"
+        "onChange:()=>{window.__changes=(window.__changes||0)+1;}})"
+    )
+    vpage.wait_for_timeout(200)
+    assert vpage.evaluate("window.__readyFlag") is False
+    # init() must not have recreated the promise — the SAME wait resolves
+    # on the first GET judgment.
+    vpage.evaluate(
+        "(window.__held||[]).forEach(r=>r(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}})))"
+    )
+    vpage.wait_for_function("window.__readyFlag === true")
+
+
+def test_embedded_snapshot_applies_and_owner_mismatch_ignored(vpage):
+    """init(opts.snapshot): owner-matching embed filters before the GET
+    resolves (and is written to the owner cache); a mismatched owner is
+    ignored entirely."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "return new Promise(()=>{})}",   # GET never resolves — embed only
+    )
+    vpage.evaluate(
+        "window.FolderVisibility.init({owner:'ownA',"
+        "snapshot:{owner:'ownA',revision:7,hiddenRoots:['hide_me']},"
+        "onChange:()=>{window.__changes=(window.__changes||0)+1;}})"
+    )
+    vpage.wait_for_timeout(150)
+    # Snapshot applied while still 'loading' — filtering is already live.
+    assert vpage.evaluate("window.FolderVisibility.isHidden('hide_me')") is True
+    assert vpage.evaluate("window.FolderVisibility.isVisible('hide_me/x')") is False
+    assert vpage.evaluate("window.FolderVisibility.isVisible('keep_a')") is True
+    assert vpage.evaluate("window.FolderVisibility.snapshot()")["revision"] == 7
+    assert json.loads(
+        vpage.evaluate("localStorage.getItem('bookq.folderVisibility.v1.ownA')")
+    )["revision"] == 7
+    # ready() still pends — embed is not a network judgment.
+    vpage.evaluate(
+        "(()=>{window.__readyFlag=false;"
+        "window.FolderVisibility.ready().then(()=>{window.__readyFlag=true;});})()"
+    )
+    vpage.wait_for_timeout(150)
+    assert vpage.evaluate("window.__readyFlag") is False
+
+
+def test_embedded_snapshot_owner_mismatch_ignored(vpage):
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "return new Promise(()=>{})}",
+    )
+    vpage.evaluate(
+        "window.FolderVisibility.init({owner:'ownA',"
+        "snapshot:{owner:'other',revision:9,hiddenRoots:['x']},"
+        "onChange:()=>{}})"
+    )
+    vpage.wait_for_timeout(150)
+    # No snapshot applied: fail-closed, nothing hidden, cache untouched.
+    assert vpage.evaluate("window.FolderVisibility.hasSnapshot") is False
+    assert vpage.evaluate("window.FolderVisibility.isHidden('x')") is False
+    assert vpage.evaluate(
+        "localStorage.getItem('bookq.folderVisibility.v1.other')"
+    ) is None
+
+
+def test_hidden_match_kinds_cover_and_ancestor(vpage):
+    """hiddenMatch: self/descendant covering kinds deny and badge; the
+    ancestor kind (path is a strict ancestor of a hidden key — the
+    shallow window's raw dir name) is filtered from the grid but never
+    denied and never editable."""
+    _boot(vpage, _json_response(
+        "{owner:'ownA',revision:1,hiddenRoots:['wrap/work','hide_me']}"
+    ))
+    _init(vpage)
+    # 'wrap' is a real top-level in this scenario (shallow payload) — even
+    # so, an ancestor match must not produce a PUT-404 toggle.
+    vpage.evaluate("window.FolderVisibility.setTopLevelPaths(['wrap','wrap/work','hide_me'])")
+    out = vpage.evaluate(
+        """(() => {const FV = window.FolderVisibility; return {
+          anc:    FV.hiddenMatch('wrap'),
+          self:   FV.hiddenMatch('wrap/work'),
+          desc:   FV.hiddenMatch('wrap/work/vol1'),
+          other:  FV.hiddenMatch('keep_a'),
+          ancVis: FV.isVisible('wrap'),
+          ancDeny:FV.isHidden('wrap'),
+          ancGuard: FV.guardPath('wrap'),
+          covGuard: FV.guardPath('wrap/work/x'),
+        };})()"""
+    )
+    assert out["anc"] == {"key": "wrap/work", "kind": "ancestor"}
+    assert out["self"] == {"key": "wrap/work", "kind": "self"}
+    assert out["desc"] == {"key": "wrap/work", "kind": "descendant"}
+    assert out["other"] is None
+    assert out["ancVis"] is False          # filtered from the grid
+    assert out["ancDeny"] is False         # but never denied
+    assert out["ancGuard"] == "allow"      # drilling in is allowed
+    assert out["covGuard"] == "hidden"     # covering still denies
+    pres = vpage.evaluate(
+        "window.FolderVisibility.presentation('wrap')"
+    )
+    assert "配下に非表示" in pres["badgeHtml"]
+    assert pres["buttonHtml"] == ""        # no PUT-404 toggle ever
+    assert pres["className"] == "is-hidden-ancestor"
+
+
+def test_hidden_match_case_and_unicode_insensitive(vpage):
+    """Matching is NFC + lowercase: a case-variant direct URL
+    (#/view/HIDE_ME for hidden key 'hide_me') still matches, and a
+    case-only rename stays hidden. _hidden keeps original names."""
+    _boot(vpage, _json_response(
+        "{owner:'ownA',revision:1,hiddenRoots:['hide_me','Café X']}"
+    ))
+    _init(vpage)
+    out = vpage.evaluate(
+        """(() => {const FV = window.FolderVisibility; return [
+          FV.isHidden('HIDE_ME'), FV.isHidden('Hide_Me/x'),
+          FV.hiddenRootFor('HIDE_ME'),
+          // NFC: 'Café X' precomposed vs 'Cafe\\u0301 X' combining mark
+          FV.isHidden('Cafe\\u0301 X'), FV.isHidden('CAFÉ X'),
+          FV.hiddenMatch('HIDE_ME').kind,
+          FV.hiddenMatch('café x/sub').kind,
+          FV.isVisible('HIDE_ME'), FV.guardPath('HIDE_ME'),
+        ];})()"""
+    )
+    assert out == [
+        True, True,
+        "hide_me",            # original key returned, not the query's case
+        True, True,
+        "self", "descendant",
+        False, "hidden",
+    ]
+
+
+def test_stale_put_response_not_adopted_converges_once(vpage):
+    """A PUT resolving BEHIND the current revision (another device's write
+    landed via GET while this write was in flight): the stale payload is
+    not adopted; exactly one convergence GET pulls the true head."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "if(o&&o.method==='PUT'){"
+        "return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:2,hiddenRoots:['hide_me']}),"
+        "{status:200,headers:{'Content-Type':'application/json'}}));}"
+        "const gets=window.__calls.filter(c=>!(c.o&&c.o.method==='PUT')).length;"
+        "if(gets<=1){return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}}));}"
+        "if(gets===2){return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:3,hiddenRoots:['keep_a']}),{status:200,"
+        "headers:{'Content-Type':'application/json'}}));}"
+        "return new Promise(res=>{(window.__held=window.__held||[]).push(res)});}",
+    )
+    _init(vpage)
+    # Pull a NEWER head via GET (another device's write) — revision 3.
+    vpage.evaluate("(()=>{window.FolderVisibility.refresh();})()")
+    vpage.wait_for_function(
+        "window.FolderVisibility.snapshot().revision === 3")
+    gets0 = vpage.evaluate(
+        "window.__calls.filter(c=>!(c.o&&c.o.method==='PUT')).length")
+    # The PUT then resolves with the OLDER rev 2 — not adopted.
+    res = vpage.evaluate("window.FolderVisibility.setHidden('hide_me', true)")
+    assert res["ok"] is True
+    snap = vpage.evaluate("window.FolderVisibility.snapshot()")
+    assert snap["revision"] == 3
+    assert snap["hiddenRoots"] == ["keep_a"]
+    # Exactly ONE bounded convergence GET is issued (coalesce ~400ms) —
+    # never a refresh storm.
+    vpage.wait_for_function(
+        "window.__calls.filter(c=>!(c.o&&c.o.method==='PUT'))"
+        f".length >= {gets0 + 1}",
+        timeout=5000)
+    vpage.wait_for_timeout(700)
+    gets = vpage.evaluate(
+        "window.__calls.filter(c=>!(c.o&&c.o.method==='PUT')).length")
+    assert gets == gets0 + 1
+    # The convergence response lands the true head.
+    vpage.evaluate(
+        "(window.__held||[]).splice(0).forEach(r=>r(new Response(JSON.stringify("
+        "{owner:'ownA',revision:4,hiddenRoots:['keep_a','hide_me']}),{status:200,"
+        "headers:{'Content-Type':'application/json'}})))"
+    )
+    vpage.wait_for_function(
+        "window.FolderVisibility.snapshot().revision === 4")
+    snap = vpage.evaluate("window.FolderVisibility.snapshot()")
+    assert sorted(snap["hiddenRoots"]) == ["hide_me", "keep_a"]

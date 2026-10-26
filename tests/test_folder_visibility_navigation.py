@@ -207,13 +207,26 @@ def _drop_vis_snapshot(vpage):
         ".forEach(k=>localStorage.removeItem(k))")
 
 
+def _suppress_embed(vpage):
+    """Neutralize the index.html snapshot embed on the NEXT document load —
+    simulates a stale pre-embed shell so the no-snapshot loading/error
+    gates still apply (init() then sees null and the GET stays the only
+    source of truth)."""
+    vpage.add_init_script(
+        "Object.defineProperty(window,'__BOOKQ_VISIBILITY_SNAPSHOT__',"
+        "{configurable:true,get(){return null;},set(v){}})")
+
+
 def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     """While the first visibility GET is outstanding the grid must never
-    paint an unfiltered list — release converges to the filtered grid."""
+    paint an unfiltered list — release converges to the filtered grid.
+    (No-snapshot case: a stale shell without the embed; the embed's own
+    first-paint path is covered by test_embedded_snapshot_filters_first_paint.)"""
     vis_put(vis_env, "hide_me", True)
     held = []
     vpage.route("**/api/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _suppress_embed(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
     vpage.wait_for_timeout(300)
@@ -233,6 +246,7 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
     held = []
     vpage.route("**/api/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series")
     assert _wait_held(held), "visibility GET was never issued"
     vpage.wait_for_timeout(300)
@@ -248,6 +262,7 @@ def test_loading_queues_view_url_then_applies(vpage, vis_env):
     held = []
     vpage.route("**/api/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/view/keep_a?p=0")
     assert _wait_held(held), "visibility GET was never issued"
     vpage.wait_for_timeout(300)
@@ -272,6 +287,7 @@ def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
 
     vpage.route("**/api/folder-visibility", handler)
     _drop_vis_snapshot(vpage)
+    _suppress_embed(vpage)
     vpage.reload()
     vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
     vpage.wait_for_timeout(300)
@@ -281,3 +297,108 @@ def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
     vpage.wait_for_selector("#tile-grid .tile")
     assert "keep_a" in vpage.locator("#tile-grid .tile").evaluate_all(
         "els=>els.map(e=>e.dataset.path)")
+
+
+# ── review round 2 ─────────────────────────────────────────────────────
+
+
+def test_embedded_snapshot_filters_first_paint(vpage, vis_env):
+    """index.html embeds the caller's snapshot — with a held GET and no
+    localStorage cache, the grid is still filtered from first paint."""
+    vis_put(vis_env, "hide_me", True)
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    vpage.reload()
+    assert _wait_held(held), "visibility GET was never issued"
+    # NOT the loading gate — the embed supplies a snapshot, so the grid
+    # paints (filtered) before the GET resolves.
+    vpage.wait_for_selector("#tile-grid .tile")
+    paths = vpage.locator("#tile-grid .tile").evaluate_all(
+        "els=>els.map(e=>e.dataset.path)")
+    assert "hide_me" not in paths
+    assert "keep_a" in paths
+    assert vpage.evaluate(
+        "window.__BOOKQ_VISIBILITY_SNAPSHOT__.hiddenRoots"
+    ) == ["hide_me"]
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function(
+        "window.FolderVisibility.readyState === 'ready'")
+
+
+def test_pending_browse_restore_keeps_list_mode(vpage, vis_env):
+    """?v=list on a pending deep-link browse survives the drain — the
+    queued navigateToFolder must not rewrite the URL in tile mode."""
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    _fresh_goto(vpage, vis_env + "/#/browse/hide_series?v=list")
+    assert _wait_held(held), "visibility GET was never issued"
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function(
+        "window.currentBrowsePath === 'hide_series'")
+    assert vpage.evaluate("window.viewMode") == "list"
+    assert "v=list" in vpage.evaluate("location.hash")
+    assert vpage.locator("#tile-grid.list-mode").count() == 1
+
+
+def test_hidden_redirect_keeps_list_mode_in_url(vpage, vis_env):
+    """redirectHiddenToTop in list mode writes '#/browse/?v=list', not a
+    bare URL that would disagree with the live viewMode."""
+    vis_put(vis_env, "hide_me", True)
+    _fresh_goto(vpage, vis_env + "/#/browse/?v=list")
+    vpage.wait_for_selector("#tile-grid.list-mode .item")
+    assert vpage.evaluate("window.viewMode") == "list"
+    vpage.evaluate("location.hash = '#/view/hide_me?p=0'")
+    vpage.wait_for_function(
+        "() => window.currentFolder === null && location.hash !== '#/view/hide_me?p=0'")
+    assert vpage.evaluate("window.viewMode") == "list"
+    assert vpage.evaluate("location.hash") == "#/browse/?v=list"
+
+
+def test_case_variant_view_url_redirects(vpage, vis_env):
+    """#/view/HIDE_ME must redirect when the stored hidden root is
+    'hide_me' — matching is case/Unicode-variant safe."""
+    vis_put(vis_env, "hide_me", True)
+    _fresh_goto(vpage, vis_env + "/#/view/HIDE_ME?p=0")
+    vpage.wait_for_function(
+        "() => !location.hash || !location.hash.startsWith('#/view/HIDE_ME')")
+    assert vpage.evaluate("window.currentFolder || null") is None
+
+
+def test_pending_nav_last_write_wins(vpage, vis_env):
+    """One pending nav slot: queueing a viewer open then a browse nav runs
+    only the latest — the viewer never opens."""
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    vpage.reload()
+    assert _wait_held(held), "visibility GET was never issued"
+    vpage.wait_for_function("() => window.FolderVisibility"
+                            " && window.FolderVisibility.readyState === 'loading'")
+    vpage.evaluate("window.loadImages('keep_a')")
+    vpage.evaluate("window.navigateToFolder('hide_series')")
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function(
+        "window.currentBrowsePath === 'hide_series'")
+    assert vpage.evaluate("window.currentFolder || null") is None
+
+
+def test_pending_nav_last_write_wins_view(vpage, vis_env):
+    """Same slot, opposite order — browse queued then view opens the book."""
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    vpage.reload()
+    assert _wait_held(held), "visibility GET was never issued"
+    vpage.wait_for_function("() => window.FolderVisibility"
+                            " && window.FolderVisibility.readyState === 'loading'")
+    vpage.evaluate("window.navigateToFolder('hide_series')")
+    vpage.evaluate("window.loadImages('keep_a')")
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function("window.currentFolder === 'keep_a'")
+    assert vpage.evaluate("window.currentBrowsePath || null") is None

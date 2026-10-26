@@ -371,3 +371,122 @@ def test_gesture_icon_only_at_browse_root(vpage):
     vpage.wait_for_function("window.currentBrowsePath === 'hide_series'")
     assert vpage.locator("#browse-root-icon").count() == 0
     assert vpage.locator("#visibility-row").is_hidden()
+
+
+# ── review round 2 ─────────────────────────────────────────────────────
+
+
+def test_shallow_window_filters_hidden_ancestor_tile(fvpage, flat_vis_env):
+    """fix3: while only the shallow (depth=1, raw dir names) tree is up, the
+    raw dir 'wrap' is an *ancestor* of hidden 'wrap/wA' — it must be filtered
+    from the normal-mode grid and must never get a toggle (PUT 'wrap' 404s),
+    even in 全表示 where it shows the 配下に非表示 badge."""
+    vis_put(flat_vis_env, "wrap/wA", True)
+    held_full = []
+
+    def _route(route):
+        if "depth=" in route.request.url:
+            # Deterministic live-FS shallow payload: raw dir name only.
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='[{"name":"wrap","type":"folder","children":[],'
+                     '"thumb":null}]')
+        else:
+            held_full.append(route)
+
+    fvpage.route("**/api/folders*", _route)
+    fvpage.reload()
+    fvpage.wait_for_function(
+        "window.FolderVisibility && "
+        "window.FolderVisibility.readyState !== 'loading'")
+    fvpage.wait_for_function(
+        "window.__BOOKQ_DEBUG && window.__BOOKQ_DEBUG.shallow === true")
+    fvpage.wait_for_timeout(300)
+    # Normal mode: 'wrap' tile filtered — the shallow window does not leak
+    # the hidden root's ancestor, and nothing unfiltered is painted.
+    assert fvpage.locator("#tile-grid .tile").count() == 0
+    # Provisional shallow indexing must not publish editable top-levels.
+    assert fvpage.evaluate(
+        "window.FolderVisibility.isTopLevel('wrap')") is False
+    assert fvpage.evaluate(
+        "window.FolderVisibility.isTopLevel('wrap/wB')") is False
+    # 全表示 during the shallow window: ancestor badge, still no toggle.
+    fvpage.evaluate("window.FolderVisibility.setShowAll(true)")
+    tile = fvpage.locator('#tile-grid .tile[data-path="wrap"]')
+    tile.wait_for(state="attached")
+    assert "配下に非表示" in tile.locator(".visibility-badge").inner_text()
+    assert tile.locator(".visibility-toggle").count() == 0
+    assert fvpage.evaluate(
+        "window.FolderVisibility.isTopLevel('wrap')") is False
+    # Release the full fetch — flattened tiles arrive, hidden self filtered.
+    fvpage.evaluate("window.FolderVisibility.setShowAll(false)")
+    for r in list(held_full):
+        r.fallback()
+    fvpage.wait_for_selector('#tile-grid .tile[data-path="wrap/wB"]')
+    fvpage.wait_for_function(
+        "window.__BOOKQ_DEBUG.shallow === false")
+    paths = _paths(fvpage)
+    assert "wrap/wA" not in paths
+    assert "wrap/wB" in paths
+    assert "wrap/arc.zip" in paths
+    # Full-tree top-levels are now published — 'wrap' (non-node) never is.
+    assert fvpage.evaluate(
+        "window.FolderVisibility.isTopLevel('wrap/wA')") is True
+    assert fvpage.evaluate(
+        "window.FolderVisibility.isTopLevel('wrap')") is False
+
+
+def test_gesture_release_on_document_clears_drag(vpage):
+    """fix11: a pointerup routed to document (release outside the header /
+    OS-level interruption) must still close the drag — a later hover must
+    never move or re-arm the icon."""
+    icon = vpage.locator("#browse-root-icon")
+    icon.wait_for(state="attached")
+    vpage.evaluate(
+        """() => {
+          const icon = document.getElementById('browse-root-icon');
+          icon.dispatchEvent(new PointerEvent('pointerdown',
+            {pointerId:7, clientX:10, clientY:10, bubbles:true}));
+          document.dispatchEvent(new PointerEvent('pointermove',
+            {pointerId:7, clientX:80, clientY:10, bubbles:true}));
+        }""")
+    vpage.wait_for_function(
+        "document.getElementById('browse-root-icon').style.transform !== ''")
+    # Release lands on document, not on the icon/header.
+    vpage.evaluate(
+        "document.dispatchEvent(new PointerEvent('pointerup',"
+        "{pointerId:7, clientX:80, clientY:10, bubbles:true}))")
+    # Hover afterwards: no drag state left behind, icon stays put, showAll
+    # was not toggled by the interrupted gesture.
+    vpage.evaluate(
+        "document.dispatchEvent(new PointerEvent('pointermove',"
+        "{pointerId:7, clientX:200, clientY:10, bubbles:true}))")
+    vpage.wait_for_timeout(100)
+    assert vpage.evaluate(
+        "document.getElementById('browse-root-icon').style.transform") == ""
+    assert vpage.evaluate("window.FolderVisibility.showAll") is False
+
+
+def test_gesture_window_blur_clears_drag(vpage):
+    """fix11: window blur mid-drag (app switch / notification) abandons the
+    gesture — icon snaps back, later moves do nothing."""
+    vpage.wait_for_selector("#browse-root-icon")
+    vpage.evaluate(
+        """() => {
+          const icon = document.getElementById('browse-root-icon');
+          icon.dispatchEvent(new PointerEvent('pointerdown',
+            {pointerId:9, clientX:10, clientY:10, bubbles:true}));
+          document.dispatchEvent(new PointerEvent('pointermove',
+            {pointerId:9, clientX:80, clientY:10, bubbles:true}));
+        }""")
+    vpage.wait_for_function(
+        "document.getElementById('browse-root-icon').style.transform !== ''")
+    vpage.evaluate("window.dispatchEvent(new Event('blur'))")
+    vpage.evaluate(
+        "document.dispatchEvent(new PointerEvent('pointermove',"
+        "{pointerId:9, clientX:200, clientY:10, bubbles:true}))")
+    vpage.wait_for_timeout(100)
+    assert vpage.evaluate(
+        "document.getElementById('browse-root-icon').style.transform") == ""
+    assert vpage.evaluate("window.FolderVisibility.showAll") is False

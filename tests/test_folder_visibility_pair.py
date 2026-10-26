@@ -285,33 +285,26 @@ def test_ui_sync_visible_path_still_applies(vpage, vis_env):
     assert vpage.evaluate("() => window.__leaveCalls") == 0
 
 
-# ── _boot readiness gate (mock level) ─────────────────────────────────────
+# ── _boot readiness gate (real promise, no stubbing) ────────────────────
 
-# Installed before page scripts: FolderVisibility.ready() becomes a pending
-# promise released only via window.__visGateResolve(). The module's internal
-# state machine (snapshot fetch etc.) still runs — only ready() callers wait.
-GATE_READY_JS = """(() => {
-  let _fv;
-  const gate = new Promise(res => { window.__visGateResolve = res; });
-  Object.defineProperty(window, 'FolderVisibility', {
-    configurable: true,
-    get() { return _fv; },
-    set(v) {
-      _fv = v;
-      v.ready = () => gate;
-    },
-  });
-})()"""
+def _wait_held(held, timeout=10.0):
+    """Poll until the route handler captured at least one request."""
+    import time
+    deadline = time.time() + timeout
+    while not held and time.time() < deadline:
+        time.sleep(0.05)
+    return held
 
 
 def test_boot_resume_waits_for_visibility_ready(request, vis_env):
     """Stored pair creds must not open a socket before the settings judgment:
-    _boot defers resume() on FolderVisibility.ready() (plan §8, §11-D)."""
+    _boot defers resume() on the REAL FolderVisibility.ready() — the
+    module-scope promise that resolves only with the first GET/PUT judgment
+    (a pre-init ready() would previously have resolved immediately)."""
     b = request_browser(request)
     ctx = b.new_context(viewport={"width": 900, "height": 600},
                       has_touch=True)
     ctx.add_init_script(INSTRUMENT)
-    ctx.add_init_script(GATE_READY_JS)
     pg = ctx.new_page()
     try:
         pg.goto(vis_env)
@@ -320,8 +313,11 @@ def test_boot_resume_waits_for_visibility_ready(request, vis_env):
             "sessionStorage.setItem('bookq.readerSync.v1', JSON.stringify("
             "{sessionId:'S', memberId:'M', resumeToken:'T',"
             " role:'leader'}))")
+        held = []
+        pg.route("**/api/folder-visibility", lambda r: held.append(r))
         pg.reload()
         pg.wait_for_function("() => document.readyState !== 'loading'")
+        assert _wait_held(held), "visibility GET was never issued"
         pg.wait_for_timeout(400)
         # 判断前: _boot の resume は待機 — ソケットはまだ存在しない
         assert pg.evaluate("() => window.__wsConns.length") == 0
@@ -329,12 +325,112 @@ def test_boot_resume_waits_for_visibility_ready(request, vis_env):
         # 判断が着いてから resume() → RESUME が wire に出る
         # (wsはconstructor時点で __wsConns に載るが RESUME は onopen 後 —
         #  socket存在ではなく frame 自体を待つ)
-        pg.evaluate("() => window.__visGateResolve()")
+        for r in list(held):
+            r.fallback()
         pg.wait_for_function(
             "() => window.__wsLog.some(f => f && f.type === 'RESUME')")
         assert pg.evaluate("() => window.__wsConns.length") == 1
     finally:
         ctx.close()
+
+
+def test_pending_commit_latest_stashed_and_retried(vpage, vis_env):
+    """fix2: commits landing while visibility is undecided are held
+    (newest only — last write wins) and re-evaluated by retryPendingCommit
+    on the ready edge. A hidden newest commit denies (leave + top); an
+    older visible one never reaches the display."""
+    vis_put(vis_env, "hide_me", True)
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.reload()
+    vpage.wait_for_function(
+        "() => window.FolderVisibility"
+        " && window.FolderVisibility.readyState === 'loading'"
+        " && window.__pairCtlTest")
+    # leave/PairedView spies — denial is observable without a socket.
+    vpage.evaluate("""() => {
+      window.__leaveCalls = 0;
+      const origLeave = window.PairController.leave.bind(
+        window.PairController);
+      window.PairController.leave = () => {
+        window.__leaveCalls++;
+        return origLeave();
+      };
+      window.__pvCalls = 0;
+      const origApply = window.PairedView.apply.bind(window.PairedView);
+      window.PairedView.apply = (...a) => { window.__pvCalls++;
+                                          return origApply(...a); };
+    }""")
+    assert _wait_held(held), "visibility GET was never issued"
+    snap = "{v:1, sessionId:'s', revision:1, manifestVersion:1," \
+           " phase:'reading', spreadId:'c0:s0', presence:{}}"
+    # Older commit (visible work) is REPLACED by the newer hidden one.
+    vpage.evaluate(
+        "() => window.__pairCtlTest.applyCommitted(" + snap + ","
+        "{folder:'keep_a', manifestVersion:1}, {role:'follower'})")
+    assert vpage.evaluate(
+        "() => window.__pairCtlTest.pendingCommit"
+        " && window.__pairCtlTest.pendingCommit.manifest.folder") == "keep_a"
+    vpage.evaluate(
+        "() => window.__pairCtlTest.applyCommitted(" + snap + ","
+        "{folder:'hide_me', manifestVersion:1}, {role:'follower'})")
+    assert vpage.evaluate(
+        "() => window.__pairCtlTest.pendingCommit"
+        " && window.__pairCtlTest.pendingCommit.manifest.folder") == "hide_me"
+    # Nothing applied or denied while the judgment is pending.
+    assert vpage.evaluate("() => window.__pvCalls") == 0
+    assert vpage.evaluate("() => window.__leaveCalls") == 0
+    # Judgment lands: onChange → retryPendingCommit → deny the newest.
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function(
+        "window.FolderVisibility.readyState === 'ready'")
+    vpage.wait_for_function("() => window.__leaveCalls >= 1")
+    vpage.wait_for_function("location.hash === ''")
+    assert vpage.evaluate(
+        "() => window.__pairCtlTest.pendingCommit") is None
+    assert vpage.evaluate("() => window.__pvCalls") == 0
+    assert vpage.evaluate("() => window.currentFolder || null") is None
+
+
+def test_exit_paired_to_solo_rechecks_hidden_solo_work(vis_env, request):
+    """fix6: leaving a pair must re-check the saved solo folder — when it
+    was hidden by another device while paired, the solo restore is denied
+    and the user lands on the top list instead."""
+    b = request_browser(request)
+    ctx_l, pl = _dev_page(b, vis_env)
+    ctx_f, pf = _dev_page(b, vis_env)
+    try:
+        _open(pf, "keep_a")              # follower's own solo book
+        _open(pl, "hide_series/vol1")    # leader's visible work
+        _pair_now(pl, pf)
+        for p in (pl, pf):
+            assert _pv(p)["active"] is True
+        assert pf.evaluate("() => window.currentFolder") \
+            == "hide_series/vol1"
+        # Another device hides the follower's solo work while paired —
+        # the paired view itself stays allowed.
+        vis_put(vis_env, "keep_a", True)
+        pf.evaluate("() => window.FolderVisibility.refresh()")
+        pf.wait_for_function(
+            "() => window.FolderVisibility.isHidden('keep_a')")
+        assert pf.evaluate("() => window.currentFolder") \
+            == "hide_series/vol1"       # paired view untouched
+        # Leave → exitPairedToSolo re-checks the stashed solo folder → deny.
+        pf.evaluate("() => window.PairController.leave()")
+        pf.wait_for_function("() => location.hash === ''")
+        assert pf.evaluate("() => window.currentFolder || null") is None
+        assert pf.evaluate(
+            "() => Array.from(document.querySelectorAll('#img-track img'))"
+            ".some(i => (i.src || '').includes('keep_a'))") is False
+        assert pf.evaluate(
+            "() => window.PairedView.state().active") is False
+        pl.wait_for_function(
+            "() => window.PairController.state.status === 'ended'",
+            timeout=15000)
+    finally:
+        ctx_l.close()
+        ctx_f.close()
 
 
 # ── solo stays inert ─────────────────────────────────────────────────────

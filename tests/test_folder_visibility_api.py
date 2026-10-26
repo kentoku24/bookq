@@ -286,7 +286,9 @@ def test_session_without_email_gets_no_shared_user(make_client, tmp_path):
     )
     assert resp.status_code == 403
     # Nothing was stored under a fallback "unknown" account.
-    store = FolderVisibilityStore(Path(os.environ["BOOKQ_STATE_DIR"]) / "folder-visibility.sqlite3")
+    from app.folder_visibility import DB_FILENAME
+
+    store = FolderVisibilityStore(Path(os.environ["BOOKQ_STATE_DIR"]) / DB_FILENAME)
     snap = store.read("unknown")
     assert snap.revision == 0 and snap.hidden_roots == ()
 
@@ -495,3 +497,132 @@ def test_non_ascii_owner_header_is_409_not_500(make_client):
     )
     assert resp.status_code == 409
     _private_headers(resp)
+
+
+# ── server-side search/facet exclusion (review round 2) ─────────────────
+
+
+def _seed_metadata(library: Path) -> None:
+    (library / "作品A" / "metadata.toml").write_text(
+        '[comic]\ntitle_jp = "見えない作品A"\n'
+        "[tags]\n"
+        'artist = ["HiddenArtist"]\n'
+        'tag = ["hiddentag"]\n',
+        encoding="utf-8")
+    (library / "series" / "metadata.toml").write_text(
+        '[comic]\ntitle_jp = "見える作品B"\n'
+        "[tags]\n"
+        'artist = ["VisibleArtist"]\n'
+        'tag = ["visibletag"]\n',
+        encoding="utf-8")
+
+
+def test_search_excludes_hidden_roots_server_side(make_client, library):
+    """fix4: /api/search drops comics under the caller's hidden roots —
+    client filtering alone would still ship them in the response body."""
+    _seed_metadata(library)
+    client = make_client()
+    base = client.get("/api/search", params={"q": "作品"})
+    assert base.status_code == 200
+    found = {c["folder_path"] for c in base.json()["results"]}
+    assert found == {"作品A", "series"}
+    _put(client, "作品A", True, _owner(client))
+    resp = client.get("/api/search", params={"q": "作品"})
+    assert resp.status_code == 200
+    found = {c["folder_path"] for c in resp.json()["results"]}
+    assert found == {"series"}
+    assert "HiddenArtist" not in resp.text
+    # Empty query + facet filter against the hidden artist also yields nothing.
+    resp = client.get("/api/search", params={"artist": "HiddenArtist"})
+    assert resp.json()["results"] == []
+
+
+def test_facets_exclude_hidden_roots_server_side(make_client, library):
+    """fix4: /api/metadata/facets drops values that exist only on hidden
+    works — incl. the whole-library path='' case."""
+    _seed_metadata(library)
+    client = make_client()
+    base = client.get("/api/metadata/facets")
+    assert base.status_code == 200
+    assert set(base.json()["artists"]) == {"HiddenArtist", "VisibleArtist"}
+    assert set(base.json()["tags"]) == {"hiddentag", "visibletag"}
+    _put(client, "作品A", True, _owner(client))
+    resp = client.get("/api/metadata/facets")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["artists"] == ["VisibleArtist"]
+    assert body["tags"] == ["visibletag"]
+    # Un-hiding restores the full aggregate (no stale per-user memo bleed).
+    _put(client, "作品A", False, _owner(client))
+    body = client.get("/api/metadata/facets").json()
+    assert set(body["artists"]) == {"HiddenArtist", "VisibleArtist"}
+
+
+def test_facets_exclusion_is_per_user(make_client, library):
+    """Alice's hidden root must not narrow Bob's facet list — the memo is
+    keyed by the caller's own exclude set."""
+    _seed_metadata(library)
+    alice = make_client(email="alice@example.com")
+    _put(alice, "作品A", True, _owner(alice))
+    bob = make_client(email="bob@example.com")
+    body = bob.get("/api/metadata/facets").json()
+    assert set(body["artists"]) == {"HiddenArtist", "VisibleArtist"}
+    assert set(body["tags"]) == {"hiddentag", "visibletag"}
+
+
+# ── index snapshot embed (review round 2) ────────────────────────────────
+
+
+def _embed_snapshot(resp) -> dict | None:
+    """Parse window.__BOOKQ_VISIBILITY_SNAPSHOT__ out of the rendered page —
+    tojson escaping makes substring asserts brittle, json.loads is exact."""
+    import json as _json
+    import re as _re
+    m = _re.search(
+        r"__BOOKQ_VISIBILITY_SNAPSHOT__ = (\{.*?\}|null);", resp.text)
+    assert m, "snapshot binding missing from index.html"
+    return _json.loads(m.group(1))
+
+
+def test_index_embeds_visibility_snapshot(make_client, library):
+    """fix5: / embeds the CALLER's snapshot (owner + revision + roots) so
+    the first paint is already filtered; the page stays private/no-cache.
+    (index() resolves the user via get_current_user — the test-mode mock is
+    test@example.com, so the API override must match for the PUT to land on
+    the same user key the page renders.)"""
+    client = make_client(email="test@example.com")
+    _put(client, "作品A", True, _owner(client))
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.headers.get("Cache-Control") == "private, no-cache"
+    snap = _embed_snapshot(resp)
+    assert snap["owner"] == visibility_owner("test@example.com", SECRET)
+    assert snap["revision"] == 1
+    assert snap["hiddenRoots"] == ["作品A"]
+    # The email itself never ships — the embed carries only the owner token.
+    line = next(
+        (l for l in resp.text.splitlines()
+         if "__BOOKQ_VISIBILITY_SNAPSHOT__" in l),
+        None)
+    assert "test@example.com" not in line
+
+
+def test_index_snapshot_is_scoped_to_the_caller(make_client, library):
+    """fix5: another user's hidden roots never appear in this user's page."""
+    alice = make_client(email="alice@example.com")
+    _put(alice, "作品A", True, _owner(alice))
+    bob = make_client(email="bob@example.com")
+    resp = bob.get("/")
+    snap = _embed_snapshot(resp)
+    assert snap["hiddenRoots"] == []    # Alice's hidden root never leaks
+
+
+def test_index_snapshot_null_on_store_failure(make_client, tmp_path):
+    """Store read failure -> null embed -> the client's normal loading gate
+    applies; the page itself still renders."""
+    blocker = tmp_path / "state-file"
+    blocker.write_text("not a directory")
+    client = make_client(state_dir=blocker)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert _embed_snapshot(resp) is None
