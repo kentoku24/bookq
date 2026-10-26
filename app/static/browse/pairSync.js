@@ -6,11 +6,18 @@
  *   leader がブラウズ一覧（#sidebar-scroll / #tile-grid）を開くと pair の phase が
  *   'selecting' になる（pairController の sidebar observer → SET_ACTIVITY）。
  *   armed = live pair && phase==='selecting' の間、自分の {path, scrollTop,
- *   viewH, viewMode} を ephemeral frame UI_SYNC で peer へ中継する。受信側は
- *   不変式「followerTop = leaderTop + leaderClientHeight」で scrollTop を導く:
+ *   clientHeight, scrollHeight, viewMode} を ephemeral frame UI_SYNC で
+ *   peer へ中継する。受信側は不変式「peer のスクロール進捗 = 自分の
+ *   スクロール進捗」で scrollTop を導く（双方向とも同じ式）:
  *
- *     follower <- leader : scrollTop = msg.top + msg.viewH     （1画面分下）
- *     leader   <- follower: scrollTop = msg.top - 自分の clientHeight
+ *     prog      = top / max(1, scrollH - viewH)
+ *     scrollTop = prog * max(0, 自分の scrollHeight - clientHeight)
+ *
+ *   tile グリッドの列数は端末幅で変わるため、px ではなく進捗率で写す —
+ *   画面の大きい peer（タブレット等）でも同じ割合位置に収まる。
+ *   scrollH を持たない旧クライアントの frame は従来の px 変換
+ *   （followerTop = top + viewH / leaderTop = top - clientHeight）へ
+ *   フォールバックする。
  *
  *   path / mode が違えば先にローカル遷移（scrollPositions 保存 →
  *   currentBrowsePath + viewMode + renderView({scrollAnchor:null}) +
@@ -39,7 +46,7 @@
  *     （drop しない — 窓内のローカル操作が失われるのを防ぐ）。
  *   - _appliedHold: 適用直後の位置と同じ path/top/mode に居る間は送信しない。
  *     clamp で目標に届かなかった位置（例: 末尾で maxTop に貼り付く）を再送
- *     すると peer が逆変換で約1画面戻されるのを防ぐ。ユーザーが実際に
+ *     すると peer が逆変換で戻されるのを防ぐ。ユーザーが実際に
  *     動かした時点（top が変わる）で解除される。
  */
 (function () {
@@ -213,19 +220,20 @@
       path: _w().currentBrowsePath || null,
       top: sc.scrollTop,
       viewH: sc.clientHeight,
+      scrollH: sc.scrollHeight,
       mode: _w().viewMode || 'tile',
     };
   }
 
   function _sigOf(p) {
     return (p.path || '') + '|' + Math.round(p.top) + '|' +
-      Math.round(p.viewH) + '|' + p.mode;
+      Math.round(p.viewH) + '|' + Math.round(p.scrollH || 0) + '|' + p.mode;
   }
 
   /* remote 適用直後の位置に留まっている間は送信しない。clamp で目標に届か
-   * なかった値を peer に返すと、逆変換（top - leaderViewH）で peer を約
-   * 1画面戻してしまうため。viewH は比較しない — resize（iOS ツールバー
-   * 伸縮等）で clamp 値が漏れないようにする。 */
+   * なかった値を peer に返すと、逆変換で peer を戻してしまうため。viewH
+   * は比較しない — resize（iOS ツールバー伸縮等）で clamp 値が漏れない
+   * ようにする。 */
   function _holdMatch(p) {
     var h = _appliedHold;
     return !!h && (p.path || null) === h.path &&
@@ -327,9 +335,19 @@
     var mx = Math.max(0, sc.scrollHeight - sc.clientHeight);
     return Math.min(Math.max(0, t), mx);
   }
-  /* peer の scrollTop をローカル座標に写す（1画面分オフセット + clamp） */
-  function _remoteTop(sc, top, viewH) {
-    var t = (_role() === 'follower') ? top + viewH : top - sc.clientHeight;
+  /* peer の scrollTop をローカル座標に写す。scrollH 有効時はスクロール
+   * 進捗 top/(scrollH-viewH) を自側の maxTop へ写す（双方向同じ式 —
+   * 逆変換にすれば元の位置へ戻る自己逆写像）。scrollH を持たない旧
+   * クライアントの frame は従来の 1画面分 px オフセットにフォールバック。 */
+  function _remoteTop(sc, top, viewH, scrollH) {
+    var t;
+    if (typeof scrollH === 'number' && isFinite(scrollH) && scrollH > 0) {
+      var peerMax = Math.max(0, scrollH - viewH);
+      var prog = peerMax > 0 ? Math.min(1, top / peerMax) : 0;
+      t = prog * Math.max(0, sc.scrollHeight - sc.clientHeight);
+    } else {
+      t = (_role() === 'follower') ? top + viewH : top - sc.clientHeight;
+    }
     return _clampTop(sc, t);
   }
   function _reducedMotion() {
@@ -686,10 +704,10 @@
       if (!sc) return;
     }
 
-    var target = _remoteTop(sc, msg.top, msg.viewH);
+    var target = _remoteTop(sc, msg.top, msg.viewH, msg.scrollH);
     var predT = null;
     if (typeof msg.pred === 'number' && isFinite(msg.pred)) {
-      predT = _remoteTop(sc, msg.pred, msg.viewH);
+      predT = _remoteTop(sc, msg.pred, msg.viewH, msg.scrollH);
     }
 
     var ctx = _ctxOf(sc, msg);
