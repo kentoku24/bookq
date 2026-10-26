@@ -169,6 +169,72 @@
 <script src="/static/browse/pairSync.js" defer></script>
 <script src="/static/progress/sync.js" defer></script>
 <script src="/static/app.js" defer></script>
+<script>
+/* Deploy-consistency watchdog: this document is served NetworkFirst (always
+ * fresh) but /static/* rides StaleWhileRevalidate, so right after a deploy a
+ * page can boot on OLD js under NEW html. Assert the globals this deploy's
+ * scripts must export; on a miss, drop only the stale .js entries, nudge the
+ * SW update, and reload once per mismatch streak (sessionStorage guard).
+ * Never deletes '/', offline.html or images — offline boot must survive. */
+(function () {
+  function stale() {
+    if (!document.getElementById('tile-grid')) return false;
+    return !(window.PairController &&
+        typeof window.PairController.sendUiSync === 'function' &&
+        typeof window.PairController.onEvent === 'function' &&
+        typeof window.openSidebar === 'function' &&
+        window.BOOKQ_BROWSE_SYNC === true);
+  }
+  try { window.__shellStale = stale; } catch (e) {}
+  function dropStaleJs() {
+    if (!window.caches) return Promise.resolve();
+    return caches.keys().then(function (names) {
+      return Promise.all(names.filter(function (n) {
+        return n.indexOf('bookq-shell-') === 0;
+      }).map(function (n) {
+        return caches.open(n).then(function (c) {
+          return c.keys().then(function (reqs) {
+            return Promise.all(reqs.filter(function (r) {
+              var p = new URL(r.url).pathname;
+              return p.indexOf('/static/') === 0 && p.slice(-3) === '.js';
+            }).map(function (r) { return c.delete(r); }));
+          });
+        });
+      }));
+    }).catch(function () {});
+  }
+  try { window.__shellDropStaleJs = dropStaleJs; } catch (e) {}
+  window.addEventListener('DOMContentLoaded', function () {
+    var KEY = 'bookq-wd-reloaded';
+    if (window.__BOOKQ_TEST_MODE__ === 'true') return;
+    if (!stale()) {
+      try { sessionStorage.removeItem(KEY); } catch (e) {}
+      return;
+    }
+    // Offline boot serves install-time html with SWR-freshened js — a marker
+    // rename would misdetect, and repair can't reach the network anyway.
+    if (navigator.onLine === false) return;
+    try {
+      if (sessionStorage.getItem(KEY)) {
+        if (typeof window.showErrorToast === 'function')
+          window.showErrorToast('更新の適用に失敗 — 通信状況を確認して再読み込みしてください');
+        return;
+      }
+      sessionStorage.setItem(KEY, '1');
+    } catch (e) { return; }
+    var jobs = [dropStaleJs()];
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+        jobs.push(navigator.serviceWorker.getRegistration()
+          .then(function (r) { if (r) return r.update(); })
+          .catch(function () {}));
+      }
+    } catch (e) {}
+    Promise.all(jobs).then(function () { location.reload(); },
+                           function () { location.reload(); });
+  });
+})();
+</script>
 {% if thumbnail_perf %}{% include "thumbnail_perf.html" %}{% endif %}
 </body>
 </html>

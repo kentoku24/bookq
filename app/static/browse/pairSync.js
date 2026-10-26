@@ -381,8 +381,17 @@
     }
     window.addEventListener('resize', function () { _requestSend(); },
                             {passive: true});
-    if (typeof pc.subscribe === 'function') _subs.push(pc.subscribe(_onCtlState));
-    if (typeof pc.onEvent === 'function') _subs.push(pc.onEvent(_onCtlEvent));
+    var ctlOk = typeof pc.subscribe === 'function' &&
+      typeof pc.onEvent === 'function';
+    if (ctlOk) {
+      _subs.push(pc.subscribe(_onCtlState));
+      _subs.push(pc.onEvent(_onCtlEvent));
+      // 健全マーカー: index.html の stale-shell watchdog が「このデプロイの
+      // 機能チェーンが揃っているか」を見る。旧 pairController には onEvent が
+      // 無いので、その混在では flag は立たず watchdog が修復に入る。
+      // _onCtlState より先に立てる — 中の例外でマーカー未設定誤診を防ぐ。
+      try { window.BOOKQ_BROWSE_SYNC = true; } catch (e) {}
+    }
     // subscribe は即時通知しない — 起動時点の状態で arm 判定する
     // （ペア中のリロードが selecting の途中で戻るケース）。
     _onCtlState(pc.state);

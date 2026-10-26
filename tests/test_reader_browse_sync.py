@@ -536,6 +536,61 @@ def test_clamped_remote_position_is_not_echoed(browser, server):
         ctx.close()
 
 
+def test_shell_watchdog_marks_healthy_and_stale(browser, server):
+    """Deploy-consistency watchdog: a page running this deploy's full shell
+    reports healthy; deleting any marker the new html requires reports stale
+    (the new-html + old-js mix that killed pair browse-sync after #122)."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        assert pg.evaluate("() => window.__shellStale()") is False
+        # Each marker independently — delete one, check, restore before the
+        # next case so a later assert can't pass on an earlier deletion.
+        assert pg.evaluate(
+            "() => { const f = window.openSidebar; delete window.openSidebar;"
+            "        const r = window.__shellStale();"
+            "        window.openSidebar = f; return r; }"
+        ) is True
+        assert pg.evaluate(
+            "() => { const b = window.BOOKQ_BROWSE_SYNC;"
+            "        window.BOOKQ_BROWSE_SYNC = false;"
+            "        const r = window.__shellStale();"
+            "        window.BOOKQ_BROWSE_SYNC = b; return r; }"
+        ) is True
+        assert pg.evaluate(
+            "() => { const f = window.PairController.sendUiSync;"
+            "        window.PairController.sendUiSync = undefined;"
+            "        const r = window.__shellStale();"
+            "        window.PairController.sendUiSync = f; return r; }"
+        ) is True
+        # everything restored — back to healthy
+        assert pg.evaluate("() => window.__shellStale()") is False
+
+        # Repair must prune only .js entries — '/', offline.html, css and
+        # icons stay so an offline boot still has a shell to boot from.
+        # (TEST_MODE skips SW registration, so seed the shell cache directly.)
+        pg.evaluate(
+            "() => caches.open('bookq-shell-v2').then(c => Promise.all(["
+            "  '/', '/static/offline.html', '/static/style.css',"
+            "  '/static/app.js', '/static/browse/pairSync.js',"
+            "  '/static/icons/icon-192.png'"
+            "].map(u => c.add(u))))"
+        )
+        pg.evaluate("() => window.__shellDropStaleJs()")
+        kept = pg.evaluate(
+            "() => caches.open('bookq-shell-v2').then(c => c.keys())"
+            "      .then(rs => rs.map(r => new URL(r.url).pathname))"
+        )
+        assert "/" in kept
+        assert "/static/offline.html" in kept
+        assert "/static/style.css" in kept
+        assert "/static/icons/icon-192.png" in kept
+        assert not any(p.endswith(".js") for p in kept), kept
+    finally:
+        ctx.close()
+
+
 def test_mirror_needs_tree_level_scrollable(browser, server):
     """Precondition guard: the fixture's root level must actually scroll at
     the small viewports used here — otherwise the offset tests above can
