@@ -333,12 +333,10 @@
     }
     // 直接呼び出しでも同じ拒否: 通常モードで非表示配下ならトップへ。
     // 判定不能（loading / error 無snapshot）は teardown せずキューだけ —
-    // navigateToFolder が _pendingBrowsePath に積み、復旧後の drain が潜り直す。
+    // navigateToFolder が _pendingNav に積み、復旧後の drain が潜り直す。
     var _FV = window.FolderVisibility;
     if (_FV && !_FV.showAll){
-      var _g = (typeof _FV.guardPath === "function") ? _FV.guardPath(path)
-        : (_FV.readyState === "loading" ? "pending"
-           : ((path && _FV.isHidden && _FV.isHidden(path)) ? "hidden" : "allow"));
+      var _g = _FV.guardPath(path);
       if (_g === "pending"){
         if (typeof window.navigateToFolder === "function") window.navigateToFolder(path);
         return;
@@ -457,15 +455,20 @@
     var _FV = window.FolderVisibility;
     if (_FV){
       var _vTarget = st ? st.folder : (bs ? bs.path : null);
-      var _vGuard = (typeof _FV.guardPath === "function") ? _FV.guardPath(_vTarget)
-        : (_FV.readyState === "loading" ? "pending"
-           : ((_vTarget && _FV.isHidden && _FV.isHidden(_vTarget)) ? "hidden" : "allow"));
+      var _vGuard = _FV.guardPath(_vTarget);
       if (_vGuard === "pending"){
         try {
           if (st && st.folder){
             try { window.urlRestoring = true; } catch(e2) { console.warn(e2); }
             if (typeof window.loadImages === "function") window.loadImages(st.folder);
           } else if (bs && typeof window.navigateToFolder === "function"){
+            // 保留中の drain は現在 viewMode で browse hash を書き直す —
+            // URL の ?v= を先に反映しないと tile で上書きされる。
+            var _nextMode = bs.v ? bs.v : "tile";
+            if (window.viewMode !== _nextMode){
+              window.viewMode = _nextMode;
+              if (window.updateFooterBtn) window.updateFooterBtn();
+            }
             window.navigateToFolder(bs.path);
           }
           if (typeof window.renderView === "function") window.renderView();

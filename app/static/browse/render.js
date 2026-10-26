@@ -24,16 +24,13 @@
   }
   function _getTileGrid(){ return document.getElementById("tile-grid"); }
   // Visibility presentation: only in 全表示 — normal mode emits no markup at
-  // all. Normal tiles omit editable → the module auto-derives it via
-  // isTopLevel (root-level node _fullPath, flattened names contain "/");
-  // read-child/read-self duplicates pass editable:false (state label only).
+  // all. Shared impl lives in the module (uiPresentation — showAll gate,
+  // editable auto-derive via isTopLevel, null-safe). facets.js uses the same
+  // one; read-child/read-self duplicates pass editable:false (label only).
   function _vis(path, editable){
     var FV = window.FolderVisibility;
-    if (!FV || !FV.showAll || typeof FV.presentation !== "function") return null;
-    try {
-      var opts = (editable === undefined) ? {} : {editable: !!editable};
-      return FV.presentation(path, opts);
-    } catch(e){ return null; }
+    return (FV && typeof FV.uiPresentation === "function")
+      ? FV.uiPresentation(path, editable) : null;
   }
   // While NO visibility snapshot exists at all the grid must never paint an
   // unfiltered list: loading → 読込中, error → 取得失敗+再試行. The gate sits

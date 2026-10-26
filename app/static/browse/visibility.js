@@ -19,6 +19,7 @@
   var _inited = false;
   var _owner = null;
   var _hidden = new Set();     // hidden ROOT keys — top-level node _fullPath (flattened names like "wrap/work" contain "/")
+  var _hiddenNorm = new Map(); // NFC+lowercase key → 元の hidden key（大小文字/合成差の直URLも同一視）
   var _hasSnapshot = false;    // true once any snapshot (cache or server) applied
   var _revision = 0;
   var _appliedSig = "";
@@ -37,8 +38,10 @@
   var _refreshFlight = null;
   var _refreshQueued = false;
   var _coalesceTimer = 0;
-  var _readyPromise = null;
   var _readyResolve = null;
+  // init 前から存在 — pair _boot 等の早期 ready() は最初の判定（GET/PUT の
+  // どちらか先に着く方）まで必ず待つ。init() はこれを再生成しない。
+  var _readyPromise = new Promise(function(res){ _readyResolve = res; });
 
   function _esc(s){ return window.OfflineCore.escapeHtml(s); }
 
@@ -96,6 +99,11 @@
     var changed = sig !== _appliedSig;
     _revision = revision;
     _hidden = new Set(list);
+    _hiddenNorm = new Map();
+    for (var _hi = 0; _hi < list.length; _hi++){
+      var _hk = _normKey(list[_hi]);
+      if (!_hiddenNorm.has(_hk)) _hiddenNorm.set(_hk, list[_hi]);
+    }
     _hasSnapshot = true;
     _appliedSig = sig;
     if (opts.cache !== false) _writeCache();
@@ -223,21 +231,48 @@
     var norm = _normalizePath(path);
     return (norm && norm.length) ? norm.split("/")[0] : null;
   }
-  // The hidden key that covers path (path === K or path under K + "/"), or
-  // null. Longest key wins so a hidden flattened root beats a hidden
-  // ancestor prefix.
-  function hiddenRootFor(path){
+  // 大小文字・Unicode 合成差を同一視する比較キー。大小文字無視の fs では
+  // サーバが "HIDE_ME" を "hide_me" に解決してしまうので、マッチングだけは
+  // この正規化で行う（_hidden 自体は表示・PUT・ツリー照合用に元名のまま）。
+  function _normKey(p){
+    var s = String(p);
+    try { s = s.normalize("NFC"); } catch(e){}
+    return s.toLowerCase();
+  }
+  // 3種の一致: self（path 自身が hidden key）、descendant（hidden key の
+  // 配下）、ancestor（path が hidden key の祖先 — 浅い window の未 flatten
+  // 名など、実ツリーノードでない経路が出す暫定 tile 用）。返す key は元名。
+  // covering（self/descendant）は longest key wins、ancestor は最短の
+  // hidden key（最も近い子孫）を返す。
+  function hiddenMatch(path){
     var norm = _normalizePath(path);
     if (norm === null || norm === "") return null;
-    var best = null;
-    _hidden.forEach(function(k){
-      if (typeof k === "string" && k &&
-          (norm === k || norm.indexOf(k + "/") === 0) &&
-          (best === null || k.length > best.length)){
-        best = k;
+    var nkey = _normKey(norm);
+    var bestCover = null;
+    var bestAnc = null;
+    _hiddenNorm.forEach(function(orig, kn){
+      if (nkey === kn || nkey.indexOf(kn + "/") === 0){
+        if (bestCover === null || kn.length > bestCover.length) bestCover = kn;
+      } else if (kn.indexOf(nkey + "/") === 0){
+        if (bestAnc === null || kn.length < bestAnc.length) bestAnc = kn;
       }
     });
-    return best;
+    if (bestCover !== null){
+      return { key: _hiddenNorm.get(bestCover) || bestCover,
+               kind: (bestCover === nkey) ? "self" : "descendant" };
+    }
+    if (bestAnc !== null){
+      return { key: _hiddenNorm.get(bestAnc) || bestAnc, kind: "ancestor" };
+    }
+    return null;
+  }
+  // The hidden key that covers path (path === K or path under K + "/"), or
+  // null. Longest key wins so a hidden flattened root beats a hidden
+  // ancestor prefix. ancestor 一致は含まない — deny 系は covering のみで
+  // 判定する（wrap への潜入自体は許し、中身は子孫側で絞る）。
+  function hiddenRootFor(path){
+    var m = hiddenMatch(path);
+    return (m && m.kind !== "ancestor") ? m.key : null;
   }
   // Positive-hidden only: with no snapshot applied the hidden set is empty,
   // so error/unknown state can never masquerade as "hidden".
@@ -245,7 +280,9 @@
   function isVisible(path){
     if (_showAll) return true;
     if (!_hasSnapshot) return false;   // fail closed — never assume "all visible"
-    return !isHidden(path);
+    // ancestor も落とす — hidden key の祖先に過ぎない暫定 tile は
+    // 通常モードでは出さない（中身が全部 hidden なので）。
+    return hiddenMatch(path) === null;
   }
 
   // ── top-level node set (editable roots) ──
@@ -313,17 +350,24 @@
   // path = node _fullPath; opts.editable = real top-level folder/archive
   // tile (omit → auto via isTopLevel). The hidden key K covering path wins
   // the badge: 「非表示」 on the root itself, 「上位フォルダが非表示」 on
-  // everything under it (K !== path).
+  // everything under it, 「配下に非表示」 on an ancestor-only match —
+  // ancestor tile は実ツリーノードでないので editable は必ず false
+  // （PUT すれば 404 になるトグルは絶対に出さない）。
   function presentation(path, opts){
     opts = opts || {};
-    var key = hiddenRootFor(path);
-    var hidden = key !== null;
-    var descendant = hidden && key !== path;
-    var cls = hidden ? (descendant ? "is-hidden-descendant" : "is-hidden") : "";
-    var badge = hidden
-      ? '<span class="visibility-badge">' + (descendant ? "上位フォルダが非表示" : "非表示") + "</span>"
-      : "";
+    var m = hiddenMatch(path);
+    var kind = m ? m.kind : null;
+    var hidden = (kind === "self" || kind === "descendant");
+    var cls = (kind === "self") ? "is-hidden"
+            : (kind === "descendant") ? "is-hidden-descendant"
+            : (kind === "ancestor") ? "is-hidden-ancestor" : "";
+    var badge = !kind ? ""
+      : '<span class="visibility-badge">' +
+        (kind === "self" ? "非表示"
+         : kind === "descendant" ? "上位フォルダが非表示"
+         : "配下に非表示") + "</span>";
     var editable = (opts.editable !== undefined) ? !!opts.editable : isTopLevel(path);
+    if (kind === "ancestor") editable = false;
     var btn = "";
     if (editable && path){
       var label = hidden ? "再表示する" : "非表示にする";
@@ -389,16 +433,23 @@
       }
       return res.json().then(function(j){
         var srvOwner = (typeof j.owner === "string" && j.owner) ? j.owner : _owner;
-        // The PUT response is the authoritative post-write snapshot — always
-        // applied, even if a newer-issued GET already landed (the GET's read
-        // predates the commit, so the write can only be fresher).
+        var srvRev = (typeof j.revision === "number") ? j.revision : 0;
+        // The PUT response is the authoritative post-write snapshot — applied
+        // when it is not behind the local revision. A PUT resolving BEHIND
+        // the current revision means another device's write landed via a
+        // GET while this write was in flight: the stale payload is not
+        // adopted; exactly one convergence GET pulls the true head instead.
+        // (owner 切替の force 採用はこの大小比較より優先。)
         _appliedGen = Math.max(_appliedGen, issueGen);
         _status = "ready"; _readOnly = false; _lastError = null;
-        _applySnapshot(srvOwner,
-          (typeof j.revision === "number") ? j.revision : 0,
-          Array.isArray(j.hiddenRoots) ? j.hiddenRoots : [],
-          { force: srvOwner !== _owner, allowDownrev: true });
-        _convergenceSent = false;
+        if (srvOwner !== _owner || srvRev >= _revision){
+          _applySnapshot(srvOwner, srvRev,
+            Array.isArray(j.hiddenRoots) ? j.hiddenRoots : [],
+            { force: srvOwner !== _owner, allowDownrev: true });
+          _convergenceSent = false;
+        } else {
+          _convergeOnce();
+        }
         _updateStatusDom();
         _resolveReady();
         return { ok: true };
@@ -478,7 +529,11 @@
       if (_saving) return;
       var root = btn.getAttribute("data-root");
       if (!root) return;
-      setHidden(root, !_hidden.has(root));
+      // self 一致なら格納キー（元名）を PUT 対象にする — 大小文字違いの
+      // キーでも解除が確実に同じ行を消す。hide は tile パスそのまま。
+      var _m = hiddenMatch(root);
+      var _selfHidden = !!(_m && _m.kind === "self");
+      setHidden(_selfHidden ? _m.key : root, !_selfHidden);
     });
   }
 
@@ -550,31 +605,42 @@
     h.addEventListener("pointerdown", function(e){
       var icon = e.target && e.target.closest ? e.target.closest("#browse-root-icon") : null;
       if (!icon || !h.contains(icon)) return;
+      // リリースがヘッダ外に出ても必ず icon（→ document まで bubble）へ届く
+      // よう pointerdown 時点で capture する — arm 時点の capture だと外側
+      // リリースで drag が残り、後の hover がアイコンを動かしてしまう。
+      try { icon.setPointerCapture(e.pointerId); } catch(_){}
       drag = { icon: icon, x0: e.clientX, y0: e.clientY, pid: e.pointerId, armed: false };
     });
-    h.addEventListener("pointermove", function(e){
-      if (!drag || e.pointerId !== drag.pid) return;
-      var dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
-      if (!drag.armed){
-        // Arm only on a clearly rightward move — vertical scroll or a left
-        // flick releases the gesture instead of hijacking it.
-        if (dx > 12 && dx > Math.abs(dy) * 1.2){
-          drag.armed = true;
-          try { drag.icon.setPointerCapture(e.pointerId); } catch(_){}
-        } else if (dx < -12 || Math.abs(dy) > 12){ drag = _reset(drag); return; }
-        else return;
-      }
-      e.preventDefault();
-      drag.icon.style.transform = "translateX(" + Math.max(0, dx) + "px)";
-    });
-    h.addEventListener("pointerup", function(e){
-      if (!drag || e.pointerId !== drag.pid) return;
-      if (drag.armed && _edge(e.clientX)) _activate();
-      else drag = _reset(drag);
-    });
-    h.addEventListener("pointercancel", function(e){
-      if (drag && e.pointerId === drag.pid) drag = _reset(drag);
-    });
+    // move/up/cancel は document 側で拾う — capture retarget でもそのまま
+    // bubble するので、ヘッダ外リリースでも必ず drag を閉じられる。
+    if (typeof document !== "undefined"){
+      document.addEventListener("pointermove", function(e){
+        if (!drag || e.pointerId !== drag.pid) return;
+        var dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+        if (!drag.armed){
+          // Arm only on a clearly rightward move — vertical scroll or a left
+          // flick releases the gesture instead of hijacking it.
+          if (dx > 12 && dx > Math.abs(dy) * 1.2){
+            drag.armed = true;
+          } else if (dx < -12 || Math.abs(dy) > 12){ drag = _reset(drag); return; }
+          else return;
+        }
+        e.preventDefault();
+        drag.icon.style.transform = "translateX(" + Math.max(0, dx) + "px)";
+      });
+      document.addEventListener("pointerup", function(e){
+        if (!drag || e.pointerId !== drag.pid) return;
+        if (drag.armed && _edge(e.clientX)) _activate();
+        else drag = _reset(drag);
+      });
+      document.addEventListener("pointercancel", function(e){
+        if (drag && e.pointerId === drag.pid) drag = _reset(drag);
+      });
+    }
+    if (typeof window !== "undefined"){
+      // OS 横取り等で up/cancel が欠けても残さない — 保険のリセット。
+      window.addEventListener("blur", function(){ drag = _reset(drag); });
+    }
   }
 
   function init(opts){
@@ -583,13 +649,21 @@
     opts = opts || {};
     _owner = (typeof opts.owner === "string" && opts.owner) ? opts.owner : null;
     _onChange = (typeof opts.onChange === "function") ? opts.onChange : null;
-    _readyPromise = new Promise(function(res){ _readyResolve = res; });
     _offline = (typeof navigator !== "undefined" && navigator.onLine === false);
     _status = "loading"; _updateStatusDom();
     // Same-owner cached snapshot applies immediately (marks read-only intent
     // until the GET resolves); a mismatched/corrupt cache is ignored entirely.
     var cached = _owner ? _readCache(_owner) : null;
     if (cached) _applySnapshot(cached.owner, cached.revision, cached.hiddenRoots, { cache: false });
+    // index.html 埋め込み snapshot — render 時点のサーバ値。owner 一致なら
+    // 初回 GET を待たず第一描画から絞り込み済みになり、GET は再同期だけに
+    // なる。cache より古い rev は _applySnapshot の単調性が弾く。
+    var embed = opts.snapshot;
+    if (embed && typeof embed === "object" && embed.owner === _owner &&
+        typeof embed.revision === "number" && Array.isArray(embed.hiddenRoots)){
+      _applySnapshot(embed.owner, embed.revision, embed.hiddenRoots, { cache: false });
+      _writeCache();
+    }
     _bindDelegatedToggle();
     _bindRefreshTriggers();
     _bindModeButtons();
@@ -597,7 +671,7 @@
     refresh();
   }
 
-  function ready(){ return _readyPromise || Promise.resolve(); }
+  function ready(){ return _readyPromise; }
 
   function snapshot(){
     return {
@@ -617,6 +691,14 @@
     };
   }
 
+  // render.js / facets.js 共用の薄い表示ヘルパ — showAll 中だけ
+  // presentation を返し、内部例外でも必ず null で落ちる。
+  function uiPresentation(path, editable){
+    if (!_showAll) return null;
+    var opts = (editable === undefined) ? {} : {editable: !!editable};
+    try { return presentation(path, opts); } catch(e){ return null; }
+  }
+
   window.FolderVisibility = {
     apiVersion: API_VERSION,
     init: init,
@@ -624,12 +706,14 @@
     refresh: refresh,
     rootForPath: rootForPath,
     hiddenRootFor: hiddenRootFor,
+    hiddenMatch: hiddenMatch,
     isHidden: isHidden,
     isVisible: isVisible,
     isTopLevel: isTopLevel,
     setTopLevelPaths: setTopLevelPaths,
     guardPath: guardPath,
     blockedGridHtml: blockedGridHtml,
+    uiPresentation: uiPresentation,
     get showAll(){ return _showAll; },
     setShowAll: setShowAll,
     get readyState(){ return _status; },

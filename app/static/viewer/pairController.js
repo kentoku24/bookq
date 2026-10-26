@@ -37,6 +37,7 @@
   var _selIssued = false;    // a SET_ACTIVITY selecting is outstanding
   var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
   var _heldCommit = null;    // newest suppressed commit while leader browses
+  var _pendingCommit = null; // newest commit held while visibility is pending
   var _lastApply = null;     // newest committed args, for display re-arm
   var _appliedKey = null;    // display key of the newest APPLIED commit
   var _resolveGen = 0;       // generation guard for async page resolution
@@ -118,9 +119,13 @@
     // denial records nothing in _lastApply/_heldCommit so the sidebar-close
     // replay paths cannot resurrect it.
     var FV = window.FolderVisibility;
-    if (FV && FV.readyState === 'error' && !FV.hasSnapshot) {
-      // 判定不能（error・snapshot 無し）— commit を適用も拒否もしない。
-      // ペアは維持し、次の peer 操作で再同期される。
+    if (FV && !FV.showAll &&
+        (FV.readyState === 'loading' || !FV.hasSnapshot)) {
+      // 判定不能（idle/loading/error・snapshot 無し — guardPath の pending
+      // と同じ条件）— 適用も拒否もせず最新 1 件だけ保持する。ready /
+      // readonly への遷移エッジで retryPendingCommit がこの同じ経路へ戻し、
+      // hidden かどうかはその時点で再評価される。
+      _pendingCommit = {snap: snap, manifest: manifest, o: o};
       return;
     }
     if (FV && FV.readyState !== 'loading' &&
@@ -393,6 +398,7 @@
     _openWorkSent = false;
     _selIssued = false;
     _heldCommit = null;
+    _pendingCommit = null;
     _lastApply = null;
     _appliedKey = null;
     _resolveGen++;
@@ -427,6 +433,7 @@
       _sideObs = null;
       _sideOpen = null;
       _heldCommit = null;
+      _pendingCommit = null;
       _appliedKey = null;
     }
     if (bound) _maybeBootstrapWork(st);
@@ -594,6 +601,16 @@
         _client = null;
       }
     },
+    /* 判定 pending 中に保持した commit の再適用 — app.js の visibility
+     * onChange が ready/readonly エッジで呼ぶ。保持は最新 1 件のみで、
+     * deny/適用の再評価は _applyCommitted 自身が行う。 */
+    retryPendingCommit: function () {
+      var c = _pendingCommit;
+      _pendingCommit = null;
+      if (!c) return;
+      try { _applyCommitted(c.snap, c.manifest, c.o); }
+      catch (e) { /* replay is best-effort */ }
+    },
     get client() { return _client; },
     get state() {
       return _client ? _client.state : {status: 'idle'};
@@ -603,6 +620,13 @@
 
   /* Test seam: an injected controller (test_reader_pairing_ui.py installs
    * window.PairController before defer scripts run) always wins. */
+  if (window.__BOOKQ_TEST_MODE__ === 'true') {
+    window.__pairCtlTest = {
+      applyCommitted: _applyCommitted,
+      get pendingCommit() { return _pendingCommit; },
+      get heldCommit() { return _heldCommit; },
+    };
+  }
   if (!globalThis.PairController) {
     globalThis.PairController = api;
     if (typeof document !== 'undefined' &&

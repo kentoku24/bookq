@@ -29,13 +29,12 @@
     }
     return out;
   }
+  // 表示プレゼンテーションは browse/render.js と同じ共有 impl
+  // （FV.uiPresentation — showAll 門・isTopLevel の editable 自動導出込み）。
   function _vis(path, editable){
     var FV = window.FolderVisibility;
-    if (!FV || !FV.showAll || typeof FV.presentation !== "function") return null;
-    try {
-      var opts = (editable === undefined) ? {} : {editable: !!editable};
-      return FV.presentation(path, opts);
-    } catch(e){ return null; }
+    return (FV && typeof FV.uiPresentation === "function")
+      ? FV.uiPresentation(path, editable) : null;
   }
   // Same no-snapshot gate the browse renderers use — a search paint must
   // never expose an unfiltered list while the visibility judgment is out.
@@ -114,9 +113,15 @@
     if(path && typeof path === 'object' && path.fetch){ deps = path; path = deps.path || ""; }
     var _d = _resolveDeps(deps);
     var myGen = _incFacetGen();
-    var q = path ? ("?path=" + encodeURIComponent(path)) : "";
+    var qp = new URLSearchParams();
+    if (path) qp.set("path", path);
+    // 全表示: ask the server for the owner's full facet set — hidden works'
+    // artists/tags must be selectable while browsing everything.
+    var _FVf = window.FolderVisibility;
+    if (_FVf && _FVf.showAll) qp.set("include_hidden", "1");
+    var qs = qp.toString();
     try {
-      var res = await _d.fetch("/api/metadata/facets" + q);
+      var res = await _d.fetch("/api/metadata/facets" + (qs ? "?" + qs : ""));
       if (myGen !== _getFacetGenVal()) return;
       if (!res.ok) throw new Error("facets HTTP " + res.status);
       _setFacets(await res.json());
@@ -142,6 +147,10 @@
     if (activeFilters.artist && activeFilters.artist.length) params.set('artist', activeFilters.artist.join(','));
     if (activeFilters.tag && activeFilters.tag.length) params.set('tag', activeFilters.tag.join(','));
     params.set('sort', activeFilters.sort || 'relevance');
+    // 全表示: the server's hidden-root exclusion is the owner's own set —
+    // opt out so hidden works come back (with badges) in show-all mode.
+    var _FVs = window.FolderVisibility;
+    if (_FVs && _FVs.showAll) params.set('include_hidden', '1');
     try {
       var res = await _d.fetch('/api/search?' + params.toString());
       if (myGen !== _searchGen) return;
