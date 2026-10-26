@@ -132,8 +132,9 @@ def _synced(pg1, pg2, timeout=15000):
     """Wait until device 2 displays device 1's committed spread+revision."""
     pg1.wait_for_function(
         "() => window.PairController.state.spreadId != null", timeout=timeout)
-    sid = pg1.evaluate("() => window.PairController.state.spreadId")
-    rev = pg1.evaluate("() => window.PairController.state.revision")
+    sid, rev = pg1.evaluate(
+        "() => { var s = window.PairController.state;"
+        " return [s.spreadId, s.revision]; }")
     pg2.wait_for_function(
         "([s, r]) => window.PairController.state.spreadId === s"
         " && window.PairController.state.revision === r",
@@ -669,12 +670,22 @@ def test_rapid_turns_converge_on_latest(devs):
     pl, pf = devs
     _open(pl, "long", "p005.png")
     _pair_now(pl, pf)
-    s0 = _pv(pl)["spreadId"]
+    assert _pv(pl)["spreadId"] == "c0:s2"
+    rev0 = _cstate(pl)["revision"]
+    n0 = len(_intents(pl, {"turn"}))
     for _ in range(5):
         pl.keyboard.press("ArrowLeft")
-    pl.wait_for_function("(s) => window.PairedView.state().spreadId !== s", arg=s0)
+    for p in (pl, pf):
+        p.wait_for_function(
+            "(r) => window.PairController.state.revision >= r"
+            " && window.PairedView.state().spreadId === 'c0:s7'",
+            arg=rev0 + 5, timeout=15000)
     sid, rev = _synced(pl, pf)
+    turns = _intents(pl, {"turn"})[n0:]
+    assert len(turns) == 5
+    assert all(t["ok"] for t in turns)
     assert _pv(pl)["spreadId"] == _pv(pf)["spreadId"] == sid
+    assert _cstate(pl)["revision"] == _cstate(pf)["revision"]
     assert _pv(pl)["anchorRef"] == _pv(pf)["anchorRef"]
 
 

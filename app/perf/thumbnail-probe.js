@@ -16,7 +16,8 @@
     return r.width > 0 && r.height > 0 && r.bottom > clip.top &&
       r.top < clip.bottom && r.right > clip.left && r.left < clip.right;
   }
-  function sample(now) {
+  function sample() {
+    const now = performance.now();
     const grid = document.getElementById("tile-grid");
     const sidebar = document.getElementById("sidebar");
     const scroll = document.getElementById("sidebar-scroll");
@@ -50,12 +51,14 @@
       keys.push([ids.get(img), src]);
       let state = decoded.get(img);
       if (!state || state.src !== src) {
-        state = {src, ok: false, error: false};
+        state = {src, ok: false, error: false, pending: false};
         decoded.set(img, state);
-        if (src) {
-          // A fulfilled decode is stronger than img.complete, which includes 404s.
-          img.decode().then(() => { state.ok = true; }, () => { state.error = true; });
-        }
+      }
+      if (src && img.complete && img.naturalWidth > 0 &&
+          !state.ok && !state.error && !state.pending) {
+        state.pending = true;
+        // A fulfilled decode is stronger than img.complete, which includes 404s.
+        img.decode().then(() => { state.ok = true; }, () => { state.error = true; });
       }
       if (src && img.complete && img.naturalWidth > 0 && state.ok) loaded++;
       else if (src && (state.error || (img.complete && img.naturalWidth === 0))) broken++;
