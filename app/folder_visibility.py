@@ -65,18 +65,24 @@ def visibility_owner(user_key: str, secret_key: str) -> str:
 def validate_root(root: object) -> str:
     """Return *root* unchanged, or raise ``ValueError`` for an invalid value.
 
-    A root is a single non-empty top-level path segment: no separators, NUL,
-    or dot names (the scanner skips ``.*`` entries entirely), and bounded in
-    length. Leading/trailing whitespace and case are preserved verbatim.
+    A root is the normalized path of a top-level tree node — one or more
+    segments, and a flattened scanner node's name legitimately contains
+    ``/`` (``wrap/work``). No NUL or backslashes, no empty / ``.`` / ``..``
+    segments (so no leading/trailing/doubled ``/``), no dot-leading segment
+    (the scanner skips ``.*`` entries), and bounded in length. The value
+    must already be normalized; whitespace and case are preserved verbatim.
     """
     if not isinstance(root, str) or not root:
         raise ValueError("root must be a non-empty string")
     if len(root) > MAX_ROOT_LENGTH:
         raise ValueError("root too long")
-    if "/" in root or "\\" in root or "\x00" in root:
-        raise ValueError("root must be a single path segment")
-    if root.startswith("."):
-        raise ValueError("root must not be a dot name")
+    if "\\" in root or "\x00" in root:
+        raise ValueError("root must not contain backslash or NUL")
+    for seg in root.split("/"):
+        if not seg or seg in (".", ".."):
+            raise ValueError("root must be a normalized path")
+        if seg.startswith("."):
+            raise ValueError("root must not contain a dot name")
     return root
 
 

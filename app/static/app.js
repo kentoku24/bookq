@@ -1217,6 +1217,19 @@
     try {
       if (typeof window !== "undefined") window.__cc_thumbIndex = {tree:nodes, single:b.singles, full:b.full};
     } catch(e) { console.warn(e); }
+    // トップ階層ノードの _fullPath を FolderVisibility へ — 非表示キー
+    // （flatten 名は / を含む）と editable 判定の両方がここを見る。
+    try {
+      var _fv = (typeof window !== "undefined") ? window.FolderVisibility : null;
+      if (_fv && typeof _fv.setTopLevelPaths === "function"){
+        var _tops = [];
+        for (var _ti = 0; nodes && _ti < nodes.length; _ti++){
+          var _tn = nodes[_ti];
+          if (_tn && _tn.type === "folder" && _tn._fullPath) _tops.push(_tn._fullPath);
+        }
+        _fv.setTopLevelPaths(_tops);
+      }
+    } catch(e) { console.warn(e); }
   }
   // Sync build+publish WITHOUT superseding: callers that only need a map for
   // the current tree (buildNodeMap read/repair) must not cancel an in-flight
@@ -1294,13 +1307,12 @@
       children = node.children.filter(n => n.type === "folder");
     }
     // 非表示適用はファセット絞り込み・shallow 早期 return より先 — raw tree
-    // は削らず、ここで表示側だけを絞る。GET 未解決の loading 中でも
-    // キャッシュ snapshot があればそれで絞る（復帰ユーザーの非表示 flash 防止）;
-    // snapshot 無しの初回だけ未絞り込みで先出しする（空グリッド flash 回避）。
+    // は削らず、ここで表示側だけを絞る。snapshot 無しの loading/error は
+    // render 側の blockedGridHtml 門が一覧自体を出さないので、ここでは
+    // isVisible の fail-closed だけ見ればよい。FV 無しの stale shell では
+    // 絞らない（watchdog が修復する）。
     var FV = window.FolderVisibility;
-    if (FV && !FV.showAll && (FV.readyState !== "loading" || FV.hasSnapshot)){
-      children = children.filter(n => FV.isVisible(n._fullPath));
-    }
+    if (FV && !FV.showAll) children = children.filter(n => FV.isVisible(n._fullPath));
     if (filtersActive()){
       // Shallow window: nodes carry no subtree_facets, so nodeMatchesFilters
       // would false out everything — never filter, show all + 読込中 badge.
@@ -1355,8 +1367,14 @@
 
   function navigateToFolder(path){
     var FV = window.FolderVisibility;
-    if (FV && FV.readyState === "loading"){ _pendingBrowsePath = path; return; }
-    if (FV && !FV.showAll && path && !FV.isVisible(path)){ redirectHiddenToTop(); return; }
+    if (FV){
+      // guardPath: 判定不能（loading / error 無snapshot）はキューだけ、
+      // hidden はトップへ、それ以外は通常通り潜る。
+      var _g = (typeof FV.guardPath === "function") ? FV.guardPath(path)
+        : (FV.readyState === "loading" ? "pending" : "allow");
+      if (_g === "pending"){ _pendingBrowsePath = path; return; }
+      if (_g === "hidden"){ redirectHiddenToTop(); return; }
+    }
     if (_shallowMode){
       // Shallow window: target children==[] — queue the drill-down in the URL
       // (pushState fires no hashchange; applyUrlState runs once post-full) and
@@ -1522,9 +1540,16 @@
       // applyUrlState early-returns while !treeLoaded — one re-run now that
       // the full tree resolves them.
       const queuedView = _pendingViewFolder; _pendingViewFolder = null;
-      _pendingBrowsePath = null;
+      const queuedBrowse = _pendingBrowsePath; _pendingBrowsePath = null;
       if (queuedView) { loadImages(queuedView); }
       else if (typeof location !== "undefined" && location.hash) { applyUrlState(); }
+      if (queuedBrowse && _pendingBrowsePath === null &&
+          !(typeof location !== "undefined" && location.hash)){
+        // visibility-pending browse queue (no URL written for it) — keep it
+        // stashed for the ready-edge drain instead of dropping it; a hash
+        // always wins (URL is the canonical queue for deep-links).
+        _pendingBrowsePath = queuedBrowse;
+      }
       return true;
     }
     // Stage 1: shallow first paint (direct children only, no facets).
@@ -1847,13 +1872,8 @@
   // null = 上端、path = そのタイルを上端に。指定できるのは
   // navigateToFolder / restoreBrowse / resetToTop の 3 経路だけ（設計 §3.1）。
   function renderView(opts){
-    var FV = window.FolderVisibility;
-    if (FV && FV.readyState === "loading"){
-      // 設定GETの判断が着くまでは無防備な一覧を出さない（読込中表示）。
-      tileGrid.classList.remove("list-mode", "card-mode");
-      tileGrid.innerHTML = '<div style="color:#555;text-align:center;padding:20px;font-size:13px">読込中…</div>';
-      return;
-    }
+    // 判定不能（loading / error 無snapshot）の一覧ブロックは renderer 内の
+    // blockedGridHtml 門が担う — renderBrowse 直叩き経路も同じ門を通る。
     tileGrid.classList.remove("list-mode", "card-mode");
     sidebar.classList.remove("tile-full");
     viewer.classList.remove("tile-full");
@@ -2007,14 +2027,23 @@
 
   async function loadImages(fullPath){
     var FV = window.FolderVisibility;
-    if (FV && FV.readyState === "loading"){
-      // 設定GETの判断が着くまではキュー — ready() 解決時に drain される
-      _pendingViewFolder = fullPath;
-      const _emp = document.getElementById("empty");
-      if (_emp){ _emp.innerHTML = "<p>読込中…</p>"; _emp.style.display = "flex"; }
-      return;
+    if (FV){
+      // 判定不能（loading / error 無snapshot）は open をキュー — ready/
+      // readonly 遷移時に drain される。error も同じく保留する（隠れて
+      // いるかもしれない本を開かない）。hidden だけ静かにトップへ。
+      var _g = (typeof FV.guardPath === "function") ? FV.guardPath(fullPath)
+        : (FV.readyState === "loading" ? "pending" : "allow");
+      if (_g === "pending"){
+        _pendingViewFolder = fullPath;
+        const _emp = document.getElementById("empty");
+        if (_emp){
+          _emp.innerHTML = (FV.readyState === "error") ? "<p>取得失敗 — 再試行してください</p>" : "<p>読込中…</p>";
+          _emp.style.display = "flex";
+        }
+        return;
+      }
+      if (_g === "hidden"){ redirectHiddenToTop(); return; }
     }
-    if (FV && !FV.showAll && fullPath && !FV.isVisible(fullPath)){ redirectHiddenToTop(); return; }
     if (_shallowMode){
       // Contract: never run on a children==[] shallow node — queue until the
       // full tree lands (the hash stays the queue for deep-links; clicks
@@ -2150,7 +2179,8 @@
       }
 
       // await 後の再判定: 取得中に通常モードで禁止対象になった本は開かない
-      if (FV && !FV.showAll && !FV.isVisible(fullPath)){ redirectHiddenToTop(); return; }
+      // （positive hidden のみ — error/unknown では既に開いた読書を壊さない）
+      if (FV && !FV.showAll && FV.isHidden(fullPath)){ redirectHiddenToTop(); return; }
       // Build spacer-mapping arrays
       realToGlobalIdx = [];
       globalToRealIdx = [];
@@ -2960,7 +2990,8 @@
       case "openWork": {
         const folder = intent.folder;
         var FV = window.FolderVisibility;
-        if (FV && FV.readyState !== "loading" && !FV.showAll && folder && !FV.isVisible(folder)){ redirectHiddenToTop(); return; }
+        // positive hidden のみ拒否 — 判定不能時は loadImages 自身がキューする
+        if (FV && FV.readyState !== "loading" && !FV.showAll && folder && FV.isHidden(folder)){ redirectHiddenToTop(); return; }
         if (intent.via === "resume") {
           // Continue-reading: a saved folder that is no longer a leaf steps
           // out to its browse parent first, then opens on a beat (unchanged
@@ -3217,6 +3248,11 @@
     // 同期を解除してトップへ戻す（redirectHiddenToTop が teardown → leave →
     // resetToTop の順を担う）。folder を解決できない manifest は拒否しない。
     var FV = window.FolderVisibility;
+    if (FV && FV.readyState === "error" && !FV.hasSnapshot){
+      // 判定不能（error・snapshot 無し）— commit を適用も拒否もしない。
+      // ペアは維持し、次の peer 操作で再同期される。
+      return;
+    }
     if (FV && FV.readyState !== "loading" &&
         typeof FV.committedFolderHidden === "function" &&
         FV.committedFolderHidden(manifest, snapshot)){
@@ -4286,15 +4322,28 @@
 
   // ── folder visibility (非表示トップ root) wiring ──
   // onChange: 同じ snapshot/モードのまま再描画し、通常モードで現在の閲覧・
-  // 待機中の移動が禁止対象になったらトップへ戻す。
+  // 待機中の移動が禁止対象になったらトップへ戻す。判断が ready/readonly
+  // へ立つたびに drain する — 起動時だけでなく error→ready の復旧や
+  // 再同期でも、キューした遷移をここで解放する（drain 先は各ガードを
+  // 再評価するので hidden 対象はその先で拒否される）。
   function _visibilityOnChange(){
     try {
       var FV = window.FolderVisibility;
-      if (FV && !FV.showAll && FV.readyState !== "loading"){
-        var targets = [_pendingViewFolder, _pendingBrowsePath, currentFolder, currentBrowsePath];
-        for (var i = 0; i < targets.length; i++){
-          var p = targets[i];
-          if (p && !FV.isVisible(p)) { redirectHiddenToTop(); return; }
+      if (FV){
+        var _st = FV.readyState;
+        if ((_st === "ready" || _st === "readonly") && (_pendingViewFolder || _pendingBrowsePath)){
+          var qv = _pendingViewFolder; _pendingViewFolder = null;
+          var qb = _pendingBrowsePath; _pendingBrowsePath = null;
+          if (qv){ loadImages(qv); return; }
+          navigateToFolder(qb);
+          return;
+        }
+        if (!FV.showAll && _st !== "loading"){
+          var targets = [_pendingViewFolder, _pendingBrowsePath, currentFolder, currentBrowsePath];
+          for (var i = 0; i < targets.length; i++){
+            var p = targets[i];
+            if (p && FV.isHidden(p)) { redirectHiddenToTop(); return; }
+          }
         }
       }
       renderView();

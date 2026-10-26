@@ -86,9 +86,11 @@
    * deny (the navigation layer queues instead). */
   function _visBlocksFolder(folder) {
     var FV = window.FolderVisibility;
+    // positive hidden のみ拒否 — error/unknown では通さない対象を
+    // 「非表示扱い」にしない（ナビ層がキューするのと同じ約束）。
     return !!(FV && FV.readyState !== 'loading' && !FV.showAll &&
-              typeof FV.isVisible === 'function' && folder &&
-              !FV.isVisible(folder));
+              typeof FV.isHidden === 'function' && folder &&
+              FV.isHidden(folder));
   }
 
   function _denyHiddenWork() {
@@ -116,6 +118,11 @@
     // denial records nothing in _lastApply/_heldCommit so the sidebar-close
     // replay paths cannot resurrect it.
     var FV = window.FolderVisibility;
+    if (FV && FV.readyState === 'error' && !FV.hasSnapshot) {
+      // 判定不能（error・snapshot 無し）— commit を適用も拒否もしない。
+      // ペアは維持し、次の peer 操作で再同期される。
+      return;
+    }
     if (FV && FV.readyState !== 'loading' &&
         typeof FV.committedFolderHidden === 'function' &&
         FV.committedFolderHidden(manifest, snap)) {

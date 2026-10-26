@@ -9,13 +9,11 @@ that was switched in another tab.
 
 import hmac
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.archive import is_archive_file
 from app.auth import require_auth
 from app.folder_visibility import (
     VisibilitySnapshot,
@@ -23,8 +21,7 @@ from app.folder_visibility import (
     validate_root,
     visibility_owner,
 )
-from app.routes import _is_within
-from app.scanner import is_pdf_file
+from app.routes import _ensure_tree_and_index
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +63,23 @@ async def _store_call(fn, *args):
         raise _err(503, "visibility store unavailable")
 
 
-def _classify_root(downloads_path: Path, root: str) -> str:
-    """'dir'/'archive'/'pdf' for a supported top-level entry, else 'missing'/'outside'."""
-    target = downloads_path / root
-    if not _is_within(downloads_path, target):
-        return "outside"
-    if target.is_dir():
-        return "dir"
-    if is_archive_file(target):
-        return "archive"
-    if is_pdf_file(target):
-        return "pdf"
-    return "missing"
+async def _top_level_folder_names(request: Request) -> set[str]:
+    """``name``s of the current tree's top-level ``type == "folder"`` nodes.
+
+    Hidden keys are top-level node identities, so a flattened scanner node
+    like ``wrap/work`` validates by tree membership — never by probing the
+    filesystem (``wrap`` alone is not a tree node and must not validate).
+    """
+    try:
+        tree, _index = await _ensure_tree_and_index(request)
+    except Exception as exc:
+        logger.warning("folder-visibility tree unavailable type=%s", type(exc).__name__)
+        raise _err(503, "library tree unavailable")
+    return {
+        n.get("name")
+        for n in tree
+        if isinstance(n, dict) and n.get("type") == "folder"
+    }
 
 
 def _respond(owner: str, snap: VisibilitySnapshot) -> JSONResponse:
@@ -108,7 +110,14 @@ async def put_folder_visibility(request: Request, user: dict = Depends(require_a
     header_owner = request.headers.get(OWNER_HEADER)
     if header_owner is None:
         raise _err(403, "visibility owner header required")
-    if not hmac.compare_digest(header_owner, owner):
+    # compare_digest on a non-ASCII str raises TypeError — compare bytes:
+    # header bytes decode as latin-1 per RFC 7230; the computed owner is
+    # always ASCII hex. Anything unencodable simply mismatches.
+    try:
+        header_bytes = header_owner.encode("latin-1")
+    except UnicodeEncodeError:
+        header_bytes = b"\x00"
+    if not hmac.compare_digest(header_bytes, owner.encode("ascii")):
         raise _err(409, "visibility owner mismatch")
 
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
@@ -134,10 +143,12 @@ async def put_folder_visibility(request: Request, user: dict = Depends(require_a
     if hidden:
         snap = await _store_call(store.read, user_key)
         if root not in snap.hidden_roots:
-            kind = await run_in_threadpool(_classify_root, settings.downloads_path, root)
-            if kind == "outside":
-                raise _err(403, "root is outside the library")
-            if kind == "missing":
+            # Must equal a current top-level folder node's name — tree
+            # membership already subsumes containment and archive/PDF roots
+            # (both scan as folder nodes). Unhide skips this so a root
+            # deleted from disk can still be cleared.
+            names = await _top_level_folder_names(request)
+            if root not in names:
                 raise _err(404, "no such top-level folder or archive")
     snap = await _store_call(store.set_hidden, user_key, root, hidden)
     return _respond(owner, snap)

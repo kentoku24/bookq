@@ -279,9 +279,15 @@
     // 代入しない。同期を解除してトップへ戻す。表示設定やモードは
     // UI_SYNC へ混ぜない（§8: モードは端末ローカル）。
     var FV = _w().FolderVisibility;
+    if (FV && FV.readyState === 'error' && !FV.hasSnapshot){
+      // 判定不能（error・snapshot 無し）— 反映も解除もしない。未適用と
+      // して stash し、次 frame・grid 変化・復旧後の再判定に委ねる。
+      _stashPending(msg, at);
+      return;
+    }
     if (FV && FV.readyState !== 'loading' && !FV.showAll &&
-        msg.path && typeof FV.isVisible === 'function' &&
-        !FV.isVisible(msg.path) &&
+        msg.path && typeof FV.isHidden === 'function' &&
+        FV.isHidden(msg.path) &&
         typeof _w().redirectHiddenToTop === 'function') {
       _w().redirectHiddenToTop();
       return;

@@ -24,16 +24,24 @@
   }
   function _getTileGrid(){ return document.getElementById("tile-grid"); }
   // Visibility presentation: only in 全表示 — normal mode emits no markup at
-  // all. Editable = real top-level folder/archive tile (single-segment path);
-  // read-child/read-self duplicates pass editable:false (state label, no button).
+  // all. Normal tiles omit editable → the module auto-derives it via
+  // isTopLevel (root-level node _fullPath, flattened names contain "/");
+  // read-child/read-self duplicates pass editable:false (state label only).
   function _vis(path, editable){
     var FV = window.FolderVisibility;
     if (!FV || !FV.showAll || typeof FV.presentation !== "function") return null;
-    try { return FV.presentation(path, {editable: !!editable}); } catch(e){ return null; }
+    try {
+      var opts = (editable === undefined) ? {} : {editable: !!editable};
+      return FV.presentation(path, opts);
+    } catch(e){ return null; }
   }
-  function _editableRoot(path){
+  // While NO visibility snapshot exists at all the grid must never paint an
+  // unfiltered list: loading → 読込中, error → 取得失敗+再試行. The gate sits
+  // inside each renderer so renderView / renderBrowse / direct calls all
+  // pass through it (a snapshot — cached or live — renders normally).
+  function _visBlocked(){
     var FV = window.FolderVisibility;
-    return !!(FV && path && FV.rootForPath(path) === path);
+    return (FV && typeof FV.blockedGridHtml === "function") ? FV.blockedGridHtml() : null;
   }
 
   function splitDisplayName(name) {
@@ -555,8 +563,9 @@
     return _tilePlaceholder();
   }
   function renderTiles(){
-    var folders = _getBrowseChildren();
     var tileGrid=_getTileGrid(); if(!tileGrid) return;
+    var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
+    var folders = _getBrowseChildren();
     var readChildren=_readChildNodes(folders);
     var rootLoose=_rootHasLooseImages();
     var ctx=_buildRenderCtx(folders.concat(readChildren));
@@ -564,7 +573,7 @@
     for(var f of folders){
       var isActive = f._fullPath === _getCurrentFolder();
       var cls = isActive ? "tile active" : "tile";
-      var vis = _vis(f._fullPath, _editableRoot(f._fullPath));
+      var vis = _vis(f._fullPath);
       if (vis && vis.className) cls += " " + vis.className;
       var folderEnc = _encodePath(f._fullPath);
       var progress = _progressFor(ctx, f._fullPath);
@@ -598,8 +607,9 @@
     var el=document.getElementById("folder-count"); if(el) el.textContent=(folders.length+readChildren.length+(rootLoose?1:0))+" 件";
   }
   function renderList(){
-    var nodes = _getBrowseChildren();
     var tileGrid=_getTileGrid(); if(!tileGrid) return;
+    var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
+    var nodes = _getBrowseChildren();
     var readChildren=_readChildNodes(nodes);
     var rootLoose=_rootHasLooseImages();
     var ctx=_buildRenderCtx(nodes.concat(readChildren));
@@ -608,7 +618,7 @@
       var path=node._fullPath;
       var isActive=path===_getCurrentFolder();
       var cls=["item","folder"]; if(isActive) cls.push("active");
-      var lvis=_vis(path, _editableRoot(path));
+      var lvis=_vis(path);
       if (lvis && lvis.className) cls.push(lvis.className);
       var url=_coverUrl(node, _coverW());
       var thumbHtml=url?'<img class="thumb" src="'+_escapeHtml(url)+'" loading="lazy" decoding="async">':"";
@@ -639,15 +649,16 @@
     var ec=document.getElementById("folder-count"); if(ec) ec.textContent=(nodes.length+readChildren.length+(rootLoose?1:0))+" 件";
   }
   function renderCards(){
-    var folders=_getBrowseChildren();
     var tileGrid=_getTileGrid(); if(!tileGrid) return;
+    var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
+    var folders=_getBrowseChildren();
     var readChildren=_readChildNodes(folders);
     var rootLoose=_rootHasLooseImages();
     var ctx=_buildRenderCtx(folders.concat(readChildren));
     var html="";
     for(var f of folders){
       var isActive=f._fullPath===_getCurrentFolder();
-      var cvis=_vis(f._fullPath, _editableRoot(f._fullPath));
+      var cvis=_vis(f._fullPath);
       var url=_coverUrl(f);
       var imgHtml;
       if(url) imgHtml='<img class="card-img" src="'+_escapeHtml(url)+'" loading="lazy" decoding="async">';

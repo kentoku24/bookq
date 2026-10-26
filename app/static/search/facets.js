@@ -32,11 +32,16 @@
   function _vis(path, editable){
     var FV = window.FolderVisibility;
     if (!FV || !FV.showAll || typeof FV.presentation !== "function") return null;
-    try { return FV.presentation(path, {editable: !!editable}); } catch(e){ return null; }
+    try {
+      var opts = (editable === undefined) ? {} : {editable: !!editable};
+      return FV.presentation(path, opts);
+    } catch(e){ return null; }
   }
-  function _editableRoot(path){
+  // Same no-snapshot gate the browse renderers use — a search paint must
+  // never expose an unfiltered list while the visibility judgment is out.
+  function _visBlocked(){
     var FV = window.FolderVisibility;
-    return !!(FV && path && FV.rootForPath(path) === path);
+    return (FV && typeof FV.blockedGridHtml === "function") ? FV.blockedGridHtml() : null;
   }
   // Late-arriving search responses must not repopulate the grid after a
   // clear/redirect — bump to invalidate.
@@ -142,6 +147,9 @@
       if (myGen !== _searchGen) return;
       if (!res.ok) throw new Error("search HTTP " + res.status);
       var data = await res.json();
+      // The body parse is itself an await — a newer search may have bumped
+      // the generation while it resolved; re-check before committing.
+      if (myGen !== _searchGen) return;
       _setSearchResults(data.results || []);
       _setSearchMode(true);
       try { if (window.refreshOfflineMap) await window.refreshOfflineMap(); } catch(e) { console.warn(e); }
@@ -184,6 +192,7 @@
   function renderSearchTiles() {
     var tileGrid = document.getElementById("tile-grid");
     if (!tileGrid) return;
+    var _blk = _visBlocked(); if (_blk !== null){ tileGrid.innerHTML = _blk; return; }
     var searchResults = _visibleResults(_getSearchResults() || []);
     var ctx = _buildSearchCtx(searchResults.map(function(r){ return r.folder_path; }));
     var html = "";
@@ -191,7 +200,7 @@
     for (var r of searchResults) {
       var imgHtml;
       var node = nodeByPath.get(r.folder_path);
-      var svis = _vis(r.folder_path, _editableRoot(r.folder_path));
+      var svis = _vis(r.folder_path);
       var url = node ? _coverUrl(node, _coverW()) : null;
       if (url) imgHtml = '<img class="tile-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">';
       else imgHtml = '<div class="tile-placeholder">\uD83D\uDCC1</div>';
@@ -212,6 +221,7 @@
   function renderSearchList() {
     var tileGrid = document.getElementById("tile-grid");
     if (!tileGrid) return;
+    var _blk = _visBlocked(); if (_blk !== null){ tileGrid.innerHTML = _blk; return; }
     var searchResults = _visibleResults(_getSearchResults() || []);
     var ctx = _buildSearchCtx(searchResults.map(function(r){ return r.folder_path; }));
     var html = "";
@@ -219,7 +229,7 @@
       var saved = ctx.progressAll[r.folder_path] || null;
       var progress = window.progressBarHtml ? window.progressBarHtml(saved) : {inlineBarHtml:''};
       var badge = progress.inlineBarHtml || '';
-      var lvis = _vis(r.folder_path, _editableRoot(r.folder_path));
+      var lvis = _vis(r.folder_path);
       var metaHtml = "";
       if (r.has_metadata) {
         var badges = [];
@@ -238,6 +248,7 @@
   function renderSearchCards() {
     var tileGrid = document.getElementById("tile-grid");
     if (!tileGrid) return;
+    var _blk = _visBlocked(); if (_blk !== null){ tileGrid.innerHTML = _blk; return; }
     var searchResults = _visibleResults(_getSearchResults() || []);
     var ctx = _buildSearchCtx(searchResults.map(function(r){ return r.folder_path; }));
     var html = "";
@@ -245,7 +256,7 @@
     for (var r of searchResults) {
       var imgHtml;
       var node = nodeByPath.get(r.folder_path);
-      var cvis = _vis(r.folder_path, _editableRoot(r.folder_path));
+      var cvis = _vis(r.folder_path);
       var url = node ? _coverUrl(node) : null;
       if (url) imgHtml = '<img class="card-img" src="' + _escapeHtml(url) + '" loading="lazy" decoding="async" onerror="this.style.display=\'none\'">';
       else imgHtml = '<div class="tile-placeholder" style="aspect-ratio:16/9">\uD83D\uDCC1</div>';

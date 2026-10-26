@@ -332,11 +332,21 @@
       } catch(e) { console.warn(e); }
     }
     // 直接呼び出しでも同じ拒否: 通常モードで非表示配下ならトップへ。
+    // 判定不能（loading / error 無snapshot）は teardown せずキューだけ —
+    // navigateToFolder が _pendingBrowsePath に積み、復旧後の drain が潜り直す。
     var _FV = window.FolderVisibility;
-    if (_FV && _FV.readyState !== "loading" && !_FV.showAll && path && !_FV.isVisible(path) &&
-        typeof window.redirectHiddenToTop === "function"){
-      window.redirectHiddenToTop();
-      return;
+    if (_FV && !_FV.showAll){
+      var _g = (typeof _FV.guardPath === "function") ? _FV.guardPath(path)
+        : (_FV.readyState === "loading" ? "pending"
+           : ((path && _FV.isHidden && _FV.isHidden(path)) ? "hidden" : "allow"));
+      if (_g === "pending"){
+        if (typeof window.navigateToFolder === "function") window.navigateToFolder(path);
+        return;
+      }
+      if (_g === "hidden" && typeof window.redirectHiddenToTop === "function"){
+        window.redirectHiddenToTop();
+        return;
+      }
     }
     // Bump token first so in-flight loadImages cannot overwrite
     try { ++window.urlRestoreGen; window.urlRestoring = false; } catch(e) { console.warn(e); }
@@ -441,14 +451,28 @@
     var bs = parseBrowseHash();
     var cur = currentViewerState();
     if (!window.treeLoaded) return;
-    // 設定GETの初回判断が着くまでは URL 復元を進めない（hash は保留のまま）。
-    if (window.FolderVisibility && window.FolderVisibility.readyState === "loading") return;
-
-    // 非表示 root／配下への復元は通常モードではトップへ — ペア早期 return より前。
+    // 設定GETの判断が着くまでは URL 復元を進めない — intent をキューへ
+    // 退避し、hash は保留のまま（error・snapshot 無しも同じ扱い）。
+    // positive hidden だけトップへ戻す — ペア早期 return より前。
     var _FV = window.FolderVisibility;
-    if (_FV && !_FV.showAll){
+    if (_FV){
       var _vTarget = st ? st.folder : (bs ? bs.path : null);
-      if (_vTarget && !_FV.isVisible(_vTarget) && typeof window.redirectHiddenToTop === "function"){
+      var _vGuard = (typeof _FV.guardPath === "function") ? _FV.guardPath(_vTarget)
+        : (_FV.readyState === "loading" ? "pending"
+           : ((_vTarget && _FV.isHidden && _FV.isHidden(_vTarget)) ? "hidden" : "allow"));
+      if (_vGuard === "pending"){
+        try {
+          if (st && st.folder){
+            try { window.urlRestoring = true; } catch(e2) { console.warn(e2); }
+            if (typeof window.loadImages === "function") window.loadImages(st.folder);
+          } else if (bs && typeof window.navigateToFolder === "function"){
+            window.navigateToFolder(bs.path);
+          }
+          if (typeof window.renderView === "function") window.renderView();
+        } catch(e) { console.warn(e); }
+        return;
+      }
+      if (_vGuard === "hidden" && typeof window.redirectHiddenToTop === "function"){
         window.redirectHiddenToTop();
         return;
       }
