@@ -52,3 +52,34 @@ def test_dockerfile_installs_unrar_from_nonfree():
     install = re.search(r"apt-get install[^\n]*", DOCKERFILE)
     assert install and "unrar" in install.group(0)
     assert "non-free" in DOCKERFILE
+
+
+# ── folder-visibility user state: dedicated volume, not a cache ───────
+#
+# Per-user hidden-root settings live in $BOOKQ_STATE_DIR/folder-visibility.sqlite3.
+# They must survive container recreation (unlike /tmp) and must NOT ride the
+# warmup/thumb cache volumes — a cache wipe would silently un-hide folders.
+
+
+def test_prod_compose_mounts_user_state_volume():
+    assert "BOOKQ_STATE_DIR=/var/lib/bookq" in PROD_COMPOSE
+    assert "user-state:/var/lib/bookq" in PROD_COMPOSE
+    assert re.search(r"^volumes:\n(?:\s+\S.*\n)*\s{2}user-state:", PROD_COMPOSE, re.M)
+
+
+def test_dev_compose_mounts_user_state_volume():
+    assert "BOOKQ_STATE_DIR=/var/lib/bookq" in DEV_COMPOSE
+    assert "user-state:/var/lib/bookq" in DEV_COMPOSE
+    assert re.search(r"^volumes:\n(?:\s+\S.*\n)*\s{2}user-state:", DEV_COMPOSE, re.M)
+
+
+def test_dev_compose_downloads_stay_readonly():
+    assert ":/app/downloads:ro" in DEV_COMPOSE
+
+
+def test_user_state_is_not_a_cache_mount():
+    for compose in (PROD_COMPOSE, DEV_COMPOSE):
+        assert "/var/lib/bookq" in compose
+        # state volume is distinct from the warmup/thumb cache mounts
+        assert "user-state:/var/cache" not in compose
+

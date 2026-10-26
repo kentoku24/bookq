@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from app import auth as auth_module
 from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
+from app.folder_visibility import user_key_for_email, visibility_owner
 from app.metadata import MetadataIndex
 from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
@@ -742,7 +743,19 @@ async def index(request: Request):
     # No Vary: User-Agent — the SW precaches '/' via a header-less Request, so a
     # varying response would never match a real navigation's cache lookup.
     ua_android = "android" in request.headers.get("user-agent", "").lower()
-    context = {"user": user, "test_mode": auth_module._TEST_MODE, "ua_android": ua_android}
+    visibility_user_key = (
+        user_key_for_email(user.get("email")) if isinstance(user, dict) else None
+    )
+    context = {
+        "user": user,
+        "test_mode": auth_module._TEST_MODE,
+        "ua_android": ua_android,
+        "visibility_owner": (
+            visibility_owner(visibility_user_key, request.app.state.settings.secret_key)
+            if visibility_user_key
+            else None
+        ),
+    }
     if thumb_perf:
         context["thumbnail_perf"] = True
         context["thumbnail_probe"] = (
