@@ -28,6 +28,7 @@ services:
       #（code 変更不要）。thumbs/ と sprites/ の両 namespace が同 root 配下。
       - thumb-cache:/var/cache/bookq-thumbs
     environment:
+      - BOOKQ_ENV=production
       - BOOKQ_CACHE_DIR=/var/cache/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
