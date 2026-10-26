@@ -18,6 +18,7 @@ from folder_visibility_helpers import (  # noqa: E402
     build_vis_tree,
     request_browser,
     spawn_vis_server,
+    swipe_root_icon,
     vis_get,
     vis_put,
     vis_reset,
@@ -58,7 +59,7 @@ def _paths(vpage, sel="#tile-grid .tile"):
 
 
 def _show_all(vpage):
-    vpage.click("#visibility-all")
+    swipe_root_icon(vpage)
     vpage.wait_for_function("window.FolderVisibility.showAll === true")
 
 
@@ -323,3 +324,50 @@ def test_flat_hidden_browse_url_redirects(fvpage, flat_vis_env):
     fvpage.goto(flat_vis_env + "/#/browse/wrap/wA")
     fvpage.wait_for_function("location.hash === ''")
     assert fvpage.evaluate("window.currentBrowsePath || null") is None
+
+
+# ── hidden entry gesture (root-icon swipe) ──────────────────────────────
+
+
+def test_mode_row_hidden_in_normal_mode(vpage):
+    # The feature leaves no trace in normal mode: no row, no body marker.
+    assert vpage.locator("#visibility-row").is_hidden()
+    assert vpage.locator("body.fv-showall").count() == 0
+
+
+def test_swipe_toggles_show_all_and_marks_icon(vpage, vis_env):
+    vis_put(vis_env, "hide_me", True)
+    vpage.reload()
+    vpage.wait_for_selector(".tile")
+    assert "hide_me" not in _paths(vpage)
+    swipe_root_icon(vpage)
+    vpage.wait_for_function("window.FolderVisibility.showAll === true")
+    assert vpage.locator("#visibility-row").is_visible()
+    assert vpage.locator("body.fv-showall").count() == 1
+    assert "hide_me" in _paths(vpage)
+    # same gesture exits back to normal mode
+    swipe_root_icon(vpage)
+    vpage.wait_for_function("window.FolderVisibility.showAll === false")
+    assert vpage.locator("#visibility-row").is_hidden()
+    assert "hide_me" not in _paths(vpage)
+
+
+def test_short_swipe_does_not_enter(vpage):
+    icon = vpage.locator("#browse-root-icon")
+    box = icon.bounding_box()
+    x0 = box["x"] + box["width"] / 2
+    y0 = box["y"] + box["height"] / 2
+    vpage.mouse.move(x0, y0)
+    vpage.mouse.down()
+    vpage.mouse.move(x0 + 80, y0, steps=5)  # ~20% of a 390px viewport — no edge
+    vpage.mouse.up()
+    assert vpage.evaluate("window.FolderVisibility.showAll") is False
+    assert vpage.locator("#visibility-row").is_hidden()
+
+
+def test_gesture_icon_only_at_browse_root(vpage):
+    # Subfolder header is "↩ name" with no #browse-root-icon — no gesture.
+    vpage.click('#tile-grid .tile[data-path="hide_series"]')
+    vpage.wait_for_function("window.currentBrowsePath === 'hide_series'")
+    assert vpage.locator("#browse-root-icon").count() == 0
+    assert vpage.locator("#visibility-row").is_hidden()

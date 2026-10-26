@@ -553,7 +553,14 @@ body.landscape-single #spread-shift{display:none}
 }
 
 /* ── folder visibility (非表示) — mode row, per-tile toggle, badges ── */
-#visibility-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 12px 6px;font-size:11px;color:#9a9a9a;border-bottom:1px solid rgba(255,255,255,0.04)}
+/* The mode row leaves NO trace in normal mode: it only exists while
+   body.fv-showall is set (entered via the root-icon swipe gesture). */
+#visibility-row{display:none;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 12px 6px;font-size:11px;color:#9a9a9a;border-bottom:1px solid rgba(255,255,255,0.04)}
+body.fv-showall #visibility-row{display:flex}
+/* Root 📁 icon — swipe target for the hidden mode entry; red while in
+   full-display mode (emoji glyphs ignore color, so hue-rotate does it). */
+#browse-root-icon{display:inline-block;touch-action:none;user-select:none;-webkit-user-select:none}
+body.fv-showall #browse-root-icon{filter:hue-rotate(300deg) saturate(1.5)}
 #visibility-label{color:#888;white-space:nowrap}
 #visibility-normal,#visibility-all{min-width:44px;min-height:44px;padding:4px 10px;border-radius:8px;border:1px solid #333;background:transparent;color:#aaa;font-size:12px;cursor:pointer;font-family:inherit;transition:background .15s,color .15s,border-color .15s}
 #visibility-normal:hover,#visibility-all:hover{background:#1e1e1e;color:#ccc}

@@ -1326,7 +1326,7 @@
     const h = document.getElementById("browse-header");
     if (!h) return;
     if (!currentBrowsePath){
-      h.innerHTML = "📁 フォルダ";
+      h.innerHTML = '<span id="browse-root-icon">📁</span> フォルダ';
       h.style.cursor = "default";
       h.onclick = null;
     } else {

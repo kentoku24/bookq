@@ -201,3 +201,18 @@ def vis_reset(base_url: str, roots=VIS_ROOTS) -> None:
             vis_put(base_url, r, False)
         except Exception:
             pass
+
+
+def swipe_root_icon(page) -> None:
+    """The hidden entry/exit gesture: drag the root 📁 header icon to the
+    right edge of the screen. Toggles full-display mode both ways."""
+    icon = page.locator("#browse-root-icon")
+    box = icon.bounding_box()
+    assert box, "#browse-root-icon has no box (not at browse root?)"
+    vw = page.viewport_size["width"] if page.viewport_size else 1280
+    x0 = box["x"] + box["width"] / 2
+    y0 = box["y"] + box["height"] / 2
+    page.mouse.move(x0, y0)
+    page.mouse.down()
+    page.mouse.move(vw - 2, y0, steps=8)
+    page.mouse.up()

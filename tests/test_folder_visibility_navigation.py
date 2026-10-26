@@ -14,6 +14,7 @@ from folder_visibility_helpers import (  # noqa: E402
     build_vis_tree,
     request_browser,
     spawn_vis_server,
+    swipe_root_icon,
     vis_put,
     vis_reset,
 )
@@ -104,14 +105,15 @@ def test_show_all_allows_hidden_view_url(vpage, vis_env):
     vis_put(vis_env, "hide_me", True)
     vpage.reload()
     vpage.wait_for_selector(".tile")
-    vpage.click("#visibility-all")
+    swipe_root_icon(vpage)
+    vpage.wait_for_function("window.FolderVisibility.showAll === true")
     vpage.evaluate("location.hash = '#/view/hide_me?p=0'")
     vpage.wait_for_function("window.currentFolder === 'hide_me'")
     assert vpage.evaluate("location.hash").startswith("#/view/hide_me")
 
 
 def test_switch_to_normal_exits_hidden_book(vpage, vis_env):
-    vpage.click("#visibility-all")
+    swipe_root_icon(vpage)
     vpage.wait_for_function("window.FolderVisibility.showAll === true")
     vis_put(vis_env, "hide_me", True)
     vpage.evaluate("window.FolderVisibility.refresh()")
@@ -177,7 +179,7 @@ def test_resume_button_skips_hidden_newest(vpage, vis_env):
     assert "keep_a" in txt
     assert "hide_me" not in txt
     # data itself is not deleted — 全显示 mode offers the hidden work again
-    vpage.click("#visibility-all")
+    swipe_root_icon(vpage)
     vpage.wait_for_function("window.FolderVisibility.showAll === true")
     txt = vpage.locator("#resume-btn-text").inner_text()
     assert "hide_me" in txt

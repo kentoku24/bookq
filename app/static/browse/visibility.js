@@ -430,6 +430,11 @@
     refresh();
   }
   function _updateStatusDom(){
+    // body.fv-showall drives the mode row's visibility AND the red root icon —
+    // in normal mode nothing about this feature is visible anywhere.
+    if (typeof document !== "undefined" && document.body){
+      document.body.classList.toggle("fv-showall", _showAll);
+    }
     var n = document.getElementById("visibility-normal");
     var a = document.getElementById("visibility-all");
     if (n){ n.setAttribute("aria-pressed", _showAll ? "false" : "true"); n.classList.toggle("active", !_showAll); }
@@ -498,6 +503,80 @@
     if (a) a.addEventListener("click", function(e){ e.preventDefault(); e.stopPropagation(); setShowAll(true); });
   }
 
+  // ── hidden entry gesture ──
+  // Swipe the root 📁 header icon all the way to the right edge of the
+  // screen to toggle full-display mode — the same gesture exits. The icon
+  // only exists at the browse root, and only people who know the gesture
+  // can reach the mode; nothing about it is discoverable in normal mode.
+  // Activation waits for pointerup AT the edge: while pointer capture is
+  // still held on the icon, the release's click is dispatched to the icon —
+  // activating mid-drag would re-render the header, drop the capture, and
+  // the release would instead land a stray click on whatever sits past the
+  // sidebar's 280px edge (closing the sidebar / hitting viewer controls).
+  function _bindEntryGesture(){
+    var h = document.getElementById("browse-header");
+    if (!h || h.__fvGesture) return;
+    h.__fvGesture = true;
+    var drag = null; // {icon, x0, y0, pid, armed}
+    var eatClick = false;
+    // Swallow exactly the click produced by an activating release — it is
+    // the gesture's own tail, not a user click on whatever is under it.
+    if (typeof document !== "undefined"){
+      document.addEventListener("click", function(e){
+        if (!eatClick) return;
+        eatClick = false;
+        e.preventDefault(); e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      }, true);
+    }
+    function _reset(d){
+      if (d && d.icon) d.icon.style.transform = "";
+      return null;
+    }
+    function _edge(x){
+      var w = (typeof window !== "undefined" && window.innerWidth) || 0;
+      return w > 0 && x >= w * 0.9;
+    }
+    function _activate(){
+      drag = _reset(drag);
+      var next = !_showAll;
+      eatClick = true;
+      setTimeout(function(){ eatClick = false; }, 0);
+      setShowAll(next);
+      if (typeof window.showToast === "function"){
+        window.showToast(next ? "全表示モード（再読み込みで解除）" : "通常モードに戻しました");
+      }
+    }
+    h.addEventListener("pointerdown", function(e){
+      var icon = e.target && e.target.closest ? e.target.closest("#browse-root-icon") : null;
+      if (!icon || !h.contains(icon)) return;
+      drag = { icon: icon, x0: e.clientX, y0: e.clientY, pid: e.pointerId, armed: false };
+    });
+    h.addEventListener("pointermove", function(e){
+      if (!drag || e.pointerId !== drag.pid) return;
+      var dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+      if (!drag.armed){
+        // Arm only on a clearly rightward move — vertical scroll or a left
+        // flick releases the gesture instead of hijacking it.
+        if (dx > 12 && dx > Math.abs(dy) * 1.2){
+          drag.armed = true;
+          try { drag.icon.setPointerCapture(e.pointerId); } catch(_){}
+        } else if (dx < -12 || Math.abs(dy) > 12){ drag = _reset(drag); return; }
+        else return;
+      }
+      e.preventDefault();
+      drag.icon.style.transform = "translateX(" + Math.max(0, dx) + "px)";
+    });
+    h.addEventListener("pointerup", function(e){
+      if (!drag || e.pointerId !== drag.pid) return;
+      if (drag.armed && _edge(e.clientX)) _activate();
+      else drag = _reset(drag);
+    });
+    h.addEventListener("pointercancel", function(e){
+      if (drag && e.pointerId === drag.pid) drag = _reset(drag);
+    });
+  }
+
   function init(opts){
     if (_inited) return;
     _inited = true;
@@ -514,6 +593,7 @@
     _bindDelegatedToggle();
     _bindRefreshTriggers();
     _bindModeButtons();
+    _bindEntryGesture();
     refresh();
   }
 
