@@ -936,6 +936,17 @@
       };
       if (payload.mode === 'tile' || payload.mode === 'list' ||
           payload.mode === 'card') p.mode = payload.mode;
+      var sh = payload.scrollH;
+      if (sh !== undefined && sh !== null) {
+        if (typeof sh !== 'number' || !isFinite(sh) || sh <= 0) return false;
+        p.scrollH = sh;
+      }
+      var pred = payload.pred;
+      if (pred !== undefined && pred !== null) {
+        if (typeof pred !== 'number' || !isFinite(pred) || pred < 0)
+          return false;
+        p.pred = pred;
+      }
       return _ctlSend(_req('UI_SYNC', p));
     }
 

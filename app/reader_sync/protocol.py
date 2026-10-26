@@ -157,9 +157,11 @@ def _validate_ui_sync(p: dict) -> None:
     """Ephemeral mirrored-UI payload (browse scroll/position).
 
     Relayed peer-to-peer like SIGNAL — never sequenced, so it must not
-    carry reader state. ``top``/``viewH`` are px in the sender's scroller;
-    the receiver derives its own target from them (e.g. follower shows
-    ``top + viewH``).
+    carry reader state. ``top``/``viewH``/``scrollH`` are px in the
+    sender's scroller; the receiver maps the sender's scroll progress
+    ``top / (scrollH - viewH)`` onto its own scroll range. ``scrollH``
+    is optional — a frame without it falls back to the legacy px
+    transform. ``pred`` is an optional predicted fling endpoint (px).
     """
     if p.get("view") not in UI_VIEWS:
         _fail(ERR_TYPE, "UI_SYNC.view must be 'browse'")
@@ -175,6 +177,18 @@ def _validate_ui_sync(p: dict) -> None:
     if (not isinstance(view_h, (int, float)) or isinstance(view_h, bool)
             or not math.isfinite(view_h) or view_h <= 0 or view_h > 100000):
         _fail(ERR_RANGE, "UI_SYNC.viewH must be finite 0<h<=100000")
+    scroll_h = p.get("scrollH")
+    if scroll_h is not None:
+        if (not isinstance(scroll_h, (int, float))
+                or isinstance(scroll_h, bool)
+                or not math.isfinite(scroll_h)
+                or scroll_h <= 0 or scroll_h > 100000000):
+            _fail(ERR_RANGE, "UI_SYNC.scrollH must be finite 0<h<=1e8")
+    pred = p.get("pred")
+    if pred is not None:
+        if (not isinstance(pred, (int, float)) or isinstance(pred, bool)
+                or not math.isfinite(pred) or pred < 0):
+            _fail(ERR_RANGE, "UI_SYNC.pred must be finite >= 0")
     mode = p.get("mode")
     if mode is not None and mode not in UI_MODES:
         _fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card")
