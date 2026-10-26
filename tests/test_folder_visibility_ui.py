@@ -490,3 +490,130 @@ def test_gesture_window_blur_clears_drag(vpage):
     assert vpage.evaluate(
         "document.getElementById('browse-root-icon').style.transform") == ""
     assert vpage.evaluate("window.FolderVisibility.showAll") is False
+
+
+_ITEM_SEL = {"tile": ".tile", "list": ".item", "card": ".card"}
+_ART_SEL = {"tile": ".tile-img", "list": ".thumb", "card": ".card-img"}
+
+
+def _cs(el, prop):
+    return el.evaluate("(e,p)=>getComputedStyle(e)[p]", prop)
+
+
+def _set_view_mode(vpage, mode):
+    for _ in range(3):
+        if vpage.evaluate("window.viewMode") == mode:
+            break
+        vpage.click("#footer-refresh-btn")
+    assert vpage.evaluate("window.viewMode") == mode
+    vpage.wait_for_function(
+        "() => {const c=document.getElementById('tile-grid').classList;"
+        "return c.contains('list-mode')===" + str(mode == "list").lower() +
+        "&&c.contains('card-mode')===" + str(mode == "card").lower() + ";}"
+    )
+
+
+def _assert_no_dimming(hidden, sibling, mode):
+    """Hidden vs visible sibling share artwork/name computed styles —
+    is-hidden* contributes badges/buttons only, never dimming."""
+    if mode == "list":
+        h_thumb = hidden.locator(".thumb")
+        s_thumb = sibling.locator(".thumb")
+        assert h_thumb.count() == 1
+        assert _cs(h_thumb, "opacity") == _cs(s_thumb, "opacity") == "0.75"
+        assert _cs(h_thumb, "filter") == "none"
+        assert _cs(hidden.locator(".name"), "color") == _cs(
+            sibling.locator(".name"), "color")
+    else:
+        art = hidden.locator(_ART_SEL[mode])
+        assert art.count() == 1
+        assert _cs(art, "opacity") == "1"
+        assert _cs(art, "filter") == "none"
+
+
+def _assert_hidden_badge_and_toggle(item):
+    assert "非表示" in item.locator(".visibility-badge").inner_text()
+    btn = item.locator(".visibility-toggle")
+    assert btn.get_attribute("aria-pressed") == "true"
+    assert btn.get_attribute("aria-label") == "再表示する"
+
+
+@pytest.mark.parametrize("mode", ["tile", "list", "card"])
+def test_show_all_hidden_not_dimmed_browse(vpage, vis_env, mode):
+    vis_put(vis_env, "hide_me", True)
+    vpage.reload()
+    vpage.wait_for_selector(".tile")
+    _show_all(vpage)
+    _set_view_mode(vpage, mode)
+    sel = _ITEM_SEL[mode]
+    hidden = vpage.locator(f'#tile-grid {sel}[data-path="hide_me"]')
+    sibling = vpage.locator(f'#tile-grid {sel}[data-path="hide_me_b"]')
+    hidden.wait_for(state="attached")
+    sibling.wait_for(state="attached")
+    _assert_no_dimming(hidden, sibling, mode)
+    _assert_hidden_badge_and_toggle(hidden)
+
+
+@pytest.mark.parametrize("mode", ["tile", "list", "card"])
+def test_show_all_hidden_not_dimmed_search(vpage, vis_env, mode):
+    vis_put(vis_env, "hide_me", True)
+    vpage.reload()
+    vpage.wait_for_selector(".tile")
+    _show_all(vpage)
+    _set_view_mode(vpage, mode)
+    vpage.fill("#search-input", "hide")
+    vpage.wait_for_function(
+        "document.getElementById('folder-count').textContent === '4 件'")
+    sel = _ITEM_SEL[mode]
+    hidden = vpage.locator(f'#tile-grid {sel}[data-path="hide_me"]')
+    sibling = vpage.locator(f'#tile-grid {sel}[data-path="hide_me_b"]')
+    hidden.wait_for(state="attached")
+    sibling.wait_for(state="attached")
+    if mode == "list":
+        assert hidden.locator(".thumb").count() == 0
+        assert _cs(hidden.locator(".name"), "color") == _cs(
+            sibling.locator(".name"), "color")
+    else:
+        _assert_no_dimming(hidden, sibling, mode)
+    _assert_hidden_badge_and_toggle(hidden)
+
+
+@pytest.mark.parametrize("mode", ["tile", "list", "card"])
+def test_show_all_hidden_descendant_not_dimmed(vpage, vis_env, mode):
+    vis_put(vis_env, "hide_series", True)
+    vpage.reload()
+    vpage.wait_for_selector(".tile")
+    _show_all(vpage)
+    _set_view_mode(vpage, mode)
+    sel = _ITEM_SEL[mode]
+    root_el = vpage.locator(f'#tile-grid {sel}[data-path="hide_series"]')
+    sibling = vpage.locator(f'#tile-grid {sel}[data-path="keep_a"]')
+    root_el.wait_for(state="attached")
+    sibling.wait_for(state="attached")
+    if mode == "tile":
+        multi = root_el.locator(".tile-multi")
+        multi.wait_for(state="attached")
+        assert _cs(multi, "opacity") == "1"
+        assert _cs(multi, "filter") == "none"
+    else:
+        _assert_no_dimming(root_el, sibling, mode)
+    ref_name = ref_thumb = None
+    if mode == "list":
+        ref_name = _cs(sibling.locator(".name"), "color")
+        ref_thumb = _cs(sibling.locator(".thumb"), "opacity")
+    root_el.click()
+    child = vpage.locator(f'#tile-grid {sel}[data-path="hide_series/vol1"]')
+    child.wait_for(state="attached")
+    assert "is-hidden-descendant" in (child.get_attribute("class") or "")
+    if mode == "list":
+        assert _cs(child.locator(".thumb"), "opacity") == ref_thumb
+        assert _cs(child.locator(".thumb"), "filter") == "none"
+        assert _cs(child.locator(".name"), "color") == ref_name
+    else:
+        art = child.locator(_ART_SEL[mode])
+        assert art.count() == 1
+        assert _cs(art, "opacity") == "1"
+        assert _cs(art, "filter") == "none"
+    assert "上位フォルダが非表示" in child.locator(
+        ".visibility-badge").inner_text()
+    assert child.locator(".visibility-toggle").count() == 0
