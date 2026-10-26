@@ -63,6 +63,42 @@
     return !!(el && el.classList && el.classList.contains('open'));
   }
 
+  /* ── FolderVisibility gates (hidden top-level roots) ──
+   * No socket opens before the settings judgment resolves (create/join/
+   * connect/resume and the _boot rejoin all wait on ready()); a picked or
+   * committed work whose root is hidden in normal mode is denied locally —
+   * the pair is left and the user lands on the top list via the shared
+   * redirectHiddenToTop. Module absent (stale-shell mix) ⇒ everything
+   * passes through as before; the watchdog repairs. */
+
+  function _visReady() {
+    try {
+      var FV = window.FolderVisibility;
+      if (FV && typeof FV.ready === 'function') {
+        return Promise.resolve(FV.ready());
+      }
+    } catch (e) { /* fall through */ }
+    return Promise.resolve();
+  }
+
+  /* Send-side judgment for an intent folder — same convention as the solo
+   * navigation guards: while the first judgment is still loading, don't
+   * deny (the navigation layer queues instead). */
+  function _visBlocksFolder(folder) {
+    var FV = window.FolderVisibility;
+    return !!(FV && FV.readyState !== 'loading' && !FV.showAll &&
+              typeof FV.isVisible === 'function' && folder &&
+              !FV.isVisible(folder));
+  }
+
+  function _denyHiddenWork() {
+    try {
+      if (typeof window.redirectHiddenToTop === 'function') {
+        window.redirectHiddenToTop();
+      }
+    } catch (e) { /* denial must never throw back into the client */ }
+  }
+
   /* ── committed-state sink ── */
 
   /* What the display actually shows for a commit — phase/presence flaps
@@ -75,6 +111,17 @@
   }
 
   function _applyCommitted(snap, manifest, o) {
+    // A committed work whose root is hidden in normal mode is never
+    // applied — the pair is released before any image renders, and the
+    // denial records nothing in _lastApply/_heldCommit so the sidebar-close
+    // replay paths cannot resurrect it.
+    var FV = window.FolderVisibility;
+    if (FV && FV.readyState !== 'loading' &&
+        typeof FV.committedFolderHidden === 'function' &&
+        FV.committedFolderHidden(manifest, snap)) {
+      _denyHiddenWork();
+      return;
+    }
     _lastApply = {snap: snap, manifest: manifest, o: o};
     var leader = !!(o && o.role === 'leader');
     if (leader && _sidebarOpen() && _displayKey(snap) === _appliedKey) {
@@ -235,6 +282,13 @@
   function _leaderOpenWork(intent) {
     var gen = ++_resolveGen;
     function emit(page) {
+      // A leader pick of a hidden work (incl. one whose root was hidden
+      // while the async page-ref resolve was in flight) never reaches the
+      // wire — same denial as the solo pick, and _sent stays clean.
+      if (_visBlocksFolder(intent.folder)) {
+        _denyHiddenWork();
+        return true;
+      }
       if (!page || typeof page.folder !== 'string' ||
           typeof page.name !== 'string') {
         _record({type: 'openWork', via: intent.via, folder: intent.folder,
@@ -272,6 +326,12 @@
         return ok;
       }
       case 'openWork':
+        // 通常モードでの禁止作品 pick — wire に出さず同期を解除してトップへ。
+        // (_leaderOpenWork re-checks at emit time for the async resolve.)
+        if (_visBlocksFolder(intent.folder)) {
+          _denyHiddenWork();
+          return true;
+        }
         return st.role === 'leader' ? _leaderOpenWork(intent)
                                     : _bailToSolo(intent);
       case 'browse':
@@ -311,6 +371,9 @@
     var folder = window.currentFolder;
     var page = _currentPageRef();
     if (typeof folder !== 'string' || !folder || !page) return;
+    // The open book is a hidden root in normal mode — never send it as the
+    // shared work; deny like a solo open of the same folder.
+    if (_visBlocksFolder(folder)) { _denyHiddenWork(); return; }
     var ok = _client.sendIntent({type: 'openWork', folder: folder, page: page});
     _record({type: 'openWork', via: 'pair-bootstrap', folder: folder,
              page: page}, ok);
@@ -425,26 +488,48 @@
 
   function _boot() {
     if (!_readCreds()) return;
-    try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+    var FV = window.FolderVisibility;
+    if (!FV || typeof FV.ready !== 'function') {
+      // Module absent (stale shell): keep the old immediate rejoin — the
+      // watchdog repairs the mixed deploy.
+      try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+      return;
+    }
+    FV.ready().then(function () {
+      // The credential rejoin waits for the settings judgment — a hidden
+      // shared work is then denied by _applyCommitted before it can render.
+      if (!_readCreds()) return;   // a leave during the wait dropped the creds
+      try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+    });
   }
 
   /* ── public controller surface (PairUI contract + S09 additions) ── */
 
   var api = {
-    create: function () { return _ensureClient().create(); },
-    join: function (code) { return _ensureClient().join(code); },
+    /* Socket-opening entry points wait on FolderVisibility.ready() — no
+     * socket exists before the settings judgment lands. */
+    create: function () {
+      return _visReady().then(function () { return _ensureClient().create(); });
+    },
+    join: function (code) {
+      return _visReady().then(function () { return _ensureClient().join(code); });
+    },
     /* One-tap connect: server-side MATCH — follower if a fresh session is
      * waiting, waiting leader otherwise. connect(pickId) binds a chosen
      * ambiguous candidate. Resolves {ambiguous|candidates} or
      * {unsupported} for UI fallback handling. */
-    connect: function (pick) { return _ensureClient().match(pick); },
+    connect: function (pick) {
+      return _visReady().then(function () { return _ensureClient().match(pick); });
+    },
     approve: function () {
       return _client ? _client.approve() : Promise.resolve({approved: false});
     },
     reject: function () {
       return _client ? _client.reject() : Promise.resolve({rejected: false});
     },
-    resume: function () { return _ensureClient().resume(); },
+    resume: function () {
+      return _visReady().then(function () { return _ensureClient().resume(); });
+    },
     leave: function () {
       return _client ? _client.leave() : Promise.resolve({left: false});
     },

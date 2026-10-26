@@ -82,11 +82,13 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - `BOOKQ_TEST_MODE=true` が必須 — `app/auth.py` の `_TEST_MODE` は import 時に一度だけ読まれ、OAuth をバイパスして mock user を返す。
 - `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
 - `uvicorn[standard]` は `requirements-dev.txt` 側のみに存在 (runtime `requirements.txt` は hypercorn)。`--with-requirements requirements-dev.txt` の付与を省略しないこと。
+- 隠しルート機能は `app/folder_visibility*.py` + `app/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
 
 ### デプロイ / ネットワーク
 
 - viewer はホストポートを公開しない。唯一の到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer:8080)。`viewer` が `bookq_default` ネットワーク外だと 502 になる。
 - 開発環境は `./dev.sh up` で管理 (10スロットプール、project `bookq-dev-pool-XX` 形式。真実は docker label `com.bookq.name` / `com.bookq.pool_slot` のみ)。本番 `docker compose up` を worktree で直接叩かないこと。
+- ユーザー設定 (隠しルート等) は `user-state` volume の `/var/lib/bookq` に永続化される。キャッシュではないのでキャッシュ掃除経路で消さないこと。
 
 ### iOS Simulator / エージェントによる実機確認
 

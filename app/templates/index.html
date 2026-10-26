@@ -47,6 +47,7 @@
 <link rel="manifest" href="/static/manifest.json">
 <link rel="stylesheet" href="/static/style.css">
 <script>window.__BOOKQ_TEST_MODE__ = "{{ 'true' if test_mode else 'false' }}";</script>
+<script>window.__BOOKQ_VISIBILITY_OWNER__ = {{ visibility_owner | tojson }};</script>
 {% if thumbnail_perf %}<script>{{ thumbnail_probe | safe }}</script>
 {% endif %}</head>
 <body>
@@ -57,6 +58,12 @@
     <button id="pair-btn" type="button" title="2台で見開き" aria-label="2台で見開き">🔗</button>
     <button id="filter-btn" title="絞り込み" aria-label="フィルタ">🔽</button>
     <a id="offline-status" href="/static/offline-harness.html?harness=1">●オンライン</a>
+  </div>
+  <div id="visibility-row" role="group" aria-label="表示対象">
+    <span id="visibility-label">表示対象</span>
+    <button id="visibility-normal" type="button" aria-pressed="true">通常</button>
+    <button id="visibility-all" type="button" aria-pressed="false">全表示</button>
+    <span id="visibility-status" role="status"></span>
   </div>
   <div id="sidebar-scroll">
     <div id="search"><input type="text" id="search-input" placeholder="検索…" autocomplete="off"></div>
@@ -146,6 +153,7 @@
 <div id="toast" role="alert"></div>
 
 <script src="/static/offline-core.js" defer></script>
+<script src="/static/browse/visibility.js" defer></script>
 <script src="/static/thumbs/resolveCover.js" defer></script>
 <script src="/static/browse/hash.js" defer></script>
 <script src="/static/browse/render.js" defer></script>
@@ -183,7 +191,9 @@
         typeof window.PairController.sendUiSync === 'function' &&
         typeof window.PairController.onEvent === 'function' &&
         typeof window.openSidebar === 'function' &&
-        window.BOOKQ_BROWSE_SYNC === true);
+        window.BOOKQ_BROWSE_SYNC === true &&
+        window.FolderVisibility && window.FolderVisibility.apiVersion === 1 &&
+        window.__BOOKQ_VISIBILITY === true);
   }
   try { window.__shellStale = stale; } catch (e) {}
   function dropStaleJs() {

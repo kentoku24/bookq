@@ -1293,6 +1293,14 @@
       if (!node || !node.children) return [];
       children = node.children.filter(n => n.type === "folder");
     }
+    // 非表示適用はファセット絞り込み・shallow 早期 return より先 — raw tree
+    // は削らず、ここで表示側だけを絞る。GET 未解決の loading 中でも
+    // キャッシュ snapshot があればそれで絞る（復帰ユーザーの非表示 flash 防止）;
+    // snapshot 無しの初回だけ未絞り込みで先出しする（空グリッド flash 回避）。
+    var FV = window.FolderVisibility;
+    if (FV && !FV.showAll && (FV.readyState !== "loading" || FV.hasSnapshot)){
+      children = children.filter(n => FV.isVisible(n._fullPath));
+    }
     if (filtersActive()){
       // Shallow window: nodes carry no subtree_facets, so nodeMatchesFilters
       // would false out everything — never filter, show all + 読込中 badge.
@@ -1346,6 +1354,9 @@
   }
 
   function navigateToFolder(path){
+    var FV = window.FolderVisibility;
+    if (FV && FV.readyState === "loading"){ _pendingBrowsePath = path; return; }
+    if (FV && !FV.showAll && path && !FV.isVisible(path)){ redirectHiddenToTop(); return; }
     if (_shallowMode){
       // Shallow window: target children==[] — queue the drill-down in the URL
       // (pushState fires no hashchange; applyUrlState runs once post-full) and
@@ -1395,7 +1406,7 @@
         if(window.searchMode) return;
         const el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
         if(!el || !tileGrid.contains(el)) return;
-        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
+        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
         if(el.dataset.readChild === "1" || el.dataset.readSelf === "1"){
           navOpenWork(el.dataset.path, "tile");
           return;
@@ -1423,7 +1434,7 @@
         if(!window.searchMode) return;
         const el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
         if(!el || !tileGrid.contains(el)) return;
-        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop')) return;
+        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
         const path = el.dataset.path;
         if (!path) return;
         navOpenWork(path, "search");
@@ -1656,7 +1667,7 @@
     // .offline-btn and .ux-pop buttons are real <button>s inside the tile:
     // let their native Enter/Space activation fire the click (delegated
     // listener / popover handlers) instead of re-clicking the whole tile.
-    if(e.target.closest && e.target.closest('.offline-btn, .ux-pop')) return;
+    if(e.target.closest && e.target.closest('.offline-btn, .ux-pop, .visibility-toggle')) return;
     const item = e.target.closest(".tile, .card, .item[data-path]");
     if (!item) return;
     e.preventDefault(); // every repeat too, or held Space scrolls the page
@@ -1836,6 +1847,13 @@
   // null = 上端、path = そのタイルを上端に。指定できるのは
   // navigateToFolder / restoreBrowse / resetToTop の 3 経路だけ（設計 §3.1）。
   function renderView(opts){
+    var FV = window.FolderVisibility;
+    if (FV && FV.readyState === "loading"){
+      // 設定GETの判断が着くまでは無防備な一覧を出さない（読込中表示）。
+      tileGrid.classList.remove("list-mode", "card-mode");
+      tileGrid.innerHTML = '<div style="color:#555;text-align:center;padding:20px;font-size:13px">読込中…</div>';
+      return;
+    }
     tileGrid.classList.remove("list-mode", "card-mode");
     sidebar.classList.remove("tile-full");
     viewer.classList.remove("tile-full");
@@ -1959,7 +1977,44 @@
     renderView();
   }
 
+  // 非表示対象への移動・閲覧要求の共通拒否: トップへ静かに戻す。
+  // 理由表示・全表示への誘導は出さない。
+  function redirectHiddenToTop(){
+    // 1) in-flight の非同期ロード・復元を世代で無効化
+    try { urlRestoreGen++; urlRestoring = false; } catch(e){}
+    try { window.facetLoadGen++; } catch(e){}
+    try { if (window.SearchFacets && typeof window.SearchFacets.invalidateSearch === "function") window.SearchFacets.invalidateSearch(); } catch(e){}
+    // 2) shallow キュー・検索状態をクリア
+    _pendingViewFolder = null; _pendingBrowsePath = null;
+    searchMode = false; searchResults = [];
+    clearTimeout(searchTimer);
+    if (searchInput) searchInput.value = "";
+    // 3) viewer を先に teardown — PairedView の solo 復元 hook が解除時に
+    //    隠した画像を再生成しないよう pairStrip を先に捨てる
+    teardownViewer();
+    // 4) ペアがあれば通常の LEAVE 経路で解除（資格情報削除・pending 解除は既存処理）
+    try { if (window.PairController && typeof window.PairController.leave === "function") window.PairController.leave(); } catch(e){}
+    // 5) 既存 resetToTop でトップ一覧・上端スクロールへ
+    resetToTop();
+    // 6) URL を canonical なトップへ replace（history entry は増やさない）
+    try { history.replaceState(null, "", location.pathname + location.search); } catch(e){}
+    try { urlStackReplace(location.pathname + location.search); } catch(e){}
+    // 7) ペア解除がサイドバー状態を触る可能性があるため最終状態をここで確定
+    sidebar.classList.add("open"); viewer.classList.add("sidebar-open");
+    syncSidebarA11y();
+  }
+  try { window.redirectHiddenToTop = redirectHiddenToTop; } catch(e) { console.warn(e); }
+
   async function loadImages(fullPath){
+    var FV = window.FolderVisibility;
+    if (FV && FV.readyState === "loading"){
+      // 設定GETの判断が着くまではキュー — ready() 解決時に drain される
+      _pendingViewFolder = fullPath;
+      const _emp = document.getElementById("empty");
+      if (_emp){ _emp.innerHTML = "<p>読込中…</p>"; _emp.style.display = "flex"; }
+      return;
+    }
+    if (FV && !FV.showAll && fullPath && !FV.isVisible(fullPath)){ redirectHiddenToTop(); return; }
     if (_shallowMode){
       // Contract: never run on a children==[] shallow node — queue until the
       // full tree lands (the hash stays the queue for deep-links; clicks
@@ -2094,6 +2149,8 @@
         chapterBoundaries = [0];
       }
 
+      // await 後の再判定: 取得中に通常モードで禁止対象になった本は開かない
+      if (FV && !FV.showAll && !FV.isVisible(fullPath)){ redirectHiddenToTop(); return; }
       // Build spacer-mapping arrays
       realToGlobalIdx = [];
       globalToRealIdx = [];
@@ -2902,6 +2959,8 @@
         return;
       case "openWork": {
         const folder = intent.folder;
+        var FV = window.FolderVisibility;
+        if (FV && FV.readyState !== "loading" && !FV.showAll && folder && !FV.isVisible(folder)){ redirectHiddenToTop(); return; }
         if (intent.via === "resume") {
           // Continue-reading: a saved folder that is no longer a leaf steps
           // out to its browse parent first, then opens on a beat (unchanged
@@ -3153,6 +3212,17 @@
   // page. Receives typed PageRef/Spread values — never a local globalIdx.
   // Must never call request() (receive-only channel).
   function applyCommittedNav(snapshot, manifest, options){
+    // 非表示 root の commit は通常モードで反映しない — PairedView.apply /
+    // DOM 反映より前に、PairController._applyCommitted と同じ O(1) 判定で
+    // 同期を解除してトップへ戻す（redirectHiddenToTop が teardown → leave →
+    // resetToTop の順を担う）。folder を解決できない manifest は拒否しない。
+    var FV = window.FolderVisibility;
+    if (FV && FV.readyState !== "loading" &&
+        typeof FV.committedFolderHidden === "function" &&
+        FV.committedFolderHidden(manifest, snapshot)){
+      redirectHiddenToTop();
+      return;
+    }
     const desc = window.PairedView.apply(snapshot, manifest, options);
     if (desc.kind === "leave"){ exitPairedToSolo(); return; }
     if (desc.kind === "paired"){ applyPairedCommit(desc, manifest); return; }
@@ -4031,7 +4101,10 @@
       return;
     }
     const all = ReadingProgress.getAll();
-    const entries = Object.entries(all).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
+    // 通常モードでは非表示 root の履歴を候補から外す（履歴データ自体は消さない）。
+    const FV = window.FolderVisibility;
+    const visOk = (FV && !FV.showAll) ? (p) => FV.isVisible(p) : () => true;
+    const entries = Object.entries(all).filter(e => visOk(e[0])).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
     if (entries.length === 0) {
       hideResumeBtn();
       return;
@@ -4210,7 +4283,38 @@
   const savedHash = (savedStash && Date.now() - savedStash.ts < 10 * 60 * 1000) ? savedStash.hash : null;
   if (savedHash && !location.hash) history.replaceState(null, "", location.pathname + location.search + savedHash);
   sessionStorage.removeItem("bookq_return_hash");
-  loadFolders().then(()=>{ applyUrlState(); tryAutoSync(); });
+
+  // ── folder visibility (非表示トップ root) wiring ──
+  // onChange: 同じ snapshot/モードのまま再描画し、通常モードで現在の閲覧・
+  // 待機中の移動が禁止対象になったらトップへ戻す。
+  function _visibilityOnChange(){
+    try {
+      var FV = window.FolderVisibility;
+      if (FV && !FV.showAll && FV.readyState !== "loading"){
+        var targets = [_pendingViewFolder, _pendingBrowsePath, currentFolder, currentBrowsePath];
+        for (var i = 0; i < targets.length; i++){
+          var p = targets[i];
+          if (p && !FV.isVisible(p)) { redirectHiddenToTop(); return; }
+        }
+      }
+      renderView();
+    } catch(e){ console.warn(e); }
+  }
+  if (window.FolderVisibility){
+    window.FolderVisibility.init({ owner: window.__BOOKQ_VISIBILITY_OWNER__, onChange: _visibilityOnChange });
+    window.FolderVisibility.ready().then(function(){
+      // 設定GET待ちに溜めた移動・復元を解放し、読込中表示を実グリッドへ置換
+      var qv = _pendingViewFolder; _pendingViewFolder = null;
+      var qb = _pendingBrowsePath; _pendingBrowsePath = null;
+      if (qv) loadImages(qv);
+      else if (qb) navigateToFolder(qb);
+      renderView();
+    });
+    // wiring 完了の結合マーカー（watchdog の混在検査対象）
+    window.__BOOKQ_VISIBILITY = true;
+  }
+
+  loadFolders().then(()=>{ (window.FolderVisibility ? window.FolderVisibility.ready() : Promise.resolve()).then(()=>{ applyUrlState(); tryAutoSync(); }); });
   loadFacets();
   // Server-held resume point: pull + merge in parallel with the tree load —
   // a deep-linked viewer already open is untouched (the merge only writes

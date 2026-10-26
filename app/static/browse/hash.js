@@ -331,6 +331,13 @@
         if (vst && vst.folder) BS.noteViewerReturn(path, vst.folder);
       } catch(e) { console.warn(e); }
     }
+    // 直接呼び出しでも同じ拒否: 通常モードで非表示配下ならトップへ。
+    var _FV = window.FolderVisibility;
+    if (_FV && _FV.readyState !== "loading" && !_FV.showAll && path && !_FV.isVisible(path) &&
+        typeof window.redirectHiddenToTop === "function"){
+      window.redirectHiddenToTop();
+      return;
+    }
     // Bump token first so in-flight loadImages cannot overwrite
     try { ++window.urlRestoreGen; window.urlRestoring = false; } catch(e) { console.warn(e); }
     _teardownViewer();
@@ -434,6 +441,18 @@
     var bs = parseBrowseHash();
     var cur = currentViewerState();
     if (!window.treeLoaded) return;
+    // 設定GETの初回判断が着くまでは URL 復元を進めない（hash は保留のまま）。
+    if (window.FolderVisibility && window.FolderVisibility.readyState === "loading") return;
+
+    // 非表示 root／配下への復元は通常モードではトップへ — ペア早期 return より前。
+    var _FV = window.FolderVisibility;
+    if (_FV && !_FV.showAll){
+      var _vTarget = st ? st.folder : (bs ? bs.path : null);
+      if (_vTarget && !_FV.isVisible(_vTarget) && typeof window.redirectHiddenToTop === "function"){
+        window.redirectHiddenToTop();
+        return;
+      }
+    }
 
     // A paired session renders the committed shared spread — the URL hash
     // mirrors it (written synchronously by applyPairedCommit) but is NOT the
