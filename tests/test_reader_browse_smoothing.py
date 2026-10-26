@@ -575,10 +575,12 @@ def test_oversized_unexpected_sample_retargets_smoothly(pair_page):
     assert abs(first - 2400) > 800, \
         "a large error must not be covered in a single frame"
     last = first
-    for _ in range(60):
+    # The chase gap cap bounds the approach to a ~40px/frame cruise, so a
+    # ~1900px retarget needs ~1.1s; allow ample frames then assert arrival.
+    for _ in range(110):
         pg.evaluate("() => window.__clock.frame(16)")
         cur = _scroll(pg)
-        assert abs(cur - last) <= 1500
+        assert abs(cur - last) <= 60
         last = cur
     assert _scroll(pg) == pytest.approx(2400, abs=2)
 

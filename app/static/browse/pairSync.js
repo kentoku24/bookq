@@ -51,6 +51,8 @@
   var PENDING_TTL_MS = 2000; // 未適用 frame の賞味期限（古い stash は捨てる）
   var STALE_MS = 180;
   var TARGET_TAU_MS = 55;
+  var REVISE_MAX_PX = 40;
+  var CHASE_GAP_PX = 240;
   var FLING_HIST_MS = 300;
   var FLING_TAU_DEF_MS = 250;
   var FLING_TAU_MIN_MS = 80;
@@ -384,7 +386,7 @@
    * tile受信時の scrollTop を段階書き換えせず、受信ストリームから作る
    * 移動目標へ2段一次遅れフィルタで毎フレーム追従する。層は:
    *   計測 _followEstimate  → 受理 _followSample（stream更新）
-   *   目標 _targetAt        → 実測 or 送信側終端予測 pred（単調hold付）
+   *   目標 _targetAt        → 実測 or 送信側終端予測 lead（改訂追従）
    *   追従 _integrate       → 厳密積分 F/X — 位置・速度とも連続で、
    *                           静的目標にオーバーシュートしない
    *   書き込み _writeFollow → DOM + 出所記録（echo防止・端re-anchor）
@@ -393,7 +395,7 @@
   function _newFollow(sc, top, t) {
     return {sc: sc, hist: [],
       stream: {t0: t, top: top, vel: 0, dir: 0, pred: null},
-      s1: top, pos: top, lastTick: t, tMax: -1e18, tMin: 1e18,
+      s1: top, pos: top, lastTick: t, lead: null,
       active: false};
   }
   function _seedFollow(sc, ctx) {
@@ -418,7 +420,7 @@
   /* 計測 — 直近3サンプルから速度・進行方向を推定する。
    * ジッターの混じる到着間隔に対し、減速が一貫する場合のみ前回速度を
    * 1/4 混ぜて平滑化する。EST_MIN_MS 未満に詰まった到着は直前サンプルへ
-   * 合流させる — 履歴を捨てると方向を失い、pred と単調holdが外れて目標が
+   * 合流させる — 履歴を捨てると方向を失い、pred と lead が外れて目標が
    * 実測へ逆走する。 */
   function _followEstimate(f, top) {
     var t = _perfNow();
@@ -471,8 +473,18 @@
     var est = _followEstimate(f, top);
     var t = est.t, v = est.v;
     var dir = v > 0 ? 1 : (v < 0 ? -1 : 0);
-    if (dir !== f.stream.dir) { f.tMax = -1e18; f.tMin = 1e18; }
+    if (dir !== f.stream.dir) f.lead = null;
     var P = _validPred(f, top, dir, pred);
+    /* 終端目標 lead — 各サンプルの最良推定（pred または実測）へ受信あたり
+     * REVISE_MAX_PX まで追従する。3点フィットのpredは推定誤差で揺れる
+     * （±数十〜百px超）— 改訂をそのまま採用すると目標が跳ねて前方突進・
+     * 後退のjerkになる。一方、全期間の最大値を保持すると早期の過大推定が
+     * ストリーム全体に残り、終端で実測へ大きく戻る。上下対称のレート制限で
+     * 改訂を吸収し、pred不在の区間は実測へ緩やかに戻る。 */
+    var T0 = (P !== null) ? P : top;
+    if (f.lead === null || dir === 0) f.lead = T0;
+    else f.lead += Math.max(-REVISE_MAX_PX,
+      Math.min(REVISE_MAX_PX, T0 - f.lead));
     f.stream = {t0: t, top: top, vel: v, dir: dir, pred: P};
     // 起動時だけ時計を合わせる — rAF 稼働中に上書きすると前フレームから
     // 受信までの経過が積分から落ち、rAF の時刻が受信より前なら dt=0 で
@@ -483,16 +495,14 @@
     _ensureRaf();
   }
 
-  /* 目標決定 — ストリームが新鮮な間は pred（あれば）を採用し、
-   * 進行方向への単調holdで目標の逆走を抑える。stale後は最後の
-   * 実測位置へ戻して収束させる。 */
+  /* 目標決定 — ストリームが新鮮な間は lead（直近の終端推定）を採用し、
+   * 実測位置より手前には下げない。stale後は最後の実測位置へ戻して
+   * 収束させる。lead 自体の改訂は受理（_followSample）で行う。 */
   function _targetAt(f, t) {
     var m = f.stream;
     var T = m.top;
-    if (t - m.t0 < STALE_MS) {
-      if (m.pred !== null && m.pred !== undefined) T = m.pred;
-      if (m.dir > 0) { if (T > f.tMax) f.tMax = T; T = f.tMax; }
-      else if (m.dir < 0) { if (T < f.tMin) f.tMin = T; T = f.tMin; }
+    if (t - m.t0 < STALE_MS && f.lead !== null && m.dir !== 0) {
+      T = (m.dir > 0) ? Math.max(m.top, f.lead) : Math.min(m.top, f.lead);
     }
     return T;
   }
@@ -551,6 +561,14 @@
     if (dt < 0) dt = 0;
     if (dt > 500) dt = 500;
     var T = _targetAt(f, ts);
+    /* 追いつきギャップの上限 — 遠い目標（フリング開始時の終端pred・大きな
+     * 実測ジャンプ・終端の後退補正）へ τ=55ms のフィルタが全速で向かうと
+     * 1フレームで百px超動く突進jerkになる。ギャップを CHASE_GAP_PX に
+     * 留めると定常速度 ≈ CHASE_GAP_PX/(2τ) のクルーズ＋末端減衰になり、
+     * 追いつきも戻りも同じ上限に収まる。 */
+    var gap = T - f.pos;
+    if (gap > CHASE_GAP_PX) T = f.pos + CHASE_GAP_PX;
+    else if (gap < -CHASE_GAP_PX) T = f.pos - CHASE_GAP_PX;
     _integrate(f, T, dt);
     var x = f.pos;
     var w = _writeFollow(x);
