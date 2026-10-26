@@ -66,7 +66,13 @@ def test_no_localstorage_for_layout(landscape_page, server):
     _open_long(landscape_page, server)
     landscape_page.locator("#spread-shift").click()
     keys = landscape_page.evaluate("Object.keys(localStorage)")
-    assert all(k in ("bookq_progress", "bookq_persist_toast") for k in keys), keys
+    # bookq.folderVisibility.v1.<owner> は仕様上のowner別snapshot cache
+    # (offline起動用) — レイアウト状態ではないため許可する。
+    assert all(
+        k in ("bookq_progress", "bookq_persist_toast")
+        or k.startswith("bookq.folderVisibility.v1.")
+        for k in keys
+    ), keys
 
 
 def test_view_mode_in_browse_url(page, server):

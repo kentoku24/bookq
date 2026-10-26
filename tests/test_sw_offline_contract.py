@@ -44,9 +44,12 @@ def test_shell_precache_v2_count():
     # precache for offline parity with the rest of the paired-reader chain.
     # progress/sync.js (server-held "続きから" resume point) is precached too —
     # the boot pull must exist in the same shell as app.js that calls it.
-    assert len(entries) == 32, f"expected 32 SHELL_ASSETS, got {len(entries)}: {entries}"
+    # browse/visibility.js (per-user hidden roots) joins the shell — the
+    # visibility module must exist in the same shell as the app that wires it.
+    assert len(entries) == 33, f"expected 33 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
     assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
+    assert '"/static/browse/visibility.js"' in m.group(1), "SHELL_ASSETS must precache browse/visibility.js"
     assert "new Request" in text and "reload" in text, "install must use new Request with cache:reload"
 
 def test_static_swr_branch_order_and_guard():
@@ -77,6 +80,27 @@ def test_static_swr_semantics():
     assert "caches.open" in text
     assert "fetch(" in text
     assert ".put(" in text
+
+def test_visibility_api_is_network_only():
+    """/api/folder-visibility must be a dedicated network-only branch BEFORE
+    the generic /api/ NetworkFirst branch — a per-user hidden set can never be
+    served from the shared API cache, and offline failure is Response.error()
+    (the module's owner-scoped localStorage snapshot is the fallback, not
+    Cache API)."""
+    text = SW_PATH.read_text(encoding="utf-8")
+    fetch_section = text[text.find('self.addEventListener("fetch"'):]
+    vis_idx = fetch_section.find("'/api/folder-visibility'")
+    api_idx = fetch_section.find("startsWith('/api/')")
+    assert vis_idx != -1, "dedicated /api/folder-visibility branch missing"
+    assert api_idx != -1, "generic /api/ NetworkFirst branch missing"
+    assert vis_idx < api_idx, (
+        f"visibility branch must precede the shared API cache branch: "
+        f"vis {vis_idx} api {api_idx}"
+    )
+    branch = fetch_section[vis_idx:api_idx]
+    assert "fetch(request)" in branch, "visibility branch must go to network"
+    assert ".put(" not in branch and "caches.open" not in branch, \
+        "visibility responses must never enter a Cache API store"
 
 def test_sw_headers(server):
     status, body, headers = _get(server, "/sw.js")
