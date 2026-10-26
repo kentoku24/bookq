@@ -4,6 +4,7 @@ tests/folder_visibility_helpers.py.
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -180,3 +181,101 @@ def test_resume_button_skips_hidden_newest(vpage, vis_env):
     vpage.wait_for_function("window.FolderVisibility.showAll === true")
     txt = vpage.locator("#resume-btn-text").inner_text()
     assert "hide_me" in txt
+
+
+# ── loading / error judgment gates ──────────────────────────────────────
+
+
+def _wait_held(held, timeout=10.0):
+    """Poll until the route handler captured at least one request."""
+    deadline = time.time() + timeout
+    while not held and time.time() < deadline:
+        time.sleep(0.05)
+    return held
+
+
+def _drop_vis_snapshot(vpage):
+    """Remove the owner-scoped visibility snapshot so the next document
+    loads cold — the vpage fixture's first successful load caches one, and
+    with a snapshot the grid correctly renders it while refreshing (the
+    loading/error gates only apply when NO snapshot exists at all)."""
+    vpage.evaluate(
+        "Object.keys(localStorage)"
+        ".filter(k=>k.startsWith('bookq.folderVisibility.'))"
+        ".forEach(k=>localStorage.removeItem(k))")
+
+
+def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
+    """While the first visibility GET is outstanding the grid must never
+    paint an unfiltered list — release converges to the filtered grid."""
+    vis_put(vis_env, "hide_me", True)
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    vpage.reload()
+    assert _wait_held(held), "visibility GET was never issued"
+    vpage.wait_for_timeout(300)
+    assert vpage.locator("#tile-grid .tile").count() == 0
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_selector("#tile-grid .tile")
+    paths = vpage.locator("#tile-grid .tile").evaluate_all(
+        "els=>els.map(e=>e.dataset.path)")
+    assert "hide_me" not in paths
+    assert "keep_a" in paths
+
+
+def test_loading_queues_browse_url_then_applies(vpage, vis_env):
+    """Deep link while the judgment is outstanding: queued, never denied —
+    the hash survives and the nav completes once visibility lands."""
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    _fresh_goto(vpage, vis_env + "/#/browse/hide_series")
+    assert _wait_held(held), "visibility GET was never issued"
+    vpage.wait_for_timeout(300)
+    # pending ≠ deny: the hash is left intact for the post-ready drain.
+    assert vpage.evaluate("location.hash") == "#/browse/hide_series"
+    assert vpage.locator("#tile-grid .tile").count() == 0
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function("window.currentBrowsePath === 'hide_series'")
+
+
+def test_loading_queues_view_url_then_applies(vpage, vis_env):
+    held = []
+    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    _drop_vis_snapshot(vpage)
+    _fresh_goto(vpage, vis_env + "/#/view/keep_a?p=0")
+    assert _wait_held(held), "visibility GET was never issued"
+    vpage.wait_for_timeout(300)
+    assert vpage.evaluate("location.hash").startswith("#/view/keep_a")
+    assert vpage.evaluate("window.currentFolder || null") is None
+    for r in list(held):
+        r.fallback()
+    vpage.wait_for_function("window.currentFolder === 'keep_a'")
+
+
+def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
+    """GET failure with no snapshot: the grid renders the error gate (never
+    an unfiltered list) and its retry converges to the filtered grid."""
+    calls = {"n": 0}
+
+    def handler(route):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            route.fulfill(status=500, content_type="application/json", body="{}")
+        else:
+            route.fallback()
+
+    vpage.route("**/api/folder-visibility", handler)
+    _drop_vis_snapshot(vpage)
+    vpage.reload()
+    vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
+    vpage.wait_for_timeout(300)
+    assert vpage.locator("#tile-grid .tile").count() == 0
+    assert vpage.locator("#tile-grid .fv-grid-retry").count() == 1
+    vpage.click("#tile-grid .fv-grid-retry")
+    vpage.wait_for_selector("#tile-grid .tile")
+    assert "keep_a" in vpage.locator("#tile-grid .tile").evaluate_all(
+        "els=>els.map(e=>e.dataset.path)")

@@ -97,7 +97,31 @@ def test_root_for_path_normalization(vpage):
     ]
 
 
-def test_hidden_set_apply_and_revision_monotonic(vpage):
+def test_top_level_set_tracks_flattened_node_names(vpage):
+    """_topLevel holds root-level node _fullPaths — flattened names keep
+    their '/' and only EXACT membership counts (never first segments)."""
+    _boot(vpage, _json_response("{owner:'ownA',revision:1,hiddenRoots:[]}"))
+    _init(vpage)
+    vpage.evaluate(
+        "window.FolderVisibility.setTopLevelPaths(['wrap/wA','hide_me','arc.zip'])"
+    )
+    out = vpage.evaluate(
+        "(()=>{const FV=window.FolderVisibility;return ["
+        "FV.isTopLevel('wrap/wA'),FV.isTopLevel('wrap'),FV.isTopLevel('wA'),"
+        "FV.isTopLevel('hide_me'),FV.isTopLevel('hide_me/sub'),"
+        "FV.isTopLevel('arc.zip'),FV.isTopLevel(''),FV.isTopLevel(null)]})()"
+    )
+    assert out == [True, False, False, True, False, True, False, False]
+    # Re-index replaces the set wholesale (stale top-levels drop out).
+    vpage.evaluate("window.FolderVisibility.setTopLevelPaths(['only'])")
+    assert vpage.evaluate("window.FolderVisibility.isTopLevel('wrap/wA')") is False
+    assert vpage.evaluate("window.FolderVisibility.isTopLevel('only')") is True
+
+
+def test_hidden_set_apply_and_downrev_converges_once(vpage):
+    """srvRev < _revision (server reset OR a stale pre-PUT read): the server
+    snapshot is adopted verbatim — the server is truth — and exactly ONE
+    convergence GET is scheduled to self-correct a stale read."""
     _boot(vpage, _json_response(
         "{owner:'ownA',revision:3,hiddenRoots:['hide_me','hide_series']}"
     ))
@@ -105,17 +129,245 @@ def test_hidden_set_apply_and_revision_monotonic(vpage):
     assert vpage.evaluate("window.FolderVisibility.isHidden('hide_me/x')") is True
     assert vpage.evaluate("window.FolderVisibility.isVisible('hide_series/vol1')") is False
     assert vpage.evaluate("window.FolderVisibility.isVisible('keep_a')") is True
-    # Older revision must not apply (monotonic per owner).
+    # Drain one-shot ambient refresh triggers (first-paint visibilitychange /
+    # focus → a coalesced re-GET) before measuring call counts.
+    vpage.wait_for_timeout(700)
+    n0 = vpage.evaluate("window.__calls.length")
     vpage.evaluate(
-        "window.fetch=(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "(()=>{window.fetch=(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
         "return Promise.resolve(new Response(JSON.stringify("
-        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200}))}"
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200}))};})()"
     )
     vpage.evaluate("window.FolderVisibility.refresh()")
-    vpage.wait_for_function("window.FolderVisibility._debug().fetchGen >= 2")
+    # The refresh plus its one scheduled convergence both land — wait for
+    # the convergence RESPONSE (flight end), not just its issue: a refresh()
+    # overlapping the in-flight convergence would queue a follow-up and
+    # skew the count.
+    vpage.wait_for_function(
+        "window.__calls.length >= %d"
+        " && !window.FolderVisibility._debug().refreshInFlight" % (n0 + 2))
     snap = vpage.evaluate("window.FolderVisibility.snapshot()")
-    assert snap["revision"] == 3
-    assert sorted(snap["hiddenRoots"]) == ["hide_me", "hide_series"]
+    assert snap["revision"] == 1
+    assert snap["hiddenRoots"] == []
+    # Bounded: an identical refresh is adopted but does NOT re-arm the
+    # convergence (the downrev self-correction is one GET per adoption).
+    n2 = vpage.evaluate("window.__calls.length")
+    vpage.evaluate("window.FolderVisibility.refresh()")
+    vpage.wait_for_timeout(600)
+    assert vpage.evaluate("window.__calls.length") == n2 + 1
+
+
+def test_hidden_root_for_longest_match(vpage):
+    """hiddenRootFor: full normalized-path prefix match on hidden keys;
+    longest key wins; escape/empty → null."""
+    _boot(vpage, _json_response(
+        "{owner:'ownA',revision:1,hiddenRoots:['wrap/wA','a']}"
+    ))
+    _init(vpage)
+    out = vpage.evaluate(
+        """(() => {const FV = window.FolderVisibility; return [
+          FV.hiddenRootFor('wrap/wA'), FV.hiddenRootFor('wrap/wA/p1.png'),
+          FV.hiddenRootFor('wrap/wB'), FV.hiddenRootFor('a/b'),
+          FV.hiddenRootFor('x/../a/b'), FV.hiddenRootFor('ab'),
+          FV.hiddenRootFor(''), FV.hiddenRootFor('..'),
+          FV.isHidden('wrap/wA/sub'), FV.isHidden('wrap'),
+          FV.isVisible('wrap/wA'), FV.isVisible('wrap/wB')
+        ];})()"""
+    )
+    assert out == [
+        "wrap/wA", "wrap/wA",
+        None, "a",
+        "a", None,
+        None, None,
+        True, False,
+        False, True,
+    ]
+
+
+def test_guard_path_states(vpage):
+    _boot(vpage, _json_response(
+        "{owner:'ownA',revision:1,hiddenRoots:['hide_me']}"
+    ))
+    _init(vpage)
+    out = vpage.evaluate(
+        """(() => {const FV = window.FolderVisibility; return [
+          FV.guardPath('hide_me'), FV.guardPath('hide_me/x'),
+          FV.guardPath('keep_a'), FV.guardPath('')];})()"""
+    )
+    assert out == ["hidden", "hidden", "allow", "allow"]
+    vpage.evaluate("window.FolderVisibility.setShowAll(true)")
+    assert vpage.evaluate("window.FolderVisibility.guardPath('hide_me')") == "allow"
+
+
+def test_guard_path_pending_without_snapshot(vpage):
+    """error with no snapshot at all: never 'hidden' — deny paths queue."""
+    _boot(vpage, "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+                 "return Promise.reject(new TypeError('down'))}")
+    _init(vpage)
+    vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
+    assert vpage.evaluate("window.FolderVisibility.guardPath('hide_me')") == "pending"
+    assert vpage.evaluate("window.FolderVisibility.isHidden('hide_me')") is False
+    assert vpage.evaluate("window.FolderVisibility.isVisible('keep_a')") is False
+
+
+def test_blocked_grid_html_states(vpage):
+    _boot(vpage, "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+                 "return Promise.reject(new TypeError('down'))}")
+    # Loading, no snapshot → 読込中 placeholder (never an unfiltered grid).
+    _init(vpage)
+    vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
+    html = vpage.evaluate("window.FolderVisibility.blockedGridHtml()")
+    assert "取得失敗" in html and "fv-grid-retry" in html
+
+
+def test_sig_delimiter_collision_still_fires_onchange(vpage):
+    """['a,b','c'] vs ['a','b,c'] — a delimiter join must not collide them
+    into the same signature (a silent no-change would skip onChange)."""
+    _boot(vpage, _json_response("{owner:'ownA',revision:1,hiddenRoots:['a,b','c']}"))
+    _init(vpage)
+    n0 = vpage.evaluate("window.__changes || 0")
+    vpage.evaluate(
+        "(()=>{window.fetch=(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:2,hiddenRoots:['a','b,c']}),{status:200}))};})()"
+    )
+    vpage.evaluate("window.FolderVisibility.refresh()")
+    vpage.wait_for_function("(window.__changes||0) > %d" % n0)
+    snap = vpage.evaluate("window.FolderVisibility.snapshot()")
+    assert sorted(snap["hiddenRoots"]) == ["a", "b,c"]
+
+
+def test_put_response_never_rolled_back_by_get(vpage):
+    """A GET issued before an in-flight PUT resolves after it: the older
+    request's response is skipped, so the PUT snapshot stays verbatim."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "if(o&&o.method==='PUT'){"
+        "return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:2,hiddenRoots:['hide_me']}),"
+        "{status:200,headers:{'Content-Type':'application/json'}}));}"
+        "const gets=window.__calls.filter(c=>!(c.o&&c.o.method==='PUT')).length;"
+        "if(gets<=1){return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}}));}"
+        "return new Promise(res=>{(window.__held=window.__held||[]).push(res)});}",
+    )
+    _init(vpage)
+    n0 = vpage.evaluate("window.__calls.length")
+    # Both promises are held — evaluate must not await them (fire-and-forget).
+    vpage.evaluate("(()=>{window.FolderVisibility.refresh();})()")          # GET#2 held
+    res = vpage.evaluate("window.FolderVisibility.setHidden('hide_me', true)")
+    assert res["ok"] is True
+    # The in-flight GET resolves with pre-PUT data → skipped entirely.
+    vpage.evaluate(
+        "(window.__held||[]).forEach(r=>r(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}})))"
+    )
+    vpage.wait_for_timeout(100)
+    snap = vpage.evaluate("window.FolderVisibility.snapshot()")
+    assert snap["revision"] == 2
+    assert snap["hiddenRoots"] == ["hide_me"]
+    # No extra GETs beyond the held one (skip ≠ convergence).
+    assert vpage.evaluate("window.__calls.length") == n0 + 2
+
+
+def test_stale_get_landing_after_put_converges_once(vpage):
+    """A GET issued DURING a PUT flight that resolves stale afterwards is
+    adopted (server truth), then self-corrected by exactly one
+    convergence refresh — final state is the PUT's revision."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "if(o&&o.method==='PUT'){"
+        "return new Promise(res=>{(window.__heldPut=window.__heldPut||[]).push(res)});}"
+        "const gets=window.__calls.filter(c=>!(c.o&&c.o.method==='PUT')).length;"
+        "if(gets<=1){return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}}));}"
+        "return new Promise(res=>{(window.__heldGet=window.__heldGet||[]).push(res)});}",
+    )
+    _init(vpage)
+    vpage.evaluate("(()=>{window.FolderVisibility.setHidden('hide_me', true);})()")  # PUT held
+    vpage.evaluate("(()=>{window.FolderVisibility.refresh();})()")                  # GET held
+    # PUT lands first with the committed snapshot.
+    vpage.evaluate(
+        "(window.__heldPut||[]).splice(0).forEach(r=>r(new Response(JSON.stringify("
+        "{owner:'ownA',revision:2,hiddenRoots:['hide_me']}),{status:200,"
+        "headers:{'Content-Type':'application/json'}})))"
+    )
+    # The newer-issued GET then resolves STALE (read before the commit):
+    # adopted downrev → exactly one convergence GET is issued (splice drains
+    # so the wait below only sees the NEW held request).
+    vpage.evaluate(
+        "(window.__heldGet||[]).splice(0).forEach(r=>r(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}})))"
+    )
+    vpage.wait_for_function(
+        "(window.__heldGet||[]).length >= 1", timeout=5000
+    )
+    vpage.evaluate(
+        "(window.__heldGet||[]).splice(0).forEach(r=>r(new Response(JSON.stringify("
+        "{owner:'ownA',revision:2,hiddenRoots:['hide_me']}),{status:200,"
+        "headers:{'Content-Type':'application/json'}})))"
+    )
+    vpage.wait_for_function(
+        "window.FolderVisibility.snapshot().revision === 2"
+    )
+    snap = vpage.evaluate("window.FolderVisibility.snapshot()")
+    assert snap["revision"] == 2
+    assert snap["hiddenRoots"] == ["hide_me"]
+
+
+def test_ready_resolves_on_put_before_first_get(vpage):
+    """ready() resolves on the first completed judgment from ANY source —
+    a PUT landing before the initial GET counts."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "if(o&&o.method==='PUT'){return Promise.resolve(new Response("
+        "JSON.stringify({owner:'ownA',revision:5,hiddenRoots:['hide_me']}),"
+        "{status:200,headers:{'Content-Type':'application/json'}}));}"
+        "return new Promise(()=>{})}",   # GET never resolves
+    )
+    vpage.evaluate(
+        "window.FolderVisibility.init({owner:'ownA',"
+        "onChange:()=>{window.__changes=(window.__changes||0)+1;}})"
+    )
+    vpage.evaluate(
+        "(()=>{window.__readyFlag=false;"
+        "window.FolderVisibility.ready().then(()=>{window.__readyFlag=true;});})()"
+    )
+    res = vpage.evaluate("window.FolderVisibility.setHidden('hide_me', true)")
+    assert res["ok"] is True
+    vpage.wait_for_function("window.__readyFlag === true")
+    assert vpage.evaluate("window.FolderVisibility.readyState") == "ready"
+
+
+def test_set_hidden_accepts_multi_segment_root(vpage):
+    """Flattened roots like wrap/wA pass client validation — membership in
+    the top-level set is the server's check, not the shape's."""
+    _boot(
+        vpage,
+        "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "if(o&&o.method==='PUT')return Promise.resolve(new Response("
+        "JSON.stringify({owner:'ownA',revision:2,hiddenRoots:['wrap/wA']}),"
+        "{status:200,headers:{'Content-Type':'application/json'}}));"
+        "return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200}))}",
+    )
+    _init(vpage)
+    res = vpage.evaluate("window.FolderVisibility.setHidden('wrap/wA', true)")
+    assert res["ok"] is True
+    puts = [c for c in vpage.evaluate("window.__calls") if c["o"].get("method") == "PUT"]
+    assert len(puts) == 1
+    assert json.loads(puts[0]["o"]["body"]) == {"root": "wrap/wA", "hidden": True}
+    # Malformed multi-segment shapes still fail client-side without a PUT.
+    for bad in ("a//b", "a/./b", "a/../b", "/a", "a/", ".h/x", "a/.b"):
+        res = vpage.evaluate("window.FolderVisibility.setHidden(%s, true)" % json.dumps(bad))
+        assert res["ok"] is False and res.get("invalid") is True, bad
 
 
 def test_refresh_is_single_flight(vpage):
@@ -211,14 +463,31 @@ def test_offline_boot_uses_cached_snapshot_readonly(vpage):
     assert res["ok"] is False and res.get("offline") is True
 
 
-def test_no_snapshot_error_fail_closed_with_retry(vpage):
+def test_no_snapshot_error_blocks_grid_queues_nav_and_retries(vpage):
+    """Error with no snapshot: the render gate stays closed (an unfiltered
+    grid is never painted), but nothing is positively hidden — navigation
+    guards return 'pending' (queue), never 'hidden' (deny). Retry recovers."""
     _boot(vpage, "(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
                  "return Promise.reject(new TypeError('down'))}")
     _init(vpage)
     vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
-    # Fail closed: nothing is "visible" without any snapshot.
+    # Render gate: no snapshot → not visible — but NOT positively hidden.
     assert vpage.evaluate("window.FolderVisibility.isVisible('keep_a')") is False
+    assert vpage.evaluate("window.FolderVisibility.isHidden('keep_a')") is False
+    assert vpage.evaluate("window.FolderVisibility.isHidden('hide_me/x')") is False
+    assert vpage.evaluate("window.FolderVisibility.guardPath('x')") == "pending"
     assert vpage.evaluate("!!document.getElementById('visibility-retry')") is True
+    # Retry converges to ready once the server answers.
+    vpage.evaluate(
+        "(()=>{window.fetch=(u,o)=>{window.__calls.push({u:String(u),o:o||{}});"
+        "return Promise.resolve(new Response(JSON.stringify("
+        "{owner:'ownA',revision:1,hiddenRoots:[]}),{status:200,"
+        "headers:{'Content-Type':'application/json'}}))};})()"
+    )
+    vpage.click("#visibility-retry")
+    vpage.wait_for_function("window.FolderVisibility.readyState === 'ready'")
+    assert vpage.evaluate("window.FolderVisibility.isVisible('keep_a')") is True
+    assert vpage.evaluate("window.FolderVisibility.guardPath('x')") == "allow"
 
 
 def test_show_all_never_persisted(vpage):

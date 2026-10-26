@@ -138,7 +138,7 @@ def test_error_responses_are_private_no_store(make_client):
     client = make_client()
     resp = client.put(
         "/api/folder-visibility",
-        json={"root": "a/b", "hidden": True},
+        json={"root": "a//b", "hidden": True},
         headers={OWNER_HEADER: _owner(client)},
     )
     assert resp.status_code == 400
@@ -199,7 +199,7 @@ def test_supported_root_kinds(make_client):
     )
 
 
-@pytest.mark.parametrize("root", ["missing", "cover.png", "notes.txt"])
+@pytest.mark.parametrize("root", ["missing", "cover.png", "notes.txt", "a/b", "作品A/sub"])
 def test_unsupported_or_missing_root_is_404(make_client, root):
     client = make_client()
     resp = _put(client, root, True, _owner(client))
@@ -209,10 +209,13 @@ def test_unsupported_or_missing_root_is_404(make_client, root):
 def test_outside_symlink_and_loop_do_not_500(make_client):
     client = make_client()
     owner = _owner(client)
+    # "escape" scans as a real top-level folder node (symlinked dir stays
+    # browsable) — tree membership subsumes containment, so it is hideable.
     resp = _put(client, "escape", True, owner)
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    # "loop" never resolves — not a tree node, never a 500.
     resp = _put(client, "loop", True, owner)
-    assert resp.status_code in (403, 404)
+    assert resp.status_code == 404
 
 
 def test_unhide_allowed_for_gone_root(make_client):
@@ -304,7 +307,8 @@ def test_hidden_must_be_strict_bool(make_client, hidden):
 
 @pytest.mark.parametrize(
     "root",
-    ["", "a/b", "a\\b", "/abs", "a\x00b", ".", "..", ".hidden", "x" * 2049, 123, None, True],
+    ["", "a\\b", "/abs", "a\x00b", ".", "..", ".hidden", "x" * 2049, 123, None, True,
+     "a//b", "a/./b", "a/../b", "/a", "a/", "a/.b", ".h/x"],
 )
 def test_invalid_roots_are_400(make_client, root):
     client = make_client()
@@ -413,3 +417,81 @@ def test_index_embeds_opaque_owner_not_email(make_client):
     assert line is not None
     assert f'"{expected}"' in line
     assert "test@example.com" not in line
+
+
+# ── flattened scanner roots ────────────────────────────────────────────
+
+
+@pytest.fixture
+def flat_client(tmp_path: Path, monkeypatch):
+    """A library whose ONLY root entry flattens: wrap/ holds the works.
+
+    scan_tree(root) sees exactly one dir and no files/archives/pdfs, so its
+    children hoist up with ``wrap/``-prefixed names — ``wrap/wA`` IS a
+    top-level tree node while ``wrap`` itself is not a node at all. The
+    archive inside wrap hoists the same way → ``wrap/arc.zip``.
+    """
+    root = tmp_path / "flat_downloads"
+    for w in ("wA", "wB"):
+        (root / "wrap" / w).mkdir(parents=True)
+        (root / "wrap" / w / "1.png").write_bytes(b"\x89PNG")
+    (root / "wrap" / "arc.zip").write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    monkeypatch.setenv("DOWNLOADS_DIR", str(root))
+    monkeypatch.setenv("BOOKQ_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("SECRET_KEY", SECRET)
+    from app.main import create_app
+
+    app = create_app()
+    app.dependency_overrides[require_auth] = lambda: {"email": "alice@example.com"}
+    return TestClient(app)
+
+
+def test_flattened_root_is_hideable_by_node_name(flat_client):
+    """``wrap/wA`` is a real top-level tree node — hideable by its full name."""
+    owner = _owner(flat_client)
+    resp = _put(flat_client, "wrap/wA", True, owner)
+    assert resp.status_code == 200
+    assert resp.json()["hiddenRoots"] == ["wrap/wA"]
+    resp = flat_client.get("/api/folder-visibility")
+    assert resp.json()["hiddenRoots"] == ["wrap/wA"]
+
+
+def test_flattened_non_node_paths_are_404(flat_client):
+    """``wrap`` was flattened away (never a node); deep paths are not roots."""
+    owner = _owner(flat_client)
+    assert _put(flat_client, "wrap", True, owner).status_code == 404
+    assert _put(flat_client, "wrap/wA/1.png", True, owner).status_code == 404
+
+
+def test_flattened_root_unhide_roundtrip(flat_client):
+    owner = _owner(flat_client)
+    _put(flat_client, "wrap/wA", True, owner)
+    resp = _put(flat_client, "wrap/wA", False, owner)
+    assert resp.status_code == 200
+    assert resp.json()["hiddenRoots"] == []
+
+
+def test_flattened_archive_root_is_hideable(flat_client):
+    """A flattened archive name (multi-segment + extension) validates by the
+    same tree-membership rule — no special casing for .zip/.pdf."""
+    owner = _owner(flat_client)
+    resp = _put(flat_client, "wrap/arc.zip", True, owner)
+    assert resp.status_code == 200
+    assert resp.json()["hiddenRoots"] == ["wrap/arc.zip"]
+
+
+# ── owner header bytes safety ──────────────────────────────────────────
+
+
+def test_non_ascii_owner_header_is_409_not_500(make_client):
+    """hmac.compare_digest on a non-ASCII str raises TypeError — the route
+    compares encoded bytes, so a non-ASCII header value mismatches to 409
+    instead of crashing to a 500."""
+    client = make_client()
+    resp = client.put(
+        "/api/folder-visibility",
+        json={"root": "作品A", "hidden": True},
+        headers=[(OWNER_HEADER.encode("ascii"), "öwner-tōken".encode("utf-8"))],
+    )
+    assert resp.status_code == 409
+    _private_headers(resp)

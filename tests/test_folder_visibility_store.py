@@ -162,17 +162,31 @@ def test_validate_root_accepts_top_segment_names():
     assert validate_root("  spaced  ") == "  spaced  "
 
 
+def test_validate_root_accepts_flattened_multi_segment_names():
+    """Flattened scanner roots are the top-level node's own name — a '/'
+    inside it is structural, not a separator to reject."""
+    assert validate_root("wrap/work") == "wrap/work"
+    assert validate_root("wrap/inner/vol1") == "wrap/inner/vol1"
+    assert validate_root("wrap/arc.zip") == "wrap/arc.zip"
+
+
 @pytest.mark.parametrize(
     "bad",
     [
         "",
-        "a/b",
         "a\\b",
         "/abs",
+        "/a",
+        "a/",
+        "a//b",
+        "a/./b",
+        "a/../b",
         "a\x00b",
         ".",
         "..",
         ".hidden",
+        "a/.b",
+        ".h/x",
         "x" * 2049,
         None,
         123,

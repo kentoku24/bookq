@@ -117,6 +117,32 @@ def build_vis_tree(root: Path) -> Path:
 VIS_ROOTS = ["hide_me", "hide_me_b", "hide_series", "hide_mixed", "hide_arc.zip"]
 
 
+def build_flat_vis_tree(root: Path) -> Path:
+    """Flattened scanner roots: the library root holds ONLY ``wrap/`` — no
+    files, no other dirs — so scan_tree hoists wrap's children to the top
+    level with ``wrap/``-prefixed names. Those ARE the top-level nodes:
+    ``wrap`` itself never exists as a tree node.
+
+      wrap/wA/        flattened leaf work (hide target, 2 pages)
+      wrap/wB/        flattened leaf work (always-visible sibling, 2 pages)
+      wrap/arc.zip    flattened ARCHIVE root (1 zip image entry)
+    """
+    for w in ("wA", "wB"):
+        d = root / "wrap" / w
+        d.mkdir(parents=True)
+        make_png(d / "1.png")
+        make_png(d / "2.png")
+    png_tmp = root / "wrap" / "_z.png"
+    make_png(png_tmp)
+    with zipfile.ZipFile(root / "wrap" / "arc.zip", "w") as z:
+        z.write(png_tmp, "p1.png")
+    png_tmp.unlink()
+    return root
+
+
+FLAT_VIS_ROOTS = ["wrap/wA", "wrap/wB", "wrap/arc.zip"]
+
+
 def spawn_vis_server(tree: Path, state_dir: Path) -> tuple:
     """Same shape as conftest's server fixture but with a dedicated state dir."""
     with socket.socket() as s:

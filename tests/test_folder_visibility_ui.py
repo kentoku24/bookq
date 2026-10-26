@@ -12,7 +12,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from folder_visibility_helpers import (  # noqa: E402
+    FLAT_VIS_ROOTS,
     VIS_ROOTS,
+    build_flat_vis_tree,
     build_vis_tree,
     request_browser,
     spawn_vis_server,
@@ -226,3 +228,98 @@ def test_archive_root_toggle(vpage, vis_env):
     vpage.wait_for_function("window.FolderVisibility.isHidden('hide_arc.zip')")
     vpage.click("#visibility-normal")
     assert "hide_arc.zip" not in _paths(vpage)
+
+
+# ── flattened scanner roots (wrap/wA etc. ARE the top-level nodes) ──────
+
+
+@pytest.fixture(scope="module")
+def flat_vis_env(tmp_path_factory):
+    tree = build_flat_vis_tree(tmp_path_factory.mktemp("vis_flat_dl"))
+    state = tmp_path_factory.mktemp("vis_flat_state")
+    proc, base = spawn_vis_server(tree, state)
+    yield base
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture
+def fvpage(flat_vis_env, request):
+    vis_reset(flat_vis_env, FLAT_VIS_ROOTS)
+    b = request_browser(request)
+    context = b.new_context(viewport={"width": 390, "height": 844})
+    page = context.new_page()
+    page.goto(flat_vis_env)
+    page.wait_for_selector(".tile")
+    yield page
+    context.close()
+
+
+def test_flat_top_level_tiles_are_flattened_names(fvpage):
+    """Every top-level tile carries the flattened _fullPath — 'wrap' itself
+    is never a node, and isTopLevel keys on the full name."""
+    paths = _paths(fvpage)
+    assert sorted(p for p in paths if p) == ["wrap/arc.zip", "wrap/wA", "wrap/wB"]
+    assert fvpage.evaluate("window.FolderVisibility.isTopLevel('wrap/wA')") is True
+    assert fvpage.evaluate("window.FolderVisibility.isTopLevel('wrap')") is False
+
+
+def test_flat_normal_mode_hides_root(fvpage, flat_vis_env):
+    vis_put(flat_vis_env, "wrap/wA", True)
+    fvpage.reload()
+    fvpage.wait_for_selector(".tile")
+    paths = _paths(fvpage)
+    assert "wrap/wA" not in paths
+    assert "wrap/wB" in paths            # sibling must not over-match
+    assert "wrap/arc.zip" in paths
+
+
+def test_flat_show_all_badge_and_toggle(fvpage, flat_vis_env):
+    vis_put(flat_vis_env, "wrap/wA", True)
+    fvpage.reload()
+    fvpage.wait_for_selector(".tile")
+    _show_all(fvpage)
+    tile = fvpage.locator('#tile-grid .tile[data-path="wrap/wA"]')
+    assert "非表示" in tile.locator(".visibility-badge").inner_text()
+    btn = tile.locator(".visibility-toggle")
+    assert btn.count() == 1             # flattened root is a real top-level — editable
+    assert btn.get_attribute("aria-pressed") == "true"
+    # unhide via the button → badge gone, server cleared
+    btn.click()
+    fvpage.wait_for_function("!window.FolderVisibility.isHidden('wrap/wA')")
+    assert "wrap/wA" not in vis_get(flat_vis_env)["hiddenRoots"]
+
+
+def test_flat_toggle_button_hides_multi_segment_root(fvpage, flat_vis_env):
+    """The delegated toggle sends the full flattened path as the root key."""
+    _show_all(fvpage)
+    fvpage.locator('#tile-grid .tile[data-path="wrap/wB"] .visibility-toggle').click()
+    fvpage.wait_for_function("window.FolderVisibility.isHidden('wrap/wB')")
+    assert "wrap/wB" in vis_get(flat_vis_env)["hiddenRoots"]
+    fvpage.click("#visibility-normal")
+    assert "wrap/wB" not in _paths(fvpage)
+
+
+def test_flat_archive_root_toggle(fvpage):
+    _show_all(fvpage)
+    tile = fvpage.locator('#tile-grid .tile[data-path="wrap/arc.zip"]')
+    tile.locator(".visibility-toggle").click()
+    fvpage.wait_for_function("window.FolderVisibility.isHidden('wrap/arc.zip')")
+    fvpage.click("#visibility-normal")
+    assert "wrap/arc.zip" not in _paths(fvpage)
+
+
+def test_flat_hidden_view_url_redirects(fvpage, flat_vis_env):
+    vis_put(flat_vis_env, "wrap/wA", True)
+    fvpage.goto("about:blank")
+    fvpage.goto(flat_vis_env + "/#/view/wrap/wA?p=0")
+    fvpage.wait_for_function("location.hash === ''")
+    assert fvpage.evaluate("window.currentFolder || null") is None
+
+
+def test_flat_hidden_browse_url_redirects(fvpage, flat_vis_env):
+    vis_put(flat_vis_env, "wrap/wA", True)
+    fvpage.goto("about:blank")
+    fvpage.goto(flat_vis_env + "/#/browse/wrap/wA")
+    fvpage.wait_for_function("location.hash === ''")
+    assert fvpage.evaluate("window.currentBrowsePath || null") is None
