@@ -757,8 +757,8 @@ def test_ui_sync_malformed_payloads_rejected():
         _ui_payload(scrollH=-3),
         _ui_payload(scrollH="big"),              # must be a number
         _ui_payload(scrollH=float("nan")),
-        _ui_payload(pred=-1),                    # pred must be >= 0
-        _ui_payload(pred="x"),                   # pred must be a number
+        _ui_payload(scrollH=True),               # bool is not a number
+        _ui_payload(scrollH=200_000_000),        # over the 1e8 cap
         _ui_payload(mode="grid"),                # unknown mode
     )
     for i, payload in enumerate(bad):

@@ -609,6 +609,12 @@ def test_shell_watchdog_marks_healthy_and_stale(browser, server):
             "        const r = window.__shellStale();"
             "        window.PairController.sendUiSync = f; return r; }"
         ) is True
+        assert pg.evaluate(
+            "() => { const b = window.BOOKQ_UI_SYNC_V2;"
+            "        window.BOOKQ_UI_SYNC_V2 = false;"
+            "        const r = window.__shellStale();"
+            "        window.BOOKQ_UI_SYNC_V2 = b; return r; }"
+        ) is True
         # everything restored — back to healthy
         assert pg.evaluate("() => window.__shellStale()") is False
 
@@ -752,6 +758,9 @@ def test_progress_ratio_spans_unequal_column_layouts(browser, server):
 
         assert _scroll_h(pl) != _scroll_h(pf), \
             "precondition: column counts must differ across widths"
+        assert _scroll_h(pf) - _view_h(pf) > 0, \
+            "precondition: follower must actually have a scroll range — " \
+            "otherwise expected==0 and the test proves nothing"
         for top in (120, 400, 250):
             _set_scroll(pl, top)
             lt, ft, expected = _wait_follower_offset(pl, pf)
@@ -777,6 +786,100 @@ def test_ui_sync_payload_carries_scroll_height(browser, server):
         assert sent, "leader arm-edge must emit its position"
         assert sent[-1]["scrollH"] == pytest.approx(_scroll_h(pg), abs=1)
         assert sent[-1]["viewH"] == pytest.approx(_view_h(pg), abs=1)
+    finally:
+        ctx.close()
+
+
+def test_legacy_frame_without_scrollh_uses_px_transform(browser, server):
+    """Mixed-version guard: a frame carrying no scrollH (old client, or a
+    device whose sendUiSync can't carry it) falls back to the legacy px
+    transform on BOTH roles — mixed pairs stay symmetric."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        assert _solo_armed(pg, "follower") is True
+        pg.evaluate(
+            """() => window.__pairBrowseSync.applyRemote(
+                 {view: 'browse', path: null, top: 100, viewH: 500})""")
+        # follower legacy: top + viewH
+        pg.wait_for_function(
+            f"() => Math.abs(({_SC}).scrollTop - 600) <= 2", timeout=5000)
+
+        # re-arm as leader — same no-scrollH frame maps to top - own viewH
+        pg.evaluate("() => window.__arm({role: 'leader'})")
+        pg.evaluate("() => window.openSidebar()")
+        pg.evaluate(
+            """() => window.__pairBrowseSync.applyRemote(
+                 {view: 'browse', path: null, top: 1000, viewH: 500})""")
+        expected = 1000 - _view_h(pg)
+        pg.wait_for_function(
+            f"() => Math.abs(({_SC}).scrollTop - {expected}) <= 2",
+            timeout=5000)
+    finally:
+        ctx.close()
+
+
+def test_mixed_shell_falls_back_to_symmetric_legacy(browser, server):
+    """new pairSync + old pairClient (SWR asset mix): the device can't put
+    scrollH on the wire, so it must NOT apply the progress transform either
+    — both directions degrade to legacy px, keeping the pair symmetric."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        pg.evaluate("() => window.BOOKQ_UI_SYNC_V2 = false")
+        pg.evaluate("() => window.openSidebar()")
+        assert _solo_armed(pg, "leader") is True
+        # own sends carry no scrollH — the peer will treat them as legacy
+        sent = pg.evaluate("() => window.__uiSent")
+        assert sent and "scrollH" not in sent[-1]
+        # a scrollH-bearing remote frame is still applied via legacy px —
+        # NOT progress, or the two directions would diverge ~1 screen/turn
+        pg.evaluate("() => window.__arm({role: 'follower'})")
+        pg.evaluate(
+            """() => window.__pairBrowseSync.applyRemote(
+                 {view: 'browse', path: null, top: 100, viewH: 500,
+                  scrollH: 4000})""")
+        pg.wait_for_function(
+            f"() => Math.abs(({_SC}).scrollTop - 600) <= 2", timeout=5000)
+    finally:
+        ctx.close()
+
+
+def test_resize_remaps_last_remote_position(browser, server):
+    """Local resize changes own maxTop — while the applied position is still
+    remote-owned (hold alive), the last peer frame is remapped onto the new
+    geometry instead of leaving the progress mismatched."""
+    ctx, pg = _dev_page(browser, server,
+                        viewport={"width": 390, "height": 460})
+    try:
+        pg.wait_for_selector(".tile")
+        assert _solo_armed(pg, "follower") is True
+        pg.evaluate(
+            """() => window.__pairBrowseSync.applyRemote(
+                 {view: 'browse', path: null, top: 500, viewH: 500,
+                  scrollH: 2500})""")
+        pg.wait_for_function(
+            "() => document.getElementById('sidebar')"
+            ".classList.contains('open')", timeout=5000)
+        # prog = 500 / (2500-500) = 0.25 -> top = 0.25 * own maxTop
+        m0 = _scroll_h(pg) - _view_h(pg)
+        pg.wait_for_function(
+            f"() => Math.abs(({_SC}).scrollTop - {0.25 * m0}) <= 2",
+            timeout=5000)
+        # taller viewport -> clientHeight grows -> maxTop shrinks -> the
+        # same px would be a *larger* progress; re-apply pulls us back to
+        # the peer's 0.25 on the new geometry
+        pg.set_viewport_size({"width": 390, "height": 620})
+        pg.wait_for_function(
+            "() => document.getElementById('sidebar-scroll')"
+            ".clientHeight > 0", timeout=5000)
+        m1 = _scroll_h(pg) - _view_h(pg)
+        assert m1 < m0, "viewport growth must shrink maxTop"
+        pg.wait_for_function(
+            f"() => Math.abs(({_SC}).scrollTop - {0.25 * m1}) <= 2",
+            timeout=5000)
     finally:
         ctx.close()
 

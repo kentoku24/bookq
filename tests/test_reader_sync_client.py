@@ -932,7 +932,7 @@ def test_send_ui_sync_writes_ctl_frame(pc_page):
           const pre = s.sent.length;
           const ok = c.sendUiSync({view: 'browse', path: 'group/ep',
                                    top: 120.5, viewH: 600, scrollH: 2400,
-                                   pred: 900, mode: 'list'});
+                                   mode: 'list'});
           const f = s.sent[s.sent.length - 1];
           return {ok, sentCount: s.sent.length - pre, f};
         }"""
@@ -942,7 +942,7 @@ def test_send_ui_sync_writes_ctl_frame(pc_page):
     assert f["type"] == "UI_SYNC" and f["sessionId"] == "S1"
     assert f["payload"] == {"view": "browse", "path": "group/ep",
                             "top": 120.5, "viewH": 600, "scrollH": 2400,
-                            "pred": 900, "mode": "list"}
+                            "mode": "list"}
 
 
 def test_send_ui_sync_gating_and_shape(pc_page):
@@ -959,15 +959,25 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           const badView = c.sendUiSync({view: 'overview', top: 0, viewH: 1});
           const badTop = c.sendUiSync({view: 'browse', top: -1, viewH: 1});
           const badH = c.sendUiSync({view: 'browse', top: 0, viewH: 0});
+          const badHBig = c.sendUiSync({view: 'browse', top: 0,
+                                        viewH: 100001});
           const noView = c.sendUiSync({path: 'x', top: 0, viewH: 1});
           const nan = c.sendUiSync({view: 'browse', top: NaN, viewH: 1});
+          const sentAfterBad = s.sent.length - base;
+          // optional fields: invalid values are dropped, the frame still
+          // goes out (position data must not be lost with the bad extra)
           const badSh = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
                                       scrollH: 0});
+          const shDropF = s.sent[s.sent.length - 1];
           const badShT = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
                                        scrollH: 'x'});
-          const badPred = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
-                                        pred: -3});
-          const sentAfterBad = s.sent.length - base;
+          const shDropF2 = s.sent[s.sent.length - 1];
+          const badShCap = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                         scrollH: 2e8});
+          const shDropF3 = s.sent[s.sent.length - 1];
+          const predDrop = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                         pred: -3});
+          const predDropF = s.sent[s.sent.length - 1];
           // minimal payload: path null, no mode
           const minOk = c.sendUiSync({view: 'browse', path: null, top: 0,
                                       viewH: 480});
@@ -983,21 +993,28 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           const down = c.sendUiSync({view: 'browse', path: null, top: 0,
                                      viewH: 1});
           const uiTypes = s.sent.filter(f => f.type === 'UI_SYNC').length;
-          return {idle, badView, badTop, badH, noView, nan, badSh, badShT,
-                  badPred, sentAfterBad,
+          return {idle, badView, badTop, badH, badHBig, noView, nan,
+                  sentAfterBad,
+                  badSh, shDropF, badShT, shDropF2, badShCap, shDropF3,
+                  predDrop, predDropF,
                   minOk, minF, unpaired, down, uiTypes};
         }"""
     )
     assert res["idle"] is False
-    for k in ("badView", "badTop", "badH", "noView", "nan",
-              "badSh", "badShT", "badPred"):
+    for k in ("badView", "badTop", "badH", "badHBig", "noView", "nan"):
         assert res[k] is False, k
     assert res["sentAfterBad"] == 0
+    # invalid optional fields are dropped, not frame-fatal
+    for k in ("badSh", "badShT", "badShCap", "predDrop"):
+        assert res[k] is True, k
+    for k in ("shDropF", "shDropF2", "shDropF3"):
+        assert "scrollH" not in res[k]["payload"], k
+    assert "pred" not in res["predDropF"]["payload"]
     assert res["minOk"] is True
     assert res["minF"]["payload"] == {"view": "browse", "path": None,
                                       "top": 0, "viewH": 480}
     assert res["unpaired"] is False and res["down"] is False
-    assert res["uiTypes"] == 1
+    assert res["uiTypes"] == 5
 
 
 def test_inbound_ui_sync_fires_ui_sync_event(pc_page):
