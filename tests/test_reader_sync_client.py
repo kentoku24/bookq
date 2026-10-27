@@ -626,6 +626,73 @@ def test_leave_while_disconnected_is_immediate_and_final(pc_page):
     assert res["statuses"][-1] == "ended/left"
 
 
+def test_leave_during_inflight_resume_flushes_after_ack(pc_page):
+    """RESUME ACK 前の leave() は即 resolve するが、ACK で link が member へ
+    bind された直後に LEAVE を wire へ流す。ACK 前に送るとサーバは
+    NO_SESSION で捨てるため、相手が resume 期間いっぱい peer-away に残る
+    (reload の URL 復元が RESUME 完了前に leave する競合)。"""
+    res = pc_page.evaluate(
+        """async () => {
+          // A: RESUME sent, ACK pending -> LEAVE deferred until the ACK.
+          const rigA = window.__mkRig();
+          const cA = rigA.mkClient();
+          const a1 = await rigA.pairLeader(cA);
+          a1.fireClose();                               // -> reconnecting
+          rigA.clock.advance(500);                      // retry -> a2
+          const a2 = rigA.sockets[1];
+          a2.fire({v: 1, type: 'HELLO'});               // RESUME goes out
+          const resumeReq = a2.sent[a2.sent.length - 1];
+          let resolvedA = null;
+          cA.leave().then(r => { resolvedA = r; });
+          await Promise.resolve();                      // immediate resolve
+          const preAck = a2.sent.map(f => f.type);
+          a2.fire(rigA.ack(resumeReq, {sessionId: 'S1', memberId: 'mL',
+                                       role: 'leader', resumeToken: 'tok'}));
+          const postAck = a2.sent.map(f => f.type);
+          rigA.clock.advance(60 * 1000);                // no retry may fire
+
+          // B: socket still CONNECTING (pre-HELLO) -> replay RESUME on
+          // HELLO, then flush LEAVE after its ACK.
+          const rigB = window.__mkRig();
+          const cB = rigB.mkClient();
+          const b1 = await rigB.pairLeader(cB);
+          b1.fireClose();
+          rigB.clock.advance(500);
+          const b2 = rigB.sockets[1];
+          cB.leave();
+          await Promise.resolve();
+          const preHello = b2.sent.map(f => f.type);    // nothing yet
+          b2.fire({v: 1, type: 'HELLO'});               // detached watcher replays
+          const reqB = b2.sent[b2.sent.length - 1];
+          b2.fire(rigB.ack(reqB, {sessionId: 'S1', memberId: 'mL',
+                                  role: 'leader', resumeToken: 'tok'}));
+          rigB.clock.advance(60 * 1000);
+          return {resolvedA, preAck, postAck,
+                  preHello, sentB: b2.sent.map(f => f.type),
+                  closedA: a2.closed, closedB: b2.closed,
+                  statusA: cA.state.status, endA: cA.state.endReason,
+                  statusB: cB.state.status, endB: cB.state.endReason,
+                  pendingA: rigA.clock.pending(), pendingB: rigB.clock.pending(),
+                  socksB: rigB.sockets.length};
+        }"""
+    )
+    # Local teardown is still immediate and final on both paths.
+    assert res["resolvedA"] == {"left": True}
+    assert res["statusA"] == "ended" and res["endA"] == "left"
+    assert res["statusB"] == "ended" and res["endB"] == "left"
+    # A: LEAVE must not precede the binding ACK — it lands right after it.
+    assert "LEAVE" not in res["preAck"]
+    assert res["postAck"] == res["preAck"] + ["LEAVE"]
+    assert res["closedA"] is True
+    # B: nothing before HELLO; RESUME replayed, then LEAVE after its ACK.
+    assert res["preHello"] == []
+    assert res["sentB"] == ["RESUME", "LEAVE"]
+    assert res["closedB"] is True
+    # Watchdog/timers drained; no stale generation may reconnect.
+    assert res["pendingA"] == 0 and res["pendingB"] == 0
+    assert res["socksB"] == 2
+
+
 def test_ready_applied_notifications_and_intent_gating(pc_page):
     """metadata READY と APPLIED が通知され、切断/loading/selecting 中の
     sendIntent が送信logに現れない。"""

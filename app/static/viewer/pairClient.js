@@ -832,9 +832,54 @@
      * teardown never waits on it, and no stale generation may rejoin. */
     function leave() {
       if (_destroyed) return Promise.resolve({left: false});
-      if (_member && _linkOpen()) _ctlSend(_req('LEAVE', {}));
+      var l = _link, e = _entry, flushAfter = null;
+      if (_member && e && l && l.t && !l.gone) {
+        /* The server binds member→link only on the entry ACK — a LEAVE sent
+         * earlier is rejected NO_SESSION and the peer sits in peer-away
+         * until the resume window expires. Detach this link so _terminate
+         * keeps it alive, replay the entry on HELLO when it never got out,
+         * and flush LEAVE once the ACK lands so the peer still gets its END.
+         * The watcher arms only after _terminate — its _syncDataT() re-arm
+         * would strip handlers installed beforehand. */
+        var entryFrame = e.sent ? null : _entryFrame(e);
+        var wantRid = e.sent ? e.rid : entryFrame.requestId;
+        var leaveFrame = _req('LEAVE', {});   // sessionId read pre-teardown
+        var t = l.t;
+        _link = null;
+        flushAfter = function () {
+          var watchdog = _setT(function () {
+            try { t.close(); } catch (x) {}
+          }, _attemptTimeout);
+          var done = function () {
+            _clearT(watchdog);
+            try { t.close(); } catch (x) {}
+          };
+          t.onopen = null;
+          t.onclose = function () { _clearT(watchdog); };
+          t.onframe = function (f) {
+            if (!f || typeof f !== 'object') return;
+            if (f.type === 'HELLO') {
+              if (entryFrame) {
+                try { t.send(entryFrame); } catch (x) { done(); }
+              }
+              return;
+            }
+            if (f.type === 'ACK' && f.requestId === wantRid) {
+              try { t.send(leaveFrame); } catch (x) {}
+              done();
+              return;
+            }
+            if (f.type === 'REJECT' || f.type === 'END' || f.type === 'ERROR') {
+              done();
+            }
+          };
+        };
+      } else if (_member && _linkOpen()) {
+        _ctlSend(_req('LEAVE', {}));
+      }
       _left = true;
       _terminate('ended', END_REASON.LEFT);
+      if (flushAfter) flushAfter();
       return Promise.resolve({left: true});
     }
 
