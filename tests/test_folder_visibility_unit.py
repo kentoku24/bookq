@@ -22,8 +22,6 @@ VIS_SRC = (REPO_ROOT / "app" / "static" / "browse" / "visibility.js").read_text(
 _STUB_HTML = """<!DOCTYPE html><html><body>
 <div id="tile-grid"></div>
 <span id="visibility-status"></span>
-<button id="visibility-normal"></button>
-<button id="visibility-all"></button>
 </body></html>"""
 
 # Fake http origin — localStorage is denied on about:blank/data: URLs, so the
