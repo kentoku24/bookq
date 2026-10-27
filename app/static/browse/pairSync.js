@@ -10,14 +10,21 @@
  *   peer へ中継する。受信側は不変式「peer のスクロール進捗 = 自分の
  *   スクロール進捗」で scrollTop を導く（双方向とも同じ式）:
  *
- *     prog      = top / max(1, scrollH - viewH)
+ *     peerMax   = max(0, scrollH - viewH)
+ *     prog      = peerMax > 0 ? min(1, top / peerMax) : 0
  *     scrollTop = prog * max(0, 自分の scrollHeight - clientHeight)
  *
  *   tile グリッドの列数は端末幅で変わるため、px ではなく進捗率で写す —
  *   画面の大きい peer（タブレット等）でも同じ割合位置に収まる。
- *   scrollH を持たない旧クライアントの frame は従来の px 変換
- *   （followerTop = top + viewH / leaderTop = top - clientHeight）へ
- *   フォールバックする。
+ *   進捗写像は「自分も scrollH を送れる」デプロイでのみ有効
+ *   （_canRatio: pairClient.js が立てる BOOKQ_UI_SYNC_V2）。SWR で
+ *   新 pairSync + 旧 pairClient が混ざった端末では送信に scrollH が
+ *   載らず peer 側は legacy を使うため、受信も legacy に倒して両方向を
+ *   対称に保つ（進捗/px が方向で混ざると切替のたびにずれが積む）。
+ *   scrollH を持たない旧クライアントの frame も同じ legacy px 変換
+ *   （followerTop = top + viewH / leaderTop = top - clientHeight）。
+ *   なお scrollHeight は content-visibility の記憶高さを含み得る近似値
+ *   （分母に入るため位置の誤差になるが、端末間で同傾向の誤差）。
  *
  *   path / mode が違えば先にローカル遷移（scrollPositions 保存 →
  *   currentBrowsePath + viewMode + renderView({scrollAnchor:null}) +
@@ -78,6 +85,7 @@
   var _mirrorOpened = false; // このモジュールが開いた sidebar か（disarm で畳む対象）
   var _userClosed = false;   // armed 中にユーザーがミラー sidebar を閉じた
   var _prevPresenceSig = '';
+  var _lastRemoteMsg = null; // 最後に受理した remote frame（resize 時の再写像用）
   var _inited = false;
   var _subs = [];            // PairController から外した購読（解除用）
   var _follow = null;
@@ -129,6 +137,13 @@
     var st = pc && pc.state;
     return st ? st.role : null;
   }
+  /* このデプロイの sendUiSync は scrollH をワイヤに載せるか。
+   * 旧 pairClient.js との SWR 混在では false — その場合は送信も受信
+   * 適用も legacy px に揃え、方向による写像の食い違いを防ぐ。 */
+  function _canRatio() {
+    try { return _w().BOOKQ_UI_SYNC_V2 === true; }
+    catch (e) { return false; }
+  }
 
   /* ── pending（未適用 frame の短期 stash）── */
 
@@ -172,6 +187,7 @@
       _pendingMsg = null;
       _userClosed = false;
       _suppressUntil = 0;
+      _lastRemoteMsg = null;
       _resetFollow();
       _releaseInput();
       _lastLocalMove = -1e9;
@@ -220,7 +236,7 @@
       path: _w().currentBrowsePath || null,
       top: sc.scrollTop,
       viewH: sc.clientHeight,
-      scrollH: sc.scrollHeight,
+      scrollH: _canRatio() ? sc.scrollHeight : undefined,
       mode: _w().viewMode || 'tile',
     };
   }
@@ -331,20 +347,24 @@
       if (_trace.length > 240) _trace.shift();
     }
   }
-  function _clampTop(sc, t) {
-    var mx = Math.max(0, sc.scrollHeight - sc.clientHeight);
-    return Math.min(Math.max(0, t), mx);
+  function _maxTop(sc) {
+    return Math.max(0, sc.scrollHeight - sc.clientHeight);
   }
-  /* peer の scrollTop をローカル座標に写す。scrollH 有効時はスクロール
+  function _clampTop(sc, t) {
+    return Math.min(Math.max(0, t), _maxTop(sc));
+  }
+  /* peer の scrollTop をローカル座標に写す。自分も scrollH を送れる
+   * デプロイ（_canRatio）かつ frame が scrollH を持つ場合はスクロール
    * 進捗 top/(scrollH-viewH) を自側の maxTop へ写す（双方向同じ式 —
-   * 逆変換にすれば元の位置へ戻る自己逆写像）。scrollH を持たない旧
-   * クライアントの frame は従来の 1画面分 px オフセットにフォールバック。 */
+   * 逆変換にすれば元の位置へ戻る自己逆写像）。それ以外は従来の
+   * 1画面分 px オフセットにフォールバック。 */
   function _remoteTop(sc, top, viewH, scrollH) {
     var t;
-    if (typeof scrollH === 'number' && isFinite(scrollH) && scrollH > 0) {
+    if (_canRatio() &&
+        typeof scrollH === 'number' && isFinite(scrollH) && scrollH > 0) {
       var peerMax = Math.max(0, scrollH - viewH);
       var prog = peerMax > 0 ? Math.min(1, top / peerMax) : 0;
-      t = prog * Math.max(0, sc.scrollHeight - sc.clientHeight);
+      t = prog * _maxTop(sc);
     } else {
       t = (_role() === 'follower') ? top + viewH : top - sc.clientHeight;
     }
@@ -387,6 +407,7 @@
     return {path: _w().currentBrowsePath || null,
             mode: _w().viewMode || 'tile',
             viewH: msg && msg.viewH || 0,
+            scrollH: msg && msg.scrollH || 0,
             sid: st ? st.sessionId : null,
             role: _role(),
             sc: sc};
@@ -394,8 +415,8 @@
   function _sameFollowCtx(ctx) {
     var c = _followCtx;
     return !!c && c.path === ctx.path && c.mode === ctx.mode &&
-      c.viewH === ctx.viewH && c.sid === ctx.sid && c.role === ctx.role &&
-      c.sc === ctx.sc;
+      c.viewH === ctx.viewH && c.scrollH === ctx.scrollH &&
+      c.sid === ctx.sid && c.role === ctx.role && c.sc === ctx.sc;
   }
 
   /* ── 追従ドライブ ──
@@ -711,6 +732,11 @@
     }
 
     var ctx = _ctxOf(sc, msg);
+    // resize 時の再写像用に最後の frame を保持（適用コンテキストの
+    // path/mode と一緒に）。busy で skip した frame も peer の真値なので
+    // 上書きしてよい。
+    _lastRemoteMsg = {path: ctx.path, mode: ctx.mode,
+                      top: msg.top, viewH: msg.viewH, scrollH: msg.scrollH};
     // 未解禁 follower の初回 frame はローカル操作中でも適用する — 捨てると
     // _unlocked が立たず、leader が動くまで自分の操作も共有されない。
     var firstApply = _role() === 'follower' && !_unlocked;
@@ -741,6 +767,28 @@
     var pm = _takePending();
     if (pm) _applyRemote(pm.msg, pm.at);
     _requestSend();
+  }
+
+  /* ローカル resize で自側の maxTop が変わると、同じ px でも進捗が
+   * ずれる（ツールバー伸縮・回転・分割表示）。適用位置が remote 由来の
+   * まま動いていなければ（_appliedHold が生きている = ユーザーがまだ
+   * 触っていない）、最後の frame を自側の新しい幾何へ写し直す。
+   * ユーザーがスクロール済みなら hold が解けているので何もしない —
+   * その位置はローカルの真値として送信される。 */
+  function _reapplyLastRemote() {
+    var sc = _scroller(), m = _lastRemoteMsg;
+    if (!_armed || !sc || !m) return;
+    if (_searchMode() || _localBusy() || !_sidebarOpen()) return;
+    if ((m.path || null) !== (_w().currentBrowsePath || null) ||
+        (m.mode || 'tile') !== (_w().viewMode || 'tile')) return;
+    if (!_holdMatch(_payload())) return;
+    var t = _remoteTop(sc, m.top, m.viewH, m.scrollH);
+    if (Math.abs(t - sc.scrollTop) <= 1) return;
+    sc.scrollTop = t;
+    _suppressUntil = Date.now() + SUPPRESS_MS;
+    _appliedHold = {path: _w().currentBrowsePath || null,
+                    top: sc.scrollTop,
+                    mode: _w().viewMode || 'tile'};
   }
 
   /* ── init ── */
@@ -847,6 +895,7 @@
     }
     window.addEventListener('resize', function () {
       _resetFollow();
+      _reapplyLastRemote();
       _requestSend();
     }, {passive: true});
     var ctlOk = typeof pc.subscribe === 'function' &&

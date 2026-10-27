@@ -161,7 +161,7 @@ def _validate_ui_sync(p: dict) -> None:
     sender's scroller; the receiver maps the sender's scroll progress
     ``top / (scrollH - viewH)`` onto its own scroll range. ``scrollH``
     is optional — a frame without it falls back to the legacy px
-    transform. ``pred`` is an optional predicted fling endpoint (px).
+    transform.
     """
     if p.get("view") not in UI_VIEWS:
         _fail(ERR_TYPE, "UI_SYNC.view must be 'browse'")
@@ -184,11 +184,6 @@ def _validate_ui_sync(p: dict) -> None:
                 or not math.isfinite(scroll_h)
                 or scroll_h <= 0 or scroll_h > 100000000):
             _fail(ERR_RANGE, "UI_SYNC.scrollH must be finite 0<h<=1e8")
-    pred = p.get("pred")
-    if pred is not None:
-        if (not isinstance(pred, (int, float)) or isinstance(pred, bool)
-                or not math.isfinite(pred) or pred < 0):
-            _fail(ERR_RANGE, "UI_SYNC.pred must be finite >= 0")
     mode = p.get("mode")
     if mode is not None and mode not in UI_MODES:
         _fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card")
