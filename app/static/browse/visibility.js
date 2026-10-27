@@ -481,15 +481,11 @@
     refresh();
   }
   function _updateStatusDom(){
-    // body.fv-showall drives the mode row's visibility AND the red root icon —
-    // in normal mode nothing about this feature is visible anywhere.
+    // body.fv-showall drives the status notice's visibility AND the red root
+    // icon — in normal mode nothing about this feature is visible anywhere.
     if (typeof document !== "undefined" && document.body){
       document.body.classList.toggle("fv-showall", _showAll);
     }
-    var n = document.getElementById("visibility-normal");
-    var a = document.getElementById("visibility-all");
-    if (n){ n.setAttribute("aria-pressed", _showAll ? "false" : "true"); n.classList.toggle("active", !_showAll); }
-    if (a){ a.setAttribute("aria-pressed", _showAll ? "true" : "false"); a.classList.toggle("active", _showAll); }
     var el = document.getElementById("visibility-status");
     if (!el) return;
     var txt = "";
@@ -549,13 +545,6 @@
       window.addEventListener("online", function(){ _offline = false; _updateStatusDom(); _scheduleRefresh(); });
       window.addEventListener("offline", function(){ _offline = true; _updateStatusDom(); });
     }
-  }
-
-  function _bindModeButtons(){
-    var n = document.getElementById("visibility-normal");
-    var a = document.getElementById("visibility-all");
-    if (n) n.addEventListener("click", function(e){ e.preventDefault(); e.stopPropagation(); setShowAll(false); });
-    if (a) a.addEventListener("click", function(e){ e.preventDefault(); e.stopPropagation(); setShowAll(true); });
   }
 
   // ── hidden entry gesture ──
@@ -666,7 +655,6 @@
     }
     _bindDelegatedToggle();
     _bindRefreshTriggers();
-    _bindModeButtons();
     _bindEntryGesture();
     refresh();
   }

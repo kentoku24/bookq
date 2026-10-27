@@ -63,6 +63,16 @@ def _show_all(vpage):
     vpage.wait_for_function("window.FolderVisibility.showAll === true")
 
 
+def _show_normal(vpage):
+    swipe_root_icon(vpage)
+    vpage.wait_for_function("window.FolderVisibility.showAll === false")
+
+
+def _assert_status_takes_no_space(vpage):
+    box = vpage.locator("#visibility-status").bounding_box()
+    assert box is None or box["height"] == 0
+
+
 def test_normal_mode_hides_root_and_prefix_sibling_safe(vpage, vis_env):
     vis_put(vis_env, "hide_me", True)
     vpage.reload()
@@ -97,7 +107,7 @@ def test_toggle_button_hides_then_normal_reasserts(vpage, vis_env):
     vpage.wait_for_function("window.FolderVisibility.isHidden('hide_me')")
     # still listed in 全表示, marked
     assert tile.locator(".visibility-badge").inner_text() == "非表示"
-    vpage.click("#visibility-normal")
+    _show_normal(vpage)
     assert "hide_me" not in _paths(vpage)
     assert "hide_me" in vis_get(vis_env)["hiddenRoots"]
 
@@ -118,7 +128,9 @@ def test_reload_resets_to_normal_mode(vpage):
     vpage.reload()
     vpage.wait_for_selector(".tile")
     assert vpage.evaluate("window.FolderVisibility.showAll") is False
-    assert vpage.locator("#visibility-normal").get_attribute("aria-pressed") == "true"
+    assert vpage.locator("body.fv-showall").count() == 0
+    for sel in ("#visibility-row", "#visibility-normal", "#visibility-all"):
+        assert vpage.locator(sel).count() == 0
 
 
 def test_data_read_self_never_hidden(vpage, vis_env):
@@ -227,7 +239,7 @@ def test_archive_root_toggle(vpage, vis_env):
     tile = vpage.locator('#tile-grid .tile[data-path="hide_arc.zip"]')
     tile.locator(".visibility-toggle").click()
     vpage.wait_for_function("window.FolderVisibility.isHidden('hide_arc.zip')")
-    vpage.click("#visibility-normal")
+    _show_normal(vpage)
     assert "hide_arc.zip" not in _paths(vpage)
 
 
@@ -297,7 +309,7 @@ def test_flat_toggle_button_hides_multi_segment_root(fvpage, flat_vis_env):
     fvpage.locator('#tile-grid .tile[data-path="wrap/wB"] .visibility-toggle').click()
     fvpage.wait_for_function("window.FolderVisibility.isHidden('wrap/wB')")
     assert "wrap/wB" in vis_get(flat_vis_env)["hiddenRoots"]
-    fvpage.click("#visibility-normal")
+    _show_normal(fvpage)
     assert "wrap/wB" not in _paths(fvpage)
 
 
@@ -306,7 +318,7 @@ def test_flat_archive_root_toggle(fvpage):
     tile = fvpage.locator('#tile-grid .tile[data-path="wrap/arc.zip"]')
     tile.locator(".visibility-toggle").click()
     fvpage.wait_for_function("window.FolderVisibility.isHidden('wrap/arc.zip')")
-    fvpage.click("#visibility-normal")
+    _show_normal(fvpage)
     assert "wrap/arc.zip" not in _paths(fvpage)
 
 
@@ -329,10 +341,17 @@ def test_flat_hidden_browse_url_redirects(fvpage, flat_vis_env):
 # ── hidden entry gesture (root-icon swipe) ──────────────────────────────
 
 
-def test_mode_row_hidden_in_normal_mode(vpage):
-    # The feature leaves no trace in normal mode: no row, no body marker.
-    assert vpage.locator("#visibility-row").is_hidden()
+def test_mode_row_absent_in_normal_and_showall(vpage):
+    # The feature leaves no trace in normal mode: no row, no body marker —
+    # and the mode controls stay absent in 全表示 too (gesture-only entry).
+    for sel in ("#visibility-row", "#visibility-label",
+                "#visibility-normal", "#visibility-all"):
+        assert vpage.locator(sel).count() == 0
     assert vpage.locator("body.fv-showall").count() == 0
+    _show_all(vpage)
+    for sel in ("#visibility-row", "#visibility-label",
+                "#visibility-normal", "#visibility-all"):
+        assert vpage.locator(sel).count() == 0
 
 
 def test_swipe_toggles_show_all_and_marks_icon(vpage, vis_env):
@@ -342,13 +361,13 @@ def test_swipe_toggles_show_all_and_marks_icon(vpage, vis_env):
     assert "hide_me" not in _paths(vpage)
     swipe_root_icon(vpage)
     vpage.wait_for_function("window.FolderVisibility.showAll === true")
-    assert vpage.locator("#visibility-row").is_visible()
     assert vpage.locator("body.fv-showall").count() == 1
+    assert vpage.locator("#visibility-row").count() == 0
     assert "hide_me" in _paths(vpage)
     # same gesture exits back to normal mode
     swipe_root_icon(vpage)
     vpage.wait_for_function("window.FolderVisibility.showAll === false")
-    assert vpage.locator("#visibility-row").is_hidden()
+    assert vpage.locator("#visibility-row").count() == 0
     assert "hide_me" not in _paths(vpage)
 
 
@@ -362,7 +381,7 @@ def test_short_swipe_does_not_enter(vpage):
     vpage.mouse.move(x0 + 80, y0, steps=5)  # ~20% of a 390px viewport — no edge
     vpage.mouse.up()
     assert vpage.evaluate("window.FolderVisibility.showAll") is False
-    assert vpage.locator("#visibility-row").is_hidden()
+    assert vpage.locator("#visibility-row").count() == 0
 
 
 def test_gesture_icon_only_at_browse_root(vpage):
@@ -370,7 +389,54 @@ def test_gesture_icon_only_at_browse_root(vpage):
     vpage.click('#tile-grid .tile[data-path="hide_series"]')
     vpage.wait_for_function("window.currentBrowsePath === 'hide_series'")
     assert vpage.locator("#browse-root-icon").count() == 0
-    assert vpage.locator("#visibility-row").is_hidden()
+    assert vpage.locator("#visibility-row").count() == 0
+
+
+@pytest.mark.parametrize("mode", ["tile", "list", "card"])
+def test_mode_row_controls_absent_empty_status_no_space(vpage, vis_env, mode):
+    vis_put(vis_env, "hide_me", True)
+    vpage.reload()
+    vpage.wait_for_selector(".tile")
+    vpage.wait_for_function(
+        "window.FolderVisibility && "
+        "window.FolderVisibility.readyState === 'ready'")
+    for sel in ("#visibility-row", "#visibility-label",
+                "#visibility-normal", "#visibility-all"):
+        assert vpage.locator(sel).count() == 0
+    _assert_status_takes_no_space(vpage)
+    _show_all(vpage)
+    _set_view_mode(vpage, mode)
+    for sel in ("#visibility-row", "#visibility-label",
+                "#visibility-normal", "#visibility-all"):
+        assert vpage.locator(sel).count() == 0
+    _assert_status_takes_no_space(vpage)
+    item = vpage.locator(
+        f'#tile-grid {_ITEM_SEL[mode]}[data-path="hide_me"]')
+    item.wait_for(state="attached")
+    btn = item.locator(".visibility-toggle")
+    assert btn.get_attribute("aria-pressed") == "true"
+    btn.click()
+    vpage.wait_for_function("!window.FolderVisibility.isHidden('hide_me')")
+
+
+def test_status_notice_only_when_needed(vpage):
+    vpage.wait_for_function(
+        "window.FolderVisibility && "
+        "window.FolderVisibility.readyState === 'ready'")
+    _show_all(vpage)
+    vpage.context.set_offline(True)
+    st = vpage.locator("#visibility-status")
+    st.wait_for(state="visible")
+    assert "オフライン（変更不可）" in st.inner_text()
+    _show_normal(vpage)
+    assert st.is_visible() is False
+    assert st.bounding_box() is None
+    _show_all(vpage)
+    st.wait_for(state="visible")
+    assert "オフライン（変更不可）" in st.inner_text()
+    vpage.context.set_offline(False)
+    vpage.wait_for_function(
+        "window.FolderVisibility.readyState === 'ready'")
 
 
 # ── review round 2 ─────────────────────────────────────────────────────
