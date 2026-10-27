@@ -687,7 +687,7 @@ def test_signal_requires_pair_and_live_peer():
 
 def _ui_payload(**kw):
     p = {"view": "browse", "path": "group/episodes", "top": 120.5,
-         "viewH": 600, "mode": "tile"}
+         "viewH": 600, "scrollH": 4200, "mode": "tile"}
     p.update(kw)
     return p
 
@@ -753,6 +753,12 @@ def test_ui_sync_malformed_payloads_rejected():
         _ui_payload(top=float("nan")),           # non-finite
         _ui_payload(viewH=0),                    # must be > 0
         _ui_payload(viewH=-4),
+        _ui_payload(scrollH=0),                  # must be > 0 when present
+        _ui_payload(scrollH=-3),
+        _ui_payload(scrollH="big"),              # must be a number
+        _ui_payload(scrollH=float("nan")),
+        _ui_payload(scrollH=True),               # bool is not a number
+        _ui_payload(scrollH=200_000_000),        # over the 1e8 cap
         _ui_payload(mode="grid"),                # unknown mode
     )
     for i, payload in enumerate(bad):

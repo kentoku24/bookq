@@ -972,7 +972,10 @@
       if (!payload || payload.view !== 'browse') return false;
       var top = payload.top, vh = payload.viewH;
       if (typeof top !== 'number' || !isFinite(top) || top < 0) return false;
-      if (typeof vh !== 'number' || !isFinite(vh) || vh <= 0) return false;
+      // 必須フィールドはサーバと同じ範範囲で厳格拒否 — ここで通しても
+      // サーバが ERR_RANGE で落とす frame を「送信済み」と誤認させない。
+      if (typeof vh !== 'number' || !isFinite(vh) || vh <= 0 ||
+          vh > 100000) return false;
       var p = {
         view: 'browse',
         path: (payload.path === undefined || payload.path === null)
@@ -981,6 +984,12 @@
       };
       if (payload.mode === 'tile' || payload.mode === 'list' ||
           payload.mode === 'card') p.mode = payload.mode;
+      // scrollH は任意フィールド — 不正値なら削って送る。frame 自体を捨てると
+      // 位置情報 (top/viewH) ごと失われる（受信側は scrollH なしを legacy
+      // px 変換として安全に処理する）。
+      var sh = payload.scrollH;
+      if (typeof sh === 'number' && isFinite(sh) && sh > 0 && sh <= 1e8)
+        p.scrollH = sh;
       return _ctlSend(_req('UI_SYNC', p));
     }
 
@@ -1593,6 +1602,11 @@
     };
     return api;
   }
+
+  // scrollH/pred を通す sendUiSync を持つデプロイの目印。SWR で旧
+  // pairClient.js が残った混在シェルを pairSync 側が検出し、双方向とも
+  // legacy px 変換に倒せるようにする。index.html の watchdog 必須 marker。
+  globalThis.BOOKQ_UI_SYNC_V2 = true;
 
   globalThis.PairClient = {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
