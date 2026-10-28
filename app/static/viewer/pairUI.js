@@ -296,7 +296,7 @@
           (typeof c.ageSec === 'number' ? ' — ' + c.ageSec + '秒前' : '');
         b.addEventListener('click', () => {
           pickList = null;
-          if (ctl) ctl.connect(c.id);
+          if (ctl) Promise.resolve(ctl.connect(c.id)).catch(() => {});
         });
         els.pickerList.appendChild(b);
       }
@@ -425,7 +425,7 @@
     const v = els.codeInput.value;
     if (!/^\d{6}$/.test(v) || !ctl || joinPending) return;
     joinPending = true;   // cleared when the join view re-opens
-    ctl.join(v);
+    Promise.resolve(ctl.join(v)).catch(() => {});
   }
 
   // ── QR display (leader) ──
@@ -599,7 +599,9 @@
       if (e.key === 'Escape') { e.preventDefault(); close(); }
     }, true);
 
-    els.create.addEventListener('click', () => { if (ctl) ctl.create(); });
+    els.create.addEventListener('click', () => {
+      if (ctl) Promise.resolve(ctl.create()).catch(() => {});
+    });
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
       joinPending = false;
