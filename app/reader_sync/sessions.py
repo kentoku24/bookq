@@ -38,6 +38,7 @@ NO_RESPONSE_TIMEOUT = 15.0     # silence -> disconnect
 CODE_TTL_SECONDS = 300.0       # pairing code lifetime
 RESUME_WINDOW_SECONDS = 300.0  # member may reattach within this window
 MATCH_WINDOW_SECONDS = 120.0   # only sessions this fresh are auto-joinable
+ANON_LINK_TTL_SECONDS = 60.0   # a link that never binds a member is reaped
 SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
 # Bulk (manifest-chunk) traffic bypasses the bounded frame queue but stays
 # bounded in bytes: two full manifests is the most one link may buffer.
@@ -81,6 +82,10 @@ _SEQUENCED_TYPES = rstate.SEQUENCED_TYPES
 DEDUP_WINDOW = 256
 DEDUP_TOMBSTONE_MAX = 8192
 
+# apply_log is forensic bookkeeping only — cap it so a long reading
+# session cannot grow it without bound.
+APPLY_LOG_MAX = 4096
+
 _TRANSPORT_REPORT = frozenset({"up", "down"})
 
 # outq sentinel marking a bulk block: the drain task pops it, then flushes
@@ -105,6 +110,14 @@ def _new_token() -> str:
 
 def _new_code() -> str:
     return f"{secrets.randbelow(1_000_000):0{CODE_DIGITS}d}"
+
+
+def _log_apply(session: "PairSession", entry: dict) -> None:
+    """Append to the forensic apply log, bounded — a long reading session
+    must not grow it without limit."""
+    session.apply_log.append(entry)
+    if len(session.apply_log) > APPLY_LOG_MAX:
+        del session.apply_log[:len(session.apply_log) - APPLY_LOG_MAX]
 
 
 class PeerLink:
@@ -136,6 +149,10 @@ class PeerLink:
         self.bulkq: deque = deque()
         self.bulk_bytes = 0
         self._bulk_pending = False
+        # Anonymous-link bookkeeping: a link that never binds a member (or
+        # loses its member to _end_session) is reaped by tick() after
+        # anon_link_ttl — a PONG-answering socket must not idle forever.
+        self.unbound_since: float | None = None
 
     # -- outbound ---------------------------------------------------
 
@@ -285,6 +302,7 @@ class SessionRegistry:
                  send_queue_max: int = SEND_QUEUE_MAX,
                  send_bulk_max_bytes: int = SEND_BULK_MAX_BYTES,
                  match_window: float = MATCH_WINDOW_SECONDS,
+                 anon_link_ttl: float = ANON_LINK_TTL_SECONDS,
                  work_resolver=None):
         self._clock = clock or time.monotonic
         # S05: OPEN_WORK / SET_OFFSET manifest resolution — a callable
@@ -298,6 +316,7 @@ class SessionRegistry:
         self.send_queue_max = send_queue_max
         self.send_bulk_max_bytes = send_bulk_max_bytes
         self.match_window = match_window
+        self.anon_link_ttl = anon_link_ttl
 
         self.sessions: dict[str, PairSession] = {}
         self.links: dict[str, PeerLink] = {}
@@ -331,6 +350,7 @@ class SessionRegistry:
         self.links[link.id] = link
         link.last_rx = self._now()
         link.next_ping_due = link.last_rx + self.heartbeat_interval
+        link.unbound_since = link.last_rx
         link.send_obj({"v": protocol.PROTOCOL_VERSION, "type": "HELLO", "link": link.id})
         logger.debug("reader-sync link=%s registered", link.id)
         self._wake_ticker()
@@ -353,12 +373,7 @@ class SessionRegistry:
         if session is None:
             return
         if session.pending is member:
-            session.pending = None
-            leader = session.leader()
-            if leader is not None and leader.link is not None:
-                leader.link.send_obj({
-                    "v": protocol.PROTOCOL_VERSION, "type": "JOIN_CANCEL",
-                    "sessionId": session.id, "memberId": member.id})
+            self._drop_pending(session, member)
             logger.debug("reader-sync link=%s pending candidate lost member=%s",
                          link.id, member.id)
             return
@@ -391,6 +406,21 @@ class SessionRegistry:
             if was_tracked:
                 logger.debug("reader-sync link=%s closed reason=%s", link.id, reason)
         self._wake_ticker()
+
+    def _drop_pending(self, session: PairSession, member: Member) -> None:
+        """Remove an unapproved join candidate: leader notified, claim
+        dropped — and ``code_consumed`` reset so the pairing code works
+        for a retry. The consumed mark serializes a *live* join; it must
+        not burn the code for the session's remaining TTL."""
+        if session.pending is member:
+            session.pending = None
+        session.code_consumed = False
+        member.session = None
+        leader = session.leader()
+        if leader is not None and leader.link is not None:
+            leader.link.send_obj({
+                "v": protocol.PROTOCOL_VERSION, "type": "JOIN_CANCEL",
+                "sessionId": session.id, "memberId": member.id})
 
     # ── inbound dispatch ─────────────────────────────────────────────
 
@@ -459,9 +489,15 @@ class SessionRegistry:
             return
 
         if session.pending is member:
-            # unapproved candidate: no state flows to it; only bail out
+            # Unapproved candidate: no state flows to it; only bail out.
+            # Its LEAVE forfeits its own claim — the leader's waiting
+            # session must survive (a stranger holding the code could
+            # otherwise kill any session by joining then leaving).
             if t == "LEAVE":
-                self._end_session(session, END_LEFT)
+                self._drop_pending(session, member)
+                link.member = None
+                link.unbound_since = self._now()
+                self.close_link(link, "pending_left")
             else:
                 self._reject(link, req, t, REASON_NOT_PAIRED)
             return
@@ -526,6 +562,7 @@ class SessionRegistry:
                         session=session, link=link)
         session.members[member.id] = member
         link.member = member
+        link.unbound_since = None
         self.sessions[session.id] = session
         self._by_code[code] = session
         self._ack(link, req, {
@@ -559,8 +596,9 @@ class SessionRegistry:
                         name=user.get("name") or "", resume_token=_new_token(),
                         session=session, link=link, status="pending")
         session.pending = member
-        session.code_consumed = True   # single-use on success
+        session.code_consumed = True   # single-use while a join is live
         link.member = member
+        link.unbound_since = None
         leader = session.leader()
         self._ack(link, req, {
             "sessionId": session.id, "memberId": member.id,
@@ -636,6 +674,13 @@ class SessionRegistry:
             self._reject(link, req, req["type"], REASON_NO_PENDING,
                          session_id=session.id)
             return
+        want = req["payload"].get("memberId")
+        if want is not None and want != pending.id:
+            # A stale verdict for a candidate who is no longer pending must
+            # not approve whoever happens to be waiting now.
+            self._reject(link, req, req["type"], REASON_NO_PENDING,
+                         session_id=session.id)
+            return
         if not approve:
             self._end_session(session, END_REJECTED)
             return
@@ -666,6 +711,7 @@ class SessionRegistry:
             return
         member.link = link
         link.member = member
+        link.unbound_since = None
         member.status = "active"
         member.offline_since = None
         self._ack(link, req, {
@@ -841,13 +887,22 @@ class SessionRegistry:
                 eff = next((m for m in session.members.values()
                             if m.role == role), member)
 
+        # Response channel: a relayed request's ACK/REJECT belongs to the
+        # *origin* member's own link — answering on the relay link hands
+        # the leader foreign-requestId frames and starves the real
+        # requester of its stale-state feedback. Falls back to the
+        # carrying link when the origin's is gone (or this wasn't relayed).
+        resp_link = link
+        if eff is not member and eff.link is not None and eff.link.alive:
+            resp_link = eff.link
+
         dkey = self._dedup_key(req, role)
         cached = session.dedup.get(dkey)
         if cached is not None:
-            link.send_obj(cached)      # identical replay, no state change
+            resp_link.send_obj(cached)   # identical replay, no state change
             return
         if dkey in session.dedup_seen:
-            self._reject_snapshot(link, req, session, role,
+            self._reject_snapshot(resp_link, req, session, role,
                                   rstate.REASON_STALE_REQUEST)
             return
 
@@ -860,9 +915,9 @@ class SessionRegistry:
                 rstate.check_manifest_version(session, payload)
                 if t in rstate.ABSOLUTE_TYPES:
                     rstate.check_base(session, req)
-            self._apply_op(link, req, session, member, eff, role)
+            self._apply_op(resp_link, req, session, member, eff, role)
         except rstate.Reject as e:
-            self._reject_snapshot(link, req, session, role, e.reason)
+            self._reject_snapshot(resp_link, req, session, role, e.reason)
 
     def _apply_op(self, link: PeerLink, req: dict, session: PairSession,
                   member: Member, eff: Member, role: str) -> None:
@@ -942,7 +997,7 @@ class SessionRegistry:
         members — applied order == sequencer receive order."""
         session.apply_seq += 1
         frame = self._state_frame(session)   # bumps revision, derives phase
-        session.apply_log.append({
+        _log_apply(session, {
             "seq": session.apply_seq, "type": req["type"], "role": role,
             "requestId": req["requestId"], "revision": frame["revision"],
             "spreadId": frame["spreadId"]})
@@ -1044,7 +1099,7 @@ class SessionRegistry:
         self._send_manifest(None, session)
         session.apply_seq += 1
         frame = self._state_frame(session)
-        session.apply_log.append({
+        _log_apply(session, {
             "seq": session.apply_seq, "type": "MANIFEST_COMMIT",
             "role": "server", "requestId": job["requestId"],
             "revision": frame["revision"], "spreadId": frame["spreadId"]})
@@ -1116,6 +1171,9 @@ class SessionRegistry:
             if m.link is not None:
                 m.link.send_obj(frame)
                 m.link.member = None
+                # the socket may outlive the session — mark it anonymous
+                # so the unbound-link reaper can collect it.
+                m.link.unbound_since = self._now()
             m.link = None
             m.session = None
         session.members.clear()
@@ -1135,6 +1193,10 @@ class SessionRegistry:
                 continue
             if now - link.last_rx >= self.no_response_timeout:
                 self.close_link(link, "no_response", code=WS_CLOSE_POLICY)
+                continue
+            if (link.member is None and link.unbound_since is not None
+                    and now - link.unbound_since >= self.anon_link_ttl):
+                self.close_link(link, "unbound_idle", code=WS_CLOSE_POLICY)
                 continue
             if now >= link.next_ping_due:
                 link.ping_seq += 1
@@ -1160,6 +1222,8 @@ class SessionRegistry:
                 continue
             dues.append(link.next_ping_due)
             dues.append(link.last_rx + self.no_response_timeout)
+            if link.member is None and link.unbound_since is not None:
+                dues.append(link.unbound_since + self.anon_link_ttl)
         for s in self.sessions.values():
             if not s.paired:
                 dues.append(s.code_expires_at)
