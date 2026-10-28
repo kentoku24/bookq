@@ -936,8 +936,11 @@ def test_manifest_digest_verified_against_real_catalog(pc_page):
     改ざんチャンクはERRORで落ち、READYもapplyも起きない。"""
     manifest = _manifest(work="夏 の 本")      # non-ASCII exercises ensure_ascii parity
     frames = _manifest_frames(manifest, "S1", 1, 1)
+    # the tampered rig pairs into session S2 — MANIFEST frames are
+    # session-scoped, so its chunks must carry S2's id to even be read
+    frames2 = _manifest_frames(manifest, "S2", 1, 1)
     res = pc_page.evaluate(
-        """async (frames) => {
+        """async ({frames, frames2}) => {
           const rig = window.__mkRig();
           const c = rig.mkClient();
           const s = await rig.pairLeader(c);
@@ -954,7 +957,7 @@ def test_manifest_digest_verified_against_real_catalog(pc_page):
           const c2 = rig2.mkClient();
           const s2 = await rig2.pairLeader(c2, 'S2');
           const nBefore = rig2.applied.length;
-          const bad = frames.map(f => Object.assign({}, f,
+          const bad = frames2.map(f => Object.assign({}, f,
             f.index === 0 ? {data: f.data.slice(0, -1) + ' '} : {}));
           for (const f of bad) s2.fire(f);
           return {okReady, okManifest,
@@ -963,7 +966,7 @@ def test_manifest_digest_verified_against_real_catalog(pc_page):
                   badStatus: c2.state.status, badErr: c2.state.error,
                   ev1: rig.evlog, ev2: rig2.evlog};
         }""",
-        frames,
+        {"frames": frames, "frames2": frames2},
     )
     assert res["okReady"] == 1
     assert res["okManifest"] == "夏 の 本"             # real manifest applied

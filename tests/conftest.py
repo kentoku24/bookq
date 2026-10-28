@@ -321,7 +321,10 @@ def server(downloads_tree: Path) -> str:
         stderr=subprocess.DEVNULL,
     )
     base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
+    # Cold starts (metadata warmup + first index build) take ~7-10s on a
+    # loaded machine — 10s is a coin flip, so give real headroom before
+    # declaring a startup failure.
+    deadline = time.time() + 30
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"Server exited early: {proc.stderr.read().decode()}")
@@ -332,7 +335,7 @@ def server(downloads_tree: Path) -> str:
             time.sleep(0.1)
     else:
         proc.terminate()
-        raise RuntimeError("Server did not become healthy within 10s")
+        raise RuntimeError("Server did not become healthy within 30s")
 
     yield base_url
 

@@ -374,9 +374,14 @@ def test_pending_leave_ends_attempt():
     leader.frames()
 
     _send(reg, f1, _request("LEAVE", session_id=created["sessionId"]))
-    assert _one(f1.frames(), "END")
-    assert _one(leader.frames(), "END")
-    assert not reg.sessions
+    # a pending candidate's LEAVE forfeits only its own claim — the
+    # leader keeps waiting and the join code is freed for a retry
+    assert f1.close_reason == "pending_left"
+    assert _one(leader.frames(), "JOIN_CANCEL")["memberId"] == joined["memberId"]
+    session = reg.sessions[created["sessionId"]]
+    assert session.pending is None and session.code_consumed is False
+    f2 = _connect(reg, "f2")
+    _join(reg, f2, created["code"])
 
 
 def test_cross_session_frame_rejected():
@@ -1080,3 +1085,149 @@ def test_match_rejected_when_already_bound():
     sid, _, _ = _pair(reg, a, b)
     _send(reg, a, _request("MATCH", request_id="m", session_id=sid))
     assert _one(a.frames(), "REJECT")["reason"] == REASON_ALREADY_BOUND
+
+
+# ── pending-candidate lifecycle (audit fixes) ──────────────────────
+
+
+def test_pending_leave_keeps_waiting_session_and_frees_code():
+    """An unapproved candidate's LEAVE forfeits only its own claim: the
+    leader keeps waiting and the code works for a retry — previously it
+    ENDed the whole session."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)
+    f1 = _connect(reg, "f1")
+    joined = _join(reg, f1, created["code"])
+    leader.frames()                                   # JOIN_REQUEST
+
+    _send(reg, f1, _request("LEAVE", session_id=created["sessionId"]))
+
+    session = reg.sessions[created["sessionId"]]      # still alive
+    assert session.pending is None
+    assert session.code_consumed is False             # free for a retry
+    jc = _one(leader.frames(), "JOIN_CANCEL")
+    assert jc["memberId"] == joined["memberId"]
+    assert f1.close_reason == "pending_left"          # transport released
+    assert f1.member is None
+
+    f2 = _connect(reg, "f2")
+    _join(reg, f2, created["code"])                   # ACK — code reusable
+    assert reg.sessions[created["sessionId"]].pending is not None
+
+
+def test_pending_detach_frees_code_for_retry():
+    """A pending candidate whose link dies drops the claim AND frees the
+    consumed code — the leader is not left with an unjoinable session."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)
+    f1 = _connect(reg, "f1")
+    _join(reg, f1, created["code"])
+    leader.frames()
+
+    reg.detach_link(f1)
+    session = reg.sessions[created["sessionId"]]
+    assert session.pending is None
+    assert session.code_consumed is False
+    _one(leader.frames(), "JOIN_CANCEL")
+
+    f2 = _connect(reg, "f2")
+    _join(reg, f2, created["code"])                   # ACK — rejoin works
+
+
+def test_approve_with_stale_member_id_does_not_swap_candidate():
+    """A stale APPROVE/REJECT for a candidate who already left must not
+    apply to whoever is pending now."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)
+    f1 = _connect(reg, "f1")
+    joined = _join(reg, f1, created["code"])
+    leader.frames()
+
+    sid = created["sessionId"]
+    _send(reg, leader, _request("APPROVE", {"memberId": "ghost"},
+                                session_id=sid, request_id="a-bad"))
+    rej = _one(leader.frames(), "REJECT")
+    assert rej["reason"] == REASON_NO_PENDING
+    assert rej["requestId"] == "a-bad"
+    session = reg.sessions[sid]
+    assert session.pending is not None and session.pending.id == joined["memberId"]
+
+    # and a targeted approve for the real candidate still works
+    _send(reg, leader, _request("APPROVE", {"memberId": joined["memberId"]},
+                                session_id=sid, request_id="a-ok"))
+    _one(leader.frames(), "ACK")
+    assert session.paired
+
+
+def test_unbound_links_are_reaped_but_bound_links_survive():
+    """A socket that never binds a member must not live forever just
+    because it answers PINGs — and an unbound link left by _end_session
+    is collected the same way."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    idle = _connect(reg, "idle")                       # never binds
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)          # bound — survives
+
+    # keep both links answering PINGs through the reap window; only the
+    # unbound one should be collected
+    for _ in range(7):
+        clock.advance(10.0)
+        reg.tick()
+        for link in (idle, leader):
+            for f in link.frames():
+                if f["type"] == "PING":
+                    _send(reg, link, {"v": 1, "type": "PONG", "seq": f["seq"]})
+    assert idle.close_reason == "unbound_idle"
+    assert idle.id not in reg.links
+    assert leader.id in reg.links and leader.member is not None
+
+    # a member unbound by _end_session becomes anonymous and is reaped too
+    orphan = _connect(reg, "orphan")
+    _join(reg, orphan, created["code"])
+    reg._end_session(reg.sessions[created["sessionId"]], "test")
+    assert orphan.member is None
+    _advance_alive(reg, clock, orphan, 61.0)
+    reg.tick()
+    assert orphan.close_reason == "unbound_idle"
+
+
+def test_relayed_request_reject_goes_to_origin_link():
+    """On the leader-sequenced plane a follower's rejected request is
+    answered on the *follower's* link — not on the relay's."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+    leader.frames(); follower.frames()
+
+    # relayed TURN with a stale epoch — leader carries, follower owns it
+    _send(reg, leader, _request(
+        "TURN", {"delta": 1, "crossChapter": True, "origin": "follower"},
+        session_id=sid, request_id="fr1", work_epoch=99, base_revision=0))
+    frej = _one(follower.frames(), "REJECT")
+    assert frej["requestId"] == "fr1" and frej["reason"] == "stale_epoch"
+    assert leader.frames() == []                       # nothing on the relay
+
+
+def test_pending_load_phase_is_loading_not_selecting():
+    """With a work pick accepted (pending_load set) but no manifest yet,
+    the derived phase is 'loading' — 'selecting' would wrongly re-arm
+    the shared browse grid the pick was made from."""
+    from app.reader_sync import state as rstate
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+    session = reg.sessions[sid]
+
+    assert rstate.derive_phase(session) == "selecting"   # no work yet
+    session.pending_load = {"seq": 1, "kind": "open_work",
+                            "requestId": "x", "role": "leader"}
+    assert rstate.derive_phase(session) == "loading"
