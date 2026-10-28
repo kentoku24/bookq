@@ -287,6 +287,12 @@
     var _attemptTimeout = opts.attemptTimeoutMs || ATTEMPT_TIMEOUT_MS;
     var _backoff = opts.backoff ||
       {base: BACKOFF_BASE_MS, cap: BACKOFF_CAP_MS, jitter: BACKOFF_JITTER_MS};
+    // Client-side liveness: the server heartbeats every ~5s and closes at
+    // 15s silence, but a black-holed path (mobile NAT drop, captive-radio
+    // freeze) delivers nothing — including the close — so only an inbound
+    // watchdog can tell a dead-but-open socket from a quiet one. 20s is
+    // four missed PINGs + slack; the check reads _lastRx at fire time.
+    var _livenessMs = opts.livenessTimeoutMs || 20000;
     var _webrtc = opts.webrtc || null;   // {pcFactory?} — enables the DC upgrade
 
     /* ── state ── */
@@ -312,6 +318,8 @@
     var _retry = 0;
     var _reconnectT = null;
     var _attemptT = null;
+    var _livenessT = null;           // inbound-silence watchdog timer
+    var _lastRx = 0;                 // _now() stamp of the last inbound frame
     var _offlineSince = null;
     var _term = null;                // {status, endReason} once terminal
     var _left = false;
@@ -366,6 +374,31 @@
       _timers = {};
       _reconnectT = null;
       _attemptT = null;
+      _livenessT = null;
+    }
+
+    /* Inbound-silence watchdog: armed (once) by every inbound frame and
+     * re-checked at fire time, so a queued backlog that updates _lastRx
+     * first always wins. A link quiet for _livenessMs is treated as dead —
+     * the same path as onclose, so reconnect bookkeeping is identical. */
+    function _disarmLiveness() {
+      if (_livenessT !== null) {
+        delete _timers[_livenessT];
+        _clearT(_livenessT);
+        _livenessT = null;
+      }
+    }
+
+    function _armLiveness() {
+      if (_livenessT !== null) return;
+      _livenessT = _later(function () {
+        _livenessT = null;
+        if (!_linkOpen()) return;
+        if (_now() - _lastRx < _livenessMs) { _armLiveness(); return; }
+        var l = _link;
+        if (l) { l.gone = true; if (l.t) { try { l.t.close(); } catch (e) {} } }
+        _handleLinkGone(_gen);
+      }, _livenessMs + 1);             // +1: fire strictly past the deadline
     }
 
     function _public() {
@@ -482,9 +515,14 @@
       var t = _dataT;
       if (!t) return false;
       // never write onto a dead transport — the DC falls back to the
-      // control channel so a mid-switch frame is never lost.
-      if (t === _dc.t) { if (!_dc.up) return false; }
-      else if (!_linkOpen()) return false;
+      // control channel so a mid-switch frame is never lost. A stale
+      // _dataT (DC died but _syncDataT hasn't run yet) re-picks first.
+      if (t === _dc.t && !_dc.up) {
+        _syncDataT();
+        t = _dataT;
+        if (!t || t === _dc.t) return false;
+      }
+      if (t !== _dc.t && !_linkOpen()) return false;
       try {
         if (_switcher) _switcher.send(obj); else t.send(obj);
         return true;
@@ -561,6 +599,7 @@
         try { old.close(); } catch (e) {}
       }
       _link = {t: null, open: false, gone: false, dead: false, gen: gen};
+      _disarmLiveness();               // the guarded socket is gone
       _connecting = true;
       var raw;
       try { raw = _factory(_url); }
@@ -607,6 +646,7 @@
       }
       _connecting = false;
       _unlater('attempt');
+      _disarmLiveness();               // nothing live left to guard
       _syncDataT();
       // requests bound to the dead link can never resolve — reject them;
       // nothing is replayed on the next link (§3.5).
@@ -676,6 +716,13 @@
         _terminate('ended', END_REASON.RESUME_EXPIRED);
         return;
       }
+      if (_entry && _entry.type === 'RESUME') {
+        // A RESUME entry kept across a dead link is re-sent on the next
+        // HELLO — overwriting it here would orphan the caller's promise.
+        _openLink();
+        _notify();
+        return;
+      }
       _entry = {
         type: 'RESUME',
         payload: {memberId: _member.memberId, resumeToken: _member.resumeToken},
@@ -725,6 +772,12 @@
 
     function _startEntry(type, payload, sessionId) {
       return new Promise(function (res, rej) {
+        if (_entry) {
+          // An outstanding entry op is superseded — its caller must get a
+          // rejection, not a promise that can never settle.
+          try { _entry.rej(_err('ERR_STATE', 'superseded')); } catch (e) {}
+          _entry = null;
+        }
         _entry = {
           type: type, payload: payload, sessionId: sessionId || null,
           res: res, rej: rej, rid: null, sent: false,
@@ -740,8 +793,16 @@
       return f;
     }
 
+    /* A bound member's link is closed politely first: LEAVE reaches the
+     * peer as an END (or the flushAfter handshake replays it), instead of
+     * the socket vanishing into a 5-minute peer-away window. */
+    function _leaveBound() {
+      if (_member) { try { leave(); } catch (e) { /* best-effort */ } }
+    }
+
     function create() {
       if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
+      _leaveBound();
       _teardownLink();
       _resetSession();
       _roleIntent = 'leader';
@@ -753,6 +814,7 @@
       if (typeof code !== 'string' || !/^\d{6}$/.test(code)) {
         return Promise.reject(_err('ERR_MALFORMED', 'code must be 6 digits'));
       }
+      _leaveBound();
       _teardownLink();
       _resetSession();
       _roleIntent = 'follower';
@@ -767,6 +829,7 @@
      * back; any other rejection stays a normal error. */
     function match(pick) {
       if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
+      _leaveBound();
       _teardownLink();
       _resetSession();
       // role decided by the server — no _roleIntent yet
@@ -1015,6 +1078,8 @@
     function _dispatch(f, gen) {
       if (_destroyed || gen !== _gen) return;        // stale-generation guard
       if (!f || typeof f !== 'object') return;
+      _lastRx = _now();
+      _armLiveness();
       if (f.v !== PROTOCOL_VERSION) {
         // version非互換 — sync stops; an update notice is the remedy (§Risks)
         _terminate('error', END_REASON.INCOMPATIBLE);
@@ -1104,7 +1169,15 @@
           return;
         }
         _bindFromAck(d);
-        if (p.type === 'RESUME') _event('resumed', {});
+        if (p.type === 'RESUME') {
+          _event('resumed', {});
+          // The server re-marks a resumed member 'active'; if we suspended
+          // locally before the link died, that must be re-asserted or the
+          // session un-pauses for a member nobody can see.
+          if (_suspended) {
+            _ctlSend(_req('SET_ACTIVITY', {state: 'suspended'}));
+          }
+        }
         p.res(d);
       } else {
         p.res(f.data || {});
@@ -1228,6 +1301,10 @@
 
     function _onManifest(f) {
       if (f.kind !== MANIFEST_KIND) return;
+      // Same session guard as _onState: a foreign-session manifest must
+      // never poison _manifest (it would shadow the real one's deferred
+      // STATE application until a newer manifest displaced it).
+      if (_member && f.sessionId && f.sessionId !== _member.sessionId) return;
       if (!Number.isInteger(f.index) || !Number.isInteger(f.count) ||
           f.count < 1 || f.index < 0 || f.index >= f.count ||
           typeof f.data !== 'string' || typeof f.digest !== 'string') {
@@ -1305,11 +1382,16 @@
       if (!_member || !_manifest) return;
       var key = _manifest.workEpoch + ':' + _manifest.manifestVersion;
       if (_readyFor === key) return;
-      _readyFor = key;
       // READY rides the manifest's own epoch — the commit STATE may not
       // have arrived yet, so _seen.epoch can still be the old epoch.
-      _dataSend(_req('READY', {manifestVersion: _manifest.manifestVersion},
-                     {workEpoch: _manifest.workEpoch}));
+      var ok = _dataSend(_req('READY',
+                              {manifestVersion: _manifest.manifestVersion},
+                              {workEpoch: _manifest.workEpoch}));
+      // Mark only on a real send: a dropped READY that still marked
+      // _readyFor would leave the member un-READYed (phase stuck at
+      // 'loading') until the next manifest re-delivery.
+      if (!ok) return;
+      _readyFor = key;
       _event('ready', {manifestVersion: _manifest.manifestVersion,
                        workEpoch: _manifest.workEpoch});
     }
@@ -1520,6 +1602,7 @@
       }
       _link = null;
       _connecting = false;
+      _disarmLiveness();
     }
 
     function _terminate(status, endReason) {
