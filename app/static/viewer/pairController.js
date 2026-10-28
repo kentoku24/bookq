@@ -382,6 +382,18 @@
         st.phase !== 'selecting' || st.manifestVersion) return;
     var folder = window.currentFolder;
     var page = _currentPageRef();
+    // Opening the sidebar ran returnToBrowse() and cleared the live reader
+    // before pairing could bind — the last-read snapshot carries the book
+    // the leader was on, so the pair opens it instead of landing on an
+    // empty 'selecting'. Only falls back for THAT work's page.
+    if ((!folder || !page) && window.lastReaderPos) {
+      var snap = window.lastReaderPos;
+      if (!folder && typeof snap.workFolder === 'string') folder = snap.workFolder;
+      if (!page && snap.workFolder === folder &&
+          typeof snap.folder === 'string' && typeof snap.name === 'string') {
+        page = {folder: snap.folder, name: snap.name};
+      }
+    }
     if (typeof folder !== 'string' || !folder || !page) return;
     // The open book is a hidden root in normal mode — never send it as the
     // shared work; deny like a solo open of the same folder.
