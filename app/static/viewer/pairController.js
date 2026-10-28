@@ -500,8 +500,17 @@
     } catch (e) { return null; }
   }
 
+  /* A closed tab leaves only the cross-tab persist record (localStorage):
+   * still inside the resume window and its owner heartbeat stale ⇒ this
+   * fresh tab should silently rejoin instead of landing on idle. */
+  function _hasPersistedResume() {
+    var PC = window.PairClient;
+    if (!PC || typeof PC.peekPersistedResume !== 'function') return null;
+    return PC.peekPersistedResume();
+  }
+
   function _boot() {
-    if (!_readCreds()) return;
+    if (!_readCreds() && !_hasPersistedResume()) return;
     var FV = window.FolderVisibility;
     if (!FV || typeof FV.ready !== 'function') {
       // Module absent (stale shell): keep the old immediate rejoin — the
@@ -512,7 +521,9 @@
     FV.ready().then(function () {
       // The credential rejoin waits for the settings judgment — a hidden
       // shared work is then denied by _applyCommitted before it can render.
-      if (!_readCreds()) return;   // a leave during the wait dropped the creds
+      if (!_readCreds() && !_hasPersistedResume()) {
+        return;   // a leave during the wait dropped the creds
+      }
       try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
     });
   }

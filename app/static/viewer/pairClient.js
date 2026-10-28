@@ -48,6 +48,14 @@
   var PROTOCOL_VERSION = 1;
   var DEFAULT_PATH = '/ws/reader-sync';
   var STORAGE_KEY = 'bookq.readerSync.v1';
+  /* Cross-tab persist record (localStorage): lets a member rejoin after its
+   * whole tab/browser died — the 切断/LEAVE path clears it, and the resume
+   * window still bounds how long reattachment stays possible. The owning
+   * tab heartbeats `hb` while bound; a boot only adopts a record whose
+   * heartbeat went stale, so two live tabs never fight over one member. */
+  var PERSIST_KEY = 'bookq.readerSync.persist.v1';
+  var RESUME_HB_MS = 4000;            // ownership heartbeat while bound
+  var RESUME_HB_STALE_MS = 12000;     // owner presumed dead after this silence
   var RESUME_WINDOW_MS = 300 * 1000;      // sessions.RESUME_WINDOW_SECONDS
   var ATTEMPT_TIMEOUT_MS = 10 * 1000;     // connect+HELLO+entry-ACK budget
   var BACKOFF_BASE_MS = [500, 1000, 2000, 5000];
@@ -95,6 +103,14 @@
     var e = new Error(code + ': ' + msg);
     e.code = code;
     return e;
+  }
+
+  /* window.localStorage itself throws SecurityError where storage is denied
+   * (e.g. about:blank) — treat that as "no persist store", never fatal. */
+  function _defaultLocalStorage() {
+    try {
+      return (typeof window !== 'undefined' && window.localStorage) || null;
+    } catch (e) { return null; }
   }
 
   function _rid() {
@@ -263,6 +279,8 @@
     var _storage = opts.storage !== undefined ? opts.storage
       : (typeof window !== 'undefined' && window.sessionStorage
          ? window.sessionStorage : null);
+    var _persist = opts.persistStorage !== undefined ? opts.persistStorage
+      : _defaultLocalStorage();
     var _events = opts.events !== undefined ? opts.events
       : (typeof window !== 'undefined' && typeof document !== 'undefined'
          ? domEventTarget(window, document) : null);
@@ -312,6 +330,9 @@
     var _retry = 0;
     var _reconnectT = null;
     var _attemptT = null;
+    var _hbT = null;                 // ownership-heartbeat timer
+    var _tabId = 't' + Math.random().toString(36).slice(2) +
+      Date.now().toString(36);       // unique per client instance/tab
     var _offlineSince = null;
     var _term = null;                // {status, endReason} once terminal
     var _left = false;
@@ -429,6 +450,8 @@
           role: _member.role, resumeToken: _member.resumeToken,
         }));
       } catch (e) { /* storage is best-effort */ }
+      _persistWrite();
+      _hbStart();
     }
 
     function _readCreds() {
@@ -445,6 +468,91 @@
     function _clearCreds() {
       if (!_storage) return;
       try { _storage.removeItem(STORAGE_KEY); } catch (e) {}
+      _persistClear();
+    }
+
+    /* ── cross-tab persist record (localStorage) ── */
+
+    function _persistRec() {
+      if (!_persist) return null;
+      try {
+        var d = JSON.parse(_persist.getItem(PERSIST_KEY) || 'null');
+        if (d && d.sessionId && d.memberId && d.resumeToken &&
+            typeof d.hb === 'number') return d;
+      } catch (e) { /* malformed/absent */ }
+      return null;
+    }
+
+    function _persistWrite() {
+      if (!_persist || !_member) return;
+      try {
+        _persist.setItem(PERSIST_KEY, JSON.stringify({
+          sessionId: _member.sessionId, memberId: _member.memberId,
+          role: _member.role, resumeToken: _member.resumeToken,
+          hb: _now(), tabId: _tabId,
+        }));
+      } catch (e) { /* best-effort */ }
+    }
+
+    /* Only our own record (same member or our ownership) or a dead owner's
+     * record may be cleared — an observer tab must not wipe creds a live
+     * sibling tab still owns. */
+    function _persistClear() {
+      if (!_persist) return;
+      try {
+        var d = _persistRec();
+        if (!d) return;
+        var own = d.tabId === _tabId ||
+          (_member && d.memberId === _member.memberId &&
+           d.sessionId === _member.sessionId);
+        if (own || _now() - d.hb > RESUME_HB_STALE_MS) {
+          _persist.removeItem(PERSIST_KEY);
+        }
+      } catch (e) {}
+    }
+
+    /* Adopt a dead owner's record: heartbeat stale yet still inside the
+     * resume window. Claim ownership BEFORE the RESUME goes out so a
+     * racing second tab sees the fresh claim and stands down. */
+    function _adoptPersist() {
+      var d = _persistRec();
+      if (!d) return null;
+      var age = _now() - d.hb;
+      if (age > _resumeWindow) {
+        try { _persist.removeItem(PERSIST_KEY); } catch (e) {}
+        return null;
+      }
+      if (age <= RESUME_HB_STALE_MS) return null;   // owner still heartbeating
+      try {
+        _persist.setItem(PERSIST_KEY, JSON.stringify({
+          sessionId: d.sessionId, memberId: d.memberId, role: d.role,
+          resumeToken: d.resumeToken, hb: _now(), tabId: _tabId,
+        }));
+      } catch (e) {}
+      return {sessionId: d.sessionId, memberId: d.memberId,
+              role: d.role, resumeToken: d.resumeToken};
+    }
+
+    /* The persist record names another tab with a fresh heartbeat — that
+     * sibling really owns the member, so this tab must stop trying. */
+    function _persistForeignLive() {
+      var d = _persistRec();
+      return !!(d && d.tabId !== _tabId &&
+                _now() - d.hb <= RESUME_HB_STALE_MS);
+    }
+
+    function _hbStart() {
+      if (_hbT !== null || !_persist) return;
+      _hbT = _setT(function tick() {
+        _hbT = null;
+        if (_destroyed || !_member) return;
+        _persistWrite();
+        _hbStart();
+      }, RESUME_HB_MS);
+    }
+
+    function _hbStop() {
+      if (_hbT !== null) { _clearT(_hbT); _hbT = null; }
     }
 
     /* ── transport plumbing ── */
@@ -778,7 +886,7 @@
       if (_member && _linkOpen()) {
         return Promise.resolve({resumed: true, already: true});
       }
-      var creds = _member || _readCreds();
+      var creds = _member || _readCreds() || _adoptPersist();
       if (!creds || !creds.memberId || !creds.resumeToken || !creds.sessionId) {
         // 復帰credential破棄 — distinguishable terminal; re-pairing required.
         _terminate('ended', END_REASON.CREDENTIALS_LOST);
@@ -1123,9 +1231,25 @@
           var end = RESUME_REJECT_END.hasOwnProperty(reason)
             ? RESUME_REJECT_END[reason] : 'session_lost';
           if (end === null) {
-            // member still claimed by a live link — retry within the window
+            /* member still claimed by a live link — retry within the
+             * window, UNLESS the persist record names a different live
+             * owner tab: then the claim is real (not a stale link being
+             * reaped) and this tab must stand down or two tabs would
+             * ping-pong the member forever. */
             try { p.rej(_err('ERR_REJECTED', reason)); } catch (e) {}
             _event('resume-rejected', {reason: reason});
+            if (_persistForeignLive()) {
+              _member = null;
+              _roleIntent = null;
+              _offlineSince = null;
+              _hbStop();
+              try {
+                if (_storage) _storage.removeItem(STORAGE_KEY);
+              } catch (e) {}
+              _teardownLink();
+              _notify();
+              return;
+            }
             _scheduleRetry();
             _notify();
             return;
@@ -1529,6 +1653,7 @@
       _rejectAllPending(endReason);
       _teardownLink();
       _timersClear();
+      _hbStop();
       _member = null;
       _roleIntent = null;
       _code = null;
@@ -1554,6 +1679,7 @@
       _rejectAllPending('destroyed');
       _teardownLink();
       _timersClear();
+      _hbStop();
       _detachEvents();
       if (_dc.t) {
         var d = _dc.t;
@@ -1608,6 +1734,25 @@
   // legacy px 変換に倒せるようにする。index.html の watchdog 必須 marker。
   globalThis.BOOKQ_UI_SYNC_V2 = true;
 
+  /* Cheap boot check (pairController): does a dead owner's persisted
+   * resume record sit inside the resume window? Same staleness rule as
+   * _adoptPersist — kept here so the key/format stay single-sourced and
+   * no socket needs to open for the answer. */
+  function peekPersistedResume(storage, now, resumeWindowMs) {
+    try {
+      var p = storage !== undefined ? storage : _defaultLocalStorage();
+      if (!p) return null;
+      var d = JSON.parse(p.getItem(PERSIST_KEY) || 'null');
+      if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
+          typeof d.hb !== 'number') return null;
+      var t = typeof now === 'function' ? now() : Date.now();
+      var w = resumeWindowMs || RESUME_WINDOW_MS;
+      var age = t - d.hb;
+      if (age <= RESUME_HB_STALE_MS || age > w) return null;
+      return d;
+    } catch (e) { return null; }
+  }
+
   globalThis.PairClient = {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     STATUS: STATUS,
@@ -1616,5 +1761,6 @@
     domEventTarget: domEventTarget,
     canonicalJson: canonicalJson,
     manifestDigestHex: manifestDigestHex,
+    peekPersistedResume: peekPersistedResume,
   };
 })();
