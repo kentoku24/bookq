@@ -1021,8 +1021,9 @@ def op_concurrent(ctx: RunCtx, op: dict) -> None:
     spec's 同時NEXT/逆方向同時/連打 competitions.
 
     Wire semantics the expectation encodes: TURN is RELATIVE (applied in
-    receive order, never base-checked) while GOTO/SET_OFFSET/SWAP_SIDES/
-    OPEN_WORK are ABSOLUTE (baseRevision == revision or stale_revision).
+    receive order, never base-checked), GOTO/SET_OFFSET/SWAP_SIDES are
+    ABSOLUTE (baseRevision == revision or stale_revision), and OPEN_WORK
+    is always accepted (self-contained pick; latest pick wins).
     ``expected_index`` defaults to declared-order application over the
     subs; pass ``"any"`` when a race outcome is legitimately open, and
     ``expected_commits`` (int or list of acceptable ints) when absolute

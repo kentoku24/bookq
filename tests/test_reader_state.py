@@ -772,6 +772,35 @@ def test_open_work_requires_page_and_leader_offset_default():
     assert _one(leader.frames(), "REJECT")["reason"] == rstate.REASON_NO_INITIAL_PAGE
 
 
+def test_open_work_accepted_despite_stale_base():
+    """A leader pick framed on stale epoch/baseRevision/manifestVersion is
+    still honored: the pick is self-contained (folder+page), latest-pick-
+    wins is the intent, and pending_load's generation guard discards an
+    older load finishing late. Rejecting it only swallowed a live tile
+    tap on the leader's browse list (the REJECT was applied as a silent
+    snapshot with no visible effect)."""
+    reg, sid, leader, follower = _reading_session()
+    session = reg.sessions[sid]
+    assert session.work_epoch == 1 and session.manifest_version == 1
+
+    # everything about this frame is stale: old epoch, old base, old mv
+    _send(reg, leader, _req("OPEN_WORK",
+                            {"folder": "book",
+                             "page": {"folder": "book", "name": "p1.png"},
+                             "manifestVersion": 0},
+                            session_id=sid, request_id="ow-stale",
+                            work_epoch=0,
+                            base_revision=session.revision - 1))
+    lf = leader.frames()
+    assert _of(lf, "REJECT") == []
+    assert _one(lf, "ACK")["request"] == "OPEN_WORK"
+    # accepted: new epoch + fresh manifest delivered to both members
+    assert session.work_epoch == 2 and session.manifest_version == 2
+    assert session.manifest is not None and session.pending_load is None
+    assert _of(lf, "MANIFEST") and _of(lf, "STATE")
+    assert _of(follower.frames(), "STATE")
+
+
 def test_set_offset_rebuilds_manifest_and_keeps_position():
     reg, sid, leader, follower = _reading_session()
     session = reg.sessions[sid]

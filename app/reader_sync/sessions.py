@@ -756,7 +756,9 @@ class SessionRegistry:
                       member: Member) -> None:
         """One sequenced request. Order of checks (each reject leaves the
         committed snapshot untouched): origin validity -> dedup -> epoch ->
-        manifestVersion -> baseRevision -> per-type handler."""
+        manifestVersion -> baseRevision -> per-type handler. OPEN_WORK
+        skips the epoch/manifestVersion/baseRevision checks — see the
+        state.py docstring for why a pick is exempt."""
         t = req["type"]
         payload = req["payload"]
 
@@ -787,10 +789,14 @@ class SessionRegistry:
             return
 
         try:
-            rstate.check_epoch(session, req)
-            rstate.check_manifest_version(session, payload)
-            if t in rstate.ABSOLUTE_TYPES:
-                rstate.check_base(session, req)
+            # OPEN_WORK is exempt from the optimistic checks: the pick is
+            # self-contained and latest-pick-wins — a stale base only made
+            # a live tile tap die silently.
+            if t != "OPEN_WORK":
+                rstate.check_epoch(session, req)
+                rstate.check_manifest_version(session, payload)
+                if t in rstate.ABSOLUTE_TYPES:
+                    rstate.check_base(session, req)
             self._apply_op(link, req, session, member, eff, role)
         except rstate.Reject as e:
             self._reject_snapshot(link, req, session, role, e.reason)
