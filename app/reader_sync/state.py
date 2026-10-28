@@ -15,10 +15,15 @@ OPEN_WORK/READY/APPLIED):
 
 - relative ops (TURN) are applied in sequencer receive order inside the
   same workEpoch — they never check baseRevision.
-- absolute ops (GOTO/SET_OFFSET/SWAP_SIDES/OPEN_WORK) require
+- absolute ops (GOTO/SET_OFFSET/SWAP_SIDES) require
   ``baseRevision == session.revision`` — a stale base is rejected and the
   latest snapshot returned, so an old absolute move can never overwrite a
   newer commit.
+- OPEN_WORK skips every optimistic check: a work pick is self-contained
+  (folder+page in the payload), "latest pick wins" is the intent, and the
+  pending_load generation guard already discards an older load finishing
+  late — rejecting a pick framed on a stale base only swallowed a live
+  tile tap on the leader's browse list (silent no-op).
 - any stale workEpoch / manifestVersion / out-of-phase request is rejected
   with a typed reason and leaves the committed snapshot exactly unchanged.
 """
@@ -48,7 +53,8 @@ REASON_MALFORMED = "malformed"
 
 # Request types that carry an absolute position/config — optimistic
 # concurrency: they must be based on the latest committed revision (#75 §3.4).
-ABSOLUTE_TYPES = frozenset({"GOTO", "SET_OFFSET", "SWAP_SIDES", "OPEN_WORK"})
+# OPEN_WORK is deliberately absent: see the module docstring.
+ABSOLUTE_TYPES = frozenset({"GOTO", "SET_OFFSET", "SWAP_SIDES"})
 
 # All request types the sequencer owns (sessions._dispatch routes these here).
 SEQUENCED_TYPES = frozenset({
