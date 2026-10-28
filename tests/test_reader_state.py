@@ -45,6 +45,7 @@ from app.reader_sync.sessions import (  # noqa: E402
     REASON_ALREADY_BOUND,  # noqa: F401  (import surface smoke)
     PeerLink,
     SessionRegistry,
+    _BULK,
 )
 
 
@@ -81,6 +82,14 @@ class FakeLink(PeerLink):
                 raw = self.outq.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if raw is _BULK:
+                self._bulk_pending = False
+                while True:
+                    bulk = self._pop_bulk()
+                    if bulk is None:
+                        break
+                    out.append(json.loads(bulk))
+                continue
             out.append(json.loads(raw))
         return out
 
@@ -822,6 +831,41 @@ def test_set_offset_rebuilds_manifest_and_keeps_position():
     # ready gate re-applies
     _send(reg, leader, _turn(1, session_id=sid, request_id="early", work_epoch=2))
     assert _one(leader.frames(), "REJECT")["reason"] == rstate.REASON_NOT_READY
+
+
+def test_huge_manifest_streams_without_killing_links():
+    """Regression: a manifest over the 64-frame outq bound used to overflow
+    the queue mid-burst (before the drain task ran once), closing both
+    links with send_queue_full and leaving the pair permanently paused —
+    a big sibling-run work (thousands of pages) hit this deterministically.
+    Bulk chunks ride the side-queue: all arrive, commit STATE still follows
+    them, neither link dies."""
+    clock = FakeClock()
+    # ~150B/page across chapters+pageRefs+spreadTable -> ~2.2MB > 64 chunks
+    pages = tuple(f"p{i:05}.png" for i in range(15000))
+    man = _manifest("big", pages=pages)
+    chunks = catalog.split_manifest(man)
+    assert len(chunks) > 64
+    reg = _reg(clock, resolver=_resolver({"big": man}))
+    leader, follower = _connect(reg, "L"), _connect(reg, "F")
+    sid = _pair(reg, leader, follower)
+
+    _send(reg, leader, _req("OPEN_WORK",
+                            {"folder": "big",
+                             "page": {"folder": "big", "name": "p00000.png"}},
+                            session_id=sid, request_id="ow"))
+
+    lf = leader.frames()
+    mans = _of(lf, "MANIFEST")
+    assert len(mans) == len(chunks)
+    assert catalog.join_manifest(mans)["digest"] == man["digest"]
+    # wire order preserved: commit STATE still lands after the chunk block
+    assert lf[-1]["type"] == "STATE" and lf[-1]["workEpoch"] == 1
+    assert leader.close_reason is None
+    ff = follower.frames()
+    assert len(_of(ff, "MANIFEST")) == len(chunks)
+    assert catalog.join_manifest(_of(ff, "MANIFEST"))["digest"] == man["digest"]
+    assert follower.close_reason is None
 
 
 def test_swap_sides_flips_projection():

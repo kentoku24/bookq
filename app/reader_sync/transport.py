@@ -14,7 +14,7 @@ import logging
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from app.auth import user_from_connection
-from app.reader_sync.sessions import PeerLink, SessionRegistry, WS_CLOSE_POLICY
+from app.reader_sync.sessions import PeerLink, SessionRegistry, WS_CLOSE_POLICY, _BULK
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,14 @@ class WebSocketLink(PeerLink):
         try:
             while True:
                 raw = await self.outq.get()
+                if raw is _BULK:
+                    self._bulk_pending = False
+                    while True:
+                        bulk = self._pop_bulk()
+                        if bulk is None:
+                            break
+                        await self._ws.send_text(bulk)
+                    continue
                 await self._ws.send_text(raw)
         except asyncio.CancelledError:
             raise
