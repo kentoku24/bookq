@@ -2418,6 +2418,16 @@
     const pos = spreads[s] ? Math.max(0, renderPagesForSpread(s).indexOf(idx)) : 0;
     cell.dataset.pos = String(pos);
     const el = ensureSpreadEl(s);
+    // Inverse of ensureBlankCell's sibling sweep: a spread gaining a real
+    // page must drop its blank placeholder. pairBlankCells is keyed by
+    // spread number, so after SWAP_SIDES flips this device's rendered side
+    // the stale blank would otherwise mask the image cell indefinitely.
+    const staleBlank = pairBlankCells[s];
+    if (staleBlank){
+      staleBlank.remove();
+      delete pairBlankCells[s];
+      el.classList.remove("pair-blank");
+    }
     let ref = null;
     for (const child of el.children){
       if (Number(child.dataset.pos) > pos){ ref = child; break; }
