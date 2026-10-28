@@ -515,14 +515,9 @@
       var t = _dataT;
       if (!t) return false;
       // never write onto a dead transport — the DC falls back to the
-      // control channel so a mid-switch frame is never lost. A stale
-      // _dataT (DC died but _syncDataT hasn't run yet) re-picks first.
-      if (t === _dc.t && !_dc.up) {
-        _syncDataT();
-        t = _dataT;
-        if (!t || t === _dc.t) return false;
-      }
-      if (t !== _dc.t && !_linkOpen()) return false;
+      // control channel so a mid-switch frame is never lost.
+      if (t === _dc.t) { if (!_dc.up) return false; }
+      else if (!_linkOpen()) return false;
       try {
         if (_switcher) _switcher.send(obj); else t.send(obj);
         return true;
@@ -1301,10 +1296,6 @@
 
     function _onManifest(f) {
       if (f.kind !== MANIFEST_KIND) return;
-      // Same session guard as _onState: a foreign-session manifest must
-      // never poison _manifest (it would shadow the real one's deferred
-      // STATE application until a newer manifest displaced it).
-      if (_member && f.sessionId && f.sessionId !== _member.sessionId) return;
       if (!Number.isInteger(f.index) || !Number.isInteger(f.count) ||
           f.count < 1 || f.index < 0 || f.index >= f.count ||
           typeof f.data !== 'string' || typeof f.digest !== 'string') {

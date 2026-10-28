@@ -41,10 +41,13 @@
 | H6 | `_sendReady` が送信前に `_readyFor` をマーク | drop した READY でメンバが未 READY のまま phase 'loading' に停滞 | 実送信成功時のみマーク |
 | H7 | RESUME 後サーバが member を 'active' に戻す | ローカル suspended 中に再接続すると「見えないメンバが active 扱い」でセッションが un-pause | `_onAck` で `_suspended` なら `SET_ACTIVITY suspended` を再 assert |
 
-### Medium (修正済)
+### Medium (記録済み・今回の変更セットには含めず)
 
-| # | 不具合 | 影響 | 修正 |
-|---|--------|------|------|
+ユーザー指示により Critical+High+テスト基盤にスコープを絞り、
+以下は発見・修正案のみ記録 (未適用)。
+
+| # | 不具合 | 影響 | 修正案 |
+|---|--------|------|--------|
 | M1 | `apply_log` 無制限増大 | 長時間セッションでメモリ増 | `APPLY_LOG_MAX=4096` で上限化 (forensic 用途のみ) |
 | M2 | 匿名リンク (未バインド) が PONG 応答で無限生存 | `_end_session` でメンバを失ったソケット含め、匿名 TCP が集積 | `unbound_since` + `ANON_LINK_TTL_SECONDS=60` の reaper、ticker の due 計算にも反映 |
 | M3 | 他セッション MANIFEST の混入 | `_manifest` poison → commit STATE 適用を影で停止 | `_onManifest` に `sessionId` 一致ガード |
@@ -63,16 +66,11 @@
   で boot-embedded snapshot と localStorage cache を殺し `hasSnapshot=false`
   で「判定不能」を決定的に維持 (error+snapshot無しでも stash する本番契約と
   一致)。
-- `test_manifest_digest_verified_against_real_catalog`: セッションスコープ
-  の MANIFEST フレームを別セッションに流用していたのを修正 — 新設した
-  sessionId ガードが実際に検出した。
-
 ### 新規回帰テスト (tests/test_reader_pairing.py)
 
 - `test_pending_leave_keeps_waiting_session_and_frees_code` (C1/H1)
 - `test_pending_detach_frees_code_for_retry` (H1)
 - `test_approve_with_stale_member_id_does_not_swap_candidate` (H2)
-- `test_unbound_links_are_reaped_but_bound_links_survive` (M2)
 - `test_relayed_request_reject_goes_to_origin_link` (C2)
 - `test_pending_load_phase_is_loading_not_selecting` (C4)
 - 既存 `test_pending_leave_ends_attempt` を新仕様に書き換え
@@ -107,17 +105,18 @@
 ## 変更ファイル
 
 - `app/reader_sync/sessions.py` — pending ライフサイクル、resp_link
-  routing、apply_log/匿名リンク上限化
+  routing、stale-APPROVE 照合
 - `app/reader_sync/state.py` — derive_phase の pending_load 扱い
 - `app/static/viewer/pairClient.js` — liveness watchdog、RESUME/entry
-  再送・supersede、_leaveBound、READY マーク、MANIFEST guard、
-  suspended 再 assert、DC フォールバック
-- `app/static/viewer/pairUI.js` — promise rejection の握りつぶし
-- `tests/` — 回帰テスト 6件追加、fixture deadline、flake 修正
+  再送・supersede、_leaveBound、READY マーク、suspended 再 assert
+- `tests/` — 回帰テスト 5件追加 + 既存1件更新、fixture deadline、flake 修正
+
+(Medium 項目 M1-M5 はユーザー指示により今回の変更セットから除外)
 
 ## コミット
 
 - `8cf43cd` fix(ai): ペアセッションのライフサイクルとリレー応答を硬化
 - `75ccef1` fix(ai): pairClient の死活監視・再送・世代ガードを硬化
-- `a6a9cc9` fix(ai): pairUI の未処理 promise rejection を解消
+- `a6a9cc9` fix(ai): pairUI の未処理 promise rejection を解消 (後に scope 外として revert)
 - `54fa8d2` test(ai): ペア監査の回帰テスト + テスト基盤 flake 修正
+- scope 絞り込みコミット (Medium M1-M5 を変更セットから除外)

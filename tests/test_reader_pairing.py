@@ -1165,39 +1165,6 @@ def test_approve_with_stale_member_id_does_not_swap_candidate():
     assert session.paired
 
 
-def test_unbound_links_are_reaped_but_bound_links_survive():
-    """A socket that never binds a member must not live forever just
-    because it answers PINGs — and an unbound link left by _end_session
-    is collected the same way."""
-    clock = FakeClock()
-    reg = _reg(clock)
-    idle = _connect(reg, "idle")                       # never binds
-    leader = _connect(reg, "leader")
-    created, _ = _create_session(reg, leader)          # bound — survives
-
-    # keep both links answering PINGs through the reap window; only the
-    # unbound one should be collected
-    for _ in range(7):
-        clock.advance(10.0)
-        reg.tick()
-        for link in (idle, leader):
-            for f in link.frames():
-                if f["type"] == "PING":
-                    _send(reg, link, {"v": 1, "type": "PONG", "seq": f["seq"]})
-    assert idle.close_reason == "unbound_idle"
-    assert idle.id not in reg.links
-    assert leader.id in reg.links and leader.member is not None
-
-    # a member unbound by _end_session becomes anonymous and is reaped too
-    orphan = _connect(reg, "orphan")
-    _join(reg, orphan, created["code"])
-    reg._end_session(reg.sessions[created["sessionId"]], "test")
-    assert orphan.member is None
-    _advance_alive(reg, clock, orphan, 61.0)
-    reg.tick()
-    assert orphan.close_reason == "unbound_idle"
-
-
 def test_relayed_request_reject_goes_to_origin_link():
     """On the leader-sequenced plane a follower's rejected request is
     answered on the *follower's* link — not on the relay's."""
