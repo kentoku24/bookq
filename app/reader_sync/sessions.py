@@ -24,6 +24,7 @@ import inspect
 import logging
 import secrets
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from app.reader_sync import protocol
@@ -38,6 +39,9 @@ CODE_TTL_SECONDS = 300.0       # pairing code lifetime
 RESUME_WINDOW_SECONDS = 300.0  # member may reattach within this window
 MATCH_WINDOW_SECONDS = 120.0   # only sessions this fresh are auto-joinable
 SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
+# Bulk (manifest-chunk) traffic bypasses the bounded frame queue but stays
+# bounded in bytes: two full manifests is the most one link may buffer.
+SEND_BULK_MAX_BYTES = 64 * 1024 * 1024
 CODE_DIGITS = 6
 
 WS_CLOSE_POLICY = 1008         # policy violation
@@ -78,6 +82,11 @@ DEDUP_WINDOW = 256
 DEDUP_TOMBSTONE_MAX = 8192
 
 _TRANSPORT_REPORT = frozenset({"up", "down"})
+
+# outq sentinel marking a bulk block: the drain task pops it, then flushes
+# the link's bulkq before taking more control frames — bulk traffic keeps
+# its FIFO position without occupying bounded-queue slots.
+_BULK = object()
 
 # UI_SYNC is an ephemeral high-frequency peer relay (browse scroll). Cap it
 # per member so a buggy sender can't fill the peer's bounded outq (queue-full
@@ -121,10 +130,16 @@ class PeerLink:
         self.next_ping_due = self.last_rx + registry.heartbeat_interval
         self.ping_seq = 0
         self.outq: asyncio.Queue = asyncio.Queue(maxsize=registry.send_queue_max)
+        # Bulk side-queue (manifest chunks): unbounded in frame count —
+        # the byte counter is the bound. A _BULK sentinel in outq holds the
+        # block's position in the FIFO; _bulk_pending says one is queued.
+        self.bulkq: deque = deque()
+        self.bulk_bytes = 0
+        self._bulk_pending = False
 
     # -- outbound ---------------------------------------------------
 
-    def _enqueue(self, raw: str) -> bool:
+    def _enqueue(self, raw) -> bool:
         try:
             self.outq.put_nowait(raw)
             return True
@@ -144,6 +159,52 @@ class PeerLink:
             self.registry.close_link(self, "send_queue_full", code=WS_CLOSE_POLICY)
             return False
         return True
+
+    def send_objs_bulk(self, objs) -> bool:
+        """Queue a run of frames (manifest chunks) as one bulk block.
+
+        A many-chunk manifest pushed frame-by-frame used to overflow the
+        bounded outq synchronously — before the drain task could run once —
+        closing both peers with send_queue_full and leaving the pair
+        permanently paused. Bulk frames ride bulkq instead; a single _BULK
+        sentinel in outq keeps the block's wire position, so ordering
+        versus later control frames is unchanged. Still bounded: a dead
+        link may buffer at most SEND_BULK_MAX_BYTES before it is closed.
+        """
+        if not self.alive:
+            return False
+        raws = []
+        for o in objs:
+            try:
+                raws.append(protocol.encode_frame(o).decode("utf-8"))
+            except protocol.ProtocolError:
+                logger.warning("reader-sync link=%s drop oversized bulk frame",
+                               self.id)
+                return False
+        if not raws:
+            return True
+        size = sum(len(r) for r in raws)
+        if self.bulk_bytes + size > self.registry.send_bulk_max_bytes:
+            self.registry.close_link(self, "bulk_queue_full", code=WS_CLOSE_POLICY)
+            return False
+        self.bulkq.extend(raws)
+        self.bulk_bytes += size
+        if not self._bulk_pending:
+            if not self._enqueue(_BULK):
+                self.registry.close_link(self, "send_queue_full",
+                                       code=WS_CLOSE_POLICY)
+                return False
+            self._bulk_pending = True
+        return True
+
+    def _pop_bulk(self):
+        """Next queued bulk frame, or None when the block is drained."""
+        try:
+            raw = self.bulkq.popleft()
+        except IndexError:
+            return None
+        self.bulk_bytes -= len(raw)
+        return raw
 
     def request_transport_close(self, code: int, reason: str) -> None:
         """Transport hook: close the underlying channel. Overridden by the
@@ -222,6 +283,7 @@ class SessionRegistry:
                  code_ttl: float = CODE_TTL_SECONDS,
                  resume_window: float = RESUME_WINDOW_SECONDS,
                  send_queue_max: int = SEND_QUEUE_MAX,
+                 send_bulk_max_bytes: int = SEND_BULK_MAX_BYTES,
                  match_window: float = MATCH_WINDOW_SECONDS,
                  work_resolver=None):
         self._clock = clock or time.monotonic
@@ -234,6 +296,7 @@ class SessionRegistry:
         self.code_ttl = code_ttl
         self.resume_window = resume_window
         self.send_queue_max = send_queue_max
+        self.send_bulk_max_bytes = send_bulk_max_bytes
         self.match_window = match_window
 
         self.sessions: dict[str, PairSession] = {}
@@ -991,17 +1054,23 @@ class SessionRegistry:
 
     def _send_manifest(self, link: PeerLink | None, session: PairSession) -> None:
         """MANIFEST chunk frames for the committed manifest — broadcast when
-        link is None, unicast otherwise (the resume path, §3.3)."""
+        link is None, unicast otherwise (the resume path, §3.3). Chunks go
+        through send_objs_bulk so a multi-chunk manifest can never overflow
+        the bounded control outq mid-burst."""
         from app.reader_sync.catalog import split_manifest   # lazy import
+        frames = []
         for chunk in split_manifest(session.manifest):
             frame = dict(chunk)
             frame.update({"type": "MANIFEST", "sessionId": session.id,
                           "workEpoch": session.work_epoch,
                           "manifestVersion": session.manifest_version})
-            if link is None:
-                self._broadcast(session, frame)
-            else:
-                link.send_obj(frame)
+            frames.append(frame)
+        if link is not None:
+            link.send_objs_bulk(frames)
+            return
+        for m in session.members.values():
+            if m.link is not None:
+                m.link.send_objs_bulk(frames)
 
     # ── broadcast / teardown ─────────────────────────────────────────
 

@@ -43,6 +43,7 @@ from app.reader_sync.sessions import (  # noqa: E402
     PeerLink,
     SessionRegistry,
     WS_CLOSE_TOO_BIG,
+    _BULK,
 )
 
 
@@ -80,6 +81,14 @@ class FakeLink(PeerLink):
                 raw = self.outq.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if raw is _BULK:
+                self._bulk_pending = False
+                while True:
+                    bulk = self._pop_bulk()
+                    if bulk is None:
+                        break
+                    out.append(json.loads(bulk))
+                continue
             out.append(json.loads(raw))
         return out
 
