@@ -760,3 +760,24 @@ def test_foreign_protocol_version_ends_with_update_notice(devs):
         "() => !(window.PairedView && window.PairedView.state"
         " && window.PairedView.state().active)")
     expect(pf.locator("#toast")).to_contain_text("再読み込み")
+
+
+# ── pick resolve failure → error toast, no silent dead tap ────────────────
+
+def test_open_work_resolve_failure_shows_error_toast(devs):
+    """A leader pick whose PageRef can't resolve (folder absent from the
+    tree AND /api/images 404s) used to be dropped silently — a dead tap
+    with zero feedback. It must surface an error toast and send no wire op."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    before = pl.evaluate("() => window.__wsLog.length")
+    pl.evaluate(
+        "() => window.ViewerNavigation.request("
+        "{type:'openWork', folder:'no_such_folder_xyz', via:'tile'})")
+    expect(pl.locator("#toast")).to_contain_text("作品を開けませんでした")
+    sent = pl.evaluate(
+        "(b) => window.__wsLog.slice(b)"
+        ".filter(f => f && f.type === 'OPEN_WORK').length", before)
+    assert sent == 0

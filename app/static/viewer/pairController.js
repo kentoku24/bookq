@@ -305,6 +305,11 @@
           typeof page.name !== 'string') {
         _record({type: 'openWork', via: intent.via, folder: intent.folder,
                  page: page || null}, false);
+        // The resolve failed (fetch error / vanished tree node) — without
+        // feedback the tap looks dead, exactly like the old silent picks.
+        if (typeof window.showErrorToast === 'function') {
+          window.showErrorToast('作品を開けませんでした');
+        }
         return false;
       }
       var ok = _client && _client.sendIntent({
