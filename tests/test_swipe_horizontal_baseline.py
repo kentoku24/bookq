@@ -1,6 +1,8 @@
 """Baseline horizontal swipe cancel/commit tests for T10.
 
-Spec: 60/48 hysteresis, dragX*0.42 preview, 220ms commit to parent, 180ms snap cancel.
+Spec: 60/48 hysteresis, whole-#sidebar 1:1 finger-follow preview over a
+parent underlay (-30%→0 parallax), 220ms commit slide-off to parent,
+180ms snap-back cancel.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_swipe_horizontal_baseline.py -q
@@ -262,38 +264,54 @@ def test_swipe_back_from_flattened_node_pops_tree_parent(page, server):
     expect(page.locator("#folder-count")).to_have_text("2 件")
 
 
-def test_swipe_preview_drag_0_42_transform_and_opacity(page, server):
+def test_swipe_preview_drag_1to1_sidebar_transform_and_underlay(page, server):
+    """The back-swipe preview moves the WHOLE #sidebar 1:1 with the finger
+    (no opacity fade) while a parent underlay parallaxes -30%→0 behind it."""
     page.locator('.tile[data-path="group"]').click()
     expect(page).to_have_url(re.compile(r"#/browse/group$"))
     vals = page.evaluate("""() => {
-        const w = document.getElementById('sidebar-scroll').clientWidth || 280;
+        const w = document.getElementById('sidebar').clientWidth || 280;
         const dragX = 60;
-        const preview = Math.min(dragX * 0.42, w);
-        const opacity = Math.max(0.7, 1 - (preview / w) * 0.3);
         window.__ptrDebug.injectH(dragX);
+        const sb = document.getElementById('sidebar');
         const grid = document.getElementById('tile-grid');
-        const tr = grid.style.transform;
-        const op = grid.style.opacity;
-        const wc = grid.style.willChange;
+        const under = document.getElementById('nav-underlay');
+        const r = {
+            w, dragX,
+            sbTransform: sb.style.transform,
+            sbWill: sb.style.willChange,
+            sbTransition: sb.style.transition,
+            gridTransform: grid.style.transform,
+            underlay: !!under,
+            underTransform: under ? under.style.transform : null,
+            underZ: under ? under.style.zIndex : null,
+            underHeader: window.__ptrDebug.underHeader,
+            dbgUnderlay: window.__ptrDebug.underlay,
+        };
         window.__ptrDebug.injectH(0);
-        return {w, dragX, preview, opacity, tr, op, wc};
+        r.afterTransform = sb.style.transform;
+        r.underlayGone = !window.__ptrDebug.underlay;
+        return r;
     }""")
-    assert abs(vals["preview"] - 25.2) < 0.01, f"preview {vals['preview']} != 25.2"
-    assert f"{vals['preview']}px" in vals["tr"] or "25.2px" in vals["tr"], f"transform {vals['tr']} missing 25.2px"
-    assert "translate3d" in vals["tr"], f"transform {vals['tr']} missing translate3d"
-    assert abs(float(vals["op"]) - vals["opacity"]) < 0.02, f"opacity {vals['op']} != {vals['opacity']}"
-    assert vals["wc"] == "transform, opacity"
-    preview2 = page.evaluate("""() => {
-        const w = document.getElementById('sidebar-scroll').clientWidth || 280;
-        window.__ptrDebug.injectH(120);
-        const tr = document.getElementById('tile-grid').style.transform;
-        const m = tr.match(/([0-9.]+)px/);
-        const got = m ? parseFloat(m[1]) : null;
-        const expected = Math.min(120*0.42, w);
-        window.__ptrDebug.injectH(0);
-        return {got, expected, tr, w};
-    }""")
-    assert abs(preview2["got"] - preview2["expected"]) < 0.5, f"120*0.42 preview {preview2}"
+    # Panel tracks the finger 1:1, capped at panel width — no 0.42 factor.
+    m = re.search(r"translate3d\(([0-9.]+)px", vals["sbTransform"] or "")
+    assert m and abs(float(m.group(1)) - vals["dragX"]) < 0.5, f"sidebar transform {vals['sbTransform']}"
+    assert vals["sbWill"] == "transform", f"willChange {vals['sbWill']}"
+    assert vals["sbTransition"] == "none", f"drag transition {vals['sbTransition']}"
+    # The grid itself carries no h-preview anymore (bottomPull only).
+    assert vals["gridTransform"] in ("", "none"), f"grid transform {vals['gridTransform']}"
+    # Parent underlay: exists, parallaxes -30%·(1-p)·w, sits under the panel.
+    assert vals["dbgUnderlay"] is True and vals["underlay"], "pop underlay missing during drag"
+    expect_p = vals["dragX"] / vals["w"]
+    expect_x = (expect_p - 1) * 0.3 * vals["w"]
+    m = re.search(r"translate3d\((-?[0-9.]+)px", vals["underTransform"] or "")
+    assert m, f"underlay transform {vals['underTransform']}"
+    assert abs(float(m.group(1)) - expect_x) < 1.0, f"underlay parallax {vals['underTransform']} expected ~{expect_x}px"
+    assert vals["underZ"] == "9", f"underlay z-index {vals['underZ']}"
+    assert "フォルダ" in (vals["underHeader"] or ""), f"underlay header {vals['underHeader']} should show root title"
+    # Release-to-idle cleans both layers.
+    assert vals["afterTransform"] in ("", "none"), f"leftover sidebar transform {vals['afterTransform']}"
+    assert vals["underlayGone"], "underlay leaked after idle"
     page.wait_for_timeout(200)
 
 
@@ -322,7 +340,7 @@ def test_swipe_animation_durations_commit_220_cancel_180_snap_180(page, server):
         fire('touchmove', 25, 50, true);
         fire('touchmove', 85, 50, true);
         fire('touchend', 85, 50, false);
-        return grid.style.transition;
+        return document.getElementById('sidebar').style.transition;
     }""")
     assert "220ms" in commit_tf, f"commit transition {commit_tf} missing 220ms"
     page.wait_for_timeout(600)
@@ -343,13 +361,13 @@ def test_swipe_animation_durations_commit_220_cancel_180_snap_180(page, server):
             }
             target.dispatchEvent(ev);
         };
-        grid.style.transition = '';
+        document.getElementById('sidebar').style.transition = '';
         fire('touchstart', 10, 50, true);
         fire('touchmove', 20, 50, true);
         fire('touchmove', 75, 50, true);
         fire('touchmove', 55, 50, true);
         fire('touchend', 55, 50, false);
-        return grid.style.transition;
+        return document.getElementById('sidebar').style.transition;
     }""")
     assert "180ms" in cancel_tf, f"cancel transition {cancel_tf} missing 180ms"
     page.wait_for_timeout(400)

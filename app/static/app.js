@@ -1303,11 +1303,11 @@
         && facetGroupMatches(f.tags, activeFilters.tag);
   }
 
-  function getBrowseChildren(){
+  function getBrowseChildrenAt(path){
     let children;
-    if (!currentBrowsePath) children = tree.filter(n => n.type === "folder");
+    if (!path) children = tree.filter(n => n.type === "folder");
     else {
-      const node = getNodeAt(currentBrowsePath);
+      const node = getNodeAt(path);
       if (!node || !node.children) return [];
       children = node.children.filter(n => n.type === "folder");
     }
@@ -1326,6 +1326,10 @@
     }
     return children;
   }
+  function getBrowseChildren(){
+    return getBrowseChildrenAt(currentBrowsePath);
+  }
+  try { window.getBrowseChildrenAt = getBrowseChildrenAt; } catch(e) { console.warn(e); }
 
   function updateBrowseHeader(){
     const h = document.getElementById("browse-header");
@@ -1340,7 +1344,10 @@
       h.style.cursor = "pointer";
         h.onclick = (e) => {
         e.stopPropagation();
-        const parent = getParentPath(currentBrowsePath);
+        const parent = browseParentOf(currentBrowsePath);
+        // Same whole-screen pop slide as the edge-swipe commit; the animated
+        // path lands in _finishPop which owns state+render+scroll restore.
+        if (_startPopAnim(parent)) return;
         currentBrowsePath = parent;
         updateBrowseHeader();
         renderView();
@@ -1391,6 +1398,17 @@
     }
     const key = getScrollKey(currentBrowsePath);
     scrollPositions[key] = sidebarScroll.scrollTop;
+    // Push slide-in: clone the CURRENT level as the underlay first (it must
+    // capture the pre-render grid), then the live panel slides in from the
+    // right over it — the new level covers the old, iOS-style.
+    let pushUnder = null;
+    if (!prefersReducedMotion() && !navAnimBusy && sidebar && sidebar.classList.contains('open')) {
+      pushUnder = mountNavUnderlay(null);
+      if (pushUnder) {
+        const uss = navUnderlaySlot ? navUnderlaySlot.querySelector('#sidebar-scroll') : null;
+        if (uss) uss.scrollTop = sidebarScroll.scrollTop;
+      }
+    }
     currentBrowsePath = path;
     updateBrowseHeader();
     // 開いた直後の位置: 直下に既読エピソードがあればその最大番号、無ければ上端。
@@ -1399,6 +1417,7 @@
     const decision = window.BrowseScroll.decide({ level: path, cause: 'open', hasSaved: false });
     renderView({ scrollAnchor: decision.anchor });
     writeBrowseState();
+    if (pushUnder) _startPushAnim(pushUnder);
   }
   try { window.navigateToFolder = navigateToFolder; } catch(e) { console.warn(e); }
 
@@ -3564,34 +3583,287 @@
   let ptrStartY = 0, ptrStartX = 0, startScrollTop = 0;
   let ptrLocked = null;
   let ptrRaf = null;
+
+  // ── level transition layers (iOS-style whole-screen slide) ──
+  // Pop (edge swipe / ↩ tap) and push (tile tap) share one underlay slot: a
+  // #sidebar clone pinned UNDER the live panel (viewer z:1 < underlay z:9 <
+  // #sidebar z:10). The clone keeps every inner id so the stylesheet applies
+  // verbatim; getElementById still resolves to the LIVE nodes because the
+  // real #sidebar precedes the clone in document order.
+  let navUnderlay = null;       // host div in the main DOM — transforms/z land here
+  let navUnderlaySlot = null;   // shadow root (fallback: host) the clone lives in
+  let navAnimBusy = false;
+  let navAnimTimer = 0;
+  let navAnimDone = null;   // completion callback of the in-flight anim
+  let _navShadowCss = null;
+  const NAV_UNDERLAY_PARALLAX = 0.3; // underlay rests -30% left, slides to 0
+  function _navWidth(){ return (sidebar && sidebar.clientWidth) || window.innerWidth || 280; }
+  function _scheduleNavDone(fn, ms){
+    navAnimDone = fn;
+    navAnimTimer = setTimeout(function(){
+      navAnimTimer = 0;
+      var f = navAnimDone; navAnimDone = null;
+      if (f) f();
+    }, ms);
+  }
+  // A fresh touch during a nav anim fast-forwards it — the new gesture owns
+  // the panel now, so finish the transition instantly rather than eat input.
+  function _finishNavAnimNow(){
+    if (!navAnimDone) return;
+    var f = navAnimDone; navAnimDone = null;
+    if (navAnimTimer) { clearTimeout(navAnimTimer); navAnimTimer = 0; }
+    f();
+  }
+  // The underlay clone lives in a shadow root so its copied ids never reach
+  // document.getElementById / querySelector (or Playwright locators) during the
+  // ~240ms it exists; the serialized page stylesheet keeps it pixel-identical.
+  function _navShadowStyles(){
+    if (_navShadowCss !== null) return _navShadowCss;
+    let css = '';
+    try {
+      for (let i = 0; i < document.styleSheets.length; i++){
+        let rules;
+        try { rules = document.styleSheets[i].cssRules; } catch(e) { continue; }
+        for (let j = 0; j < rules.length; j++) css += rules[j].cssText + '\n';
+      }
+    } catch(e) { console.warn(e); }
+    _navShadowCss = css;
+    return css;
+  }
+  function _mountUnderlayHost(){
+    const host = document.createElement('div');
+    host.id = 'nav-underlay';
+    host.setAttribute('aria-hidden', 'true');
+    host.setAttribute('inert', '');
+    host.style.cssText = 'position:fixed;inset:0;z-index:9;pointer-events:none;will-change:transform;transition:none';
+    navUnderlaySlot = host;   // degraded: ids collide, visuals still work
+    try {
+      const shadow = host.attachShadow({mode:'closed'});   // closed: locators/queries must not reach the clone
+      const st = document.createElement('style');
+      st.textContent = _navShadowStyles();
+      shadow.appendChild(st);
+      navUnderlaySlot = shadow;
+    } catch(e) { console.warn(e); }
+    document.body.appendChild(host);
+    return host;
+  }
+  function mountNavUnderlay(patch){
+    if (navUnderlay || !sidebar) return null;
+    const host = _mountUnderlayHost();
+    const u = sidebar.cloneNode(true);
+    u.style.transform = '';          // never inherit a mid-gesture translate
+    u.style.transition = 'none';     // per-rAF parallax writes must not lag
+    if (patch) { try { patch(u); } catch(e) { console.warn(e); } }
+    navUnderlaySlot.appendChild(u);
+    navUnderlay = host;
+    return host;
+  }
+  function teardownNavUnderlay(){
+    if (navUnderlay) { try { navUnderlay.remove(); } catch(e) { console.warn(e); } navUnderlay = null; }
+    navUnderlaySlot = null;
+  }
+  function _clearNavInlineStyles(){
+    if (sidebar) {
+      sidebar.style.transition = '';
+      sidebar.style.transform = '';
+      sidebar.style.willChange = '';
+      sidebar.style.pointerEvents = '';
+    }
+    if (resumeBtn) {
+      resumeBtn.style.transition = '';
+      resumeBtn.style.transform = '';
+    }
+  }
+  // The resume pill is a sibling of #sidebar — it rides the moving panel via
+  // a composed transform (its CSS transform is the translateX(-50%) centring).
+  function _resumeNavAnim(t, tr){
+    if (!resumeBtn) return;
+    if (resumeBtn.classList.contains('hidden')) {
+      resumeBtn.style.transition = '';
+      resumeBtn.style.transform = '';
+      return;
+    }
+    if (tr !== undefined) resumeBtn.style.transition = tr;
+    resumeBtn.style.transform = t;
+  }
+  function _savedScrollFor(path){
+    try {
+      const key = getScrollKey(path);
+      return (scrollPositions[key] !== undefined) ? scrollPositions[key] : 0;
+    } catch(e) { return 0; }
+  }
+  // Pop underlay: the PARENT level, built as a skeleton clone — header /
+  // search / chips / footer are shallow clones (small), while #tile-grid is
+  // rebuilt via buildLevelHtml so a full child grid is never copied and
+  // immediately discarded at drag-arm.
+  function _mountPopUnderlay(parent){
+    if (navUnderlay || !sidebar) return null;
+    const host = _mountUnderlayHost();
+    const u = sidebar.cloneNode(false);         // attrs/classes/id, no children
+    u.style.transform = '';
+    u.style.transition = 'none';   // per-rAF parallax writes must not lag
+    const header = document.getElementById('sidebar-header');
+    if (header) {
+      const hc = header.cloneNode(true);
+      const h = hc.querySelector('#browse-header');
+      if (h) {
+        if (!parent) h.innerHTML = '<span id="browse-root-icon">\uD83D\uDCC1</span> フォルダ';
+        else { const n = getNodeAt(parent); h.innerHTML = '↩ ' + escapeHtml(n ? n.name : parent); }
+      }
+      u.appendChild(hc);
+    }
+    const vs = document.getElementById('visibility-status');
+    if (vs) u.appendChild(vs.cloneNode(true));
+    const ss = sidebarScroll.cloneNode(false);  // scroller attrs/classes only
+    const si = document.getElementById('search');
+    if (si) {
+      const sic = si.cloneNode(true);
+      const liveInput = document.getElementById('search-input');
+      const uInput = sic.querySelector('#search-input');
+      if (liveInput && uInput) uInput.value = liveInput.value;
+      ss.appendChild(sic);
+    }
+    const chips = document.getElementById('filter-chips');
+    if (chips) ss.appendChild(chips.cloneNode(true));
+    const g = tileGrid ? tileGrid.cloneNode(false) : document.createElement('div');   // keeps list-mode/card-mode classes
+    if (!g.id) g.id = 'tile-grid';
+    let outCount;
+    if (window.BrowseRender && typeof window.BrowseRender.buildLevelHtml === 'function') {
+      const out = window.BrowseRender.buildLevelHtml(parent, viewMode);
+      g.innerHTML = out.html;
+      outCount = out.count;
+    }
+    ss.appendChild(g);
+    u.appendChild(ss);
+    const footer = document.getElementById('sidebar-footer');
+    if (footer) {
+      const fc = footer.cloneNode(true);
+      const cnt = fc.querySelector('#folder-count');
+      if (cnt && outCount !== undefined) cnt.textContent = outCount + ' 件';
+      u.appendChild(fc);
+    }
+    navUnderlaySlot.appendChild(u);
+    ss.scrollTop = _savedScrollFor(parent);     // after append: writes stick
+    navUnderlay = host;
+    return host;
+  }
+  function ensurePopUnderlay(){
+    if (navUnderlay || navAnimBusy) return;
+    if (window.searchMode) return;
+    if (prefersReducedMotion()) return;
+    const parent = browseParentOf(currentBrowsePath);
+    const u = _mountPopUnderlay(parent);
+    if (u) u.style.transform = 'translate3d(' + (-NAV_UNDERLAY_PARALLAX * _navWidth()) + 'px,0,0)';
+  }
+  // Shared landing for swipe-commit and ↩-tap pops: the live panel has
+  // already slid off right; swap its content to the parent invisibly and
+  // drop the underlay that was standing in for it.
+  function _finishPop(parent){
+    currentBrowsePath = parent;
+    updateBrowseHeader();
+    renderView();
+    writeBrowseStateWith(parent);
+    const key = getScrollKey(currentBrowsePath);
+    if (scrollPositions[key] !== undefined){
+      requestAnimationFrame(() => { sidebarScroll.scrollTop = scrollPositions[key]; });
+    }
+    _clearNavInlineStyles();
+    teardownNavUnderlay();
+    navAnimBusy = false;
+    hDragState = 'idle';
+    hDragX = 0;
+    ptrLocked = null;
+    hHapticFired = false;
+    applyVisual();
+  }
+  function _startPopCommit(parent){
+    const w = _navWidth();
+    navAnimBusy = true;
+    const tr = 'transform 220ms cubic-bezier(0,0,0.2,1)';
+    sidebar.style.transition = tr;
+    sidebar.style.transform = 'translate3d(' + w + 'px,0,0)';
+    sidebar.style.willChange = 'transform';
+    sidebar.style.pointerEvents = 'none';
+    if (navUnderlay) {
+      navUnderlay.style.transition = tr;
+      navUnderlay.style.transform = 'translate3d(0,0,0)';
+    }
+    _resumeNavAnim('translateX(-50%) translate3d(' + w + 'px,0,0)', tr);
+    _scheduleNavDone(function(){ _finishPop(parent); }, 220);
+  }
+  // ↩ tap pop: same slide as the swipe commit, starting from rest.
+  function _startPopAnim(parent){
+    if (navAnimBusy || !sidebar || !sidebar.classList.contains('open')) return false;
+    if (prefersReducedMotion()) return false;
+    if (window.searchMode) return false;
+    const u = _mountPopUnderlay(parent);
+    if (!u) return false;
+    u.style.transform = 'translate3d(' + (-NAV_UNDERLAY_PARALLAX * _navWidth()) + 'px,0,0)';
+    void u.offsetWidth;   // commit the -30% start so its transition can run
+    _startPopCommit(parent);
+    return true;
+  }
+  // Push: the new level was just rendered — slide the live panel in from the
+  // right over a static clone of the level that was on screen.
+  function _startPushAnim(under){
+    const w = _navWidth();
+    navAnimBusy = true;
+    const tr = 'transform 240ms cubic-bezier(0,0,0.2,1)';
+    sidebar.style.transition = 'none';
+    sidebar.style.transform = 'translate3d(' + w + 'px,0,0)';
+    sidebar.style.willChange = 'transform';
+    sidebar.style.pointerEvents = 'none';
+    _resumeNavAnim('translateX(-50%) translate3d(' + w + 'px,0,0)', 'none');
+    void sidebar.offsetWidth;   // commit the off-screen start before the transition arms
+    sidebar.style.transition = tr;
+    sidebar.style.transform = 'translate3d(0px,0,0)';
+    _resumeNavAnim('', tr);
+    if (under) {
+      under.style.transition = tr;
+      under.style.transform = 'translate3d(' + (-NAV_UNDERLAY_PARALLAX * w) + 'px,0,0)';
+    }
+    _scheduleNavDone(function(){
+      _clearNavInlineStyles();
+      teardownNavUnderlay();
+      navAnimBusy = false;
+    }, 240);
+  }
   function applyVisual(){
     const prefersReduced = prefersReducedMotion();
-    if (prefersReduced) {
-      if (tileGrid) {
+    if (tileGrid) {
+      // #tile-grid's transform is now only the bottom rubber band — the
+      // back-swipe h-drag moves the whole #sidebar panel instead.
+      if (prefersReduced || bottomPull <= 0) {
         tileGrid.style.transform = '';
         tileGrid.style.opacity = '';
         tileGrid.style.willChange = '';
-      }
-      return;
-    }
-    if (tileGrid) {
-      if (hDragState === 'draggingH' || hDragState === 'ready_to_pop') {
-        const w = sidebarScroll.clientWidth || 280;
-        const preview = Math.min(Math.max(hDragX * 0.42, 0), w);
-        const opacity = String(Math.max(0.7, 1 - (preview / w) * 0.3));
-        tileGrid.style.transform = 'translate3d(' + preview + 'px,0,0)';
-        tileGrid.style.opacity = opacity;
-        tileGrid.style.willChange = 'transform, opacity';
-      } else if (bottomPull > 0) {
+      } else {
         tileGrid.style.transform = 'translate3d(0,' + (-bottomPull) + 'px,0)';
         tileGrid.style.opacity = '';
         tileGrid.style.willChange = 'transform';
-      } else {
-        tileGrid.style.transform = '';
-        tileGrid.style.opacity = '';
-        tileGrid.style.willChange = '';
       }
     }
+    if (!sidebar || navAnimBusy) return;   // anims own the inline styles
+    if (prefersReduced || (hDragState !== 'draggingH' && hDragState !== 'ready_to_pop')) {
+      sidebar.style.transition = '';
+      sidebar.style.transform = '';
+      sidebar.style.willChange = '';
+      if (navUnderlay) { navUnderlay.style.transition = ''; navUnderlay.style.transform = ''; }
+      _resumeNavAnim('');
+      return;
+    }
+    // Whole-screen finger-follow: the panel tracks dx 1:1 while the parent
+    // underlay parallaxes -30% → 0 behind it.
+    const w = _navWidth();
+    const x = Math.min(Math.max(hDragX, 0), w);
+    sidebar.style.transition = 'none';
+    sidebar.style.transform = 'translate3d(' + x + 'px,0,0)';
+    sidebar.style.willChange = 'transform';
+    if (navUnderlay) {
+      const p = w > 0 ? Math.min(x / w, 1) : 1;
+      navUnderlay.style.transform = 'translate3d(' + ((p - 1) * NAV_UNDERLAY_PARALLAX * w) + 'px,0,0)';
+    }
+    _resumeNavAnim(x > 0 ? 'translateX(-50%) translate3d(' + x + 'px,0,0)' : '');
   }
   function ptrSnapBack(){
     hDragState = 'idle';
@@ -3601,6 +3873,9 @@
     hHapticFired = false;
     if (ptrRaf) { cancelAnimationFrame(ptrRaf); ptrRaf = null; }
     if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
+    _finishNavAnimNow();
+    teardownNavUnderlay();
+    _clearNavInlineStyles();
     if (tileGrid) tileGrid.style.transition = 'transform ' + PTR_SNAP_MS + 'ms ease-out, opacity ' + PTR_SNAP_MS + 'ms ease-out';
     applyVisual();
     setTimeout(function(){
@@ -3625,7 +3900,11 @@
   // Non-committing cleanup shared by every "gesture context changed" path.
   // Drops the armed preventer and the drag/pull bookkeeping so a leaked state
   // can never keep scroll suppressed.
-  function resetBrowseGesture(){
+  function resetBrowseGesture(finishAnim){
+    // Fast-forward any in-flight nav anim — a fresh gesture owns the panel.
+    // MutationObserver sweeps pass finishAnim:false — a re-render that lands
+    // mid-anim must not kill the transition itself.
+    if (finishAnim !== false) _finishNavAnimNow();
     disarmTmBlock();
     hDragState = 'idle';
     hDragX = 0;
@@ -3634,6 +3913,9 @@
     hHapticFired = false;
     if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
     if (ptrRaf) { cancelAnimationFrame(ptrRaf); ptrRaf = null; }
+    // A mid-gesture re-render detaches touch delivery; the h-drag's panel
+    // preview and its underlay go with it (a running nav anim owns them).
+    if (!navAnimBusy) { teardownNavUnderlay(); _clearNavInlineStyles(); }
     applyVisual();
   }
   sidebarScroll.addEventListener('touchstart', function(e){
@@ -3653,6 +3935,7 @@
   }, {passive: true});
   sidebarScroll.addEventListener('touchmove', function(e){
     if (!e.touches || e.touches.length !== 1) return;
+    if (navAnimBusy) return;   // a commit/cancel/push anim owns the panel
     if (bottomPull === 0 && hDragState === 'idle' && hDragX === 0) {
       if (!ptrAtBottom) {
         const startXGate = ptrStartX < 24 || currentBrowsePath !== null;
@@ -3693,7 +3976,11 @@
         if (hDragX < 0) hDragX = 0;
         if (hDragState === 'idle' && dx > H_DRAG_ARM && Math.abs(dx) > Math.abs(dy)) {
           hDragState = 'draggingH';
-          if (tileGrid) tileGrid.style.willChange = 'transform, opacity';
+          // Mount the parent underlay and pin the panel's transition off
+          // before the first rAF write, or the CSS .35s open/close
+          // transition would lag the finger's first frame.
+          ensurePopUnderlay();
+          if (sidebar) { sidebar.style.transition = 'none'; sidebar.style.willChange = 'transform'; }
         }
         if (hDragState === 'draggingH' || hDragState === 'ready_to_pop') {
           if (hDragX >= H_SWIPE_THRESHOLD && hDragState === 'draggingH') {
@@ -3743,8 +4030,9 @@
     if (hRaf) { cancelAnimationFrame(hRaf); hRaf = null; }
     if (hDragState === 'ready_to_pop' && hDragX >= H_SWIPE_THRESHOLD) {
       const prefersReducedH = prefersReducedMotion();
+      const parent = browseParentOf(currentBrowsePath);
       if (prefersReducedH) {
-        currentBrowsePath = browseParentOf(currentBrowsePath);
+        currentBrowsePath = parent;
         updateBrowseHeader();
         renderView();
         writeBrowseStateWith(currentBrowsePath);
@@ -3752,50 +4040,49 @@
         hDragX = 0;
         ptrLocked = null;
         hHapticFired = false;
+        teardownNavUnderlay();
+        _clearNavInlineStyles();
         if (tileGrid) { tileGrid.style.transform = ''; tileGrid.style.opacity = ''; tileGrid.style.willChange = ''; }
         applyVisual();
       } else {
-        if (tileGrid) {
-          tileGrid.style.transition = 'transform 220ms cubic-bezier(0,0,0.2,1), opacity 220ms ease';
-          tileGrid.style.transform = 'translate3d(100%,0,0)';
-          tileGrid.style.opacity = '0.7';
-        }
-        setTimeout(function(){
-          currentBrowsePath = browseParentOf(currentBrowsePath);
-          updateBrowseHeader();
-          renderView();
-          writeBrowseStateWith(currentBrowsePath);
-          hDragState = 'idle';
-          hDragX = 0;
-          ptrLocked = null;
-          hHapticFired = false;
-          if (tileGrid) { tileGrid.style.transition = ''; tileGrid.style.transform = ''; tileGrid.style.opacity = ''; tileGrid.style.willChange = ''; }
-          applyVisual();
-        }, 220);
+        _startPopCommit(parent);
       }
       return;
     } else if (hDragState === 'draggingH' || hDragState === 'ready_to_pop') {
       const hadH = hDragX > 0;
-      const curH = hDragX;
       hDragState = 'idle';
       hDragX = 0;
       ptrLocked = null;
       hHapticFired = false;
       const prefersReducedH2 = prefersReducedMotion();
-      if (hadH || curH > 0) {
+      if (hadH) {
         if (prefersReducedH2) {
-          if (tileGrid) { tileGrid.style.transform = ''; tileGrid.style.opacity = ''; tileGrid.style.willChange = ''; }
+          teardownNavUnderlay();
+          _clearNavInlineStyles();
           applyVisual();
           setTimeout(function(){ applyVisual(); }, 180);
         } else {
-          if (tileGrid) tileGrid.style.transition = 'transform 180ms ease-out, opacity 180ms ease-out';
-          applyVisual();
-          setTimeout(function(){
-            if (tileGrid) { tileGrid.style.transition = ''; tileGrid.style.willChange = ''; }
+          // Snap back: the whole panel returns to rest and the parent
+          // underlay retreats to its -30% rest, then both come down.
+          const w = _navWidth();
+          navAnimBusy = true;
+          const tr = 'transform 180ms ease-out';
+          sidebar.style.transition = tr;
+          sidebar.style.transform = 'translate3d(0,0,0)';
+          if (navUnderlay) {
+            navUnderlay.style.transition = tr;
+            navUnderlay.style.transform = 'translate3d(' + (-NAV_UNDERLAY_PARALLAX * w) + 'px,0,0)';
+          }
+          _resumeNavAnim('', tr);
+          _scheduleNavDone(function(){
+            _clearNavInlineStyles();
+            teardownNavUnderlay();
+            navAnimBusy = false;
             applyVisual();
           }, 180);
         }
       } else {
+        teardownNavUnderlay();
         applyVisual();
       }
       return;
@@ -3839,7 +4126,7 @@
   if (tileGrid && window.MutationObserver) {
     new MutationObserver(function(){
       if (tmBlockArmed || hDragState !== 'idle' || bottomPull > 0 || hDragX !== 0 || ptrLocked) {
-        resetBrowseGesture();
+        resetBrowseGesture(false);
       }
     }).observe(tileGrid, {childList: true});
   }
@@ -3852,7 +4139,7 @@
     e.stopPropagation();
     if (e.cancelable) e.preventDefault();
   }, {capture: true});
-  if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get tmArmed(){return tmBlockArmed}, get ptrLock(){return ptrLocked}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, injectH(v){ if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
+  if(window.__BOOKQ_TEST_MODE__==='true'){ window.__ptrDebug={get hState(){return hDragState}, get bVisual(){return bottomPull}, get hX(){return hDragX}, get tmArmed(){return tmBlockArmed}, get ptrLock(){return ptrLocked}, get H_THRESH(){return H_SWIPE_THRESHOLD}, get H_DEACT(){return H_SWIPE_DEACTIVATE}, get underlay(){return !!navUnderlay}, get underHeader(){ try { return navUnderlaySlot ? (navUnderlaySlot.querySelector('#browse-header')||{}).textContent : null; } catch(e){ return null; } }, get navBusy(){return navAnimBusy}, injectH(v){ _finishNavAnimNow(); if(typeof v==='number'){ hDragX=v; hDragState=v>=H_SWIPE_THRESHOLD?'ready_to_pop':v>0?'draggingH':'idle'; if(v>0) ensurePopUnderlay(); else teardownNavUnderlay(); applyVisual(); } else { hDragState=v; applyVisual(); } }, injectBottom(v){ bottomPull=v; applyVisual(); }}; window.__testFilters={get filters(){return activeFilters}, set filters(v){activeFilters=v; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, clear(){activeFilters={artist:[],tag:[],sort:'relevance'}; try{updateFilterChips(); renderView();} catch(_) { console.warn(_); }}, get count(){return document.querySelectorAll('.tile').length}}; window.__orientDebug = { get runs(){ return orientRuns; } }; }
 
   imgContainer.addEventListener("dblclick", e => e.preventDefault());
   // H6: do NOT preventDefault() on multi-touch here — that also cancels the

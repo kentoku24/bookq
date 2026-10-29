@@ -139,6 +139,13 @@ def test_rerender_mid_gesture_releases_blocker(page, server):
     assert st["h"] == "idle", f"leaked hDragState after re-render: {st}"
     transform = _fire(page, "document.getElementById('tile-grid').style.transform")
     assert transform in ("", "none"), f"leaked preview transform: {transform}"
+    # The h-preview lives on #sidebar now — it must clear too, underlay included.
+    sb_transform = _fire(page, "document.getElementById('sidebar').style.transform")
+    assert sb_transform in ("", "none"), f"leaked sidebar preview transform: {sb_transform}"
+    underlays = _fire(page, "[...document.querySelectorAll('#sidebar')].length")
+    assert underlays == 1, f"leaked nav underlay: {underlays} #sidebar nodes"
+    leaked = _fire(page, "!!document.getElementById('nav-underlay')")
+    assert leaked is False, "leaked #nav-underlay host"
 
 
 def test_second_finger_release_rebaselines(page, server):
