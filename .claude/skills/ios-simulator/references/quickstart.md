@@ -2,7 +2,7 @@
 
 ```bash
 # 1. シミュレータを起動
-xcrun simctl boot "iPhone 17" 2>/dev/null; open -a Simulator
+xcrun simctl boot "iPhone 13" 2>/dev/null; open -a Simulator
 # 2. dev 環境を立てる（fixture 推奨：実データを汚さない）
 ./dev.sh up demo --fixture
 # 3. Simulator の Safari で開く
@@ -14,7 +14,7 @@ xcrun simctl io booted screenshot /tmp/sim.png
 ヘルパー経由:
 
 ```bash
-./scripts/open-simulator.sh https://dev-demo.<your-tailnet>.ts.net  # 既定 iPhone 17
+./scripts/open-simulator.sh https://dev-demo.<your-tailnet>.ts.net  # 既定 iPhone 13
 ./scripts/open-simulator.sh $(./dev.sh url demo)  # URL を dev.sh から取得
 SIMULATOR_DEVICE="iPad Pro 13-inch (M4) (16GB)" ./scripts/open-simulator.sh https://dev-demo.<your-tailnet>.ts.net
 ```
@@ -61,6 +61,6 @@ Simulator GUI 無しで `simctl` + `idb` が完結する (Simulator.app が見�
 ```
 
 - 開く URL には `?perf=1` を付ける (**`#` の前**, 例 `.../?perf=1#/view/...`) — ビューア内蔵 HUD (`app.js`) がタップ→ターン間の計測を表示する
-- 座標は**ポイント** (iPhone 17 は 393×852)、Retina ピクスポではない
+- 座標は**ポイント** (iPhone 13 は 390×844)、Retina ピクスポではない
 - コード変更後の再確認は **`xcrun simctl shutdown` → `boot`** で fresh セッションにする (Safari が古い `static/app.js` をキャッシュするため)
 - 詳細 (`references/tap-driving.md`): ジェスチャ分類・HUD 判読・idb 罠・dev env の local モード再 up 事故

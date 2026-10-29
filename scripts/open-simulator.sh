@@ -8,8 +8,8 @@ set -euo pipefail
 # Supports both bare https:// URL and subcommands for backward compatibility
 # --udid を受け付ける subcommand は複数台同時起動 (#85 2台検証) でも対象を一意化する
 
-DEVICE=${SIMULATOR_DEVICE:-"iPhone 17"}
-[ -z "$DEVICE" ] && DEVICE="iPhone 17"
+DEVICE=${SIMULATOR_DEVICE:-"iPhone 13"}
+[ -z "$DEVICE" ] && DEVICE="iPhone 13"
 
 usage() {
   echo "Usage: $0 <dev-url> | $0 {check|list|screenshot [path] [--udid <u>]|shutdown [--udid <u>]|verify|open <url> [--udid <u>]|tap <x> <y> [--udid <u>]|swipe <x1> <y1> <x2> <y2> [--duration <s>] [--udid <u>]}" >&2

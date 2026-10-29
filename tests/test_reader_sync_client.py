@@ -1577,3 +1577,211 @@ def test_suspended_reasserted_after_resume(pc_page):
     assert res["s2types"] == ["RESUME:", "SET_ACTIVITY:suspended"]
     assert res["all"][-1] == "SET_ACTIVITY:active"
     assert "resumed" in res["evlog"]
+
+
+# ── cross-tab persisted resume (localStorage ownership heartbeat) ────────
+
+
+PERSIST_KEY = "bookq.readerSync.persist.v1"
+
+
+def test_persist_record_written_on_bind_and_cleared_on_leave(pc_page):
+    """Bind で localStorage に creds+hb+tabId が書かれ、leave() (切断) で
+    消える — 明示切断後は再接続リトライしない契約。"""
+    res = pc_page.evaluate(
+        """async (PKEY) => {
+          const mkStore = () => { const m = {};
+            return {getItem: k => (k in m ? m[k] : null),
+                    setItem: (k, v) => { m[k] = String(v); },
+                    removeItem: k => { delete m[k]; }, _m: m}; };
+          const persist = mkStore();
+          const rig = window.__mkRig();
+          const c = rig.mkClient({persistStorage: persist});
+          await rig.pairLeader(c);
+          const bound = JSON.parse(persist.getItem(PKEY) || 'null');
+          rig.clock.advance(4500);            // one heartbeat tick
+          const hb2 = JSON.parse(persist.getItem(PKEY) || 'null').hb;
+          await c.leave();
+          const afterLeave = persist.getItem(PKEY);
+          return {bound, hb2, afterLeave, tabId: bound && bound.tabId};
+        }""",
+        PERSIST_KEY,
+    )
+    assert res["bound"] and res["bound"]["sessionId"] == "S1"
+    assert res["bound"]["memberId"] == "mL" and res["bound"]["resumeToken"] == "tok"
+    assert res["bound"]["tabId"] and res["bound"]["hb"] == 1000 * 1000
+    assert res["hb2"] > res["bound"]["hb"]           # heartbeat advanced
+    assert res["afterLeave"] is None                 # 切断 clears the record
+
+
+def test_dead_owner_record_is_adopted_and_resumed(pc_page):
+    """タブ全落ち（heartbeat 停止）後の新規クライアントが persist record を
+    採用し、RESUME で自動復帰する。"""
+    res = pc_page.evaluate(
+        """async (PKEY) => {
+          const mkStore = () => { const m = {};
+            return {getItem: k => (k in m ? m[k] : null),
+                    setItem: (k, v) => { m[k] = String(v); },
+                    removeItem: k => { delete m[k]; }, _m: m}; };
+          const persist = mkStore();
+          const rig = window.__mkRig();
+          const c1 = rig.mkClient({persistStorage: persist});
+          await rig.pairLeader(c1);
+          c1.destroy();                                // tab death: hb stops
+          rig.clock.advance(13000);                     // hb stale (>12s)
+          // fresh tab: empty sessionStorage, shared localStorage
+          const c2 = rig.mkClient({persistStorage: persist,
+                                   storage: mkStore()});
+          const pr = c2.resume();
+          const s2 = rig.sockets[rig.sockets.length - 1];
+          s2.fire({v: 1, type: 'HELLO'});
+          const resumeReq = s2.sent[s2.sent.length - 1];
+          const claimed = JSON.parse(persist.getItem(PKEY) || 'null');
+          s2.fire(rig.ack(resumeReq, {sessionId: 'S1', memberId: 'mL',
+                                      role: 'leader', resumeToken: 'tok'}));
+          await pr;
+          const owned = JSON.parse(persist.getItem(PKEY) || 'null');
+          return {resumeReq, claimed, owned,
+                  resumed: c2.state.status};
+        }""",
+        PERSIST_KEY,
+    )
+    req = res["resumeReq"]
+    assert req["type"] == "RESUME"
+    assert req["payload"]["memberId"] == "mL"
+    assert req["payload"]["resumeToken"] == "tok"
+    assert res["claimed"]["tabId"] == res["owned"]["tabId"]   # our claim stuck
+    assert res["resumed"] in ("connected", "connecting", "loading",
+                              "waiting", "selecting")
+
+
+def test_fresh_owner_record_not_adopted(pc_page):
+    """別タブが生存中（heartbeat fresh）の record は採用しない — 多重タブで
+    member を取り合わない。"""
+    res = pc_page.evaluate(
+        """async (PKEY) => {
+          const mkStore = () => { const m = {};
+            return {getItem: k => (k in m ? m[k] : null),
+                    setItem: (k, v) => { m[k] = String(v); },
+                    removeItem: k => { delete m[k]; }, _m: m}; };
+          const persist = mkStore();
+          const rig = window.__mkRig();
+          const c1 = rig.mkClient({persistStorage: persist});
+          await rig.pairLeader(c1);          // live owner, hb fresh
+          // second live tab: empty sessionStorage
+          const c2 = rig.mkClient({persistStorage: persist,
+                                   storage: mkStore()});
+          const r = await c2.resume();
+          return {r, sockets: rig.sockets.length,
+                  status: c2.state.status, end: c2.state.endReason};
+        }""",
+        PERSIST_KEY,
+    )
+    assert res["r"] == {"resumed": False, "reason": "credentials_lost"}
+    assert res["status"] == "ended" and res["end"] == "credentials_lost"
+    # no new socket beyond the paired one was opened for the stand-down
+    assert res["sockets"] == 1
+
+
+def test_expired_persist_record_is_dropped(pc_page):
+    """resume window 超過の record は採用されず除去される。"""
+    res = pc_page.evaluate(
+        """async (PKEY) => {
+          const mkStore = () => { const m = {};
+            return {getItem: k => (k in m ? m[k] : null),
+                    setItem: (k, v) => { m[k] = String(v); },
+                    removeItem: k => { delete m[k]; }, _m: m}; };
+          const persist = mkStore();
+          const rig = window.__mkRig();
+          const c1 = rig.mkClient({persistStorage: persist});
+          await rig.pairLeader(c1);
+          c1.destroy();
+          rig.clock.advance(301 * 1000);      // past the 300s window
+          const c2 = rig.mkClient({persistStorage: persist,
+                                   storage: mkStore()});
+          const r = await c2.resume();
+          return {r, rec: persist.getItem(PKEY), sockets: rig.sockets.length};
+        }""",
+        PERSIST_KEY,
+    )
+    assert res["r"] == {"resumed": False, "reason": "credentials_lost"}
+    assert res["rec"] is None                 # stale record reaped
+
+
+def test_resume_in_use_stands_down_when_foreign_tab_owns(pc_page):
+    """採用した RESUME が resume_in_use で蹴られ、persist owner が別タブ
+    (fresh hb) なら retry せず idle に退く — ping-pong 防止。"""
+    res = pc_page.evaluate(
+        """async (PKEY) => {
+          const mkStore = () => { const m = {};
+            return {getItem: k => (k in m ? m[k] : null),
+                    setItem: (k, v) => { m[k] = String(v); },
+                    removeItem: k => { delete m[k]; }, _m: m}; };
+          const persist = mkStore();
+          const rig = window.__mkRig();
+          const c1 = rig.mkClient({persistStorage: persist});
+          await rig.pairLeader(c1);
+          c1.destroy();
+          rig.clock.advance(13000);
+          const c2 = rig.mkClient({persistStorage: persist,
+                                   storage: mkStore()});
+          const pr = c2.resume();
+          const s2 = rig.sockets[rig.sockets.length - 1];
+          s2.fire({v: 1, type: 'HELLO'});
+          const resumeReq = s2.sent[s2.sent.length - 1];
+          // a third tab raced us: its claim (fresh hb, different tabId) won
+          const rec = JSON.parse(persist.getItem(PKEY));
+          persist.setItem(PKEY, JSON.stringify({
+            sessionId: rec.sessionId, memberId: rec.memberId,
+            role: rec.role, resumeToken: rec.resumeToken,
+            hb: rig.clock.now(), tabId: 'other-tab'}));
+          let err = null;
+          pr.catch(e => { err = e.code || String(e); });
+          s2.fire(rig.rej(resumeReq, 'resume_in_use'));
+          await Promise.resolve(); await Promise.resolve();
+          rig.clock.advance(60 * 1000);       // no retry may fire
+          const retried = rig.sockets.slice(1).some(
+            s => s !== s2 && s.sent.some(f => f.type === 'RESUME'));
+          return {err, retried, status: c2.state.status,
+                  owner: JSON.parse(persist.getItem(PKEY)).tabId,
+                  sessionCreds: c2 ? 'kept-or-cleared' : null};
+        }""",
+        PERSIST_KEY,
+    )
+    assert res["retried"] is False
+    assert res["status"] == "idle"
+    assert res["owner"] == "other-tab"        # foreign claim untouched
+
+
+def test_peek_persisted_resume_gate(pc_page):
+    """controller _boot が使う peek: stale-owner record のみ返す。"""
+    res = pc_page.evaluate(
+        """(PKEY) => {
+          const mkStore = () => { const m = {};
+            return {getItem: k => (k in m ? m[k] : null),
+                    setItem: (k, v) => { m[k] = String(v); },
+                    removeItem: k => { delete m[k]; }}; };
+          const peek = window.PairClient.peekPersistedResume;
+          const fresh = mkStore();
+          fresh.setItem(PKEY, JSON.stringify({
+            sessionId: 'S1', memberId: 'mL', role: 'leader',
+            resumeToken: 'tok', hb: 1000 * 1000, tabId: 'x'}));
+          const stale = mkStore();
+          stale.setItem(PKEY, JSON.stringify({
+            sessionId: 'S1', memberId: 'mL', role: 'leader',
+            resumeToken: 'tok', hb: 1000 * 1000, tabId: 'x'}));
+          const empty = mkStore();
+          return {
+            none: peek(empty, () => 1000 * 1000),
+            fresh: peek(fresh, () => 1000 * 1000 + 3000),   // owner alive
+            stale: !!peek(stale, () => 1000 * 1000 + 13000), // adoptable
+            expired: peek(stale, () => 1000 * 1000 + 301000),
+            malformed: (() => { const s = mkStore();
+              s.setItem(PKEY, '{bad'); return peek(s, () => 0); })(),
+          };
+        }""",
+        PERSIST_KEY,
+    )
+    assert res["none"] is None and res["fresh"] is None
+    assert res["stale"] is True and res["expired"] is None
+    assert res["malformed"] is None

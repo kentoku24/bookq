@@ -9,7 +9,7 @@ Simulator 上のビューア挙動検証 (タップ・ゆるいドリフト・�
  `brew tap facebook/fb && brew install idb-companion && pipx install fb-idb`
 - Simulator GUI (Simulator.app) は**不要**。`simctl` / `idb` はヘッドレスで完結する
  (`openurl`・`screenshot`・`recordVideo`・`idb ui tap` すべて GUI 無しで動く)。
-- 座標は**ポイント** (iPhone 17 なら 393×852)。Retina ピクセル (1179×2556) ではない。
+- 座標は**ポイント** (iPhone 13 なら 390×844)。Retina ピクセル (1170×2532) ではない。
  スクショはピクセル座標 — コードで読むときは ÷3 でポイントに戻す。
 
 ## 2. 基本コマンド

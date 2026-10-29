@@ -77,7 +77,7 @@ iPhone UA: `Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/6
 xcrun simctl io booted screenshot .omo/evidence/<run-dir>/03-simulator.png
 ```
 
-Default device iPhone 17. Real Safari has no timing instrumentation — screenshot only. The first shot may be a blank first-paint; reopen once if so. Source of truth for Simulator mechanics: `.claude/skills/ios-simulator/SKILL.md`.
+Default device iPhone 13. Real Safari has no timing instrumentation — screenshot only. The first shot may be a blank first-paint; reopen once if so. Source of truth for Simulator mechanics: `.claude/skills/ios-simulator/SKILL.md`.
 
 ### 6. Tear down
 

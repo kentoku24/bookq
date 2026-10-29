@@ -93,7 +93,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 ### iOS Simulator / エージェントによる実機確認
 
 - **Source of truth: `.claude/skills/ios-simulator/SKILL.md`**。エージェントはスキル経由で実行。詳細は `references/` を参照。薄い人間向け要約は `docs/ios-simulator.md`。
-- 既定 `iPhone 17`（`SIMULATOR_DEVICE` で変更可）、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。
+- 既定 `iPhone 13`（`SIMULATOR_DEVICE` で変更可）、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。
 
 ## 8. 並行作業の隔離
 
