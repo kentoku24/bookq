@@ -915,6 +915,19 @@ async def version(request: Request):
     )
 
 
+@api_router.get("/api/me")
+async def api_me(user: dict = Depends(require_auth)):
+    """Current user identity — native clients use it to validate their token."""
+    return JSONResponse(
+        content={
+            "email": user.get("email"),
+            "name": user.get("name"),
+            "picture": user.get("picture"),
+        },
+        headers={"Cache-Control": "private, no-store", "Vary": "Authorization, Cookie"},
+    )
+
+
 def _find_tree_node(nodes: list[dict], target: str, parent_path: str = "") -> dict | None:
     """Find the folder node whose downloads-relative path equals *target*.
 

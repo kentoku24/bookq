@@ -7,6 +7,7 @@ Set BOOKQ_TEST_MODE=true to bypass auth in test environments.
 """
 
 import os
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse
@@ -14,6 +15,7 @@ from authlib.integrations.starlette_client import OAuth, OAuthError
 from starlette.requests import HTTPConnection
 
 from app.config import Settings
+from app.native_auth import mint_native_token, verify_native_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -42,6 +44,29 @@ def init_oauth(settings: Settings):
     )
 
 
+def _bearer_user(connection: HTTPConnection) -> dict | None:
+    """Verify ``Authorization: Bearer <native-token>`` (native clients only).
+
+    The signed-cookie session is unreachable from a native app — its OAuth
+    completes inside ASWebAuthenticationSession, whose cookies never reach
+    the app's URLSession — so the OAuth callback mints an HMAC token that
+    every API + the WS endpoint accept here through the same chokepoint.
+    Same fail-closed posture as the cookie path: any problem -> None and
+    the session cookie gets its usual say.
+    """
+    authz = connection.headers.get("authorization", "")
+    scheme, _, token = authz.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    try:
+        settings = connection.app.state.settings
+    except Exception:
+        return None
+    return verify_native_token(
+        token.strip(), settings.secret_key, settings.allowed_emails_set
+    )
+
+
 def user_from_connection(connection: HTTPConnection) -> dict | None:
     """Shared signed-cookie user extraction for HTTP and WebSocket scopes.
 
@@ -52,6 +77,9 @@ def user_from_connection(connection: HTTPConnection) -> dict | None:
     """
     if _TEST_MODE:
         return {"email": "test@example.com", "name": "Test User", "picture": ""}
+    bearer = _bearer_user(connection)
+    if bearer is not None:
+        return bearer
     return connection.session.get("user")
 
 
@@ -73,11 +101,39 @@ async def require_auth(request: Request) -> dict:
 # ── Auth routes ────────────────────────────────────────────────────────
 
 
+def _native_redirect_url(token: str, name: str) -> str:
+    """``bookq://`` callback URL carrying the minted bearer token.
+
+    ASWebAuthenticationSession intercepts this redirect in-process — the
+    token never transits an app WebView or a server log. The token is
+    b64url already; the display name may carry unicode/spaces.
+    """
+    return (
+        f"bookq://auth/callback?token={quote(token, safe='')}"
+        f"&name={quote(name, safe='')}"
+    )
+
+
 @router.get("/login")
 async def login(request: Request):
-    """Redirect to Google OAuth consent screen."""
+    """Redirect to Google OAuth consent screen.
+
+    ``?native=1`` marks the flow for a native client: the callback then
+    answers with a Bearer token through the ``bookq://`` custom scheme
+    instead of a session cookie. TEST_MODE short-circuits Google entirely
+    so dev environments can still exercise the app's token-receive path.
+    """
     settings: Settings = request.app.state.settings
     redirect_uri = settings.base_url.rstrip("/") + "/auth/callback" if settings.base_url else str(request.url_for("auth_callback"))
+    if request.query_params.get("native") == "1":
+        if _TEST_MODE:
+            email = "test@example.com"
+            name = "Test User"
+            token = mint_native_token(email, name, settings.secret_key)
+            return RedirectResponse(
+                url=_native_redirect_url(token, name), status_code=303
+            )
+        request.session["native_client"] = True
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 
@@ -99,6 +155,16 @@ async def auth_callback(request: Request):
     if email not in settings.allowed_emails_set:
         request.session.clear()
         raise HTTPException(status_code=403, detail="Email not allowed")
+
+    if request.session.pop("native_client", False):
+        # Native-client flow: hand the credential back as a bearer token via
+        # the custom scheme rather than a session cookie the app can't carry.
+        request.session.clear()
+        name = userinfo.get("name", email)
+        token = mint_native_token(email, name, settings.secret_key)
+        return RedirectResponse(
+            url=_native_redirect_url(token, name), status_code=303
+        )
 
     request.session["user"] = {
         "email": email,
