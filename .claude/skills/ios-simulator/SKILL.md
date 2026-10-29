@@ -32,6 +32,7 @@ Not for: pure API/logic (`pytest`), Chromium motion (`video-verification`), 7-da
 | Screenshot | `./scripts/open-simulator.sh screenshot /tmp/sim.png` |
 | Video (Simulator) | `xcrun simctl io booted recordVideo /tmp/sim.mp4` |
 | Full verify | `./scripts/open-simulator.sh verify` |
+| メモリ削減 | `brew install mobai-app/tap/simslim` — helper が boot 後に自動適用 (`--except web`); `SIMSLIM=0` で無効化 |
 
 Details: `references/quickstart.md`, `references/devices.md`.
 
@@ -52,6 +53,7 @@ Details: `references/quickstart.md`, `references/devices.md`.
 
 - 7-day LRU not reproducible in Simulator — verify `touch` logic only; real wait needs iPad hardware. Source: `README.md: Safari 7日注意`.
 - `video-verification` is Chromium-only; Simulator uses `recordVideo`.
+- Booted sim は ~160 の背景デーモンで数GBを常駐させる。`simslim` 導入済みなら `open-simulator.sh` が open 時に自動 slim (永続 override、実測 6.6GB→2.7GB)。`web` カテゴリは Safari 検証のため残す。検証後は `shutdown` で解放。
 
 ## Related
 

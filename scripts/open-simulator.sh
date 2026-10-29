@@ -7,6 +7,8 @@ set -euo pipefail
 # iOS Simulator の Safari で URL を開くヘルパー
 # Supports both bare https:// URL and subcommands for backward compatibility
 # --udid を受け付ける subcommand は複数台同時起動 (#85 2台検証) でも対象を一意化する
+# boot 後に simslim (brew install mobai-app/tap/simslim) があれば不要デーモンを止めて
+# メモリを削減する (実測 ~4x)。無効化するには SIMSLIM=0 を付ける。
 
 DEVICE=${SIMULATOR_DEVICE:-"iPhone 13"}
 [ -z "$DEVICE" ] && DEVICE="iPhone 13"
@@ -27,6 +29,30 @@ usage() {
 linux_skip() {
   echo "⚠️  xcrun not found — skipping (Linux CI)" >&2
   exit 0
+}
+
+# booted simulator のメモリ削減 (任意依存: brew install mobai-app/tap/simslim)。
+# 起動した sim は ~160 の背景デーモンで GB 級を常駐させる。simslim はそれらを
+# launchd override で止め、永続化するので次回 boot も自動で slim になる。
+# web カテゴリ (Safari sync / web push / universal links) は実機Safari検証用に残す。
+# SIMSLIM=0 で無効化。simslim 未導入・UDID 未解決・失敗時は何もしない。
+slim_if_available() {
+  [ "${SIMSLIM:-1}" = "0" ] && return 0
+  command -v simslim >/dev/null 2>&1 || return 0
+  local target="$1" udid=""
+  if [[ "$target" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
+    udid="$target"
+  elif command -v python3 >/dev/null 2>&1; then
+    # simslim は UDID 必須なので booted デバイス名から解決する (名前は argv 渡し — 引用符を含んでも崩れない)
+    udid=$(xcrun simctl list devices booted -j 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((dev["udid"] for runtimes in d.get("devices",{}).values() for dev in runtimes if dev.get("state")=="Booted" and dev.get("name")==sys.argv[1]), ""))' "$target" 2>/dev/null || true)
+  fi
+  [ -z "$udid" ] && return 0
+  # 永続 override 済みかつ現在 boot でも停止済みなら再適用しない
+  simslim status "$udid" --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('persistent') and d.get('managedDisabled',0)>0 else 1)" 2>/dev/null && return 0
+  echo "simslim: stopping background daemons on $udid (first apply can take minutes)..." >&2
+  if simslim on "$udid" --except web --no-reboot >/dev/null 2>&1; then
+    echo "simslim: slimmed $udid (except web; persists across reboots)" >&2
+  fi
 }
 
 cmd_check() {
@@ -59,6 +85,11 @@ cmd_check() {
     echo "idb: available ($(command -v idb))" >&2
   else
     echo "idb: not found (tap requires: brew tap facebook/fb && brew install idb-companion && pipx install fb-idb)" >&2
+  fi
+  if command -v simslim >/dev/null 2>&1; then
+    echo "simslim: available ($(command -v simslim)) — open 時に booted sim を自動 slim" >&2
+  else
+    echo "simslim: not found (optional — booted sim のメモリを ~4x 削減: brew install mobai-app/tap/simslim)" >&2
   fi
 }
 
@@ -284,6 +315,7 @@ open_url_on() {
     echo "Error: timed out waiting for Simulator ($target) to boot (30s). Check 'xcrun simctl list | grep Booted'." >&2
     exit 1
   fi
+  slim_if_available "$target"
   if ! xcrun simctl openurl "$target" "$url"; then
     echo "Error: failed to open $url in Simulator ($target)." >&2
     exit 1
