@@ -38,6 +38,7 @@ NO_RESPONSE_TIMEOUT = 15.0     # silence -> disconnect
 CODE_TTL_SECONDS = 300.0       # pairing code lifetime
 RESUME_WINDOW_SECONDS = 300.0  # member may reattach within this window
 MATCH_WINDOW_SECONDS = 120.0   # only sessions this fresh are auto-joinable
+LOAD_TIMEOUT_SECONDS = 120.0   # work resolve budget -> ERROR "timeout"
 SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
 # Bulk (manifest-chunk) traffic bypasses the bounded frame queue but stays
 # bounded in bytes: two full manifests is the most one link may buffer.
@@ -286,6 +287,7 @@ class SessionRegistry:
                  send_queue_max: int = SEND_QUEUE_MAX,
                  send_bulk_max_bytes: int = SEND_BULK_MAX_BYTES,
                  match_window: float = MATCH_WINDOW_SECONDS,
+                 load_timeout: float = LOAD_TIMEOUT_SECONDS,
                  work_resolver=None):
         self._clock = clock or time.monotonic
         # S05: OPEN_WORK / SET_OFFSET manifest resolution — a callable
@@ -299,6 +301,7 @@ class SessionRegistry:
         self.send_queue_max = send_queue_max
         self.send_bulk_max_bytes = send_bulk_max_bytes
         self.match_window = match_window
+        self.load_timeout = load_timeout
 
         self.sessions: dict[str, PairSession] = {}
         self.links: dict[str, PeerLink] = {}
@@ -1025,7 +1028,15 @@ class SessionRegistry:
         to completion inline rather than silently dropping it."""
         async def runner():
             try:
-                manifest = await awaitable
+                # Bounded resolve: a wedged enumeration (stalled mount,
+                # pathological archive) must surface as ERROR "timeout",
+                # not pin the session at 'loading' forever.
+                manifest = await asyncio.wait_for(awaitable, self.load_timeout)
+            except asyncio.TimeoutError:
+                from app.reader_sync.catalog import ManifestError, ERR_TIMEOUT
+                self._finish_load_by_id(
+                    session.id, job,
+                    error=ManifestError(ERR_TIMEOUT, "work resolve timed out"))
             except Exception as e:
                 self._finish_load_by_id(session.id, job, error=e)
             else:
@@ -1057,26 +1068,31 @@ class SessionRegistry:
             return
         session.pending_load = None
         if error is not None:
-            code = getattr(error, "code", None) or "ERR_MALFORMED"
-            reason = rstate.MANIFEST_ERR_REASON.get(code, "malformed")
-            logger.info("reader-sync load failed code=%s", code)
-            self._broadcast(session, {
-                "v": protocol.PROTOCOL_VERSION, "type": "ERROR",
-                "sessionId": session.id, "code": reason})
-            self._broadcast_state(session)
+            self._load_failed(session, error)
             return
-        # commit: new epoch + manifest for everyone, READY gate re-arms
+        # commit: new epoch + manifest for everyone, READY gate re-arms.
+        # Validate and split BEFORE mutating session state — a build failure
+        # here (oversize manifest, unplannable table) must surface as an
+        # ERROR frame; raising mid-commit strands members at 'loading' with
+        # the epoch already bumped and no commit STATE ever broadcast.
+        from app.reader_sync.catalog import split_manifest   # lazy import
+        try:
+            plan = rstate.plan_from_manifest(manifest)
+            chunks = split_manifest(manifest)
+        except Exception as e:
+            self._load_failed(session, e)
+            return
         session.work_epoch += 1
         session.manifest_version += 1
         session.manifest = manifest
-        session.plan = rstate.plan_from_manifest(manifest)
+        session.plan = plan
         session.offset = manifest.get("offset", session.offset)
         session.spread_id = (manifest.get("initial") or {}).get("spreadId")
         session.ready.clear()
         session.dedup.clear()
         session.dedup_seen.clear()
         session.selecting = False
-        self._send_manifest(None, session)
+        self._send_manifest(None, session, chunks)
         session.apply_seq += 1
         frame = self._state_frame(session)
         session.apply_log.append({
@@ -1087,14 +1103,29 @@ class SessionRegistry:
                     session.apply_seq, frame["revision"])
         self._broadcast(session, frame)
 
-    def _send_manifest(self, link: PeerLink | None, session: PairSession) -> None:
+    def _load_failed(self, session: PairSession, error) -> None:
+        """Work-load failure: typed ERROR frame + current STATE so members
+        leave 'loading' instead of waiting on a commit that never comes."""
+        code = getattr(error, "code", None) or "ERR_MALFORMED"
+        reason = rstate.MANIFEST_ERR_REASON.get(code, "malformed")
+        logger.info("reader-sync load failed code=%s", code)
+        self._broadcast(session, {
+            "v": protocol.PROTOCOL_VERSION, "type": "ERROR",
+            "sessionId": session.id, "code": reason})
+        self._broadcast_state(session)
+
+    def _send_manifest(self, link: PeerLink | None, session: PairSession,
+                       chunks=None) -> None:
         """MANIFEST chunk frames for the committed manifest — broadcast when
         link is None, unicast otherwise (the resume path, §3.3). Chunks go
         through send_objs_bulk so a multi-chunk manifest can never overflow
-        the bounded control outq mid-burst."""
+        the bounded control outq mid-burst. ``chunks`` may carry an
+        already-split manifest so _finish_load validates before mutating."""
         from app.reader_sync.catalog import split_manifest   # lazy import
+        if chunks is None:
+            chunks = split_manifest(session.manifest)
         frames = []
-        for chunk in split_manifest(session.manifest):
+        for chunk in chunks:
             frame = dict(chunk)
             frame.update({"type": "MANIFEST", "sessionId": session.id,
                           "workEpoch": session.work_epoch,

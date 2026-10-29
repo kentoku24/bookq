@@ -305,6 +305,11 @@
           typeof page.name !== 'string') {
         _record({type: 'openWork', via: intent.via, folder: intent.folder,
                  page: page || null}, false);
+        // The resolve failed (fetch error / vanished tree node) — without
+        // feedback the tap looks dead, exactly like the old silent picks.
+        if (typeof window.showErrorToast === 'function') {
+          window.showErrorToast('作品を開けませんでした');
+        }
         return false;
       }
       var ok = _client && _client.sendIntent({
@@ -312,6 +317,11 @@
       });
       _record({type: 'openWork', via: intent.via, folder: intent.folder,
                page: page}, ok);
+      // Dropped (link not open / pair torn down mid-tap): no queueing —
+      // a delayed open would surprise the user, so surface it instead.
+      if (!ok && typeof window.showErrorToast === 'function') {
+        window.showErrorToast('作品を開けませんでした');
+      }
       return ok;
     }
     if (intent.page) return emit(intent.page);
@@ -461,6 +471,15 @@
         try { window.showErrorToast('更新あり: 再読み込みで最新版が適用されます'); }
         catch (x) { /* notice is best-effort */ }
       }
+    }
+    if (e && e.type === 'error' &&
+        typeof window.showErrorToast === 'function') {
+      // Server-side load failure (timeout / not_found / size / …) or a local
+      // manifest/apply error: the STATE that follows re-arms the session but
+      // nothing else surfaces the failure — without this the pick still
+      // looks like a dead tap, the exact class this audit removes.
+      try { window.showErrorToast('作品を開けませんでした'); }
+      catch (x) { /* notice is best-effort */ }
     }
     _eventSubs.slice().forEach(function (cb) {
       try { cb(e); } catch (x) { /* subscriber isolation */ }

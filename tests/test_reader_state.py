@@ -868,6 +868,81 @@ def test_huge_manifest_streams_without_killing_links():
     assert follower.close_reason is None
 
 
+def test_manifest_commit_failure_reports_error_and_stays_pickable(monkeypatch):
+    """Regression: a manifest that fails at commit time (split_manifest
+    ERR_SIZE) used to raise inside _finish_load — the epoch/manifest were
+    already bumped but no commit STATE was ever broadcast, leaving every
+    member stuck at 'loading' forever. The failure must surface as an
+    ERROR frame instead, commit nothing, and stay pickable."""
+    monkeypatch.setattr(catalog, "MAX_MANIFEST_BYTES", 8)   # force ERR_SIZE
+    clock = FakeClock()
+    reg = _reg(clock, resolver=_resolver({"book": _manifest()}))
+    leader, follower = _connect(reg, "L"), _connect(reg, "F")
+    sid = _pair(reg, leader, follower)
+    session = reg.sessions[sid]
+
+    _send(reg, leader, _req("OPEN_WORK",
+                            {"folder": "book",
+                             "page": {"folder": "book", "name": "p1.png"}},
+                            session_id=sid, request_id="ow"))
+
+    lf = leader.frames()
+    assert _one(lf, "ERROR")["code"] == "size"
+    assert _of(lf, "MANIFEST") == []
+    # nothing half-committed: epoch/manifest untouched, back to selecting
+    assert session.work_epoch == 0 and session.manifest is None
+    assert session.pending_load is None
+    assert _of(lf, "STATE")[-1]["phase"] == "selecting"
+    assert leader.close_reason is None and follower.close_reason is None
+    assert _of(follower.frames(), "ERROR")             # peer notified too
+
+    # recovery: a well-formed re-pick still commits normally
+    monkeypatch.setattr(catalog, "MAX_MANIFEST_BYTES", 32 * 1024 * 1024)
+    _send(reg, leader, _req("OPEN_WORK",
+                            {"folder": "book",
+                             "page": {"folder": "book", "name": "p1.png"}},
+                            session_id=sid, request_id="ow2"))
+    assert session.work_epoch == 1 and session.manifest is not None
+    assert _of(leader.frames(), "MANIFEST")
+
+
+def test_load_timeout_reports_error_and_stays_pickable():
+    """A wedged resolver (stalled mount, pathological archive) used to pin
+    the session at 'loading' forever — the load budget now surfaces ERROR
+    'timeout', clears pending_load, and leaves the pair pickable."""
+    def hang(link, job):
+        return asyncio.Event().wait()    # awaitable that never completes
+    clock = FakeClock()
+    reg = _reg(clock, resolver=hang, load_timeout=0.05)
+    leader, follower = _connect(reg, "L"), _connect(reg, "F")
+    sid = _pair(reg, leader, follower)
+    session = reg.sessions[sid]
+
+    async def go():
+        _send(reg, leader, _req("OPEN_WORK",
+                                {"folder": "book",
+                                 "page": {"folder": "book", "name": "p1.png"}},
+                                session_id=sid, request_id="ow"))
+        # The resolve runs as a task on this loop — pump until the 50ms
+        # budget expires and _finish_load broadcasts the failure. (Must
+        # run under drive(): outside a loop _schedule_load would bind the
+        # runner to whatever loop a prior Playwright test left behind.)
+        for _ in range(50):
+            if session.pending_load is None:
+                break
+            await asyncio.sleep(0.05)
+        assert session.pending_load is None
+
+    from tests.helpers import drive
+    drive(go())
+
+    lf = leader.frames()
+    assert _one(lf, "ERROR")["code"] == "timeout"
+    assert session.pending_load is None and session.manifest is None
+    assert _of(lf, "STATE")[-1]["phase"] == "selecting"
+    assert leader.close_reason is None and follower.close_reason is None
+
+
 def test_swap_sides_flips_projection():
     reg, sid, leader, follower = _reading_session()
     session = reg.sessions[sid]

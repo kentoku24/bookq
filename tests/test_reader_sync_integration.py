@@ -760,3 +760,61 @@ def test_foreign_protocol_version_ends_with_update_notice(devs):
         "() => !(window.PairedView && window.PairedView.state"
         " && window.PairedView.state().active)")
     expect(pf.locator("#toast")).to_contain_text("再読み込み")
+
+
+# ── pick resolve failure → error toast, no silent dead tap ────────────────
+
+def test_open_work_resolve_failure_shows_error_toast(devs):
+    """A leader pick whose PageRef can't resolve (folder absent from the
+    tree AND /api/images 404s) used to be dropped silently — a dead tap
+    with zero feedback. It must surface an error toast and send no wire op."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    before = pl.evaluate("() => window.__wsLog.length")
+    pl.evaluate(
+        "() => window.ViewerNavigation.request("
+        "{type:'openWork', folder:'no_such_folder_xyz', via:'tile'})")
+    expect(pl.locator("#toast")).to_contain_text("作品を開けませんでした")
+    sent = pl.evaluate(
+        "(b) => window.__wsLog.slice(b)"
+        ".filter(f => f && f.type === 'OPEN_WORK').length", before)
+    assert sent == 0
+
+
+def test_open_work_send_failure_shows_error_toast(devs):
+    """A pick while the link is down used to be dropped silently (sendIntent
+    false, record only). No queueing — the tap surfaces an error toast so
+    the user knows to retry once reconnected."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    _kill_ws(pl)                       # dead and unable to reconnect —
+    # a live resume retry would let sendIntent succeed and drop the toast.
+    pl.wait_for_function(
+        "() => window.PairController.state.status !== 'connected'",
+        timeout=15000)
+    pl.evaluate(
+        "() => window.ViewerNavigation.request("
+        "{type:'openWork', folder:'simple_manga', via:'tile'})")
+    expect(pl.locator("#toast")).to_contain_text("作品を開けませんでした")
+
+
+def test_server_error_frame_shows_error_toast(devs):
+    """A pick that fails server-side (resolve timeout, oversize manifest,
+    vanished work) is broadcast as an ERROR frame to both members. The
+    follow-up STATE re-arms 'selecting' but nothing else told the picker —
+    the error event must surface a toast or the tap still looks dead."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    sid = pl.evaluate("() => window.PairController.state.sessionId")
+    for pg in (pl, pf):
+        pg.evaluate(
+            "(s) => window.__wsConns[0].onmessage("
+            "{data: JSON.stringify({v: 1, type: 'ERROR', sessionId: s,"
+            " code: 'timeout'})})", sid)
+        expect(pg.locator("#toast")).to_contain_text("作品を開けませんでした")
