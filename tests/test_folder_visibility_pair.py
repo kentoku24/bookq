@@ -342,6 +342,17 @@ def test_pending_commit_latest_stashed_and_retried(vpage, vis_env):
     vis_put(vis_env, "hide_me", True)
     held = []
     vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    # The held GET cannot keep FV 'loading' past its own 3s client-side
+    # fetch timeout — the abort then resolves the judgment as 'error'/
+    # 'readonly' and the stash window closes mid-test (observed flake).
+    # Kill the boot-embedded snapshot AND the cached one so hasSnapshot
+    # stays false: `_applyCommitted`'s "判定不能" gate then holds at ANY
+    # timing, exactly like a real client whose settings fetch failed with
+    # nothing cached.
+    vpage.context.add_init_script(
+        "Object.defineProperty(window, '__BOOKQ_VISIBILITY_SNAPSHOT__',"
+        " {configurable: true, get: function(){ return null; }});"
+        "try { localStorage.clear(); } catch(e) {}")
     vpage.reload()
     vpage.wait_for_function(
         "() => window.FolderVisibility"

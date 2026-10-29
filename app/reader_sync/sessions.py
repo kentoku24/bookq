@@ -44,6 +44,7 @@ SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
 SEND_BULK_MAX_BYTES = 64 * 1024 * 1024
 CODE_DIGITS = 6
 
+WS_CLOSE_NORMAL = 1000         # normal closure
 WS_CLOSE_POLICY = 1008         # policy violation
 WS_CLOSE_TOO_BIG = 1009        # frame over the 64KiB cap
 WS_CLOSE_GOING_AWAY = 1001     # shutdown / server going away
@@ -353,12 +354,7 @@ class SessionRegistry:
         if session is None:
             return
         if session.pending is member:
-            session.pending = None
-            leader = session.leader()
-            if leader is not None and leader.link is not None:
-                leader.link.send_obj({
-                    "v": protocol.PROTOCOL_VERSION, "type": "JOIN_CANCEL",
-                    "sessionId": session.id, "memberId": member.id})
+            self._drop_pending(session, member)
             logger.debug("reader-sync link=%s pending candidate lost member=%s",
                          link.id, member.id)
             return
@@ -391,6 +387,24 @@ class SessionRegistry:
             if was_tracked:
                 logger.debug("reader-sync link=%s closed reason=%s", link.id, reason)
         self._wake_ticker()
+
+    def _drop_pending(self, session: PairSession, member: Member) -> None:
+        """Remove an unapproved join candidate: leader notified, claim
+        dropped — and ``code_consumed`` reset so the pairing code works
+        for a retry. The consumed mark serializes a *live* join — freeing
+        it while a different candidate is live would admit a second
+        pending, so the whole drop is scoped to the actual pending
+        member."""
+        if session.pending is not member:
+            return
+        session.pending = None
+        session.code_consumed = False
+        member.session = None
+        leader = session.leader()
+        if leader is not None and leader.link is not None:
+            leader.link.send_obj({
+                "v": protocol.PROTOCOL_VERSION, "type": "JOIN_CANCEL",
+                "sessionId": session.id, "memberId": member.id})
 
     # ── inbound dispatch ─────────────────────────────────────────────
 
@@ -459,9 +473,14 @@ class SessionRegistry:
             return
 
         if session.pending is member:
-            # unapproved candidate: no state flows to it; only bail out
+            # Unapproved candidate: no state flows to it; only bail out.
+            # Its LEAVE forfeits its own claim — the leader's waiting
+            # session must survive (a stranger holding the code could
+            # otherwise kill any session by joining then leaving).
             if t == "LEAVE":
-                self._end_session(session, END_LEFT)
+                self._drop_pending(session, member)
+                link.member = None
+                self.close_link(link, "pending_left", code=WS_CLOSE_NORMAL)
             else:
                 self._reject(link, req, t, REASON_NOT_PAIRED)
             return
@@ -559,7 +578,7 @@ class SessionRegistry:
                         name=user.get("name") or "", resume_token=_new_token(),
                         session=session, link=link, status="pending")
         session.pending = member
-        session.code_consumed = True   # single-use on success
+        session.code_consumed = True   # single-use while a join is live
         link.member = member
         leader = session.leader()
         self._ack(link, req, {
@@ -633,6 +652,13 @@ class SessionRegistry:
             return
         pending = session.pending
         if pending is None:
+            self._reject(link, req, req["type"], REASON_NO_PENDING,
+                         session_id=session.id)
+            return
+        want = req["payload"].get("memberId")
+        if want is not None and want != pending.id:
+            # A stale verdict for a candidate who is no longer pending must
+            # not approve whoever happens to be waiting now.
             self._reject(link, req, req["type"], REASON_NO_PENDING,
                          session_id=session.id)
             return
@@ -841,13 +867,22 @@ class SessionRegistry:
                 eff = next((m for m in session.members.values()
                             if m.role == role), member)
 
+        # Response channel: a relayed request's ACK/REJECT belongs to the
+        # *origin* member's own link — answering on the relay link hands
+        # the leader foreign-requestId frames and starves the real
+        # requester of its stale-state feedback. Falls back to the
+        # carrying link when the origin's is gone (or this wasn't relayed).
+        resp_link = link
+        if eff is not member and eff.link is not None and eff.link.alive:
+            resp_link = eff.link
+
         dkey = self._dedup_key(req, role)
         cached = session.dedup.get(dkey)
         if cached is not None:
-            link.send_obj(cached)      # identical replay, no state change
+            resp_link.send_obj(cached)   # identical replay, no state change
             return
         if dkey in session.dedup_seen:
-            self._reject_snapshot(link, req, session, role,
+            self._reject_snapshot(resp_link, req, session, role,
                                   rstate.REASON_STALE_REQUEST)
             return
 
@@ -860,9 +895,9 @@ class SessionRegistry:
                 rstate.check_manifest_version(session, payload)
                 if t in rstate.ABSOLUTE_TYPES:
                     rstate.check_base(session, req)
-            self._apply_op(link, req, session, member, eff, role)
+            self._apply_op(resp_link, req, session, member, eff, role)
         except rstate.Reject as e:
-            self._reject_snapshot(link, req, session, role, e.reason)
+            self._reject_snapshot(resp_link, req, session, role, e.reason)
 
     def _apply_op(self, link: PeerLink, req: dict, session: PairSession,
                   member: Member, eff: Member, role: str) -> None:

@@ -1357,6 +1357,228 @@ def test_match_non_malformed_reject_is_a_real_error(pc_page):
     assert res["evlog"] == ["rejected:bad_code"]
 
 
+# ── audit-hardening regressions (client side of #144) ────────────────
+
+
+def test_inbound_silence_watchdog_recovers_blackholed_link(pc_page):
+    """C3: closeすら届かないブラックホール経路は受信watchdogで検出し、
+    onclose相当の再接続経路へ。inboundが続く限り誤発火しない — 発火時刻の
+    _lastRx再判定でPING到着分の猶予が延びる。"""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient({livenessTimeoutMs: 20000});
+          const s1 = await rig.pairLeader(c);
+          // a mid-window inbound frame pushes the fire-time recheck out —
+          // silence is measured from _lastRx, not from arm time
+          rig.clock.advance(15000);
+          s1.fire({v: 1, type: 'PING', seq: 9});
+          rig.clock.advance(15000);             // watchdog fires+re-arms here
+          const alive = {open: s1.open, closed: s1.closed,
+                         sockets: rig.sockets.length,
+                         status: c.state.status};
+          // now the path black-holes entirely: nothing inbound for 20s+
+          rig.clock.advance(20001);             // watchdog kills + retry(500ms)
+          const s2 = rig.sockets[rig.sockets.length - 1];
+          const sameSocket = s2 === s1;
+          s2.fire({v: 1, type: 'HELLO'});
+          const types = s2.sent.map(f => f.type);
+          s2.fire(rig.ack(s2.sent[s2.sent.length - 1],
+                          {sessionId: 'S1', memberId: 'mL', role: 'leader',
+                           resumeToken: 'tok'}));
+          return {alive, sameSocket, s1closed: s1.closed, types,
+                  sockets: rig.sockets.length,
+                  statuses: rig.statuses, status: c.state.status,
+                  evlog: rig.evlog};
+        }"""
+    )
+    # while inbound frames kept arriving the watchdog never fired
+    assert res["alive"] == {"open": True, "closed": False, "sockets": 1,
+                            "status": "connected"}
+    # after the silence deadline the old socket was closed and recovery began
+    assert res["s1closed"] is True and res["sameSocket"] is False
+    assert res["sockets"] == 2
+    assert res["types"] == ["RESUME"]           # same path as a real onclose
+    assert "reconnecting" in res["statuses"]
+    assert res["status"] == "connected" and "resumed" in res["evlog"]
+
+
+def test_resume_entry_survives_link_death_before_ack(pc_page):
+    """H3: resume() の呼び出し promise が、RESUME 送信後〜ACK前のリンク
+    死亡を跨いでも orphan されない — 保持 entry が次の HELLO で再送され、
+    その ACK が元の promise を解決する。"""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          rig.storage.setItem('bookq.readerSync.v1', JSON.stringify(
+            {sessionId: 'S1', memberId: 'mL', role: 'leader',
+             resumeToken: 'tok'}));
+          const c = rig.mkClient();
+          let settled = null;
+          const pr = c.resume().then(r => { settled = r; return r; });
+          const s1 = rig.sockets[0];
+          s1.fire({v: 1, type: 'HELLO'});
+          const first = s1.sent.map(f => f.type);
+          s1.fireClose();                        // dies before the RESUME ACK
+          rig.clock.advance(500);                // retry -> second link
+          const s2 = rig.sockets[1];
+          s2.fire({v: 1, type: 'HELLO'});
+          const second = s2.sent.map(f => f.type);
+          s2.fire(rig.ack(s2.sent[s2.sent.length - 1],
+                          {sessionId: 'S1', memberId: 'mL', role: 'leader',
+                           resumeToken: 'tok'}));
+          await Promise.resolve(); await Promise.resolve();
+          // the server then pushes the committed STATE — the real flow
+          s2.fire(rig.st('S1', 3, {phase: 'reading', spreadId: 'c0:s0',
+                                   presence: rig.presence(2)}));
+          return {first, second, settled, sockets: rig.sockets.length,
+                  evlog: rig.evlog, status: c.state.status,
+                  prType: typeof pr.then};
+        }"""
+    )
+    assert res["first"] == ["RESUME"] and res["second"] == ["RESUME"]
+    # the caller's promise resolved with the ACK data — previously the
+    # second _attemptResume overwrote the kept entry and orphaned it
+    assert res["settled"]["sessionId"] == "S1"
+    assert res["status"] == "connected" and "resumed" in res["evlog"]
+
+
+def test_new_entry_op_supersedes_inflight_entry(pc_page):
+    """H4: 未ACKの entry op を新しい create/join が黙殺しない — 先の
+    promise は 'superseded' で明示 reject され settle する。"""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          let jErr = null;
+          const jp = c.join('654321');
+          jp.catch(e => { jErr = e; });
+          const s1 = rig.sockets[0];
+          s1.fire({v: 1, type: 'HELLO'});
+          const jtypes = s1.sent.map(f => f.type);   // JOIN out, never ACKed
+          const cp = c.create();                     // supersedes the JOIN
+          await Promise.resolve(); await Promise.resolve();
+          const s2 = rig.sockets[1];
+          s2.fire({v: 1, type: 'HELLO'});
+          const ctypes = s2.sent.map(f => f.type);
+          s2.fire(rig.ack(s2.sent[0], {sessionId: 'S2', code: '111111',
+                                     memberId: 'mL', role: 'leader',
+                                     resumeToken: 'tok'}));
+          await cp;
+          return {jtypes, ctypes, jErrCode: jErr && jErr.code,
+                  sessionId: c.state.sessionId, role: c.state.role,
+                  status: c.state.status};
+        }"""
+    )
+    assert res["jtypes"] == ["JOIN"] and res["ctypes"] == ["CREATE"]
+    assert res["jErrCode"] == "ERR_STATE"       # superseded — never hangs
+    # bound to the NEW session — 'connecting' until the first STATE lands
+    assert res["sessionId"] == "S2" and res["role"] == "leader"
+    assert res["status"] == "connecting"
+
+
+def test_create_and_join_on_bound_member_leave_politely(pc_page):
+    """H5: バインド済みで create/join/match を呼ぶと先に LEAVE を出す —
+    ソケットの黙殺で相手を5分の paused に残さない。"""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s1 = await rig.pairLeader(c);
+          const cp = c.create();                  // bound -> LEAVE first
+          const s1last = s1.sent[s1.sent.length - 1];
+          const s2 = rig.sockets[rig.sockets.length - 1];
+          s2.fire({v: 1, type: 'HELLO'});
+          s2.fire(rig.ack(s2.sent[0], {sessionId: 'S2', code: '111111',
+                                     memberId: 'mL2', role: 'leader',
+                                     resumeToken: 't2'}));
+          await cp;
+          const jp = c.join('999999');            // bound again -> LEAVE first
+          const s2last = s2.sent[s2.sent.length - 1];
+          const s3 = rig.sockets[rig.sockets.length - 1];
+          s3.fire({v: 1, type: 'HELLO'});
+          s3.fire(rig.ack(s3.sent[0], {sessionId: 'S3', memberId: 'mF',
+                                     role: 'follower', resumeToken: 't3',
+                                     leaderName: 'l'}));
+          await jp;
+          return {s1last, s2last, s1closed: s1.closed, s2closed: s2.closed,
+                  s3type: s3.sent[0].type, s3code: s3.sent[0].payload.code,
+                  sessionId: c.state.sessionId, role: c.state.role};
+        }"""
+    )
+    assert res["s1last"]["type"] == "LEAVE"
+    assert res["s1last"]["sessionId"] == "S1"
+    assert res["s2last"]["type"] == "LEAVE"
+    assert res["s1closed"] is True and res["s2closed"] is True
+    assert res["s3type"] == "JOIN" and res["s3code"] == "999999"
+    assert res["sessionId"] == "S3" and res["role"] == "follower"
+
+
+def test_ready_marks_only_after_send_succeeds(pc_page):
+    """H6: READY の送信が失敗した時に _readyFor をマークしない — 次の
+    manifest 再配送で本当に送られるまで READY を再試行する (旧: 送信前
+    マークで drop 分が永久に未 READY → 'loading' 停滞)。"""
+    res = pc_page.evaluate(
+        """async (manifestFrames) => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          // one-shot send failure: the READY that follows lands nowhere
+          const origSend = s.send;
+          s.send = function (o) { s.send = origSend; throw new Error('boom'); };
+          for (const f of manifestFrames) s.fire(f);
+          const afterFail = {
+            readySent: s.sent.filter(f => f.type === 'READY').length,
+            readyEv: rig.evlog.filter(e => e === 'ready').length,
+          };
+          // manifest re-delivery (same epoch:mv — the RESUME path) re-arms it
+          for (const f of manifestFrames) s.fire(f);
+          return {afterFail,
+                  readySent: s.sent.filter(f => f.type === 'READY').length,
+                  readyEv: rig.evlog.filter(e => e === 'ready').length};
+        }""",
+        _manifest_frames(_manifest(), "S1", 1, 1),
+    )
+    assert res["afterFail"] == {"readySent": 0, "readyEv": 0}
+    assert res["readySent"] == 1 and res["readyEv"] == 1
+
+
+def test_suspended_reasserted_after_resume(pc_page):
+    """H7: RESUME でサーバが member を 'active' に戻すため、ローカル
+    suspended 中の再バインド直後に SET_ACTIVITY suspended を再 assert —
+    '見えないメンバが active' によるセッション un-pause を防ぐ。"""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s1 = await rig.pairLeader(c);
+          rig.evTarget.fire('hidden');               // locally suspended
+          const s1acts = s1.sent
+            .filter(f => f.type === 'SET_ACTIVITY')
+            .map(f => f.payload.state);
+          s1.fireClose();                            // dies while hidden
+          rig.clock.advance(500);
+          const s2 = rig.sockets[1];
+          s2.fire({v: 1, type: 'HELLO'});
+          s2.fire(rig.ack(s2.sent[s2.sent.length - 1],
+                          {sessionId: 'S1', memberId: 'mL', role: 'leader',
+                           resumeToken: 'tok'}));
+          const s2types = s2.sent.map(f => f.type + ':' +
+            ((f.payload && f.payload.state) || ''));
+          rig.evTarget.fire('visible');              // now un-suspend
+          const all = s2.sent.map(f => f.type + ':' +
+            ((f.payload && f.payload.state) || ''));
+          return {s1acts, s2types, all, evlog: rig.evlog};
+        }"""
+    )
+    assert res["s1acts"] == ["suspended"]
+    # right after the RESUME-ACK the client re-asserts its suspension —
+    # previously the server's 'active' won and the pair un-paused blindly
+    assert res["s2types"] == ["RESUME:", "SET_ACTIVITY:suspended"]
+    assert res["all"][-1] == "SET_ACTIVITY:active"
+    assert "resumed" in res["evlog"]
+
+
 # ── cross-tab persisted resume (localStorage ownership heartbeat) ────────
 
 

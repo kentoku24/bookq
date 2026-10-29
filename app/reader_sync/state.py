@@ -116,9 +116,15 @@ def derive_phase(session) -> str:
     if any(m.link is None or not m.link.alive or m.status != "active"
            for m in members):
         return "paused"
+    # An accepted pick is "loading" even before its manifest commits —
+    # reporting 'selecting' while a resolver is in flight re-arms the
+    # shared browse grid the pick was made from (docstring: loading covers
+    # "in flight").
+    if session.pending_load is not None:
+        return "loading"
     if session.selecting or session.manifest is None:
         return "selecting"
-    if session.pending_load is not None or not all_ready(session):
+    if not all_ready(session):
         return "loading"
     return "reading"
 

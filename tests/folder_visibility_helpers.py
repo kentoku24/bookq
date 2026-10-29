@@ -159,7 +159,9 @@ def spawn_vis_server(tree: Path, state_dir: Path) -> tuple:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
+    # Same headroom as conftest's server fixture — cold metadata warmup
+    # regularly eats most of a 10s deadline on a loaded machine.
+    deadline = time.time() + 30
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError("visibility test server exited early")
@@ -170,7 +172,7 @@ def spawn_vis_server(tree: Path, state_dir: Path) -> tuple:
             time.sleep(0.1)
     else:
         proc.terminate()
-        raise RuntimeError("visibility test server did not become healthy in 10s")
+        raise RuntimeError("visibility test server did not become healthy in 30s")
     return proc, base_url
 
 
