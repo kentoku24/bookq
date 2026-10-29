@@ -637,6 +637,9 @@ cmd_down() {
     if [ "$all" = 1 ] && [ "$full" = 1 ] && [ "$yes" = 0 ]; then
         die "--all --full は全環境の完全撤去です。--yes を付けて確認してください"
     fi
+    if [ "$prune" = 0 ] && [ "$all" = 0 ]; then
+        die "--no-prune-volumes は --all と併用してください"
+    fi
 
     if [ "$all" = 1 ]; then
         # 孤立ボリュームは teardown の前に確定させる。後で数えると、この
