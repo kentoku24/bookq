@@ -918,10 +918,23 @@ def test_load_timeout_reports_error_and_stays_pickable():
     sid = _pair(reg, leader, follower)
     session = reg.sessions[sid]
 
-    _send(reg, leader, _req("OPEN_WORK",
-                            {"folder": "book",
-                             "page": {"folder": "book", "name": "p1.png"}},
-                            session_id=sid, request_id="ow"))
+    async def go():
+        _send(reg, leader, _req("OPEN_WORK",
+                                {"folder": "book",
+                                 "page": {"folder": "book", "name": "p1.png"}},
+                                session_id=sid, request_id="ow"))
+        # The resolve runs as a task on this loop — pump until the 50ms
+        # budget expires and _finish_load broadcasts the failure. (Must
+        # run under drive(): outside a loop _schedule_load would bind the
+        # runner to whatever loop a prior Playwright test left behind.)
+        for _ in range(50):
+            if session.pending_load is None:
+                break
+            await asyncio.sleep(0.05)
+        assert session.pending_load is None
+
+    from tests.helpers import drive
+    drive(go())
 
     lf = leader.frames()
     assert _one(lf, "ERROR")["code"] == "timeout"
