@@ -7,6 +7,7 @@ Run:
     BOOKQ_TEST_MODE=true DOWNLOADS_DIR=<tmp> uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_archive.py -q
 """
 
+import asyncio
 import os
 import struct
 import sys
@@ -29,6 +30,7 @@ from app.metadata import MetadataIndex  # noqa: E402
 from app.routes import _resolve_archive  # noqa: E402
 from app.scanner import scan_tree  # noqa: E402
 from tests.fixtures.rar5 import make_rar5_store  # noqa: E402
+from tests.helpers import cold_index_lifespan, get_folders_ready  # noqa: E402
 
 
 def _require_rar_tool() -> None:
@@ -421,16 +423,38 @@ def client(archive_tree: Path, monkeypatch):
 
     from fastapi.testclient import TestClient
 
-    return TestClient(create_app())
+    app = create_app()
+    app.router.lifespan_context = cold_index_lifespan
+    with TestClient(app) as client:
+        yield client
 
 
 def test_api_folders_shows_archives(client):
-    res = client.get("/api/folders")
-    assert res.status_code == 200
-    by_name = {n["name"]: n for n in res.json()}
+    by_name = {n["name"]: n for n in get_folders_ready(client)}
     assert by_name["work.zip"]["thumb"] is not None
     assert by_name["doc.pdf"]["thumb"] == "p001.png"
     assert by_name["empty.zip"]["thumb"] is None
+
+
+def test_api_folders_retries_202_until_index_built(client, monkeypatch):
+    import app.routes as routes
+
+    calls = 0
+    original = routes._scan_and_rebuild
+
+    async def slow_scan(path, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return await original(path, *args, **kwargs)
+
+    monkeypatch.setattr(routes, "_scan_and_rebuild", slow_scan)
+    monkeypatch.setattr(routes, "_INDEX_BUILD_AWAIT_SEC", 0.001)
+    by_name = {n["name"]: n for n in get_folders_ready(client)}
+    assert by_name["work.zip"]["thumb"] is not None
+    assert by_name["doc.pdf"]["thumb"] == "p001.png"
+    assert by_name["empty.zip"]["thumb"] is None
+    assert calls == 1
 
 
 def test_api_images_archive_and_pdf(client):
@@ -555,7 +579,7 @@ def test_regular_folder_unaffected(client):
 
 
 def test_api_folders_shows_rar_and_epub(client):
-    by_name = {n["name"]: n for n in client.get("/api/folders").json()}
+    by_name = {n["name"]: n for n in get_folders_ready(client)}
     assert by_name["book.cbr"]["thumb"] == "2.png"
     assert by_name["manga.epub"]["thumb"] == "OEBPS/Images/z_cover.png"
     assert by_name["broken.rar"]["thumb"] is None

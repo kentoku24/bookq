@@ -36,6 +36,7 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from app.scanner import scan_tree  # noqa: E402
+from tests.helpers import cold_index_lifespan, get_folders_ready  # noqa: E402
 from tests.test_scanner_perf_todo6 import _make_pdf, _make_png, _make_zip  # noqa: E402
 
 
@@ -96,13 +97,21 @@ def test_shallow_scan_plain_files_and_dirs_unchanged(tmp_path):
 
 @pytest.fixture
 def archive_client(tmp_path, monkeypatch):
-    """TestClient serving a tree with one archive (fill target)."""
+    """TestClient serving a tree with one archive (fill target).
+
+    Same cold-index setup as tests/test_archive.py: a persistent portal keeps
+    the single-flight index_build_task alive across polls, and the no-op
+    lifespan keeps startup warmup from racing it.
+    """
     _build_shallow_tree(tmp_path)
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path))
     from app.main import create_app
     from fastapi.testclient import TestClient
 
-    return TestClient(create_app())
+    app = create_app()
+    app.router.lifespan_context = cold_index_lifespan
+    with TestClient(app) as client:
+        yield client
 
 
 def _current_generation(first_payload):
@@ -114,9 +123,8 @@ def _current_generation(first_payload):
 
 
 def test_folders_since_returns_differential_response(archive_client):
-    r1 = archive_client.get("/api/folders")
-    assert r1.status_code == 200
-    gen = _current_generation(r1.json())
+    first_payload = get_folders_ready(archive_client)
+    gen = _current_generation(first_payload)
 
     # Same generation → no new content: 304 or an explicit unchanged flag.
     r_same = archive_client.get("/api/folders", params={"since": gen})
