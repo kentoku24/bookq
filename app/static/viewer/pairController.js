@@ -460,6 +460,15 @@
         catch (x) { /* notice is best-effort */ }
       }
     }
+    if (e && e.type === 'error' &&
+        typeof window.showErrorToast === 'function') {
+      // Server-side load failure (timeout / not_found / size / …) or a local
+      // manifest/apply error: the STATE that follows re-arms the session but
+      // nothing else surfaces the failure — without this the pick still
+      // looks like a dead tap, the exact class this audit removes.
+      try { window.showErrorToast('作品を開けませんでした'); }
+      catch (x) { /* notice is best-effort */ }
+    }
     _eventSubs.slice().forEach(function (cb) {
       try { cb(e); } catch (x) { /* subscriber isolation */ }
     });
