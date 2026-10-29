@@ -1,5 +1,6 @@
 """Folder scanning utilities for the image viewer."""
 
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,14 +22,39 @@ IMAGE_EXTENSIONS = {".avif", ".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp", "
 PDF_EXTENSIONS = {".pdf"}
 
 
-def _sort_key(name: str) -> tuple[int, ...]:
-    """Extract numeric parts for natural sort (01.avif < 02.avif < 10.avif)."""
+# ── native sort-key core (Phase 1 W1 pilot, issue #163) ──────────────────────
+# bookq_rs (rust/bookq_rs) implements _sort_key/_normalize_kanji/
+# _kanji_run_to_int/natural_key byte-for-byte. When the extension imports, the
+# wrappers below delegate per call; BOOKQ_RUST=0 forces the Python path.
+# _py_* keep the reference implementations — the parity harness
+# (tests/migration/test_rust_parity.py) diffs them against bookq_rs, and they
+# are the per-call fallback when the Rust call itself cannot run (non-str
+# input, or names with lone surrogates that Rust's &str cannot represent).
+try:
+    import bookq_rs as _rs
+except ImportError:
+    _rs = None
+if _rs is not None and os.environ.get("BOOKQ_RUST", "1") == "0":
+    _rs = None
+
+
+def _py_sort_key(name: str) -> tuple[int, ...]:
     parts = _NUMERIC_RE.split(name)
     key: list[int] = []
     for p in parts:
         if p.isascii() and p.isdigit():
             key.append(int(p))
     return tuple(key)
+
+
+def _sort_key(name: str) -> tuple[int, ...]:
+    """Extract numeric parts for natural sort (01.avif < 02.avif < 10.avif)."""
+    if _rs is not None:
+        try:
+            return _rs._sort_key(name)
+        except Exception:
+            pass
+    return _py_sort_key(name)
 
 
 # Kanji numeral normalization (漢数字 → ASCII digits in numeric slots).
@@ -42,12 +68,11 @@ _KANJI_DIGITS = {"〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
 _KANJI_UNITS  = {"十": 10, "百": 100, "千": 1000}
 _KANJI_BIG    = "万億兆"          # out of scope: bail the whole run
 _KANJI_RUN_RE = re.compile("[" + "".join(_KANJI_DIGITS) + "".join(_KANJI_UNITS) + _KANJI_BIG + "]+")
-_KANJI_PRE    = set("第【之の・ー- ")    # must match JS byte-for-byte
+_KANJI_PRE    = set("第【之の・ー- ")    # context guard (mirrored by bookq_rs)
 _KANJI_POST   = set("部話章巻回集編幕期頁号節月】")
 
 
-def _kanji_run_to_int(run: str) -> int | None:
-    """'二十三'->23, '十'->10, '二百五'->205; None if run contains 万/億/兆."""
+def _py_kanji_run_to_int(run: str) -> int | None:
     if any(ch in _KANJI_BIG for ch in run):
         return None
     total, cur = 0, 0
@@ -60,22 +85,79 @@ def _kanji_run_to_int(run: str) -> int | None:
     return total + cur
 
 
-def _normalize_kanji(name: str) -> str:
-    """Convert kanji numerals in numeric slots to ASCII digits; else leave as-is."""
+def _kanji_run_to_int(run: str) -> int | None:
+    """'二十三'->23, '十'->10, '二百五'->205; None if run contains 万/億/兆."""
+    if _rs is not None:
+        try:
+            return _rs._kanji_run_to_int(run)
+        except Exception:
+            pass
+    return _py_kanji_run_to_int(run)
+
+
+def _py_normalize_kanji(name: str) -> str:
     def repl(m: re.Match) -> str:
         before = name[m.start() - 1] if m.start() > 0 else None
         after  = name[m.end()] if m.end() < len(name) else None
         if before is not None and before not in _KANJI_PRE:  return m.group(0)
         if after  is not None and after  not in _KANJI_POST: return m.group(0)
-        value = _kanji_run_to_int(m.group(0))
+        value = _py_kanji_run_to_int(m.group(0))
         return m.group(0) if value is None else str(value)
     return _KANJI_RUN_RE.sub(repl, name)
 
 
+def _normalize_kanji(name: str) -> str:
+    """Convert kanji numerals in numeric slots to ASCII digits; else leave as-is."""
+    if _rs is not None:
+        try:
+            return _rs._normalize_kanji(name)
+        except Exception:
+            pass
+    return _py_normalize_kanji(name)
+
+
+def _py_natural_key(name: str) -> tuple[str | int, ...]:
+    return tuple(int(p) if p.isascii() and p.isdigit() else p
+                 for p in _NUMERIC_RE.split(_py_normalize_kanji(name)))
+
+
 def natural_key(name: str) -> tuple[str | int, ...]:
     """Server-side natural sort key (sole source of sort truth; ch-2 < ch-10; 第一部 < 第二部)."""
-    return tuple(int(p) if p.isascii() and p.isdigit() else p
-                 for p in _NUMERIC_RE.split(_normalize_kanji(name)))
+    if _rs is not None:
+        try:
+            return _rs.natural_key(name)
+        except Exception:
+            pass
+    return _py_natural_key(name)
+
+
+def _sort_natural(names: list[str]) -> None:
+    """In-place ``sorted(key=lambda n: (natural_key(n), n))``.
+
+    The Rust batch path computes all keys in one FFI call and sorts
+    ``zip(keys, names)`` — element-for-element the same (key, name) tuple
+    comparison, just faster.
+    """
+    if _rs is not None:
+        try:
+            keys = _rs.natural_keys(names)
+            names[:] = [n for _, n in sorted(zip(keys, names))]
+            return
+        except Exception:
+            pass
+    names.sort(key=lambda n: (natural_key(n), n))
+
+
+def _sort_file(names: list[str]) -> None:
+    """In-place ``sorted(key=lambda n: (_sort_key(n), n))``; batch path like _sort_natural."""
+    if _rs is not None:
+        try:
+            keys = _rs.sort_keys(names)
+            names[:] = [n for _, n in sorted(zip(keys, names))]
+            return
+        except Exception:
+            pass
+    names.sort(key=lambda n: (_sort_key(n), n))
 
 
 def is_pdf_file(path: Path) -> bool:
@@ -311,10 +393,10 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
             elif suffix in PDF_EXTENSIONS:
                 pdfs.append(entry.name)
 
-    dirs.sort(key=lambda d: (natural_key(d), d))
-    files.sort(key=lambda f: (_sort_key(f), f))
-    archives.sort(key=lambda a: (natural_key(a), a))
-    pdfs.sort(key=lambda a: (natural_key(a), a))
+    _sort_natural(dirs)
+    _sort_file(files)
+    _sort_natural(archives)
+    _sort_natural(pdfs)
     _phases["walk_ms"] += (time.perf_counter() - walk_start) * 1000
 
     if files:
@@ -388,5 +470,5 @@ def list_images(folder_path: Path) -> list[str]:
         for f in folder_path.iterdir()
         if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS and not f.name.startswith(".")
     ]
-    files.sort(key=lambda f: (_sort_key(f), f))
+    _sort_file(files)
     return files

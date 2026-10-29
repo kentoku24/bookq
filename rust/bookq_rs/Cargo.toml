@@ -1,0 +1,17 @@
+[package]
+name = "bookq_rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Native sort-key core for bookq (Phase 1 W1 pilot, issue #163)"
+license = "Proprietary"
+
+[lib]
+name = "bookq_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py314"] }
+
+[profile.release]
+lto = true

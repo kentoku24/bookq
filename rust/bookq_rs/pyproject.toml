@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "bookq_rs"
+version = "0.1.0"
+description = "Native sort-key core for bookq (Phase 1 W1 pilot, issue #163)"
+requires-python = ">=3.14"
+
+[tool.maturin]
+bindings = "pyo3"
+# abi3-py314: one wheel covers every CPython >=3.14 GIL build (docker slim +
+# local uv-managed 3.14). Free-threaded 3.14t is deliberately out of scope
+# (risk-register E2) — abi3t would be needed for that target.
+features = ["pyo3/abi3-py314"]
