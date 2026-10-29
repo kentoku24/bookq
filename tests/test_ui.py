@@ -343,10 +343,21 @@ _GEOM_JS = """() => {
   return {vw: innerWidth, vh: innerHeight, spreads};
 }"""
 
+_READY_JS = """() => {
+  const cur = [...document.querySelectorAll('#img-track img')]
+    .find(im => Number(im.style.getPropertyValue('--i')) === window.currentIdx);
+  if (!cur) return false;
+  const sc = cur.closest('.spread-container');
+  if (!sc) return false;
+  const imgs = [...sc.querySelectorAll('img')];
+  return imgs.length > 0 && imgs.every(im => im.complete && im.naturalWidth > 0);
+}"""
+
 
 def geom(page, settle: int = 400):
     """Read spread/page geometry once images have loaded and laid out."""
     page.wait_for_selector("#img-track .spread-container")
+    page.wait_for_function(_READY_JS)
     page.wait_for_timeout(settle)
     # A fixed wait alone is not enough: on a slow CI runner the .3s page-turn
     # slide can still be in its easing tail (~2px short) when it expires.
@@ -517,6 +528,24 @@ def test_neighbor_image_load_does_not_move_current_spread(landscape_page):
     page.wait_for_timeout(300)
     late = spread_with(geom(page), 0)["left"]
     assert abs(early - late) < TOL, f"current spread shifted {late - early:.1f}px on neighbour load"
+
+
+def test_geom_waits_for_current_spread_image_load(page):
+    page.set_content("""
+      <div id="img-track"><div class="spread-container" style="width:800px;height:600px">
+        <div class="page-cell"><img style="--i:0;width:400px;height:600px"></div>
+      </div></div>
+      <script>
+        window.currentIdx = 0;
+        setTimeout(() => {
+          document.querySelector('#img-track img').src = '/image/mixed_ar/p1.png';
+        }, 700);
+      </script>
+    """)
+    g = geom(page, settle=0)
+    pages = loaded_pages(g)
+    assert pages, "no images loaded"
+    assert pages[0]["natWidth"] > 0 and pages[0]["natHeight"] > 0
 
 
 def test_trailing_solo_page_is_centered(landscape_page):
