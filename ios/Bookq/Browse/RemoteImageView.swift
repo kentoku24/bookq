@@ -50,6 +50,7 @@ final class RemoteImageLoader: ObservableObject {
 struct RemoteImageView: View {
     let url: URL?
     var contentMode: ContentMode = .fill
+    var onImageLoaded: ((UIImage) -> Void)? = nil
     @State private var image: UIImage?
     @State private var failed = false
 
@@ -79,5 +80,6 @@ struct RemoteImageView: View {
         guard let url else { failed = true; return }
         image = await RemoteImageLoader.shared.load(url)
         failed = image == nil
+        if let image { onImageLoaded?(image) }
     }
 }

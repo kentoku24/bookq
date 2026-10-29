@@ -47,6 +47,7 @@ final class AppModel: ObservableObject {
         self.api = api
         self.library = LibraryStore(api: api)
         RemoteImageLoader.shared.api = api
+        progress.attach(ProgressSync(api: api))
     }
 
     /// Probe the server. 401 → login required; 200 → ready.
@@ -58,6 +59,7 @@ final class AppModel: ObservableObject {
             let me = try await api.me()
             auth.apply(user: me)
             phase = .ready
+            Task { await progress.syncWithServer() }
         } catch APIError.unauthorized {
             phase = .login
         } catch {
