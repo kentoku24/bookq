@@ -1571,18 +1571,15 @@
       shallowOk = true;
     } catch(e){ console.warn("shallow folders failed, falling through to full", e); }
     // Stage 2: full tree in the background — final DOM identical to full-only.
-    try {
-      const res = await _fetch("/api/folders", {credentials: 'same-origin'});
-      if (_loadGen !== _loadFoldersGen) return;
-      if (!res.ok) throw new Error("http "+res.status);
+    const _applyFullRes = async function(res){
       const data = await readFoldersResponse(res, null, () => _loadGen === _loadFoldersGen);
-      if (_loadGen !== _loadFoldersGen) return;
+      if (_loadGen !== _loadFoldersGen) return false;
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
       // Render first, persist in the background — the fetched `data` drives the
       // tree, IDB persistence only matters for the next reload, so it must
       // never delay first paint.
-      if (!await restoreTree(data, {shallow:false})) return;
-      if (_loadGen !== _loadFoldersGen) return;
+      if (!await restoreTree(data, {shallow:false})) return false;
+      if (_loadGen !== _loadFoldersGen) return false;
       // Stamp only a genuinely-online load: an offline cold start must keep
       // _onlineRevalidateLast=0 so the reconnect revalidation fires instead
       // of being eaten by the freshness gate.
@@ -1601,6 +1598,38 @@
           }).catch(function(e){ console.warn(e); });
         }});
       } catch(e) { console.warn(e); }
+      return true;
+    };
+    // 202 = the server index is still building: the shallow grid already
+    // painted, so retry the bare fetch on a short clock until the build
+    // lands instead of parking a multi-second request or falling back to
+    // the stale snapshot. Bounded so a wedged build can't spin forever.
+    let _fullRetry = 0;
+    const _scheduleFullRetry = function(){
+      if (++_fullRetry > 40) return;
+      setTimeout(async function(){
+        if (_loadGen !== _loadFoldersGen) return;
+        try {
+          const res2 = await _fetch("/api/folders", {credentials: 'same-origin'});
+          if (_loadGen !== _loadFoldersGen) return;
+          if (res2.status === 202){ _scheduleFullRetry(); return; }
+          if (!res2.ok) throw new Error("http "+res2.status);
+          await _applyFullRes(res2);
+        } catch(e){ console.warn("full folders retry failed", e); _scheduleFullRetry(); }
+      }, Math.min(1500 * _fullRetry, 5000));
+    };
+    try {
+      const res = await _fetch("/api/folders", {credentials: 'same-origin'});
+      if (_loadGen !== _loadFoldersGen) return;
+      if (res.status === 202){
+        _scheduleFullRetry();
+        if (shallowOk){ updateShallowBadge(); return; }
+        // No shallow paint either — fall through to the recovery path so a
+        // stale snapshot (if any) shows while the retry keeps working.
+        throw new Error("index building");
+      }
+      if (!res.ok) throw new Error("http "+res.status);
+      await _applyFullRes(res);
     } catch(e){
       // Recovery work is only valid while this load generation still owns the
       // pipeline — a newer loadFolders must never see stale marks/renders.

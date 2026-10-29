@@ -43,6 +43,52 @@ _jinja_env = Environment(
 
 _index_lock = asyncio.Lock()
 
+
+class _IndexBuilding(Exception):
+    """The metadata index cache is missing and its cold build is still running."""
+
+
+# How long a request may wait on an in-flight cold build before answering
+# 202. Small libraries finish inside the budget and keep the synchronous
+# 200 contract; a large-library cold build never parks a request.
+_INDEX_BUILD_AWAIT_SEC = 0.8
+
+
+async def _rebuild_into_cache(app) -> None:
+    """Single-flight cold build: scan outside _index_lock, swap inside it.
+
+    Runs as ``app.state.index_build_task`` so every cache-miss caller shares
+    one build instead of queueing on a 5-10s scan under the lock. The handle
+    is cleared in finally; scan failures propagate to the awaiters and cache
+    nothing (a partial tree is never kept).
+    """
+    state = getattr(app, "state", app)
+    try:
+        tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(
+            state.settings.downloads_path
+        )
+        async with _index_lock:
+            cache_data = getattr(state, "metadata_index_cache", None)
+            if (
+                cache_data is not None
+                and (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL
+                and "tree" in cache_data
+            ):
+                # A warmup or manual /api/refresh landed a fresh cache while
+                # this scan ran — keep that one, it is fresher by definition.
+                return
+            prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
+            # Same null-signature contract as the previous inline path: the
+            # next background refresh walks the tree and self-heals it.
+            state.metadata_index_cache = {
+                "tree": tree, "index": index, "timestamp": time.time(),
+                "generation": prev_gen, "signature": None}
+    finally:
+        try:
+            state.index_build_task = None
+        except Exception:
+            pass
+
 # Shallow-warmup background fill pacing (plan shallow-warmup-fill T3): one
 # opaque archive node is materialized at a time, with this pause between
 # items, and the fill pauses entirely while a request arrived within
@@ -310,7 +356,7 @@ async def _background_index_refresh(app) -> None:
             pass
 
 
-async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], MetadataIndex]:
+async def _ensure_tree_and_index(request: Request, wait: bool = False) -> tuple[list[dict], MetadataIndex]:
     """Return a (tree, index) pair, never blocking the request on a scan.
 
     A single scan_tree walk feeds both the folders response and the index
@@ -324,10 +370,17 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
     moves to a single-flight background task (_schedule_index_refresh —
     see _background_index_refresh, which gates the rebuild on the
     filesystem signature so an unchanged tree costs zero scans), so the
-    first request past expiry never blocks on a 5-10s full scan. Only a
-    missing cache (cold start, warmup failure) still builds synchronously
-    under the lock; that build stores a null signature, and the first
-    background refresh self-heals it to the walked one.
+    first request past expiry never blocks on a 5-10s full scan.
+
+    Cold-miss (startup before warmup lands, warmup failure) also never
+    blocks: the build runs as the shared ``app.state.index_build_task``
+    (_rebuild_into_cache), callers await it only for
+    ``_INDEX_BUILD_AWAIT_SEC``, and a still-running build raises
+    ``_IndexBuilding`` — the handlers answer 202 + Retry-After instead of
+    parking the request for the whole scan. Small libraries finish inside
+    the budget, so their 200 contract is unchanged. ``wait=True`` restores
+    the old block-until-built semantics for callers that cannot answer
+    202 (the reader-sync WS path has no retry channel to offer).
     """
     cache_data = getattr(request.app.state, "metadata_index_cache", None)
     if cache_data is not None and "tree" in cache_data:
@@ -337,7 +390,23 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
         _schedule_index_refresh(request.app)
         return cache_data["tree"], cache_data["index"]
 
-    async with _index_lock:
+    # Bound the LOCK WAIT itself: /api/refresh holds _index_lock across its
+    # whole synchronous rebuild, which would otherwise park a cold-miss
+    # caller for the same 10s+ this path exists to avoid. An in-flight
+    # refresh IS a build — its swap lands a fresh cache, so answering 202
+    # and letting the client retry is the same contract as the task path.
+    # No shield here (unlike the task await below): a timed-out acquire must
+    # be cancelled outright, or the leaked waiter would grab the lock later
+    # with nobody left to release it. wait=True callers keep the old
+    # unbounded acquire — they cannot express "come back later".
+    if wait:
+        await _index_lock.acquire()
+    else:
+        try:
+            await asyncio.wait_for(_index_lock.acquire(), _INDEX_BUILD_AWAIT_SEC)
+        except asyncio.TimeoutError:
+            raise _IndexBuilding()
+    try:
         # Double-check after acquiring lock — another coroutine may have rebuilt.
         cache_data = getattr(request.app.state, "metadata_index_cache", None)
         if (
@@ -346,19 +415,29 @@ async def _ensure_tree_and_index(request: Request) -> tuple[list[dict], Metadata
             and "tree" in cache_data
         ):
             return cache_data["tree"], cache_data["index"]
-
-        downloads_path = request.app.state.settings.downloads_path
-        tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)
-        # Cache only after both succeed (cache-nothing on failure). The
-        # generation is the *fill* progress counter (warmup = 1, +1 per
-        # filled node), so a rebuild preserves it. The signature starts
-        # null (only lifespan warmup pre-populates a walked one); the next
-        # background refresh walks and stores it.
-        prev_gen = cache_data.get("generation", 1) if isinstance(cache_data, dict) else 1
-        cache_data = {"tree": tree, "index": index, "timestamp": time.time(),
-                      "generation": prev_gen, "signature": None}
-        request.app.state.metadata_index_cache = cache_data
-        return tree, index
+        task = getattr(request.app.state, "index_build_task", None)
+        if task is None:
+            task = asyncio.create_task(_rebuild_into_cache(request.app))
+            request.app.state.index_build_task = task
+    finally:
+        _index_lock.release()
+    # Await OUTSIDE the lock and bounded: the lock only guards
+    # check-and-swap, so a 10s+ cold scan never parks a queue of requests
+    # under it. Shield keeps a timed-out caller from cancelling the shared
+    # build; its exception (build failure) still propagates to every awaiter.
+    if wait:
+        await asyncio.shield(task)
+    else:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), _INDEX_BUILD_AWAIT_SEC)
+        except asyncio.TimeoutError:
+            raise _IndexBuilding()
+    cache_data = getattr(request.app.state, "metadata_index_cache", None)
+    if cache_data is None or "tree" not in cache_data:
+        # The task returned without caching (a fresher cache landed mid-run
+        # and was then invalidated, or the task failed in a non-raising way).
+        raise _IndexBuilding()
+    return cache_data["tree"], cache_data["index"]
 
 
 async def _ensure_index(request: Request) -> MetadataIndex:
@@ -952,7 +1031,17 @@ async def api_folders(
         # Legacy full tree — byte-compatible default (search/offline/tests).
         # Tree/index come from the shared TTL cache; Todo 6 (HTTP cache) can
         # key its ETag off the same cache timestamp.
-        tree, index = await _ensure_tree_and_index(request)
+        try:
+            tree, index = await _ensure_tree_and_index(request)
+        except _IndexBuilding:
+            # no-store, never _FOLDERS_CACHE_CONTROL: a private 60s-cached
+            # 202 would feed the client's retry loop stale bodies long after
+            # the build landed (and stay out of the SW api cache too).
+            return JSONResponse(
+                {"detail": "metadata index building"},
+                status_code=202,
+                headers={"Retry-After": "2", "Cache-Control": "no-store"},
+            )
         # Captured immediately after the await, with no intervening await, so
         # it cannot desync from the *tree* a concurrent rebuild may replace.
         cache_data = request.app.state.metadata_index_cache
@@ -1093,7 +1182,14 @@ async def search(
     response body. ``include_hidden`` opts out for the owner's own 全表示
     mode (the caller's own hidden set — never another user's).
     """
-    index = await _ensure_index(request)
+    try:
+        index = await _ensure_index(request)
+    except _IndexBuilding:
+        return JSONResponse(
+            {"detail": "metadata index building"},
+            status_code=202,
+            headers={"Retry-After": "2", "Cache-Control": "no-store"},
+        )
     hidden = await _visibility_hidden_roots(request, _user)
     if include_hidden:
         hidden = ()
@@ -1123,7 +1219,14 @@ async def get_facets(
 
     Contract: returns {artists, tags} only (no parodies key).
     """
-    index = await _ensure_index(request)
+    try:
+        index = await _ensure_index(request)
+    except _IndexBuilding:
+        return JSONResponse(
+            {"detail": "metadata index building"},
+            status_code=202,
+            headers={"Retry-After": "2", "Cache-Control": "no-store"},
+        )
     hidden = await _visibility_hidden_roots(request, _user)
     if include_hidden:
         hidden = ()

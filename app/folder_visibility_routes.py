@@ -81,7 +81,9 @@ async def _top_level_folder_names(request: Request) -> set[str]:
     filesystem (``wrap`` alone is not a tree node and must not validate).
     """
     try:
-        tree, _index = await _ensure_tree_and_index(request)
+        # wait=True: a PUT has no 202 to answer — ride an in-flight cold
+        # index build to completion instead of failing the write.
+        tree, _index = await _ensure_tree_and_index(request, wait=True)
     except Exception as exc:
         logger.warning("folder-visibility tree unavailable type=%s", type(exc).__name__)
         raise _err(503, "library tree unavailable")

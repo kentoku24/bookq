@@ -457,7 +457,9 @@ async def resolve_work(connection, openedFolder, initialPageRef, offset) -> dict
         raise ManifestError(ERR_MALFORMED, "initialPageRef must be a PageRef dict")
 
     state = connection.app.state
-    tree, _index = await _ensure_tree_and_index(connection)
+    # wait=True: the WS request path has no 202 to return — keep the old
+    # block-until-built semantics while a cold index build is in flight.
+    tree, _index = await _ensure_tree_and_index(connection, wait=True)
     downloads_dir = state.settings.downloads_path
 
     # Memoize resolved manifests per tree generation: the dict holds the
