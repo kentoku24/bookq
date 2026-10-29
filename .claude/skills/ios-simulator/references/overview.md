@@ -27,6 +27,6 @@ host に Tailscale が無い（`tailscale status` が失敗する、`.env` が�
 - 既定 port は 8080。2つ目の同時 local 環境は `--port N` が必須（衝突はビルド前に失敗する）。
 - 初回表示が「0 folders」でも異常ではない。初回の `/api/folders` スキャンが遅いだけなので、まず reload する。
   それでも 0 なら `docker inspect bookq-dev-viewer-dev-XX --format '{{json .Mounts}}'` で `/tmp/bookq-fixture-<name>/downloads → /app/downloads (ro)` を確認する。
-- Simulator に「Booted」の iPhone 17 が既にあれば helper の boot は skip される。複数 Booted 時は `booted` エイリアスの解決先が不定なので `xcrun simctl list devices booted` で UDID を確認する。
+- Simulator に「Booted」の iPhone 13 が既にあれば helper の boot は skip される。複数 Booted 時は `booted` エイリアスの解決先が不定なので `xcrun simctl list devices booted` で UDID を確認する。
 
 正準は `README.md: 3b. ローカルモード` と `docs/deployment.md: ローカルモード`。

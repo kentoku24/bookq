@@ -21,7 +21,7 @@ Not for: pure API/logic (`pytest`), Chromium motion (`video-verification`), 7-da
 
 | Task | Command |
 |---|---|
-| Open (default iPhone 17) | `./scripts/open-simulator.sh https://dev-demo.<your-tailnet>.ts.net` |
+| Open (default iPhone 13) | `./scripts/open-simulator.sh https://dev-demo.<your-tailnet>.ts.net` |
 | Open current env | `./scripts/open-simulator.sh $(./dev.sh url demo)` |
 | Open local env (no tailscale) | `./dev.sh up demo --local --fixture` → `./scripts/open-simulator.sh http://127.0.0.1:8080` |
 | Device override | `SIMULATOR_DEVICE="iPad Pro 13-inch (M4) (16GB)" ./scripts/open-simulator.sh <url>` |

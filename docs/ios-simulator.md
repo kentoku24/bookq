@@ -12,7 +12,7 @@
 
 ```bash
 # 1. シミュレータを起動
-xcrun simctl boot "iPhone 17" 2>/dev/null; open -a Simulator
+xcrun simctl boot "iPhone 13" 2>/dev/null; open -a Simulator
 # 2. dev 環境を立てる（fixture 推奨）
 ./dev.sh up demo --fixture
 # 3. Safari で開く

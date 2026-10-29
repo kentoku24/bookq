@@ -139,7 +139,7 @@ Viewer conventions that will bite if assumed otherwise:
 - **iOS viewport and evidence.** `tests/conftest.py:_new_page` backs `ios_page` 390x844 isMobile/hasTouch scale 3 iPhone UA, `ipad_page` 820x1180 scale 2 iPad UA, `ipad_landscape_page` 1180x820 scale 2. `BROWSER=webkit` switches to `webkit_browser`, otherwise `browser` (chromium), no pytest `--browser` flag. `RECORD_VIDEO=1 RECORD_VIDEO_DIR=.omo/evidence` records to `.omo/evidence` with `mkdir -p`, required because `opencode.json` denies `external_directory` so `/tmp` is blocked. WebKit narrow skip keeps Cache and storage estimate assertions passing, only the persist toast is skipped. Simulator host network share makes `https://dev-*.ts.net` reachable from the Simulator, run `xcrun simctl boot "iPhone 15"` then `xcrun simctl openurl booted https://dev-*.ts.net` for manual QA. `dev.sh --fixture` mounts the synthetic tree from `tests/fixtures/uiux_tree.py` for that URL.
 
 **Source of truth: `.claude/skills/ios-simulator/SKILL.md`**。エージェントはスキル経由で実行。詳細は `references/` を参照。薄い人間向け要約は `docs/ios-simulator.md`。
-既定 `iPhone 17`、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。
+既定 `iPhone 13`、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。
 **Tailscale の無い host**（`tailscale status` 失敗、`.env` 無し）では `./dev.sh up <name> --fixture` が「tailnet ドメインを導出できません」で止まる。その場合は `./dev.sh up <name> --local --fixture` → `./scripts/open-simulator.sh http://127.0.0.1:8080` に切り替える（Simulator は host network 共有、`127.0.0.1` は Secure Context なので SW も動く。helper は `https://` と loopback `http://` のみ受理）。初回表示の「0 folders」は初回スキャン待ちなので reload する。
 
 ## Testing approach
