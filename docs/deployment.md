@@ -47,8 +47,9 @@ dev-03.your-tailnet.ts.net ──▶ viewer (例: ENV review-42 → slot 03)
 ./dev.sh logs [name] [-f]    # ログ
 ./dev.sh down [name]         # 削除（ボリューム保持でスロット再利用。dev-XX の identity は残る）
 ./dev.sh down [name] --full  # 完全撤去（ボリューム・イメージまで削除。プールスロット dev-01..10 は API 削除せず再利用）
-./dev.sh down --all          # 全部削除（全スロット解放）
+./dev.sh down --all          # 全部削除（全スロット解放。実行前に孤立していたボリュームも回収）
 ./dev.sh gc                  # 未参照・dangling イメージの回収（up 成功後にも自動実行）
+./dev.sh gc-volumes [--dry-run]  # 孤立ボリューム（コンテナの無い bookq-dev-* の残骸）の回収
 ```
 
 環境名を省略すると現在のブランチから導出される（`origin/`・`claude/`・`bookq-` の接頭辞は落とす）。URL の tailnet ドメインは `DEV_TS_DOMAIN` か、リポジトリ／worktree の `.env`、無ければメインのチェックアウトの `.env` の `BASE_URL` から導出する。

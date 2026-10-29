@@ -14,13 +14,17 @@
 #   ./dev.sh up [name] [--ref REF] [--fixture]   起動（--fixture: 実データの代わりに合成テストツリーをマウント）
 #   ./dev.sh up [name] [--local [--port N] [--lan-allow]] [--fixture]   起動（--local: tailscale 無しで http://127.0.0.1:<port> に公開。2つ目の同時環境には --port が必要）
 #   ./dev.sh down [name] [--full]    停止・削除（--full 無しはボリューム保持でスロット再利用 / --full は state ボリュームまで削除してスロット解放）
-#   ./dev.sh down --all [--full] [--yes]   全環境を削除（--all --full は --yes 必須）
+#   ./dev.sh down --all [--full] [--yes] [--no-prune-volumes]   全環境を削除（--all --full は --yes 必須）
 #                                    --full: ボリューム・イメージ・ノード登録まで完全撤去
 #                                    （プールスロット dev-01..dev-10 の再利用では API 削除は不要）
+#                                    --all は実行前に既に孤立していたボリュームも回収する
+#                                    （--no-prune-volumes で無効化）
 #   ./dev.sh list                    一覧（ENV → SLOT マッピングを表示）
 #   ./dev.sh url [name]              URL だけ出力（プールスロット dev-XX ベース）
 #   ./dev.sh logs [name] [-f ...]    ログ
 #   ./dev.sh gc                      未参照・dangling イメージの回収（up 成功後にも自動実行）
+#   ./dev.sh gc-volumes [--dry-run]  孤立ボリュームの回収（コンテナの無い bookq-dev-* の残骸）
+#                                    down --all からも自動実行される
 #
 # 例:
 #   ./dev.sh up review-42 --ref origin/feature/foo   # 空きスロット（例: dev-03）に割当
@@ -317,6 +321,82 @@ all_projects() {
         --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u || true
 }
 
+# ============================================================ ボリューム
+
+# 孤立ボリューム = コンテナが 1 つも無い bookq-dev-* プロジェクトの残骸。
+# down はボリュームを保持する仕様（再 up で同じ認証状態に戻す）ため、
+# コンテナだけ消えた環境の state がディスクに残り続ける。これを回収する。
+#
+# compose が自動命名する 3 種だけを対象にするので、次のものは構造的に
+# 対象外になる:
+#   - 本番のボリューム (bookq_user-state 等) — bookq-dev- 接頭辞を持たない
+#   - bookq-dev-pool-XX_tailscale-state — スロット固定の tailnet identity で、
+#     Free プランでのスロット再利用設計上あえて保持する（自動命名 3 種ではない）
+# 環境名は slugify で [a-z0-9-] に正規化されるためプロジェクト名に '_' は
+# 現れず、末尾の '_<volume>' を削ればプロジェクト名が一意に戻る。
+AUTO_VOLUME_SUFFIXES="user-state thumb-cache warmup-cache"
+
+project_of_volume() {
+    local vol="$1" suffix
+    for suffix in $AUTO_VOLUME_SUFFIXES; do
+        case "$vol" in
+            *"_$suffix") printf '%s' "${vol%_$suffix}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# compose プロジェクトのうち Docker 上にコンテナ（停止済みも含む）を持つもの。
+# ここに現れないプロジェクトのボリュームだけが孤立と判定される。
+live_compose_projects() {
+    docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u || true
+}
+
+# 孤立ボリューム名を 1 行 1 件で出力する（副作用なし）。
+list_orphan_volumes() {
+    local live vol project
+    live="$(live_compose_projects)"
+    while IFS= read -r vol; do
+        [ -n "$vol" ] || continue
+        case "$vol" in
+            "$PROJECT_PREFIX"*) ;;
+            *) continue ;;
+        esac
+        project="$(project_of_volume "$vol")" || continue
+        # bookq-dev-pool-XX（旧形式）の自動命名ボリュームも対象にする:
+        # 現行の up は bookq-dev-XX-<name> しか作らず、死んだ旧プロジェクトの
+        # ボリュームを再利用する経路は無い（保持が必要な tailscale-state は
+        # 自動命名 3 種ではないので suffix 判定で既に弾かれている）。
+        # プロジェクトが生きていれば（コンテナが 1 つでもあれば）残す。
+        if printf '%s\n' "$live" | grep -qxF -- "$project"; then
+            continue
+        fi
+        printf '%s\n' "$vol"
+    done < <(docker volume ls --format '{{.Name}}' 2>/dev/null || true)
+}
+
+# 受け取ったリストのボリュームを削除する。1 件の失敗で全体を止めない
+# （使用中・レースで消えた等は警告してスキップ）。
+prune_volumes_from_list() {
+    local list="$1" vol removed=0 failed=0
+    if [ -z "$list" ]; then
+        printf 'ℹ️  孤立ボリュームはありません。\n'
+        return 0
+    fi
+    printf '🧹 孤立ボリューム（コンテナの無い bookq-dev-* の残骸）を回収します:\n'
+    while IFS= read -r vol; do
+        [ -n "$vol" ] || continue
+        if docker volume rm "$vol" >/dev/null 2>&1; then
+            printf '   🗑️  %s\n' "$vol"
+            removed=$((removed + 1))
+        else
+            warn "ボリューム '$vol' を削除できませんでした（使用中の可能性）。スキップします。"
+            failed=$((failed + 1))
+        fi
+    done <<< "$list"
+    printf '♻️  孤立ボリューム: %d 件削除（%d 件スキップ）\n' "$removed" "$failed"
+}
+
 # ============================================================ サブコマンド
 
 cmd_up() {
@@ -539,12 +619,13 @@ cmd_down() {
 
     # cmd_up と同じループスタイルでパース。--full は名前導出より先に消費する
     # （./dev.sh down --full が 'full' という環境名を導出しないように）。
-    local name="" all=0 full=0 yes=0 project found=0 slot hostname
+    local name="" all=0 full=0 yes=0 prune=1 project found=0 slot hostname orphan_vols=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --full) full=1; shift ;;
             --all)  all=1; shift ;;
             --yes)  yes=1; shift ;;
+            --no-prune-volumes) prune=0; shift ;;
             -*) die "不明なオプション: $1" ;;
             *) [ -z "$name" ] && name="$1" || die "引数が多すぎます: $1"; shift ;;
         esac
@@ -556,8 +637,17 @@ cmd_down() {
     if [ "$all" = 1 ] && [ "$full" = 1 ] && [ "$yes" = 0 ]; then
         die "--all --full は全環境の完全撤去です。--yes を付けて確認してください"
     fi
+    if [ "$prune" = 0 ] && [ "$all" = 0 ]; then
+        die "--no-prune-volumes は --all と併用してください"
+    fi
 
     if [ "$all" = 1 ]; then
+        # 孤立ボリュームは teardown の前に確定させる。後で数えると、この
+        # down で停止しただけの環境（ボリュームは保持が仕様）まで孤立に見え、
+        # 保持すべき state を消してしまう。
+        if [ "$prune" = 1 ]; then
+            orphan_vols="$(list_orphan_volumes)"
+        fi
         for project in $(all_projects); do
             [ -n "$project" ] || continue
             case "$project" in
@@ -599,6 +689,9 @@ cmd_down() {
             found=1
         done
         [ "$found" = 1 ] || printf 'ℹ️  削除する開発環境はありません。\n'
+        if [ "$prune" = 1 ]; then
+            prune_volumes_from_list "$orphan_vols"
+        fi
         return
     fi
 
@@ -1067,6 +1160,33 @@ cmd_gc() {
         "$sweep_del" "$skip_inuse" "$skip_young" "$grace"
 }
 
+# 孤立ボリュームの回収。down --all からも呼ばれるが、単体で先払いで掃除
+# したいとき用に --dry-run で対象の確認だけもできる。
+cmd_gc_volumes() {
+    local dry=0 list vol
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry=1; shift ;;
+            -*) die "不明なオプション: $1" ;;
+            *) die "引数が多すぎます: $1" ;;
+        esac
+    done
+
+    list="$(list_orphan_volumes)"
+    if [ "$dry" = 1 ]; then
+        if [ -z "$list" ]; then
+            printf 'ℹ️  孤立ボリュームはありません。\n'
+            return 0
+        fi
+        printf '🔍 削除対象の孤立ボリューム（--dry-run のため未削除）:\n'
+        while IFS= read -r vol; do
+            [ -n "$vol" ] && printf '   - %s\n' "$vol"
+        done <<< "$list"
+        return 0
+    fi
+    prune_volumes_from_list "$list"
+}
+
 # Print the whole leading comment block — deriving the range from the comments
 # themselves, so adding or removing a subcommand can't truncate --help.
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
@@ -1078,6 +1198,7 @@ case "${1:-}" in
     url)       shift; cmd_url "${1:-}" ;;
     logs)      shift; cmd_logs "$@" ;;
     gc)        shift; cmd_gc "$@" ;;
+    gc-volumes) shift; cmd_gc_volumes "$@" ;;
     ""|-h|--help|help) usage ;;
     *) die "不明なサブコマンド: $1（--help を参照）" ;;
 esac

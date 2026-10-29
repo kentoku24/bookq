@@ -299,11 +299,12 @@ uv run --with playwright playwright install chromium
 | コマンド | 動作 |
 |---|---|
 | `./dev.sh up [name] [--ref REF] [--fixture]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント |
-| `./dev.sh down [name]` / `--all` | 撤去（ボリュームと tailnet ノードの登録は保持）。`--full` でボリューム・イメージ・ノード登録まで完全撤去（TS_API_KEY 設定時。`--all --full` は `--yes` 必須） |
+| `./dev.sh down [name]` / `--all` | 撤去（ボリュームと tailnet ノードの登録は保持）。`--full` でボリューム・イメージ・ノード登録まで完全撤去（TS_API_KEY 設定時。`--all --full` は `--yes` 必須）。`--all` は実行前に既に孤立していたボリューム（コンテナの無い `bookq-dev-*` の残骸）も回収する（`--no-prune-volumes` で無効化） |
 | `./dev.sh list` | 一覧（名前・状態・ref・commit・URL） |
 | `./dev.sh url [name]` | URL だけ出力（スクリプト用） |
 | `./dev.sh logs [name] [-f]` | ログ |
 | `./dev.sh gc` | 未参照・dangling イメージの回収（up 成功時にも自動実行） |
+| `./dev.sh gc-volumes [--dry-run]` | 孤立ボリューム（コンテナの無い `bookq-dev-*` の残骸）の回収。`--dry-run` で対象の確認のみ |
 
 環境名を省略すると現在のブランチから導出されます（`origin/`・`claude/`・`bookq-` の接頭辞は落とす）。**URL はノード名 `dev-<名前>` から決定的に決まるので、ポートの割り当ては存在しません。**
 
