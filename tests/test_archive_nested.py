@@ -28,6 +28,7 @@ from app.archive import build_archive_tree, list_archive_entries  # noqa: E402
 from app.routes import _find_tree_node  # noqa: E402
 from app.scanner import scan_tree  # noqa: E402
 from tests.fixtures.rar5 import make_rar5_store  # noqa: E402
+from tests.helpers import cold_index_lifespan, get_folders_ready  # noqa: E402
 
 ARCHIVES = ["nested.zip", "nested.cbr"]
 
@@ -127,7 +128,10 @@ def client(nested_tree: Path, monkeypatch):
 
     from fastapi.testclient import TestClient
 
-    return TestClient(create_app())
+    app = create_app()
+    app.router.lifespan_context = cold_index_lifespan
+    with TestClient(app) as client:
+        yield client
 
 
 def _node(tree: list[dict], name: str) -> dict:
@@ -197,15 +201,14 @@ def test_api_images_nested_prefix_is_descendant_relative(client, archive: str):
 
 @pytest.mark.parametrize("archive", ARCHIVES)
 def test_folders_addresses_nested_prefix(client, nested_tree: Path, archive: str):
-    tree = client.get("/api/folders").json()
+    tree = get_folders_ready(client)
     found = _find_tree_node(tree, f"{archive}/vol01")
     assert found is not None and found["type"] == "folder"
     assert found["thumb"] == "01.jpg"
     assert _find_tree_node(tree, f"{archive}/vol01/sub")["thumb"] == "03.jpg"
     # Shallow subtree endpoint resolves the archive prefix too.
-    res = client.get("/api/folders", params={"path": f"{archive}/vol01", "depth": 1})
-    assert res.status_code == 200
-    assert [c["name"] for c in res.json()] == ["sub"]
+    children = get_folders_ready(client, params={"path": f"{archive}/vol01", "depth": 1})
+    assert [c["name"] for c in children] == ["sub"]
 
 
 @pytest.mark.parametrize("archive", ARCHIVES)

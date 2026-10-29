@@ -10,6 +10,8 @@ builder copies in test_thumbs and test_cover_warmup. Import via
 
 import asyncio
 import threading
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 
@@ -61,3 +63,22 @@ def make_pdf(path: Path, pages: int = 2) -> None:
     path.write_bytes(
         b"%PDF-1.4\n" + "".join(objs).encode() + b"trailer\n<< /Root 1 0 R >>\n%%EOF"
     )
+
+
+@asynccontextmanager
+async def cold_index_lifespan(app):
+    yield
+
+
+def get_folders_ready(client, *, params=None, timeout: float = 30):
+    deadline = time.monotonic() + timeout
+    while True:
+        res = client.get("/api/folders", params=params)
+        if res.status_code != 202 or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    assert res.status_code == 200, (
+        f"/api/folders did not become ready: status {res.status_code}, "
+        f"body {res.text[:500]!r}"
+    )
+    return res.json()
