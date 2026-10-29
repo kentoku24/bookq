@@ -8,6 +8,22 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
+# Native build stage: bookq_rs PyO3 wheel (Phase 1 W1, issue #163).
+# The wheel is optional at runtime — app/scanner.py falls back to the Python
+# reference impl on ImportError — but shipping it is how prod gets the native
+# sort-key path. abi3-py314: one wheel covers every CPython >=3.14 GIL build.
+FROM python:3.14-slim AS rsbuilder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH="/root/.cargo/bin:$PATH"
+
+WORKDIR /rs
+COPY rust/bookq_rs/ ./
+RUN pip install --no-cache-dir "maturin>=1.5,<2" && maturin build --release
+
 # Runtime stage: copy only the venv + application code
 FROM python:3.14-slim
 
@@ -36,6 +52,12 @@ ENV DOWNLOADS_DIR=/app/downloads
 
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# bookq_rs native sort-key core (Phase 1 W1, issue #163). Removing this
+# install line is the image-level rollback: app runs the Python impl instead.
+COPY --from=rsbuilder /rs/target/wheels/bookq_rs-*.whl /tmp/
+RUN /opt/venv/bin/pip install --no-cache-dir /tmp/bookq_rs-*.whl \
+    && rm -f /tmp/bookq_rs-*.whl
 
 WORKDIR /app
 

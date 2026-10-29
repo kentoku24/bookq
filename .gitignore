@@ -20,3 +20,6 @@ dev_fixture/
 .env.backup
 *.pem
 .claude/settings.local.json
+
+# Rust build artifacts (bookq_rs wheel + cargo target)
+rust/**/target/
