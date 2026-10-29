@@ -382,6 +382,18 @@
         st.phase !== 'selecting' || st.manifestVersion) return;
     var folder = window.currentFolder;
     var page = _currentPageRef();
+    // Opening the sidebar ran returnToBrowse() and cleared the live reader
+    // before pairing could bind — the last-read snapshot carries the book
+    // the leader was on, so the pair opens it instead of landing on an
+    // empty 'selecting'. Only falls back for THAT work's page.
+    if ((!folder || !page) && window.lastReaderPos) {
+      var snap = window.lastReaderPos;
+      if (!folder && typeof snap.workFolder === 'string') folder = snap.workFolder;
+      if (!page && snap.workFolder === folder &&
+          typeof snap.folder === 'string' && typeof snap.name === 'string') {
+        page = {folder: snap.folder, name: snap.name};
+      }
+    }
     if (typeof folder !== 'string' || !folder || !page) return;
     // The open book is a hidden root in normal mode — never send it as the
     // shared work; deny like a solo open of the same folder.
@@ -500,8 +512,17 @@
     } catch (e) { return null; }
   }
 
+  /* A closed tab leaves only the cross-tab persist record (localStorage):
+   * still inside the resume window and its owner heartbeat stale ⇒ this
+   * fresh tab should silently rejoin instead of landing on idle. */
+  function _hasPersistedResume() {
+    var PC = window.PairClient;
+    if (!PC || typeof PC.peekPersistedResume !== 'function') return null;
+    return PC.peekPersistedResume();
+  }
+
   function _boot() {
-    if (!_readCreds()) return;
+    if (!_readCreds() && !_hasPersistedResume()) return;
     var FV = window.FolderVisibility;
     if (!FV || typeof FV.ready !== 'function') {
       // Module absent (stale shell): keep the old immediate rejoin — the
@@ -512,7 +533,9 @@
     FV.ready().then(function () {
       // The credential rejoin waits for the settings judgment — a hidden
       // shared work is then denied by _applyCommitted before it can render.
-      if (!_readCreds()) return;   // a leave during the wait dropped the creds
+      if (!_readCreds() && !_hasPersistedResume()) {
+        return;   // a leave during the wait dropped the creds
+      }
       try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
     });
   }

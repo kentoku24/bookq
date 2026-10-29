@@ -2418,6 +2418,16 @@
     const pos = spreads[s] ? Math.max(0, renderPagesForSpread(s).indexOf(idx)) : 0;
     cell.dataset.pos = String(pos);
     const el = ensureSpreadEl(s);
+    // Inverse of ensureBlankCell's sibling sweep: a spread gaining a real
+    // page must drop its blank placeholder. pairBlankCells is keyed by
+    // spread number, so after SWAP_SIDES flips this device's rendered side
+    // the stale blank would otherwise mask the image cell indefinitely.
+    const staleBlank = pairBlankCells[s];
+    if (staleBlank){
+      staleBlank.remove();
+      delete pairBlankCells[s];
+      el.classList.remove("pair-blank");
+    }
     let ref = null;
     for (const child of el.children){
       if (Number(child.dataset.pos) > pos){ ref = child; break; }
@@ -2691,6 +2701,20 @@
     } else {
       counter.textContent = (idx + 1) + " / " + images.length;
       folderName.textContent = currentFolder ? currentFolder.split("/").pop() : "";
+    }
+    // Last-read snapshot for pair bootstrap: opening the sidebar runs
+    // returnToBrowse() which clears currentFolder/images, so the pair
+    // controller's openWork bootstrap needs this memory of what was on
+    // screen. Solo only — a paired session knows its own work already.
+    if (!(pairStrip && pairStrip.active)){
+      const pg = images[idx];
+      if (currentFolder && pg && !pg.isSpacer && typeof pg.name === "string"){
+        try {
+          const ci = chapterList.length > 1 ? getCurrentChapterInfo(idx) : null;
+          const leaf = (ci && chapterList[ci.chapterIdx] && chapterList[ci.chapterIdx].fullPath) || currentFolder;
+          window.lastReaderPos = {workFolder: currentFolder, folder: leaf, name: pg.name};
+        } catch(e) { /* snapshot is best-effort */ }
+      }
     }
     // Per-chapter progress save. Skipped during the initial open (urlSyncPaused)
     // so a deep-link visit doesn't overwrite the stored resume point on sight —
