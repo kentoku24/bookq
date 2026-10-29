@@ -18,6 +18,7 @@
 | `idb ui tap` が全滅・tap/swipe コマンドが無い | idb 未導入 | `brew tap facebook/fb && brew install idb-companion && pipx install fb-idb`; `./scripts/open-simulator.sh check` |
 | Simulator GUI (Simulator.app) が存在しない | 環境依存で GUI バンドルが無い | 不要 — `simctl`/`idb` はヘッドレスで完結 (`openurl`・`screenshot`・`recordVideo`・`idb ui tap`) |
 | HUD 計測が表示されない | URL に `?perf=1` が無い / hash の後ろに付けている | `.../?perf=1#/view/...` の形 (`#` の前)。HUD は `app.js` が `location.search` を読む |
+| Activity Monitor で SimulatorTrampoline / DeviceHub / sim のメモリが大きい | booted sim が ~160 デーモン (GB級) を常駐。SimulatorTrampoline 本体は ~7MB で、sim プロセスのランチャーなので無効化不可 | `brew install mobai-app/tap/simslim` — helper が open 時に自動 slim (`--except web`、永続化)。使い終わったら `xcrun simctl shutdown all`。DeviceHub は quit でよい (オンデマンド再起動) |
 
 `video-verification` スキルは Chromium 前提。Simulator の動画は `xcrun simctl io booted recordVideo /tmp/sim.mp4` を使う。
 

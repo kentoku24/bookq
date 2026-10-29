@@ -42,6 +42,8 @@ xcrun simctl openurl booted "http://127.0.0.1:8080/#/view/zoom_episodes/series/e
 
 ヘルパーは内部で `xcrun simctl bootstatus "$DEVICE" -b` ポーリング（最大30秒）で起動を待つため、初回 boot でも `sleep 2` 失敗を避けられる。
 
+`simslim` (`brew install mobai-app/tap/simslim`) が入っていれば open 時に不要デーモン ~160個を自動停止する（実測 6.6GB→2.7GB、`web` カテゴリは Safari 検証のため残す。永続 override なので以後の boot も slim）。`SIMSLIM=0` で無効化。直接 `simctl boot` した場合は自動適用されないので、helper 経由で開くか `simslim on <udid>` を実行すること。
+
 動画が必要な場合（Chromium の `video-verification` ではなく Simulator ネイティブ）:
 
 ```bash
