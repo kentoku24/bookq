@@ -781,3 +781,21 @@ def test_open_work_resolve_failure_shows_error_toast(devs):
         "(b) => window.__wsLog.slice(b)"
         ".filter(f => f && f.type === 'OPEN_WORK').length", before)
     assert sent == 0
+
+
+def test_open_work_send_failure_shows_error_toast(devs):
+    """A pick while the link is down used to be dropped silently (sendIntent
+    false, record only). No queueing — the tap surfaces an error toast so
+    the user knows to retry once reconnected."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    pl.evaluate("() => window.__wsConns[0].close()")
+    pl.wait_for_function(
+        "() => window.PairController.state.status !== 'connected'",
+        timeout=15000)
+    pl.evaluate(
+        "() => window.ViewerNavigation.request("
+        "{type:'openWork', folder:'simple_manga', via:'tile'})")
+    expect(pl.locator("#toast")).to_contain_text("作品を開けませんでした")

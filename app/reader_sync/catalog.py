@@ -72,6 +72,7 @@ ERR_EMPTY_WORK = "ERR_EMPTY_WORK"          # resolved work has zero pages
 ERR_FORBIDDEN = "ERR_FORBIDDEN"            # outside downloads / unreadable
 ERR_NOT_FOUND = "ERR_NOT_FOUND"            # folder (or inner prefix) absent
 ERR_BROKEN_ARCHIVE = "ERR_BROKEN_ARCHIVE"    # container unreadable as its type
+ERR_TIMEOUT = "ERR_TIMEOUT"                  # resolver exceeded the load budget
 
 
 class ManifestError(model.ModelError):

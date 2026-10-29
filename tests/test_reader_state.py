@@ -906,6 +906,30 @@ def test_manifest_commit_failure_reports_error_and_stays_pickable(monkeypatch):
     assert _of(leader.frames(), "MANIFEST")
 
 
+def test_load_timeout_reports_error_and_stays_pickable():
+    """A wedged resolver (stalled mount, pathological archive) used to pin
+    the session at 'loading' forever — the load budget now surfaces ERROR
+    'timeout', clears pending_load, and leaves the pair pickable."""
+    def hang(link, job):
+        return asyncio.Event().wait()    # awaitable that never completes
+    clock = FakeClock()
+    reg = _reg(clock, resolver=hang, load_timeout=0.05)
+    leader, follower = _connect(reg, "L"), _connect(reg, "F")
+    sid = _pair(reg, leader, follower)
+    session = reg.sessions[sid]
+
+    _send(reg, leader, _req("OPEN_WORK",
+                            {"folder": "book",
+                             "page": {"folder": "book", "name": "p1.png"}},
+                            session_id=sid, request_id="ow"))
+
+    lf = leader.frames()
+    assert _one(lf, "ERROR")["code"] == "timeout"
+    assert session.pending_load is None and session.manifest is None
+    assert _of(lf, "STATE")[-1]["phase"] == "selecting"
+    assert leader.close_reason is None and follower.close_reason is None
+
+
 def test_swap_sides_flips_projection():
     reg, sid, leader, follower = _reading_session()
     session = reg.sessions[sid]

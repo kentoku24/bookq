@@ -78,6 +78,7 @@ MANIFEST_ERR_REASON = {
     "ERR_RANGE": "range",
     "ERR_SIZE": "size",
     "ERR_MALFORMED": "malformed",
+    "ERR_TIMEOUT": "timeout",
 }
 
 

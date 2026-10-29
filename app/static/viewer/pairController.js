@@ -317,6 +317,11 @@
       });
       _record({type: 'openWork', via: intent.via, folder: intent.folder,
                page: page}, ok);
+      // Dropped (link not open / pair torn down mid-tap): no queueing —
+      // a delayed open would surprise the user, so surface it instead.
+      if (!ok && typeof window.showErrorToast === 'function') {
+        window.showErrorToast('作品を開けませんでした');
+      }
       return ok;
     }
     if (intent.page) return emit(intent.page);

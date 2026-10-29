@@ -38,6 +38,7 @@ NO_RESPONSE_TIMEOUT = 15.0     # silence -> disconnect
 CODE_TTL_SECONDS = 300.0       # pairing code lifetime
 RESUME_WINDOW_SECONDS = 300.0  # member may reattach within this window
 MATCH_WINDOW_SECONDS = 120.0   # only sessions this fresh are auto-joinable
+LOAD_TIMEOUT_SECONDS = 120.0   # work resolve budget -> ERROR "timeout"
 SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
 # Bulk (manifest-chunk) traffic bypasses the bounded frame queue but stays
 # bounded in bytes: two full manifests is the most one link may buffer.
@@ -285,6 +286,7 @@ class SessionRegistry:
                  send_queue_max: int = SEND_QUEUE_MAX,
                  send_bulk_max_bytes: int = SEND_BULK_MAX_BYTES,
                  match_window: float = MATCH_WINDOW_SECONDS,
+                 load_timeout: float = LOAD_TIMEOUT_SECONDS,
                  work_resolver=None):
         self._clock = clock or time.monotonic
         # S05: OPEN_WORK / SET_OFFSET manifest resolution — a callable
@@ -298,6 +300,7 @@ class SessionRegistry:
         self.send_queue_max = send_queue_max
         self.send_bulk_max_bytes = send_bulk_max_bytes
         self.match_window = match_window
+        self.load_timeout = load_timeout
 
         self.sessions: dict[str, PairSession] = {}
         self.links: dict[str, PeerLink] = {}
@@ -990,7 +993,15 @@ class SessionRegistry:
         to completion inline rather than silently dropping it."""
         async def runner():
             try:
-                manifest = await awaitable
+                # Bounded resolve: a wedged enumeration (stalled mount,
+                # pathological archive) must surface as ERROR "timeout",
+                # not pin the session at 'loading' forever.
+                manifest = await asyncio.wait_for(awaitable, self.load_timeout)
+            except asyncio.TimeoutError:
+                from app.reader_sync.catalog import ManifestError, ERR_TIMEOUT
+                self._finish_load_by_id(
+                    session.id, job,
+                    error=ManifestError(ERR_TIMEOUT, "work resolve timed out"))
             except Exception as e:
                 self._finish_load_by_id(session.id, job, error=e)
             else:
