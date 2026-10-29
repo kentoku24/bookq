@@ -363,9 +363,10 @@ list_orphan_volumes() {
             *) continue ;;
         esac
         project="$(project_of_volume "$vol")" || continue
-        case "$project" in
-            "$POOL_PREFIX"*) continue ;;
-        esac
+        # bookq-dev-pool-XX（旧形式）の自動命名ボリュームも対象にする:
+        # 現行の up は bookq-dev-XX-<name> しか作らず、死んだ旧プロジェクトの
+        # ボリュームを再利用する経路は無い（保持が必要な tailscale-state は
+        # 自動命名 3 種ではないので suffix 判定で既に弾かれている）。
         # プロジェクトが生きていれば（コンテナが 1 つでもあれば）残す。
         if printf '%s\n' "$live" | grep -qxF -- "$project"; then
             continue
