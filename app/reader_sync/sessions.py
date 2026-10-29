@@ -44,6 +44,7 @@ SEND_QUEUE_MAX = 64            # bounded per-link outbound queue (frames)
 SEND_BULK_MAX_BYTES = 64 * 1024 * 1024
 CODE_DIGITS = 6
 
+WS_CLOSE_NORMAL = 1000         # normal closure
 WS_CLOSE_POLICY = 1008         # policy violation
 WS_CLOSE_TOO_BIG = 1009        # frame over the 64KiB cap
 WS_CLOSE_GOING_AWAY = 1001     # shutdown / server going away
@@ -390,10 +391,13 @@ class SessionRegistry:
     def _drop_pending(self, session: PairSession, member: Member) -> None:
         """Remove an unapproved join candidate: leader notified, claim
         dropped — and ``code_consumed`` reset so the pairing code works
-        for a retry. The consumed mark serializes a *live* join; it must
-        not burn the code for the session's remaining TTL."""
-        if session.pending is member:
-            session.pending = None
+        for a retry. The consumed mark serializes a *live* join — freeing
+        it while a different candidate is live would admit a second
+        pending, so the whole drop is scoped to the actual pending
+        member."""
+        if session.pending is not member:
+            return
+        session.pending = None
         session.code_consumed = False
         member.session = None
         leader = session.leader()
@@ -476,7 +480,7 @@ class SessionRegistry:
             if t == "LEAVE":
                 self._drop_pending(session, member)
                 link.member = None
-                self.close_link(link, "pending_left")
+                self.close_link(link, "pending_left", code=WS_CLOSE_NORMAL)
             else:
                 self._reject(link, req, t, REASON_NOT_PAIRED)
             return

@@ -40,8 +40,10 @@ from app.reader_sync.sessions import (  # noqa: E402
     REASON_WRONG_SESSION,
     RESUME_WINDOW_SECONDS,
     UI_SYNC_RATE_MAX,
+    Member,
     PeerLink,
     SessionRegistry,
+    WS_CLOSE_NORMAL,
     WS_CLOSE_TOO_BIG,
     _BULK,
 )
@@ -1110,6 +1112,7 @@ def test_pending_leave_keeps_waiting_session_and_frees_code():
     jc = _one(leader.frames(), "JOIN_CANCEL")
     assert jc["memberId"] == joined["memberId"]
     assert f1.close_reason == "pending_left"          # transport released
+    assert f1.close_code == WS_CLOSE_NORMAL           # a polite drop, not a violation
     assert f1.member is None
 
     f2 = _connect(reg, "f2")
@@ -1195,6 +1198,32 @@ def test_pending_load_phase_is_loading_not_selecting():
     session = reg.sessions[sid]
 
     assert rstate.derive_phase(session) == "selecting"   # no work yet
+    session.selecting = True        # the real bug: leader mid-browse on pick
     session.pending_load = {"seq": 1, "kind": "open_work",
                             "requestId": "x", "role": "leader"}
     assert rstate.derive_phase(session) == "loading"
+
+
+def test_drop_pending_non_pending_member_is_noop():
+    """_drop_pending called for a member that isn't the live candidate
+    must not free the consumed code, clear the pending claim, or cancel
+    the real candidate's JOIN_REQUEST — the reset exists to serialize a
+    *live* join only."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)
+    f1 = _connect(reg, "f1")
+    joined = _join(reg, f1, created["code"])
+    leader.frames()                                   # JOIN_REQUEST
+
+    session = reg.sessions[created["sessionId"]]
+    ghost = Member(id="ghost", role="follower", name="g",
+                   resume_token="t", session=session)
+    reg._drop_pending(session, ghost)
+
+    assert session.pending is not None
+    assert session.pending.id == joined["memberId"]
+    assert session.code_consumed is True              # live join stays spent
+    assert ghost.session is session                   # complete no-op
+    assert _of_type(leader.frames(), "JOIN_CANCEL") == []
