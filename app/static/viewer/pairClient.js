@@ -769,7 +769,10 @@
       return new Promise(function (res, rej) {
         if (_entry) {
           // An outstanding entry op is superseded — its caller must get a
-          // rejection, not a promise that can never settle.
+          // rejection, not a promise that can never settle. Its requestId
+          // registration goes with it (the ACK can only ever arrive on a
+          // dead socket, but a stale slot lingers until the next teardown).
+          if (_entry.rid) delete _pending[_entry.rid];
           try { _entry.rej(_err('ERR_STATE', 'superseded')); } catch (e) {}
           _entry = null;
         }
