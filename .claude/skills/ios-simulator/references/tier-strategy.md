@@ -55,7 +55,7 @@ BROWSER=webkit uv run --with pytest --with playwright --with-requirements requir
 `verify` は上記を `example.com` で到達性のみ検証する一連として集約:
 
 ```bash
-bash scripts/open-simulator.sh verify  # check → boot "iPhone 17" → open https://example.com → screenshot .omo/evidence/sim-verify.png
+bash scripts/open-simulator.sh verify  # check → boot "iPhone 13" → open https://example.com → screenshot .omo/evidence/sim-verify.png
 test -x scripts/open-simulator.sh && bash scripts/open-simulator.sh verify 2>&1 | grep -q "Simulator ready\|skip" && echo ok
 ```
 
