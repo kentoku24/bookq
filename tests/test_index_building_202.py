@@ -99,6 +99,25 @@ def test_cold_build_inside_budget_keeps_sync_contract(tmp_path):
     assert isinstance(tree, list)
 
 
+def test_lock_held_rebuild_bounds_caller_to_202(tmp_path):
+    """/api/refresh holds _index_lock across its whole synchronous rebuild —
+    a cold-miss caller must bound the lock ACQUIRE too (~0.8s), not park on
+    it for the entire scan."""
+    async def main():
+        request = _stub_request(tmp_path)
+        await routes._index_lock.acquire()
+        try:
+            t0 = time.monotonic()
+            with pytest.raises(_IndexBuilding):
+                await _ensure_tree_and_index(request)
+            return time.monotonic() - t0
+        finally:
+            routes._index_lock.release()
+
+    waited = drive(main())
+    assert waited < _INDEX_BUILD_AWAIT_SEC + 1.0
+
+
 def test_wait_true_blocks_until_build_lands(tmp_path, monkeypatch):
     """wait=True (the WS path, which cannot answer 202) keeps the old
     block-until-built semantics past the request budget."""
