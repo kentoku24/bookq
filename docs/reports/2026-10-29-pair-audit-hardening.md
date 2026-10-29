@@ -9,12 +9,14 @@
 
 ## 検証結果サマリ
 
-- ペア関連テスト一式: **375 passed / 0 failed / 0 errors** (約107秒)
-  - test_reader_pairing.py (FakeLink 単体) + test_reader_sync_model.py: 63
-  - test_reader_sync_client.py (実 pairClient.js + Playwright 注入fake): 25
+- ペア関連テスト一式: **381 passed / 0 failed / 0 errors** (約108秒)
+  - test_reader_pairing.py (FakeLink 単体) + test_reader_sync_model.py: 64
+  - test_reader_sync_client.py (実 pairClient.js + Playwright 注入fake): 31
   - test_reader_state / manifest / transport / verify / browse_sync /
     browse_smoothing / sync_integration / ws / ws_state / paired_view /
     pairing_ui / folder_visibility_pair を含む
+  - 追加した client 回帰テスト6本は旧 pairClient.js (main) に当てて
+    全件 FAIL することを確認済み — 各修正の退行を検出できる
 - 実サーバ (uvicorn) 起動・実 WebSocket 往復: 正常 (health ~7-10s の
   コールドスタートを考慮しテスト deadline を 10s→30s に引上げ)
 
@@ -66,14 +68,41 @@
   で boot-embedded snapshot と localStorage cache を殺し `hasSnapshot=false`
   で「判定不能」を決定的に維持 (error+snapshot無しでも stash する本番契約と
   一致)。
-### 新規回帰テスト (tests/test_reader_pairing.py)
+### 新規回帰テスト
+
+tests/test_reader_pairing.py (server FakeLink):
 
 - `test_pending_leave_keeps_waiting_session_and_frees_code` (C1/H1)
 - `test_pending_detach_frees_code_for_retry` (H1)
 - `test_approve_with_stale_member_id_does_not_swap_candidate` (H2)
 - `test_relayed_request_reject_goes_to_origin_link` (C2)
-- `test_pending_load_phase_is_loading_not_selecting` (C4)
+- `test_pending_load_phase_is_loading_not_selecting` (C4,
+  selecting=True の実バグ条件を固定)
+- `test_drop_pending_non_pending_member_is_noop` (レビュー指摘:
+  _drop_pending のガード外副作用を封じる)
 - 既存 `test_pending_leave_ends_attempt` を新仕様に書き換え
+
+tests/test_reader_sync_client.py (実 pairClient.js + Playwright 注入fake):
+
+- `test_inbound_silence_watchdog_recovers_blackholed_link` (C3,
+  re-arm までカバー)
+- `test_resume_entry_survives_link_death_before_ack` (H3)
+- `test_new_entry_op_supersedes_inflight_entry` (H4)
+- `test_create_and_join_on_bound_member_leave_politely` (H5)
+- `test_ready_marks_only_after_send_succeeds` (H6)
+- `test_suspended_reasserted_after_resume` (H7)
+
+### レビュー指摘への衛生修正 (Critical/High とは別の軽微改善)
+
+- `_drop_pending` の `code_consumed` 解放・`JOIN_CANCEL`・
+  `member.session=None` を `session.pending is member` のガード内に
+  限定 — 将来 pending≠member で呼ぶ経路が増えても live join を
+  直列化する印が誤って解放されない
+- pending 候補の `LEAVE` 応答 close code を 1008 (policy violation)
+  から 1000 (normal) へ — クライアントは code を読まないため実害なし、
+  wire 意味論の修正
+- `_startEntry` の supersede で送信済み entry の `_pending[rid]` 登録を
+  除去 — 次回 teardown まで残る stale slot を即時解放
 
 ## 残存リスク / 未検証領域
 
@@ -109,7 +138,8 @@
 - `app/reader_sync/state.py` — derive_phase の pending_load 扱い
 - `app/static/viewer/pairClient.js` — liveness watchdog、RESUME/entry
   再送・supersede、_leaveBound、READY マーク、suspended 再 assert
-- `tests/` — 回帰テスト 5件追加 + 既存1件更新、fixture deadline、flake 修正
+- `tests/` — server 回帰テスト 6件追加 + client 回帰テスト 6件追加 +
+  既存1件更新、fixture deadline、flake 修正
 
 (Medium 項目 M1-M5 はユーザー指示により今回の変更セットから除外)
 
@@ -119,4 +149,8 @@
 - `75ccef1` fix(ai): pairClient の死活監視・再送・世代ガードを硬化
 - `a6a9cc9` fix(ai): pairUI の未処理 promise rejection を解消 (後に scope 外として revert)
 - `54fa8d2` test(ai): ペア監査の回帰テスト + テスト基盤 flake 修正
-- scope 絞り込みコミット (Medium M1-M5 を変更セットから除外)
+- `91fab69` docs(ai): ペア監査レポートを docs/reports に保存
+- `5554baa` chore(ai): 変更セットを Critical+High+テスト基盤に絞る (Medium M1-M5 除外)
+- `e333988` test(ai): pairClient の監査修正にクライアント側回帰テストを追加
+- `51bf839` fix(ai): _drop_pending を実 pending メンバに限定し pending_left を normal close に
+- `c2a25ea` fix(ai): supersede された entry の stale requestId 登録を除去
