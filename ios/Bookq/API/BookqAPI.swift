@@ -209,6 +209,14 @@ final class BookqAPI: Sendable {
         }
     }
 
+    func deleteReadingPosition() async throws {
+        let (_, resp) = try await send(
+            makeRequest(path: "api/reading-position", method: "DELETE"))
+        guard (200..<300).contains(resp.statusCode) else {
+            throw APIError.status(resp.statusCode)
+        }
+    }
+
     func folderVisibility() async throws -> VisibilitySnapshot {
         let (data, resp) = try await send(makeRequest(path: "api/folder-visibility"))
         return try decode(VisibilitySnapshot.self, data, resp)
