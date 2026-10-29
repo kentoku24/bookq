@@ -43,8 +43,8 @@ slim_if_available() {
   if [[ "$target" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]]; then
     udid="$target"
   elif command -v python3 >/dev/null 2>&1; then
-    # simslim は UDID 必須なので booted デバイス名から解決する
-    udid=$(xcrun simctl list devices booted -j 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((dev['udid'] for runtimes in d.get('devices',{}).values() for dev in runtimes if dev.get('state')=='Booted' and dev.get('name')=='''$target'''), ''))" 2>/dev/null || true)
+    # simslim は UDID 必須なので booted デバイス名から解決する (名前は argv 渡し — 引用符を含んでも崩れない)
+    udid=$(xcrun simctl list devices booted -j 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((dev["udid"] for runtimes in d.get("devices",{}).values() for dev in runtimes if dev.get("state")=="Booted" and dev.get("name")==sys.argv[1]), ""))' "$target" 2>/dev/null || true)
   fi
   [ -z "$udid" ] && return 0
   # 永続 override 済みかつ現在 boot でも停止済みなら再適用しない
