@@ -109,6 +109,20 @@
     deps = deps || {};
     return { fetch: deps.fetch || (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch) };
   }
+  // 202 = the server metadata index is still building: retry on a short
+  // backoff clock instead of parsing the status body as a payload. Returns
+  // null when the caller was superseded; returns the (non-202 or last-202)
+  // Response otherwise, so giving up leaves prior state untouched.
+  async function _fetchBuilding(url, fetchFn, stillCurrent){
+    var res = null;
+    for (var attempt = 0; ; attempt++){
+      res = await fetchFn(url);
+      if (!stillCurrent()) return null;
+      if (res.status !== 202) return res;
+      if (attempt >= 9) return res;
+      await new Promise(function(r){ setTimeout(r, Math.min(1500 * (attempt + 1), 5000)); });
+    }
+  }
   async function loadFacets(path, deps) {
     if(path && typeof path === 'object' && path.fetch){ deps = path; path = deps.path || ""; }
     var _d = _resolveDeps(deps);
@@ -121,8 +135,8 @@
     if (_FVf && _FVf.showAll) qp.set("include_hidden", "1");
     var qs = qp.toString();
     try {
-      var res = await _d.fetch("/api/metadata/facets" + (qs ? "?" + qs : ""));
-      if (myGen !== _getFacetGenVal()) return;
+      var res = await _fetchBuilding("/api/metadata/facets" + (qs ? "?" + qs : ""), _d.fetch, function(){ return myGen === _getFacetGenVal(); });
+      if (!res || res.status === 202) return;
       if (!res.ok) throw new Error("facets HTTP " + res.status);
       _setFacets(await res.json());
       renderFacetOptions();
@@ -152,8 +166,8 @@
     var _FVs = window.FolderVisibility;
     if (_FVs && _FVs.showAll) params.set('include_hidden', '1');
     try {
-      var res = await _d.fetch('/api/search?' + params.toString());
-      if (myGen !== _searchGen) return;
+      var res = await _fetchBuilding('/api/search?' + params.toString(), _d.fetch, function(){ return myGen === _searchGen; });
+      if (!res || res.status === 202) return;
       if (!res.ok) throw new Error("search HTTP " + res.status);
       var data = await res.json();
       // The body parse is itself an await — a newer search may have bumped

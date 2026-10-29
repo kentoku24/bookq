@@ -136,7 +136,9 @@ async function cacheFirst(req) {
 async function networkFirst(req, cacheName) {
   try {
     const res = await fetch(req);
-    if (res.ok) {
+    // 202 (index building) is res.ok but a status payload, not data —
+    // caching it would serve {detail:"..."} as the offline fallback body.
+    if (res.ok && res.status !== 202) {
       const clone = res.clone();
       (await caches.open(cacheName)).put(req, clone).catch(() => {});
     }
