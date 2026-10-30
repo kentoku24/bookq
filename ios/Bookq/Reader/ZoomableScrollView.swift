@@ -6,6 +6,8 @@ import UIKit
 /// pager keeps receiving swipes, and enabled while zoomed for panning.
 struct ZoomableScrollView<Content: View>: UIViewRepresentable {
     var onZoomChange: ((Bool) -> Void)? = nil
+    /// Fired when a pinch-IN (scale < ~0.75) ends near 1x — overview trigger.
+    var onPinchOut: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
     func makeUIView(context: Context) -> UIScrollView {
@@ -30,13 +32,13 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
             hosted.view.heightAnchor.constraint(equalTo: sv.frameLayoutGuide.heightAnchor),
         ])
 
-        let doubleTap = UITapGestureRecognizer(
-            target: context.coordinator, action: #selector(Coordinator.onDoubleTap(_:)))
-        doubleTap.numberOfTapsRequired = 2
-        sv.addGestureRecognizer(doubleTap)
-
+        // No double-tap zoom (per product decision — pinch + pan only).
         // At 1x the pan gesture must not eat swipes meant for the pager.
         sv.panGestureRecognizer.isEnabled = false
+        // A second target on the pinch GR observes pinch-IN endings for the
+        // overview gesture — UIScrollView itself just bounces back to 1.
+        sv.pinchGestureRecognizer?.addTarget(
+            context.coordinator, action: #selector(Coordinator.onPinch(_:)))
         context.coordinator.scrollView = sv
         context.coordinator.updateZoomState()
         return sv
@@ -45,6 +47,7 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
     func updateUIView(_ sv: UIScrollView, context: Context) {
         context.coordinator.host.rootView = content()
         context.coordinator.onZoomChange = onZoomChange
+        context.coordinator.onPinchOut = onPinchOut
     }
 
     func makeCoordinator() -> Coordinator {
@@ -55,25 +58,25 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
         let host: UIHostingController<Content>
         weak var scrollView: UIScrollView?
         var onZoomChange: ((Bool) -> Void)?
+        var onPinchOut: (() -> Void)?
         private var zoomed = false
 
         init(host: UIHostingController<Content>) { self.host = host }
+
+        @objc func onPinch(_ gr: UIPinchGestureRecognizer) {
+            guard gr.state == .ended || gr.state == .cancelled,
+                  let sv = scrollView else { return }
+            // Deliberate pinch-in that lands at ~1x → open the page grid.
+            if gr.scale < 0.75 && sv.zoomScale <= 1.05 {
+                sv.setZoomScale(1, animated: false)
+                onPinchOut?()
+            }
+        }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { host.view }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             updateZoomState()
-        }
-
-        @objc func onDoubleTap(_ g: UITapGestureRecognizer) {
-            guard let sv = scrollView else { return }
-            if sv.zoomScale > 1.01 {
-                sv.setZoomScale(1, animated: true)
-            } else {
-                let p = g.location(in: host.view)
-                let r = CGRect(x: p.x - 100, y: p.y - 100, width: 200, height: 200)
-                sv.zoom(to: r, animated: true)
-            }
         }
 
         func updateZoomState() {

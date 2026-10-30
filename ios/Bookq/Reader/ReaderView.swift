@@ -23,6 +23,13 @@ struct ReaderView: View {
     @State private var pageAR: [Int: CGFloat] = [:]  // measured AR per page
     @State private var viewportSize: CGSize = .zero
     @State private var saveTask: Task<Void, Never>?
+    @State private var showOverview = false
+    @State private var pendingIdx: Int?
+    @State private var lastNavAt = Date.distantPast
+    @State private var navTask: Task<Void, Never>?
+    /// tapForward equivalent — session-only like the web. true = left zone
+    /// turns forward (web default), false = right zone turns forward.
+    @State private var tapForwardLeft = true
 
     private var pageMode: ReaderPageMode {
         let landscape = viewportSize.width >= viewportSize.height
@@ -96,16 +103,41 @@ struct ReaderView: View {
         .tabViewStyle(.page(indexDisplayMode: .never))
         .environment(\.layoutDirection, .rightToLeft)
         .id(work.pageMode)                       // rebuild on mode change
-        // Tap zones (web zoneActionAt): left 30% = next, right 30% = prev,
-        // center toggles chrome. SpatialTap is single-tap; zoom pan/double-tap
-        // are handled inside ZoomableScrollView.
+        // Tap zones (web zoneActionAt): edge 30% zones follow tapForward
+        // (default left = forward), center toggles chrome. SpatialTap is
+        // single-tap; zoom pan/pinch live inside ZoomableScrollView.
         .gesture(SpatialTapGesture().onEnded { ev in
             let frac = ev.location.x / max(size.width, 1)
-            if frac < 0.30 { turn(1, in: work) }
-            else if frac > 0.70 { turn(-1, in: work) }
+            if frac < 0.30 { turn(tapForwardLeft ? 1 : -1, in: work) }
+            else if frac > 0.70 { turn(tapForwardLeft ? -1 : 1, in: work) }
             else { withAnimation { showChrome.toggle() } }
         })
+        // Web keyboard parity (iPad/hardware keyboard): →=next, ←=prev,
+        // Home/End = chapter edges, G = overview.
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.rightArrow) { turn(1, in: work); return .handled }
+        .onKeyPress(.leftArrow) { turn(-1, in: work); return .handled }
+        .onKeyPress(keys: [.init("g"), .init("G")]) { _ in
+            showOverview = true; return .handled
+        }
+        .onKeyPress(.home) { snapTo(chapterEdge(0, in: work), in: work); return .handled }
+        .onKeyPress(.end) { snapTo(chapterEdge(-1, in: work), in: work); return .handled }
         .overlay(alignment: .trailing) { chapterLabel(work, spread: spreadIdx) }
+        .sheet(isPresented: $showOverview) {
+            if let api = model.api {
+                OverviewView(work: work, api: api, currentIdx: $currentIdx) {
+                    showOverview = false
+                }
+            }
+        }
+    }
+
+    /// Global index of the current chapter's first (0) or last (-1) real page.
+    private func chapterEdge(_ which: Int, in work: ReaderWork) -> Int {
+        let info = work.chapterInfo(at: currentIdx)
+        let local = which == 0 ? 0 : work.chapters[info.chapterIdx].images.count - 1
+        return work.resumeGlobalIndex(chapterIdx: info.chapterIdx, localIdx: local)
     }
 
     /// Bind TabView selection (spread index) → currentIdx (global page idx).
@@ -146,7 +178,10 @@ struct ReaderView: View {
         let page = work.images[idx]
         let url = model.api?.pageURL(folder: page.folder, name: page.name,
                                      original: model.config.originalImages)
-        return ZoomableScrollView(onZoomChange: { z in zoomed = z }) {
+        return ZoomableScrollView(
+            onZoomChange: { z in zoomed = z },
+            onPinchOut: { showOverview = true }
+        ) {
             RemoteImageView(url: url, contentMode: .fit) { img in
                 let ar = img.size.width / max(img.size.height, 1)
                 if pageAR[idx] != ar { pageAR[idx] = ar }
@@ -228,6 +263,25 @@ struct ReaderView: View {
                     .background(.black.opacity(0.5), in: Circle())
             }
             .accessibilityLabel("spread toggle")
+            // tapmode-controls equivalent: swaps the edge tap zones.
+            Button {
+                tapForwardLeft.toggle()
+            } label: {
+                Image(systemName: tapForwardLeft
+                      ? "arrowtriangle.left.fill" : "arrowtriangle.right.fill")
+                    .padding(10)
+                    .background(tapForwardLeft ? .black.opacity(0.5) : Color.accentColor,
+                                in: Circle())
+            }
+            .accessibilityLabel("タップ送り方向")
+            Button {
+                showOverview = true
+            } label: {
+                Image(systemName: "rectangle.grid.2x2")
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Circle())
+            }
+            .accessibilityLabel("複数ページ")
         }
         .foregroundStyle(.white)
     }
@@ -267,14 +321,36 @@ struct ReaderView: View {
     // MARK: - Navigation
 
     /// Tap-zone turn — web navTurn: spread granularity, cross-chapter.
+    /// Rapid taps coalesce: the first lands instantly, follow-ups merge into
+    /// one pending target so the pager plays a single animation instead of
+    /// queueing one per tap (web's instant-strip equivalent).
     private func turn(_ dir: Int, in work: ReaderWork) {
-        let next = dir > 0
-            ? work.nextSpreadFirstPage(after: currentIdx)
-            : work.prevSpreadFirstPage(before: currentIdx)
-        if let next { snapTo(next, in: work) }
+        let base = pendingIdx ?? currentIdx
+        guard let next = dir > 0
+            ? work.nextSpreadFirstPage(after: base)
+            : work.prevSpreadFirstPage(before: base) else { return }
+        let now = Date()
+        if now.timeIntervalSince(lastNavAt) > 0.25 {
+            lastNavAt = now
+            snapTo(next, in: work)
+        } else {
+            pendingIdx = next
+            navTask?.cancel()
+            navTask = Task {
+                try? await Task.sleep(nanoseconds: 160_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let t = pendingIdx else { return }
+                    pendingIdx = nil
+                    lastNavAt = Date()
+                    snapTo(t, in: work)
+                }
+            }
+        }
     }
 
     private func snapTo(_ idx: Int, in work: ReaderWork) {
+        pendingIdx = nil
         guard idx >= 0 && idx < work.images.count else { return }
         currentIdx = idx
         scheduleSave()
@@ -297,6 +373,8 @@ struct ReaderView: View {
     /// Rebuild spreads on mode/offset/orientation change (no re-pad).
     private func rebuild() {
         guard var w = work else { return }
+        // web: spreadOffset resets to 0 when leaving spread mode
+        if pageMode != .spread { spreadOffset = 0 }
         // web: on switch to spread, current page snaps down to pair start
         if pageMode == .spread && w.pageMode != .spread {
             currentIdx = (currentIdx / 2) * 2
