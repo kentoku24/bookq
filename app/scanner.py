@@ -298,9 +298,79 @@ def _timed_pdf_node(base: Path, pname: str, downloads_root=None) -> tuple[dict, 
     return node, (time.perf_counter() - t0) * 1000
 
 
-def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
-              _phases: dict[str, float] | None = None,
-              _downloads_root=None, list_archives: bool = True) -> list[dict]:
+def _expand_archive_pdf_level(base: Path, archives: list[str], pdfs: list[str],
+                              _downloads_root, _phases: dict) -> tuple[dict, dict]:
+    """Fan out archive/PDF node expansion over the per-level thread pool.
+
+    Shared by the Python reference walk and the native-path assembly; both
+    produce the same ``{name: node}`` maps and accumulate the same phase
+    fields (CPU-span sums, not critical path).
+    """
+    archive_nodes: dict[str, dict] = {}
+    pdf_nodes: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(archives) + len(pdfs))) as pool:
+        archive_futs = [(aname, pool.submit(_timed_archive_node, base, aname, _downloads_root))
+                        for aname in archives]
+        pdf_futs = [(pname, pool.submit(_timed_pdf_node, base, pname, _downloads_root))
+                    for pname in pdfs]
+        for aname, fut in archive_futs:
+            node, span_ms = fut.result()
+            archive_nodes[aname] = node
+            _phases["archive_ms"] += span_ms
+        for pname, fut in pdf_futs:
+            node, span_ms = fut.result()
+            pdf_nodes[pname] = node
+            _phases["pdf_ms"] += span_ms
+    return archive_nodes, pdf_nodes
+
+
+def _assemble_fs(base: Path, rec: tuple, _phases: dict,
+                 _downloads_root, list_archives: bool) -> list[dict]:
+    """Materialise ``bookq_rs.scan_fs`` records into ``scan_tree`` nodes.
+
+    Rust did classification/visited/sorting; this applies the unchanged
+    node-building rules — file leaves, archive/PDF expansion (Python, via
+    ``_expand_archive_pdf_level``), single-child flattening, and
+    ``folder_cover_fields`` — in the same files→archives→pdfs→dirs order.
+    """
+    files, archives, pdfs, subdirs = rec
+    entries: list[dict] = []
+    for fname in files:
+        entries.append({"name": fname, "type": "image", "children": None})
+    if list_archives and (archives or pdfs):
+        archive_nodes, pdf_nodes = _expand_archive_pdf_level(
+            base, archives, pdfs, _downloads_root, _phases)
+    for aname in archives:
+        if list_archives:
+            entries.append(archive_nodes[aname])
+        else:
+            entries.append({"name": aname, "type": "folder", "children": [],
+                            "thumb": None, "archive": True})
+    for pname in pdfs:
+        if list_archives:
+            entries.append(pdf_nodes[pname])
+        else:
+            entries.append({"name": pname, "type": "folder", "children": [],
+                            "thumb": None, "archive": True, "pdf": True})
+    for dname, sub in subdirs:
+        child = _assemble_fs(base / dname, sub, _phases, _downloads_root, list_archives)
+        if not files and not archives and not pdfs and len(subdirs) == 1:
+            for c in child:
+                c["name"] = dname + "/" + c["name"]
+            entries.extend(child)
+        else:
+            thumb, sub_thumbs = folder_cover_fields(child)
+            entry: dict = {"name": dname, "type": "folder", "children": child,
+                           "thumb": thumb}
+            if sub_thumbs is not None:
+                entry["thumbs"] = sub_thumbs
+            entries.append(entry)
+    return entries
+
+
+def _py_scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
+                  _phases: dict[str, float] | None = None,
+                  _downloads_root=None, list_archives: bool = True) -> list[dict]:
     """Return recursive folder tree with image-leaves mixed in.
 
     Each node is a dict:
@@ -419,19 +489,8 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
     archive_nodes: dict[str, dict] = {}
     pdf_nodes: dict[str, dict] = {}
     if list_archives and (archives or pdfs):
-        with ThreadPoolExecutor(max_workers=min(4, len(archives) + len(pdfs))) as pool:
-            archive_futs = [(aname, pool.submit(_timed_archive_node, base, aname, _downloads_root))
-                            for aname in archives]
-            pdf_futs = [(pname, pool.submit(_timed_pdf_node, base, pname, _downloads_root))
-                        for pname in pdfs]
-            for aname, fut in archive_futs:
-                node, span_ms = fut.result()
-                archive_nodes[aname] = node
-                _phases["archive_ms"] += span_ms
-            for pname, fut in pdf_futs:
-                node, span_ms = fut.result()
-                pdf_nodes[pname] = node
-                _phases["pdf_ms"] += span_ms
+        archive_nodes, pdf_nodes = _expand_archive_pdf_level(
+            base, archives, pdfs, _downloads_root, _phases)
     for aname in archives:
         if list_archives:
             entries.append(archive_nodes[aname])
@@ -446,8 +505,8 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
                             "thumb": None, "archive": True, "pdf": True})
 
     for dname in dirs:
-        child = scan_tree(base / dname, _visited, _phases, _downloads_root,
-                          list_archives=list_archives)
+        child = _py_scan_tree(base / dname, _visited, _phases, _downloads_root,
+                              list_archives=list_archives)
         if not files and not archives and not pdfs and len(dirs) == 1:
             for c in child:
                 c["name"] = dname + "/" + c["name"]
@@ -463,7 +522,42 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
     return entries
 
 
-def list_images(folder_path: Path) -> list[str]:
+def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
+              _phases: dict[str, float] | None = None,
+              _downloads_root=None, list_archives: bool = True) -> list[dict]:
+    """Return recursive folder tree with image-leaves mixed in.
+
+    Native path (issue #163 W3): ``bookq_rs.scan_fs`` does the whole
+    iterdir/stat/sort/visited walk and returns per-directory records;
+    ``_assemble_fs`` then applies the unchanged node rules (archive/PDF
+    expansion through the same pool helper, single-child flattening,
+    ``folder_cover_fields``). The Rust call returns ``None`` whenever it
+    cannot prove identical output — non-UTF-8 names, a caller-supplied
+    ``_visited`` set, or a read error — and the reference walk runs
+    instead, preserving every behaviour including raised OSErrors.
+    ``_phases`` stays populated: ``walk_ms`` covers the Rust call,
+    ``archive_ms``/``pdf_ms`` the Python-side expansion.
+    """
+    if _visited is None and _rs is not None:
+        try:
+            walk_start = time.perf_counter()
+            raw = _rs.scan_fs(str(base))
+            walk_ms = (time.perf_counter() - walk_start) * 1000
+        except Exception:
+            raw = None
+            walk_ms = 0.0
+        if raw is not None:
+            if _phases is None:
+                _phases = {"walk_ms": 0.0, "archive_ms": 0.0, "pdf_ms": 0.0}
+            _phases["walk_ms"] += walk_ms
+            if _downloads_root is None:
+                _downloads_root = base
+            return _assemble_fs(base, raw, _phases, _downloads_root, list_archives)
+    return _py_scan_tree(base, _visited, _phases, _downloads_root,
+                         list_archives=list_archives)
+
+
+def _py_list_images(folder_path: Path) -> list[str]:
     """Return image files sorted naturally by numeric prefix."""
     files = [
         f.name
@@ -472,3 +566,14 @@ def list_images(folder_path: Path) -> list[str]:
     ]
     _sort_file(files)
     return files
+
+
+def list_images(folder_path: Path) -> list[str]:
+    if _rs is not None:
+        try:
+            got = _rs.list_images_rs(str(folder_path))
+        except Exception:
+            got = None
+        if got is not None:
+            return got
+    return _py_list_images(folder_path)

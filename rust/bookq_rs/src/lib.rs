@@ -96,7 +96,7 @@ fn kanji_run_to_int_impl(run: &[char]) -> Option<i64> {
 /// `_normalize_kanji`: convert kanji numerals in numeric slots to ASCII digits.
 /// A run converts only when the char before it (if any) is in PRE and the char
 /// after it (if any) is in POST; string edges pass both guards.
-fn normalize_kanji_impl(name: &str) -> String {
+pub(crate) fn normalize_kanji_impl(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let n = chars.len();
     let mut out = String::with_capacity(name.len());
@@ -130,14 +130,14 @@ fn normalize_kanji_impl(name: &str) -> String {
 }
 
 /// One part of a `re.split("([0-9]+)")` result.
-enum Part {
+pub(crate) enum Part {
     Text(String),
     Num(String), // ASCII digits only; int() applied on the Python side
 }
 
 /// Faithful `re.split(r"([0-9]+)", s)`: alternating text/num segments,
 /// always beginning and ending with a text segment (possibly empty).
-fn split_numeric(s: &str) -> Vec<Part> {
+pub(crate) fn split_numeric(s: &str) -> Vec<Part> {
     let mut parts = Vec::new();
     let mut text = String::new();
     let mut run: Option<String> = None;
@@ -311,6 +311,70 @@ fn rar_names(path: &str) -> Option<Vec<(String, bool)>> {
     archive::rar_names(std::path::Path::new(path))
 }
 
+mod meta;
+mod scans;
+
+// ── W3: filesystem walks (parity contract documented in scans.rs) ─────────
+
+/// `scan_fs(path)` → nested (files, archives, pdfs, [(name, subdir)...]);
+/// None → Python fallback.
+#[pyfunction]
+fn scan_fs(py: Python<'_>, path: &str) -> Option<Py<PyAny>> {
+    let p = std::path::PathBuf::from(path);
+    let got = py.detach(move || scans::scan_fs(&p));
+    got.map(|d| fsdir_to_py(py, d))
+}
+
+fn fsdir_to_py(py: Python<'_>, d: scans::FsDir) -> Py<PyAny> {
+    let subs: Vec<(String, Py<PyAny>)> = d
+        .subdirs
+        .into_iter()
+        .map(|(n, s)| (n, fsdir_to_py(py, s)))
+        .collect();
+    PyTuple::new(py, [
+        d.files.into_py_any(py).unwrap_or_else(|_| py.None()),
+        d.archives.into_py_any(py).unwrap_or_else(|_| py.None()),
+        d.pdfs.into_py_any(py).unwrap_or_else(|_| py.None()),
+        subs.into_py_any(py).unwrap_or_else(|_| py.None()),
+    ])
+    .map(|t| t.into_any().unbind())
+    .unwrap_or_else(|_| py.None())
+}
+
+/// `list_images(path)` → sorted image names; None → Python fallback.
+#[pyfunction]
+fn list_images_rs(path: &str) -> Option<Vec<String>> {
+    scans::list_images(std::path::Path::new(path))
+}
+
+/// `tree_signature(path)` → sha256 hexdigest; None → Python fallback.
+#[pyfunction]
+fn tree_signature_rs(py: Python<'_>, path: &str) -> Option<String> {
+    let p = std::path::PathBuf::from(path);
+    py.detach(move || scans::tree_signature(&p))
+}
+
+// ── W4: metadata read path (parity contract documented in meta.rs) ────────
+
+/// `meta_walk(root)` → ComicRec list in `_walk` order; None → fallback.
+#[pyfunction]
+fn meta_walk(py: Python<'_>, root: &str) -> Option<Vec<meta::ComicRec>> {
+    let p = std::path::PathBuf::from(root);
+    py.detach(move || meta::meta_walk(&p))
+}
+
+/// `parse_metadata_batch(base, folders)` → Option<ComicRec> per folder;
+/// None → Python fallback for the whole batch.
+#[pyfunction]
+fn parse_metadata_batch(
+    py: Python<'_>,
+    base: &str,
+    folders: Vec<String>,
+) -> Option<Vec<Option<meta::ComicRec>>> {
+    let p = std::path::PathBuf::from(base);
+    py.detach(move || meta::parse_metadata_batch(&p, &folders))
+}
+
 #[pymodule]
 fn bookq_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_kanji_run_to_int, m)?)?;
@@ -323,6 +387,11 @@ fn bookq_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(zip_read_entry, m)?)?;
     m.add_function(wrap_pyfunction!(epub_raw, m)?)?;
     m.add_function(wrap_pyfunction!(rar_names, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_fs, m)?)?;
+    m.add_function(wrap_pyfunction!(list_images_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(tree_signature_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(meta_walk, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_metadata_batch, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

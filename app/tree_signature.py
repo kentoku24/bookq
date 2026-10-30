@@ -132,8 +132,35 @@ def _scan_dir_local(path: Path, dir_st: os.stat_result) -> tuple[bytes, list[tup
     return bytes(local), children
 
 
+try:
+    import bookq_rs as _rs
+except ImportError:
+    _rs = None
+if _rs is not None and os.environ.get("BOOKQ_RUST", "1") == "0":
+    _rs = None
+
+
 def compute_signature(root: Path) -> str | None:
     """Return a stable sha256 hexdigest of the tree under *root*.
+
+    Native path (issue #163 W3): ``bookq_rs.tree_signature_rs`` reproduces
+    the BFS/local-terms/bottom-up fold byte-for-byte and returns ``None``
+    on any error — which is also the reference contract's answer for a
+    missing or unreadable root, so the wrapper re-runs the Python walk on
+    ``None`` (correct either way; the miss case is rare).
+    """
+    if _rs is not None:
+        try:
+            got = _rs.tree_signature_rs(str(root))
+        except Exception:
+            got = None
+        if got is not None:
+            return got
+    return _py_compute_signature(root)
+
+
+def _py_compute_signature(root: Path) -> str | None:
+    """Reference implementation of :func:`compute_signature`.
 
     Level-synchronous parallel BFS over a single per-call pool; bottom-up
     combination in reverse BFS order (pure CPU, schedule-independent).

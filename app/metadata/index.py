@@ -1,6 +1,7 @@
 """MetadataIndex — searchable index of comic metadata."""
 
 import logging
+import os
 from pathlib import Path
 
 from app.archive import ARCHIVE_EXTENSIONS
@@ -15,6 +16,31 @@ from .models import ComicMetadata
 from .search import _calculate_relevance, _matches_filters
 
 logger = logging.getLogger(__name__)
+
+# ── native read path (Phase 1 W4, issue #163) ─────────────────────────────
+# bookq_rs re-implements the FS walk + metadata.toml parse byte-for-byte
+# (natural-key ordering, visited dedupe, `int()` conversions, `_split_aliases`
+# / `_flatten_tags` semantics). ``None`` from a native call means "cannot
+# prove identical output" — the wrapper then runs the reference code below.
+# ``BOOKQ_RUST=0`` forces the Python path.
+try:
+    import bookq_rs as _rs
+except ImportError:
+    _rs = None
+if _rs is not None and os.environ.get("BOOKQ_RUST", "1") == "0":
+    _rs = None
+
+
+def _comic_from_rec(rec: tuple) -> ComicMetadata:
+    """Rebuild a :class:`ComicMetadata` from a ``bookq_rs`` record tuple."""
+    (folder_path, folder_name, title_jp, title_en,
+     artist, tags, source, has_metadata, total_pages) = rec
+    return ComicMetadata(
+        folder_path=folder_path, folder_name=folder_name,
+        title_jp=title_jp, title_en=title_en, artist=artist,
+        tags=tags, source=source, has_metadata=has_metadata,
+        total_pages=total_pages,
+    )
 
 __all__ = ["MetadataIndex"]
 
@@ -39,7 +65,7 @@ class MetadataIndex:
             logger.warning("downloads_path does not exist: %s", downloads_path)
             return
 
-        self.comics = self._walk(downloads_path, downloads_path)
+        self.comics = self._walk_native(downloads_path, downloads_path)
 
         self._build_facets()
 
@@ -66,6 +92,7 @@ class MetadataIndex:
 
         found: list[ComicMetadata] = []
         seen: set[str] = set()
+        ordered_prefixes: list[str] = []
 
         def _parse_prefixes(prefixes: list[str]) -> None:
             for depth in range(1, len(prefixes) + 1):
@@ -73,9 +100,7 @@ class MetadataIndex:
                 if prefix in seen:
                     continue
                 seen.add(prefix)
-                comic = self._parse_folder(downloads_path / prefix, downloads_path)
-                if comic is not None:
-                    found.append(comic)
+                ordered_prefixes.append(prefix)
 
         def _visit(nodes: list[dict], parent_rel: str) -> None:
             for node in nodes:
@@ -94,7 +119,24 @@ class MetadataIndex:
                         _parse_prefixes(dir_parts)
 
         _visit(tree, "")
-        self.comics = found
+
+        recs = None
+        if _rs is not None and ordered_prefixes:
+            try:
+                recs = _rs.parse_metadata_batch(
+                    str(downloads_path), ordered_prefixes)
+            except Exception:
+                recs = None
+        if recs is not None:
+            # One FFI crossing for the whole prefix set — same order, same
+            # records; a per-folder None mirrors _parse_folder's skip.
+            self.comics = [_comic_from_rec(r) for r in recs if r is not None]
+        else:
+            for prefix in ordered_prefixes:
+                comic = self._parse_folder(downloads_path / prefix, downloads_path)
+                if comic is not None:
+                    found.append(comic)
+            self.comics = found
 
         self._build_facets()
 
@@ -186,7 +228,18 @@ class MetadataIndex:
 
     # ── indexing helpers ──────────────────────────────────────────────────
 
-    def _walk(
+    def _walk_native(self, directory: Path, downloads_base: Path) -> list[ComicMetadata]:
+        """Native ``_walk``: whole DFS + toml parse in one Rust call."""
+        if _rs is not None:
+            try:
+                got = _rs.meta_walk(str(directory))
+            except Exception:
+                got = None
+            if got is not None:
+                return [_comic_from_rec(r) for r in got]
+        return self._py_walk(directory, downloads_base)
+
+    def _py_walk(
         self,
         directory: Path,
         downloads_base: Path,
@@ -243,7 +296,7 @@ class MetadataIndex:
             comic = self._parse_folder(entry, downloads_base)
             if comic is not None:
                 found.append(comic)
-            found.extend(self._walk(entry, downloads_base, visited))
+            found.extend(self._py_walk(entry, downloads_base, visited))
         return found
 
     def _parse_folder(self, folder: Path, downloads_base: Path) -> ComicMetadata | None:
