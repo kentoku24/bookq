@@ -49,8 +49,8 @@ def test_dev_compose_keeps_healthcheck_and_restart():
 
 
 def test_dockerfile_installs_unrar_from_nonfree():
-    install = re.search(r"apt-get install[^\n]*", DOCKERFILE)
-    assert install and "unrar" in install.group(0)
+    installs = re.findall(r"apt-get install[^\n]*", DOCKERFILE)
+    assert any("unrar" in line for line in installs)
     assert "non-free" in DOCKERFILE
 
 
