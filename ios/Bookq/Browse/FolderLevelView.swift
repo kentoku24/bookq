@@ -9,6 +9,7 @@ struct FolderLevelView: View {
 
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var progress: ReadingProgressStore
+    @EnvironmentObject private var offline: OfflineStore
     @Environment(\.horizontalSizeClass) private var hSize
     @State private var query = ""
 
@@ -30,25 +31,37 @@ struct FolderLevelView: View {
                 .padding(.horizontal, 12).padding(.top, 4)
             LazyVGrid(columns: columns, spacing: 8, pinnedViews: []) {
                 ForEach(folders, id: \.path) { entry in
-                    Button { onFolderTap(entry) } label: {
-                        FolderTileView(
-                            path: entry.path,
-                            node: entry.node,
-                            layout: model.config.layoutMode,
-                            progress: progress.progress(
-                                for: entry.path,
-                                leaves: library.leafPaths(under: entry.path))
-                        )
+                    let leaves = library.leafPaths(under: entry.path)
+                    ZStack(alignment: .topTrailing) {
+                        Button { onFolderTap(entry) } label: {
+                            FolderTileView(
+                                path: entry.path,
+                                node: entry.node,
+                                layout: model.config.layoutMode,
+                                progress: progress.progress(for: entry.path, leaves: leaves),
+                                leaves: leaves
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        if !leaves.isEmpty {
+                            OfflineButton(path: entry.path, leaves: leaves, store: offline)
+                                .padding(5)
+                        }
                     }
-                    .buttonStyle(.plain)
                     .id(entry.path)
                 }
                 ForEach(selfTiles, id: \.path) { entry in
-                    Button { onOpen(entry.path) } label: {
-                        SelfTileView(node: entry.node, path: entry.path,
-                                     layout: model.config.layoutMode)
+                    ZStack(alignment: .topTrailing) {
+                        Button { onOpen(entry.path) } label: {
+                            SelfTileView(node: entry.node, path: entry.path,
+                                         layout: model.config.layoutMode)
+                        }
+                        .buttonStyle(.plain)
+                        // the self-tile is itself the download target
+                        OfflineButton(path: entry.path, leaves: [entry.path],
+                                      store: offline)
+                            .padding(5)
                     }
-                    .buttonStyle(.plain)
                     .id("self-\(entry.path)")
                 }
             }

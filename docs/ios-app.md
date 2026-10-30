@@ -84,9 +84,31 @@ Google なしで即トークンを返すため、アプリ側フローは dev �
 - 隠しルート: GET で読み取り、トップレベルでフィルタ +
   「隠しルートを表示」トグル（web の 全表示 相当）。hide/unhide 操作 UI は Phase 5。
 
+## オフラインDL（web parity: `offline-core.js` + `storeAdapter.js`）
+
+- 作品タイル/行の右上円ボタン（`OfflineButton` = web `offlineControlsHtml` 相当）。
+  状態機械: idle ↓ / listing 回転弧 / downloading 進捗リング+■ / stopping /
+  partial ↓◯(黄) / complete ✓(緑) / confirm-delete 🗑(赤) / deleting。
+- タップ: idle→即DL / downloading→中断(部分保持→partial) / partial→
+  「続きをDL or 削除」シート / complete→確認armed(3s)→再タップで削除。
+- 列挙: leaf フォルダをツリーから展開（親が直接画像を持つ場合は自身も leaf）。
+  各 leaf を `/api/images?folder=` で listing → `/view/`（原本設定時 `/image/`）で
+  `Documents/BookqOffline/<enc(folder)>/<name>` へ逐次保存。
+  records は leaf 毎に works.json へ永続化 {pageCount,cachedCount,bytes,names,…}。
+- 読み出し: `RemoteImageLoader` が remote URL (`/view/`,`/image/`,`/thumb/`) を
+  folder+name に戻してローカル優先（SW cache-first 相当）。Reader の leaf
+  listing も `/api/images` 失敗時は record の names ∩ 実在ファイルで代替。
+- オフライン起動: ツリーは最終成功取得を Application Support に snapshot
+  (`tree-<host>.json`)。/api/me 失敗でも snapshot があれば `.ready` で
+  ライブラリを開き、ダウンロード済み作品を読める（web の SW cache parity）。
+  バックグラウンド refresh 失敗はツリーが空の時だけエラー画面にする
+  （stale ツリーがある限り閲覧継続 = web の SW NetworkFirst 相当）。
+- ストレージ: 設定画面に「オフライン保存 N 作品・X MB」。上限超過
+  （ディスク溢れ）は中断して toast 表示（web の quota modal 相当の扱いは flag）。
+
 ## 既知の制約（後続フェーズ）
 
-- オフライン DL・検索/ファセット・隠しルート管理 UI・dual-reader 未実装
+- 検索/ファセット・隠しルート管理 UI・dual-reader 未実装（Phase 5/6）
 - ページ画像は既定 `/view/`（web 既定は `/image/`。原本モードは設定で切替可）
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
 - UI 自動テストなし（単体テストのみ）

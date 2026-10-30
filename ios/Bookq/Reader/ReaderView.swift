@@ -9,6 +9,7 @@ struct ReaderView: View {
 
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var progress: ReadingProgressStore
+    @EnvironmentObject private var offline: OfflineStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
@@ -414,12 +415,27 @@ struct ReaderView: View {
         }
     }
 
+    /// Fresh listing online; downloaded-subset listing when offline —
+    /// the web's "cached entries serve the reader" equivalent.
+    private func namesForLeaf(_ leaf: String) async throws -> [String] {
+        guard let api = model.api else {
+            if let names = offline.downloadedNames(leaf: leaf) { return names }
+            throw APIError.protocolError
+        }
+        do {
+            return try await api.images(folder: leaf)
+        } catch {
+            if let names = offline.downloadedNames(leaf: leaf) { return names }
+            throw error
+        }
+    }
+
     // MARK: - Load
 
     /// `viewport` is the GeometryReader size at first layout — reading the
     /// @State viewportSize here would race with .onAppear.
     private func load(viewport: CGSize) async {
-        guard let api = model.api, let library = model.library else {
+        guard model.api != nil, let library = model.library else {
             error = "未接続"; loading = false; return
         }
         viewportSize = viewport
@@ -429,15 +445,17 @@ struct ReaderView: View {
             var (chapters, _) = ReaderWork.chapters(for: path, in: library.tree)
             // Plain fallback: no tree data → fetch /api/images (web behavior)
             if chapters.count == 1 && chapters[0].images.isEmpty {
-                let names = try await api.images(folder: path)
+                let names = try await namesForLeaf(path)
                 chapters[0].images = names.map { PageRef(name: $0, folder: path) }
             }
             // If cross-chapter leaves had empty children (shouldn't happen
             // for leaf folders — tree carries their image names), fetch.
             for (i, ch) in chapters.enumerated() where ch.images.isEmpty {
-                let names = try await api.images(folder: ch.fullPath)
+                let names = try await namesForLeaf(ch.fullPath)
                 chapters[i].images = names.map { PageRef(name: $0, folder: ch.fullPath) }
             }
+            // Leaf reads update LRU timestamps (web lastReadAt).
+            for ch in chapters { offline.touchRead(leaf: ch.fullPath) }
 
             let w = ReaderWork.assemble(clickedPath: path, chapters: chapters,
                                       pageMode: openMode, spreadOffset: spreadOffset)

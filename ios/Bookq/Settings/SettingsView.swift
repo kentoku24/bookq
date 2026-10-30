@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var offline: OfflineStore
     @Environment(\.dismiss) private var dismiss
     @State private var version: String = ""
     @State private var urlDraft = ""
@@ -40,6 +41,7 @@ struct SettingsView: View {
                 Section("情報") {
                     LabeledContent("サーバーバージョン", value: version)
                     LabeledContent("画像キャッシュ", value: cacheText)
+                    LabeledContent("オフライン保存", value: offlineText)
                     Button("画像キャッシュをクリア") {
                         RemoteImageLoader.shared.clear()
                         URLCache.shared.removeAllCachedResponses()
@@ -65,5 +67,13 @@ struct SettingsView: View {
     private var cacheText: String {
         let m = URLCache.shared
         return "\(m.currentDiskUsage / 1024 / 1024) MB"
+    }
+
+    private var offlineText: String {
+        let mb = Double(offline.totalBytes) / 1_000_000
+        let size = mb >= 1000
+            ? String(format: "%.1f GB", mb / 1000)
+            : String(format: "%.0f MB", mb)
+        return "\(offline.workCount) 作品・\(size)"
     }
 }
