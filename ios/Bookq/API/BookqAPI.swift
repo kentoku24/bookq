@@ -14,6 +14,22 @@ final class BookqAPI: Sendable {
         self.tokenProvider = tokenProvider
     }
 
+    /// `ws(s)://<host>/ws/reader-sync` — the dual-reader sync endpoint.
+    /// Bearer auth rides the upgrade request (server accepts it on the WS
+    /// handshake exactly like HTTP routes).
+    var readerSyncURL: URL? {
+        guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        else { return nil }
+        switch comps.scheme {
+        case "https": comps.scheme = "wss"
+        case "http": comps.scheme = "ws"
+        default: return nil
+        }
+        comps.path = "/ws/reader-sync"
+        comps.query = nil
+        return comps.url
+    }
+
     // MARK: - Requests
 
     private func makeRequest(path: String,
