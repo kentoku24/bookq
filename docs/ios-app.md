@@ -106,9 +106,34 @@ Google なしで即トークンを返すため、アプリ側フローは dev �
 - ストレージ: 設定画面に「オフライン保存 N 作品・X MB」。上限超過
   （ディスク溢れ）は中断して toast 表示（web の quota modal 相当の扱いは flag）。
 
-## 既知の制約（後続フェーズ）
+## dual-reader 同期（Phase 6, server-ws plane）
 
-- 検索/ファセット・隠しルート管理 UI・dual-reader 未実装（Phase 5/6）
+- `Sync/PairSocket.swift` — `URLSessionWebSocketTask` で `/ws/reader-sync`、
+  `Authorization: Bearer` 認証、テキスト JSON フレーム（v:1, 64KiB）。
+- `Sync/PairStore.swift` — pairClient.js + pairController.js の状態機械移植。
+  CREATE/JOIN/MATCH/RESUME エントリ、ACK/REJECT 相関、STATE dedup
+  (epoch,rev strictly-greater)、MANIFEST chunk 再構成＋sha256 検証、
+  READY/APPLIED、PING→PONG + 20s liveness、reconnect RESUME
+  (300s window)。TURN/GOTO/SET_OFFSET/SWAP_SIDES/OPEN_WORK は
+  phase==reading ゲート + manifestVersion 付き（web と同一ルール）。
+  JOIN_REQUEST は auto-approve（web #114 相当）。
+- `Sync/CanonicalJSON.swift` — `json.dumps(sort_keys,separators,
+  ensure_ascii)` バイト互換。manifest digest 検証に使用。
+- `Sync/PairSheet.swift` — ペアリング UI（作成=コード+QR / 6桁参加 /
+  MATCH 自動接続 / セッション情報 / 切断）。
+- `Sync/PairedReaderView.swift` — pairedView.js 相当。自分の side の
+  単ページ描画、タップゾーン TURN(cross)、スワイプ/キー TURN(clamp)、
+  スライダー GOTO、offset/入替トグル。leader が閉じると
+  SET_ACTIVITY selecting。
+- `LibraryView` — leader+paired の作品タップは OPEN_WORK intent に
+  ルーティング（solo リーダーは開かない）。phase→reading で
+  PairedReaderView が全画面自動表示、手動 dismiss は workEpoch 毎に
+  記憶され「同期中」バナーから再入室。
+
+## 既知の制約
+
+- webrtc-dc データプレーン・UI_SYNC ブラウズ同期・QR スキャンは非対応
+  （server-ws plane とコード/MATCH 入力で代替）
 - ページ画像は既定 `/view/`（web 既定は `/image/`。原本モードは設定で切替可）
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
 - UI 自動テストなし（単体テストのみ）
