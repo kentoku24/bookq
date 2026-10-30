@@ -59,15 +59,21 @@ def _counting_uncached(monkeypatch):
 
 
 def _counting_zipfile(monkeypatch):
-    """Wrap ``zipfile.ZipFile`` with an open counter (delegates)."""
-    real = zipfile.ZipFile
+    """Wrap ``archive._zip_names`` with an open counter (delegates).
+
+    Counts at the dispatch seam rather than ``zipfile.ZipFile`` itself: the
+    native reader (issue #163) lists archives without touching ``zipfile``,
+    but both implementations still funnel through this function exactly once
+    per real re-read.
+    """
+    real = app_archive._zip_names
     calls: list = []
 
     def spy(*args, **kwargs):
         calls.append(args)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(zipfile, "ZipFile", spy)
+    monkeypatch.setattr(app_archive, "_zip_names", spy)
     return calls
 
 
