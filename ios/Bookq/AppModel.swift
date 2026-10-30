@@ -22,6 +22,10 @@ final class AppModel: ObservableObject {
     let config = AppConfig()
     let auth = AuthManager()
     let progress = ReadingProgressStore()
+    /// Offline downloads — survives API rebuilds via provider closures.
+    private(set) lazy var offline = OfflineStore(
+        apiProvider: { [weak self] in self?.api },
+        originalImages: { [weak self] in self?.config.originalImages ?? false })
     private(set) var api: BookqAPI?
     private(set) var library: LibraryStore?
 
@@ -47,6 +51,9 @@ final class AppModel: ObservableObject {
         self.api = api
         self.library = LibraryStore(api: api)
         RemoteImageLoader.shared.api = api
+        RemoteImageLoader.shared.offlineResolver = { [weak offline] in
+            offline?.localFileURL(remoteURL: $0)
+        }
         progress.attach(ProgressSync(api: api))
     }
 
@@ -64,7 +71,10 @@ final class AppModel: ObservableObject {
             phase = .login
         } catch {
             bootError = error.localizedDescription
-            phase = .onboarding
+            // Web parity: a dead server is not a setup problem when we hold
+            // a tree snapshot — enter the library offline (SW cache parity)
+            // instead of dumping the user on the onboarding screen.
+            phase = (library?.tree.isEmpty == false) ? .ready : .onboarding
         }
     }
 

@@ -17,8 +17,22 @@ final class LibraryStore: ObservableObject {
     private var etag: String?
     private var loadedOnce = false
 
+    /// Snapshot of the last good tree — the web equivalent is the SW
+    /// NetworkFirst cache of `/api/folders`, which lets the PWA browse (and
+    /// open downloaded works) while offline. Keyed per server base URL so
+    /// switching servers can't leak the previous server's tree.
+    private let snapshotURL: URL
+
     init(api: BookqAPI) {
         self.api = api
+        var cs = CharacterSet.alphanumerics
+        cs.insert(charactersIn: "-_")
+        let key = (api.baseURL.host ?? "default")
+            .addingPercentEncoding(withAllowedCharacters: cs) ?? "default"
+        snapshotURL = FileManager.default.urls(for: .applicationSupportDirectory,
+                                               in: .userDomainMask)[0]
+            .appendingPathComponent("tree-\(key).json")
+        restoreSnapshot()
     }
 
     /// Initial + incremental load. `force` bypasses the ETag/generation skip.
@@ -48,6 +62,7 @@ final class LibraryStore: ObservableObject {
                 break
             }
             await loadVisibility()
+            saveSnapshot()
         } catch {
             self.error = error.localizedDescription
         }
@@ -61,6 +76,38 @@ final class LibraryStore: ObservableObject {
         } catch {
             // visibility is best-effort — never fail the browse for it
         }
+    }
+
+    // MARK: - Offline snapshot
+
+    private struct Snapshot: Codable {
+        var tree: [TreeNode]
+        var hiddenRoots: Set<String>
+        var generation: Int
+    }
+
+    private func saveSnapshot() {
+        struct Env: Encodable { var snapshot: Snapshot }
+        let snap = Snapshot(tree: tree, hiddenRoots: hiddenRoots,
+                            generation: generation)
+        try? FileManager.default.createDirectory(
+            at: snapshotURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(Env(snapshot: snap)) {
+            try? data.write(to: snapshotURL, options: .atomic)
+        }
+    }
+
+    /// Pre-populate `tree` before the first fetch — offline launches get
+    /// last-known folders immediately (SW-cached /api/folders parity).
+    private func restoreSnapshot() {
+        struct Env: Decodable { var snapshot: Snapshot }
+        guard let data = try? Data(contentsOf: snapshotURL),
+              let snap = try? JSONDecoder().decode(Env.self, from: data).snapshot
+        else { return }
+        tree = snap.tree
+        hiddenRoots = snap.hiddenRoots
+        generation = snap.generation
     }
 
     private var pollTask: Task<Void, Never>?

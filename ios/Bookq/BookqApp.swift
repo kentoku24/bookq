@@ -9,6 +9,7 @@ struct BookqApp: App {
             RootView()
                 .environmentObject(model)
                 .environmentObject(model.progress)
+                .environmentObject(model.offline)
                 .preferredColorScheme(.dark)
         }
     }

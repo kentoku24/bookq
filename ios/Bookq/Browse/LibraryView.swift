@@ -3,6 +3,7 @@ import SwiftUI
 /// Root browse screen: NavigationStack of FolderLevelViews + reader modal.
 struct LibraryView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var offline: OfflineStore
     @State private var showSettings = false
 
     var body: some View {
@@ -34,13 +35,29 @@ struct LibraryView: View {
             model.library?.startPolling()
         }
         .overlay {
-            if let err = model.library?.error {
+            // Error overlay only when there is nothing to show — a failed
+            // background poll must not blank usable (stale) tree data, the
+            // same way the web keeps browsing off its cached /api/folders.
+            if let err = model.library?.error,
+               model.library?.tree.isEmpty ?? true {
                 errorOverlay(err)
             } else if model.library?.loading == true,
                       model.library?.tree.isEmpty ?? true {
                 ProgressView("読み込み中…")
             }
         }
+        // DL完了/失敗 toast (web #toast equivalent)
+        .overlay(alignment: .bottom) {
+            if let toast = offline.toast {
+                Text(toast)
+                    .font(.subheadline)
+                    .padding(.horizontal, 16).padding(.vertical, 9)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 30)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut, value: offline.toast)
     }
 
     private var levelStack: some View {
@@ -93,6 +110,11 @@ struct LibraryView: View {
                 Button { Task { await model.library?.refresh() } } label: {
                     Label("再読み込み", systemImage: "arrow.clockwise")
                 }
+                if offline.workCount > 0 {
+                    Divider()
+                    // #storage-text equivalent (static menu row)
+                    Text(offlineLabel)
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -102,6 +124,14 @@ struct LibraryView: View {
                 Image(systemName: "gearshape")
             }
         }
+    }
+
+    private var offlineLabel: String {
+        let mb = Double(offline.totalBytes) / 1_000_000
+        let size = mb >= 1000
+            ? String(format: "%.1f GB", mb / 1000)
+            : String(format: "%.0f MB", mb)
+        return "オフライン: \(offline.workCount) 作品・\(size)"
     }
 
     private var layoutBinding: Binding<AppConfig.LayoutMode> {

@@ -7,6 +7,10 @@ struct FolderTileView: View {
     let node: TreeNode
     var layout: AppConfig.LayoutMode = .tile
     var progress: Double = 0
+    /// Download targets for the offline button (empty = no button) —
+    /// rendered by the caller as a sibling overlay (a Button inside a
+    /// Button label never receives taps).
+    var leaves: [String] = []
 
     @EnvironmentObject private var model: AppModel
 

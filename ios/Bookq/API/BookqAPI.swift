@@ -123,8 +123,7 @@ final class BookqAPI: Sendable {
     func images(folder: String) async throws -> [String] {
         let q = [URLQueryItem(name: "folder", value: folder)]
         let (data, resp) = try await send(makeRequest(path: "api/images", query: q))
-        struct Resp: Decodable { var images: [String] }
-        return try decode(Resp.self, data, resp).images
+        return try decode([String].self, data, resp)
     }
 
     // MARK: - Image URLs

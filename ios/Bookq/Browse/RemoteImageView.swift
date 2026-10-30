@@ -10,6 +10,9 @@ final class RemoteImageLoader: ObservableObject {
     private let cache = NSCache<NSString, UIImage>()
     private var inFlight: [URL: Task<UIImage?, Never>] = [:]
     var api: BookqAPI?
+    /// SW cache-first equivalent: resolve a remote URL to a downloaded
+    /// offline file before hitting the network.
+    var offlineResolver: ((URL) -> URL?)?
 
     init() {
         cache.countLimit = 400
@@ -23,7 +26,13 @@ final class RemoteImageLoader: ObservableObject {
     func load(_ url: URL) async -> UIImage? {
         if let hit = image(for: url) { return hit }
         if let existing = inFlight[url] { return await existing.value }
-        let task = Task<UIImage?, Never> { [api] in
+        let task = Task<UIImage?, Never> { [api, offlineResolver] in
+            if let local = offlineResolver?(url),
+               let img = UIImage(contentsOfFile: local.path) {
+                let cost = Int(img.size.width * img.size.height * 4)
+                self.cache.setObject(img, forKey: url.absoluteString as NSString, cost: cost)
+                return img
+            }
             guard let api else { return nil }
             do {
                 let data = try await api.imageData(url: url)
