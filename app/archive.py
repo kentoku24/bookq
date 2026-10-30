@@ -7,6 +7,7 @@ yields ``None`` so the API renders an empty message / 404 instead of a 500.
 """
 
 import logging
+import os
 import posixpath
 import xml.etree.ElementTree as ET
 import zipfile
@@ -17,6 +18,22 @@ from app.scanner import IMAGE_EXTENSIONS, folder_cover_fields, natural_key
 from app import warmup_cache
 
 logger = logging.getLogger(__name__)
+
+# ── native archive readers (Phase 1 W2, issue #163) ──────────────────────────
+# bookq_rs (rust/bookq_rs) re-implements the listing/read paths of zipfile and
+# rarfile byte-for-byte: EOCD/ZIP64/SFX handling, cp437/UTF-8 name decoding and
+# the 0x7075 unicode-name extra for ZIP; RAR3 (incl. the compressed-UTF16
+# UnicodeFilename scheme) and RAR5 header parsing for RAR. The Rust functions
+# return ``None`` whenever they cannot *prove* the Python implementation would
+# produce the identical result — the wrappers then run the reference code
+# below, so behaviour is unchanged in every uncertain case. ``BOOKQ_RUST=0``
+# forces the Python path; extraction still goes through the external tool.
+try:
+    import bookq_rs as _rs
+except ImportError:
+    _rs = None
+if _rs is not None and os.environ.get("BOOKQ_RUST", "1") == "0":
+    _rs = None
 
 RAR_EXTENSIONS = {".rar", ".cbr"}
 EPUB_EXTENSIONS = {".epub"}
@@ -207,7 +224,7 @@ def build_archive_tree(entries: list[str]) -> list[dict]:
     return built[id(root)]
 
 
-def _zip_names(path: Path) -> list[str]:
+def _py_zip_names(path: Path) -> list[str]:
     try:
         with zipfile.ZipFile(path) as zf:
             return [info.filename for info in zf.infolist()]
@@ -215,7 +232,18 @@ def _zip_names(path: Path) -> list[str]:
         return []
 
 
-def _rar_names(path: Path) -> list[str]:
+def _zip_names(path: Path) -> list[str]:
+    if _rs is not None:
+        try:
+            got = _rs.zip_names(str(path))
+        except Exception:
+            got = None
+        if got is not None:
+            return got
+    return _py_zip_names(path)
+
+
+def _py_rar_names(path: Path) -> list[str]:
     try:
         import rarfile
 
@@ -223,6 +251,19 @@ def _rar_names(path: Path) -> list[str]:
             return [info.filename for info in rf.infolist() if not info.is_dir()]
     except Exception:
         return []
+
+
+def _rar_names(path: Path) -> list[str]:
+    if _rs is not None:
+        try:
+            got = _rs.rar_names(str(path))
+        except Exception:
+            got = None
+        if got is not None:
+            # (filename, is_dir) pairs in header order → same as
+            # ``infolist() if not info.is_dir()``
+            return [name for name, is_dir in got if not is_dir]
+    return _py_rar_names(path)
 
 
 def _epub_resolve(base_dir: str, href: str) -> str:
@@ -278,7 +319,16 @@ def _epub_spine_images(zf: zipfile.ZipFile) -> list[str]:
     return out
 
 
-def _epub_entries(path: Path) -> list[str]:
+def _epub_from_parts(raw: list[str], spine: list[str]) -> list[str]:
+    """Compose the finalized listing from raw zip names + spine-resolved names."""
+    present = set(raw)
+    ordered = _finalize([n for n in spine if n in present], keep_order=True)
+    if ordered:
+        return ordered
+    return _finalize(raw)
+
+
+def _py_epub_entries(path: Path) -> list[str]:
     try:
         with zipfile.ZipFile(path) as zf:
             raw = [info.filename for info in zf.infolist()]
@@ -288,11 +338,19 @@ def _epub_entries(path: Path) -> list[str]:
                 spine = []
     except Exception:
         return []
-    present = set(raw)
-    ordered = _finalize([n for n in spine if n in present], keep_order=True)
-    if ordered:
-        return ordered
-    return _finalize(raw)
+    return _epub_from_parts(raw, spine)
+
+
+def _epub_entries(path: Path) -> list[str]:
+    if _rs is not None:
+        try:
+            got = _rs.epub_raw(str(path))
+        except Exception:
+            got = None
+        if got is not None:
+            raw, spine = got
+            return _epub_from_parts(raw, spine)
+    return _py_epub_entries(path)
 
 
 def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
@@ -351,7 +409,7 @@ def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
     return entries
 
 
-def _read_zip(path: Path, inner: str) -> bytes | None:
+def _py_read_zip(path: Path, inner: str) -> bytes | None:
     try:
         with zipfile.ZipFile(path) as zf:
             if inner not in zf.namelist():
@@ -360,6 +418,17 @@ def _read_zip(path: Path, inner: str) -> bytes | None:
                 return fp.read()
     except Exception:
         return None
+
+
+def _read_zip(path: Path, inner: str) -> bytes | None:
+    if _rs is not None:
+        try:
+            got = _rs.zip_read_entry(str(path), inner)
+        except Exception:
+            got = None
+        if got is not None:
+            return got
+    return _py_read_zip(path, inner)
 
 
 def _read_rar(path: Path, inner: str) -> bytes | None:

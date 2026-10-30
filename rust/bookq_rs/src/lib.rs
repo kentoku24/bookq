@@ -283,6 +283,34 @@ fn sort_keys(py: Python<'_>, names: Vec<String>) -> PyResult<Vec<Py<PyTuple>>> {
         .collect()
 }
 
+mod archive;
+
+// ── W2: archive readers (parity contract documented in archive.rs) ─────────
+
+/// `zip_names(path)` → CD-ordered entry names; None → Python fallback.
+#[pyfunction]
+fn zip_names(path: &str) -> Option<Vec<String>> {
+    archive::zip_names(std::path::Path::new(path))
+}
+
+/// `zip_read_entry(path, inner)` → entry bytes; None → Python fallback.
+#[pyfunction]
+fn zip_read_entry(path: &str, inner: &str) -> Option<Vec<u8>> {
+    archive::zip_read_entry(std::path::Path::new(path), inner)
+}
+
+/// `epub_raw(path)` → (raw zip names, spine-resolved names); None → fallback.
+#[pyfunction]
+fn epub_raw(path: &str) -> Option<(Vec<String>, Vec<String>)> {
+    archive::epub_raw(std::path::Path::new(path))
+}
+
+/// `rar_names(path)` → (filename, is_dir) in header order; None → fallback.
+#[pyfunction]
+fn rar_names(path: &str) -> Option<Vec<(String, bool)>> {
+    archive::rar_names(std::path::Path::new(path))
+}
+
 #[pymodule]
 fn bookq_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_kanji_run_to_int, m)?)?;
@@ -291,6 +319,10 @@ fn bookq_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(natural_key, m)?)?;
     m.add_function(wrap_pyfunction!(natural_keys, m)?)?;
     m.add_function(wrap_pyfunction!(sort_keys, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_names, m)?)?;
+    m.add_function(wrap_pyfunction!(zip_read_entry, m)?)?;
+    m.add_function(wrap_pyfunction!(epub_raw, m)?)?;
+    m.add_function(wrap_pyfunction!(rar_names, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
