@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.tree_signature import compute_signature
+from app.tree_signature import _py_compute_signature, compute_signature
 
 
 def _seed(root: Path) -> None:
@@ -112,18 +112,19 @@ def test_signature_symlink_cycle_terminates(tmp_path: Path) -> None:
 
 
 def test_signature_unreadable_subdir_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Any walk-time OSError is a fail-open None (no per-entry swallowing)."""
+    """Any walk-time OSError is a fail-open None (no per-entry swallowing).
+
+    Uses a real permission denial rather than an ``os.scandir`` monkeypatch —
+    the native reader (issue #163) walks with Rust ``read_dir``, which the
+    monkeypatch cannot reach; the chmod fails both backends identically.
+    """
     _seed(tmp_path)
     denied = tmp_path / "series"
-    real_scandir = os.scandir
-
-    def _boom(path, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if Path(path) == denied:
-            raise PermissionError(13, "Permission denied")
-        return real_scandir(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "scandir", _boom)
-    assert compute_signature(tmp_path) is None
+    os.chmod(denied, 0)
+    try:
+        assert compute_signature(tmp_path) is None
+    finally:
+        os.chmod(denied, 0o755)
 
 
 # --- Todo 2 RED additions: parallel tree-signature acceptance gate ---
@@ -410,7 +411,11 @@ def test_plain_images_not_statted(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         return _CountingIterator(real_scandir(path, *args, **kwargs))  # type: ignore[no-untyped-call]
 
     monkeypatch.setattr(os, "scandir", _counting_scandir)
-    sig = compute_signature(tmp_path)
+    # Python-impl performance invariant: the native reader (issue #163)
+    # does not call os.scandir, so the counter would see zero calls and the
+    # assertion could not tell "no stats" from "no Python at all". The
+    # digest parity between both backends is covered by the other tests.
+    sig = _py_compute_signature(tmp_path)
     assert sig is not None and len(sig) == 64
 
     for img in plain_images:
