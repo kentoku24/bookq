@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import UIKit
 
 /// Folder tree + hidden-root state. Loaded on boot, refreshed via
 /// `/api/refresh` + generation tracking.
@@ -59,6 +60,24 @@ final class LibraryStore: ObservableObject {
             hiddenRoots = Set(snap.hidden)
         } catch {
             // visibility is best-effort — never fail the browse for it
+        }
+    }
+
+    private var pollTask: Task<Void, Never>?
+
+    /// Web fill-poll equivalent: while the app is active, re-request the
+    /// tree delta (`?since=<gen>`) on a fixed 15s cadence so newly added
+    /// works appear without a manual refresh.
+    func startPolling() {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !Task.isCancelled else { return }
+                if UIApplication.shared.applicationState == .active {
+                    await self?.load()
+                }
+            }
         }
     }
 

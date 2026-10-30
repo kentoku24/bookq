@@ -23,6 +23,11 @@ struct FolderLevelView: View {
         let selfTiles = query.isEmpty ? library.selfTiles(path: path) : []
 
         ScrollView {
+            // #folder-count equivalent
+            Text("\(folders.count + selfTiles.count) 件")
+                .font(.caption2).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.horizontal, 12).padding(.top, 4)
             LazyVGrid(columns: columns, spacing: 8, pinnedViews: []) {
                 ForEach(folders, id: \.path) { entry in
                     Button { onFolderTap(entry) } label: {

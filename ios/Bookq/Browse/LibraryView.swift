@@ -31,6 +31,7 @@ struct LibraryView: View {
         }
         .task {
             await model.library?.load()
+            model.library?.startPolling()
         }
         .overlay {
             if let err = model.library?.error {
@@ -58,7 +59,7 @@ struct LibraryView: View {
             Button { openWork(last.path) } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "book.fill")
-                    Text("続きから: \(last.entry.title ?? last.path)")
+                    Text("続きから: \(last.entry.title ?? last.path) p.\(last.entry.page + 1)")
                         .lineLimit(1)
                     Spacer()
                     Image(systemName: "chevron.right")
