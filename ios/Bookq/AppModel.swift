@@ -33,6 +33,12 @@ final class AppModel: ObservableObject {
     private(set) lazy var search = SearchModel(
         apiProvider: { [weak self] in self?.api },
         showAll: { [weak self] in self?.visibility.showAll ?? false })
+    /// Dual-reader sync (reader_sync server-ws equivalent).
+    private(set) lazy var pair = PairStore(
+        url: { [weak self] in self?.api?.readerSyncURL },
+        token: { [weak self] in self?.auth.tokenBox.token },
+        persistKey: { [weak self] in
+            "bookq.pairSync.v1.\(self?.config.baseURL?.host ?? "default")" })
     private(set) var api: BookqAPI?
     private(set) var library: LibraryStore?
 
@@ -63,6 +69,44 @@ final class AppModel: ObservableObject {
             offline?.localFileURL(remoteURL: $0)
         }
         progress.attach(ProgressSync(api: api))
+        configurePair()
+    }
+
+    /// PairStore providers — injected per API rebuild so a server switch
+    /// can never resolve pages or veto picks against the wrong backend.
+    private func configurePair() {
+        pair.openWorkResolver = { [weak self] folder in
+            await self?.resolveInitialPageRef(folder)
+        }
+        pair.visibilityBlocks = { [weak self] path in
+            self?.visibility.guardPath(path) == .hidden
+        }
+        pair.bootstrapWork = { [weak self] in
+            guard let self, let last = self.progress.lastRead,
+                  let ref = await self.resolveInitialPageRef(last.path)
+            else { return nil }
+            return (last.path, ref)
+        }
+    }
+
+    /// `_resolveInitialPageRef` — leaf folders take all children, mixed
+    /// folders image children only, others fall back to /api/images.
+    /// Index = saved resume page clamped into range (web _pickRef).
+    func resolveInitialPageRef(_ folder: String) async -> PairPageRef? {
+        var names: [String]? = nil
+        if let node = BrowseModel.node(at: folder, in: library?.tree ?? []) {
+            if BrowseModel.hasOnlyImages(node) {
+                names = (node.children ?? []).map(\.name)
+            } else if BrowseModel.hasImages(node) {
+                names = (node.children ?? []).filter(\.isImage).map(\.name)
+            }
+        }
+        if names == nil, let api {
+            names = try? await api.images(folder: folder)
+        }
+        guard let names, !names.isEmpty else { return nil }
+        let idx = min(max(progress.entries[folder]?.page ?? 0, 0), names.count - 1)
+        return PairPageRef(folder: folder, name: names[idx])
     }
 
     /// Probe the server. 401 → login required; 200 → ready.
@@ -75,6 +119,7 @@ final class AppModel: ObservableObject {
             auth.apply(user: me)
             phase = .ready
             Task { await progress.syncWithServer() }
+            pair.bootResume()
         } catch APIError.unauthorized {
             phase = .login
         } catch {

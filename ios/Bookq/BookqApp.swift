@@ -12,6 +12,7 @@ struct BookqApp: App {
                 .environmentObject(model.offline)
                 .environmentObject(model.visibility)
                 .environmentObject(model.search)
+                .environmentObject(model.pair)
                 .preferredColorScheme(.dark)
         }
     }

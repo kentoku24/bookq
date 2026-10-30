@@ -6,8 +6,13 @@ struct LibraryView: View {
     @EnvironmentObject private var offline: OfflineStore
     @EnvironmentObject private var search: SearchModel
     @EnvironmentObject private var visibility: VisibilityStore
+    @EnvironmentObject private var pair: PairStore
     @State private var showSettings = false
     @State private var showFacets = false
+    @State private var showPair = false
+    /// Epoch the user manually dismissed — the paired reader auto-opens on
+    /// each new work commit but never yanks back mid-browse within one.
+    @State private var pairSuppressedEpoch: Int?
 
     var body: some View {
         NavigationStack(path: $model.navPath) {
@@ -30,11 +35,19 @@ struct LibraryView: View {
         .fullScreenCover(item: $model.openReader) { route in
             ReaderView(path: route.path)
         }
+        // Paired reader: auto-presents whenever the shared session enters
+        // 'reading' (each workEpoch once — manual dismissal is remembered).
+        .fullScreenCover(isPresented: pairReaderBinding) {
+            PairedReaderView()
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
         .sheet(isPresented: $showFacets) {
             FacetSheet(search: search)
+        }
+        .sheet(isPresented: $showPair) {
+            PairSheet()
         }
         .searchable(text: $search.query, prompt: "作品を検索")
         .onChange(of: visibility.showAll) { _, _ in
@@ -77,6 +90,7 @@ struct LibraryView: View {
     private var levelStack: some View {
         VStack(spacing: 0) {
             resumePill
+            pairBanner
             filterChipsRow
             if let library = model.library {
                 if search.active {
@@ -185,6 +199,13 @@ struct LibraryView: View {
                 Image(systemName: "gearshape")
             }
         }
+        ToolbarItem(placement: .automatic) {
+            Button { showPair = true } label: {
+                Image(systemName: pair.bound
+                      ? "person.2.fill" : "person.2")
+            }
+            .accessibilityLabel("ペアリング")
+        }
     }
 
     private var offlineLabel: String {
@@ -208,6 +229,13 @@ struct LibraryView: View {
     /// `guardPath` — pending judgments queue behind a refresh; positive-
     /// hidden paths never open the reader in normal mode.
     private func openWork(_ path: String) {
+        // Paired + leader: a work pick is a shared OPEN_WORK intent, never
+        // a local solo open (pairController navHandler equivalent). The
+        // follower's tap stays local — the pair survives its own browse.
+        if pair.role == .leader && pair.paired {
+            Task { _ = await pair.pickWork(folder: path) }
+            return
+        }
         switch visibility.guardPath(path) {
         case .pending:
             Task {
@@ -219,6 +247,59 @@ struct LibraryView: View {
             return
         case .allow:
             model.openReader = BrowseRoute.reader(path)
+        }
+    }
+
+    /// Paired-reader cover binding: opens on phase→reading once per
+    /// workEpoch; dismissing records the epoch so it stays browsable
+    /// until the next shared work commit.
+    private var pairReaderBinding: Binding<Bool> {
+        Binding(
+            get: {
+                pair.phase == .reading &&
+                pairSuppressedEpoch != pair.lastState?.workEpoch
+            },
+            set: { presented in
+                if !presented { pairSuppressedEpoch = pair.lastState?.workEpoch }
+            })
+    }
+
+    /// "同期中" banner — re-entry into the shared reader while it is
+    /// suppressed or while waiting for the leader's pick.
+    @ViewBuilder
+    private var pairBanner: some View {
+        if pair.paired, let ph = pair.phase {
+            Button {
+                // -1 never equals a real workEpoch → the cover binding
+                // sees a mismatch and presents the paired reader.
+                pairSuppressedEpoch = -1
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.2.fill")
+                    Text(bannerText(ph)).lineLimit(1)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                }
+                .font(.subheadline)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func bannerText(_ ph: PairPhase) -> String {
+        switch ph {
+        case .reading:
+            let p = pair.projection
+            return p.map { "同期中: \($0.spreadIndex + 1)/\($0.spreadTotal)" } ?? "同期中"
+        case .selecting:
+            return pair.role == .leader ? "ペア中: 作品を選んでください" : "ペア中: リーダーが選択中"
+        case .loading: return "ペア中: 読み込み中…"
+        case .paused: return "ペア中: 相手が離席中"
+        case .waiting: return "ペア中: 参加者待ち"
         }
     }
 
