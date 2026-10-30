@@ -4,7 +4,10 @@ import SwiftUI
 struct LibraryView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var offline: OfflineStore
+    @EnvironmentObject private var search: SearchModel
+    @EnvironmentObject private var visibility: VisibilityStore
     @State private var showSettings = false
+    @State private var showFacets = false
 
     var body: some View {
         NavigationStack(path: $model.navPath) {
@@ -29,6 +32,17 @@ struct LibraryView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showFacets) {
+            FacetSheet(search: search)
+        }
+        .searchable(text: $search.query, prompt: "作品を検索")
+        .onChange(of: visibility.showAll) { _, _ in
+            // include_hidden affects both search and facet sets server-side
+            Task {
+                await search.loadFacets()
+                if search.active { await search.search() }
+            }
         }
         .task {
             await model.library?.load()
@@ -63,9 +77,55 @@ struct LibraryView: View {
     private var levelStack: some View {
         VStack(spacing: 0) {
             resumePill
+            filterChipsRow
             if let library = model.library {
-                FolderLevelView(path: "", library: library, onOpen: openWork)
+                if search.active {
+                    SearchResultsView(search: search, library: library,
+                                      onOpen: openWork)
+                } else {
+                    FolderLevelView(path: "", library: library,
+                                    onOpen: openWork, searchExternal: true)
+                }
             }
+        }
+    }
+
+    /// `#filter-chips` + funnel — active facet chips (✕ re-searches) and the
+    /// sheet button with an active count badge.
+    @ViewBuilder
+    private var filterChipsRow: some View {
+        let chips = search.artists.sorted().map { ("🎨", $0) }
+            + search.tags.sorted().map { ("🏷", $0) }
+        if !chips.isEmpty || search.active {
+            HStack(spacing: 6) {
+                Button { showFacets = true } label: {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                    if !chips.isEmpty {
+                        Text("\(chips.count)").font(.caption2)
+                    }
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(Array(chips.enumerated()), id: \.offset) { _, c in
+                            HStack(spacing: 3) {
+                                Text(c.0 + c.1).font(.caption2).lineLimit(1)
+                                Button {
+                                    if c.0 == "🎨" { search.artists.remove(c.1) }
+                                    else { search.tags.remove(c.1) }
+                                    search.filtersChanged()
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 8, weight: .bold))
+                                }
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.secondary.opacity(0.15), in: Capsule())
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 4)
         }
     }
 
@@ -100,12 +160,13 @@ struct LibraryView: View {
                     Label("リスト", systemImage: "list.bullet").tag(AppConfig.LayoutMode.list)
                     Label("カード", systemImage: "rectangle.stack").tag(AppConfig.LayoutMode.card)
                 }
-                if !(model.library?.hiddenRoots.isEmpty ?? true) {
-                    Toggle("隠しルートを表示",
-                           isOn: Binding(
-                            get: { model.library?.showAll ?? false },
-                            set: { model.library?.showAll = $0 }))
-                }
+                // 全表示 entry — always reachable (the web's equivalent is a
+                // hidden swipe on the root icon, always armed too). Eye
+                // toggles and badges only appear while this mode is on.
+                Toggle("隠しルートを表示",
+                       isOn: Binding(
+                        get: { visibility.showAll },
+                        set: { visibility.showAll = $0 }))
                 Divider()
                 Button { Task { await model.library?.refresh() } } label: {
                     Label("再読み込み", systemImage: "arrow.clockwise")
@@ -144,8 +205,21 @@ struct LibraryView: View {
         BrowseModel.splitDisplayName(path).leaf
     }
 
+    /// `guardPath` — pending judgments queue behind a refresh; positive-
+    /// hidden paths never open the reader in normal mode.
     private func openWork(_ path: String) {
-        model.openReader = BrowseRoute.reader(path)
+        switch visibility.guardPath(path) {
+        case .pending:
+            Task {
+                await visibility.refresh()
+                guard visibility.guardPath(path) != .hidden else { return }
+                model.openReader = BrowseRoute.reader(path)
+            }
+        case .hidden:
+            return
+        case .allow:
+            model.openReader = BrowseRoute.reader(path)
+        }
     }
 
     private func errorOverlay(_ err: String) -> some View {

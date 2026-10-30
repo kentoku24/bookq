@@ -10,6 +10,8 @@ struct BookqApp: App {
                 .environmentObject(model)
                 .environmentObject(model.progress)
                 .environmentObject(model.offline)
+                .environmentObject(model.visibility)
+                .environmentObject(model.search)
                 .preferredColorScheme(.dark)
         }
     }

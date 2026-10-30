@@ -11,21 +11,47 @@ struct FolderTileView: View {
     /// rendered by the caller as a sibling overlay (a Button inside a
     /// Button label never receives taps).
     var leaves: [String] = []
+    /// Search-result metadata — badge row under the title (artist≤2,tag≤4).
+    var meta: ComicMetadata? = nil
+    /// Visibility presentation (showAll only): badge text + dim + whether
+    /// the caller renders the eye toggle.
+    var vis: VisibilityStore.Presentation? = nil
 
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        switch layout {
-        case .tile: tileBody
-        case .list: rowBody(thumbSize: 44)
-        case .card: rowBody(thumbSize: 72)
+        Group {
+            switch layout {
+            case .tile: tileBody
+            case .list: rowBody(thumbSize: 44)
+            case .card: rowBody(thumbSize: 72)
+            }
+        }
+        .opacity(vis?.dimmed == true ? 0.45 : 1)
+        .overlay(alignment: .topLeading) { visBadge }
+    }
+
+    @ViewBuilder
+    private var visBadge: some View {
+        if let badge = vis?.badge {
+            Text(badge)
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(.black.opacity(0.7), in: Capsule())
+                .foregroundStyle(.white)
+                .padding(4)
         }
     }
 
     private var tileBody: some View {
         VStack(alignment: .leading, spacing: 4) {
-            cover
+            // Fixed-ratio cover box — a resizable image reports its
+            // intrinsic size as the ideal width and would overflow the
+            // grid column; the clear box proposes a bounded frame and the
+            // image fills+clips inside it.
+            Color.clear
                 .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                .overlay { cover.clipped() }
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(alignment: .bottom) { progressBar }
             titleStack
@@ -80,6 +106,29 @@ struct FolderTileView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            }
+            if let meta, meta.has_metadata {
+                metadataBadges(meta)
+            }
+        }
+    }
+
+    /// `tile-metadata` equivalent — artist ≤2 (🎨), tags ≤4 (🏷). Badges
+    /// WRAP like the web's flex row (a rigid HStack would demand a minimum
+    /// width larger than the tile column and overflow the grid cell).
+    @ViewBuilder
+    private func metadataBadges(_ meta: ComicMetadata) -> some View {
+        let badges = meta.artist.prefix(2).map { ("🎨", $0) }
+            + meta.tags.prefix(4).map { ("🏷", $0) }
+        if !badges.isEmpty {
+            FlowLayout(spacing: 3) {
+                ForEach(Array(badges.enumerated()), id: \.offset) { _, b in
+                    Text(b.0 + " " + b.1)
+                        .font(.system(size: 8))
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                        .lineLimit(1)
+                }
             }
         }
     }

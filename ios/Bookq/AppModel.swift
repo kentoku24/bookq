@@ -26,6 +26,13 @@ final class AppModel: ObservableObject {
     private(set) lazy var offline = OfflineStore(
         apiProvider: { [weak self] in self?.api },
         originalImages: { [weak self] in self?.config.originalImages ?? false })
+    /// Hidden-root state machine (browse/visibility.js equivalent).
+    private(set) lazy var visibility = VisibilityStore(
+        apiProvider: { [weak self] in self?.api })
+    /// Global metadata search (search/facets.js equivalent).
+    private(set) lazy var search = SearchModel(
+        apiProvider: { [weak self] in self?.api },
+        showAll: { [weak self] in self?.visibility.showAll ?? false })
     private(set) var api: BookqAPI?
     private(set) var library: LibraryStore?
 
@@ -50,6 +57,7 @@ final class AppModel: ObservableObject {
                            tokenProvider: { [box = auth.tokenBox] in box.token })
         self.api = api
         self.library = LibraryStore(api: api)
+        self.library?.visibility = visibility
         RemoteImageLoader.shared.api = api
         RemoteImageLoader.shared.offlineResolver = { [weak offline] in
             offline?.localFileURL(remoteURL: $0)
