@@ -146,14 +146,31 @@
   }
   // Root exception: root-level loose images have no parent level, so root
   // browsing alone shows ONE self tile (data-read-self, same label) for them.
-  function _rootHasLooseImages(){
-    if (_getCurrentBrowsePath()) return false;
+  function _looseImagesAt(path){
+    if (path) return false;
     var roots = [];
     try { roots = window.tree || []; } catch(e){ roots = []; }
     for (var j = 0; j < roots.length; j++){
       if (roots[j] && roots[j].type === "image") return true;
     }
     return false;
+  }
+  function _rootHasLooseImages(){
+    if (_getCurrentBrowsePath()) return false;
+    return _looseImagesAt(null);
+  }
+  // One browse level's model for an ARBITRARY path (underlay renders the
+  // parent level while the live grid still shows the child). Uses
+  // window.getBrowseChildrenAt so visibility/facet filtering matches the
+  // live render; falls back to the live children on a stale shell.
+  function _levelModel(path){
+    var folders = (typeof window.getBrowseChildrenAt === "function")
+      ? window.getBrowseChildrenAt(path) : _getBrowseChildren();
+    var readChildren = _readChildNodes(folders);
+    var rootLoose = _looseImagesAt(path);
+    var ctx = _buildRenderCtx(folders.concat(readChildren));
+    return {folders: folders, readChildren: readChildren, rootLoose: rootLoose,
+            ctx: ctx, count: folders.length + readChildren.length + (rootLoose ? 1 : 0)};
   }
   // Delegated browse-click fallback: a single #tile-grid listener using
   // closest(), shared by tiles/list/cards. Prefers the app.js binder when
@@ -559,13 +576,8 @@
     if(url2) return '<img class="tile-img" src="' + _escapeHtml(url2) + '" loading="lazy" decoding="async">';
     return _tilePlaceholder();
   }
-  function renderTiles(){
-    var tileGrid=_getTileGrid(); if(!tileGrid) return;
-    var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
-    var folders = _getBrowseChildren();
-    var readChildren=_readChildNodes(folders);
-    var rootLoose=_rootHasLooseImages();
-    var ctx=_buildRenderCtx(folders.concat(readChildren));
+  function _tilesHtml(m){
+    var folders=m.folders, readChildren=m.readChildren, rootLoose=m.rootLoose, ctx=m.ctx;
     var html="";
     for(var f of folders){
       var isActive = f._fullPath === _getCurrentFolder();
@@ -598,18 +610,19 @@
       var sOffline=_offlineHtmlFor(ctx, "");
       html+='<div class="tile" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button">'+_tilePlaceholder()+'<div class="tile-name">'+sProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+sOffline+'</div>';
     }
-    tileGrid.innerHTML = html || '<div style="color:#555;text-align:center;padding:20px;font-size:13px">' + _emptyBrowseMessage() + '</div>';
-    _scheduleCv(tileGrid);
-    _bindTiles();
-    var el=document.getElementById("folder-count"); if(el) el.textContent=(folders.length+readChildren.length+(rootLoose?1:0))+" 件";
+    return html;
   }
-  function renderList(){
+  function renderTiles(){
     var tileGrid=_getTileGrid(); if(!tileGrid) return;
     var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
-    var nodes = _getBrowseChildren();
-    var readChildren=_readChildNodes(nodes);
-    var rootLoose=_rootHasLooseImages();
-    var ctx=_buildRenderCtx(nodes.concat(readChildren));
+    var m=_levelModel(_getCurrentBrowsePath());
+    tileGrid.innerHTML = _tilesHtml(m) || '<div style="color:#555;text-align:center;padding:20px;font-size:13px">' + _emptyBrowseMessage() + '</div>';
+    _scheduleCv(tileGrid);
+    _bindTiles();
+    var el=document.getElementById("folder-count"); if(el) el.textContent=m.count+" 件";
+  }
+  function _listHtml(m){
+    var nodes=m.folders, readChildren=m.readChildren, rootLoose=m.rootLoose, ctx=m.ctx;
     var html="";
     for(var node of nodes){
       var path=node._fullPath;
@@ -640,18 +653,19 @@
       var lsProgress=_progressFor(ctx, "");
       html+='<div class="item folder" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+lsProgress.inlineBarHtml+'</span>'+_offlineHtmlFor(ctx, "")+'</div>';
     }
-    tileGrid.innerHTML=html||'<div class="item" style="color:#555">'+_emptyBrowseMessage()+'</div>';
-    _scheduleCv(tileGrid);
-    _bindList();
-    var ec=document.getElementById("folder-count"); if(ec) ec.textContent=(nodes.length+readChildren.length+(rootLoose?1:0))+" 件";
+    return html;
   }
-  function renderCards(){
+  function renderList(){
     var tileGrid=_getTileGrid(); if(!tileGrid) return;
     var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
-    var folders=_getBrowseChildren();
-    var readChildren=_readChildNodes(folders);
-    var rootLoose=_rootHasLooseImages();
-    var ctx=_buildRenderCtx(folders.concat(readChildren));
+    var m=_levelModel(_getCurrentBrowsePath());
+    tileGrid.innerHTML=_listHtml(m)||'<div class="item" style="color:#555">'+_emptyBrowseMessage()+'</div>';
+    _scheduleCv(tileGrid);
+    _bindList();
+    var ec=document.getElementById("folder-count"); if(ec) ec.textContent=m.count+" 件";
+  }
+  function _cardsHtml(m){
+    var folders=m.folders, readChildren=m.readChildren, rootLoose=m.rootLoose, ctx=m.ctx;
     var html="";
     for(var f of folders){
       var isActive=f._fullPath===_getCurrentFolder();
@@ -686,10 +700,29 @@
       var csOffline=_offlineHtmlFor(ctx, "");
       html+='<div class="card" data-path="" data-read-self="1" tabindex="0" role="button">'+_cardPlaceholder()+'<div class="card-content"><div class="card-title">'+csProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+csOffline+'</div>';
     }
-    tileGrid.innerHTML=html||'<div style="color:#555;text-align:center;padding:20px;font-size:13px">'+_emptyBrowseMessage()+'</div>';
+    return html;
+  }
+  function renderCards(){
+    var tileGrid=_getTileGrid(); if(!tileGrid) return;
+    var _blk=_visBlocked(); if(_blk!==null){ tileGrid.innerHTML=_blk; return; }
+    var m=_levelModel(_getCurrentBrowsePath());
+    tileGrid.innerHTML=_cardsHtml(m)||'<div style="color:#555;text-align:center;padding:20px;font-size:13px">'+_emptyBrowseMessage()+'</div>';
     _scheduleCv(tileGrid);
     _bindCards();
-    var cc=document.getElementById("folder-count"); if(cc) cc.textContent=(folders.length+readChildren.length+(rootLoose?1:0))+" 件";
+    var cc=document.getElementById("folder-count"); if(cc) cc.textContent=m.count+" 件";
+  }
+  // One browse level's HTML + count for an arbitrary path — the pop
+  // underlay renders the parent level while the live grid still shows the
+  // child. Mode mirrors renderBrowse's non-search dispatch.
+  function buildLevelHtml(path, mode){
+    var blk=_visBlocked();
+    var m=_levelModel(path);
+    var html;
+    if (blk!==null) html=blk;
+    else if (mode==="list") html=_listHtml(m);
+    else if (mode==="card") html=_cardsHtml(m);
+    else html=_tilesHtml(m);
+    return {html: html || '<div style="color:#555;text-align:center;padding:20px;font-size:13px">'+_emptyBrowseMessage()+'</div>', count: m.count};
   }
   // scrollAnchor が渡された描画だけが位置を決める（undefined = 触らない）。
   // innerHTML 置換と同一タスクで書くので、誤った位置が 1 フレーム見えない。
@@ -715,7 +748,7 @@
   window.renderList=renderList;
   window.renderCards=renderCards;
   window.renderBrowse=renderBrowse;
-  window.BrowseRender={renderTiles,renderList,renderCards,renderBrowse,multiThumbSpec,splitDisplayName,nameHtml,hydrateMultiCovers,scheduleMultiHydration};
+  window.BrowseRender={renderTiles,renderList,renderCards,renderBrowse,buildLevelHtml,multiThumbSpec,splitDisplayName,nameHtml,hydrateMultiCovers,scheduleMultiHydration};
   // Real tile/card/item heights follow the responsive width breakpoints —
   // re-measure on resize so the skipped-element estimates don't drift stale.
   window.addEventListener('resize', function(){
