@@ -8,10 +8,15 @@ import UIKit
 final class LibraryStore: ObservableObject {
     @Published private(set) var tree: [TreeNode] = []
     @Published private(set) var generation: Int = 0
-    @Published private(set) var hiddenRoots: Set<String> = []
-    @Published var showAll: Bool = false
     @Published private(set) var loading = false
     @Published private(set) var error: String?
+
+    /// Hidden-root judgment lives in VisibilityStore (server-owned,
+    /// guarded). Set post-init so the store can be constructed first;
+    /// attaching republishes the top-level set (snapshot trees too).
+    var visibility: VisibilityStore? {
+        didSet { republishTopLevel() }
+    }
 
     private let api: BookqAPI
     private var etag: String?
@@ -61,35 +66,30 @@ final class LibraryStore: ObservableObject {
             case .notModified:
                 break
             }
-            await loadVisibility()
+            republishTopLevel()
+            Task { await visibility?.refresh() }
             saveSnapshot()
         } catch {
             self.error = error.localizedDescription
         }
     }
 
-    /// "building" 202s are already retried inside BookqAPI.folders.
-    private func loadVisibility() async {
-        do {
-            let snap = try await api.folderVisibility()
-            hiddenRoots = Set(snap.hidden)
-        } catch {
-            // visibility is best-effort — never fail the browse for it
-        }
+    /// Republish the top-level _fullPath set to the visibility store —
+    /// web republishes `setTopLevelPaths` on every (re)index too.
+    private func republishTopLevel() {
+        visibility?.setTopLevelPaths(tree.filter { $0.isFolder }.map { $0.name })
     }
 
     // MARK: - Offline snapshot
 
     private struct Snapshot: Codable {
         var tree: [TreeNode]
-        var hiddenRoots: Set<String>
         var generation: Int
     }
 
     private func saveSnapshot() {
         struct Env: Encodable { var snapshot: Snapshot }
-        let snap = Snapshot(tree: tree, hiddenRoots: hiddenRoots,
-                            generation: generation)
+        let snap = Snapshot(tree: tree, generation: generation)
         try? FileManager.default.createDirectory(
             at: snapshotURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
@@ -106,8 +106,8 @@ final class LibraryStore: ObservableObject {
               let snap = try? JSONDecoder().decode(Env.self, from: data).snapshot
         else { return }
         tree = snap.tree
-        hiddenRoots = snap.hiddenRoots
         generation = snap.generation
+        republishTopLevel()
     }
 
     private var pollTask: Task<Void, Never>?
@@ -152,22 +152,20 @@ final class LibraryStore: ObservableObject {
         BrowseModel.node(at: path, in: tree)
     }
 
-    /// Folder entries for a browse level, honoring hidden roots at top level.
+    /// Folder entries for a browse level. Visibility is judged per full
+    /// path via `isVisible` (fail-closed, ancestor matches filtered too) —
+    /// same predicate every web renderer uses.
     func levelFolders(path: String) -> [(path: String, node: TreeNode)] {
-        var entries = BrowseModel.folders(at: path, in: tree)
-        if path.isEmpty && !showAll {
-            entries = entries.filter { !hiddenRoots.contains($0.node.name) }
-        }
-        return entries
+        let entries = BrowseModel.folders(at: path, in: tree)
+        guard let vis = visibility, !vis.showAll else { return entries }
+        return entries.filter { vis.isVisible($0.path) }
     }
 
     /// Self/read tiles for a level (mixed children, or root loose images).
     func selfTiles(path: String) -> [(path: String, node: TreeNode)] {
-        var tiles = BrowseModel.selfTiles(at: path, in: tree)
-        if path.isEmpty && !showAll {
-            tiles = tiles.filter { $0.path.isEmpty || !hiddenRoots.contains($0.node.name) }
-        }
-        return tiles
+        let tiles = BrowseModel.selfTiles(at: path, in: tree)
+        guard let vis = visibility, !vis.showAll else { return tiles }
+        return tiles.filter { $0.path.isEmpty || vis.isVisible($0.path) }
     }
 
     /// All leaf folders (for future resume/offline enumeration).

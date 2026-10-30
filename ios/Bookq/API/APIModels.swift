@@ -5,17 +5,23 @@ import Foundation
 struct TreeNode: Codable, Hashable {
     var name: String
     var type: String            // "folder" | "image"
-    var children: [TreeNode]?
-    var thumb: String?
-    var thumbs: [String]?
-    var archive: Bool?
-    var pdf: Bool?
-    var hasMetadata: Bool?
-    var metadata: ComicMetadata?
-    var subtreeFacets: [String: [String]]?
+    var children: [TreeNode]? = nil
+    var thumb: String? = nil
+    var thumbs: [String]? = nil
+    var archive: Bool? = nil
+    var pdf: Bool? = nil
+    var hasMetadata: Bool? = nil
+    var metadata: ComicMetadata? = nil
+    var subtreeFacets: [String: [String]]? = nil
 
     var isFolder: Bool { type == "folder" }
     var isImage: Bool { type == "image" }
+
+    enum CodingKeys: String, CodingKey {
+        case name, type, children, thumb, thumbs, archive, pdf, metadata
+        case hasMetadata = "has_metadata"
+        case subtreeFacets = "subtree_facets"
+    }
 }
 
 struct ComicMetadata: Codable, Hashable {
@@ -48,10 +54,12 @@ struct VersionResponse: Codable, Hashable {
 }
 
 /// `/api/folder-visibility` response (per-user snapshot).
+/// Wire shape: {owner, revision, hiddenRoots} — verified against
+/// `app/folder_visibility_routes.py` `_respond`.
 struct VisibilitySnapshot: Codable, Hashable {
     var owner: String
     var revision: Int
-    var hidden: [String]
+    var hiddenRoots: [String]
 }
 
 /// `/api/reading-position` record — single latest position per user.
@@ -68,14 +76,12 @@ struct PositionEnvelope: Codable {
     var position: ReadingPosition?
 }
 
-/// `/api/search` response: searchPath → matched nodes.
-struct SearchResults: Codable {
-    var searchPath: String
-    var results: [TreeNode]
-    enum CodingKeys: String, CodingKey {
-        case results
-        case searchPath = "search_path"
-    }
+/// `/api/search` response — {query, total, results:[ComicMetadata]}.
+/// Results serialize `ComicMetadata.to_dict()` (snake_case keys).
+struct SearchResponse: Codable {
+    var query: String
+    var total: Int
+    var results: [ComicMetadata]
 }
 
 /// `/api/facets` response — union of subtree_facets.

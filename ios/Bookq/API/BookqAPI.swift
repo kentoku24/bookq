@@ -221,6 +221,67 @@ final class BookqAPI: Sendable {
         return try decode(VisibilitySnapshot.self, data, resp)
     }
 
+    /// PUT /api/folder-visibility — body exactly {root,hidden}, owner proof
+    /// via `X-Bookq-Visibility-Owner`. 409 = owner mismatch (stale account),
+    /// 404 = root not a current top-level folder (hide only). The response
+    /// is the authoritative post-write snapshot.
+    func setFolderVisibility(root: String, hidden: Bool, owner: String) async throws -> VisibilitySnapshot {
+        var req = makeRequest(path: "api/folder-visibility", method: "PUT")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(owner, forHTTPHeaderField: "X-Bookq-Visibility-Owner")
+        struct Body: Encodable { var root: String; var hidden: Bool }
+        req.httpBody = try JSONEncoder().encode(Body(root: root, hidden: hidden))
+        let (data, resp) = try await send(req)
+        return try decode(VisibilitySnapshot.self, data, resp)
+    }
+
+    // MARK: - Search / facets
+
+    /// `_fetchBuilding` equivalent (search/facets.js): 202 index-building
+    /// responses retry on `min(1500*(n+1),5000)` backoff, max 10 attempts.
+    /// Staleness is the caller's generation guard — Task cancellation also
+    /// aborts a retry loop mid-flight.
+    private func fetchBuilding(path: String, query: [URLQueryItem])
+        async throws -> (Data, HTTPURLResponse)? {
+        for attempt in 0..<10 {
+            try Task.checkCancellation()
+            let (data, resp) = try await send(makeRequest(path: path, query: query))
+            try Task.checkCancellation()
+            if resp.statusCode != 202 { return (data, resp) }
+            let wait = min(1.5 * Double(attempt + 1), 5.0)
+            try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+        }
+        return nil
+    }
+
+    /// GET /api/search — `doSearch` equivalent. Filters: artist/tag comma-
+    /// joined (server ANDs keys, ORs within a key), sort fixed relevance.
+    /// `includeHidden` opts out of the caller's hidden-root exclusion
+    /// (owner-scoped server-side — never another user's set). nil = still
+    /// building after 10 attempts or cancelled.
+    func search(q: String, artist: [String], tag: [String],
+                includeHidden: Bool) async throws -> SearchResponse? {
+        var query = [URLQueryItem(name: "q", value: q)]
+        if !artist.isEmpty { query.append(URLQueryItem(name: "artist", value: artist.joined(separator: ","))) }
+        if !tag.isEmpty { query.append(URLQueryItem(name: "tag", value: tag.joined(separator: ","))) }
+        query.append(URLQueryItem(name: "sort", value: "relevance"))
+        if includeHidden { query.append(URLQueryItem(name: "include_hidden", value: "1")) }
+        guard let (data, resp) = try await fetchBuilding(
+            path: "api/search", query: query) else { return nil }
+        return try decode(SearchResponse.self, data, resp)
+    }
+
+    /// GET /api/metadata/facets — `loadFacets` equivalent. `path` scopes to
+    /// a subtree ("" = whole library).
+    func facets(path: String = "", includeHidden: Bool) async throws -> Facets? {
+        var query: [URLQueryItem] = []
+        if !path.isEmpty { query.append(URLQueryItem(name: "path", value: path)) }
+        if includeHidden { query.append(URLQueryItem(name: "include_hidden", value: "1")) }
+        guard let (data, resp) = try await fetchBuilding(
+            path: "api/metadata/facets", query: query) else { return nil }
+        return try decode(Facets.self, data, resp)
+    }
+
     /// POST /api/refresh — full metadata rebuild.
     func refresh() async throws {
         let (_, resp) = try await send(makeRequest(path: "api/refresh", method: "POST"))
