@@ -152,8 +152,9 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   `UIScreen.didConnect/didDisconnect`（deprecated だが物理接続の唯一の
   シグナル）+ 次のページ送りで追従。
 - 解像度: 接続時に `screen.availableModes` から最大画素数のモードを選び
-  `screen.currentMode` に設定（native 4K を強制）。オーバースキャン TV
-  対策は `overscanCompensation = .insetBounds`（通常モニタでは no-op）。
+  `screen.currentMode` に設定（native 4K を強制）。`overscanCompensation
+  = .none` でフルパネル使用 — `.insetBounds` はオーバースキャン報告
+  ディスプレイで外周に黒枠が残るため（TV では端クリップの可能性あり）。
 - `ExternalDisplayRootView`/`ExternalReaderView` は端末リーダーと同じ
   規則で描画（外部 geometry から pageMode 決定、`work.withMode` で
   spread 再構成、`ReaderWork.spreadFit` 共有、RTL、chrome/gesture なし）。
