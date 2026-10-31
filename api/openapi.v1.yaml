@@ -605,6 +605,7 @@ paths:
           schema: {type: boolean, default: false}
       responses:
         "200":
+          description: 検索結果（relevance 降順）
           content:
             application/json:
               schema:
@@ -632,6 +633,7 @@ paths:
           schema: {type: boolean, default: false}
       responses:
         "200":
+          description: 利用可能なファセット値
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Facets"}
@@ -645,6 +647,7 @@ paths:
       summary: "[v0] POST /api/v1/index/refresh を使う"
       responses:
         "200":
+          description: 再構築完了
           content:
             application/json:
               schema:
@@ -662,6 +665,7 @@ paths:
       security: []
       responses:
         "200":
+          description: OK
           content:
             application/json:
               schema:
@@ -677,6 +681,7 @@ paths:
       summary: "[v0] GET /api/v1/version を使う"
       responses:
         "200":
+          description: "バージョン情報。`Cache-Control: no-store`"
           content:
             application/json:
               schema:
@@ -709,6 +714,7 @@ paths:
           schema: {type: string}
       responses:
         "200":
+          description: 合成 JPEG
           content:
             image/jpeg:
               schema: {type: string, format: binary}
@@ -751,6 +757,7 @@ paths:
                 ts: {type: integer}
       responses:
         "200":
+          description: 適用結果（ok = 採用、stale = 古い ts で棄却）
           content:
             application/json:
               schema:
@@ -768,6 +775,7 @@ paths:
           schema: {type: string}
       responses:
         "200":
+          description: 消去完了
           content:
             application/json:
               schema:
@@ -783,6 +791,7 @@ paths:
       summary: "[v0] GET /api/v1/folder-visibility を使う"
       responses:
         "200":
+          description: "可視性スナップショット。`Cache-Control: private, no-store`"
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}
@@ -809,6 +818,7 @@ paths:
                 hidden: {type: boolean}
       responses:
         "200":
+          description: 更新後の可視性スナップショット
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}

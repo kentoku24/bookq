@@ -260,8 +260,7 @@ components:
         payload:
           type: object
           description: type ごとのペイロード（下記 oneOf 参照）
-      discriminator:
-        propertyName: type
+      discriminator: type
       oneOf:
         - type: object
           properties:
