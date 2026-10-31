@@ -11,6 +11,9 @@ import os
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from authlib.integrations.starlette_client import OAuth, OAuthError
+from joserfc import jwt
+from joserfc.errors import JoseError
+from joserfc.jwk import OctKey
 from starlette.requests import HTTPConnection
 
 from app.config import Settings
@@ -49,10 +52,53 @@ def user_from_connection(connection: HTTPConnection) -> dict | None:
     Request (HTTP) and WebSocket reach the same session here — the WS endpoint
     uses this instead of the Request-based dependency. The TEST_MODE check
     lives here exactly once (#78: do not duplicate it in transport code).
+
+    Auth order: signed session cookie first, then `Authorization: Bearer`
+    (for native clients that can't do the cookie OAuth dance). Both paths
+    return the same user dict shape.
     """
     if _TEST_MODE:
         return {"email": "test@example.com", "name": "Test User", "picture": ""}
-    return connection.session.get("user")
+    user = connection.session.get("user")
+    if user is not None:
+        return user
+    return _user_from_bearer(connection)
+
+
+def _user_from_bearer(connection: HTTPConnection) -> dict | None:
+    """Validate `Authorization: Bearer <jwt>` (HS256, SECRET_KEY-signed).
+
+    Claims: ``sub`` (email) and ``exp`` are required; ``name``/``picture``
+    optional. Issued by /api/v1/auth/token for native clients; this side
+    only validates. Mirrors the cookie path's allowlist policy: the
+    configured set is required, an empty set rejects everyone.
+    """
+    scheme, _, token = connection.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    settings: Settings = connection.app.state.settings
+    if not settings.secret_key:
+        return None
+    try:
+        key = OctKey.import_key(settings.secret_key)
+        claims = jwt.decode(token.strip(), key).claims
+        jwt.JWTClaimsRegistry().validate(claims)
+    except (JoseError, ValueError):
+        return None
+    if claims.get("exp") is None:  # tokens without expiry are not accepted
+        return None
+    email = (claims.get("sub") or "").lower()
+    if not email:
+        return None
+    # Same allowlist policy as the OAuth callback: empty ALLOWED_EMAILS
+    # denies everyone (fail-closed), never fail-open.
+    if email not in settings.allowed_emails_set:
+        return None
+    return {
+        "email": email,
+        "name": claims.get("name") or email,
+        "picture": claims.get("picture") or "",
+    }
 
 
 async def get_current_user(request: Request) -> dict | None:
