@@ -70,7 +70,8 @@ def _user_from_bearer(connection: HTTPConnection) -> dict | None:
 
     Claims: ``sub`` (email) and ``exp`` are required; ``name``/``picture``
     optional. Issued by /api/v1/auth/token for native clients; this side
-    only validates. Mirrors the cookie path's allowlist policy.
+    only validates. Mirrors the cookie path's allowlist policy: the
+    configured set is required, an empty set rejects everyone.
     """
     scheme, _, token = connection.headers.get("authorization", "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
@@ -89,7 +90,9 @@ def _user_from_bearer(connection: HTTPConnection) -> dict | None:
     email = (claims.get("sub") or "").lower()
     if not email:
         return None
-    if settings.allowed_emails_set and email not in settings.allowed_emails_set:
+    # Same allowlist policy as the OAuth callback: empty ALLOWED_EMAILS
+    # denies everyone (fail-closed), never fail-open.
+    if email not in settings.allowed_emails_set:
         return None
     return {
         "email": email,

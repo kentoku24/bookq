@@ -43,7 +43,7 @@ def app_scope(monkeypatch):
     settings = app.state.settings
     saved = (settings.secret_key, list(settings.allowed_emails), settings.downloads_dir)
     settings.secret_key = KEY
-    settings.allowed_emails = []
+    settings.allowed_emails = ["reader@example.com"]
     yield app
     settings.secret_key, settings.allowed_emails, settings.downloads_dir = saved
 
@@ -112,6 +112,12 @@ def test_allowlist_enforced(app_scope):
     assert auth.user_from_connection(_conn(app_scope, _token())) is not None
 
 
+def test_empty_allowlist_rejects_everyone(app_scope):
+    """Fail-closed like the OAuth callback: empty ALLOWED_EMAILS = deny all."""
+    app_scope.state.settings.allowed_emails = []
+    assert auth.user_from_connection(_conn(app_scope, _token())) is None
+
+
 def test_empty_secret_key_disables_bearer(app_scope):
     app_scope.state.settings.secret_key = ""
     assert auth.user_from_connection(_conn(app_scope, _token())) is None
@@ -122,6 +128,7 @@ def test_protected_endpoint_accepts_bearer(app_scope, tmp_path):
 
     with TestClient(app_scope) as client:
         app_scope.state.settings.secret_key = KEY  # lifespan reloads settings
+        app_scope.state.settings.allowed_emails = ["reader@example.com"]
         app_scope.state.settings.downloads_dir = str(tmp_path)
         r = client.get("/api/folders", headers={"Authorization": f"Bearer {_token()}"})
         assert r.status_code == 200
