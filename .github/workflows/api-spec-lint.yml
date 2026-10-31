@@ -1,0 +1,31 @@
+# Lint the API contract files (single source of truth for server/client).
+# Spectral validates OpenAPI + AsyncAPI shape and hygiene rules from
+# .spectral.yaml. Runs on any PR touching api/ or this workflow.
+name: api-spec-lint
+
+on:
+  pull_request:
+    paths:
+      - "api/**"
+      - ".spectral.yaml"
+      - ".github/workflows/api-spec-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spectral:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Lint API specs
+        run: npx --yes @stoplight/spectral-cli lint --ruleset .spectral.yaml --fail-severity error api/openapi.v1.yaml api/asyncapi.yaml
