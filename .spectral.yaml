@@ -1,0 +1,10 @@
+extends:
+  - spectral:oas
+  - spectral:asyncapi
+rules:
+  # v0 paths are intentionally kept (deprecated) alongside v1 — duplicate
+  # operationIds across them would collide, so uniqueness stays enforced but
+  # descriptions/tags hygiene rules stay at their default severities.
+  operation-operationId-unique: error
+  # Info/description presence is enforced; keep the rest of the recommended
+  # set as-is so spec edits fail loudly on shape errors.

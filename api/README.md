@@ -1,0 +1,23 @@
+# api/ — 公開 API 契約 (single source of truth)
+
+サーバ (FastAPI → 将来 Rust) とクライアント (PWA / iOS) の間の正本仕様。
+**実装ではなくこのディレクトリが契約の正** — 振る舞いを変える変更は必ずここを先に更新する。
+
+| ファイル | 内容 |
+|---|---|
+| `openapi.v1.yaml` | REST API (OpenAPI 3.1)。`/api/v1/*` 正規形 + deprecated v0 併記 |
+| `asyncapi.yaml` | `/ws/reader-sync` のワイヤ形式 (AsyncAPI 3.0) |
+| `reader-sync-protocol.md` | reader-sync の振る舞い契約 (フェーズ機械・逐次化・拒否理由・MANIFEST)。asyncapi.yaml とセットで読む |
+
+## 編集規約
+
+- **後方互換**: 公開フィールドの削除・型変更・意味変更は不可。追加は optional フィールドのみ。
+  破壊的変更が必要なら新バージョン (`openapi.v2.yaml` 等) を切る。
+- **v0 → v1**: `/api/*` (v0) は deprecated。新規クライアントは `/api/v1/*` のみ使う。
+  v1 で意味が変わる箇所 (envelope 統一、Bearer 認証、per-folder reading-positions) は
+  各 operation の description を参照。
+- **wire-stable 文字列**: `reader-sync-protocol.md` §5 の拒否理由・enum 値は
+  iOS/web が文字列一致で処理する契約面。リネーム禁止、追加のみ可。
+- **CI**: Spectral lint が PR で両 spec を検査する。ローカル確認:
+  `npx @stoplight/spectral-cli lint api/openapi.v1.yaml api/asyncapi.yaml`
+- 実装側の契約テスト (Schemathesis) は別 PR で追加予定。
