@@ -1,7 +1,12 @@
 # Contract test: run the FastAPI app in test mode and verify it conforms to
 # api/openapi.v1.yaml via Schemathesis (property-based testing over the spec).
-# /api/v1/* paths are excluded until the v1 endpoints land (M1) — remove the
-# --exclude-path filter when they do.
+#
+# `ignored_auth` is excluded because BOOKQ_TEST_MODE bypasses auth by design —
+# the check would flag every authenticated operation as "accepts invalid
+# credentials". Auth enforcement itself is covered by tests/test_bearer_auth.py.
+# `allow_header_conformance` is excluded because Starlette's default OPTIONS
+# handler only ever reports "Allow: GET" — a framework quirk, not a contract
+# decision we control at the route level.
 name: api-contract
 
 on:
@@ -49,5 +54,5 @@ jobs:
       - name: Schemathesis contract test
         run: |
           uv run --with schemathesis schemathesis run api/openapi.v1.yaml \
-            --base-url http://127.0.0.1:8080 \
-            --exclude-path '^/api/v1/'
+            --url http://127.0.0.1:8080 \
+            --exclude-checks ignored_auth,allow_header_conformance
