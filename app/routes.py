@@ -1766,22 +1766,32 @@ def _validate_folder_param(folder) -> str:
     return folder
 
 
+def _as_int(v) -> int | None:
+    """JSON Schema `integer` admits integral floats (2716.0) — coerce them.
+
+    bools and non-integral/non-finite values stay rejected.
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and math.isfinite(v) and v.is_integer():
+        return int(v)
+    return None
+
+
 def _validate_position_body_v1(body) -> dict:
     """Validate a v1 PUT body ``{page,total,ts}`` — folder comes from the query."""
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="expected JSON object")
-    page = body.get("page")
-    if not isinstance(page, int) or isinstance(page, bool) or page < 0:
+    page = _as_int(body.get("page"))
+    if page is None or page < 0:
         raise HTTPException(status_code=400, detail="invalid page")
-    total = body.get("total")
-    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+    total = _as_int(body.get("total"))
+    if total is None or total < 1:
         raise HTTPException(status_code=400, detail="invalid total")
-    ts = body.get("ts")
-    if (
-        not isinstance(ts, int)
-        or isinstance(ts, bool)
-        or ts < 0
-    ):
+    ts = _as_int(body.get("ts"))
+    if ts is None or ts < 0:
         raise HTTPException(status_code=400, detail="invalid ts")
     return {"page": page, "total": total, "ts": ts}
 
@@ -1799,23 +1809,20 @@ def _validate_position_payload(body) -> dict:
         or "\x00" in folder
     ):
         raise HTTPException(status_code=400, detail="invalid folder")
-    page = body.get("page")
-    if not isinstance(page, int) or isinstance(page, bool) or page < 0:
+    page = _as_int(body.get("page"))
+    if page is None or page < 0:
         raise HTTPException(status_code=400, detail="invalid page")
-    total = body.get("total")
-    if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+    total = _as_int(body.get("total"))
+    if total is None or total < 1:
         raise HTTPException(status_code=400, detail="invalid total")
     ts = body.get("ts")
     if ts is None:
         ts = int(time.time() * 1000)
-    elif (
-        isinstance(ts, bool)
-        or not isinstance(ts, (int, float))
-        or not math.isfinite(ts)  # json.loads accepts NaN/Infinity; int() would 500
-        or ts < 0
-    ):
-        raise HTTPException(status_code=400, detail="invalid ts")
-    return {"folder": folder, "page": page, "total": total, "ts": int(ts)}
+    else:
+        ts = _as_int(ts)
+        if ts is None or ts < 0:
+            raise HTTPException(status_code=400, detail="invalid ts")
+    return {"folder": folder, "page": page, "total": total, "ts": ts}
 
 
 @api_router.get("/api/reading-position")

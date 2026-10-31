@@ -7,6 +7,7 @@ against these shapes.
 """
 
 import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -84,7 +85,7 @@ async def v1_search(
     q: str = Query("", description="Free text search"),
     artist: str = Query("", description="Artist filter"),
     tag: str = Query("", description="Tags (comma-separated)"),
-    sort: str = Query("relevance", description="Sort: relevance"),
+    sort: Literal["relevance"] = Query("relevance", description="Sort: relevance"),
     include_hidden: bool = Query(False, description="全表示 mode: do not exclude the caller's hidden roots"),
     _user: dict = Depends(require_auth),
 ):

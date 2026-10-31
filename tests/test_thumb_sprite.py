@@ -124,7 +124,8 @@ def test_sprite_opens_archive_exactly_once(client, monkeypatch) -> None:
 
 def test_sprite_non_archive_folder_is_400(client) -> None:
     # plain is a directory now (dir sprites are supported) — see dir tests.
-    assert client.get("/api/thumb-sprite?folder=nope.zip&names=a.png&w=200").status_code == 400
+    # nonexistent folder → 404; existing non-archive/non-dir → 400.
+    assert client.get("/api/thumb-sprite?folder=nope.zip&names=a.png&w=200").status_code == 404
     assert client.get("/api/thumb-sprite?folder=r.png&names=a.png&w=200").status_code == 400
     assert client.get("/api/thumb-sprite?folder=work.zip&w=200").status_code == 400
 
