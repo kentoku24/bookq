@@ -148,6 +148,20 @@ final class VisibilityStoreTests: XCTestCase {
         XCTAssertFalse(store.isVisible("work"))
     }
 
+    /// Review fix — cold boot resolves /me AFTER the cached snapshot is
+    /// restored, so auth.user is nil; accountChanged(knownOwner:) must
+    /// keep the snapshot when the account matches, reset only on a real
+    /// owner change.
+    func testAccountChangedKeepsSameOwnerSnapshot() {
+        apply(owner: "o1", rev: 3, roots: ["secret"])
+        store.accountChanged(knownOwner: "o1")
+        XCTAssertTrue(store.hasSnapshot)
+        XCTAssertEqual(store.guardPath("secret"), .hidden)
+        store.accountChanged(knownOwner: "o2")
+        XCTAssertFalse(store.hasSnapshot)
+        XCTAssertEqual(store.guardPath("secret"), .pending)
+    }
+
     // MARK: cached restore
 
     func testCacheRestoreMarksReadonly() {

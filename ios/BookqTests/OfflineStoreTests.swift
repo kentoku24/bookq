@@ -156,6 +156,87 @@ final class OfflineStoreTests: XCTestCase {
         XCTAssertTrue(s1.records.isEmpty)
     }
 
+    // MARK: legacy migration (review fix — pre-scope data must not vanish)
+
+    /// Pre-scoping releases stored works.json + leaf dirs at root; the
+    /// first signed-in scope must adopt them so pre-update downloads
+    /// stay visible and readable.
+    func testLegacyDataMigratesIntoScope() throws {
+        let leaf = "w/ch1"
+        var cs = CharacterSet.alphanumerics
+        cs.insert(charactersIn: "-_.")
+        let enc = leaf.addingPercentEncoding(withAllowedCharacters: cs)!
+        let legacyDir = root.appendingPathComponent(enc, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: legacyDir, withIntermediateDirectories: true)
+        try Data([1]).write(to: legacyDir.appendingPathComponent("p1.jpg"))
+        let rec = OfflineStore.LeafRecord(
+            folder: leaf, pageCount: 1, cachedCount: 1, bytes: 1,
+            thumb: nil, names: ["p1.jpg"], addedAt: 1, lastReadAt: 1)
+        try JSONEncoder().encode([leaf: rec])
+            .write(to: root.appendingPathComponent("works.json"))
+        // A foreign scope dir must NOT be swallowed by the migration.
+        let foreign = root.appendingPathComponent("h2%7Cb%40x", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: foreign, withIntermediateDirectories: true)
+
+        let s = OfflineStore(apiProvider: { nil },
+                             scopeProvider: { "h1|a@x" }, root: root)
+        XCTAssertEqual(s.records[leaf]?.cachedCount, 1)
+        XCTAssertNotNil(s.localFileURL(folder: leaf, name: "p1.jpg"))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("works.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path))
+    }
+
+    /// The anonymous scope must not claim a signed-in library — a
+    /// logged-out boot leaves legacy data in place until the real
+    /// account arrives.
+    func testLegacyNotMigratedForAnonScope() throws {
+        let rec = OfflineStore.LeafRecord(
+            folder: "w", pageCount: 1, cachedCount: 1, bytes: 1,
+            thumb: nil, names: ["p1.jpg"], addedAt: 1, lastReadAt: 1)
+        try JSONEncoder().encode(["w": rec])
+            .write(to: root.appendingPathComponent("works.json"))
+        _ = OfflineStore(apiProvider: { nil },
+                         scopeProvider: { "h1|anon" }, root: root)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("works.json").path))
+    }
+
+    /// Review fix — a delete issued just before a scope switch must
+    /// remove THIS scope's files only; the next scope's same-named work
+    /// and its record survive.
+    func testDeleteDuringScopeSwitchKeepsNewScopeFiles() async throws {
+        var scope = "h|a@x"
+        let s = OfflineStore(apiProvider: { nil },
+                             scopeProvider: { scope }, root: root)
+        let leaf = "w"
+        try FileManager.default.createDirectory(
+            at: s.dirURL(for: leaf), withIntermediateDirectories: true)
+        try Data([1]).write(to: s.fileURL(folder: leaf, name: "p1.jpg"))
+        s.testPut(OfflineStore.LeafRecord(
+            folder: leaf, pageCount: 1, cachedCount: 1, bytes: 1,
+            thumb: nil, names: ["p1.jpg"], addedAt: 1, lastReadAt: 1))
+        let dirA = s.dirURL(for: leaf)
+        s.delete(path: leaf, leaves: [leaf])
+        // Switch before the delete task's filesystem pass runs.
+        scope = "h|b@x"
+        s.scopeChanged()
+        let dirB = s.dirURL(for: leaf)
+        try FileManager.default.createDirectory(
+            at: dirB, withIntermediateDirectories: true)
+        try Data([2]).write(to: dirB.appendingPathComponent("p1.jpg"))
+        s.testPut(OfflineStore.LeafRecord(
+            folder: leaf, pageCount: 1, cachedCount: 1, bytes: 1,
+            thumb: nil, names: ["p1.jpg"], addedAt: 1, lastReadAt: 1))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dirA.path))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: dirB.appendingPathComponent("p1.jpg").path))
+        XCTAssertNotNil(s.records[leaf])
+    }
+
     // MARK: downloadedNames filters to existing files
 
     func testDownloadedNamesIntersection() throws {

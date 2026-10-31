@@ -69,8 +69,35 @@ final class OfflineStore: ObservableObject {
         self.root = root ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BookqOffline", isDirectory: true)
         lastScope = scopeProvider()
+        migrateLegacyIfNeeded()
         load()
         pruneOrphans()
+    }
+
+    /// Pre-scoping releases kept `works.json` + leaf dirs directly under
+    /// `root`; without this one-time move into the active scope every
+    /// pre-update download would silently vanish. Only runs into a
+    /// concrete account scope — the anonymous scope must not claim a
+    /// signed-in user's library (it would strand the data on logout).
+    private func migrateLegacyIfNeeded() {
+        let s = lastScope ?? scopeProvider()
+        guard let sep = s.lastIndex(of: "|"),
+              s[s.index(after: sep)...] != "anon",
+              let items = try? fm.contentsOfDirectory(atPath: root.path) else { return }
+        let dst = scopedRoot
+        try? fm.createDirectory(at: dst, withIntermediateDirectories: true)
+        let legacy = root.appendingPathComponent("works.json")
+        try? fm.moveItem(at: legacy, to: recordsURL)
+        for name in items
+        // Skip the active scope, other scopes ("<enc>%7C<enc>"), and the
+        // anonymous scope — legacy leaf dirs never contain "%7C".
+        where name != dst.lastPathComponent && !name.contains("%7C") && name != "anon" {
+            let src = root.appendingPathComponent(name, isDirectory: true)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: src.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+            try? fm.moveItem(at: src, to: dst.appendingPathComponent(name, isDirectory: true))
+        }
     }
 
     /// Re-read state after a server/account switch — the new scope has
@@ -79,6 +106,7 @@ final class OfflineStore: ObservableObject {
         let s = scopeProvider()
         guard s != lastScope else { return }
         lastScope = s
+        migrateLegacyIfNeeded()
         records = [:]
         downloading = []
         stopping = []
@@ -360,13 +388,19 @@ final class OfflineStore: ObservableObject {
         deleting.insert(path)
         confirming.remove(path)
         let targets = Array(Set(leaves + [path]))
+        // Bind to THIS scope's dirs now — dirURL() re-reads scopeProvider,
+        // so resolving inside the Task could hit the next scope's dirs and
+        // wipe a same-named work there. The stale-scope record is left
+        // behind on purpose: pruneOrphans() drops it on the next visit.
+        let dirs = targets.map { dirURL(for: $0) }
+        let scope = lastScope
         Task {
             defer { deleting.remove(path); showToast("削除しました") }
-            for t in targets {
-                records[t] = nil
-                try? fm.removeItem(at: dirURL(for: t))
+            for (i, t) in targets.enumerated() {
+                if lastScope == scope { records[t] = nil }
+                try? fm.removeItem(at: dirs[i])
             }
-            persist()
+            if lastScope == scope { persist() }
         }
     }
 

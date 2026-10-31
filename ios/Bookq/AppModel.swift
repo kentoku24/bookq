@@ -136,15 +136,14 @@ final class AppModel: ObservableObject {
         bootError = nil
         do {
             let me = try await api.me()
-            if auth.user?.email != me.email {
-                // Account switch — the previous user's per-account state
-                // (visibility, offline records) must not bleed through.
-                visibility.accountChanged()
-                auth.apply(user: me)
-                offline.scopeChanged()
-            } else {
-                auth.apply(user: me)
-            }
+            // Account switch — the previous user's per-account state
+            // (visibility, offline records) must not bleed through. The
+            // store itself knows the previous owner (auth.user is nil
+            // until now): a same-account reboot must keep its cached
+            // snapshot.
+            visibility.accountChanged(knownOwner: me.email)
+            auth.apply(user: me)
+            offline.scopeChanged()
             phase = .ready
             Task { await progress.syncWithServer() }
             pair.bootResume()
@@ -173,6 +172,10 @@ final class AppModel: ObservableObject {
 
     func didLogin() {
         configureAPI()
+        // A different account signing in must not inherit the previous
+        // owner's hidden roots or offline records.
+        visibility.accountChanged(knownOwner: auth.user?.email)
+        offline.scopeChanged()
         phase = .ready
     }
 

@@ -13,6 +13,12 @@ final class RemoteImageLoader: ObservableObject {
     /// SW cache-first equivalent: resolve a remote URL to a downloaded
     /// offline file before hitting the network.
     var offlineResolver: ((URL) -> URL?)?
+    /// Network fetch seam — tests inject a stub to hold a fetch in-flight.
+    var fetcher: ((URL) async throws -> Data)?
+    /// Bumped by clear() — an in-flight fetch that outlives a server /
+    /// account switch must not write the old scope's image back into the
+    /// cache.
+    private var cacheEpoch = 0
 
     init() {
         cache.countLimit = 400
@@ -26,17 +32,25 @@ final class RemoteImageLoader: ObservableObject {
     func load(_ url: URL) async -> UIImage? {
         if let hit = image(for: url) { return hit }
         if let existing = inFlight[url] { return await existing.value }
-        let task = Task<UIImage?, Never> { [api, offlineResolver] in
+        let epoch = cacheEpoch
+        let task = Task<UIImage?, Never> { [api, offlineResolver, fetcher] in
             if let local = offlineResolver?(url),
                let img = UIImage(contentsOfFile: local.path) {
+                guard self.cacheEpoch == epoch else { return nil }
                 let cost = Int(img.size.width * img.size.height * 4)
                 self.cache.setObject(img, forKey: url.absoluteString as NSString, cost: cost)
                 return img
             }
-            guard let api else { return nil }
             do {
-                let data = try await api.imageData(url: url)
+                let data: Data
+                if let fetcher {
+                    data = try await fetcher(url)
+                } else {
+                    guard let api else { return nil }
+                    data = try await api.imageData(url: url)
+                }
                 guard let img = UIImage(data: data, scale: 1) else { return nil }
+                guard self.cacheEpoch == epoch else { return nil }
                 let cost = Int(img.size.width * img.size.height * 4)
                 self.cache.setObject(img, forKey: url.absoluteString as NSString, cost: cost)
                 return img
@@ -51,7 +65,10 @@ final class RemoteImageLoader: ObservableObject {
     }
 
     func clear() {
+        cacheEpoch += 1
         cache.removeAllObjects()
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
     }
 }
 

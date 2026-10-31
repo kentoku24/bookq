@@ -108,7 +108,12 @@ final class VisibilityStore: ObservableObject {
     /// not stay applied (they'd leak or wrongly hide roots) while the
     /// new account's snapshot is pending. Reset to fail-closed loading;
     /// the next refresh()/cache-restore repopulates for the new owner.
-    func accountChanged() {
+    /// `knownOwner` skips the reset when the resolved account matches
+    /// the restored owner — at cold boot auth.user is nil until /me
+    /// resolves, and wiping there would discard the same account's
+    /// cached snapshot it exists to serve.
+    func accountChanged(knownOwner: String? = nil) {
+        guard owner != knownOwner else { return }
         owner = nil
         revision = 0
         hasSnapshot = false
