@@ -939,12 +939,12 @@ _FOLDERS_CACHE_CONTROL = "private, max-age=60"
 
 def _folders_response(
     request: Request,
-    response: Response,  # unused — kept only so api_folders' FastAPI DI signature is unchanged
-    payload: list[dict],
+    payload,
     path: str,
     depth: int | None,
     gen,
     gen_int: int = 1,
+    key_ns: str = "v0",
 ):
     """Attach ETag + Cache-Control, or return 304 on If-None-Match hit.
 
@@ -977,7 +977,7 @@ def _folders_response(
         body_cache = {"gen": gen, "gen_int": gen_int, "entries": {}}
         request.app.state.folders_body_cache = body_cache
 
-    cache_key = (path, depth)
+    cache_key = (key_ns, path, depth)
     entry = body_cache["entries"].get(cache_key)
     if entry is None:
         body_str = json.dumps(
@@ -985,7 +985,7 @@ def _folders_response(
             separators=(",", ":"), default=str,
         )
         body = body_str.encode("utf-8")
-        digest = hashlib.sha1(f"{path}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+        digest = hashlib.sha1(f"{key_ns}:{path}:{depth}:{body_str}".encode("utf-8")).hexdigest()
         etag = f'"{digest[:24]}-g{gen_int}"'
         entry = (body, etag)
         body_cache["entries"][cache_key] = entry
@@ -1017,6 +1017,25 @@ async def api_folders(
     frontend must only OfflineTree.putTree() full-tree snapshots. Flattened
     names (containing "/") are returned verbatim.
     """
+    return await _folder_tree(request, path, depth, since, v1=False)
+
+
+async def _folder_tree(
+    request: Request,
+    path: str,
+    depth: int | None,
+    since: int | None,
+    *,
+    v1: bool = False,
+):
+    """Shared core of ``/api/folders`` (v0) and ``/api/v1/tree`` (v1).
+
+    v1 wraps every payload in the spec envelope
+    ``{kind: tree|children, nodes, generation}``; v0 keeps the bare list
+    (or ``{tree, generation}`` on a ``since`` mismatch). ``key_ns`` keeps
+    the shared body/ETag cache from serving one version's shape at the
+    other's URL.
+    """
     # Direct unit calls pass the raw Query defaults; treat them as omitted.
     if not isinstance(path, str):
         path = ""
@@ -1027,6 +1046,13 @@ async def api_folders(
     if depth is not None and depth < 1:
         raise HTTPException(status_code=400, detail="depth must be >= 1")
     request.app.state.last_request_at = time.time()
+    key_ns = "v1" if v1 else "v0"
+
+    def _wrap(nodes: list[dict], kind: str, gen_int: int):
+        if not v1:
+            return nodes
+        return {"kind": kind, "nodes": nodes, "generation": gen_int}
+
     if depth is None:
         # Legacy full tree — byte-compatible default (search/offline/tests).
         # Tree/index come from the shared TTL cache; Todo 6 (HTTP cache) can
@@ -1054,8 +1080,10 @@ async def api_folders(
         subtree = index.subtree_facets()
         _attach_subtree_facets(tree, subtree, "")
         if since is not None:
+            if v1:
+                return JSONResponse({"kind": "tree", "nodes": tree, "generation": gen_int})
             return JSONResponse({"tree": tree, "generation": gen_int})
-        return _folders_response(request, response, tree, "", None, gen, gen_int)
+        return _folders_response(request, _wrap(tree, "tree", gen_int), "", None, gen, gen_int, key_ns)
     norm = path.rstrip("/")
     downloads_path = request.app.state.settings.downloads_path
     target_fs = downloads_path if not norm else downloads_path / norm
@@ -1087,7 +1115,7 @@ async def api_folders(
             target_children = node.get("children") or []
         # Copies, not views into the cached tree (children must stay intact there).
         shallow = [{**c, "children": []} for c in target_children if c.get("type") == "folder"]
-        return _folders_response(request, response, shallow, norm, depth, gen, gen_int)
+        return _folders_response(request, _wrap(shallow, "children", gen_int), norm, depth, gen, gen_int, key_ns)
     # Live-FS fallback: list one directory level directly. Archives/PDFs are
     # classified by suffix membership only — never opened, images never
     # stat'ed. Deliberately bypasses folders_body_cache: that cache is keyed
@@ -1138,12 +1166,15 @@ async def api_folders(
                      "archive": True, "pdf": True} for n in pdfs]
                 + [{"name": n, "type": "folder", "children": []} for n in dirs]
             )
+    fallback_gen = (
+        int(cache_data.get("generation", 1) or 1) if isinstance(cache_data, dict) else 0
+    )
     body_str = json.dumps(
-        shallow, ensure_ascii=False, allow_nan=False, indent=None,
+        _wrap(shallow, "children", fallback_gen), ensure_ascii=False, allow_nan=False, indent=None,
         separators=(",", ":"), default=str,
     )
     body = body_str.encode("utf-8")
-    digest = hashlib.sha1(f"{norm}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(f"{key_ns}:{norm}:{depth}:{body_str}".encode("utf-8")).hexdigest()
     etag = f'"{digest[:24]}"'
     headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
     if getattr(request, "headers", None) is not None and request.headers.get(
@@ -1165,17 +1196,8 @@ async def _visibility_hidden_roots(request: Request, user: dict) -> tuple[str, .
     return await hidden_roots_for_request(request, user)
 
 
-@api_router.get("/api/search")
-async def search(
-    request: Request,
-    q: str = Query("", description="Free text search"),
-    artist: str = Query("", description="Artist filter"),
-    tag: str = Query("", description="Tags (comma-separated)"),
-    sort: str = Query("relevance", description="Sort: relevance"),
-    include_hidden: bool = Query(False, description="全表示 mode: do not exclude the caller's hidden roots"),
-    _user: dict = Depends(require_auth),
-):
-    """Search comics by text and facet filters. Requires authentication.
+async def _search_impl(request: Request, q: str, artist: str, tag: str, sort: str, include_hidden: bool, user: dict):
+    """Shared ``/api/search`` + ``/api/v1/search`` core.
 
     Comics under the caller's hidden roots are excluded server-side —
     shipping them and filtering client-side would still leak them in the
@@ -1190,7 +1212,7 @@ async def search(
             status_code=202,
             headers={"Retry-After": "2", "Cache-Control": "no-store"},
         )
-    hidden = await _visibility_hidden_roots(request, _user)
+    hidden = await _visibility_hidden_roots(request, user)
     if include_hidden:
         hidden = ()
 
@@ -1204,20 +1226,26 @@ async def search(
     return {"query": q, "total": len(results), "results": results}
 
 
-@api_router.get("/api/metadata/facets")
-async def get_facets(
+@api_router.get("/api/search")
+async def search(
     request: Request,
-    path: str = Query("", description="Subtree path relative to downloads dir (empty = whole library)"),
+    q: str = Query("", description="Free text search"),
+    artist: str = Query("", description="Artist filter"),
+    tag: str = Query("", description="Tags (comma-separated)"),
+    sort: str = Query("relevance", description="Sort: relevance"),
     include_hidden: bool = Query(False, description="全表示 mode: do not exclude the caller's hidden roots"),
     _user: dict = Depends(require_auth),
 ):
-    """Return available facet filter options. Requires authentication.
+    """Search comics by text and facet filters. Requires authentication."""
+    return await _search_impl(request, q, artist, tag, sort, include_hidden, _user)
+
+
+async def _facets_impl(request: Request, path: str, include_hidden: bool, user: dict):
+    """Shared ``/api/metadata/facets`` + ``/api/v1/facets`` core.
 
     Hidden roots are excluded server-side — a facet value existing only on
     hidden works must never surface. ``include_hidden`` opts out for the
     owner's own 全表示 mode (the caller's own hidden set — never another's).
-
-    Contract: returns {artists, tags} only (no parodies key).
     """
     try:
         index = await _ensure_index(request)
@@ -1227,10 +1255,24 @@ async def get_facets(
             status_code=202,
             headers={"Retry-After": "2", "Cache-Control": "no-store"},
         )
-    hidden = await _visibility_hidden_roots(request, _user)
+    hidden = await _visibility_hidden_roots(request, user)
     if include_hidden:
         hidden = ()
     return index.facets_for(path, exclude_roots=hidden)
+
+
+@api_router.get("/api/metadata/facets")
+async def get_facets(
+    request: Request,
+    path: str = Query("", description="Subtree path relative to downloads dir (empty = whole library)"),
+    include_hidden: bool = Query(False, description="全表示 mode: do not exclude the caller's hidden roots"),
+    _user: dict = Depends(require_auth),
+):
+    """Return available facet filter options. Requires authentication.
+
+    Contract: returns {artists, tags} only (no parodies key).
+    """
+    return await _facets_impl(request, path, include_hidden, _user)
 
 
 @api_router.post("/api/refresh")
@@ -1581,16 +1623,23 @@ async def serve_thumb_sprite(
     return await handle_thumb_sprite(request)
 
 
-# ── Reading position (server-held, one latest record per user) ─────────
+# ── Reading position (server-held; v1 per-folder, v0 single-latest) ────
 #
 # The "続きから" pill mirrors its newest localStorage entry here so a fresh
 # device (or a browser restart) can resume where another device left off.
-# One record per user, last-writer-wins, held only in memory on app.state —
-# single worker assumed (production runs one hypercorn worker), and a
-# container restart losing the record is an accepted trade-off. The stored
-# folder path is opaque data: it is never resolved against the filesystem
-# here, only echoed back, so no containment check applies.
+# Per-user store on app.state — single worker assumed (production runs one
+# hypercorn worker), and a container restart losing records is an accepted
+# trade-off. The stored folder path is opaque data: it is never resolved
+# against the filesystem here, only echoed back, so no containment check
+# applies.
+#
+# Store shape per user: ``{"folders": {folder: rec|tombstone},
+# "tombstone_ts": int, "updated_at": float}``. The v1 API is per-folder
+# last-writer-wins; the v0 API keeps its single-slot semantics on top —
+# v0 GET reads the newest folder record, v0 PUT accepts only a global
+# newest, and both delete-alls land on ``tombstone_ts``.
 _POSITION_MAX_USERS = 100
+_POSITION_MAX_FOLDERS = 512
 # How far into the future a client ts may reach before being clamped.
 # 5 minutes tolerates ordinary clock drift while bounding a wrong-clock
 # write's damage to the same window.
@@ -1617,6 +1666,124 @@ def _positions(request: Request) -> dict:
 def _position_user_key(user: dict) -> str:
     email = user.get("email") if isinstance(user, dict) else None
     return str(email or "unknown").lower()
+
+
+def _user_position_slot(positions: dict, key: str, create: bool = True) -> dict | None:
+    """The caller's ``{folders, tombstone_ts, updated_at}`` slot."""
+    slot = positions.get(key)
+    if not isinstance(slot, dict) or not isinstance(slot.get("folders"), dict):
+        if not create:
+            return None
+        slot = {"folders": {}, "tombstone_ts": 0, "updated_at": 0.0}
+        positions[key] = slot
+    return slot
+
+
+def _latest_position(slot: dict | None) -> dict | None:
+    """The newest non-tombstone record across the slot's folders (v0 view)."""
+    latest = None
+    for rec in (slot or {}).get("folders", {}).values():
+        if rec.get("tombstone"):
+            continue
+        if latest is None or rec["ts"] > latest["ts"]:
+            latest = rec
+    return latest
+
+
+def _slot_max_ts(slot: dict | None) -> int:
+    """Newest ts over every folder record, tombstones included."""
+    ts = (slot or {}).get("tombstone_ts", 0)
+    for rec in (slot or {}).get("folders", {}).values():
+        if rec.get("ts", 0) > ts:
+            ts = rec["ts"]
+    return ts
+
+
+def _live_max_ts(slot: dict | None) -> int:
+    """Newest ts over non-tombstone folder records only."""
+    ts = 0
+    for rec in (slot or {}).get("folders", {}).values():
+        if not rec.get("tombstone") and rec.get("ts", 0) > ts:
+            ts = rec["ts"]
+    return ts
+
+
+def _store_position_v0(slot: dict, rec: dict) -> bool:
+    """v0 single-slot semantics: accept only a global newest write.
+
+    Rejects at-or-below a delete-all tombstone, at-or-below this folder's
+    own delete tombstone, and strictly below the live newest — the same
+    "newest ts wins, tombstone ties lose" contract the single-slot store
+    had, extended over per-folder records.
+    """
+    if rec["ts"] <= slot["tombstone_ts"]:
+        return False
+    existing = slot["folders"].get(rec["folder"])
+    if existing is not None and existing.get("tombstone") and rec["ts"] <= existing["ts"]:
+        return False
+    if rec["ts"] < _live_max_ts(slot):
+        return False
+    slot["folders"][rec["folder"]] = rec
+    return True
+
+
+def _store_position_v1(slot: dict, rec: dict) -> bool:
+    """v1 per-folder last-writer-wins: reject only an older/equal ts for the
+    SAME folder, or at-or-below a delete-all tombstone."""
+    if rec["ts"] <= slot["tombstone_ts"]:
+        return False
+    existing = slot["folders"].get(rec["folder"])
+    if existing is not None:
+        if existing.get("tombstone"):
+            if rec["ts"] <= existing["ts"]:
+                return False
+        elif rec["ts"] < existing["ts"]:
+            return False
+    slot["folders"][rec["folder"]] = rec
+    return True
+
+
+def _trim_position_slot(slot: dict) -> None:
+    """Bound the per-folder map; evict the least-recently-written entry."""
+    if len(slot["folders"]) > _POSITION_MAX_FOLDERS:
+        stalest = min(
+            slot["folders"],
+            key=lambda f: slot["folders"][f].get("updated_at", 0),
+        )
+        del slot["folders"][stalest]
+
+
+def _validate_folder_param(folder) -> str:
+    """Validate a folder query/path param against the v0 body rules."""
+    if (
+        not isinstance(folder, str)
+        or not folder
+        or len(folder) > 2048
+        or folder.startswith("/")
+        or "\x00" in folder
+    ):
+        raise HTTPException(status_code=400, detail="invalid folder")
+    return folder
+
+
+def _validate_position_body_v1(body) -> dict:
+    """Validate a v1 PUT body ``{page,total,ts}`` — folder comes from the query."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected JSON object")
+    page = body.get("page")
+    if not isinstance(page, int) or isinstance(page, bool) or page < 0:
+        raise HTTPException(status_code=400, detail="invalid page")
+    total = body.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise HTTPException(status_code=400, detail="invalid total")
+    ts = body.get("ts")
+    if (
+        not isinstance(ts, int)
+        or isinstance(ts, bool)
+        or ts < 0
+    ):
+        raise HTTPException(status_code=400, detail="invalid ts")
+    return {"page": page, "total": total, "ts": ts}
 
 
 def _validate_position_payload(body) -> dict:
@@ -1653,12 +1820,14 @@ def _validate_position_payload(body) -> dict:
 
 @api_router.get("/api/reading-position")
 async def get_reading_position(request: Request, user: dict = Depends(require_auth)):
-    """Return the caller's single latest reading position (null when unset)."""
-    rec = _positions(request).get(_position_user_key(user))
-    if rec and rec.get("tombstone"):
-        rec = None  # wiped slot reads as empty; the tombstone only rejects PUTs
+    """Return the caller's single latest reading position (null when unset).
+
+    v0 single-slot view over the per-folder store: the newest non-tombstone
+    record across all folders.
+    """
+    slot = _user_position_slot(_positions(request), _position_user_key(user), create=False)
     return JSONResponse(
-        content={"position": rec},
+        content={"position": _latest_position(slot)},
         headers={"Cache-Control": "no-store"},
     )
 
@@ -1669,10 +1838,10 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
 
     Arrival order alone can't express "this PUT left its device before the
     stored record was written" (retry backlogs, keepalive retransmits,
-    cross-device writes), so a stored record rejects strictly-older PUTs.
-    A tombstone (left by DELETE) also rejects the wiped record itself — the
-    wiped ts is still "equal", not newer — so another device's self-heal
-    can't resurrect a wiped position.
+    cross-device writes), so the newest stored record rejects
+    strictly-older PUTs. A tombstone (left by DELETE) also rejects the
+    wiped record itself — the wiped ts is still "equal", not newer — so
+    another device's self-heal can't resurrect a wiped position.
     """
     try:
         body = await request.json()
@@ -1692,18 +1861,16 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
     rec["updated_at"] = time.time()
     positions = _positions(request)
     key = _position_user_key(user)
-    stored = positions.get(key)
-    if stored:
-        threshold = stored.get("ts", 0)
-        stale = rec["ts"] <= threshold if stored.get("tombstone") else rec["ts"] < threshold
-        if stale:
-            return {"status": "stale"}
     if key not in positions and len(positions) >= _POSITION_MAX_USERS:
         # Bound the map under a misconfigured deployment — the email
         # allowlist keeps this unreachable in practice.
         stalest = min(positions, key=lambda k: positions[k].get("updated_at", 0))
         del positions[stalest]
-    positions[key] = rec
+    slot = _user_position_slot(positions, key)
+    if not _store_position_v0(slot, rec):
+        return {"status": "stale"}
+    slot["updated_at"] = rec["updated_at"]
+    _trim_position_slot(slot)
     return {"status": "ok"}
 
 
@@ -1711,12 +1878,12 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
 async def delete_reading_position(
     request: Request, hard: bool = False, user: dict = Depends(require_auth)
 ):
-    """Clear the caller's stored reading position (harness 全消去).
+    """Clear the caller's stored reading positions (harness 全消去).
 
-    Leaves a tombstone carrying the wiped record's ts: PUTs at-or-older
-    than it are rejected, so a stale in-flight write or another device's
-    boot self-heal of the same record can't resurrect the position. A
-    genuinely newer read always lands.
+    Wipes every folder record and leaves a tombstone carrying the newest
+    wiped ts: PUTs at-or-older than it are rejected, so a stale in-flight
+    write or another device's boot self-heal of the same records can't
+    resurrect them. A genuinely newer read always lands.
 
     ``?hard=1`` (test mode only) removes the slot entirely — the conftest
     reset fixture needs a truly clean slate, since a tombstone would
@@ -1727,10 +1894,10 @@ async def delete_reading_position(
     if hard and auth_module._TEST_MODE:
         positions.pop(key, None)
         return {"status": "ok"}
-    prev = positions.get(key)
+    slot = _user_position_slot(positions, key)
     positions[key] = {
-        "tombstone": True,
-        "ts": (prev or {}).get("ts", 0),
+        "folders": {},
+        "tombstone_ts": _slot_max_ts(slot),
         "updated_at": time.time(),
     }
     return {"status": "ok"}

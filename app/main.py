@@ -12,6 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.compression import ApiGZipMiddleware
 from app.config import load_settings
+from app.api_v1 import router as api_v1_router
 from app.auth import router as auth_router, init_oauth
 from app.folder_visibility import FolderVisibilityStore
 from app.folder_visibility_routes import router as folder_visibility_router
@@ -214,6 +215,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(api_router)
+    app.include_router(api_v1_router)
     app.include_router(folder_visibility_router)
     app.state.folder_visibility = FolderVisibilityStore(settings.state_path)
 
