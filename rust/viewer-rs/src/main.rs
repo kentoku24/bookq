@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+mod folders;
 mod serve;
+mod tree;
 use serve::Serve;
 
 #[derive(Clone)]
@@ -33,13 +35,15 @@ struct Upstream {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     upstream: Upstream,
     /// Downloads root, resolved once (symlinks collapsed like the Python side).
-    downloads: PathBuf,
+    pub(crate) downloads: PathBuf,
     /// `BOOKQ_TEST_MODE=true` — native endpoints only activate when the
     /// Python side would also skip auth; everything else proxies upstream.
     native: bool,
+    /// `/api/folders` index cache (`metadata_index_cache`).
+    pub(crate) index: std::sync::Arc<folders::IndexState>,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -145,6 +149,22 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
     }
 }
 
+/// `/api/folders` — native tree/index/facets/ETag port (R1b).
+/// Query-parse failures (FastAPI 422) and build failures fall through.
+async fn api_folders(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let headers = req.headers().clone();
+    match folders::api_folders(&st, &headers, q).await {
+        Serve::Proxy => proxy(&st.upstream, req).await,
+        Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
+    }
+}
+
 /// `/image/{*path}` — native for plain files and ZIP/CBZ/EPUB entries.
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -194,19 +214,26 @@ async fn main() {
         .unwrap_or_default()
         .eq_ignore_ascii_case("true");
 
+    let index = std::sync::Arc::new(folders::IndexState::new());
     let st = AppState {
         upstream: Upstream {
             client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
             authority,
         },
-        downloads,
+        downloads: downloads.clone(),
         native,
+        index: index.clone(),
     };
+    if native {
+        // warmup_metadata_index — lifespan kicks the same cold-miss path.
+        index.spawn_warmup(downloads.clone());
+    }
     tracing::info!(native = st.native, downloads = %st.downloads.display(), "read-path endpoints");
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/api/images", any(api_images))
+        .route("/api/folders", any(api_folders))
         .route("/image/{*path}", any(serve_image))
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await

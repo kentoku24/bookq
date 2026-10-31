@@ -39,11 +39,11 @@ pub enum Serve {
 
 // ── Suffix/extension tables (mirror app/scanner.py + app/archive.py) ──────────
 
-const IMAGE_EXTENSIONS: &[&str] = &[
+pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
     ".avif", ".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg",
 ];
-const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".cbz", ".rar", ".cbr", ".epub"];
-const PDF_EXTENSIONS: &[&str] = &[".pdf"];
+pub(crate) const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".cbz", ".rar", ".cbr", ".epub"];
+pub(crate) const PDF_EXTENSIONS: &[&str] = &[".pdf"];
 const MAX_ARCHIVE_ENTRIES: usize = 2000;
 
 fn suffix_lower(p: &Path) -> String {
@@ -120,7 +120,7 @@ fn realpath(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `_is_within`: target inside base after resolving both.
-fn is_within(base: &Path, target: &Path) -> bool {
+pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
     match (realpath(base), realpath(target)) {
         (Ok(b), Ok(t)) => t.starts_with(&b),
         _ => false,
@@ -192,7 +192,7 @@ fn finalize(names: impl IntoIterator<Item = String>, keep_order: bool) -> Vec<St
 /// `list_archive_entries` without the disk cache (read-path parity only;
 /// the warm cache is a performance layer whose output is identical).
 /// Unreadable archives yield `[]`, matching Python's never-raise contract.
-fn list_archive_entries(path: &Path) -> Vec<String> {
+pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
     match suffix_lower(path).as_str() {
         ".rar" | ".cbr" => finalize(
             bookq_core::rar_names(path)
@@ -689,7 +689,11 @@ pub async fn maybe_gzip(req_headers: &HeaderMap, res: Response, compressible: bo
         return Response::from_parts(parts, Body::empty());
     };
     let bytes = collected.to_bytes();
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+    // OS byte 3 (Unix) — zlib's gzip.compress sets it from the platform;
+    // flate2's default header writes 255 which differs on the wire.
+    let mut enc = flate2::GzBuilder::new()
+        .operating_system(3)
+        .write(Vec::new(), flate2::Compression::new(6));
     if enc.write_all(&bytes).is_err() {
         return Response::from_parts(parts, Body::from(bytes));
     }
@@ -785,3 +789,8 @@ mod tests {
         assert!(!archive_not_modified(&h2, "\"x\"", 1_800_000_000.9)); // mtime after header
     }
 }
+
+pub(crate) fn suffix_is_epub(name: &str) -> bool {
+    name.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("epub"))
+}
+

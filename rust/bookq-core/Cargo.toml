@@ -9,6 +9,7 @@ license = "Proprietary"
 [dependencies]
 crc32fast = "1"
 flate2 = "1"
+lopdf = "0.38"
 roxmltree = "0.20"
 sha2 = "0.10"
 toml = "0.8"

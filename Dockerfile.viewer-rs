@@ -3,11 +3,13 @@
 # only rust/ is needed.
 
 FROM rust:1-slim AS rsbuilder
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY rust/ ./rust/
 RUN cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs
 
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g && rm -rf /var/lib/apt/lists/*
 COPY --from=rsbuilder /src/rust/target/release/viewer-rs /usr/local/bin/viewer-rs
 
 # Upstream the proxy falls through to; overridden by compose.

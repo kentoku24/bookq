@@ -204,3 +204,13 @@ mod tests {
         assert_eq!(sort_file_cmp("10.jpg", "9.jpg"), Ordering::Greater);
     }
 }
+
+/// `pdf_page_count(path)` — pypdfium2's `len(PdfDocument)` equivalent:
+/// parsed pages-tree count, `0` on any open/parse failure (matching the
+/// Python contract of never raising for a bad PDF).
+pub fn pdf_page_count(path: &std::path::Path) -> usize {
+    match lopdf::Document::load(path) {
+        Ok(doc) => doc.get_pages().len(),
+        Err(_) => 0,
+    }
+}
