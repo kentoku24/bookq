@@ -4,8 +4,10 @@ import UIKit
 /// Scene delegate for the `windowExternalDisplayNonInteractive` role —
 /// builds the fullscreen reader window on the external screen at its
 /// highest-resolution mode (native 4K when the panel offers it).
-/// `overscanCompensation = .insetBounds` keeps content inside the visible
-/// area on overscanned TVs; it is a no-op on regular monitors.
+/// `overscanCompensation = .none` uses the full panel: `.insetBounds`
+/// shrinks the window into the visible area and leaves a black frame on
+/// displays that report overscan. Monitors don't overscan — the only cost
+/// is edge clipping on actual overscanned TVs.
 final class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
@@ -20,7 +22,7 @@ final class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
             if let best = ExternalDisplayStore.bestMode(for: screen) {
                 screen.currentMode = best
             }
-            screen.overscanCompensation = .insetBounds
+            screen.overscanCompensation = .none
 
             let window = UIWindow(windowScene: windowScene)
             window.rootViewController = UIHostingController(rootView: ExternalDisplayRootView())

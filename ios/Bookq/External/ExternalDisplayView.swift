@@ -9,11 +9,12 @@ struct ExternalDisplayRootView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black
             if let p = store.presentation {
                 ExternalReaderView(p: p)
             }
         }
+        .ignoresSafeArea()
         .preferredColorScheme(.dark)
     }
 }
