@@ -455,7 +455,7 @@ paths:
     put:
       tags: [state]
       operationId: putFolderVisibility
-      summary: 隠しルート更新（リビジョン CAS）
+      summary: 隠しルートの単項目トグル（v0 と同一契約）
       parameters:
         - name: x-bookq-visibility-owner
           in: header
@@ -464,28 +464,24 @@ paths:
           description: GET が返した `owner` トークンをエコーバック
       requestBody:
         required: true
+        description: "body は `{root, hidden}` の2キーのみ（追加キーは 400）"
         content:
           application/json:
             schema:
               type: object
-              required: [revision, hiddenRoots]
+              required: [root, hidden]
+              additionalProperties: false
               properties:
-                revision: {type: integer}
-                hiddenRoots:
-                  type: array
-                  items: {type: string}
+                root: {type: string, description: 先頭パスセグメント（書庫名も可）}
+                hidden: {type: boolean}
       responses:
         "200":
           description: 更新後スナップショット
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}
+        "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
-        "409":
-          description: revision 衝突（最新を GET し直して再送）
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Error"}
 
   /api/v1/auth/token:
     post:
@@ -725,13 +721,17 @@ paths:
       summary: "[v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う"
       responses:
         "200":
-          description: レコードまたは null
+          description: "`{position: レコードまたは null}` — 常にオブジェクト envelope"
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: "#/components/schemas/ReadingPosition"
-                  - type: "null"
+                type: object
+                required: [position]
+                properties:
+                  position:
+                    oneOf:
+                      - $ref: "#/components/schemas/ReadingPosition"
+                      - type: "null"
     put:
       tags: [state]
       deprecated: true
@@ -802,11 +802,11 @@ paths:
           application/json:
             schema:
               type: object
+              required: [root, hidden]
+              additionalProperties: false
               properties:
-                revision: {type: integer}
-                hiddenRoots:
-                  type: array
-                  items: {type: string}
+                root: {type: string}
+                hidden: {type: boolean}
       responses:
         "200":
           content:

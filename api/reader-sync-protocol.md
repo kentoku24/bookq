@@ -91,7 +91,7 @@ manifest コミット後、全メンバーが READY するまで `loading`。
 
 ### MANIFEST
 `OPEN_WORK` 受理 → manifest 解決（非同期・load_seq generation guard）
-→ `MANIFEST_COMMIT{seq}` + `MANIFEST{sessionId, manifestVersion, data...}` 配布。
+→ `MANIFEST` chunk フレーム群 `{kind:"manifest-chunk", digest, index, count, data}` + `type:MANIFEST, sessionId, workEpoch, manifestVersion` 配布 → コミットは続く `STATE` フレームが担う（`MANIFEST_COMMIT` は wire メッセージではなくサーバ内部の apply-log 種別）。
 解決失敗は manifest error → 拒否理由にマップ（下表）。
 
 manifest 本体の shape:

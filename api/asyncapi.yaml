@@ -40,7 +40,6 @@ channels:
       applied: {$ref: "#/components/messages/Applied"}
       state: {$ref: "#/components/messages/State"}
       manifest: {$ref: "#/components/messages/Manifest"}
-      manifestCommit: {$ref: "#/components/messages/ManifestCommit"}
       end: {$ref: "#/components/messages/End"}
       ping: {$ref: "#/components/messages/Ping"}
       pong: {$ref: "#/components/messages/Pong"}
@@ -66,7 +65,6 @@ operations:
       - {$ref: "#/channels/readerSync/messages/applied"}
       - {$ref: "#/channels/readerSync/messages/state"}
       - {$ref: "#/channels/readerSync/messages/manifest"}
-      - {$ref: "#/channels/readerSync/messages/manifestCommit"}
       - {$ref: "#/channels/readerSync/messages/end"}
       - {$ref: "#/channels/readerSync/messages/ping"}
       - {$ref: "#/channels/readerSync/messages/pong"}
@@ -114,34 +112,38 @@ components:
       title: リクエストが逐次適用された通知
       payload:
         type: object
-        required: [v, type, seq]
+        required: [v, type, sessionId, requestId, revision, by]
         properties:
           v: {type: integer, const: 1}
           type: {type: string, const: APPLIED}
-          seq: {type: integer, description: 適用シーケンス番号}
+          sessionId: {type: string}
           requestId: {type: string}
+          revision: {type: integer, description: 適用後の STATE リビジョン}
+          by: {type: string, enum: [leader, follower], description: 適用要求者のロール}
     State:
       title: 完全状態スナップショット
       payload: {$ref: "#/components/schemas/StateFrame"}
     Manifest:
       title: セッションマニフェスト（chunked 転送可）
+      description: |
+        1 manifest = 1+ chunk フレーム。`kind:manifest-chunk` の
+        `{digest,index,count,data}` を index 順に連結すると canonical JSON が
+        復元され、`digest` (sha256) と照合できる。送信後に STATE フレームが
+        続く（コミット通知は STATE が担い、MANIFEST_COMMIT という wire メッセージは存在しない）。
       payload:
         type: object
-        required: [v, type, sessionId, manifestVersion]
+        required: [v, type, sessionId, workEpoch, manifestVersion, kind, digest, index, count, data]
         properties:
           v: {type: integer, const: 1}
           type: {type: string, const: MANIFEST}
           sessionId: {type: string}
+          workEpoch: {type: integer}
           manifestVersion: {type: integer}
-          data: {type: string, description: chunk payload}
-    ManifestCommit:
-      payload:
-        type: object
-        required: [v, type, seq]
-        properties:
-          v: {type: integer, const: 1}
-          type: {type: string, const: MANIFEST_COMMIT}
-          seq: {type: integer}
+          kind: {type: string, const: manifest-chunk}
+          digest: {type: string, description: "sha256:<hex> 全チャンク共通"}
+          index: {type: integer, minimum: 0}
+          count: {type: integer, minimum: 1}
+          data: {type: string, description: chunk 分割された canonical JSON 片}
     End:
       payload:
         type: object
@@ -176,7 +178,15 @@ components:
           data: {}
     UiSync:
       title: ephemeral UI ミラー（非シーケンス・reader state 混入禁止）
-      payload: {$ref: "#/components/schemas/UiSyncPayload"}
+      payload:
+        type: object
+        required: [v, type, sessionId, from, payload]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: UI_SYNC}
+          sessionId: {type: string}
+          from: {type: string, enum: [leader, follower], description: 送信元ロール}
+          payload: {$ref: "#/components/schemas/UiSyncPayload"}
     TransportState:
       payload:
         type: object
@@ -184,7 +194,9 @@ components:
         properties:
           v: {type: integer, const: 1}
           type: {type: string, const: TRANSPORT_STATE}
-          state: {type: string}
+          sessionId: {type: string}
+          dataPlane: {type: string, enum: [server-ws, webrtc-dc]}
+          revision: {type: integer, description: 切替が確定した STATE リビジョン}
     JoinRequest:
       title: ピアからの join 要求通知
       payload:
