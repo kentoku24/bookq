@@ -18,19 +18,34 @@ final class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
         // screen/window/store work.
         MainActor.assumeIsolated {
             guard let windowScene = scene as? UIWindowScene else { return }
-            let screen = windowScene.screen
-            if let best = ExternalDisplayStore.bestMode(for: screen) {
-                screen.currentMode = best
-            }
-            screen.overscanCompensation = .none
+            Self.configureScreen(windowScene.screen)
 
             let window = UIWindow(windowScene: windowScene)
             window.rootViewController = UIHostingController(rootView: ExternalDisplayRootView())
             window.isHidden = false
             self.window = window
 
-            ExternalDisplayStore.shared.sceneDidConnect(session)
+            ExternalDisplayStore.shared.sceneDidConnect(
+                session, screen: windowScene.screen)
         }
+    }
+
+    /// Re-apply the mode when the scene re-activates — a link renegotiation
+    /// (sleep/yank) can silently revert currentMode to the display default.
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        MainActor.assumeIsolated {
+            guard let windowScene = scene as? UIWindowScene else { return }
+            Self.configureScreen(windowScene.screen)
+        }
+    }
+
+    /// Force the highest-pixel mode + full-panel rendering. See `bestMode`
+    /// and the class doc for the overscan trade-off.
+    @MainActor private static func configureScreen(_ screen: UIScreen) {
+        if let best = ExternalDisplayStore.bestMode(for: screen) {
+            screen.currentMode = best
+        }
+        screen.overscanCompensation = .none
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {

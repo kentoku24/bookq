@@ -35,6 +35,8 @@ final class ExternalDisplayStore: ObservableObject {
     /// The live scene session (AnyObject so tests can inject a stand-in —
     /// UISceneSession cannot be constructed).
     var sessionRef: AnyObject?
+    /// The connected external UIScreen — drives the diagnostics readout.
+    private(set) var externalScreen: UIScreen?
     private var activationPending = false
     private var destroying = false
     private var observers: [NSObjectProtocol] = []
@@ -90,8 +92,9 @@ final class ExternalDisplayStore: ObservableObject {
 
     // MARK: - Scene delegate callbacks
 
-    func sceneDidConnect(_ session: UISceneSession) {
+    func sceneDidConnect(_ session: UISceneSession, screen: UIScreen) {
         sessionRef = session
+        externalScreen = screen
         markConnected()
     }
 
@@ -108,6 +111,7 @@ final class ExternalDisplayStore: ObservableObject {
 
     func markDisconnected() {
         sessionRef = nil
+        externalScreen = nil
         connected = false
         activationPending = false
         destroying = false
