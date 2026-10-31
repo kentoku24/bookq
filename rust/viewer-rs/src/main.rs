@@ -8,7 +8,7 @@
 
 use axum::{
     body::Body,
-    extract::{Query, Request, State},
+    extract::{Request, State},
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -19,14 +19,20 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::{TokioExecutor, TokioIo},
 };
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+// v1 retarget (issue #163 M3+): only /api/v1/* endpoints get native
+// handlers — v0 routes are deprecated upstream and must always proxy.
+// serve/tree/folders hold the contract-independent core (archive listing,
+// path containment, tree assembly, index cache) that M4–M7 wire onto the
+// v1 envelopes; until then their exports are intentionally unused.
+#[allow(dead_code)]
 mod folders;
+#[allow(dead_code)]
 mod serve;
+#[allow(dead_code)]
 mod tree;
-use serve::Serve;
 
 #[derive(Clone)]
 struct Upstream {
@@ -126,46 +132,8 @@ async fn proxy(st: &Upstream, mut req: Request<Body>) -> Response {
     forward(req, st).await
 }
 
-/// `/api/images?folder=...` — native unless the decision tree hits a PDF or
-/// the `folder` param is absent (FastAPI's 422 body stays upstream's own).
-async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
-    }
-    let folder = Query::<HashMap<String, String>>::try_from_uri(req.uri())
-        .ok()
-        .and_then(|q| q.0.get("folder").cloned());
-    let Some(folder) = folder else {
-        return proxy(&st.upstream, req).await;
-    };
-    let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
-    let out = tokio::task::spawn_blocking(move || serve::api_images(&downloads, &folder))
-        .await
-        .unwrap_or(serve::Serve::Proxy);
-    match out {
-        Serve::Proxy => proxy(&st.upstream, req).await,
-        Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
-    }
-}
-
-/// `/api/folders` — native tree/index/facets/ETag port (R1b).
-/// Query-parse failures (FastAPI 422) and build failures fall through.
-async fn api_folders(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
-    }
-    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
-        .map(|q| q.0)
-        .unwrap_or_default();
-    let headers = req.headers().clone();
-    match folders::api_folders(&st, &headers, q).await {
-        Serve::Proxy => proxy(&st.upstream, req).await,
-        Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
-    }
-}
-
-/// `/image/{*path}` — native for plain files and ZIP/CBZ/EPUB entries.
+/// `/image/{*path}` — a v1 contract path (media is not versioned): native
+/// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native || req.method() != axum::http::Method::GET {
@@ -187,8 +155,8 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
         .await
         .unwrap_or(serve::Serve::Proxy);
     match out {
-        Serve::Proxy => proxy(&st.upstream, req).await,
-        Serve::Done(res) => res, // /image is outside the gzip prefixes
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+        serve::Serve::Done(res) => res, // /image is outside the gzip prefixes
     }
 }
 
@@ -232,8 +200,8 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
-        .route("/api/images", any(api_images))
-        .route("/api/folders", any(api_folders))
+        // M3 skeleton: no v1 native handlers yet — everything proxies.
+        // /image/{*path} is a v1 contract path (media, not versioned).
         .route("/image/{*path}", any(serve_image))
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await
