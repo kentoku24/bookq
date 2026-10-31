@@ -117,7 +117,7 @@ final class PairStore: ObservableObject {
     private var attemptingResume = false
     private var entryType: String?
     private var entryPayload: [String: Any] = [:]
-    private let resumeWindow: TimeInterval = 300
+    private let resumeWindow: TimeInterval
     private var bootstrapTried = false
     private var suspended = false
 
@@ -141,11 +141,13 @@ final class PairStore: ObservableObject {
 
     init(url: @escaping () -> URL?, token: @escaping () -> String?,
          transportFactory: @escaping () -> PairTransporting = { PairSocket() },
-         persistKey: @escaping () -> String = { "bookq.pairSync.v1" }) {
+         persistKey: @escaping () -> String = { "bookq.pairSync.v1" },
+         resumeWindow: TimeInterval = 300) {
         self.urlProvider = url
         self.tokenProvider = token
         self.transportFactory = transportFactory
         self.persistKey = persistKey
+        self.resumeWindow = resumeWindow
     }
 
     // MARK: - Entry ops
@@ -332,6 +334,9 @@ final class PairStore: ObservableObject {
         if let t { Task { await t.closeSocket() } }
         for (_, c) in pending { c.resume(throwing: PairError.disconnected) }
         pending.removeAll()
+        // A superseding entry/teardown must release the in-flight entry
+        // waiter — nilling it leaks the awaiting create()/join() forever.
+        entryCont?.resume(throwing: PairError.disconnected)
         entryCont = nil
         member = nil; code = nil; joinRequest = nil
         lastState = nil; manifest = nil; projection = nil

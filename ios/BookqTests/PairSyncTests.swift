@@ -566,4 +566,74 @@ final class PairStoreTests: XCTestCase {
         let sent = await waitForSent(3)
         XCTAssertEqual(sent.last?["type"] as? String, "LEAVE")
     }
+
+    /// Resume window expiry ends the session locally instead of retrying
+    /// forever (web _resumeWindow parity — 300s, shrunk here for test).
+    func testResumeWindowExpiryEndsSession() async throws {
+        store = PairStore(
+            url: { URL(string: "ws://test/ws/reader-sync") },
+            token: { "tok" },
+            transportFactory: { self.fake },
+            persistKey: { self.key },
+            resumeWindow: 0.05)
+        try await enterReading()
+        await fake.drop()
+        // First backoff already exceeds the window → terminal end.
+        for _ in 0..<50 {
+            if case .ended = store.status { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard case .ended(let reason) = store.status else {
+            XCTFail("expected ended"); return
+        }
+        XCTAssertEqual(reason, "resume_expired")
+        let connects = await fake.connectCount
+        XCTAssertEqual(connects, 1)   // no reconnect attempt
+    }
+
+    /// leave() while the link is dead ends immediately — no reconnect,
+    /// creds cleared (web _leaveBound final-offline parity).
+    func testLeaveWhileDisconnectedEndsLocally() async throws {
+        try await enterReading()
+        await fake.drop()
+        for _ in 0..<50 where store.status != .connecting {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        store.leave()
+        for _ in 0..<50 {
+            if case .ended = store.status { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard case .ended = store.status else {
+            XCTFail("expected ended"); return
+        }
+        XCTAssertNil(UserDefaults.standard.data(forKey: key))
+        // Retry machine torn down — no reconnect fires afterwards.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        let connects = await fake.connectCount
+        XCTAssertEqual(connects, 1)
+    }
+
+    /// A new entry op supersedes an in-flight one — the superseded
+    /// caller throws instead of hanging (web _entryOp supersede parity).
+    func testEntrySupersededByNewEntry() async throws {
+        let joinTask = Task { @MainActor in try await store.join(code: "123456") }
+        await hello()
+        let sent1 = await waitForSent(1)
+        XCTAssertEqual(sent1[0]["type"] as? String, "JOIN")
+        // No ACK — create() takes over: join's entry waiter must throw.
+        let createTask = Task { @MainActor in try await store.create() }
+        do {
+            try await joinTask.value
+            XCTFail("superseded join should throw")
+        } catch { /* expected */ }
+        await hello()
+        let sent2 = await waitForSent(2)
+        let create = try XCTUnwrap(sent2.last)
+        XCTAssertEqual(create["type"] as? String, "CREATE")
+        await ack(create["requestId"] as! String, request: "CREATE",
+                  data: bindData)
+        try await createTask.value
+        XCTAssertTrue(store.bound)
+    }
 }
