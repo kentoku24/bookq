@@ -729,9 +729,14 @@ final class PairStore: ObservableObject {
         try await sendRequest("REJECT", payload: ["memberId": jr.memberId])
     }
 
-    /// Polite leave — the server ENDs the session for both sides.
+    /// Polite leave — the server ENDs the session for both sides. Send
+    /// happens BEFORE teardown (web _leaveBound) or the transport nil
+    /// swallows the frame.
     func leave() {
-        Task { _ = try? await sendRequest("LEAVE", payload: [:]) }
+        if let t = transport {
+            let req = envelope(type: "LEAVE", payload: [:])
+            Task { try? await t.send(req.text) }
+        }
         credStore = nil
         finishEnded(reason: "left")
     }

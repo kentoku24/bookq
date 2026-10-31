@@ -93,19 +93,32 @@ final class AppModel: ObservableObject {
     /// folders image children only, others fall back to /api/images.
     /// Index = saved resume page clamped into range (web _pickRef).
     func resolveInitialPageRef(_ folder: String) async -> PairPageRef? {
+        await Self.initialPageRef(
+            folder: folder, tree: library?.tree ?? [],
+            images: { try? await self.api?.images(folder: folder) },
+            savedPage: progress.entries[folder]?.page)
+    }
+
+    /// Pure core of `resolveInitialPageRef` — extracted for tests (web
+    /// `_resolveInitialPageRef` parity: leaf = all children, mixed =
+    /// image children only, fallback = fetched listing; saved resume
+    /// page clamped into range).
+    static func initialPageRef(
+        folder: String, tree: [TreeNode],
+        images: () async -> [String]?,
+        savedPage: Int?
+    ) async -> PairPageRef? {
         var names: [String]? = nil
-        if let node = BrowseModel.node(at: folder, in: library?.tree ?? []) {
+        if let node = BrowseModel.node(at: folder, in: tree) {
             if BrowseModel.hasOnlyImages(node) {
                 names = (node.children ?? []).map(\.name)
             } else if BrowseModel.hasImages(node) {
                 names = (node.children ?? []).filter(\.isImage).map(\.name)
             }
         }
-        if names == nil, let api {
-            names = try? await api.images(folder: folder)
-        }
+        if names == nil { names = await images() }
         guard let names, !names.isEmpty else { return nil }
-        let idx = min(max(progress.entries[folder]?.page ?? 0, 0), names.count - 1)
+        let idx = min(max(savedPage ?? 0, 0), names.count - 1)
         return PairPageRef(folder: folder, name: names[idx])
     }
 

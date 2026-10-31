@@ -413,4 +413,157 @@ final class PairStoreTests: XCTestCase {
         }
         XCTAssertNil(UserDefaults.standard.data(forKey: key))
     }
+
+    // MARK: - Intent matrix (test_viewer_navigation parity)
+
+    /// Slider drag → GOTO with page ref + manifestVersion.
+    func testGotoSendsIntent() async throws {
+        try await enterReading()
+        XCTAssertTrue(store.goto(page: PairPageRef(
+            folder: "作品A/第1話", name: "p2.png")))
+        let sent = await waitForSent(3)
+        let g = try XCTUnwrap(sent.last)
+        XCTAssertEqual(g["type"] as? String, "GOTO")
+        let page = (g["payload"] as? [String: Any])?["page"] as? [String: Any]
+        XCTAssertEqual(page?["folder"] as? String, "作品A/第1話")
+        XCTAssertEqual(page?["name"] as? String, "p2.png")
+        XCTAssertEqual((g["payload"] as? [String: Any])?["manifestVersion"] as? Int, 1)
+    }
+
+    /// Spread-shift → SET_OFFSET; swap → SWAP_SIDES flips leaderSide.
+    func testSetOffsetAndSwapSides() async throws {
+        try await enterReading()
+        XCTAssertTrue(store.setOffset(0))
+        XCTAssertTrue(store.swapSides())
+        let sent = await waitForSent(4)
+        let off = sent[2], swap = sent[3]
+        XCTAssertEqual(off["type"] as? String, "SET_OFFSET")
+        XCTAssertEqual((off["payload"] as? [String: Any])?["offset"] as? Int, 0)
+        XCTAssertEqual(swap["type"] as? String, "SWAP_SIDES")
+        XCTAssertEqual((swap["payload"] as? [String: Any])?["leaderSide"] as? String, "left")
+    }
+
+    /// Movement intents are gated on phase==reading — in `waiting` none
+    /// of them reach the wire (web sendIntent guard).
+    func testIntentsGatedOutsideReading() async throws {
+        let task = Task { @MainActor in try await store.create() }
+        await hello()
+        let sent = await waitForSent(1)
+        guard let first = sent.first else { return }
+        await ack(first["requestId"] as! String, request: "CREATE", data: bindData)
+        try await task.value
+        // phase=waiting — every intent refused, zero frames emitted.
+        XCTAssertFalse(store.turn(delta: 1, crossChapter: true, fromChapter: nil))
+        XCTAssertFalse(store.goto(page: PairPageRef(folder: "x", name: "y")))
+        XCTAssertFalse(store.setOffset(0))
+        XCTAssertFalse(store.swapSides())
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let sentCount = await fake.sent().count
+        XCTAssertEqual(sentCount, 1)
+    }
+
+    /// Follower cannot OPEN_WORK (leader-only intent); leader pickWork
+    /// routes through the resolver and emits it.
+    func testOpenWorkLeaderOnly() async throws {
+        try await enterReading()   // bound as leader (bindData role)
+        store.openWorkResolver = { folder in
+            PairPageRef(folder: folder, name: "p1.png")
+        }
+        let picked = await store.pickWork(folder: "作品B")
+        XCTAssertTrue(picked)
+        let sent = await waitForSent(3)
+        let ow = try XCTUnwrap(sent.last)
+        XCTAssertEqual(ow["type"] as? String, "OPEN_WORK")
+        XCTAssertEqual((ow["payload"] as? [String: Any])?["folder"] as? String, "作品B")
+    }
+
+    /// Hidden-root veto: a blocked folder never emits OPEN_WORK.
+    func testOpenWorkVisibilityVeto() async throws {
+        try await enterReading()
+        store.visibilityBlocks = { _ in true }
+        store.openWorkResolver = { folder in
+            PairPageRef(folder: folder, name: "p1.png")
+        }
+        let picked = await store.pickWork(folder: "hidden")
+        XCTAssertFalse(picked)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        let sentCount = await fake.sent().count
+        XCTAssertEqual(sentCount, 2)
+    }
+
+    // MARK: - Heartbeat / activity / persistence
+
+    /// Server PING → PONG preserving seq (test_reader_pairing ping_pong).
+    func testPingAnswersPong() async throws {
+        try await enterReading()
+        await fake.emit(wire(["v": 1, "type": "PING", "seq": 7]))
+        let sent = await waitForSent(3)
+        let pong = try XCTUnwrap(sent.last)
+        XCTAssertEqual(pong["type"] as? String, "PONG")
+        XCTAssertEqual(pong["seq"] as? Int, 7)
+    }
+
+    /// MATCH sends MATCH and binds the ACKed role (follower).
+    func testMatchBinds() async throws {
+        let task = Task { @MainActor in try await store.match() }
+        await hello()
+        let sent = await waitForSent(1)
+        guard let first = sent.first else { return }
+        XCTAssertEqual(first["type"] as? String, "MATCH")
+        await ack(first["requestId"] as! String, request: "MATCH",
+                  data: ["sessionId": "s9", "memberId": "m9",
+                         "role": "follower", "resumeToken": "rt9"])
+        try await task.value
+        XCTAssertEqual(store.role, .follower)
+        XCTAssertTrue(store.bound)
+    }
+
+    /// JOIN code must be exactly 6 digits — malformed never opens a link.
+    func testJoinMalformedCodeRejected() async throws {
+        do {
+            try await store.join(code: "12345")
+            XCTFail("expected malformed")
+        } catch { /* expected */ }
+        let sentCount = await fake.sent().count
+        XCTAssertEqual(sentCount, 0)
+        XCTAssertFalse(store.bound)
+    }
+
+    /// Suspended activity survives a reconnect — RESUME ACK reasserts
+    /// SET_ACTIVITY suspended (web pairClient suspended-reassert).
+    func testSuspendedReassertedAfterResume() async throws {
+        try await enterReading()
+        store.setActivity("suspended")
+        let sent = await waitForSent(3)
+        XCTAssertEqual(sent[2]["type"] as? String, "SET_ACTIVITY")
+        await fake.drop()
+        for _ in 0..<200 where await fake.connectCount < 2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        await hello()
+        let sent2 = await waitForSent(4)
+        guard let resume = sent2.last else { return }
+        XCTAssertEqual(resume["type"] as? String, "RESUME")
+        await ack(resume["requestId"] as! String, request: "RESUME",
+                  data: ["sessionId": "s1", "memberId": "m1",
+                         "role": "leader", "resumeToken": "rt1"])
+        let sent3 = await waitForSent(5)
+        let act = try XCTUnwrap(sent3.last)
+        XCTAssertEqual(act["type"] as? String, "SET_ACTIVITY")
+        XCTAssertEqual((act["payload"] as? [String: Any])?["state"] as? String, "suspended")
+    }
+
+    /// leave() clears persisted creds — next boot won't auto-resume.
+    func testLeaveClearsPersistedCreds() async throws {
+        try await enterReading()
+        XCTAssertNotNil(UserDefaults.standard.data(forKey: key))
+        store.leave()
+        for _ in 0..<50 {
+            if case .ended = store.status { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNil(UserDefaults.standard.data(forKey: key))
+        let sent = await waitForSent(3)
+        XCTAssertEqual(sent.last?["type"] as? String, "LEAVE")
+    }
 }
