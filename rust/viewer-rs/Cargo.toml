@@ -1,0 +1,15 @@
+[package]
+name = "viewer-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Rust backend for bookq — parallel deployment with proxy fall-through (issue #163)"
+license = "Proprietary"
+
+[dependencies]
+axum = "0.8"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

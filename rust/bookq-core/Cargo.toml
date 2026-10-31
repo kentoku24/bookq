@@ -1,0 +1,14 @@
+[package]
+name = "bookq-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Pure-Rust port of bookq's CPU-heavy server logic (issue #163)"
+license = "Proprietary"
+
+[dependencies]
+crc32fast = "1"
+flate2 = "1"
+roxmltree = "0.20"
+sha2 = "0.10"
+toml = "0.8"
