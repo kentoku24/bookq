@@ -29,7 +29,17 @@ final class AppConfig: ObservableObject {
         let candidate = s.contains("://") ? s : "https://\(s)"
         guard let url = URL(string: candidate),
               let scheme = url.scheme, scheme.hasPrefix("http"),
-              url.host != nil else { return nil }
+              let host = url.host else { return nil }
+        // Bearer tokens go out on every request — plaintext http is only
+        // acceptable for loopback dev servers, never a remote host.
+        if scheme == "http", !Self.isLoopback(host) { return nil }
         return url
+    }
+
+    /// localhost / 127.* / ::1 — the only hosts allowed over http.
+    static func isLoopback(_ host: String) -> Bool {
+        let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return h == "localhost" || h.hasSuffix(".localhost")
+            || h.hasPrefix("127.") || h == "::1"
     }
 }

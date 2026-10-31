@@ -42,7 +42,17 @@ final class ReadingProgressStore: ObservableObject {
 
     /// Record a position locally + push to the server (web `save()`):
     /// debounced by callers, writes ts=now, pushes {folder,page,total,ts}.
+    /// Same-position re-saves (close/inactive flush without a page move)
+    /// are no-ops — a fresh ts on a stale page would clobber a newer
+    /// remote position from another device.
     func record(path: String, page: Int, total: Int, title: String? = nil) {
+        if let cur = entries[path], cur.page == page, cur.total == total {
+            if let title, title != cur.title {
+                entries[path]?.title = title
+                save()
+            }
+            return
+        }
         let ts = nowMs
         store(path, page: page, total: total, ts: ts, title: title)
         sync?.push(.init(folder: path, page: page, total: total, ts: ts))

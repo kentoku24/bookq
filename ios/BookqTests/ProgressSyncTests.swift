@@ -155,6 +155,24 @@ final class ProgressSyncTests: XCTestCase {
         await waitPuts(1)
     }
 
+    /// Review fix — recording the SAME position is a no-op: a fresh ts
+    /// on an unchanged page would clobber a newer remote position from
+    /// another device (reader close/inactive flush without a page move).
+    func testRecordSamePositionIsNoOp() async {
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
+        let store = ReadingProgressStore()
+        store.attach(sync)
+        store.record(path: "A", page: 3, total: 10)
+        let ts1 = store.entries["A"]?.ts
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        // Close-flush without moving: no ts bump, no second PUT.
+        store.record(path: "A", page: 3, total: 10)
+        XCTAssertEqual(store.entries["A"]?.ts, ts1)
+        await waitPuts(1)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 1)
+    }
+
     /// mergeRemote writes the position WITHOUT re-pushing (no echo loop).
     func testMergeRemoteDoesNotEcho() async {
         StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }

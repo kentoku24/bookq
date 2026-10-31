@@ -734,16 +734,43 @@ final class PairStore: ObservableObject {
         try await sendRequest("REJECT", payload: ["memberId": jr.memberId])
     }
 
-    /// Polite leave — the server ENDs the session for both sides. Send
-    /// happens BEFORE teardown (web _leaveBound) or the transport nil
-    /// swallows the frame.
+    /// Polite leave — the server ENDs the session for both sides.
+    /// Faithful port of web `_leaveBound`:
+    ///  1. detach the transport so teardown cannot close it first;
+    ///  2. if an entry request is still awaiting its ACK, wait (bounded)
+    ///     for the bind — a LEAVE sent earlier is rejected NO_SESSION
+    ///     and the peer sits in peer-away until the resume window ends;
+    ///  3. send LEAVE → brief grace for the server END → close, chained
+    ///     on one task so the close can never overtake the send.
     func leave() {
-        if let t = transport {
-            let req = envelope(type: "LEAVE", payload: [:])
-            Task { try? await t.send(req.text) }
-        }
         credStore = nil
-        finishEnded(reason: "left")
+        guard let t = transport else {
+            finishEnded(reason: "left")
+            return
+        }
+        transport = nil
+        let req = envelope(type: "LEAVE", payload: [:])
+        Task { [weak self] in
+            let deadline = Date().addingTimeInterval(3)
+            while await self?.entryAwaitingAck == true, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            // Web sends LEAVE then closes — the socket's close handshake
+            // flushes the queued frame (no post-send wait).
+            try? await t.send(req.text)
+            await t.closeSocket()
+            await MainActor.run { [weak self] in
+                self?.finishEnded(reason: "left")
+            }
+        }
+    }
+
+    /// Entry frame sent but its ACK not yet arrived — the server has not
+    /// bound member→link, so LEAVE would be rejected NO_SESSION. A
+    /// reconnect in progress (`offlineSince` set) is NOT this case —
+    /// web tears a gone link down immediately without waiting.
+    private var entryAwaitingAck: Bool {
+        status == .connecting && entryCont == nil && offlineSince == nil
     }
 
     func setActivity(_ state: String) {

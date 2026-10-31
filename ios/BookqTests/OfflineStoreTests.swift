@@ -114,6 +114,48 @@ final class OfflineStoreTests: XCTestCase {
         }
     }
 
+    /// Review fix — nested archive page: `work.cbz/sub/p1.jpg` must
+    /// resolve via the longest recorded leaf prefix, not the naive
+    /// last-component split (which would look in leaf "work.cbz/sub").
+    func testRemoteURLNestedInnerPath() throws {
+        let leaf = "work.cbz"
+        putRecord(leaf, cached: 1, total: 1, names: ["sub/p1.jpg"])
+        let nested = store.dirURL(for: leaf).appendingPathComponent("sub")
+        try FileManager.default.createDirectory(
+            at: nested, withIntermediateDirectories: true)
+        let f = store.fileURL(folder: leaf, name: "sub/p1.jpg")
+        try Data([1]).write(to: f)
+        let url = URL(string: "https://x.example/view/work.cbz/sub/p1.jpg")!
+        XCTAssertEqual(store.localFileURL(remoteURL: url), f)
+        // And the naive split must NOT accidentally resolve elsewhere.
+        XCTAssertNil(store.localFileURL(folder: "work.cbz/sub", name: "p1.jpg"))
+    }
+
+    /// Review fix — records/files are namespaced per server+account:
+    /// a scope switch exposes an empty store, not another user's data.
+    func testScopeIsolatesRecordsAndFiles() throws {
+        var scope = "h1|a@x"
+        let s1 = OfflineStore(apiProvider: { nil },
+                              scopeProvider: { scope }, root: root)
+        s1.testPut(OfflineStore.LeafRecord(
+            folder: "w", pageCount: 1, cachedCount: 1, bytes: 1,
+            thumb: nil, names: ["p1.jpg"], addedAt: 1, lastReadAt: 1))
+        XCTAssertEqual(s1.records.count, 1)
+        // Same root, different account → nothing visible.
+        let s2 = OfflineStore(apiProvider: { nil },
+                              scopeProvider: { "h1|b@x" }, root: root)
+        XCTAssertTrue(s2.records.isEmpty)
+        // Same account, different server → also isolated.
+        let s3 = OfflineStore(apiProvider: { nil },
+                              scopeProvider: { "h2|a@x" }, root: root)
+        XCTAssertTrue(s3.records.isEmpty)
+        // scopeChanged() on a live store drops in-memory state and
+        // reloads the new scope's records.
+        scope = "h1|b@x"
+        s1.scopeChanged()
+        XCTAssertTrue(s1.records.isEmpty)
+    }
+
     // MARK: downloadedNames filters to existing files
 
     func testDownloadedNamesIntersection() throws {

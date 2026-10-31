@@ -130,6 +130,24 @@ final class VisibilityStoreTests: XCTestCase {
         XCTAssertTrue(store.isVisible("a"))
     }
 
+    // MARK: account switch (review fix — no cross-account leakage)
+
+    /// accountChanged() drops the previous owner's entire snapshot —
+    /// hidden roots, revision, showAll — and returns to fail-closed
+    /// loading until the new account's first refresh.
+    func testAccountChangedClearsPriorOwner() {
+        apply(owner: "o1", rev: 3, roots: ["secret", "work/b"])
+        store.showAll = true
+        store.accountChanged()
+        XCTAssertFalse(store.showAll)
+        XCTAssertTrue(store.readOnly == false)
+        XCTAssertEqual(store.status, .loading)
+        // Old hidden roots must not hide (or expose) anything in the
+        // pending state — guardPath reports pending, not hidden/allow.
+        XCTAssertEqual(store.guardPath("secret"), .pending)
+        XCTAssertFalse(store.isVisible("work"))
+    }
+
     // MARK: cached restore
 
     func testCacheRestoreMarksReadonly() {

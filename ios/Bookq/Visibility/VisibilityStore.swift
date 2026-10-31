@@ -49,6 +49,10 @@ final class VisibilityStore: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var coalesceTask: Task<Void, Never>?
     private var convergenceSent = false
+    /// Bumped on account/server switch — in-flight refreshes whose
+    /// epoch went stale are discarded so the old owner's snapshot can
+    /// never re-apply after the reset.
+    private var accountEpoch = 0
     private var topLevel: Set<String> = []
 
     private let apiProvider: () -> BookqAPI?
@@ -98,6 +102,27 @@ final class VisibilityStore: ObservableObject {
             try? d.write(to: cacheURL(for: owner), options: .atomic)
         }
         try? owner.write(to: lastOwnerURL, atomically: true, encoding: .utf8)
+    }
+
+    /// Account/server switch — the previous owner's hidden roots must
+    /// not stay applied (they'd leak or wrongly hide roots) while the
+    /// new account's snapshot is pending. Reset to fail-closed loading;
+    /// the next refresh()/cache-restore repopulates for the new owner.
+    func accountChanged() {
+        owner = nil
+        revision = 0
+        hasSnapshot = false
+        appliedSig = ""
+        hiddenRoots = []
+        hiddenNorm = [:]
+        showAll = false
+        readOnly = false
+        convergenceSent = false
+        status = .loading
+        lastError = nil
+        coalesceTask?.cancel()
+        accountEpoch += 1
+        objectWillChange.send()
     }
 
     /// Same-owner cached snapshot applies immediately (read-only intent
@@ -158,6 +183,7 @@ final class VisibilityStore: ObservableObject {
         guard let api = apiProvider() else { status = .error; lastError = .fetch; return }
         let cached = owner.flatMap { readCache(owner: $0) }
         let prevStatus = status
+        let epoch = accountEpoch
         do {
             // 3s timeout — GET_TIMEOUT_MS parity
             let snap = try await withThrowingTaskGroup(of: VisibilitySnapshot.self) { group in
@@ -170,6 +196,8 @@ final class VisibilityStore: ObservableObject {
                 group.cancelAll()
                 return v
             }
+            guard epoch == accountEpoch else { return }  // account switched mid-flight
+
             let downrev = (snap.owner == owner) && (snap.revision < revision)
             status = .ready; readOnly = false; lastError = nil
             applySnapshot(owner: snap.owner, revision: snap.revision,
@@ -182,10 +210,12 @@ final class VisibilityStore: ObservableObject {
                 convergenceSent = false
             }
         } catch let e as APIError {
+            guard epoch == accountEpoch else { return }
             if case .unauthorized = e {
                 status = .error; lastError = .auth
             } else { resolveFetchFailure(cached: cached) }
         } catch {
+            guard epoch == accountEpoch else { return }
             resolveFetchFailure(cached: cached)
         }
         if status != prevStatus { objectWillChange.send() }

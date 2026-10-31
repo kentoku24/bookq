@@ -65,11 +65,13 @@ final class LibraryStoreTests: XCTestCase {
                     ["tree": self.treeJSON, "generation": 7])
             }
             return StubURLProtocol.json(self.treeJSON,
-                                        headers: ["ETag": "\"42-abc\""])
+                                        headers: ["ETag": "\"abc123def-g42\""])
         }
         let s = LibraryStore(api: api())
         await s.load()
-        XCTAssertEqual(s.generation, 42)   // from ETag
+        // Review fix — server ETag is "<digest24>-g<gen>"; digits inside
+        // the digest must not corrupt the parsed generation.
+        XCTAssertEqual(s.generation, 42)   // from ETag -g suffix
         await s.load()
         XCTAssertEqual(s.generation, 7)    // from delta
         XCTAssertEqual(StubURLProtocol.hits(path: "api/folders"), 2)

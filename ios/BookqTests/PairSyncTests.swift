@@ -101,6 +101,10 @@ actor FakeTransport: PairTransporting {
     /// Number of connect() calls — reconnect tests wait for the fresh
     /// link before emitting, or frames land on the finished stream.
     private(set) var connectCount = 0
+    /// Index into sentRaw at which closeSocket() ran — ordering tests
+    /// assert LEAVE landed before the close (nil = still open).
+    private(set) var closedAfterSendCount: Int?
+    private(set) var closeCount = 0
 
     func connect(url: URL, token: String?) -> AsyncStream<PairSocket.Event> {
         connectCount += 1
@@ -113,6 +117,8 @@ actor FakeTransport: PairTransporting {
     }
     func send(_ text: String) async throws { sentRaw.append(text) }
     func closeSocket() {
+        closeCount += 1
+        closedAfterSendCount = sentRaw.count
         cont?.yield(.closed(code: 1000, reason: "closed"))
         cont?.finish()
     }
@@ -635,5 +641,59 @@ final class PairStoreTests: XCTestCase {
                   data: bindData)
         try await createTask.value
         XCTAssertTrue(store.bound)
+    }
+
+    /// Review fix — LEAVE must land on the wire BEFORE the socket closes
+    /// (web _leaveBound: send → close chained, never reordered).
+    func testLeaveSendsBeforeSocketClose() async throws {
+        try await enterReading()
+        store.leave()
+        for _ in 0..<100 {
+            let closes = await fake.closeCount
+            if closes > 0 { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let sent = await waitForSent(3)
+        XCTAssertEqual(sent.last?["type"] as? String, "LEAVE")
+        // closeSocket() ran only after the LEAVE send completed — the
+        // sent-count captured at close time includes the LEAVE frame.
+        let closedAfter = await fake.closedAfterSendCount
+        let sentCount = await fake.sent().count
+        XCTAssertEqual(closedAfter, sentCount)
+        for _ in 0..<50 {
+            if case .ended = store.status { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard case .ended = store.status else {
+            XCTFail("expected ended"); return
+        }
+    }
+
+    /// Review fix — LEAVE issued while the entry ACK is still in flight
+    /// is deferred until the ACK binds member→link; an earlier send is
+    /// rejected NO_SESSION and strands the peer (web _leaveBound).
+    func testLeaveWaitsForEntryAck() async throws {
+        let createTask = Task { @MainActor in try await store.create() }
+        await hello()
+        let sent = await waitForSent(1)
+        let createRid = sent[0]["requestId"] as! String
+        // Leave BEFORE the CREATE ACK — the bounded wait begins.
+        store.leave()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        // LEAVE not yet on the wire — still waiting for the entry ACK.
+        let sentNow = await fake.sent()
+        XCTAssertEqual(sentNow.count, 1)
+        // ACK arrives → LEAVE flushes, then the socket closes.
+        await ack(createRid, request: "CREATE", data: bindData)
+        try await createTask.value
+        let sent2 = await waitForSent(2)
+        XCTAssertEqual(sent2.last?["type"] as? String, "LEAVE")
+        for _ in 0..<100 {
+            let closes = await fake.closeCount
+            if closes > 0 { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let closes = await fake.closeCount
+        XCTAssertEqual(closes, 1)
     }
 }

@@ -44,16 +44,51 @@ final class OfflineStore: ObservableObject {
 
     private let fm = FileManager.default
     private let root: URL
+    /// Namespace per server+account ("host|owner") so a switch never
+    /// exposes another server's or user's downloads.
+    private let scopeProvider: () -> String
+    private var lastScope: String?
 
-    /// `apiProvider` is resolved per call so the store survives API-client
-    /// rebuilds (server URL change / re-login).
+    private var scopedRoot: URL {
+        let s = scopeProvider()
+        var cs = CharacterSet.alphanumerics
+        cs.insert(charactersIn: "-_.")
+        let enc = s.addingPercentEncoding(withAllowedCharacters: cs) ?? "anon"
+        return root.appendingPathComponent(enc, isDirectory: true)
+    }
+
+    /// `apiProvider`/`scopeProvider` are resolved per call so the store
+    /// survives API-client rebuilds (server URL change / re-login).
     init(apiProvider: @escaping () -> BookqAPI?,
          originalImages: @escaping () -> Bool = { false },
+         scopeProvider: @escaping () -> String = { "anon" },
          root: URL? = nil) {
         self.apiProvider = apiProvider
         self.originalImages = originalImages
+        self.scopeProvider = scopeProvider
         self.root = root ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BookqOffline", isDirectory: true)
+        lastScope = scopeProvider()
+        load()
+        pruneOrphans()
+    }
+
+    /// Re-read state after a server/account switch — the new scope has
+    /// its own records; any in-memory leftover would leak across users.
+    func scopeChanged() {
+        let s = scopeProvider()
+        guard s != lastScope else { return }
+        lastScope = s
+        records = [:]
+        downloading = []
+        stopping = []
+        listing = []
+        deleting = []
+        confirming = []
+        progressPct = [:]
+        tasks.values.forEach { $0.cancel() }
+        tasks = [:]
+        stopRequested = []
         load()
         pruneOrphans()
     }
@@ -67,7 +102,7 @@ final class OfflineStore: ObservableObject {
         let enc = leaf.isEmpty
             ? "__root__"
             : leaf.addingPercentEncoding(withAllowedCharacters: cs) ?? "__root__"
-        return root.appendingPathComponent(enc, isDirectory: true)
+        return scopedRoot.appendingPathComponent(enc, isDirectory: true)
     }
 
     func fileURL(folder: String, name: String) -> URL {
@@ -81,12 +116,27 @@ final class OfflineStore: ObservableObject {
     }
 
     /// Map any remote image URL (`/image/`, `/view/`, `/thumb/`) back to a
-    /// downloaded page file — the SW cache-first equivalent.
+    /// downloaded page file — the SW cache-first equivalent. Archive
+    /// inner paths need the longest leaf-prefix match: `work.cbz` +
+    /// `sub/01.jpg` saves under `dir(work.cbz)/sub/01.jpg`, so splitting
+    /// at the last "/" would look in the wrong leaf.
     func localFileURL(remoteURL url: URL) -> URL? {
         var path = url.path
         for prefix in ["/view/", "/image/", "/thumb/"] where path.hasPrefix(prefix) {
             path.removeFirst(prefix.count)
             guard let rel = path.removingPercentEncoding else { return nil }
+            // Longest recorded leaf that prefixes the remote path.
+            var best: (leaf: String, name: String)?
+            for leaf in records.keys
+            where leaf.isEmpty || rel.hasPrefix(leaf + "/") {
+                let name = leaf.isEmpty
+                    ? rel : String(rel.dropFirst(leaf.count + 1))
+                if !name.isEmpty, (best?.leaf.count ?? -1) < leaf.count {
+                    best = (leaf, name)
+                }
+            }
+            if let best { return localFileURL(folder: best.leaf, name: best.name) }
+            // No recorded leaf — last-component split fallback.
             let name = (rel as NSString).lastPathComponent
             let folder = (rel as NSString).deletingLastPathComponent
             return localFileURL(folder: folder, name: name)
@@ -96,7 +146,7 @@ final class OfflineStore: ObservableObject {
 
     // MARK: - Records / persistence
 
-    private var recordsURL: URL { root.appendingPathComponent("works.json") }
+    private var recordsURL: URL { scopedRoot.appendingPathComponent("works.json") }
 
     private func load() {
         guard let data = try? Data(contentsOf: recordsURL),
@@ -107,7 +157,7 @@ final class OfflineStore: ObservableObject {
     }
 
     private func persist() {
-        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: scopedRoot, withIntermediateDirectories: true)
         if let data = try? JSONEncoder().encode(records) {
             try? data.write(to: recordsURL, options: .atomic)
         }
@@ -258,6 +308,11 @@ final class OfflineStore: ObservableObject {
                             let url = api.pageURL(folder: leaf, name: name,
                                                   original: originalImages())
                             let data = try await api.imageData(url: url)
+                            // Archive inner dirs (name = "sub/p1.jpg") —
+                            // leaf dir alone doesn't cover them.
+                            try fm.createDirectory(
+                                at: dest.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
                             try data.write(to: dest, options: .atomic)
                             bytes += Int64(data.count)
                         }

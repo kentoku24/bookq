@@ -138,12 +138,15 @@ final class LibraryStore: ObservableObject {
         await load(force: true)
     }
 
-    /// ETag embeds the generation (`"\"<gen>-<digest>\""`) — cheap hint only;
-    /// the authoritative counter arrives on the first delta.
+    /// ETag embeds the generation as `"<digest24>-g<gen>"` — parse only
+    /// the `-g` suffix or digest digits corrupt `since` into a
+    /// never-matching value and every poll refetches the full tree.
     private func extractGeneration(etag: String?) -> Int? {
-        guard let etag else { return nil }
-        let digits = etag.filter { $0.isNumber }
-        return Int(digits.prefix(10))
+        guard let etag,
+              let g = etag.components(separatedBy: "-g").last else { return nil }
+        // Suffix may carry a trailing quote — digits only.
+        let digits = g.prefix { $0.isNumber }
+        return Int(digits)
     }
 
     // MARK: - Queries

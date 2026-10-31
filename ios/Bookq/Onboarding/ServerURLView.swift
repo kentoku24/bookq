@@ -50,7 +50,9 @@ struct ServerURLView: View {
     private func check() async {
         model.config.serverURLString = text
         guard let base = model.config.baseURL else {
-            error = "URL が不正です"
+            error = text.lowercased().hasPrefix("http://")
+                ? "http:// は localhost のみ利用できます（認証トークン保護のため https が必要です）"
+                : "URL が不正です"
             return
         }
         checking = true

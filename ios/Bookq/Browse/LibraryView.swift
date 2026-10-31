@@ -252,11 +252,13 @@ struct LibraryView: View {
 
     /// Paired-reader cover binding: opens on phase→reading once per
     /// workEpoch; dismissing records the epoch so it stays browsable
-    /// until the next shared work commit.
+    /// until the next shared work commit. `selecting` also presents —
+    /// the leader's selecting overlay is where a new pick happens, and
+    /// without it the re-entry banner dead-ends.
     private var pairReaderBinding: Binding<Bool> {
         Binding(
             get: {
-                pair.phase == .reading &&
+                (pair.phase == .reading || pair.phase == .selecting) &&
                 pairSuppressedEpoch != pair.lastState?.workEpoch
             },
             set: { presented in

@@ -23,9 +23,15 @@ final class AppModel: ObservableObject {
     let auth = AuthManager()
     let progress = ReadingProgressStore()
     /// Offline downloads — survives API rebuilds via provider closures.
+    /// Records/files are namespaced by host+account so a server or user
+    /// switch can never expose another scope's downloads.
     private(set) lazy var offline = OfflineStore(
         apiProvider: { [weak self] in self?.api },
-        originalImages: { [weak self] in self?.config.originalImages ?? false })
+        originalImages: { [weak self] in self?.config.originalImages ?? false },
+        scopeProvider: { [weak self] in
+            let host = self?.config.baseURL?.host ?? "anon"
+            return "\(host)|\(self?.auth.user?.email ?? "anon")"
+        })
     /// Hidden-root state machine (browse/visibility.js equivalent).
     private(set) lazy var visibility = VisibilityStore(
         apiProvider: { [weak self] in self?.api })
@@ -65,6 +71,7 @@ final class AppModel: ObservableObject {
         self.library = LibraryStore(api: api)
         self.library?.visibility = visibility
         RemoteImageLoader.shared.api = api
+        RemoteImageLoader.shared.clear()  // server switch: stale images must not resolve
         RemoteImageLoader.shared.offlineResolver = { [weak offline] in
             offline?.localFileURL(remoteURL: $0)
         }
@@ -129,7 +136,15 @@ final class AppModel: ObservableObject {
         bootError = nil
         do {
             let me = try await api.me()
-            auth.apply(user: me)
+            if auth.user?.email != me.email {
+                // Account switch — the previous user's per-account state
+                // (visibility, offline records) must not bleed through.
+                visibility.accountChanged()
+                auth.apply(user: me)
+                offline.scopeChanged()
+            } else {
+                auth.apply(user: me)
+            }
             phase = .ready
             Task { await progress.syncWithServer() }
             pair.bootResume()
@@ -145,9 +160,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Server URL was saved in onboarding/settings → rebuild and probe.
+    /// Old-scope state is dropped before the new host is probed so a
+    /// slow first response cannot serve another server's downloads or
+    /// hidden-root set.
     func serverURLChanged() {
         auth.logout()
+        visibility.accountChanged()
         configureAPI()
+        offline.scopeChanged()
         Task { await boot() }
     }
 
