@@ -10,6 +10,7 @@ struct ReaderView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var progress: ReadingProgressStore
     @EnvironmentObject private var offline: OfflineStore
+    @EnvironmentObject private var ext: ExternalDisplayStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
@@ -33,8 +34,7 @@ struct ReaderView: View {
     @State private var tapForwardLeft = true
 
     private var pageMode: ReaderPageMode {
-        let landscape = viewportSize.width >= viewportSize.height
-        return (landscape && landscapeSpread) ? .spread : .single
+        ReaderWork.pageMode(for: viewportSize, landscapeSpread: landscapeSpread)
     }
 
     var body: some View {
@@ -57,7 +57,9 @@ struct ReaderView: View {
         .onDisappear {
             saveCurrentPosition()
             progress.sync?.flush()          // pagehide → flush pending PUT
+            ext.endPresentation()           // external display → back to mirroring
         }
+        .onChange(of: pageAR) { _, _ in publishExternal() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
                 saveCurrentPosition()
@@ -158,21 +160,15 @@ struct ReaderView: View {
     private func spreadCell(work: ReaderWork, spread s: Int,
                             pages: [Int], in size: CGSize) -> some View {
         let ars = pages.map { pageAR[$0] ?? 0.7 }
-        let arSum = max(ars.reduce(0, +), 0.001)
         let gap: CGFloat = 5
-        var h = size.height
-        var w = arSum * h + gap * CGFloat(ars.count - 1)
-        if w > size.width {
-            h = (size.width - gap * CGFloat(ars.count - 1)) / arSum
-            w = size.width
-        }
+        let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
         return HStack(spacing: gap) {
             ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in
                 pageView(work: work, idx: idx)
-                    .frame(width: ars[pos] * h, height: h)
+                    .frame(width: ars[pos] * fit.height, height: fit.height)
             }
         }
-        .frame(width: w, height: h)
+        .frame(width: fit.width, height: fit.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -297,6 +293,19 @@ struct ReaderView: View {
                     .background(.black.opacity(0.5), in: Circle())
             }
             .accessibilityLabel("複数ページ")
+            // External display: shown only while a screen is attached;
+            // toggles projection on (accent) / off (device mirrors).
+            if ext.available {
+                Button {
+                    ext.userEnabled.toggle()
+                } label: {
+                    Image(systemName: ext.connected && ext.userEnabled ? "tv.fill" : "tv")
+                        .padding(10)
+                        .background(ext.userEnabled ? Color.accentColor : .black.opacity(0.5),
+                                    in: Circle())
+                }
+                .accessibilityLabel("外部ディスプレイ")
+            }
         }
         .foregroundStyle(.white)
     }
@@ -370,6 +379,20 @@ struct ReaderView: View {
         currentIdx = idx
         scheduleSave()
         prefetch(around: idx, in: work)
+        publishExternal()
+    }
+
+    /// Publish the current snapshot to the external-display projection.
+    /// The store activates the session only while a screen is attached.
+    private func publishExternal() {
+        guard let work else { return }
+        ext.updatePresentation(.init(
+            work: work, currentIdx: currentIdx, pageAR: pageAR,
+            spreadOffset: spreadOffset, landscapeSpread: landscapeSpread,
+            urlFor: { [model] page in
+                model.api?.pageURL(folder: page.folder, name: page.name,
+                                   original: model.config.originalImages)
+            }))
     }
 
     private func prefetch(around idx: Int, in work: ReaderWork) {
@@ -396,6 +419,7 @@ struct ReaderView: View {
         }
         w = w.withMode(pageMode, offset: spreadOffset)
         work = w
+        publishExternal()
     }
 
     private func onOrientationChange() {
@@ -484,6 +508,7 @@ struct ReaderView: View {
             currentIdx = start
             work = w
             prefetch(around: start, in: w)
+            publishExternal()
         } catch APIError.status(let s) where [404, 401, 403].contains(s) {
             error = "フォルダが見つかりません (HTTP \(s))"
         } catch {
