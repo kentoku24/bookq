@@ -5,7 +5,7 @@ self.onmessage = async function (e) {
   var envelope = !!(e && e.data && e.data.envelope);
   try {
     var parsed = JSON.parse(text);
-    var data = (envelope && parsed && !Array.isArray(parsed)) ? parsed.tree : parsed;
+    var data = (envelope && parsed && !Array.isArray(parsed)) ? (parsed.nodes || parsed.tree) : parsed;
     if (!Array.isArray(data)) {
       self.postMessage({ ok: false, invalid: true });
       return;

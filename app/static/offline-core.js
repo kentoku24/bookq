@@ -370,7 +370,7 @@
     function _parseTreeJson(jsonText, treeEnvelope) {
       let parsed;
       try { parsed = JSON.parse(jsonText); } catch (e) { return { error: e }; }
-      const data = (treeEnvelope && parsed && !Array.isArray(parsed)) ? parsed.tree : parsed;
+      const data = (treeEnvelope && parsed && !Array.isArray(parsed)) ? (parsed.nodes || parsed.tree) : parsed;
       if (!Array.isArray(data)) return { error: new Error("invalid tree snapshot") };
       return { data };
     }

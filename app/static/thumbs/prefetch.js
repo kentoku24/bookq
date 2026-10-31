@@ -56,10 +56,10 @@
     return -1;
   }
   function _isThumbUrl(u){
-    return u && (u.indexOf('/thumb/') === 0 || u.indexOf('/api/thumb-sprite') === 0);
+    return u && (u.indexOf('/thumb/') === 0 || u.indexOf('/api/v1/thumb-sprite') === 0);
   }
   function _dirForUrl(url, tileFolder){
-    if (url.indexOf('/api/thumb-sprite') === 0){
+    if (url.indexOf('/api/v1/thumb-sprite') === 0){
       var m = /[?&]folder=([^&]*)/.exec(url);
       if (m){ try { return decodeURIComponent(m[1]) || null; } catch(e) { return null; } }
       return tileFolder || null;

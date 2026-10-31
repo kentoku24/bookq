@@ -283,10 +283,10 @@
   function _resolveInitialPageRef(folder, done) {
     var names = _treeNames(folder);
     if (names) { done(_pickRef(folder, names)); return; }
-    fetch('/api/images?folder=' + encodeURIComponent(folder))
+    fetch(globalThis.BookqApi.imagesUrl(folder))
       .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
       .then(function (list) {
-        done(Array.isArray(list) ? _pickRef(folder, list) : null);
+        done(globalThis.BookqApi.imagesOf(list) ? _pickRef(folder, globalThis.BookqApi.imagesOf(list)) : null);
       })
       .catch(function () { done(null); });
   }

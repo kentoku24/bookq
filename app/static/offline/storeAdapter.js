@@ -289,9 +289,10 @@
     var leafFileMap = new Map();
     async function fetchLeafFiles(lp){
       throwIfAborted();
-      var res = await _fetch("/api/images?folder="+encodeURIComponent(lp), {signal});
+      var res = await _fetch(globalThis.BookqApi.imagesUrl(lp), {signal});
       if(!res.ok) throw new Error("list failed "+res.status+" for "+lp);
-      var files = await res.json();
+      var files = globalThis.BookqApi.imagesOf(await res.json());
+      if(!files) throw new Error("malformed images response for "+lp);
       throwIfAborted();
       return files;
     }
