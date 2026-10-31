@@ -1,0 +1,14 @@
+# bookq — local test fragment for --rs envs (additional -f only, never standalone).
+#
+# Usage: docker compose -f docker-compose.dev.yml -f docker-compose.dev-rs.yml -f docker-compose.local-rs.yml up -d viewer viewer-rs
+# Same role as docker-compose.local.yml but the published/labelled endpoint is
+# viewer-rs (the port belongs to the Rust backend; viewer stays internal as the
+# fall-through upstream).
+services:
+  viewer-rs:
+    ports:
+      - "${LOCAL_BIND:-127.0.0.1}:${LOCAL_PORT:-8080}:8080"
+    labels:
+      com.bookq.local: "true"
+      com.bookq.local_port: "${LOCAL_PORT:-8080}"
+      com.bookq.local_bind: "${LOCAL_BIND:-127.0.0.1}"

@@ -1,0 +1,53 @@
+# bookq — 開発環境 overlay: viewer-rs（Rust バックエンド）を足す追加 -f のみ。
+#
+#   docker compose -f docker-compose.dev.yml -f docker-compose.dev-rs.yml ...
+#
+# `./dev.sh up <name> --rs` で使う。構成は viewer（フォールスルー先として必須）
+# + viewer-rs + tailscale で、tailscale serve が viewer-rs を指すよう
+# TS_SERVE_TARGET を上書きする — dev-XX.<tailnet>.ts.net に来るリクエストは
+# 全て viewer-rs が受け、未実装パスは viewer:8080 に中継される。
+#
+# viewer-rs は host/network の認証を通さず viewer に中継するだけなので、
+# セッション Cookie・OAuth も含め全パスが透過的に動く。
+#
+# 直接 docker compose を叩かないこと。必須変数 (:?) が未設定だと失敗する。
+
+services:
+  viewer-rs:
+    image: "${DEV_RS_IMAGE:?DEV_RS_IMAGE is required — use ./dev.sh up --rs}"
+    container_name: "bookq-dev-viewer-rs-dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}"
+
+    volumes:
+      # R1 以降で scan_fs/meta_walk が参照する実データ（viewer と同じ ro マウント）。
+      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+
+    environment:
+      - BOOKQ_UPSTREAM=http://viewer:8080
+      - DOWNLOADS_DIR=/app/downloads
+
+    # dev.sh のプール管理は role=dev (viewer) のみを見る — このサービスは
+    # dev-rs として識別し、slot/名前ラベルは gc の参照判定用に共有する。
+    labels:
+      com.bookq.role: dev-rs
+      com.bookq.name: "${DEV_ENV_NAME:-${DEV_NAME}}"
+      com.bookq.pool_slot: "${DEV_POOL_SLOT}"
+      com.bookq.hostname: "${DEV_HOSTNAME:-dev-${DEV_POOL_SLOT}}"
+      com.bookq.ref: "${DEV_REF:-worktree}"
+      com.bookq.commit: "${DEV_COMMIT:-unknown}"
+      com.bookq.branch: "${DEV_BRANCH:-unknown}"
+      com.bookq.worktree: "${DEV_WORKTREE:-unknown}"
+      com.bookq.dev-image-tag: "${DEV_RS_IMAGE}"
+      com.bookq.backend: rs
+
+    restart: unless-stopped
+
+    depends_on:
+      viewer:
+        condition: service_healthy
+
+  tailscale:
+    environment:
+      - TS_SERVE_TARGET=http://viewer-rs:8080
+    depends_on:
+      - viewer
+      - viewer-rs

@@ -12,6 +12,9 @@
 #
 #   ./dev.sh up [name] [--ref REF]   起動（初回は空きスロット 01..10 を割当、既存なら同じスロットを再利用）
 #   ./dev.sh up [name] [--ref REF] [--fixture]   起動（--fixture: 実データの代わりに合成テストツリーをマウント）
+#   ./dev.sh up [name] [--rs]        viewer-rs（Rust バックエンド）構成で起動。viewer も同居して
+#                                    フォールスルー先になり、tailscale serve は viewer-rs を指す
+#                                    （com.bookq.backend=rs ラベルで再 up 時もモードを維持）
 #   ./dev.sh up [name] [--local [--port N] [--lan-allow]] [--fixture]   起動（--local: tailscale 無しで http://127.0.0.1:<port> に公開。2つ目の同時環境には --port が必要）
 #   ./dev.sh down [name] [--full]    停止・削除（--full 無しはボリューム保持でスロット再利用 / --full は state ボリュームまで削除してスロット解放）
 #   ./dev.sh down --all [--full] [--yes] [--no-prune-volumes]   全環境を削除（--all --full は --yes 必須）
@@ -42,6 +45,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 DEV_COMPOSE="docker-compose.dev.yml"
 LOCAL_COMPOSE="docker-compose.local.yml"
+DEV_RS_COMPOSE="docker-compose.dev-rs.yml"
+LOCAL_RS_COMPOSE="docker-compose.local-rs.yml"
 PROJECT_PREFIX="bookq-dev-"
 PROD_PROJECT="bookq"
 DEV_LABEL="com.bookq.role=dev"
@@ -169,16 +174,19 @@ pool_hostname_of() {
     printf 'dev-%s' "$slot"
 }
 
+# 環境→プロジェクト/スロットの引きは com.bookq.name（viewer + viewer-rs 両方に
+# 付く）で行う。role=dev だけだと、down 途中で viewer だけ消えた残骸環境の
+# viewer-rs を見失う（down で overlay 未読込 → orphan 残りの経験あり）。
 find_project_for_env() {
     local want="$1"
-    docker ps -a --filter "label=$DEV_LABEL" \
+    docker ps -a --filter "label=com.bookq.name" \
         --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.bookq.name"}}|{{.Label "com.bookq.pool_slot"}}' 2>/dev/null \
         | awk -F'|' -v want="$want" '$2 == want {print $1; exit}'
 }
 
 find_slot_for_env() {
     local want="$1"
-    docker ps -a --filter "label=$DEV_LABEL" \
+    docker ps -a --filter "label=com.bookq.name" \
         --format '{{.Label "com.bookq.name"}}|{{.Label "com.bookq.pool_slot"}}' 2>/dev/null \
         | awk -F'|' -v want="$want" '$1 == want {print $2; exit}'
 }
@@ -188,7 +196,7 @@ find_free_slot() {
     for i in $(seq 1 "$POOL_SIZE"); do
         slot="$(pool_slot_padded "$i")"
         # スロットが空かはラベル pool_slot で判定（プロジェクト名は dev-01-main のようにブランチを含むため、プロジェクト名では判定できない）
-        ids="$(docker ps -a --filter "label=$DEV_LABEL" --filter "label=com.bookq.pool_slot=$slot" --format '{{.ID}}' 2>/dev/null || true)"
+        ids="$(docker ps -a --filter "label=com.bookq.pool_slot=$slot" --format '{{.ID}}' 2>/dev/null || true)"
         if [ -z "$ids" ]; then
             printf '%s' "$slot"
             return 0
@@ -237,9 +245,11 @@ actual_dev_fqdn() {
 # port/bind 空ラベルは防御既定 8080 / 127.0.0.1。
 local_url_for() {
     local want="$1" row local port bind
-    row="$(docker ps -a --filter "label=$DEV_LABEL" \
+    # rs 環境では local ラベルを持つのは viewer-rs（role=dev-rs）。name ラベルは
+    # 両サービスに付くので name で拾い、local=true の行を採る。
+    row="$(docker ps -a --filter "label=com.bookq.name" \
         --format '{{.Label "com.bookq.name"}}|{{.Label "com.bookq.local"}}|{{.Label "com.bookq.local_port"}}|{{.Label "com.bookq.local_bind"}}' \
-        2>/dev/null | awk -F'|' -v want="$want" '$1 == want {print; exit}' || true)"
+        2>/dev/null | awk -F'|' -v want="$want" '$1 == want && $2 == "true" {print; exit}' || true)"
     [ -n "$row" ] || return 1
     local="${row#*|}"; local="${local%%|*}"
     [ "$local" = "true" ] || return 1
@@ -256,6 +266,9 @@ local_url_for() {
 # compose がファイルを解釈できるよう、解決済みの値（無ければダミー）を渡す。
 compose_env_defaults() {
     DEV_IMAGE="${DEV_IMAGE:-bookq-dev:placeholder}"
+    DEV_RS_IMAGE="${DEV_RS_IMAGE:-bookq-dev:rs-placeholder}"
+    DEV_BACKEND="${DEV_BACKEND:-py}"
+    export DEV_RS_IMAGE DEV_BACKEND
     DEV_NAME="${DEV_NAME:-unknown}"
     DEV_ENV_NAME="${DEV_ENV_NAME:-$DEV_NAME}"
     DEV_POOL_SLOT="${DEV_POOL_SLOT:-00}"
@@ -285,7 +298,15 @@ compose_env_defaults() {
 compose() {
     local project="$1"; shift
     compose_env_defaults
-    docker compose -f "$SCRIPT_DIR/$DEV_COMPOSE" -p "$project" "$@"
+    # rs 環境は overlay を同梱しないと viewer-rs が compose から見えず、
+    # down/logs で orphan 残りになる。viewer 削除済みの残骸でも検出できるよう
+    # backend=rs ラベルをプロジェクト全体から探す（viewer/viewer-rs 両方に付く）。
+    local files=(-f "$SCRIPT_DIR/$DEV_COMPOSE")
+    if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$project" \
+            --filter "label=com.bookq.backend=rs" 2>/dev/null | head -1)" ]; then
+        files+=(-f "$SCRIPT_DIR/$DEV_RS_COMPOSE")
+    fi
+    docker compose "${files[@]}" -p "$project" "$@"
 }
 
 # ローカル専用: viewer だけを起動する追加フラグメント付き。tailscale サービスは
@@ -294,6 +315,14 @@ compose_local() {
     local project="$1"; shift
     compose_env_defaults
     docker compose -f "$SCRIPT_DIR/$DEV_COMPOSE" -f "$SCRIPT_DIR/$LOCAL_COMPOSE" -p "$project" "$@"
+}
+
+# --local --rs 専用: viewer-rs にポート公開と local ラベルを集約する
+# （local-rs フラグメントで viewer-rs が LOCAL_PORT を受ける）。
+compose_local_rs() {
+    local project="$1"; shift
+    compose_env_defaults
+    docker compose -f "$SCRIPT_DIR/$DEV_COMPOSE" -f "$SCRIPT_DIR/$DEV_RS_COMPOSE" -f "$SCRIPT_DIR/$LOCAL_RS_COMPOSE" -p "$project" "$@"
 }
 
 # ローカル verify: 127.0.0.1 のみ。rebuild.sh dev_verify は DEV_FQDN 必須 +
@@ -402,12 +431,13 @@ prune_volumes_from_list() {
 cmd_up() {
     require_repo_root
 
-    local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow=""
+    local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow="" rs_mode=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --ref)  [ $# -ge 2 ] || die "--ref には値が必要です";  ref="$2";  shift 2 ;;
             --ref=*)  ref="${1#--ref=}";  shift ;;
             --fixture) fixture=1; shift ;;
+            --rs) rs_mode=1; shift ;;
             --local) local_mode=1; shift ;;
             --lan-allow) lan_allow=1; shift ;;
             --port) [ $# -ge 2 ] || die "--port には値が必要です"; local_port="$2"; local_port_set=1; shift 2 ;;
@@ -461,6 +491,13 @@ cmd_up() {
     local existing_project existing_slot
     existing_project="$(find_project_for_env "$name" || true)"
     if [ -n "$existing_project" ]; then
+        # 既存環境の backend モードをラベルから継承（--rs 無しの再 up でも
+        # viewer-rs 構成を維持する）。--rs 指定は py 環境を rs に切替える。
+        # viewer 不在の残骸でも判定できるよう backend=rs ラベルを直接探す。
+        if [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$existing_project" \
+                --filter "label=com.bookq.backend=rs" 2>/dev/null | head -1)" ]; then
+            rs_mode=1
+        fi
         case "$existing_project" in
             "$POOL_PREFIX"*)
                 slot="$(normalize_pool_slot "${existing_project#$POOL_PREFIX}")" \
@@ -532,18 +569,27 @@ cmd_up() {
         find_authkey >/dev/null || die "TS_AUTHKEY が見つかりません。環境変数に設定するか $(main_checkout)/.env に書いてください。"
     fi
 
+    # --rs は rebuild.sh の dev build/deploy も読む（rs イメージのビルドと
+    # compose overlay の追加）。環境変数で渡す。
+    if [ -n "$rs_mode" ]; then export DEV_RS=1; fi
+
     # ビルド（時間がかかるが、他の環境と競合しない）。
-    local built tag sha
+    local built tag sha rs_tag=""
     built="$("$SCRIPT_DIR/rebuild.sh" dev build "$name" "$ref")"
-    tag="${built%% *}"; sha="${built##* }"
+    read -r tag sha rs_tag <<< "$built"
 
     printf '🔧 開発環境 "%s" を起動します (project=%s, slot=%s, hostname=%s, ref=%s)\n\n' \
         "$name" "$project" "$slot" "$hostname" "${ref:-作業ツリー}"
+    if [ -n "$rs_mode" ]; then printf '   （backend: viewer-rs / proxy fall-through → viewer:8080）\n\n'; fi
     if [ -n "$local_mode" ]; then
         printf '   （ローカル: tailscale 無し / port=%s bind=%s)\n\n' "$local_port" "$local_bind"
     fi
 
     export DEV_IMAGE="$tag"
+    if [ -n "$rs_mode" ]; then
+        export DEV_RS_IMAGE="$rs_tag"
+        export DEV_BACKEND="rs"
+    fi
     export DEV_NAME="$name"
     export DEV_ENV_NAME="$name"
     export DEV_POOL_SLOT="$(normalize_pool_slot "$slot")"
@@ -569,8 +615,13 @@ cmd_up() {
     #（-f $DEV_COMPOSE 固定 + DEV_FQDN/https 硬直のため bypass）。
     # ローカルは viewer のみ・localhost curl のみ。
     if [ -n "$local_mode" ]; then
-        compose_local "$project" up -d viewer \
-            || die "ローカル環境の起動に失敗しました。ログ: ./dev.sh logs $name"
+        if [ -n "$rs_mode" ]; then
+            compose_local_rs "$project" up -d viewer viewer-rs \
+                || die "ローカル環境 (viewer-rs) の起動に失敗しました。ログ: ./dev.sh logs $name"
+        else
+            compose_local "$project" up -d viewer \
+                || die "ローカル環境の起動に失敗しました。ログ: ./dev.sh logs $name"
+        fi
         local_verify "$local_port"
     else
         "$SCRIPT_DIR/rebuild.sh" dev deploy
@@ -895,6 +946,16 @@ for d in data.get("devices", []):
         docker image rm "bookq-dev:$commit" >/dev/null 2>&1 || true
     fi
 
+    # viewer-rs イメージも同じ dev-image-tag ラベルで記録されている（rs 環境のみ）。
+    local rs_tag
+    rs_tag="$(docker ps -a \
+        --filter "label=com.docker.compose.project=$project" \
+        --filter "label=com.docker.compose.service=viewer-rs" \
+        --format '{{.Label "com.bookq.dev-image-tag"}}' 2>/dev/null | head -1 || true)"
+    if [ -n "$rs_tag" ] && [ "$rs_tag" != "unknown" ]; then
+        docker image rm "$rs_tag" >/dev/null 2>&1 || true
+    fi
+
     if [ -n "$slot_for_api" ]; then
         printf '✅ 完全撤去しました（ボリューム・イメージ。slot dev-%s は次回 up で再利用されます）\n' "$slot_for_api"
     elif [ "$node_done" = 1 ] && [ "$found" = 1 ] && [ "$deleted" = 1 ]; then
@@ -1111,12 +1172,14 @@ cmd_gc() {
     # 全 dev コンテナ（稼働・停止両方）が参照するイメージ ID の集合 R。
     # コンテナ側 {{.Image}} は sha256:<64hex>、docker images の {{.ID}} は 12 桁の
     # 短縮 ID — 前方一致で照合する。
+    # role=dev ではなく com.bookq.name で拾う: viewer-rs (role=dev-rs) が参照する
+    # rs イメージも「使用中」と判定するため（停止環境の誤回収防止）。
     ref_ids=" "
     while IFS= read -r cid; do
         [ -n "$cid" ] || continue
         img="$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null || true)"
         [ -n "$img" ] && ref_ids="$ref_ids${img#sha256:} "
-    done < <(docker ps -aq --filter "label=$DEV_LABEL")
+    done < <(docker ps -aq --filter "label=com.bookq.name")
 
     # 候補は bookq-dev リポジトリのタグ付きイメージのみ（dangling は手順 1/2）。
     # 削除は ID ではなく「その ID の持つ bookq-dev タグ」に対して行う:
