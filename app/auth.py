@@ -119,10 +119,43 @@ async def require_auth(request: Request) -> dict:
 # ── Auth routes ────────────────────────────────────────────────────────
 
 
+def _native_login_params(request: Request) -> dict | None:
+    """Parse + validate the `?client=native` PKCE login parameters.
+
+    Returns ``{code_challenge, state}`` for a native request, ``None`` for a
+    browser login. RFC 8252 requires S256 — `plain` is rejected. Validation
+    failures raise 400 before the OAuth redirect is attempted.
+    """
+    q = request.query_params
+    if q.get("client") != "native":
+        return None
+    challenge = q.get("code_challenge", "")
+    method = q.get("code_challenge_method", "S256")
+    state = q.get("state", "")
+    # RFC 7636: unencoded verifier is 43..128 chars; the S256 challenge is
+    # its base64url digest (43 chars). Bound, don't normalize.
+    if not (43 <= len(challenge) <= 128):
+        raise HTTPException(status_code=400, detail="invalid code_challenge")
+    if method != "S256":
+        raise HTTPException(status_code=400, detail="code_challenge_method must be S256")
+    if len(state) > 256:
+        raise HTTPException(status_code=400, detail="invalid state")
+    return {"code_challenge": challenge, "state": state}
+
+
 @router.get("/login")
 async def login(request: Request):
-    """Redirect to Google OAuth consent screen."""
+    """Redirect to Google OAuth consent screen.
+
+    ``?client=native`` runs the RFC 8252 flow: the PKCE challenge (and the
+    client's CSRF ``state``) rides in the signed session cookie through the
+    OAuth round-trip, and the callback redirects to ``bookq://auth`` with a
+    one-time exchange code instead of setting the session user.
+    """
     settings: Settings = request.app.state.settings
+    native = _native_login_params(request)
+    if native is not None:
+        request.session["bookq_native_pkce"] = native
     redirect_uri = settings.base_url.rstrip("/") + "/auth/callback" if settings.base_url else str(request.url_for("auth_callback"))
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
@@ -145,6 +178,26 @@ async def auth_callback(request: Request):
     if email not in settings.allowed_emails_set:
         request.session.clear()
         raise HTTPException(status_code=403, detail="Email not allowed")
+
+    pending_native = request.session.pop("bookq_native_pkce", None)
+    if pending_native is not None:
+        # Native flow: no session cookie — hand the app a one-time code
+        # bound to its PKCE challenge; it exchanges it at /api/v1/auth/token.
+        from app.auth_token import issue_auth_code
+
+        code = issue_auth_code(
+            request.app.state,
+            email=email,
+            name=userinfo.get("name", email),
+            picture=userinfo.get("picture", ""),
+            code_challenge=pending_native["code_challenge"],
+        )
+        params = {"code": code}
+        if pending_native["state"]:
+            params["state"] = pending_native["state"]
+        from urllib.parse import urlencode
+
+        return RedirectResponse(url=f"bookq://auth?{urlencode(params)}", status_code=303)
 
     request.session["user"] = {
         "email": email,

@@ -13,6 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.compression import ApiGZipMiddleware
 from app.config import load_settings
 from app.auth import router as auth_router, init_oauth
+from app.auth_token import token_router
 from app.folder_visibility import FolderVisibilityStore
 from app.folder_visibility_routes import router as folder_visibility_router
 from app.routes import _background_fill, _warm_covers, api_router, warmup_metadata_index
@@ -213,6 +214,7 @@ def create_app() -> FastAPI:
         app.mount("/static", NoCacheStaticFiles(directory=static_dir), name="static")
 
     app.include_router(auth_router)
+    app.include_router(token_router)
     app.include_router(api_router)
     app.include_router(folder_visibility_router)
     app.state.folder_visibility = FolderVisibilityStore(settings.state_path)
