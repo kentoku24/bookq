@@ -29,7 +29,7 @@ def _new_prefetch_page(browser, width=1280, height=800):
 def _folder_entries(page):
     return page.evaluate(
         """() => performance.getEntriesByType('resource')
-            .filter(e => e.name.includes('/api/folders'))
+            .filter(e => e.name.includes('/api/v1/tree'))
             .map(e => e.name)"""
     )
 
@@ -66,7 +66,7 @@ REVALIDATE_SPY_JS = """() => {
     const of = window.fetch.bind(window);
     window.fetch = (input, init) => {
         const u = typeof input === 'string' ? input : (input && input.url) || '';
-        if (u.indexOf('/api/folders') === 0) {
+        if (u.indexOf('/api/v1/tree') === 0) {
             window.__perf.foldersReqs.push({
                 url: u,
                 inm: (init && init.headers && init.headers['If-None-Match']) || null
@@ -90,7 +90,7 @@ def test_startup_fetches_folders_exactly_twice_and_seeds_etag(browser, server):
         _flush_frames(page)
         entries = _folder_entries(page)
         assert len(entries) == 2, (
-            f"startup must issue exactly 2 /api/folders fetches "
+            f"startup must issue exactly 2 /api/v1/tree fetches "
             f"(shallow + full), got {len(entries)}: {entries}"
         )
         assert "depth=1" in entries[0], entries
@@ -117,7 +117,7 @@ def test_warm_revalidate_coalesced_conditional_304_no_render(browser, server):
         )
         reqs = page.evaluate("() => window.__perf.foldersReqs")
         assert len(reqs) == 1, f"coalesced revalidate must fire exactly one request: {reqs}"
-        assert reqs[0]["url"].endswith("/api/folders"), reqs
+        assert reqs[0]["url"].endswith("/api/v1/tree"), reqs
         assert reqs[0]["inm"], "warm revalidate must carry the seeded If-None-Match"
         assert page.evaluate("() => window.__perf.jsonCalls") == 0
         assert page.evaluate("() => window.__perf.textCalls") == 0
@@ -160,7 +160,7 @@ def test_failed_revalidate_stays_retryable(browser, server):
                 const of = window.fetch.bind(window);
                 window.fetch = (u, i) => {
                     const url = typeof u === 'string' ? u : (u && u.url) || '';
-                    if (window.__failFolders && url === '/api/folders')
+                    if (window.__failFolders && url === '/api/v1/tree')
                         return Promise.reject(new Error('net down'));
                     return of(u, i);
                 };
@@ -190,7 +190,7 @@ def test_malformed_full_response_keeps_shallow_state(browser, server):
                 status=200, content_type="application/json", body='{"bad":1}'
             )
 
-    page.route("**/api/folders*", handler)
+    page.route("**/api/v1/tree*", handler)
     try:
         page.goto(server + "/")
         page.wait_for_selector("#tile-grid .tile", timeout=8000)
@@ -209,7 +209,7 @@ def test_malformed_full_response_keeps_shallow_state(browser, server):
         assert "読込中" in badge, f"shallow waiting badge must remain: {badge!r}"
     finally:
         try:
-            page.unroute("**/api/folders*")
+            page.unroute("**/api/v1/tree*")
         except Exception:
             pass
         context.close()
@@ -229,7 +229,7 @@ def test_stale_revalidation_cannot_overwrite_new_load(browser, server):
                 window.fetch = (u, i) => {
                     const url = typeof u === 'string' ? u : (u && u.url) || '';
                     const inm = i && i.headers && i.headers['If-None-Match'];
-                    if (url === '/api/folders' && inm)
+                    if (url === '/api/v1/tree' && inm)
                         return held.then(() => new Response(
                             '[{"name":"ZZZ","type":"folder","children":[{"name":"z.png","type":"image"}]}]',
                             {status: 200, headers: {'Content-Type': 'application/json', 'ETag': '"ZZZ"'}}));
@@ -419,9 +419,9 @@ def test_superseded_full_index_never_publishes(browser, server):
                 let nShallow = 0, nFull = 0;
                 window.fetch = (u, i) => {
                     const url = typeof u === 'string' ? u : (u && u.url) || '';
-                    if (url.indexOf('/api/folders?depth=1') === 0)
+                    if (url.indexOf('/api/v1/tree?depth=1') === 0)
                         return (++nShallow === 1) ? of(u, i) : held.then(() => of(u, i));
-                    if (url.indexOf('/api/folders') === 0)
+                    if (url.indexOf('/api/v1/tree') === 0)
                         return (++nFull === 1)
                             ? Promise.resolve(new Response(big,
                                 {status: 200, headers: {'Content-Type': 'application/json'}}))
@@ -734,7 +734,7 @@ def test_fillpoll_dict_envelope_passes_raw_text(browser, server):
                 const of = window.fetch.bind(window);
                 window.fetch = (u, i) => {
                     const url = typeof u === 'string' ? u : (u && u.url) || '';
-                    if (url.indexOf('/api/folders') === 0)
+                    if (url.indexOf('/api/v1/tree') === 0)
                         return Promise.resolve(new Response(
                             JSON.stringify({tree: [{name:'FP', type:'folder',
                                 children:[{name:'e.png', type:'image'}]}], generation: 42}),
@@ -818,7 +818,7 @@ PREFETCH_STUB_JS = """() => {
     window.__pfFetch = of;
     window.fetch = (u, i) => {
         const url = typeof u === 'string' ? u : (u && u.url) || '';
-        if (url.indexOf('/thumb/') === 0 || url.indexOf('/api/thumb-sprite') === 0) {
+        if (url.indexOf('/thumb/') === 0 || url.indexOf('/api/v1/thumb-sprite') === 0) {
             window.__pf.calls.push(url);
             window.__pf._inflight++;
             window.__pf.maxInflight = Math.max(window.__pf.maxInflight, window.__pf._inflight);
@@ -878,7 +878,7 @@ ELIGIBLE_URLS_JS = """() => {
         if (!on && !near) return;
         el.querySelectorAll('img[src]').forEach(img => {
             const u = img.getAttribute('src');
-            if ((u.indexOf('/thumb/') === 0 || u.indexOf('/api/thumb-sprite') === 0) && !seen.has(u)) {
+            if ((u.indexOf('/thumb/') === 0 || u.indexOf('/api/v1/thumb-sprite') === 0) && !seen.has(u)) {
                 seen.add(u);
                 out.push(u);
             }
@@ -1024,7 +1024,7 @@ def test_prefetch_coalesced_schedule_and_close_cancel(browser, server):
                 const of = window.__pfFetch;
                 window.fetch = (u, i) => {
                     const url = typeof u === 'string' ? u : (u && u.url) || '';
-                    if (url.indexOf('/thumb/') === 0 || url.indexOf('/api/thumb-sprite') === 0) {
+                    if (url.indexOf('/thumb/') === 0 || url.indexOf('/api/v1/thumb-sprite') === 0) {
                         window.__pf.calls.push(url);
                         if (i && i.signal)
                             i.signal.addEventListener('abort', () => { window.__pf.aborted = true; });
@@ -1159,7 +1159,7 @@ def test_recent_online_load_offline_online_invalidates_freshness(browser, server
             "() => window.__perf.foldersReqs.length >= 1", timeout=8000
         )
         reqs = page.evaluate("() => window.__perf.foldersReqs")
-        assert reqs[0]["url"].endswith("/api/folders"), reqs
+        assert reqs[0]["url"].endswith("/api/v1/tree"), reqs
         assert reqs[0]["inm"], f"must be a conditional request: {reqs}"
     finally:
         context.close()
@@ -1168,7 +1168,7 @@ def test_recent_online_load_offline_online_invalidates_freshness(browser, server
 def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
     """Full offline-cache reload then reconnect <5min: the initial offline
     load must NOT stamp the freshness gate, so the online event sends a full
-    conditional /api/folders revalidation (no fake time)."""
+    conditional /api/v1/tree revalidation (no fake time)."""
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
@@ -1182,7 +1182,7 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
             """async () => {
                 try {
                     const c = await caches.open('bookq-api-v1');
-                    return !!(await c.match('/api/folders'));
+                    return !!(await c.match('/api/v1/tree'));
                 } catch (e) { return false; }
             }""",
             timeout=10000,
@@ -1202,12 +1202,12 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
         page.evaluate("() => window.dispatchEvent(new Event('online'))")
         page.wait_for_function(
             """() => window.__perf.foldersReqs.some(
-                r => r.url.endsWith('/api/folders'))""",
+                r => r.url.endsWith('/api/v1/tree'))""",
             timeout=10000,
         )
         reqs = page.evaluate("() => window.__perf.foldersReqs")
-        full = [r for r in reqs if r["url"].endswith("/api/folders")]
-        assert full, f"reconnect must issue a full /api/folders request: {reqs}"
+        full = [r for r in reqs if r["url"].endswith("/api/v1/tree")]
+        assert full, f"reconnect must issue a full /api/v1/tree request: {reqs}"
         assert full[0]["inm"], (
             f"reconnect revalidation must be conditional (If-None-Match "
             f"seeded from the SW-cached response): {full}"
@@ -1417,7 +1417,7 @@ def test_persist_tree_snapshot_defers_for_load_and_revalidate(browser, server):
                     children:[{name:'c.png', type:'image'}]}];
                 window.fetch = (u, i) => {
                     const url = typeof u === 'string' ? u : (u && u.url) || '';
-                    if (url === '/api/folders')
+                    if (url === '/api/v1/tree')
                         return Promise.resolve(new Response(JSON.stringify(changed),
                             {status: 200, headers: {'Content-Type': 'application/json',
                                                     'ETag': '"C1"'}}));
@@ -1469,7 +1469,7 @@ def test_buildnodemap_repair_keeps_full_index_alive(browser, server):
         else:
             route.fulfill(status=200, content_type="application/json", body=big)
 
-    page.route("**/api/folders*", handler)
+    page.route("**/api/v1/tree*", handler)
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.__heldIdx.length > 0", timeout=15000)
@@ -1492,7 +1492,7 @@ def test_buildnodemap_repair_keeps_full_index_alive(browser, server):
         ), "published thumb index must track the loaded full tree"
     finally:
         try:
-            page.unroute("**/api/folders*")
+            page.unroute("**/api/v1/tree*")
         except Exception:
             pass
         context.close()

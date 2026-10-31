@@ -208,11 +208,11 @@ def test_turn_burst_coalesces_puts(page, server):
     puts = []
 
     def on_route(route):
-        if route.request.method == "PUT" and "/api/reading-position" in route.request.url:
+        if route.request.method == "PUT" and "/api/v1/reading-positions" in route.request.url:
             puts.append(route.request.url)
         route.continue_()
 
-    page.route("**/api/reading-position", on_route)
+    page.route("**/api/v1/reading-positions*", on_route)
     page.locator('.tile[data-path="long"]').click()
     expect(page.locator("#counter")).to_have_text("1 / 30")
     baseline = len(puts)
@@ -230,13 +230,13 @@ def test_put_failure_retries_with_backoff(page, server):
     puts = []
 
     def on_route(route):
-        if route.request.method == "PUT" and "/api/reading-position" in route.request.url:
+        if route.request.method == "PUT" and "/api/v1/reading-positions" in route.request.url:
             puts.append(route.request.url)
             route.fulfill(status=500)
         else:
             route.continue_()
 
-    page.route("**/api/reading-position", on_route)
+    page.route("**/api/v1/reading-positions*", on_route)
     page.locator('.tile[data-path="long"]').click()
     expect(page.locator("#counter")).to_have_text("1 / 30")
     page.keyboard.press("ArrowLeft")
@@ -254,7 +254,7 @@ def test_failed_pull_never_selfheals(page, server):
     puts = []
 
     def on_route(route):
-        if "/api/reading-position" not in route.request.url:
+        if "/api/v1/reading-positions" not in route.request.url:
             route.continue_()
             return
         if route.request.method == "GET":
@@ -263,7 +263,7 @@ def test_failed_pull_never_selfheals(page, server):
             puts.append(route.request.url)
             route.continue_()
 
-    page.route("**/api/reading-position", on_route)
+    page.route("**/api/v1/reading-positions*", on_route)
     page.evaluate(
         "localStorage.setItem('bookq_progress', "
         "JSON.stringify({'local/book': {page: 0, total: 10, ts: %d}}))" % (base + 1000)

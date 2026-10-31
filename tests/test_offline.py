@@ -329,7 +329,7 @@ def test_api_fallback(page, server):
     for attempt in range(2):
         try:
             online_tree = page.evaluate(
-                "async () => { const r = await fetch('/api/folders'); const j = await r.json(); return Array.isArray(j) ? j.length : 0; }"
+                "async () => { const r = await fetch('/api/v1/tree'); const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : 0; }"
             )
             break
         except Exception as e:
@@ -349,7 +349,7 @@ def test_api_fallback(page, server):
             # offline, so assert what the SW would serve — the cached folders
             # payload and the IDB tree, both length-equal to the online tree.
             api_hit = page.evaluate(
-                "async () => { try { const h = await caches.match('/api/folders'); if (!h) return -1; const j = await h.json(); return Array.isArray(j) ? j.length : -1; } catch { return -2; } }"
+                "async () => { try { const h = await caches.match('/api/v1/tree'); if (!h) return -1; const j = await h.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; } catch { return -2; } }"
             )
             assert api_hit == online_tree, f"offline SW cache len {api_hit} != online {online_tree}"
             idb_len = page.evaluate("async () => { try { const t = await window.OfflineTree.getTree(); return Array.isArray(t) ? t.length : 0; } catch { return 0; } }")
@@ -360,7 +360,7 @@ def test_api_fallback(page, server):
         for attempt in range(2):
             try:
                 offline_len = page.evaluate(
-                    "async () => { try { const r = await fetch('/api/folders'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j) ? j.length : -1; } catch (e) { return -2; } }"
+                    "async () => { try { const r = await fetch('/api/v1/tree'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; } catch (e) { return -2; } }"
                 )
                 break
             except Exception as e:
@@ -376,12 +376,12 @@ def test_api_fallback(page, server):
             page.context.set_offline(False)
             try:
                 page.wait_for_timeout(400)
-                page.evaluate("async () => { try { await fetch('/api/folders'); } catch {} }")
+                page.evaluate("async () => { try { await fetch('/api/v1/tree'); } catch {} }")
             finally:
                 page.context.set_offline(True)
             for _ in range(15):
                 offline_len = page.evaluate(
-                    "async () => { try { const r = await fetch('/api/folders'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j) ? j.length : -1; } catch (e) { return -2; } }"
+                    "async () => { try { const r = await fetch('/api/v1/tree'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; } catch (e) { return -2; } }"
                 )
                 if offline_len != -2:
                     break
@@ -412,7 +412,7 @@ def test_offline_status_class_toggles_with_health(page, server):
     assert "offline" not in (page.locator("#offline-status").get_attribute("class") or ""), \
         "online status must not carry .offline"
 
-    page.route("**/api/health*", lambda route: route.abort("failed"))
+    page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
         # mirror the harness test: SW can bypass route interception, so also
         # reject health fetches at the app level before calling updateOnlineStatus
@@ -422,7 +422,7 @@ def test_offline_status_class_toggles_with_health(page, server):
                 window._origFetchHealthT7 = orig;
                 window.fetch = (input, init) => {
                     const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/health')) return Promise.reject(new Error('failed'));
+                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
                     return orig(input, init);
                 };
             }"""
@@ -443,7 +443,7 @@ def test_offline_status_class_toggles_with_health(page, server):
         except Exception:
             pass
     finally:
-        page.unroute("**/api/health*")
+        page.unroute("**/api/v1/health*")
         page.evaluate(
             """() => { try { if(window._origFetchHealthT7) window.fetch = window._origFetchHealthT7; } catch {} }"""
         )

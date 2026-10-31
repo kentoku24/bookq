@@ -46,7 +46,7 @@ def test_shell_precache_v2_count():
     # the boot pull must exist in the same shell as app.js that calls it.
     # browse/visibility.js (per-user hidden roots) joins the shell — the
     # visibility module must exist in the same shell as the app that wires it.
-    assert len(entries) == 33, f"expected 33 SHELL_ASSETS, got {len(entries)}: {entries}"
+    assert len(entries) == 34, f"expected 33 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
     assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
     assert '"/static/browse/visibility.js"' in m.group(1), "SHELL_ASSETS must precache browse/visibility.js"
@@ -55,7 +55,7 @@ def test_shell_precache_v2_count():
 def test_static_swr_branch_order_and_guard():
     text = SW_PATH.read_text(encoding="utf-8")
     assert "staticSWR" in text or "StaleWhileRevalidate" in text or "caches.match" in text
-    health_idx = text.find("/api/health")
+    health_idx = text.find("/api/v1/health")
     # static branch is in fetch handler: startsWith('/static/') && ['script','style'...
     fetch_section = text[text.find('self.addEventListener("fetch"'):]
     static_idx = fetch_section.find("startsWith('/static/')")
@@ -70,7 +70,7 @@ def test_static_swr_branch_order_and_guard():
     assert image_idx != -1
     assert static_idx < image_idx, f"branch order wrong: static {static_idx} image {image_idx} in fetch handler"
     # global order health before static
-    assert text.find("/api/health") < text.find("staticSWR") or text.find("/api/health") < fetch_section.find("startsWith('/static/')") + text.find('self.addEventListener("fetch"')
+    assert text.find("/api/v1/health") < text.find("staticSWR") or text.find("/api/v1/health") < fetch_section.find("startsWith('/static/')") + text.find('self.addEventListener("fetch"')
     assert "!url.pathname.startsWith('/static/')" in text, "image branch must guard !/static/"
     assert "['script','style','image','font','css']" in text or '["script"' in text or "request.destination" in text
 
@@ -82,16 +82,16 @@ def test_static_swr_semantics():
     assert ".put(" in text
 
 def test_visibility_api_is_network_only():
-    """/api/folder-visibility must be a dedicated network-only branch BEFORE
+    """/api/v1/folder-visibility must be a dedicated network-only branch BEFORE
     the generic /api/ NetworkFirst branch — a per-user hidden set can never be
     served from the shared API cache, and offline failure is Response.error()
     (the module's owner-scoped localStorage snapshot is the fallback, not
     Cache API)."""
     text = SW_PATH.read_text(encoding="utf-8")
     fetch_section = text[text.find('self.addEventListener("fetch"'):]
-    vis_idx = fetch_section.find("'/api/folder-visibility'")
+    vis_idx = fetch_section.find("'/api/v1/folder-visibility'")
     api_idx = fetch_section.find("startsWith('/api/')")
-    assert vis_idx != -1, "dedicated /api/folder-visibility branch missing"
+    assert vis_idx != -1, "dedicated /api/v1/folder-visibility branch missing"
     assert api_idx != -1, "generic /api/ NetworkFirst branch missing"
     assert vis_idx < api_idx, (
         f"visibility branch must precede the shared API cache branch: "

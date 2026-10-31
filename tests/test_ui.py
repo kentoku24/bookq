@@ -94,7 +94,7 @@ def test_multi_thumbnail_tile_for_folder_with_subfolders(page):
     imgs = tile.locator(".tile-multi img")
     expect(imgs).to_have_count(1)
     src = imgs.first.get_attribute("src") or ""
-    assert "/api/thumb-sprite?" in src and "rows=2" in src
+    assert "/api/v1/thumb-sprite?" in src and "rows=2" in src
 
 
 def test_list_mode_toggle(page):

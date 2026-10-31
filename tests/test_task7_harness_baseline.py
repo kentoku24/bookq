@@ -76,7 +76,7 @@ def test_failing_new_displays_thumb_api_shell(page, server):
     api_el = page.locator("#harness-api-folders-cached")
     assert api_el.count() == 1, "missing #harness-api-folders-cached"
     api_text = api_el.text_content() or ""
-    assert "/api/folders" in api_text, f"/api/folders missing, got {api_text!r}"
+    assert "/api/v1/tree" in api_text, f"/api/folders missing, got {api_text!r}"
     assert "cached" in api_text.lower(), f"cached missing, got {api_text!r}"
     # must mention ignoreSearch
     assert "ignoreSearch" in api_text or "ignore" in api_text.lower(), f"ignoreSearch fallback not displayed, got {api_text!r}"

@@ -459,7 +459,7 @@ def test_search_results_show_thumbnail(search_page):
 
     RED pre-fix (placeholder div), GREEN post-fix (tree-thumb fallback).
     """
-    with search_page.expect_response(lambda r: "/api/search" in r.url):
+    with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
         search_page.locator("#search-input").fill("テスト")
     # .tile-metadata only exists on SEARCH tiles (the root grid's tiles lack
     # it), so this proves the search render — not a stale root tile.
@@ -537,7 +537,7 @@ def test_search_cards_show_thumbnail(search_page):
     search_page.locator("#footer-refresh-btn").click()
     search_page.wait_for_selector("#tile-grid.card-mode")
 
-    with search_page.expect_response(lambda r: "/api/search" in r.url):
+    with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
         search_page.locator("#search-input").fill("テスト")
     search_page.wait_for_selector("#tile-grid .card", timeout=5000)
     # Exactly one result ("sample") — the root grid would show 2+ cards, so
@@ -599,7 +599,7 @@ def test_counter_shows_warning_on_current_page_failure(page, server, fail404_pro
 def fail500_proxy(server: str):
     """Proxy that 500s every /api/images request (any ?folder= query) and
     forwards everything else to the shared fixture server."""
-    yield from _start_path_fail_proxy(server, {"/api/images": 500})
+    yield from _start_path_fail_proxy(server, {"/api/v1/images": 500})
 
 
 def test_transient_error_resets_chapter_state(page, server, fail500_proxy):

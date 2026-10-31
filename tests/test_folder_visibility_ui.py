@@ -461,7 +461,7 @@ def test_shallow_window_filters_hidden_ancestor_tile(fvpage, flat_vis_env):
         else:
             held_full.append(route)
 
-    fvpage.route("**/api/folders*", _route)
+    fvpage.route("**/api/v1/tree*", _route)
     fvpage.reload()
     fvpage.wait_for_function(
         "window.FolderVisibility && "
