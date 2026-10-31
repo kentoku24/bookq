@@ -1,0 +1,61 @@
+# Schemathesis contract-test configuration.
+# Loaded automatically when `schemathesis run` executes in this directory.
+
+# The far-future `ts` guard on reading-position PUTs rejects schema-valid
+# input with 400 — an intentional wrong-clock defense (see the comment in
+# app/routes.py: a clamped ts would let a skewed device dominate LWW
+# forever). The bound is relative to server time, which the static schema
+# cannot express, so the rejection is allowed per-operation here instead.
+
+[[operations]]
+include-name = "PUT /api/reading-position"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+[[operations]]
+include-name = "PUT /api/v1/reading-positions"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+# /image's `Range` header is declared with the `^bytes=` prefix pattern; the
+# full Range grammar (and range validity vs. file size) can't be expressed in
+# the schema, so a malformed-but-pattern-matching value legitimately 400s.
+
+[[operations]]
+include-name = "GET /image/{path}"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+# Media paths reject shapes the `type: string` schema can't express
+# (empty segments, trailing slashes, NUL bytes, unresolvable names).
+
+[[operations]]
+include-name = "GET /thumb/{path}"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+[[operations]]
+include-name = "GET /view/{path}"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+# thumb-sprite's `folder`/`names` carry semantic constraints the schema can't
+# express (folder must exist as dir or archive; names must yield ≥1 non-empty
+# entry), so schema-valid-but-unusable input legitimately 400s.
+
+[[operations]]
+include-name = "GET /api/thumb-sprite"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+[[operations]]
+include-name = "GET /api/v1/thumb-sprite"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]

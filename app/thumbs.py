@@ -876,6 +876,8 @@ async def handle_thumb_sprite(request: Request) -> Response:
         is_dir = folder_path.is_dir()
     except (OSError, ValueError):
         raise HTTPException(status_code=404, detail="File not found")
+    if not folder_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
     if not is_archive and not is_dir:
         raise HTTPException(status_code=400, detail="Not an archive or directory")
 
