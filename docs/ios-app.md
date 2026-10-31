@@ -64,6 +64,7 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 | `Library/` | ツリー保持・ブラウズルール（flatten/self-tile/multiThumb）・進捗 |
 | `Browse/` | タイル/リスト/カードグリッド・認証付き画像ローダ |
 | `Reader/` | リーダー（`ReaderModel`=spread/chapter 組立、`ReaderView`=UI、`ZoomableScrollView`=ズーム、`ProgressSync`=進捗同期、`OverviewView`=複数ページグリッド） |
+| `External/` | 外部ディスプレイ投影（USB-C→モニタ）|`ExternalDisplayStore`=セッション管理+公開状態、`ExternalDisplaySceneDelegate`=外部 scene 構築、`ExternalDisplayView`=フルスクリーン描画 |
 
 ## リーダー仕様（web parity）
 
@@ -140,10 +141,33 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   PairedReaderView が全画面自動表示、手動 dismiss は workEpoch 毎に
   記憶され「同期中」バナーから再入室。
 
+## 外部ディスプレイ投影（USB-C → モニタ）
+
+- `windowExternalDisplayNonInteractive` scene role で第二 WindowScene を
+  外部スクリーンに起動（`Info.plist` の `UIApplicationSceneManifest` +
+  `ExternalDisplaySceneDelegate`）。非対話ロールのため操作は端末側のみ。
+- 発動: 画面接続中にリーダーを開くと自動投影。リーダー内クロームの
+  tv ボタンで ON/OFF（セッション限定）。リーダーを閉じるとセッション
+  破棄 → ミラーリングに復帰。ケーブル抜き差しは
+  `UIScreen.didConnect/didDisconnect`（deprecated だが物理接続の唯一の
+  シグナル）+ 次のページ送りで追従。
+- 解像度: 接続時に `screen.availableModes` から最大画素数のモードを選び
+  `screen.currentMode` に設定（native 4K を強制）。オーバースキャン TV
+  対策は `overscanCompensation = .insetBounds`（通常モニタでは no-op）。
+- `ExternalDisplayRootView`/`ExternalReaderView` は端末リーダーと同じ
+  規則で描画（外部 geometry から pageMode 決定、`work.withMode` で
+  spread 再構成、`ReaderWork.spreadFit` 共有、RTL、chrome/gesture なし）。
+  画像は `RemoteImageLoader.shared` のキャッシュをそのまま共用。
+- `ReaderView` が `Presentation`（work/currentIdx/pageAR/spreadOffset/
+  landscapeSpread/urlFor）を `ExternalDisplayStore.shared` に公開。
+  paired（dual-reader）中は投影しない（solo リーダーのみ）。
+
 ## 既知の制約
 
 - webrtc-dc データプレーン・UI_SYNC ブラウズ同期・QR スキャンは非対応
   （server-ws plane とコード/MATCH 入力で代替）
 - ページ画像は既定 `/view/`（web 既定は `/image/`。原本モードは設定で切替可）
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
+- 外部ディスプレイはシミュレータで生成できないため投影経路は実機 QA のみ
+  （単体テストは state machine/レイアウト helper のみカバー）
 - UI 自動テストなし（単体テストのみ）
