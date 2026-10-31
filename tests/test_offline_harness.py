@@ -164,7 +164,7 @@ def test_02_api_folders_cache_hit(page, server):
     for attempt in range(2):
         try:
             online_len = page.evaluate(
-                "async () => { const r = await fetch('/api/folders'); const j = await r.json(); return Array.isArray(j) ? j.length : -1; }"
+                "async () => { const r = await fetch('/api/v1/tree'); const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; }"
             )
             break
         except Exception as e:
@@ -181,7 +181,7 @@ def test_02_api_folders_cache_hit(page, server):
         for attempt in range(2):
             try:
                 offline_len = page.evaluate(
-                    "async () => { try { const r = await fetch('/api/folders'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j) ? j.length : -1; } catch { return -2; } }"
+                    "async () => { try { const r = await fetch('/api/v1/tree'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; } catch { return -2; } }"
                 )
                 break
             except Exception as e:
@@ -192,7 +192,7 @@ def test_02_api_folders_cache_hit(page, server):
         if offline_len == -2:
             # Cheap direct-cache read first: it answers in-page even when the
             # SW path lags. Only a double miss triggers re-seed + polling.
-            offline_len2 = page.evaluate("async () => { try { const hit = await caches.match('/api/folders'); if (!hit) return -2; const j = await hit.json(); return Array.isArray(j) ? j.length : -1; } catch { return -2; } }")
+            offline_len2 = page.evaluate("async () => { try { const hit = await caches.match('/api/v1/tree'); if (!hit) return -2; const j = await hit.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; } catch { return -2; } }")
             if offline_len2 > 0:
                 offline_len = offline_len2
             else:
@@ -202,13 +202,13 @@ def test_02_api_folders_cache_hit(page, server):
                 page.context.set_offline(False)
                 try:
                     page.wait_for_selector(".tile", timeout=2400)
-                    page.evaluate("async () => { try { await fetch('/api/folders'); } catch {} }")
+                    page.evaluate("async () => { try { await fetch('/api/v1/tree'); } catch {} }")
                 finally:
                     page.context.set_offline(True)
                 deadline = time.time() + 6
                 while time.time() < deadline:
                     offline_len = page.evaluate(
-                        "async () => { try { const r = await fetch('/api/folders'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j) ? j.length : -1; } catch { return -2; } }"
+                        "async () => { try { const r = await fetch('/api/v1/tree'); if (!r.ok) return -1; const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : -1; } catch { return -2; } }"
                     )
                     if offline_len != -2:
                         break
@@ -538,7 +538,7 @@ def test_09_vpn_split_health_abort(page, server):
     clear_all(page)
     goto_offline(page, server)
     wait_for_sw(page)
-    page.route("**/api/health*", lambda route: route.abort("failed"))
+    page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
         page.evaluate(
             """() => {
@@ -546,7 +546,7 @@ def test_09_vpn_split_health_abort(page, server):
                 window._origFetchHealth = orig;
                 window.fetch = (input, init) => {
                     const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/health')) return Promise.reject(new Error('failed'));
+                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
                     return orig(input, init);
                 };
             }"""
@@ -564,7 +564,7 @@ def test_09_vpn_split_health_abort(page, server):
                 window._origFetchHarness = orig2;
                 window.fetch = (input, init) => {
                     const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/health')) return Promise.reject(new Error('failed'));
+                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
                     return orig2(input, init);
                 };
             }"""
@@ -577,7 +577,7 @@ def test_09_vpn_split_health_abort(page, server):
         ng_count = page.evaluate("() => document.querySelectorAll('#harness-signals .signal.ng').length")
         assert ng_count >= 5, f"expected many ng signals on health abort, got {ng_count}"
     finally:
-        page.unroute("**/api/health*")
+        page.unroute("**/api/v1/health*")
         page.evaluate(
             """() => {
                 try { if(window._origFetchHealth) window.fetch = window._origFetchHealth; } catch {}

@@ -77,7 +77,7 @@ def _collect_perf_stats(page) -> dict:
     return page.evaluate(
         """(sel) => {
             const entries = performance.getEntriesByType("resource");
-            const folders = entries.filter((e) => e.name.includes("/api/folders"));
+            const folders = entries.filter((e) => e.name.includes("/api/v1/tree"));
             const images = entries.filter((e) => e.name.includes("/image/"));
             const imgBytes = images.reduce((s, e) => s + (e.transferSize || 0), 0);
             const markStart = window.__cc_markTopStart || null;
@@ -176,7 +176,7 @@ def test_top_covers_use_thumbnails(server, browser):
         non_thumb = [
             s
             for s in srcs
-            if not (s.startswith("/thumb/") or s.startswith("/api/thumb-sprite"))
+            if not (s.startswith("/thumb/") or s.startswith("/api/v1/thumb-sprite"))
         ]
         print(f"[top-display-perf] non_thumb_src_count={len(non_thumb)}")
         assert non_thumb == []

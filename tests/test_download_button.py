@@ -143,7 +143,7 @@ def test_01_offline_btn_visible_6_modes(page, server):
             window._origFetchSearch = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/search')) {
+                if (u.includes('/api/v1/search')) {
                     const payload = {query:'simple', total:2, results:[{folder_path:'simple_manga', folder_name:'simple_manga', has_metadata:false, artist:[], tags:[]},{folder_path:'group/episodes/ch-1', folder_name:'ch-1', has_metadata:false, artist:[], tags:[]}]};
                     return new Response(JSON.stringify(payload), {status:200, headers:{'Content-Type':'application/json'}});
                 }
@@ -187,7 +187,7 @@ def test_01_offline_btn_visible_6_modes(page, server):
     finally:
         page.evaluate("() => { try { if(window._origFetchSearch) window.fetch = window._origFetchSearch; } catch {} }")
         try:
-            page.unroute("**/api/search**")
+            page.unroute("**/api/v1/search**")
         except Exception:
             pass
         # clear search
@@ -299,7 +299,7 @@ def test_03_single_tap_stop_leaves_partial(page, server):
     # stopping after the second page lands always leaves 2 < total cached.
     # (The first page URL doubles as the folder thumb and may already be
     # cached from grid render, so the stop precondition keys on the second.)
-    files_dl3 = page.evaluate("async () => { const r = await fetch('/api/images?folder=' + encodeURIComponent('simple_manga')); return await r.json(); }")
+    files_dl3 = page.evaluate("async () => { const r = await fetch('/api/v1/images?folder=' + encodeURIComponent('simple_manga')); return (await r.json()).images; }")
     first_file, second_file = files_dl3[0], files_dl3[1]
     page.evaluate(
         """(first) => {
@@ -406,7 +406,7 @@ def test_03_single_tap_stop_leaves_partial(page, server):
         # proven put-ok entries can later read absent there (no delete runs),
         # so the record (IDB, authoritative) plus a non-empty coherent cache
         # carry the contract instead of exact key equality.
-        files = page.evaluate("async () => { const r=await fetch('/api/images?folder='+encodeURIComponent('simple_manga')); return await r.json(); }")
+        files = page.evaluate("async () => { const r=await fetch('/api/v1/images?folder='+encodeURIComponent('simple_manga')); return (await r.json()).images; }")
         assert isinstance(files, list) and len(files) == 5, f"files {files}"
         first_url = page.evaluate("(f) => window.OfflineCore.imageUrl('simple_manga', f)", files[0])
         second_url = page.evaluate("(f) => window.OfflineCore.imageUrl('simple_manga', f)", files[1])
@@ -471,7 +471,7 @@ def test_04_listing_abort_returns_idle_and_is_listing(page, server):
             window._origFetchDL4 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 800)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 800)); }
                 return window._origFetchDL4(input, init);
             };
         }"""
@@ -507,7 +507,7 @@ def test_04_listing_abort_returns_idle_and_is_listing(page, server):
     finally:
         page.evaluate("() => { try { if(window._origFetchDL4) window.fetch = window._origFetchDL4; } catch {} }")
         try:
-            page.unroute("**/api/images**")
+            page.unroute("**/api/v1/images**")
         except Exception:
             pass
         try:
@@ -931,7 +931,7 @@ def test_08_visual_layer_computed_styles(page, server):
             window._origFetchDL8 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 3000)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 3000)); }
                 return window._origFetchDL8(input, init);
             };
         }"""
@@ -1000,7 +1000,7 @@ def test_09_reduced_motion_stops_spinner_keeps_arc(page, server):
             window._origFetchDL9 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 3000)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 3000)); }
                 return window._origFetchDL9(input, init);
             };
         }"""
@@ -1423,7 +1423,7 @@ def test_11_progress_ring_advances_in_file_phase(page, server):
             window._origFetchDL11 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 800)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 800)); }
                 if (u.includes('/image/simple_manga/')) { await new Promise(r=>setTimeout(r, 600)); }
                 return window._origFetchDL11(input, init);
             };

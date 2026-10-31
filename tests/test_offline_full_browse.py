@@ -91,7 +91,7 @@ def _get_online_tree_len(page):
     for _ in range(2):
         try:
             return page.evaluate(
-                "async () => { const r = await fetch('/api/folders'); const j = await r.json(); return Array.isArray(j) ? j.length : 0; }"
+                "async () => { const r = await fetch('/api/v1/tree'); const j = await r.json(); return Array.isArray(j.nodes||j) ? (j.nodes||j).length : 0; }"
             )
         except Exception as e:
             if "Execution context was destroyed" in str(e):
@@ -157,7 +157,7 @@ def test_api_folders_offline_recovery(page, server):
     sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
     assert "res.clone()" in sw_text and "caches.open" in sw_text, "SW networkFirst must clone before put"
     # SW still has /api/folders alias fallback (app no longer populates Cache entry)
-    assert "caches.match('/api/folders')" in sw_text or 'caches.match("/api/folders")' in sw_text, "SW must have /api/folders alias fallback"
+    assert "caches.match('/api/v1/tree')" in sw_text or 'caches.match("/api/folders")' in sw_text, "SW must have /api/folders alias fallback"
     assert "ignoreSearch" in sw_text, "SW must have ignoreSearch fallback"
 
     # verify app.js uses IDB-only and no longer caches.put/match for /api/folders
@@ -168,7 +168,7 @@ def test_api_folders_offline_recovery(page, server):
     assert "OfflineTree.getTree" in app_text, "app.js catch must recover via OfflineTree.getTree"
     # loadFolders should not contain caches.open for folders nor caches.match for folders catch
     lf_section = app_text[app_text.find("async function loadFolders"): app_text.find("async function loadFolders")+4000]
-    assert 'caches.match("/api/folders")' not in lf_section and "caches.match('/api/folders')" not in lf_section, "loadFolders must not contain caches.match for /api/folders (IDB-only)"
+    assert 'caches.match("/api/folders")' not in lf_section and "caches.match('/api/v1/tree')" not in lf_section, "loadFolders must not contain caches.match for /api/folders (IDB-only)"
     assert 'caches.open("bookq-api-v1")' not in lf_section, "loadFolders must not put /api/folders to Cache (IDB-only)"
     # hashchange only, no popstate
     assert 'addEventListener("hashchange"' in hash_text, "must have single hashchange listener (owned by browse/hash.js)"
@@ -206,7 +206,7 @@ def test_api_folders_offline_recovery(page, server):
     page.wait_for_selector(".tile", timeout=10000)
     wait_for_sw(page)
     # abort health probe at both route and fetch level (mirrors test_offline harness #9)
-    page.route("**/api/health*", lambda route: route.abort("failed"))
+    page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
         page.evaluate(
             """() => {
@@ -214,7 +214,7 @@ def test_api_folders_offline_recovery(page, server):
                 window._origFetchHealthT2 = orig;
                 window.fetch = (input, init) => {
                     const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/health')) return Promise.reject(new Error('failed'));
+                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
                     return orig(input, init);
                 };
             }"""
@@ -231,7 +231,7 @@ def test_api_folders_offline_recovery(page, server):
         assert "0 folders" not in count_text, f"health abort should not empty browsing: {count_text}"
         # verify cached tree still fetchable despite health failure
         still_ok = page.evaluate(
-            "async () => { try { const r = await fetch('/api/folders'); const j = await r.json(); return Array.isArray(j) && j.length > 0; } catch { return false; } }"
+            "async () => { try { const r = await fetch('/api/v1/tree'); const j = await r.json(); return Array.isArray(j.nodes||j) && (j.nodes||j).length > 0; } catch { return false; } }"
         )
         assert still_ok, "browsing tree must remain available when health probe fails"
         try:
@@ -239,7 +239,7 @@ def test_api_folders_offline_recovery(page, server):
         except Exception:
             pass
     finally:
-        page.unroute("**/api/health*")
+        page.unroute("**/api/v1/health*")
         page.evaluate("() => { try { if(window._origFetchHealthT2) window.fetch = window._origFetchHealthT2; } catch {} }")
         page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
         page.wait_for_function(
@@ -487,16 +487,16 @@ def test_viewer_hash_relaunch_offline_restores_tiles(page, server):
     page.wait_for_selector(".tile", timeout=2400)
     # 4. Ensure IDB path works with Cache absent (delete Cache entry if present, assert IDB still restores)
     # IDB is now sole tree store; Cache /api/folders is harmless opportunistic (SW) but app no longer relies on it.
-    page.evaluate("async () => { try{ const c=await caches.open('bookq-api-v1'); const ks=await c.keys(); for(const k of ks){ if(k.url.includes('/api/folders')) try{ await c.delete(k);}catch{} } }catch{} }")
+    page.evaluate("async () => { try{ const c=await caches.open('bookq-api-v1'); const ks=await c.keys(); for(const k of ks){ if(k.url.includes('/api/v1/tree')) try{ await c.delete(k);}catch{} } }catch{} }")
     idb_still = page.evaluate("async () => { try { const t = await window.OfflineTree.getTree(); return Array.isArray(t) && t.length>0; } catch { return false; } }")
     assert idb_still, "OfflineTree.getTree must still have tree after Cache eviction (IDB-only recovery)"
     # Cache should now be absent or empty for /api/folders (not required)
-    still = page.evaluate("async () => !!(await caches.match('/api/folders'))")
+    still = page.evaluate("async () => !!(await caches.match('/api/v1/tree'))")
     # no assert on still — Cache absent is expected/acceptable for IDB-only
 
     # 5. Go offline: context offline + health abort (amber must not break browsing)
     page.context.set_offline(True)
-    page.route("**/api/health*", lambda route: route.abort("failed"))
+    page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
         # 6. Reload with viewer hash (simulated task-kill relaunch)
         viewer_url = server + "/" + viewer_hash
@@ -665,7 +665,7 @@ def test_viewer_hash_relaunch_offline_restores_tiles(page, server):
             pass
     finally:
         try:
-            page.unroute("**/api/health*")
+            page.unroute("**/api/v1/health*")
         except Exception:
             pass
         try:
@@ -852,7 +852,7 @@ def test_auto_sync_on_first_online_visit(page, server):
                 window.fetch = (input, init) => {
                     try{
                         const u = typeof input === 'string' ? input : (input && input.url) || '';
-                        if(u.includes('/api/folders')) window.__apiHits.push(u);
+                        if(u.includes('/api/v1/tree')) window.__apiHits.push(u);
                     }catch{}
                     return window.__origFetchForSpy(input, init);
                 };
@@ -929,7 +929,7 @@ def test_auto_sync_on_first_online_visit(page, server):
             pass
     finally:
         try:
-            page.unroute("**/api/folders*")
+            page.unroute("**/api/v1/tree*")
         except Exception:
             pass
         page.evaluate("() => { try { if(window.__origFetchForSpy) window.fetch = window.__origFetchForSpy; } catch {} }")
@@ -1036,7 +1036,7 @@ def test_browse_to_view_offline_transition(page, server):
     page.wait_for_selector(".tile", timeout=10000)
     wait_for_sw(page)
     # Put a fetch spy that counts /api/images hits (fast path should produce 0)
-    page.evaluate("() => { window.__imgHits=[]; if(!window.__origFetchImg){ window.__origFetchImg=window.fetch.bind(window); window.fetch=(input,init)=>{ try{ const u=typeof input==='string'?input:(input&&input.url)||''; if(u.includes('/api/images')) window.__imgHits.push(u); }catch{} return window.__origFetchImg(input,init); } } window.__imgHits=[]; }")
+    page.evaluate("() => { window.__imgHits=[]; if(!window.__origFetchImg){ window.__origFetchImg=window.fetch.bind(window); window.fetch=(input,init)=>{ try{ const u=typeof input==='string'?input:(input&&input.url)||''; if(u.includes('/api/v1/images')) window.__imgHits.push(u); }catch{} return window.__origFetchImg(input,init); } } window.__imgHits=[]; }")
     # Navigate to a browse level that contains leaves (group deep) then back to root for chain test
     # Directly test leaf open: find chain tile (flattened leaf) and click it while offline
     page.context.set_offline(True)
@@ -1159,7 +1159,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
     page.locator('.tile[data-path="group/episodes"]').click()
     expect(page.locator("#browse-header")).to_contain_text("episodes", timeout=5000)
 
-    orig = page.evaluate("async () => { const r=await fetch('/api/folders'); return await r.json(); }")
+    orig = page.evaluate("async () => { const r=await fetch('/api/v1/tree'); return (await r.json()).nodes; }")
     try:
         res = page.evaluate("""async (orig) => {
             const origFetch = window.fetch.bind(window);
@@ -1170,7 +1170,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
                 Date.now = () => origNow() + 10*60*1000;
                 window.fetch = (input, init) => {
                     const u = typeof input==='string'?input:(input&&input.url)||'';
-                    if(u.includes('/api/folders')) return Promise.resolve(new Response(JSON.stringify([]), {headers:{'Content-Type':'application/json'}}));
+                    if(u.includes('/api/v1/tree')) return Promise.resolve(new Response(JSON.stringify([]), {headers:{'Content-Type':'application/json'}}));
                     return origFetch(input, init);
                 };
                 await window.revalidateFoldersForOnline();
@@ -1181,7 +1181,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
         assert res["tiles"] == 0
         assert "フォルダが見つかりません" in res["grid"]
     finally:
-        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v1'); await c.put('/api/folders', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
+        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v1'); await c.put('/api/v1/tree', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
         page.goto(server + "/?offline=1")
         page.wait_for_selector(".tile", timeout=10000)
         wait_for_sw(page)
@@ -1200,7 +1200,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
                 Date.now = () => origNow() + 10*60*1000;
                 window.fetch = (input, init) => {
                     const u = typeof input==='string'?input:(input&&input.url)||'';
-                    if(u.includes('/api/folders')) {
+                    if(u.includes('/api/v1/tree')) {
                         const pruned = JSON.parse(JSON.stringify(orig));
                         const grp = pruned.find(n=>n.name==='group');
                         if(grp&&grp.children) grp.children = grp.children.filter(c=>c.name!=='episodes');
@@ -1216,7 +1216,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
         assert "episodes" not in res2["header"].lower()
         assert "フォルダ" not in res2["header"]
     finally:
-        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v1'); await c.put('/api/folders', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
+        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v1'); await c.put('/api/v1/tree', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
         page.goto(server + "/?offline=1")
         page.wait_for_selector(".tile", timeout=10000)
         wait_for_sw(page)

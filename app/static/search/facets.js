@@ -135,7 +135,7 @@
     if (_FVf && _FVf.showAll) qp.set("include_hidden", "1");
     var qs = qp.toString();
     try {
-      var res = await _fetchBuilding("/api/metadata/facets" + (qs ? "?" + qs : ""), _d.fetch, function(){ return myGen === _getFacetGenVal(); });
+      var res = await _fetchBuilding(globalThis.BookqApi.endpoints.facets + (qs ? "?" + qs : ""), _d.fetch, function(){ return myGen === _getFacetGenVal(); });
       if (!res || res.status === 202) return;
       if (!res.ok) throw new Error("facets HTTP " + res.status);
       _setFacets(await res.json());
@@ -166,7 +166,7 @@
     var _FVs = window.FolderVisibility;
     if (_FVs && _FVs.showAll) params.set('include_hidden', '1');
     try {
-      var res = await _fetchBuilding('/api/search?' + params.toString(), _d.fetch, function(){ return myGen === _searchGen; });
+      var res = await _fetchBuilding(globalThis.BookqApi.endpoints.search + '?' + params.toString(), _d.fetch, function(){ return myGen === _searchGen; });
       if (!res || res.status === 202) return;
       if (!res.ok) throw new Error("search HTTP " + res.status);
       var data = await res.json();

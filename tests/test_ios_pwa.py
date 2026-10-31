@@ -40,14 +40,14 @@ def test_ios_offline_health_amber(ios_page, server):
     wait_for_sw(page)
     page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
     page.wait_for_function("() => document.getElementById('offline-status')?.textContent.includes('オンライン')", timeout=5000)
-    page.route("**/api/health*", lambda route: route.abort("failed"))
+    page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     page.evaluate(
         """() => {
             const orig = window.fetch;
             window._healthOrig = orig;
             window.fetch = (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/health')) return Promise.reject(new Error('failed'));
+                if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
                 return orig(input, init);
             };
         }"""
@@ -55,7 +55,7 @@ def test_ios_offline_health_amber(ios_page, server):
     page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
     page.wait_for_function("() => document.getElementById('offline-status')?.textContent.includes('オフライン')", timeout=5000)
     expect(page.locator("#offline-status")).to_have_class(re.compile(r"\boffline\b"), timeout=5000)
-    page.unroute("**/api/health*")
+    page.unroute("**/api/v1/health*")
     page.evaluate("() => { try { if(window._healthOrig) window.fetch = window._healthOrig; } catch {} }")
     page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
     page.wait_for_function("() => document.getElementById('offline-status')?.textContent.includes('オンライン')", timeout=5000)

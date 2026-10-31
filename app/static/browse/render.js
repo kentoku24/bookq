@@ -253,7 +253,7 @@
     // prefetch / HTTP) that hold a same-URL 480x720 body from before the
     // w=200 sheet shrink.
     var sw = _coverW();
-    var src = "/api/thumb-sprite?folder=" + folderEnc + "&names=" + names +
+    var src = globalThis.BookqApi.endpoints.thumbSprite + "?folder=" + folderEnc + "&names=" + names +
       "&w=" + sw + "&v=2&rows=" + spec.rows.join(",");
     var one = '<img src="' + _escapeHtml(src) + '" loading="lazy" decoding="async" style="grid-column:1/-1;grid-row:1/-1">';
     return '<div class="tile-multi" style="grid-template-columns:repeat(' + spec.cols + ',1fr);grid-template-rows:repeat(' + spec.rows.length + ',minmax(0,1fr))">' + one + '</div>';
@@ -496,7 +496,7 @@
     if (!_fillPoll.onTree) return;
     if (typeof document !== "undefined" && document.hidden){ _fillPollSchedule(); return; }
     var epoch = _fillPollEpoch;
-    var url = (_fillPoll.gen === null) ? "/api/folders" : ("/api/folders?since=" + _fillPoll.gen);
+    var url = globalThis.BookqApi.treeUrl({since: _fillPoll.gen});
     fetch(url, {credentials: "same-origin"}).then(function(res){
       if (res.status === 304 || !res.ok){ _fillPollBackoff(); return null; }
       var etag = null;
@@ -522,14 +522,16 @@
       if (epoch !== _fillPollEpoch) return;
       var body = out.body;
       if (body === null){ _fillPollBackoff(); return; }
-      if (body && !Array.isArray(body) && body.tree){
-        // Dict-with-generation shape: numeric compare against known gen.
+      if (body && !Array.isArray(body) && globalThis.BookqApi.nodesOf(body)){
+        // Envelope-with-generation shape (v1 {kind,nodes,generation}; v0-era
+        // {tree,generation} tolerated by nodesOf): numeric compare against
+        // known gen.
         var gen = body.generation;
         if (gen === _fillPoll.gen){ _fillPollBackoff(); return; }
         if (typeof gen === "number" && isFinite(gen)) _fillPoll.gen = gen;
         if (out.etag) _fillPoll.etag = out.etag;
         _fillPoll.delay = FILL_POLL_BASE_MS;
-        try { _fillPoll.onTree(body.tree, out.raw, {treeEnvelope:true}); } catch(e){ console.warn(e); }
+        try { _fillPoll.onTree(globalThis.BookqApi.nodesOf(body), out.raw, {treeEnvelope:true}); } catch(e){ console.warn(e); }
         _fillPollSchedule();
         return;
       }

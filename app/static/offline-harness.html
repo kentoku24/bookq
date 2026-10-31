@@ -76,7 +76,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
     <h3>Thumb hit rate</h3>
     <div id="harness-thumb-hit" class="mono hint" style="margin-top:6px">thumb hit: —</div>
     <h3>API folders cache</h3>
-    <div id="harness-api-folders-cached" class="mono hint" style="margin-top:6px">/api/folders cached: —</div>
+    <div id="harness-api-folders-cached" class="mono hint" style="margin-top:6px">/api/v1/tree cached: —</div>
     <h3>SHELL precache</h3>
     <div id="harness-shell-hits" class="mono hint" style="margin-top:6px">SHELL hits: —</div>
   </section>
@@ -89,9 +89,9 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
       <button id="btn-health-abort" class="btn btn-primary" type="button">health abortでオフライン</button>
       <button id="btn-set-offline" class="btn" type="button">全断(setOffline)</button>
     </div>
-    <p id="harness-ops-hint" class="hint mono" style="margin-top:8px">操作の説明: health abort は fetch('/api/health?online_check=1',{headers:{'X-Online-Check':'1'}}) を AbortController で中断し、offline 状態遷移を誘発。setOffline は window.dispatchEvent(new Event('offline')) でアプリの offline リスナを発火。</p>
+    <p id="harness-ops-hint" class="hint mono" style="margin-top:8px">操作の説明: health abort は fetch('/api/v1/health?online_check=1',{headers:{'X-Online-Check':'1'}}) を AbortController で中断し、offline 状態遷移を誘発。setOffline は window.dispatchEvent(new Event('offline')) でアプリの offline リスナを発火。</p>
     <ul class="hint" style="margin-top:10px;padding-left:18px">
-      <li><code>health abortでオフライン</code>: <code>fetch('/api/health?online_check=1')</code> を AbortController で中断し、<code>#offline-status</code> の <code>○オフライン</code> 遷移を誘発（SWの online_check バイパス経路を検証）。</li>
+      <li><code>health abortでオフライン</code>: <code>fetch('/api/v1/health?online_check=1')</code> を AbortController で中断し、<code>#offline-status</code> の <code>○オフライン</code> 遷移を誘発（SWの online_check バイパス経路を検証）。</li>
       <li><code>全断(setOffline)</code>: <code>window.dispatchEvent(new Event('offline'))</code> でアプリの <code>offline</code> リスナ経由で UI をオフライン状態に切替。</li>
       <li>いずれも本ハーネスからはネットワーク自体は切断しません — 検出ロジックの反応のみを観測します。</li>
     </ul>
@@ -100,7 +100,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
   <!-- ③ 対象 -->
   <section id="sec-target" aria-labelledby="sec-target-title">
     <h2 id="sec-target-title">③ 対象</h2>
-    <p class="hint">検証対象の leaf フォルダを選択。列挙は <code>/api/folders</code> のツリーから leaf（画像のみを含むフォルダ）を抽出して dropdown に流し込む。Todo2 で配線。</p>
+    <p class="hint">検証対象の leaf フォルダを選択。列挙は <code>/api/v1/tree</code> のツリーから leaf（画像のみを含むフォルダ）を抽出して dropdown に流し込む。Todo2 で配線。</p>
     <div style="margin-top:10px">
       <label for="harness-target-select" class="hint" style="display:block;margin-bottom:6px">対象フォルダ（leaf enumeration）</label>
       <select id="harness-target-select" aria-label="対象フォルダ">
@@ -116,7 +116,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
   <!-- ④ 検出シグナル -->
   <section id="sec-signals" aria-labelledby="sec-signals-title">
     <h2 id="sec-signals-title">④ 検出シグナル</h2>
-    <p class="hint">オフライン検出の 10 回試行結果。○＝成功（オフラインと判定）、×＝失敗（オンラインのまま）。<code>/api/health?online_check=1</code> の fetch 成否を 10 回ポーリングして更新。</p>
+    <p class="hint">オフライン検出の 10 回試行結果。○＝成功（オフラインと判定）、×＝失敗（オンラインのまま）。<code>/api/v1/health?online_check=1</code> の fetch 成否を 10 回ポーリングして更新。</p>
     <div id="harness-signals" class="signal-list" aria-label="10 failures ○/× list">
       <span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span><span class="signal">—</span>
     </div>
@@ -126,7 +126,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
   <!-- ⑤ バージョン -->
   <section id="sec-version" aria-labelledby="sec-version-title">
     <h2 id="sec-version-title">⑤ バージョン</h2>
-    <p class="hint">ビルド情報 — <code>/api/version</code> から取得。refresh() で再取得。</p>
+    <p class="hint">ビルド情報 — <code>/api/v1/version</code> から取得。refresh() で再取得。</p>
     <div class="kv" style="margin-top:10px">
       <dt>version</dt><dd id="harness-version-version" class="mono">—</dd>
       <dt>sha</dt><dd id="harness-version-sha" class="mono">—</dd>
@@ -172,6 +172,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
 </main>
 <div class="footer"><a href="/">← Viewer に戻る</a> &nbsp;·&nbsp; <a href="/static/offline-harness.html?harness=1">harness=1 で開く</a></div>
 <script src="/static/offline-core.js"></script>
+<script src="/static/api/v1.js"></script>
 <script src="/static/progress/sync.js"></script>
 <script>
 const harness = {};
@@ -242,10 +243,10 @@ harness.getLeafPathsFor = getLeafPathsFor;
 
 async function fetchTree(){
   try{
-    const r = await fetch('/api/folders');
+    const r = await fetch('/api/v1/tree');
     if(!r.ok) return;
     const data = await r.json();
-    tree = data;
+    tree = (data && data.nodes) || data;
     window.tree = tree;
     setFullPaths(tree, "");
     populateTargetSelect();
@@ -311,7 +312,7 @@ async function probeSignals(){
     const c=new AbortController();
     const t=setTimeout(()=>{ try{c.abort();}catch{} }, 1200);
     try{
-      const r=await fetch('/api/health?online_check=1&_t='+Date.now()+'_'+i,{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:c.signal});
+      const r=await fetch('/api/v1/health?online_check=1&_t='+Date.now()+'_'+i,{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:c.signal});
       return !!r.ok;
     }catch{
       return false;
@@ -329,7 +330,7 @@ async function loadVersion(){
   const sEl=document.getElementById('harness-version-sha');
   const dEl=document.getElementById('harness-version-date');
   try{
-    const r=await fetch('/api/version',{cache:'no-store'});
+    const r=await fetch('/api/v1/version',{cache:'no-store'});
     if(!r.ok) throw new Error('not ok '+r.status);
     const j=await r.json();
     if(vEl) vEl.textContent=j.version||'unknown';
@@ -437,7 +438,7 @@ async function refresh(){
     const online = navigator.onLine;
     let healthOk=false;
     try{
-      const r=await fetch('/api/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}});
+      const r=await fetch('/api/v1/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}});
       healthOk=r.ok;
     }catch{ healthOk=false; }
     if(statusEl){
@@ -541,18 +542,18 @@ async function refresh(){
     }
   }catch{}
 
-  // ── /api/folders cached with ignoreSearch fallback ──
+  // ── /api/v1/tree cached with ignoreSearch fallback ──
   try{
     const apiEl=document.getElementById('harness-api-folders-cached');
     if(apiEl){
       let cached=false, cachedIgnore=false, hitWithQS=false;
       if('caches' in window){
-        try{ const r1=await caches.match('/api/folders'); cached=!!r1; }catch{}
-        try{ const r2=await caches.match('/api/folders', {ignoreSearch:true}); cachedIgnore=!!r2; }catch{}
-        try{ const r3=await caches.match('/api/folders?_harness=1', {ignoreSearch:true}); hitWithQS=!!r3; }catch{}
+        try{ const r1=await caches.match('/api/v1/tree'); cached=!!r1; }catch{}
+        try{ const r2=await caches.match('/api/v1/tree', {ignoreSearch:true}); cachedIgnore=!!r2; }catch{}
+        try{ const r3=await caches.match('/api/v1/tree?_harness=1', {ignoreSearch:true}); hitWithQS=!!r3; }catch{}
       }
       // keep exact substrings required for grep/verification
-      apiEl.textContent=`/api/folders cached ${cached} (ignoreSearch ${cachedIgnore}) — hitWithQS ${hitWithQS} — caches.match + ignoreSearch fallback ${cached||cachedIgnore?"hit":"miss"}`;
+      apiEl.textContent=`/api/v1/tree cached ${cached} (ignoreSearch ${cachedIgnore}) — hitWithQS ${hitWithQS} — caches.match + ignoreSearch fallback ${cached||cachedIgnore?"hit":"miss"}`;
       window.__harnessApiCached=cached;
       window.__harnessApiCachedIgnore=cachedIgnore;
     }
@@ -617,7 +618,7 @@ document.getElementById('btn-health-abort')?.addEventListener('click', async ()=
   if(hint) hint.textContent='health abort: fetch を AbortController で中断中…';
   try{
     const ctl=new AbortController();
-    const p=fetch('/api/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:ctl.signal});
+    const p=fetch('/api/v1/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:ctl.signal});
     ctl.abort();
     await p;
   }catch(e){

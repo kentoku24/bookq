@@ -43,7 +43,8 @@
  */
 (function () {
   "use strict";
-  var URL = "/api/reading-position";
+  var _API = (globalThis.BookqApi && globalThis.BookqApi.endpoints) || {};
+  var URL = _API.readingPositions || "/api/v1/reading-positions";
   var DEBOUNCE_MS = 2000;
   var RETRY_MAX_MS = 60000;
   var _timer = null;          // send timer (debounce or retry backoff)
@@ -78,12 +79,12 @@
     var gen = _epoch;
     var ac = typeof AbortController !== "undefined" ? new AbortController() : null;
     _inFlightAbort = ac;
-    fetch(URL, {
+    fetch((globalThis.BookqApi && globalThis.BookqApi.putPositionUrl ? globalThis.BookqApi.putPositionUrl(rec.folder) : URL + "?folder=" + encodeURIComponent(rec.folder)), {
       method: "PUT",
       credentials: "same-origin",
       keepalive: true,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ folder: rec.folder, page: rec.page, total: rec.total, ts: rec.ts }),
+      body: JSON.stringify({ page: rec.page, total: rec.total, ts: rec.ts }),
       signal: ac ? ac.signal : undefined,
     }).then(function (res) {
       if (res && res.ok) { _lastSentKey = _key(rec); return "sent"; }
@@ -132,7 +133,7 @@
       var res = await fetch(URL, { credentials: "same-origin", cache: "no-store" });
       if (!res || !res.ok) return { ok: false };
       var data = await res.json();
-      var pos = data && data.position;
+      var pos = (globalThis.BookqApi && globalThis.BookqApi.latestPositionOf) ? globalThis.BookqApi.latestPositionOf(data) : (data && (data.positions ? data.positions[0] : data.position)) || null;
       if (!pos || typeof pos.folder !== "string" || !Number.isFinite(pos.page)) {
         return { ok: true, position: null };
       }

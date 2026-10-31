@@ -9,7 +9,7 @@
  */
 (function () {
   var API_VERSION = 1;
-  var URL = "/api/folder-visibility";
+  var URL = (globalThis.BookqApi && globalThis.BookqApi.endpoints.folderVisibility) || "/api/v1/folder-visibility";
   var OWNER_HEADER = "X-Bookq-Visibility-Owner";
   var GET_TIMEOUT_MS = 3000;
   var CACHE_PREFIX = "bookq.folderVisibility.v1.";

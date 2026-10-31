@@ -224,7 +224,7 @@ def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     first-paint path is covered by test_embedded_snapshot_filters_first_paint.)"""
     vis_put(vis_env, "hide_me", True)
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     _suppress_embed(vpage)
     vpage.reload()
@@ -244,7 +244,7 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
     """Deep link while the judgment is outstanding: queued, never denied —
     the hash survives and the nav completes once visibility lands."""
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series")
@@ -260,7 +260,7 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
 
 def test_loading_queues_view_url_then_applies(vpage, vis_env):
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/view/keep_a?p=0")
@@ -285,7 +285,7 @@ def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
         else:
             route.fallback()
 
-    vpage.route("**/api/folder-visibility", handler)
+    vpage.route("**/api/v1/folder-visibility", handler)
     _drop_vis_snapshot(vpage)
     _suppress_embed(vpage)
     vpage.reload()
@@ -307,7 +307,7 @@ def test_embedded_snapshot_filters_first_paint(vpage, vis_env):
     localStorage cache, the grid is still filtered from first paint."""
     vis_put(vis_env, "hide_me", True)
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
@@ -331,7 +331,7 @@ def test_pending_browse_restore_keeps_list_mode(vpage, vis_env):
     """?v=list on a pending deep-link browse survives the drain — the
     queued navigateToFolder must not rewrite the URL in tile mode."""
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series?v=list")
     assert _wait_held(held), "visibility GET was never issued"
@@ -372,7 +372,7 @@ def test_pending_nav_last_write_wins(vpage, vis_env):
     """One pending nav slot: queueing a viewer open then a browse nav runs
     only the latest — the viewer never opens."""
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
@@ -390,7 +390,7 @@ def test_pending_nav_last_write_wins(vpage, vis_env):
 def test_pending_nav_last_write_wins_view(vpage, vis_env):
     """Same slot, opposite order — browse queued then view opens the book."""
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"

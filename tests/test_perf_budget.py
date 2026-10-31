@@ -7,21 +7,21 @@ decisions.md（2026-09-21）の KPI/PR 順序に対応。
 
 FOLDERS_ENTRIES_JS = """
 () => performance.getEntriesByType('resource')
-  .filter(e => e.name.includes('/api/folders'))
+  .filter(e => e.name.includes('/api/v1/tree'))
   .map(e => ({name: e.name, start: e.startTime, transfer: e.transferSize, encoded: e.encodedBodySize, decoded: e.decodedBodySize}))
 """
 
 
 def _wait_for_folders_entries(page, n: int, timeout_ms: int = 10_000):
     page.wait_for_function(
-        "(n) => performance.getEntriesByType('resource').filter(e => e.name.includes('/api/folders')).length >= n",
+        "(n) => performance.getEntriesByType('resource').filter(e => e.name.includes('/api/v1/tree')).length >= n",
         arg=n,
         timeout=timeout_ms,
     )
 
 
 def test_top_page_fetches_folders_body_once(server, browser):
-    """初回ロードで /api/folders のボディ転送は shallow + full のちょうど 2 回。
+    """初回ロードで /api/v1/tree のボディ転送は shallow + full のちょうど 2 回。
 
     Todo2 の shallow-first 契約: 1 回目 `?depth=1` (first paint)、2 回目 full
     (同一 DOM への追従)。ボディ判定は transfer >= encoded の実転送で行う。
@@ -88,7 +88,7 @@ def test_top_page_fetches_folders_body_once(server, browser):
                 window.fetch = (input, init) => {
                     const u = typeof input === 'string' ? input : (input && input.url) || '';
                     const p = of(input, init);
-                    if (u.indexOf('/api/folders') === 0)
+                    if (u.indexOf('/api/v1/tree') === 0)
                         window.__perfReqs.push({
                             inm: (init && init.headers && init.headers['If-None-Match']) || null,
                             status: p.then(r => r.status),

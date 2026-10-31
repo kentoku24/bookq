@@ -208,7 +208,7 @@
   function updateOnlineStatus(deps){
     const _d = _resolveDeps(deps);
     const _fetch = _d.fetch;
-    const el=document.getElementById('offline-status'); if(!el) return; _fetch('/api/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}}).then(r=>{ const online=!!r.ok; el.textContent=online?'●オンライン':'○オフライン'; el.classList.toggle('offline', !online); }).catch(()=>{ el.textContent='○オフライン'; el.classList.add('offline'); }); }
+    const el=document.getElementById('offline-status'); if(!el) return; _fetch(globalThis.BookqApi.endpoints.health+'?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}}).then(r=>{ const online=!!r.ok; el.textContent=online?'●オンライン':'○オフライン'; el.classList.toggle('offline', !online); }).catch(()=>{ el.textContent='○オフライン'; el.classList.add('offline'); }); }
   let _onlineRevalidateLast = 0;
   let _onlineRevalidateTimer = null;
   // Todo 5: warm-only conditional fetch. Keys mirror the server
@@ -234,10 +234,15 @@
       try { text = await res.text(); } catch(e) { return; }
       if (!_cur()) return;
       try { data = JSON.parse(text); } catch(e) { return; }
-      if (Array.isArray(data)){ try { _rawFoldersText.set(data, {text: text, treeEnvelope: false}); } catch(e) {} }
+      {
+        const nodes = globalThis.BookqApi.nodesOf(data);
+        if (nodes) { try { _rawFoldersText.set(nodes, {text: text, treeEnvelope: !Array.isArray(data)}); } catch(e) {} }
+        data = nodes;
+      }
     } else if (typeof res.json === "function"){
       try { data = await res.json(); } catch(e) { return; }
       if (!_cur()) return;
+      data = globalThis.BookqApi.nodesOf(data);
     } else return;
     if(!Array.isArray(data)) return;
     if (!_cur()) return;
@@ -252,7 +257,7 @@
   async function fetchLatestFolders(deps, opts){
     const _d = _resolveDeps(deps);
     const depth = (opts && opts.depth) || null;
-    const url = depth ? ("/api/folders?depth=" + depth) : "/api/folders";
+    const url = globalThis.BookqApi.treeUrl(depth ? {depth: depth} : null);
     // "no-cache" = 必ずサーバに再検証（If-None-Match）するが、304 なら HTTP
     // キャッシュのボディを使う。"no-store" だと 3.8MB を毎回まるごと取り直す。
     const init = {cache:"no-cache", credentials:"same-origin"};
@@ -310,7 +315,7 @@
       }
       try{
         const c = await (_d.caches || caches).open("bookq-api-v1");
-        await c.put("/api/folders", new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
+        await c.put(globalThis.BookqApi.endpoints.tree, new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
       } catch(e) { console.warn(e); }
       if (loadGen !== _loadFoldersGen) return;
       try{ await refreshOfflineMap(); } catch(e) { console.warn(e); }
@@ -1580,7 +1585,7 @@
     // Stage 1: shallow first paint (direct children only, no facets).
     let shallowOk = false;
     try {
-      const res = await _fetch("/api/folders?depth=1", {credentials: 'same-origin'});
+      const res = await _fetch(globalThis.BookqApi.treeUrl({depth: 1}), {credentials: 'same-origin'});
       if (_loadGen !== _loadFoldersGen) return;
       if (!res.ok) throw new Error("http "+res.status);
       const data = await readFoldersResponse(res, 1, () => _loadGen === _loadFoldersGen);
@@ -1629,7 +1634,7 @@
       setTimeout(async function(){
         if (_loadGen !== _loadFoldersGen) return;
         try {
-          const res2 = await _fetch("/api/folders", {credentials: 'same-origin'});
+          const res2 = await _fetch(globalThis.BookqApi.endpoints.tree, {credentials: 'same-origin'});
           if (_loadGen !== _loadFoldersGen) return;
           if (res2.status === 202){ _scheduleFullRetry(); return; }
           if (!res2.ok) throw new Error("http "+res2.status);
@@ -1638,7 +1643,7 @@
       }, Math.min(1500 * _fullRetry, 5000));
     };
     try {
-      const res = await _fetch("/api/folders", {credentials: 'same-origin'});
+      const res = await _fetch(globalThis.BookqApi.endpoints.tree, {credentials: 'same-origin'});
       if (_loadGen !== _loadFoldersGen) return;
       if (res.status === 202){
         _scheduleFullRetry();
@@ -2217,14 +2222,14 @@
             .filter(c => c.type === "image")
             .map(c => ({name: c.name, folder: fullPath}));
         } else {
-          const res = await fetch("/api/images?folder=" + encodeURIComponent(fullPath));
+          const res = await fetch(globalThis.BookqApi.imagesUrl(fullPath));
           if (!res.ok) {
             const err = new Error("Failed to load folder (HTTP " + res.status + ")");
             err.status = res.status;
             throw err;
           }
-          const filenames = await res.json();
-          if (!Array.isArray(filenames)) {
+          const filenames = globalThis.BookqApi.imagesOf(await res.json());
+          if (!filenames) {
             const err = new Error("Malformed folder response");
             err.status = 0;
             throw err;
@@ -4646,7 +4651,7 @@
     if(_appVersionLoaded) return;
     _appVersionLoaded = true;
     try{
-      const r = await fetch('/api/version', {cache:'no-store'});
+      const r = await fetch(globalThis.BookqApi.endpoints.version, {cache:'no-store'});
       if(!r.ok) return;
       const j = await r.json();
       const version = j.version || "";
