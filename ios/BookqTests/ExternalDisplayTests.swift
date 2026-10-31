@@ -65,17 +65,20 @@ final class ExternalDisplayTests: XCTestCase {
         XCTAssertFalse(s.connected)
     }
 
-    func testNoScreenDefersActivationUntilConnect() {
+    func testActivationDoesNotWaitForScreenAttach() {
+        // UIScreen.screens only reports screens that already back a scene,
+        // so activation itself is the attach check — a failed request just
+        // hits the error handler and is retried on the next publish.
         let s = makeStore(screens: 0)
         var a = 0
         s.activate = { a += 1 }
         s.updatePresentation(makePresentation())
-        XCTAssertEqual(a, 0)
+        XCTAssertEqual(a, 1)
         XCTAssertFalse(s.available)
         s.externalScreenCount = { 1 }
         s.refreshAvailability()
         XCTAssertTrue(s.available)
-        XCTAssertEqual(a, 1)
+        XCTAssertEqual(a, 1)   // still pending from the first request
     }
 
     func testNoPresentationNeverActivates() {

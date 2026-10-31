@@ -223,6 +223,13 @@ struct ReaderView: View {
                             .lineLimit(1)
                             .frame(maxWidth: 150)
                     }
+                    // External-display bring-up diagnostic (temporary).
+                    if let s = ext.externalScreen {
+                        Text(ExternalDisplayStore.describe(s))
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
+                    }
                 }
                 .foregroundStyle(.white)
                 .padding(6)
@@ -293,9 +300,9 @@ struct ReaderView: View {
                     .background(.black.opacity(0.5), in: Circle())
             }
             .accessibilityLabel("複数ページ")
-            // External display: shown only while a screen is attached;
-            // toggles projection on (accent) / off (device mirrors).
-            if ext.available {
+            // External display toggle: appears once the session is live,
+            // and stays while disabled so it can be re-enabled.
+            if ext.connected || !ext.userEnabled {
                 Button {
                     ext.userEnabled.toggle()
                 } label: {

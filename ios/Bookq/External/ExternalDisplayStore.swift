@@ -120,18 +120,22 @@ final class ExternalDisplayStore: ObservableObject {
 
     // MARK: - Availability / activation state machine
 
-    /// Recompute `available` from physical screens + session liveness, then
-    /// reconcile activation. Called on screen (dis)connect notifications.
+    /// Recompute `available` from physical screens + session liveness
+    /// (diagnostic only — activation does not gate on it), then reconcile
+    /// activation. Called on screen (dis)connect notifications.
     func refreshAvailability() {
         available = externalScreenCount() > 0 || connected
         refreshActivation()
     }
 
-    /// want = presenting && userEnabled && screen present. One pending
-    /// activation at a time; destruction defers session cleanup to
-    /// sceneDidDisconnect so a stale session can't bounce back.
+    /// want = presenting && userEnabled. Activation IS the attach check:
+    /// `UIScreen.screens` only reports screens that already back a scene
+    /// (iOS 16+), so gating on it would block activation forever. A failed
+    /// request just hits the error handler — cheap, retried on the next
+    /// publish or screen-connect notification. One pending activation at
+    /// a time; destruction defers session cleanup to sceneDidDisconnect.
     private func refreshActivation() {
-        let want = presentation != nil && userEnabled && available
+        let want = presentation != nil && userEnabled
         if want, sessionRef == nil, !activationPending, !destroying {
             activationPending = true
             activate()
@@ -164,6 +168,18 @@ final class ExternalDisplayStore: ObservableObject {
     /// call it synchronously during willConnectTo.
     nonisolated static func bestModeIndex(_ modes: [ModeRef]) -> Int? {
         modes.indices.max(by: { modes[$0].pixelCount < modes[$1].pixelCount })
+    }
+
+    /// "3840×2160@1.0  bounds 3840×2160  insets 0,0,0,0" — one glance tells
+    /// whether the panel got native 4K or fell back to a scaled mode.
+    static func describe(_ screen: UIScreen) -> String {
+        let m = screen.currentMode
+        let mode = m.map { "\(Int($0.size.width))×\(Int($0.size.height))@\($0.pixelAspectRatio)" } ?? "?"
+        let b = screen.bounds
+        let i = screen.overscanCompensationInsets
+        let fmt = { (v: CGFloat) in String(format: "%.0f", v) }
+        return "\(mode)  bounds \(fmt(b.width))×\(fmt(b.height))  " +
+               "insets \(fmt(i.top)),\(fmt(i.left)),\(fmt(i.bottom)),\(fmt(i.right))"
     }
 
     /// Highest-resolution mode the external screen offers — assigned to

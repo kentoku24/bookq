@@ -7,18 +7,6 @@ import UIKit
 struct ExternalDisplayRootView: View {
     @ObservedObject private var store = ExternalDisplayStore.shared
 
-    /// "3840×2160@1.0  bounds 3840×2160  insets 0,0,0,0" — one glance tells
-    /// whether the panel got native 4K or fell back to a scaled mode.
-    private static func describe(_ screen: UIScreen) -> String {
-        let m = screen.currentMode
-        let mode = m.map { "\(Int($0.size.width))×\(Int($0.size.height))@\($0.pixelAspectRatio)" } ?? "?"
-        let b = screen.bounds
-        let i = screen.overscanCompensationInsets
-        let fmt = { (v: CGFloat) in String(format: "%.0f", v) }
-        return "\(mode)  bounds \(fmt(b.width))×\(fmt(b.height))  " +
-               "insets \(fmt(i.top)),\(fmt(i.left)),\(fmt(i.bottom)),\(fmt(i.right))"
-    }
-
     var body: some View {
         ZStack {
             Color.black
@@ -31,12 +19,13 @@ struct ExternalDisplayRootView: View {
         // Diagnostics overlay (temporary, for device bring-up): shows what
         // mode/bounds the panel actually reports — a 1:1-scaled monitor
         // fed 1080p and an insetBounds shrink look identical from afar.
+        // Inset enough to survive panel-level overscan clipping.
         .overlay(alignment: .bottomLeading) {
             if let screen = store.externalScreen {
-                Text(Self.describe(screen))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.4))
-                    .padding(6)
+                Text(ExternalDisplayStore.describe(screen))
+                    .font(.system(size: 18, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .padding(40)
             }
         }
     }
