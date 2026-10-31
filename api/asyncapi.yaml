@@ -1,0 +1,386 @@
+asyncapi: "3.0.0"
+info:
+  title: bookq Reader Sync Protocol
+  version: "1.0.0"
+  description: |
+    `/ws/reader-sync` の dual-reader 同期プロトコル。
+
+    全フレームは JSON。`v` = プロトコルバージョン（現行 1）。
+    1 フレーム最大 64KiB（MANIFEST チャンク合計 32MiB まで）。
+    画像/バイナリはデータプレーンを通らない（必ず `/image/*` HTTP 経由）。
+
+    ## 意味論
+
+    - クライアント→サーバは「リクエストフレーム」:
+      `{v, requestId, sessionId, workEpoch, baseRevision, type, payload}`
+      サーバが受信順に逐次化（sequenced）して適用し、
+      ACK/REJECT/APPLIED で応答する。
+    - STATE フレームは `revision` 単調増加の完全スナップショット。
+    - PING/PONG は keepalive（シーケンス対象外）。
+    - SIGNAL / UI_SYNC は peer-to-peer 中継でシーケンスされない
+      （UI_SYNC は ephemeral のみ、reader state を含んではならない）。
+    - エラー応答の `code` は `ERR_VERSION | ERR_MALFORMED | ERR_TYPE |
+      ERR_RANGE | ERR_SIZE`。
+
+servers:
+  bookq:
+    host: "bookq.{tailnet}.ts.net:443"
+    protocol: wss
+    description: tailscale serve 経由（認証は cookieAuth or Bearer）
+
+channels:
+  readerSync:
+    address: /ws/reader-sync
+    title: Dual-reader sync
+    messages:
+      request: {$ref: "#/components/messages/Request"}
+      hello: {$ref: "#/components/messages/Hello"}
+      ack: {$ref: "#/components/messages/Ack"}
+      reject: {$ref: "#/components/messages/Reject"}
+      applied: {$ref: "#/components/messages/Applied"}
+      state: {$ref: "#/components/messages/State"}
+      manifest: {$ref: "#/components/messages/Manifest"}
+      manifestCommit: {$ref: "#/components/messages/ManifestCommit"}
+      end: {$ref: "#/components/messages/End"}
+      ping: {$ref: "#/components/messages/Ping"}
+      pong: {$ref: "#/components/messages/Pong"}
+      signal: {$ref: "#/components/messages/Signal"}
+      uiSync: {$ref: "#/components/messages/UiSync"}
+      transportState: {$ref: "#/components/messages/TransportState"}
+      joinRequest: {$ref: "#/components/messages/JoinRequest"}
+      joinCancel: {$ref: "#/components/messages/JoinCancel"}
+      error: {$ref: "#/components/messages/Error"}
+
+operations:
+  sendRequest:
+    action: send
+    channel: {$ref: "#/channels/readerSync"}
+    messages: [{$ref: "#/channels/readerSync/messages/request"}]
+  receive:
+    action: receive
+    channel: {$ref: "#/channels/readerSync"}
+    messages:
+      - {$ref: "#/channels/readerSync/messages/hello"}
+      - {$ref: "#/channels/readerSync/messages/ack"}
+      - {$ref: "#/channels/readerSync/messages/reject"}
+      - {$ref: "#/channels/readerSync/messages/applied"}
+      - {$ref: "#/channels/readerSync/messages/state"}
+      - {$ref: "#/channels/readerSync/messages/manifest"}
+      - {$ref: "#/channels/readerSync/messages/manifestCommit"}
+      - {$ref: "#/channels/readerSync/messages/end"}
+      - {$ref: "#/channels/readerSync/messages/ping"}
+      - {$ref: "#/channels/readerSync/messages/pong"}
+      - {$ref: "#/channels/readerSync/messages/signal"}
+      - {$ref: "#/channels/readerSync/messages/uiSync"}
+      - {$ref: "#/channels/readerSync/messages/transportState"}
+      - {$ref: "#/channels/readerSync/messages/joinRequest"}
+      - {$ref: "#/channels/readerSync/messages/joinCancel"}
+      - {$ref: "#/channels/readerSync/messages/error"}
+
+components:
+  messages:
+    Request:
+      title: クライアントリクエストフレーム
+      payload: {$ref: "#/components/schemas/RequestFrame"}
+    Hello:
+      title: 接続直後の greeting
+      payload:
+        type: object
+        required: [v, type, link]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: HELLO}
+          link: {type: string, description: link id}
+    Ack:
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: ACK}
+          requestId: {type: string}
+          sessionId: {type: [string, "null"]}
+    Reject:
+      payload:
+        type: object
+        required: [v, type, reason]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: REJECT}
+          requestId: {type: string}
+          reason: {type: string}
+          sessionId: {type: [string, "null"]}
+    Applied:
+      title: リクエストが逐次適用された通知
+      payload:
+        type: object
+        required: [v, type, seq]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: APPLIED}
+          seq: {type: integer, description: 適用シーケンス番号}
+          requestId: {type: string}
+    State:
+      title: 完全状態スナップショット
+      payload: {$ref: "#/components/schemas/StateFrame"}
+    Manifest:
+      title: セッションマニフェスト（chunked 転送可）
+      payload:
+        type: object
+        required: [v, type, sessionId, manifestVersion]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: MANIFEST}
+          sessionId: {type: string}
+          manifestVersion: {type: integer}
+          data: {type: string, description: chunk payload}
+    ManifestCommit:
+      payload:
+        type: object
+        required: [v, type, seq]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: MANIFEST_COMMIT}
+          seq: {type: integer}
+    End:
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: END}
+          reason: {type: string}
+    Ping:
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: PING}
+    Pong:
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: PONG}
+    Signal:
+      title: WebRTC signaling 中継（非シーケンス）
+      payload:
+        type: object
+        required: [v, type, kind]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: SIGNAL}
+          kind: {type: string, enum: [offer, answer, ice]}
+          data: {}
+    UiSync:
+      title: ephemeral UI ミラー（非シーケンス・reader state 混入禁止）
+      payload: {$ref: "#/components/schemas/UiSyncPayload"}
+    TransportState:
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: TRANSPORT_STATE}
+          state: {type: string}
+    JoinRequest:
+      title: ピアからの join 要求通知
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: JOIN_REQUEST}
+          link: {type: string}
+    JoinCancel:
+      payload:
+        type: object
+        required: [v, type]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: JOIN_CANCEL}
+    Error:
+      payload:
+        type: object
+        required: [v, type, code]
+        properties:
+          v: {type: integer, const: 1}
+          type: {type: string, const: ERROR}
+          code:
+            type: string
+            enum: [ERR_VERSION, ERR_MALFORMED, ERR_TYPE, ERR_RANGE, ERR_SIZE]
+          message: {type: string}
+
+  schemas:
+    RequestFrame:
+      type: object
+      required: [v, requestId, sessionId, workEpoch, baseRevision, type, payload]
+      properties:
+        v: {type: integer, const: 1}
+        requestId: {type: string, minLength: 1}
+        sessionId: {type: [string, "null"]}
+        workEpoch: {type: integer, minimum: 0}
+        baseRevision: {type: integer, minimum: 0}
+        type:
+          type: string
+          enum:
+            - CREATE        # セッション作成
+            - JOIN          # payload.code = 6桁数字
+            - APPROVE       # join 承認
+            - REJECT        # join 拒否
+            - RESUME
+            - LEAVE
+            - MATCH         # payload.pick = 1..64 文字のトークン
+            - TURN          # payload.delta = ±1, crossChapter: bool
+            - GOTO          # payload.page = PageRef
+            - SET_OFFSET    # payload.offset = 0|1
+            - SWAP_SIDES    # payload.leaderSide = right|left
+            - OPEN_WORK     # payload.folder: str, page?: PageRef
+            - SET_ACTIVITY
+            - READY
+            - PING
+            - APPLIED       # payload.requestId: str
+            - SIGNAL
+            - TRANSPORT_STATE
+            - UI_SYNC
+        payload:
+          type: object
+          description: type ごとのペイロード（下記 oneOf 参照）
+      discriminator:
+        propertyName: type
+      oneOf:
+        - type: object
+          properties:
+            type: {const: CREATE}
+            payload: {type: object}
+        - type: object
+          properties:
+            type: {const: JOIN}
+            payload:
+              type: object
+              required: [code]
+              properties:
+                code: {type: string, pattern: '^\d{6}$'}
+        - type: object
+          properties:
+            type: {const: MATCH}
+            payload:
+              type: object
+              properties:
+                pick: {type: string, minLength: 1, maxLength: 64}
+        - type: object
+          properties:
+            type: {const: TURN}
+            payload:
+              type: object
+              required: [delta, crossChapter]
+              properties:
+                delta: {type: integer, enum: [1, -1]}
+                crossChapter: {type: boolean}
+                fromChapter: {type: [string, "null"]}
+        - type: object
+          properties:
+            type: {const: GOTO}
+            payload:
+              type: object
+              required: [page]
+              properties:
+                page: {$ref: "#/components/schemas/PageRef"}
+        - type: object
+          properties:
+            type: {const: SET_OFFSET}
+            payload:
+              type: object
+              required: [offset]
+              properties:
+                offset: {type: integer, enum: [0, 1]}
+        - type: object
+          properties:
+            type: {const: SWAP_SIDES}
+            payload:
+              type: object
+              required: [leaderSide]
+              properties:
+                leaderSide: {type: string, enum: [right, left]}
+        - type: object
+          properties:
+            type: {const: OPEN_WORK}
+            payload:
+              type: object
+              required: [folder]
+              properties:
+                folder: {type: string}
+                page: {$ref: "#/components/schemas/PageRef"}
+        - type: object
+          properties:
+            type: {const: SIGNAL}
+            payload:
+              type: object
+              required: [kind]
+              properties:
+                kind: {type: string, enum: [offer, answer, ice]}
+        - type: object
+          properties:
+            type: {const: APPLIED}
+            payload:
+              type: object
+              required: [requestId]
+              properties:
+                requestId: {type: string}
+        - type: object
+          properties:
+            type: {const: UI_SYNC}
+            payload: {$ref: "#/components/schemas/UiSyncPayload"}
+        - type: object
+          properties:
+            type:
+              enum:
+                - APPROVE
+                - REJECT
+                - RESUME
+                - LEAVE
+                - SET_ACTIVITY
+                - READY
+                - PING
+                - TRANSPORT_STATE
+            payload: {type: object}
+
+    PageRef:
+      type: object
+      required: [folder, name]
+      properties:
+        folder: {type: string}
+        name: {type: string}
+
+    UiSyncPayload:
+      type: object
+      required: [view, top, viewH]
+      properties:
+        view: {type: string, enum: [browse]}
+        path: {type: [string, "null"], maxLength: 4096}
+        top: {type: number, minimum: 0, description: sender scroller の px}
+        viewH: {type: number, exclusiveMinimum: 0, maximum: 100000}
+        scrollH: {type: number, exclusiveMinimum: 0, maximum: 100000000}
+        mode: {type: string, enum: [tile, list, card]}
+
+    StateFrame:
+      type: object
+      required: [v, type, sessionId, revision, workEpoch, manifestVersion, phase, spreadId, offset, leaderSide, presence]
+      properties:
+        v: {type: integer, const: 1}
+        type: {type: string, const: STATE}
+        sessionId: {type: string}
+        revision: {type: integer, minimum: 0}
+        workEpoch: {type: integer, minimum: 0}
+        manifestVersion: {type: integer, minimum: 0}
+        phase:
+          type: string
+          enum: [waiting, loading, reading, selecting, paused, ended]
+        spreadId: {type: [string, "null"]}
+        offset: {type: integer, enum: [0, 1]}
+        leaderSide: {type: string, enum: [right, left]}
+        presence:
+          type: object
+          description: "link id → {role: leader|follower, ...}"

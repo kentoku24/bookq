@@ -1,0 +1,962 @@
+openapi: 3.1.0
+info:
+  title: bookq API
+  version: "1.0.0"
+  description: |
+    bookq サーバ/クライアント間の単一の正 (single source of truth)。
+
+    この spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。
+    FastAPI (`app/`) と Rust (`server-rs/`) の両実装はこの spec に対して
+    Schemathesis 契約テストで検証される。iOS / Web クライアントはこの spec
+    からコード生成する。
+
+    ## 認証
+
+    全 `/api/**`・`/image/**`・`/thumb/**`・`/view/**`・`/ws/**` は認証必須。
+
+    - `cookieAuth`: Google OAuth → 署名 session cookie（ブラウザ向け、現行）
+    - `bearerAuth`: `POST /api/v1/auth/token` で発行する Bearer token
+      （ネイティブ向け、RFC 8252 PKCE フロー）
+
+    ## 共通セマンティクス
+
+    ### パス文字列
+    `folder` / `{path}` 系パラメータはすべてダウンロードルート相対の
+    POSIX パス。先頭・末尾 `/` 不可、`..` 不可。URL 埋め込み時は
+    **セグメント単位で percent-encode** する（`/` → `%2F` にしない。
+    全体 encode は別 URL になりキャッシュ不一致を起こす）。
+
+    ### 書庫の仮想フォルダ
+    `.zip .cbz .rar .cbr .epub` は `type: "folder", archive: true` の
+    ノードとして現れる。書庫内部のパスは longest-prefix 解決:
+    `<…>/work.cbz/vol01/page.png` は書庫 `work.cbz` のエントリ
+    `vol01/page.png` を指す。`.pdf` は `archive: true, pdf: true`。
+
+    ### ツリーの flatten
+    「画像を持たず子フォルダが1つだけ」のフォルダは親に潰し込まれ、
+    子ノードの `name` が `"parent/child"` になる。`name` が `/` を
+    含むのはこの規約による正常形であり、クライアントはそのまま
+    パス連結に使ってよい。
+
+    ### サムネイル解決
+    ノードの `thumb` / `thumbs[]` は**フォルダ相対のファイル名**。
+    クライアントは `/image/<fullPath>/<thumb>` に解決する
+    （`fullPath` = 親パス + `name` の連結）。
+
+    ### インデックス構築中
+    メタデータインデックス構築中は `202 + Retry-After` を返す。
+    クライアントは Retry-After 後に同一リクエストを再送する。
+
+    ### 排他・鮮度
+    `generation` はライブラリ世代番号。`since=<generation>` で
+    既知世代と一致する場合 304 を返す。メディア endpoint は
+    `ETag` / `If-None-Match` と `Range: bytes=` をサポートする。
+
+    ### 隠しルート（セキュリティ契約）
+    呼び出しユーザーの hidden roots 配下のコンテンツは
+    **サーバ側で除外**する。クライアント側フィルタはレスポンス本体に
+    該当データを含めてしまうため認めない。`include_hidden=true` は
+    呼び出しユーザー自身の hidden セットにのみ適用される。
+
+  contact:
+    name: bookq
+
+servers:
+  - url: /
+    description: Same origin (production behind tailscale serve)
+
+tags:
+  - name: meta
+  - name: tree
+  - name: search
+  - name: media
+  - name: state
+  - name: auth
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [meta]
+      operationId: getHealth
+      summary: 死活監視
+      security: []  # 監視用に認証不要とする（要決定: 認証必須にするなら外す）
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [ok]}
+
+  /api/v1/version:
+    get:
+      tags: [meta]
+      operationId: getVersion
+      summary: サーババージョン
+      responses:
+        "200":
+          description: "バージョン情報。`Cache-Control: no-store`"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, sha, build_date]
+                properties:
+                  version: {type: string}
+                  sha: {type: string}
+                  build_date: {type: string}
+
+  /api/v1/tree:
+    get:
+      tags: [tree]
+      operationId: getTree
+      summary: フォルダツリー取得（全木または浅い一覧）
+      description: |
+        `depth` 省略で全木を返す。`depth>=1` で `path` 直下の
+        folder 型子ノードのみを浅く返す（`children: []`、`metadata`/
+        `subtree_facets` キーなし）。
+
+        `since` に既知の `generation` を渡すと、一致時 304、
+        不一致時は全木を返す（`since` 指定時は常に全木モード）。
+      parameters:
+        - name: path
+          in: query
+          schema: {type: string, default: ""}
+          description: サブツリーパス（空 = ルート）
+        - name: depth
+          in: query
+          schema: {type: integer, minimum: 1}
+          description: 省略 = 全木
+        - name: since
+          in: query
+          schema: {type: integer}
+          description: 既知 generation。一致 = 304
+      responses:
+        "200":
+          description: "ツリー。`ETag` + `Cache-Control: private, max-age=60`"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TreeResponse"}
+        "202": {$ref: "#/components/responses/IndexBuilding"}
+        "304": {description: since が generation に一致（本体なし）}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/v1/images:
+    get:
+      tags: [tree]
+      operationId: listImages
+      summary: フォルダ / 書庫 / 書庫内プレフィックスの画像一覧
+      description: |
+        `folder` が通常ディレクトリなら直下の画像名、書庫ファイルなら
+        書庫内エントリ名、書庫内プレフィックスならその配下の相対名を返す。
+        再帰しない（直下のみ）。順序は natural sort（漢数字正規化含む）。
+      parameters:
+        - name: folder
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: 画像名リスト
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [folder, images]
+                properties:
+                  folder: {type: string}
+                  images:
+                    type: array
+                    items: {type: string}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 書庫形式は解釈可能だが展開ツールが無い（RAR compressed entry 等）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/search:
+    get:
+      tags: [search]
+      operationId: search
+      summary: 作品検索
+      parameters:
+        - name: q
+          in: query
+          schema: {type: string, default: ""}
+        - name: artist
+          in: query
+          schema: {type: string, default: ""}
+        - name: tag
+          in: query
+          schema: {type: string, default: ""}
+          description: カンマ区切り
+        - name: sort
+          in: query
+          schema: {type: string, default: relevance, enum: [relevance]}
+        - name: include_hidden
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: 検索結果（relevance 降順）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [query, total, results]
+                properties:
+                  query: {type: string}
+                  total: {type: integer}
+                  results:
+                    type: array
+                    items: {$ref: "#/components/schemas/ComicMetadata"}
+        "202": {$ref: "#/components/responses/IndexBuilding"}
+
+  /api/v1/facets:
+    get:
+      tags: [search]
+      operationId: getFacets
+      summary: フィルタ用ファセット一覧
+      parameters:
+        - name: path
+          in: query
+          schema: {type: string, default: ""}
+          description: スコープするサブツリーパス（空 = 全体）
+        - name: include_hidden
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: 利用可能なファセット値
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Facets"}
+        "202": {$ref: "#/components/responses/IndexBuilding"}
+
+  /api/v1/index/refresh:
+    post:
+      tags: [meta]
+      operationId: refreshIndex
+      summary: メタデータインデックス同期再構築
+      description: 完了後にレスポンスを返す。次の /api/v1/tree 読み取りは新内容を見る。
+      responses:
+        "200":
+          description: 再構築完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, folders]
+                properties:
+                  status: {type: string, enum: [ok]}
+                  folders: {type: integer, description: インデックスされた作品数}
+
+  /api/v1/thumb-sprite:
+    get:
+      tags: [media]
+      operationId: getThumbSprite
+      summary: コンタクトシート（multi-thumb グリッド用合成画像）
+      parameters:
+        - name: folder
+          in: query
+          required: true
+          schema: {type: string}
+          description: 書庫ファイルまたはディレクトリ
+        - name: names
+          in: query
+          required: true
+          schema: {type: string}
+          description: カンマ区切りエントリ名（folder 相対。上限あり、超過分は無視）
+        - name: w
+          in: query
+          schema: {type: integer, enum: [200, 400, 800], default: 400}
+        - name: rows
+          in: query
+          schema: {type: string, pattern: '^\d+(,\d+)*$'}
+          description: 例 `3,3,3` — 2D グリッド構成。省略時は横ストリップ
+      responses:
+        "200":
+          description: 合成 JPEG
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /image/{path}:
+    get:
+      tags: [media]
+      operationId: getImage
+      summary: 画像本体（Range / ETag 対応）
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+          description: セグメント単位 percent-encode 済みパス
+        - name: Range
+          in: header
+          schema: {type: string, pattern: '^bytes='}
+        - name: If-None-Match
+          in: header
+          schema: {type: string}
+      responses:
+        "200":
+          description: 画像バイナリ
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+        "206": {description: Range レスポンス}
+        "304": {description: ETag 一致}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /thumb/{path}:
+    get:
+      tags: [media]
+      operationId: getThumb
+      summary: リサイズ JPEG サムネイル
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+        - name: w
+          in: query
+          schema: {type: integer, enum: [200, 400, 800], default: 400}
+      responses:
+        "200":
+          description: サムネ JPEG
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /view/{path}:
+    get:
+      tags: [media]
+      operationId: getView
+      summary: リーダー用正規化ページ
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: 正規化画像
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/v1/reading-positions:
+    get:
+      tags: [state]
+      operationId: listReadingPositions
+      summary: 呼び出しユーザーの読書位置一覧（per-folder LWW）
+      parameters:
+        - name: folder
+          in: query
+          schema: {type: string}
+          description: 指定時はその作品の位置のみ
+      responses:
+        "200":
+          description: 位置レコード群
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [positions]
+                properties:
+                  positions:
+                    type: array
+                    items: {$ref: "#/components/schemas/ReadingPosition"}
+    put:
+      tags: [state]
+      operationId: putReadingPosition
+      summary: 読書位置の記録（newest ts wins）
+      parameters:
+        - name: folder
+          in: query
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [page, total, ts]
+              properties:
+                page: {type: integer, minimum: 0}
+                total: {type: integer, minimum: 0}
+                ts:
+                  type: integer
+                  description: クライアント ms epoch。未来側は ±5min クランプ
+      responses:
+        "200":
+          description: |
+            `{"status":"ok"}` 受理、`{"status":"stale"}` 既知より古い ts で棄却
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [ok, stale]}
+        "400": {$ref: "#/components/responses/BadRequest"}
+    delete:
+      tags: [state]
+      operationId: deleteReadingPosition
+      summary: 読書位置の消去
+      parameters:
+        - name: folder
+          in: query
+          schema: {type: string}
+          description: 省略時は全件消去（既存「全消去」ハーネス相当）
+      responses:
+        "200":
+          description: 消去完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [ok]}
+
+  /api/v1/folder-visibility:
+    get:
+      tags: [state]
+      operationId: getFolderVisibility
+      summary: 呼び出しユーザーの隠しルート一覧
+      responses:
+        "200":
+          description: "可視性スナップショット。`Cache-Control: private, no-store`"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FolderVisibility"}
+        "503":
+          description: ストア読み取り失敗（fail-closed：フィルタなし一覧は返さない）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    put:
+      tags: [state]
+      operationId: putFolderVisibility
+      summary: 隠しルート更新（リビジョン CAS）
+      parameters:
+        - name: x-bookq-visibility-owner
+          in: header
+          required: true
+          schema: {type: string}
+          description: GET が返した `owner` トークンをエコーバック
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [revision, hiddenRoots]
+              properties:
+                revision: {type: integer}
+                hiddenRoots:
+                  type: array
+                  items: {type: string}
+      responses:
+        "200":
+          description: 更新後スナップショット
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FolderVisibility"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409":
+          description: revision 衝突（最新を GET し直して再送）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/auth/token:
+    post:
+      tags: [auth]
+      operationId: exchangeToken
+      summary: 認可コード / リフレッシュトークンを Bearer token に交換
+      description: |
+        ネイティブクライアント向け（RFC 8252）。`/auth/login?client=native`
+        が custom scheme (`bookq://auth?code=…`) にリダイレクトし、
+        その `code` + PKCE `code_verifier` をここで交換する。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [grant_type, code, code_verifier]
+                  properties:
+                    grant_type: {type: string, const: authorization_code}
+                    code: {type: string}
+                    code_verifier: {type: string}
+                - type: object
+                  required: [grant_type, refresh_token]
+                  properties:
+                    grant_type: {type: string, const: refresh_token}
+                    refresh_token: {type: string}
+      responses:
+        "200":
+          description: トークン発行
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, token_type, expires_in]
+                properties:
+                  access_token: {type: string}
+                  token_type: {type: string, const: Bearer}
+                  expires_in: {type: integer, description: 秒}
+                  refresh_token: {type: string}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {description: コード / verifier / refresh token 不正}
+
+  # ── v0 互換 (deprecated: v1 へ移行後に削除) ────────────────────────
+  /api/folders:
+    get:
+      tags: [tree]
+      deprecated: true
+      operationId: legacyGetFolders
+      summary: "[v0] GET /api/v1/tree を使う"
+      parameters:
+        - name: path
+          in: query
+          schema: {type: string, default: ""}
+        - name: depth
+          in: query
+          schema: {type: integer, minimum: 1}
+        - name: since
+          in: query
+          schema: {type: integer}
+      responses:
+        "200":
+          description: |
+            v0 は 3 shape を返す: `since` 指定時 `{tree, generation}`、
+            それ以外はノード配列（素配列）。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: {$ref: "#/components/schemas/TreeNode"}
+                  - type: object
+                    required: [tree, generation]
+                    properties:
+                      tree:
+                        type: array
+                        items: {$ref: "#/components/schemas/TreeNode"}
+                      generation: {type: integer}
+        "304": {description: since 一致}
+        "202": {$ref: "#/components/responses/IndexBuilding"}
+
+  /api/images:
+    get:
+      tags: [tree]
+      deprecated: true
+      operationId: legacyListImages
+      summary: "[v0] 素配列を返す旧版。GET /api/v1/images を使う"
+      parameters:
+        - name: folder
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: 画像名の素配列
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {type: string}
+
+  /api/search:
+    get:
+      tags: [search]
+      deprecated: true
+      operationId: legacySearch
+      summary: "[v0] GET /api/v1/search を使う"
+      parameters:
+        - name: q
+          in: query
+          schema: {type: string, default: ""}
+        - name: artist
+          in: query
+          schema: {type: string, default: ""}
+        - name: tag
+          in: query
+          schema: {type: string, default: ""}
+        - name: include_hidden
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query: {type: string}
+                  total: {type: integer}
+                  results:
+                    type: array
+                    items: {$ref: "#/components/schemas/ComicMetadata"}
+        "202": {$ref: "#/components/responses/IndexBuilding"}
+
+  /api/metadata/facets:
+    get:
+      tags: [search]
+      deprecated: true
+      operationId: legacyFacets
+      summary: "[v0] GET /api/v1/facets を使う"
+      parameters:
+        - name: path
+          in: query
+          schema: {type: string, default: ""}
+        - name: include_hidden
+          in: query
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Facets"}
+        "202": {$ref: "#/components/responses/IndexBuilding"}
+
+  /api/refresh:
+    post:
+      tags: [meta]
+      deprecated: true
+      operationId: legacyRefresh
+      summary: "[v0] POST /api/v1/index/refresh を使う"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  folders: {type: integer}
+
+  /api/health:
+    get:
+      tags: [meta]
+      deprecated: true
+      operationId: legacyHealth
+      summary: "[v0] GET /api/v1/health を使う"
+      security: []
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+
+  /api/version:
+    get:
+      tags: [meta]
+      deprecated: true
+      operationId: legacyVersion
+      summary: "[v0] GET /api/v1/version を使う"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: {type: string}
+                  sha: {type: string}
+                  build_date: {type: string}
+
+  /api/thumb-sprite:
+    get:
+      tags: [media]
+      deprecated: true
+      operationId: legacyThumbSprite
+      summary: "[v0] GET /api/v1/thumb-sprite を使う"
+      parameters:
+        - name: folder
+          in: query
+          required: true
+          schema: {type: string}
+        - name: names
+          in: query
+          required: true
+          schema: {type: string}
+        - name: w
+          in: query
+          schema: {type: integer, default: 400}
+        - name: rows
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+
+  /api/reading-position:
+    get:
+      tags: [state]
+      deprecated: true
+      operationId: legacyGetReadingPosition
+      summary: "[v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う"
+      responses:
+        "200":
+          description: レコードまたは null
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ReadingPosition"
+                  - type: "null"
+    put:
+      tags: [state]
+      deprecated: true
+      operationId: legacyPutReadingPosition
+      summary: "[v0] newest-ts-wins 単一レコード"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [folder, page, total, ts]
+              properties:
+                folder: {type: string}
+                page: {type: integer}
+                total: {type: integer}
+                ts: {type: integer}
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [ok, stale]}
+    delete:
+      tags: [state]
+      deprecated: true
+      operationId: legacyDeleteReadingPosition
+      summary: "[v0] 最新レコードの消去"
+      parameters:
+        - name: folder
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+
+  /api/folder-visibility:
+    get:
+      tags: [state]
+      deprecated: true
+      operationId: legacyGetFolderVisibility
+      summary: "[v0] GET /api/v1/folder-visibility を使う"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FolderVisibility"}
+    put:
+      tags: [state]
+      deprecated: true
+      operationId: legacyPutFolderVisibility
+      summary: "[v0] PUT /api/v1/folder-visibility を使う"
+      parameters:
+        - name: x-bookq-visibility-owner
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                revision: {type: integer}
+                hiddenRoots:
+                  type: array
+                  items: {type: string}
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FolderVisibility"}
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: Google OAuth 後の署名 session cookie（ブラウザ向け）
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: /api/v1/auth/token 発行の Bearer token（ネイティブ向け）
+
+  responses:
+    IndexBuilding:
+      description: |
+        メタデータインデックス構築中。`Retry-After` 秒後に再送。
+        `Cache-Control: no-store`（SW/プライベートキャッシュ不可）。
+      headers:
+        Retry-After:
+          schema: {type: integer, default: 2}
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [detail]
+            properties:
+              detail: {type: string, example: "metadata index building"}
+    BadRequest:
+      description: パラメータ不正
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Forbidden:
+      description: パスがダウンロードルート外 / 権限なし
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: 対象が存在しない
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+
+  schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: {type: string}
+        code:
+          type: string
+          description: 機械可読コード（新規 endpoint で任意付与。v0 互換では省略可）
+
+    TreeNode:
+      type: object
+      required: [name, type]
+      description: |
+        `name` は flatten 規約により `/` を含み得る（"parent/child"）。
+        `thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`
+        に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。
+      properties:
+        name: {type: string}
+        type: {type: string, enum: [folder, image]}
+        children:
+          type: array
+          items: {$ref: "#/components/schemas/TreeNode"}
+        thumb:
+          type: string
+          nullable: true
+          description: "サブツリー DFS 最初の画像のフォルダ相対名"
+        thumbs:
+          type: array
+          items: {type: string}
+          maxItems: 9
+          description: 直下の 2+ サブフォルダが thumb を持つ時のみ存在
+        archive: {type: boolean, description: 書庫仮想フォルダ}
+        pdf: {type: boolean, description: 書庫かつ PDF}
+        has_metadata: {type: boolean}
+        metadata: {$ref: "#/components/schemas/ComicMetadata"}
+        subtree_facets: {$ref: "#/components/schemas/Facets"}
+
+    TreeResponse:
+      type: object
+      required: [kind, nodes, generation]
+      properties:
+        kind:
+          type: string
+          enum: [tree, children]
+          description: tree=全木 / children=depth 指定の浅い一覧
+        nodes:
+          type: array
+          items: {$ref: "#/components/schemas/TreeNode"}
+        generation: {type: integer}
+
+    ComicMetadata:
+      type: object
+      required: [folder_path, folder_name, artist, tags, source, has_metadata, total_pages]
+      properties:
+        folder_path: {type: string}
+        folder_name: {type: string}
+        title_jp: {type: string}
+        title_en: {type: string}
+        artist:
+          type: array
+          items: {type: string}
+        tags:
+          type: array
+          items: {type: string}
+        source: {type: string}
+        has_metadata: {type: boolean}
+        total_pages: {type: integer}
+
+    Facets:
+      type: object
+      required: [artists, tags]
+      description: "`{artists, tags}` のみ（parodies キーは返さない）"
+      properties:
+        artists:
+          type: array
+          items: {type: string}
+        tags:
+          type: array
+          items: {type: string}
+
+    ReadingPosition:
+      type: object
+      required: [folder, page, total, ts]
+      properties:
+        folder: {type: string, description: 不透明文字列。サーバは FS 解決しない}
+        page: {type: integer, minimum: 0}
+        total: {type: integer, minimum: 0}
+        ts: {type: integer, description: ms epoch、newest-wins}
+
+    FolderVisibility:
+      type: object
+      required: [owner, revision, hiddenRoots]
+      properties:
+        owner: {type: string, description: PUT 時に x-bookq-visibility-owner でエコーバック}
+        revision: {type: integer}
+        hiddenRoots:
+          type: array
+          items: {type: string}
+          description: 先頭パスセグメント（書庫も対象）
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
