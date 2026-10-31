@@ -1,8 +1,9 @@
 import XCTest
 @testable import Bookq
 
-/// External-display projection: activation state machine, best-mode
-/// selection, and the shared spread-fit/pageMode helpers.
+/// External-display projection: presentation lifecycle, accessory
+/// availability tracking, best-mode selection, and the shared
+/// spread-fit/pageMode helpers.
 @MainActor
 final class ExternalDisplayTests: XCTestCase {
     private func makePresentation() -> ExternalDisplayStore.Presentation {
@@ -15,13 +16,37 @@ final class ExternalDisplayTests: XCTestCase {
                      spreadOffset: 0, landscapeSpread: true, urlFor: { _ in nil })
     }
 
-    private func makeStore(screens: Int) -> ExternalDisplayStore {
+    // MARK: - Presentation lifecycle
+
+    func testPresentationPublishAndEnd() {
         let s = ExternalDisplayStore()
-        s.externalScreenCount = { screens }
-        s.activate = {}
-        s.deactivate = { _ in }
-        s.refreshAvailability()
-        return s
+        XCTAssertNil(s.presentation)
+        s.updatePresentation(makePresentation())
+        XCTAssertNotNil(s.presentation)
+        s.endPresentation()
+        XCTAssertNil(s.presentation)
+    }
+
+    func testAccessoryAvailabilityTracking() {
+        let s = ExternalDisplayStore()
+        XCTAssertFalse(s.accessoryAvailable)
+        s.accessoryAvailabilityChanged(true)
+        XCTAssertTrue(s.accessoryAvailable)
+        s.accessoryAvailabilityChanged(false)
+        XCTAssertFalse(s.accessoryAvailable)
+    }
+
+    func testAccessoryPresentedAndLost() {
+        let s = ExternalDisplayStore()
+        s.markAccessoryPresented()
+        XCTAssertTrue(s.connected)
+        s.screenLost()
+        XCTAssertFalse(s.connected)
+        XCTAssertNil(s.externalScreen)
+    }
+
+    func testUserEnabledDefaultsTrue() {
+        XCTAssertTrue(ExternalDisplayStore().userEnabled)
     }
 
     // MARK: - bestMode
@@ -51,90 +76,6 @@ final class ExternalDisplayTests: XCTestCase {
 
     func testBestModeEmpty() {
         XCTAssertNil(ExternalDisplayStore.bestModeIndex([]))
-    }
-
-    // MARK: - Activation state machine
-
-    func testPresentationWithScreenActivatesOnce() {
-        let s = makeStore(screens: 1)
-        var a = 0
-        s.activate = { a += 1 }
-        s.updatePresentation(makePresentation())
-        s.updatePresentation(makePresentation())   // republish — still pending
-        XCTAssertEqual(a, 1)
-        XCTAssertFalse(s.connected)
-    }
-
-    func testActivationDoesNotWaitForScreenAttach() {
-        // UIScreen.screens only reports screens that already back a scene,
-        // so activation itself is the attach check — a failed request just
-        // hits the error handler and is retried on the next publish.
-        let s = makeStore(screens: 0)
-        var a = 0
-        s.activate = { a += 1 }
-        s.updatePresentation(makePresentation())
-        XCTAssertEqual(a, 1)
-        XCTAssertFalse(s.available)
-        s.externalScreenCount = { 1 }
-        s.refreshAvailability()
-        XCTAssertTrue(s.available)
-        XCTAssertEqual(a, 1)   // still pending from the first request
-    }
-
-    func testNoPresentationNeverActivates() {
-        let s = makeStore(screens: 1)
-        var a = 0
-        s.activate = { a += 1 }
-        s.refreshAvailability()
-        XCTAssertEqual(a, 0)
-    }
-
-    func testEndPresentationDestroysSession() {
-        let s = makeStore(screens: 1)
-        var a = 0, d = 0
-        s.activate = { a += 1 }
-        s.deactivate = { _ in d += 1 }
-        s.updatePresentation(makePresentation())
-        s.sessionRef = NSObject()
-        s.markConnected()
-        s.endPresentation()
-        XCTAssertEqual(d, 1)
-        s.markDisconnected()
-        XCTAssertNil(s.sessionRef)
-        XCTAssertFalse(s.connected)
-        // No bounce-back: presentation is gone, so availability alone must
-        // not re-activate even though the screen is still attached.
-        XCTAssertEqual(a, 1)
-    }
-
-    func testUserDisableDestroysThenReenableReactivates() {
-        let s = makeStore(screens: 1)
-        var a = 0, d = 0
-        s.activate = { a += 1 }
-        s.deactivate = { _ in d += 1 }
-        s.updatePresentation(makePresentation())
-        s.sessionRef = NSObject()
-        s.markConnected()
-        s.userEnabled = false
-        XCTAssertEqual(d, 1)
-        s.markDisconnected()
-        s.userEnabled = true
-        XCTAssertEqual(a, 2)
-    }
-
-    func testReactivationAfterDisconnectWhilePresenting() {
-        let s = makeStore(screens: 1)
-        var a = 0
-        s.activate = { a += 1 }
-        s.updatePresentation(makePresentation())
-        s.sessionRef = NSObject()
-        s.markConnected()
-        s.updatePresentation(makePresentation())  // connected: no re-request
-        XCTAssertEqual(a, 1)
-        // Session drops (display sleep/yank) → while still presenting,
-        // the next availability pass activates a fresh session.
-        s.markDisconnected()
-        XCTAssertEqual(a, 2)
     }
 
     // MARK: - Shared layout helpers

@@ -15,22 +15,5 @@
 			</array>
 		</dict>
 	</array>
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<true/>
-		<key>UIApplicationSceneConfigurations</key>
-		<dict>
-			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>
-			<array>
-				<dict>
-					<key>UISceneConfigurationName</key>
-					<string>External Display</string>
-					<key>UISceneDelegateClassName</key>
-					<string>$(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate</string>
-				</dict>
-			</array>
-		</dict>
-	</dict>
 </dict>
 </plist>

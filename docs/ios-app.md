@@ -64,7 +64,7 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 | `Library/` | ツリー保持・ブラウズルール（flatten/self-tile/multiThumb）・進捗 |
 | `Browse/` | タイル/リスト/カードグリッド・認証付き画像ローダ |
 | `Reader/` | リーダー（`ReaderModel`=spread/chapter 組立、`ReaderView`=UI、`ZoomableScrollView`=ズーム、`ProgressSync`=進捗同期、`OverviewView`=複数ページグリッド） |
-| `External/` | 外部ディスプレイ投影（USB-C→モニタ）|`ExternalDisplayStore`=セッション管理+公開状態、`ExternalDisplaySceneDelegate`=外部 scene 構築、`ExternalDisplayView`=フルスクリーン描画 |
+| `External/` | 外部ディスプレイ投影（USB-C→モニタ）|`ExternalDisplayStore`=投影状態+モード選択、`ExternalDisplayView`=accessory 宣言+フルスクリーン描画 |
 
 ## リーダー仕様（web parity）
 
@@ -143,25 +143,31 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 
 ## 外部ディスプレイ投影（USB-C → モニタ）
 
-- `windowExternalDisplayNonInteractive` scene role で第二 WindowScene を
-  外部スクリーンに起動（`Info.plist` の `UIApplicationSceneManifest` +
-  `ExternalDisplaySceneDelegate`）。非対話ロールのため操作は端末側のみ。
-- 発動: 画面接続中にリーダーを開くと自動投影。リーダー内クロームの
-  tv ボタンで ON/OFF（セッション限定）。リーダーを閉じるとセッション
-  破棄 → ミラーリングに復帰。ケーブル抜き差しは
-  `UIScreen.didConnect/didDisconnect`（deprecated だが物理接続の唯一の
-  シグナル）+ 次のページ送りで追従。
-- 解像度: 接続時に `screen.availableModes` から最大画素数のモードを選び
-  `screen.currentMode` に設定（native 4K を強制）。`overscanCompensation
-  = .none` でフルパネル使用 — `.insetBounds` はオーバースキャン報告
-  ディスプレイで外周に黒枠が残るため（TV では端クリップの可能性あり）。
+- iOS 27+ の `ExternalNonInteractiveAccessory`（SwiftUI `.sceneAccessory`）
+  を `ReaderView` に宣言。システムが接続ディスプレイに accessory シーンを
+  作成して投影（ミラーリング解除）。非対話のため操作は端末側のみ。
+- 発動: リーダー表示中にディスプレイ接続すると自動投影（accessory の
+  `isEnabled` = `userEnabled` 既定 ON）。リーダー内クロームの tv ボタンで
+  ON/OFF（OFF は `isEnabled=false` → ミラーリングに復帰）。リーダーを
+  閉じると accessory 宣言ごと除去 → ミラーリングに復帰。抜き差しは
+  `onAvailabilityChange` が追跡し tv ボタンの表示を駆動。
+- 解像度: accessory シーンには delegate が無いため、view 内の
+  `ScreenProbe`（0 サイズ UIViewRepresentable）が
+  `window.windowScene.screen` から UIScreen を取得し、
+  `screen.availableModes` 中の最大画素モードを `screen.currentMode` に
+  設定（native 4K を強制）。`overscanCompensation = .none` でフルパネル
+  使用 — `.insetBounds` はオーバースキャン報告ディスプレイで外周に黒枠が
+  残るため（TV では端クリップの可能性あり）。
 - `ExternalDisplayRootView`/`ExternalReaderView` は端末リーダーと同じ
   規則で描画（外部 geometry から pageMode 決定、`work.withMode` で
   spread 再構成、`ReaderWork.spreadFit` 共有、RTL、chrome/gesture なし）。
   画像は `RemoteImageLoader.shared` のキャッシュをそのまま共用。
+  accessory シーンには environment object が届かないため状態は
+  `ExternalDisplayStore.shared`（シングルトン）経由。
 - `ReaderView` が `Presentation`（work/currentIdx/pageAR/spreadOffset/
   landscapeSpread/urlFor）を `ExternalDisplayStore.shared` に公開。
   paired（dual-reader）中は投影しない（solo リーダーのみ）。
+- iOS <27 では accessory API が無いため外部投影は無効（tv ボタン非表示）。
 
 ## 既知の制約
 

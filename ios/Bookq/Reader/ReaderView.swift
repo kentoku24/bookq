@@ -59,6 +59,7 @@ struct ReaderView: View {
             progress.sync?.flush()          // pagehide → flush pending PUT
             ext.endPresentation()           // external display → back to mirroring
         }
+        .modifier(ExternalAccessoryModifier(ext: ext))
         .onChange(of: pageAR) { _, _ in publishExternal() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
@@ -223,12 +224,17 @@ struct ReaderView: View {
                             .lineLimit(1)
                             .frame(maxWidth: 150)
                     }
-                    // External-display bring-up diagnostic (temporary).
+                    // External-display bring-up diagnostic (temporary):
+                    // mode/bounds when connected, else availability state.
                     if let s = ext.externalScreen {
                         Text(ExternalDisplayStore.describe(s))
                             .font(.system(size: 8, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.7))
                             .lineLimit(1)
+                    } else if ext.accessoryAvailable {
+                        Text("ext: display available")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
                 .foregroundStyle(.white)
@@ -300,9 +306,9 @@ struct ReaderView: View {
                     .background(.black.opacity(0.5), in: Circle())
             }
             .accessibilityLabel("複数ページ")
-            // External display toggle: appears once the session is live,
-            // and stays while disabled so it can be re-enabled.
-            if ext.connected || !ext.userEnabled {
+            // External display toggle: shown while a display is attached
+            // or projecting, and stays while disabled so it can be re-enabled.
+            if ext.accessoryAvailable || ext.connected || !ext.userEnabled {
                 Button {
                     ext.userEnabled.toggle()
                 } label: {

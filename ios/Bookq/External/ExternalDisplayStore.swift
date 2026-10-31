@@ -1,10 +1,12 @@
 import SwiftUI
 import UIKit
 
-/// External-display projection (windowExternalDisplayNonInteractive scope):
-/// owns the scene-session lifecycle and the reader snapshot the external
-/// window renders. Singleton — the scene delegate cannot receive
-/// environment objects, so it reaches the same store via `.shared`.
+/// External-display projection (iOS 26+ `ExternalNonInteractiveAccessory`):
+/// the system presents a scene accessory on an attached display — no manual
+/// session management. This store carries the reader snapshot the accessory
+/// content renders, plus availability reported by `onAvailabilityChange`.
+/// Singleton — the accessory scene cannot receive environment objects, so
+/// it reaches the same store via `.shared`.
 @MainActor
 final class ExternalDisplayStore: ObservableObject {
     static let shared = ExternalDisplayStore()
@@ -21,58 +23,20 @@ final class ExternalDisplayStore: ObservableObject {
         var urlFor: (PageRef) -> URL?
     }
 
-    /// A physical screen is attached (or our session is already live) —
-    /// drives tv-button visibility in the reader chrome.
-    @Published private(set) var available = false
-    /// The external scene session is live and rendering.
+    /// A display is attached and the accessory can present — drives
+    /// tv-button visibility in the reader chrome.
+    @Published private(set) var accessoryAvailable = false
+    /// The accessory content is actually on screen.
     @Published private(set) var connected = false
-    /// Session-only opt-out via the reader chrome tv button.
-    @Published var userEnabled = true {
-        didSet { refreshActivation() }
-    }
+    /// Projection on/off — bound straight into `isEnabled` of the
+    /// ExternalNonInteractiveAccessory, so the system mirrors when false.
+    @Published var userEnabled = true
     @Published private(set) var presentation: Presentation?
 
-    /// The live scene session (AnyObject so tests can inject a stand-in —
-    /// UISceneSession cannot be constructed).
-    var sessionRef: AnyObject?
-    /// The connected external UIScreen — drives the diagnostics readout.
+    /// The external UIScreen, captured by the probe inside the accessory
+    /// scene — drives the diagnostics readout. Private(set): assigned via
+    /// `screenFound` (which also applies the mode).
     private(set) var externalScreen: UIScreen?
-    private var activationPending = false
-    private var destroying = false
-    private var observers: [NSObjectProtocol] = []
-
-    // Injectable seams — real UIApplication calls are installed in init.
-    var activate: () -> Void = {}
-    var deactivate: (AnyObject) -> Void = { _ in }
-    /// Attached non-device screens. `UIScreen.screens`/didConnect are
-    /// deprecated since iOS 16 but remain the only API that reports a
-    /// physically attached display *before* any scene session exists —
-    /// `openSessions` only covers already-connected scenes.
-    var externalScreenCount: () -> Int = { 0 }
-
-    init() {
-        externalScreenCount = { max(UIScreen.screens.count - 1, 0) }
-        activate = { [weak self] in
-            let req = UISceneSessionActivationRequest(
-                role: .windowExternalDisplayNonInteractive)
-            UIApplication.shared.activateSceneSession(for: req) { _ in
-                Task { @MainActor in self?.activationDidFail() }
-            }
-        }
-        deactivate = { ref in
-            guard let session = ref as? UISceneSession else { return }
-            UIApplication.shared.requestSceneSessionDestruction(
-                session, options: nil) { _ in }
-        }
-        for name in [UIScreen.didConnectNotification, UIScreen.didDisconnectNotification] {
-            observers.append(NotificationCenter.default.addObserver(
-                forName: name, object: nil, queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in self?.refreshAvailability() }
-            })
-        }
-        refreshAvailability()
-    }
 
     // MARK: - Presentation (ReaderView)
 
@@ -80,75 +44,44 @@ final class ExternalDisplayStore: ObservableObject {
     /// and when layout inputs change.
     func updatePresentation(_ p: Presentation) {
         presentation = p
-        refreshActivation()
     }
 
-    /// Reader dismissed — drop the session; the display falls back to
-    /// mirroring the device.
+    /// Reader dismissed — the accessory declares on that view unregisters
+    /// and the display falls back to mirroring.
     func endPresentation() {
         presentation = nil
-        refreshActivation()
     }
 
-    // MARK: - Scene delegate callbacks
+    // MARK: - Accessory lifecycle
 
-    func sceneDidConnect(_ session: UISceneSession, screen: UIScreen) {
-        sessionRef = session
+    /// `onAvailabilityChange` from the scene accessory.
+    func accessoryAvailabilityChanged(_ available: Bool) {
+        accessoryAvailable = available
+    }
+
+    /// The probe inside the accessory scene found its UIScreen — apply the
+    /// highest-pixel mode and full-panel rendering here (no scene delegate
+    /// exists on an accessory scene).
+    func screenFound(_ screen: UIScreen) {
         externalScreen = screen
-        markConnected()
+        markAccessoryPresented()
+        if let best = Self.bestMode(for: screen) {
+            screen.currentMode = best
+        }
+        screen.overscanCompensation = .none
     }
 
-    func markConnected() {
-        activationPending = false
-        destroying = false
+    /// State half of `screenFound` — separate so tests can drive it
+    /// (UIScreen cannot be constructed).
+    func markAccessoryPresented() {
         connected = true
-        available = true
     }
 
-    func sceneDidDisconnect(_ session: UISceneSession) {
-        if sessionRef == nil || sessionRef === session { markDisconnected() }
-    }
-
-    func markDisconnected() {
-        sessionRef = nil
+    /// Accessory content torn down (display detached, disabled, or the
+    /// declaring reader view removed) → back to mirroring.
+    func screenLost() {
         externalScreen = nil
         connected = false
-        activationPending = false
-        destroying = false
-        refreshAvailability()
-    }
-
-    // MARK: - Availability / activation state machine
-
-    /// Recompute `available` from physical screens + session liveness
-    /// (diagnostic only — activation does not gate on it), then reconcile
-    /// activation. Called on screen (dis)connect notifications.
-    func refreshAvailability() {
-        available = externalScreenCount() > 0 || connected
-        refreshActivation()
-    }
-
-    /// want = presenting && userEnabled. Activation IS the attach check:
-    /// `UIScreen.screens` only reports screens that already back a scene
-    /// (iOS 16+), so gating on it would block activation forever. A failed
-    /// request just hits the error handler — cheap, retried on the next
-    /// publish or screen-connect notification. One pending activation at
-    /// a time; destruction defers session cleanup to sceneDidDisconnect.
-    private func refreshActivation() {
-        let want = presentation != nil && userEnabled
-        if want, sessionRef == nil, !activationPending, !destroying {
-            activationPending = true
-            activate()
-        } else if !want, let session = sessionRef, !destroying {
-            destroying = true
-            deactivate(session)
-        }
-    }
-
-    /// Clear the pending flag only — no immediate retry (a persistent
-    /// failure would loop). The next publish/state change retries.
-    private func activationDidFail() {
-        activationPending = false
     }
 
     // MARK: - Resolution
@@ -164,22 +97,9 @@ final class ExternalDisplayStore: ObservableObject {
     }
 
     /// Index of the mode with the most native pixels (max-by: last wins
-    /// ties, deterministic). Pure — nonisolated so the scene delegate can
-    /// call it synchronously during willConnectTo.
+    /// ties, deterministic).
     nonisolated static func bestModeIndex(_ modes: [ModeRef]) -> Int? {
         modes.indices.max(by: { modes[$0].pixelCount < modes[$1].pixelCount })
-    }
-
-    /// "3840×2160@1.0  bounds 3840×2160  insets 0,0,0,0" — one glance tells
-    /// whether the panel got native 4K or fell back to a scaled mode.
-    static func describe(_ screen: UIScreen) -> String {
-        let m = screen.currentMode
-        let mode = m.map { "\(Int($0.size.width))×\(Int($0.size.height))@\($0.pixelAspectRatio)" } ?? "?"
-        let b = screen.bounds
-        let i = screen.overscanCompensationInsets
-        let fmt = { (v: CGFloat) in String(format: "%.0f", v) }
-        return "\(mode)  bounds \(fmt(b.width))×\(fmt(b.height))  " +
-               "insets \(fmt(i.top)),\(fmt(i.left)),\(fmt(i.bottom)),\(fmt(i.right))"
     }
 
     /// Highest-resolution mode the external screen offers — assigned to
@@ -192,5 +112,17 @@ final class ExternalDisplayStore: ObservableObject {
             ModeRef(size: $0.size, pixelAspectRatio: $0.pixelAspectRatio)
         }) else { return nil }
         return modes[i]
+    }
+
+    /// "3840×2160@1.0  bounds 3840×2160  insets 0,0,0,0" — one glance tells
+    /// whether the panel got native 4K or fell back to a scaled mode.
+    static func describe(_ screen: UIScreen) -> String {
+        let m = screen.currentMode
+        let mode = m.map { "\(Int($0.size.width))×\(Int($0.size.height))@\($0.pixelAspectRatio)" } ?? "?"
+        let b = screen.bounds
+        let i = screen.overscanCompensationInsets
+        let fmt = { (v: CGFloat) in String(format: "%.0f", v) }
+        return "\(mode)  bounds \(fmt(b.width))×\(fmt(b.height))  " +
+               "insets \(fmt(i.top)),\(fmt(i.left)),\(fmt(i.bottom)),\(fmt(i.right))"
     }
 }

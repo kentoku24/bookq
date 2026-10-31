@@ -1,9 +1,39 @@
 import SwiftUI
 import UIKit
 
-/// Root view of the external-display window. Non-interactive role — no
-/// gestures, no chrome. Black standby while no reader is presented
-/// (transient: the session only activates while a presentation exists).
+/// iOS 27+ external-display plumbing. Applied to ReaderView: declares an
+/// `ExternalNonInteractiveAccessory` the system presents on an attached
+/// display (kicking out of mirroring); `isEnabled` mirrors `userEnabled`,
+/// so toggling it returns the display to mirroring. `onAvailabilityChange`
+/// reports a display attach — the only reliable attach signal (UIScreen
+/// notifications are deprecated and only cover scene-backed screens).
+struct ExternalAccessoryModifier: ViewModifier {
+    @ObservedObject var ext: ExternalDisplayStore
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 27.0, *) {
+            content.sceneAccessory {
+                ExternalNonInteractiveAccessory(
+                    isEnabled: Binding(
+                        get: { ext.userEnabled },
+                        set: { ext.userEnabled = $0 })
+                ) {
+                    ExternalDisplayRootView()
+                }
+                .onAvailabilityChange { available in
+                    Task { @MainActor in ext.accessoryAvailabilityChanged(available) }
+                }
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// Root view of the accessory content on the external screen. Renders the
+/// published reader snapshot fullscreen; black standby while nothing is
+/// presented (transient — the system mirrors when disabled/detached).
 struct ExternalDisplayRootView: View {
     @ObservedObject private var store = ExternalDisplayStore.shared
 
@@ -13,13 +43,17 @@ struct ExternalDisplayRootView: View {
             if let p = store.presentation {
                 ExternalReaderView(p: p)
             }
+            // Zero-size probe: the accessory scene has no delegate, so the
+            // screen object is obtained through the view hierarchy itself —
+            // it is also what lets us force the native-4K mode.
+            ScreenProbe(store: store).frame(width: 0, height: 0)
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
+        .onDisappear { store.screenLost() }
         // Diagnostics overlay (temporary, for device bring-up): shows what
-        // mode/bounds the panel actually reports — a 1:1-scaled monitor
-        // fed 1080p and an insetBounds shrink look identical from afar.
-        // Inset enough to survive panel-level overscan clipping.
+        // mode/bounds the panel actually reports. Inset enough to survive
+        // panel-level overscan clipping.
         .overlay(alignment: .bottomLeading) {
             if let screen = store.externalScreen {
                 Text(ExternalDisplayStore.describe(screen))
@@ -27,6 +61,29 @@ struct ExternalDisplayRootView: View {
                     .foregroundStyle(.white.opacity(0.6))
                     .padding(40)
             }
+        }
+    }
+}
+
+/// Grabs the accessory scene's UIScreen from the window hierarchy and hands
+/// it to the store (mode + overscan are applied there). Zero-size, invisible.
+private struct ScreenProbe: UIViewRepresentable {
+    let store: ExternalDisplayStore
+
+    func makeUIView(context: Context) -> ProbeView {
+        let v = ProbeView()
+        v.onScreen = { [store] screen in store.screenFound(screen) }
+        return v
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {}
+
+    final class ProbeView: UIView {
+        var onScreen: ((UIScreen) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let screen = window?.windowScene?.screen else { return }
+            onScreen?(screen)
         }
     }
 }
