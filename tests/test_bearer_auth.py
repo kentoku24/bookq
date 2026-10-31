@@ -29,15 +29,23 @@ def _token(*, key=KEY, exp_offset=3600, sub="reader@example.com", **claims):
 
 @pytest.fixture()
 def app_scope(monkeypatch):
-    """App with test-mode auth bypass off and a known signing key."""
+    """App with test-mode auth bypass off and a known signing key.
+
+    The imported app object is process-global, so mutated settings are
+    restored on teardown to avoid leaking state into other tests in the
+    same pytest worker.
+    """
     monkeypatch.setattr(auth, "_TEST_MODE", False)
     from app.main import app
 
     if not hasattr(app.state, "settings"):
         app.state.settings = load_settings()
-    app.state.settings.secret_key = KEY
-    app.state.settings.allowed_emails = []
-    return app
+    settings = app.state.settings
+    saved = (settings.secret_key, list(settings.allowed_emails), settings.downloads_dir)
+    settings.secret_key = KEY
+    settings.allowed_emails = []
+    yield app
+    settings.secret_key, settings.allowed_emails, settings.downloads_dir = saved
 
 
 def _conn(app, token=None, session=None):
