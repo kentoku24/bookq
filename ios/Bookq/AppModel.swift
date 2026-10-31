@@ -65,7 +65,13 @@ final class AppModel: ObservableObject {
             phase = .onboarding
             return
         }
+        // No shared URLCache for the authed API session — cached error
+        // responses (e.g. a 404 caught during a server restart) must not be
+        // replayed to later boots, and authed bodies stay off disk.
+        let cfg = URLSessionConfiguration.default
+        cfg.urlCache = nil
         let api = BookqAPI(baseURL: base,
+                           session: URLSession(configuration: cfg),
                            tokenProvider: { [box = auth.tokenBox] in box.token })
         self.api = api
         self.library = LibraryStore(api: api)

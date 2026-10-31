@@ -35,6 +35,17 @@ final class LibraryStoreTests: XCTestCase {
             ["name": "p2.png", "type": "image"]]]]
     }
 
+    /// API requests must bypass URLCache — RFC 7231 heuristically caches
+    /// error responses, so a transient 404 (e.g. during a server restart)
+    /// would otherwise replay on every later boot and skip server sync.
+    func testRequestsBypassURLCache() async {
+        StubURLProtocol.handler = { _ in StubURLProtocol.json(self.treeJSON) }
+        let s = LibraryStore(api: api())
+        await s.load()
+        let rec = StubURLProtocol.last(path: "api/folders")
+        XCTAssertEqual(rec?.request.cachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
     /// A fetched tree is persisted — a fresh store constructed later
     /// (e.g. next launch, offline) restores it before any network.
     func testSnapshotRestoreOnInit() async {

@@ -103,7 +103,9 @@ struct RemoteImageView: View {
     }
 
     private func load() async {
-        guard let url else { failed = true; return }
+        // No cover URL = absent thumb (web shows the neutral placeholder);
+        // ⚠️ is reserved for a fetch that actually failed.
+        guard let url else { return }
         image = await RemoteImageLoader.shared.load(url)
         failed = image == nil
         if let image { onImageLoaded?(image) }

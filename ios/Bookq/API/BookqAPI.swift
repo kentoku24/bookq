@@ -42,6 +42,10 @@ final class BookqAPI: Sendable {
         if !query.isEmpty { comps.queryItems = query }
         var req = URLRequest(url: comps.url!)
         req.httpMethod = method
+        // Bearer-authed JSON must never replay from URLCache — RFC 7231
+        // heuristically caches error responses, and a stale 404 on /api/me
+        // poisons every later boot until the entry expires.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         if let token = tokenProvider() {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
