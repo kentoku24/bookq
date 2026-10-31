@@ -24,6 +24,9 @@ services:
     environment:
       - BOOKQ_UPSTREAM=http://viewer:8080
       - DOWNLOADS_DIR=/app/downloads
+      # Same value as the viewer's env: native endpoints only activate where
+      # auth is bypassed; outside test mode every request proxies upstream.
+      - BOOKQ_TEST_MODE=true
 
     # dev.sh のプール管理は role=dev (viewer) のみを見る — このサービスは
     # dev-rs として識別し、slot/名前ラベルは gc の参照判定用に共有する。
