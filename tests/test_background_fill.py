@@ -209,3 +209,62 @@ def test_fill_never_invents_a_cover_for_imageless_archives(tmp_path, monkeypatch
     series = _find(state.metadata_index_cache["tree"], "series")
     assert series["thumb"] is None
     assert "thumbs" not in series
+
+
+def test_fill_coalesces_generation_bumps(tmp_path, monkeypatch):
+    """N materialized nodes must produce fewer than N generation bumps.
+
+    Every bump answers each ?since-polling client with a full tree
+    re-fetch, so the fill coalesces: with the count/interval triggers
+    patched wide open, three fills must land a single end-of-work flush —
+    and every materialized node is still visible in the tree.
+    """
+    routes_mod = _fast_fill(monkeypatch)
+    monkeypatch.setattr(routes_mod, "_FILL_BUMP_EVERY_ITEMS", 1000)
+    monkeypatch.setattr(routes_mod, "_FILL_BUMP_INTERVAL_SECONDS", 3600.0)
+    downloads = tmp_path / "downloads"
+    for i in range(3):
+        _make_zip(downloads / "series" / f"vol-{i:02d}.zip", ["01.png"])
+    (downloads / "plain").mkdir(parents=True)
+    state = _shallow_state(downloads)
+    gen0 = state.metadata_index_cache["generation"]
+
+    async def main():
+        await _background_fill(state)
+        return True
+
+    assert drive(main())
+    cache = state.metadata_index_cache
+    bumps = cache["generation"] - gen0
+    assert bumps == 1, f"3 fills flushed exactly once at end-of-work, got {bumps} bumps"
+    assert bumps < 3, "N fills must not bump the generation N times"
+    for i in range(3):
+        node = _find(cache["tree"], f"series/vol-{i:02d}.zip")
+        assert node.get("children"), f"vol-{i:02d}.zip left opaque"
+
+
+def test_fill_count_trigger_bumps_mid_run(tmp_path, monkeypatch):
+    """The item-count trigger must advance the generation before end-of-work.
+
+    With the interval wide open and _FILL_BUMP_EVERY_ITEMS=2, a 3-item fill
+    bumps once mid-run (after the 2nd splice) plus the final flush: two
+    bumps total — still strictly fewer than one per item.
+    """
+    routes_mod = _fast_fill(monkeypatch)
+    monkeypatch.setattr(routes_mod, "_FILL_BUMP_EVERY_ITEMS", 2)
+    monkeypatch.setattr(routes_mod, "_FILL_BUMP_INTERVAL_SECONDS", 3600.0)
+    downloads = tmp_path / "downloads"
+    for i in range(3):
+        _make_zip(downloads / "series" / f"vol-{i:02d}.zip", ["01.png"])
+    (downloads / "plain").mkdir(parents=True)
+    state = _shallow_state(downloads)
+    gen0 = state.metadata_index_cache["generation"]
+
+    async def main():
+        await _background_fill(state)
+        return True
+
+    assert drive(main())
+    bumps = state.metadata_index_cache["generation"] - gen0
+    assert bumps == 2, f"count trigger + final flush expected 2 bumps, got {bumps}"
+    assert bumps < 3

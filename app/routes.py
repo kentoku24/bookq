@@ -97,6 +97,17 @@ async def _rebuild_into_cache(app) -> None:
 _FILL_IDLE_SECONDS = 10.0
 _FILL_STEP_SECONDS = 0.2
 
+# Generation-bump coalescing (plan fill-pacing): the fill used to bump the
+# cache generation on EVERY materialized node — each bump answers every
+# ?since-polling client with a full tree re-fetch (~12MB on the live
+# library), so a long fill turned into a storm of identical downloads. The
+# bump now lands at most once per _FILL_BUMP_INTERVAL_SECONDS, once per
+# _FILL_BUMP_EVERY_ITEMS materialized nodes, and always once after the
+# final item — the generation stays monotonic and ?since semantics are
+# unchanged, pollers just observe fewer, larger steps.
+_FILL_BUMP_INTERVAL_SECONDS = 2.0
+_FILL_BUMP_EVERY_ITEMS = 10
+
 
 async def _wait_requests_idle(app_state) -> None:
     """Sleep until no request has arrived for ``_FILL_IDLE_SECONDS``.
@@ -547,7 +558,11 @@ async def _background_fill(app_state) -> None:
     Spawned once by lifespan after 起動完了; lives past yield. Each opaque
     node is rebuilt with the same listing code the full scan uses
     (_scan_archive_node/_scan_pdf_node) under _index_lock, swapped in place,
-    and the cache generation bumps by 1. Between items the task sleeps
+    and the cache generation advances — coalesced to at most one bump per
+    _FILL_BUMP_INTERVAL_SECONDS, per _FILL_BUMP_EVERY_ITEMS materialized
+    nodes, and always once after the final item, so ?since pollers see
+    fewer, larger steps instead of a full-tree re-fetch per node. Between
+    items the task sleeps
     _FILL_STEP_SECONDS and pauses while requests are fresh (idle detection
     via app_state.last_request_at). Per-item exceptions are logged and
     skipped; index/facets are untouched (name-only registration already
@@ -564,6 +579,12 @@ async def _background_fill(app_state) -> None:
         downloads_path = app_state.settings.downloads_path
         tree = cache["tree"]
         done: set[str] = set()
+        # Coalesced generation accounting: *pending* counts the splices this
+        # tree has taken since its last bump. A tree swap resets it — a
+        # rebuilt cache carries its own generation and unreachable splices
+        # must not advance it.
+        pending = 0
+        last_bump = time.monotonic()
         while True:
             await _wait_requests_idle(app_state)
             full: str | None = None
@@ -574,8 +595,15 @@ async def _background_fill(app_state) -> None:
                         return
                     if cache["tree"] is not tree:
                         tree, done = cache["tree"], set()
+                        pending, last_bump = 0, time.monotonic()
                     found = _find_first_opaque(tree, "", done)
                     if found is None:
+                        if pending:
+                            # Final flush: the completed tail of the work
+                            # must always advance the generation, or ?since
+                            # pollers would never see the last materialized
+                            # nodes.
+                            cache["generation"] = int(cache.get("generation", 1) or 1) + 1
                         return
                     chain, full, is_pdf = found
                     nodes, idx = chain[-1]
@@ -600,7 +628,14 @@ async def _background_fill(app_state) -> None:
                     nodes[idx] = filled
                     _refresh_ancestor_covers(chain)
                     done.add(full)
-                    cache["generation"] = int(cache.get("generation", 1) or 1) + 1
+                    pending += 1
+                    now = time.monotonic()
+                    if (
+                        pending >= _FILL_BUMP_EVERY_ITEMS
+                        or now - last_bump >= _FILL_BUMP_INTERVAL_SECONDS
+                    ):
+                        cache["generation"] = int(cache.get("generation", 1) or 1) + 1
+                        pending, last_bump = 0, now
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
