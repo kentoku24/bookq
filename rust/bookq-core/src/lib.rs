@@ -18,7 +18,9 @@ mod archive;
 mod meta;
 mod scans;
 
-pub use archive::{epub_raw, rar_names, zip_names, zip_read_entry, ZipEntry};
+pub use archive::{
+    epub_raw, open_archive, rar_names, zip_names, zip_read_entry, OpenArchive, ZipEntry,
+};
 pub use meta::{meta_walk, parse_metadata_batch, ComicRec};
 pub use scans::{
     list_images, natural_cmp, scan_fs, sort_file_cmp, tree_signature, FsDir,

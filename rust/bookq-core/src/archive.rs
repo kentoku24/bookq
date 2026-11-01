@@ -473,6 +473,10 @@ fn zip_read_with(f: &mut File, entries: &[ZipEntry], inner: &str) -> ReadOutcome
         Some(e) => e,
         None => return ReadOutcome::None,
     };
+    zip_read_data(f, e)
+}
+
+fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     if e.flag_bits & MASK_ENCRYPTED != 0 {
         return ReadOutcome::None; // RuntimeError → None
     }
@@ -1994,5 +1998,465 @@ pub fn rar_names(path: &Path) -> Option<Vec<(String, bool)>> {
         Ok(entries) => Some(entries.into_iter().map(|e| (e.filename, e.is_dir)).collect()),
         Err(RarErr::Fatal) => Some(Vec::new()), // raised → rarfile → []
         Err(RarErr::Partial) => None,           // fd-level failure → Python decides
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Open-archive memo — port of app/archive.py's _open_archives LRU (#217)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// Serving /image/<archive>/<entry> (and the thumbs/view hit paths) used to
+// re-open the archive — re-parsing the ZIP central directory / every RAR
+// header block / the EPUB OPF — on EVERY page request, O(E) per read. A
+// reading session issues one request per page against the same work, so
+// parsed archive state is memoized in a small LRU keyed by
+// (resolved path, st_mtime_ns, st_size): a modified archive is a different
+// key and is re-parsed, while its stale entry ages out and the File closes
+// on drop.
+//
+// Python serializes reads on each cached object because ZipFile/RarFile
+// share one file cursor; the Rust equivalent keeps Mutex<File> for the
+// same reason — a read must own the seek cursor end-to-end or concurrent
+// readers interleave seeks. Open/parse happens OUTSIDE the LRU lock so a
+// slow header parse never serializes unrelated archive traffic, and a
+// concurrent insert race keeps the first object (the loser's File closes
+// unused — Python closes it explicitly; Drop does it here).
+//
+// Open failures are not cached: the next request retries, matching
+// Python's "return the exception to the caller" behaviour — callers see
+// `None` and fall back to the uncached one-shot functions, exactly like
+// Python's `entry is None → _read_zip_uncached`.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::UNIX_EPOCH;
+
+const OPEN_ARCHIVE_CACHE_MAX: usize = 8;
+
+type ArchiveKey = (String, u64, u64); // (resolved path, mtime_ns, size)
+
+enum Parsed {
+    /// .zip/.cbz/.epub — parsed central directory + shared file handle.
+    Zip {
+        file: Mutex<File>,
+        entries: Vec<ZipEntry>,
+        /// py `NameToInfo` — last duplicate wins; makes entry lookup
+        /// `getinfo()`-O(1) instead of `namelist()`-O(E).
+        name_idx: HashMap<String, usize>,
+        /// .epub only — (raw image names, spine order) from `epub_raw`.
+        epub: Option<(Vec<String>, Vec<String>)>,
+    },
+    /// .rar/.cbr — parsed header names. Entry reads still proxy upstream
+    /// (compressed extraction needs external unrar); the memo saves the
+    /// O(E) header walk the listing was paying per request.
+    Rar { names: Vec<(String, bool)> },
+}
+
+/// One cached open archive. All fields are immutable after construction;
+/// reads go through the per-format accessors below.
+pub struct OpenArchive {
+    parsed: Parsed,
+}
+
+impl OpenArchive {
+    /// ZIP-family entry bytes via the memoized CD + shared file.
+    /// `Some(bytes)` only on a proven-identical read — anything else is
+    /// `None`, matching `zip_read_entry`'s fallback contract.
+    pub fn read_zip_entry(&self, inner: &str) -> Option<Vec<u8>> {
+        let Parsed::Zip {
+            file,
+            entries,
+            name_idx,
+            ..
+        } = &self.parsed
+        else {
+            return None;
+        };
+        let i = *name_idx.get(inner)?;
+        let mut f = file.lock().ok()?;
+        match zip_read_data(&mut f, &entries[i]) {
+            ReadOutcome::Data(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// ZIP central-directory names in stored order (`zip_names` shape).
+    pub fn zip_names(&self) -> Option<Vec<String>> {
+        match &self.parsed {
+            Parsed::Zip { entries, .. } => {
+                Some(entries.iter().map(|e| e.filename.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// EPUB (raw names, spine order) — `epub_raw` shape; `None` for non-epub.
+    pub fn epub_raw(&self) -> Option<(Vec<String>, Vec<String>)> {
+        match &self.parsed {
+            Parsed::Zip { epub: Some(e), .. } => Some(e.clone()),
+            _ => None,
+        }
+    }
+
+    /// RAR (name, is_dir) pairs — `rar_names` shape; `None` for non-rar.
+    pub fn rar_names(&self) -> Option<Vec<(String, bool)>> {
+        match &self.parsed {
+            Parsed::Rar { names } => Some(names.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// Global LRU: resolved-path+mtime+size → parsed archive.
+static OPEN_ARCHIVES: LazyLock<
+    Mutex<(HashMap<ArchiveKey, Arc<OpenArchive>>, VecDeque<ArchiveKey>)>,
+> = LazyLock::new(|| Mutex::new((HashMap::new(), VecDeque::new())));
+
+/// `_archive_cache_key`: resolved path + (mtime, size) — an edited file is
+/// a different key. `None` when the path can't be stat'ed (callers then do
+/// a direct one-shot open, exactly like Python).
+fn archive_cache_key(path: &Path) -> Option<ArchiveKey> {
+    let st = path.metadata().ok()?;
+    let mtime_ns = st
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as u64;
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Some((resolved.to_string_lossy().into_owned(), mtime_ns, st.len()))
+}
+
+/// Lowercased ".ext" for format dispatch (serve.rs::suffix_lower twin —
+/// bookq-core can't reach into viewer-rs).
+fn archive_suffix(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_lowercase()))
+        .unwrap_or_default()
+}
+
+/// Parse *path*'s headers by format — `None` when any step fails (the
+/// failure is not cached; the next request retries).
+fn parse_archive(path: &Path) -> Option<Parsed> {
+    match archive_suffix(path).as_str() {
+        ".rar" | ".cbr" => Some(Parsed::Rar {
+            names: rar_names(path)?,
+        }),
+        ".epub" => {
+            let mut f = File::open(path).ok()?;
+            let entries = match read_cd(&mut f) {
+                Ok(Some(e)) => e,
+                _ => return None,
+            };
+            let epub = epub_raw(path);
+            Some(Parsed::Zip {
+                file: Mutex::new(f),
+                name_idx: name_index(&entries),
+                entries,
+                epub,
+            })
+        }
+        _ => {
+            let mut f = File::open(path).ok()?;
+            let entries = match read_cd(&mut f) {
+                Ok(Some(e)) => e,
+                _ => return None,
+            };
+            Some(Parsed::Zip {
+                file: Mutex::new(f),
+                name_idx: name_index(&entries),
+                entries,
+                epub: None,
+            })
+        }
+    }
+}
+
+/// `NameToInfo`: last duplicate filename wins (mirrors `zip_read_with`'s
+/// `.rev().find()` order).
+fn name_index(entries: &[ZipEntry]) -> HashMap<String, usize> {
+    let mut m = HashMap::with_capacity(entries.len());
+    for (i, e) in entries.iter().enumerate() {
+        m.insert(e.filename.clone(), i);
+    }
+    m
+}
+
+/// Return the memoized parsed archive for *path*, parsing on miss.
+/// `None` = no cache key (unstat'able) or parse failure — callers fall
+/// back to the uncached one-shot functions, same as Python.
+pub fn open_archive(path: &Path) -> Option<Arc<OpenArchive>> {
+    let key = archive_cache_key(path)?;
+    {
+        let (map, order) = &mut *OPEN_ARCHIVES.lock().ok()?;
+        if let Some(hit) = map.get(&key) {
+            let hit = hit.clone();
+            if let Some(pos) = order.iter().position(|k| *k == key) {
+                let k = order.remove(pos).unwrap();
+                order.push_back(k);
+            }
+            return Some(hit);
+        }
+    }
+    // Parse outside the LRU lock: header walks are the expensive part and
+    // must not serialize unrelated archives.
+    let parsed = parse_archive(path)?;
+    let entry = Arc::new(OpenArchive { parsed });
+    let (map, order) = &mut *OPEN_ARCHIVES.lock().ok()?;
+    if let Some(existing) = map.get(&key) {
+        // A racing thread won — keep its object; our File closes on drop.
+        return Some(existing.clone());
+    }
+    order.push_back(key.clone());
+    map.insert(key, entry.clone());
+    while map.len() > OPEN_ARCHIVE_CACHE_MAX {
+        let Some(old) = order.pop_front() else { break };
+        map.remove(&old);
+    }
+    Some(entry)
+}
+
+/// Drop every cached archive (test isolation).
+#[cfg(test)]
+pub fn clear_open_archive_cache() {
+    if let Ok(mut guard) = OPEN_ARCHIVES.lock() {
+        let (map, order) = &mut *guard;
+        map.clear();
+        order.clear();
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn le16(v: u16) -> [u8; 2] {
+        v.to_le_bytes()
+    }
+    fn le32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+
+    /// Minimal stored-method ZIP writer — local headers + CD + EOCD.
+    fn make_zip(path: &Path, members: &[(&str, &[u8])]) {
+        let mut local: Vec<u8> = Vec::new();
+        let mut cd: Vec<u8> = Vec::new();
+        for (name, data) in members {
+            let crc = crc32fast::hash(data);
+            let off = local.len() as u32;
+            local.extend_from_slice(&le32(0x0403_4b50));
+            local.extend_from_slice(&le16(20)); // version needed
+            local.extend_from_slice(&le16(0)); // flags
+            local.extend_from_slice(&le16(0)); // stored
+            local.extend_from_slice(&le16(0)); // mtime
+            local.extend_from_slice(&le16(0)); // mdate
+            local.extend_from_slice(&le32(crc));
+            local.extend_from_slice(&le32(data.len() as u32));
+            local.extend_from_slice(&le32(data.len() as u32));
+            local.extend_from_slice(&le16(name.len() as u16));
+            local.extend_from_slice(&le16(0)); // extra
+            local.extend_from_slice(name.as_bytes());
+            local.extend_from_slice(data);
+
+            cd.extend_from_slice(&le32(0x0201_4b50));
+            cd.extend_from_slice(&le16(20)); // made by
+            cd.extend_from_slice(&le16(20)); // needed
+            cd.extend_from_slice(&le16(0)); // flags
+            cd.extend_from_slice(&le16(0)); // stored
+            cd.extend_from_slice(&le16(0));
+            cd.extend_from_slice(&le16(0));
+            cd.extend_from_slice(&le32(crc));
+            cd.extend_from_slice(&le32(data.len() as u32));
+            cd.extend_from_slice(&le32(data.len() as u32));
+            cd.extend_from_slice(&le16(name.len() as u16));
+            cd.extend_from_slice(&le16(0)); // extra
+            cd.extend_from_slice(&le16(0)); // comment
+            cd.extend_from_slice(&le16(0)); // disk
+            cd.extend_from_slice(&le16(0)); // int attr
+            cd.extend_from_slice(&le32(0)); // ext attr
+            cd.extend_from_slice(&le32(off));
+            cd.extend_from_slice(name.as_bytes());
+        }
+        let mut out = local;
+        let cd_off = out.len() as u32;
+        let cd_len = cd.len() as u32;
+        out.extend_from_slice(&cd);
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(members.len() as u16));
+        out.extend_from_slice(&le16(members.len() as u16));
+        out.extend_from_slice(&le32(cd_len));
+        out.extend_from_slice(&le32(cd_off));
+        out.extend_from_slice(&le16(0));
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn tmp_cbz(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bookq-arch-{tag}-{}-{}.cbz",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// The LRU is process-global and cargo runs tests in parallel — stateful
+    /// assertions serialize here so another test's opens can't evict the
+    /// entry under test mid-assertion. Poison is ignored so one test's panic
+    /// doesn't cascade into the rest.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn memo_returns_same_object_and_reads() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_cbz("same");
+        make_zip(&p, &[("001.png", b"one"), ("002.png", b"two")]);
+
+        let a = open_archive(&p).unwrap();
+        let b = open_archive(&p).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "repeat open must reuse the memo");
+        assert_eq!(a.read_zip_entry("001.png").unwrap(), b"one");
+        assert_eq!(a.read_zip_entry("002.png").unwrap(), b"two");
+        assert_eq!(a.read_zip_entry("999.png"), None);
+        assert_eq!(a.zip_names().unwrap(), vec!["001.png", "002.png"]);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn memo_rekeys_on_content_change() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_cbz("rekey");
+        make_zip(&p, &[("001.png", b"first")]);
+        let a = open_archive(&p).unwrap();
+        assert_eq!(a.read_zip_entry("001.png").unwrap(), b"first");
+
+        // Rewrite same size; force a distinct mtime so the key must change
+        // even on coarse-timestamp filesystems.
+        make_zip(&p, &[("001.png", b"secnd")]);
+        File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+            .unwrap();
+
+        let b = open_archive(&p).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b), "edited file is a different key");
+        assert_eq!(b.read_zip_entry("001.png").unwrap(), b"secnd");
+        // The old object never serves stale bytes: its fd sees the rewritten
+        // inode, the read produces the new bytes, and the OLD entry's CRC
+        // rejects them → None (same safe-side failure Python would give).
+        assert_eq!(a.read_zip_entry("001.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn memo_lru_evicts_oldest() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let mut paths = Vec::new();
+        for i in 0..(OPEN_ARCHIVE_CACHE_MAX + 2) {
+            let p = tmp_cbz(&format!("lru{i}"));
+            make_zip(&p, &[("001.png", format!("data{i}").as_bytes())]);
+            paths.push(p);
+        }
+        let first = open_archive(&paths[0]).unwrap();
+        for p in &paths[1..] {
+            open_archive(p).unwrap();
+        }
+        // paths[0] was evicted — a fresh open re-parses into a new object.
+        let again = open_archive(&paths[0]).unwrap();
+        assert!(!Arc::ptr_eq(&first, &again), "oldest entry must be evicted");
+        assert_eq!(again.read_zip_entry("001.png").unwrap(), b"data0".to_vec());
+        // The most recent archives still hit the memo.
+        let last_a = open_archive(paths.last().unwrap()).unwrap();
+        let last_b = open_archive(paths.last().unwrap()).unwrap();
+        assert!(Arc::ptr_eq(&last_a, &last_b));
+        for p in &paths {
+            std::fs::remove_file(p).ok();
+        }
+    }
+
+    #[test]
+    fn memo_duplicate_name_last_wins() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_cbz("dup");
+        make_zip(
+            &p,
+            &[("a.png", b"old"), ("b.png", b"mid"), ("a.png", b"new")],
+        );
+        let a = open_archive(&p).unwrap();
+        assert_eq!(
+            a.read_zip_entry("a.png").unwrap(),
+            b"new",
+            "NameToInfo last-duplicate-wins must match zip_read_with"
+        );
+        assert_eq!(zip_read_entry(&p, "a.png").unwrap(), b"new");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn memo_bad_archive_not_cached() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_cbz("bad");
+        std::fs::write(&p, b"definitely not a zip file").unwrap();
+        assert!(open_archive(&p).is_none());
+        // A failed parse is never cached — a repaired file parses next time.
+        make_zip(&p, &[("001.png", b"fixed")]);
+        let a = open_archive(&p).unwrap();
+        assert_eq!(a.read_zip_entry("001.png").unwrap(), b"fixed");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn memo_concurrent_reads_are_correct() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_cbz("conc");
+        let members: Vec<(String, Vec<u8>)> = (0..16)
+            .map(|i| (format!("{i:03}.png"), format!("payload-{i}").into_bytes()))
+            .collect();
+        let refs: Vec<(&str, &[u8])> = members
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect();
+        make_zip(&p, &refs);
+        let a = open_archive(&p).unwrap();
+
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let arc = a.clone();
+            let expected: Vec<(String, Vec<u8>)> = (0..16)
+                .map(|i| {
+                    let idx = (i + t) % 16;
+                    (
+                        format!("{idx:03}.png"),
+                        format!("payload-{idx}").into_bytes(),
+                    )
+                })
+                .collect();
+            handles.push(std::thread::spawn(move || {
+                for (name, want) in expected {
+                    assert_eq!(arc.read_zip_entry(&name).unwrap(), want);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        std::fs::remove_file(&p).ok();
     }
 }
