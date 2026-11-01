@@ -852,18 +852,23 @@ _NEEDLE_SEL = {
 # so ["#pair-status", "#menu-btn", "#pair-btn"] means: strip when it has
 # a real rect, else the フォルダ一覧 drawer, then the 🔗 launcher — the
 # launcher is open()-only while status is non-idle.
+# Panel-section controls chain ONLY through #pair-status — the sidebar
+# openers used to fall through to #menu-btn while the modal covered the
+# strip (top:false), and a sidebar open on a CONNECTED leader fires
+# SET_ACTIVITY selecting, which reading-gates SWAP_SIDES/TURN into
+# silent no-ops. The modal owns the screen; wait for the target rect
+# instead of flapping parents.
 _OPENERS = {
     "#pair-btn": ["#menu-btn"],
-    "#pair-status": ["#menu-btn"],
-    "#pair-swap": ["#pair-status", "#menu-btn", "#pair-btn"],
-    "#pair-leave": ["#pair-status", "#menu-btn", "#pair-btn"],
-    "#pair-join-open": ["#pair-status", "#menu-btn", "#pair-btn"],
-    "#pair-code-input": ["#pair-join-open", "#pair-status", "#menu-btn",
-                         "#pair-btn"],
-    "#pair-leader-cancel": ["#pair-status", "#menu-btn", "#pair-btn"],
-    "#pair-waiting-cancel": ["#pair-status", "#menu-btn", "#pair-btn"],
-    "#pair-error-leave": ["#pair-status", "#menu-btn", "#pair-btn"],
-    "#pair-join-back": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-status": [],
+    "#pair-swap": ["#pair-status"],
+    "#pair-leave": ["#pair-status"],
+    "#pair-join-open": ["#pair-status"],
+    "#pair-code-input": ["#pair-join-open", "#pair-status"],
+    "#pair-leader-cancel": ["#pair-status"],
+    "#pair-waiting-cancel": ["#pair-status"],
+    "#pair-error-leave": ["#pair-status"],
+    "#pair-join-back": ["#pair-status"],
     "#browse-header": ["#menu-btn"],
 }
 
@@ -922,7 +927,8 @@ def _ui_rect(rep: dict, needles) -> dict | None:
 
 
 def _ui_tap(ctx: RunCtx, spec, needles, what: str,
-            tries: int = 16, delay: float = 0.7) -> str:
+            tries: int = 16, delay: float = 0.7,
+            expect_el: str | None = None) -> str:
     """Tap a real UI control on the simulator: resolve the needle to a
     client rect via the pair-report hook, open a parent surface when the
     control isn't mounted yet, tap the calibrated screen point."""
@@ -972,10 +978,38 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                 off = _ui_offset(ctx, spec)
             x = r["x"] + r["w"] / 2 + off[0]
             y = r["y"] + r["h"] / 2 + off[1]
+            t0 = int(time.time() * 1000)
             drv.tap(spec, x, y)
             ctx.note(f"ui_tap_{needles[0]}", True,
                      f"{what} @({x:.0f},{y:.0f})")
-            return needles[0]
+            if expect_el is None:
+                return needles[0]
+            # Verify what the tap actually hit — a rect sampled before
+            # an async re-layout lands on the WRONG control (the pair
+            # session-info reflow slid 作品変更 under the 左右交換
+            # coordinate). The hook's lastTap.el names the real target;
+            # a mistap re-enters the poll so the opener chain reopens
+            # the surface and the next report supplies a fresh rect.
+            hit = None
+            vdead = time.monotonic() + 3.0
+            while time.monotonic() < vdead:
+                try:
+                    lt = (ctx._pair_report_state(spec.role)
+                          .get("lastTap") or {})
+                except AssertError:
+                    lt = {}
+                if lt.get("t", 0) >= t0 - 300 and lt.get("el"):
+                    hit = lt["el"]
+                    break
+                time.sleep(0.3)
+            if hit == expect_el:
+                return needles[0]
+            ctx.note("ui_mistap", True,
+                     f"{what} @({x:.0f},{y:.0f}) hit {hit or '?'} "
+                     f"(want {expect_el}) — retrying")
+            prev_r = None
+            time.sleep(delay)
+            continue
         prev_r = None
         last_rep = rep
         rects = rep.get("rects") or {}
@@ -983,10 +1017,18 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         # polls — #menu-btn is a toggle, so re-firing every iteration
         # would flap the sidebar; but a tap that missed (overlay race,
         # mid-animation) must get to try again or the call is doomed.
+        # While the pair modal is open it owns the screen — poking the
+        # strip/sidebar/launcher under it either toggles the panel shut
+        # or (menu-btn on a connected leader) pauses the session at
+        # 'selecting'. Suppress external openers and wait for the rect.
+        panel_open = bool((rects.get("#pair-close") or {}).get("w"))
         for n in needles:
             sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
             for op_sel in (_OPENERS.get(sel) or []):
                 if it - fired.get(op_sel, -99) < 5:
+                    continue
+                if panel_open and op_sel in ("#pair-status", "#menu-btn",
+                                             "#pair-btn"):
                     continue
                 orr = rects.get(op_sel)
                 if orr and orr["w"] > 0 and orr.get("top") is not False:
@@ -1399,8 +1441,8 @@ def _send_move_ax(ctx: RunCtx, actor: str, op: dict) -> dict:
             time.sleep(0.3)
         return {"sent": True}
     if t == "swap_sides":
-        _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip")
-        _ui_tap(ctx, spec, ["左右交換"], "swap button")
+        _ui_tap(ctx, spec, ["左右交換"], "swap button",
+                expect_el="#pair-swap")
         return {"sent": True}
     if t == "set_offset":
         # #spread-shift toggles the offset (0<->1) — the chrome button
@@ -2423,17 +2465,38 @@ def op_leave(ctx: RunCtx, op: dict) -> None:
             spec.page.evaluate(
                 "() => window.PairController.leave()")
         else:
-            # simulator: real UI leave — strip → pair panel → 解除. A
-            # session that already ended (peer left, server END after a
-            # suspend/resume edge) shows no strip — idle IS the terminal
-            # the END poll below checks.
-            try:
-                _st = ctx._ui_state(spec.role)
-            except AssertError:
-                _st = {}
-            if _st.get("sessionId") or _st.get("status") == "connected":
-                _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip")
-                _ui_tap(ctx, spec, ["解除"], "leave button")
+            # simulator: real UI leave — strip → pair panel → 解除 — on
+            # BOTH sides that still hold a session. A peer that already
+            # dropped can't end the other's session, so whoever still
+            # shows connected gets the tap. The state read is retried:
+            # a transient endpoint hiccup used to silently skip the
+            # leave and the END poll then timed out with a healthy
+            # leader still connected.
+            peer = "follower" if actor == "leader" else "leader"
+            for cspec in (ctx.clients[actor], ctx.clients[peer]):
+                _st = None
+                for _try in range(4):
+                    try:
+                        _st = ctx._ui_state(cspec.role)
+                        break
+                    except AssertError:
+                        time.sleep(0.8)
+                if _st is None:
+                    ctx.note("leave_state_unread", True,
+                             f"{cspec.role} state unread — leave skipped")
+                    continue
+                if _st.get("sessionId") or _st.get("status") == "connected":
+                    try:
+                        # A leftover-open panel covers the strip — skip
+                        # the explicit strip tap and let the opener
+                        # chain reach 解除 either way.
+                        _ui_tap(ctx, cspec, ["解除"], "leave button",
+                                expect_el="#pair-leave")
+                    except EnvError:
+                        # END raced ahead of the tap — the peer's own
+                        # leave already closed this side, which is the
+                        # terminal the poll below checks anyway.
+                        pass
     else:
         ctx.cmd(actor, "leave")
     ctx.poll_both(
