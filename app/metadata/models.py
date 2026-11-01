@@ -1,13 +1,82 @@
 """ComicMetadata dataclass and pure helpers."""
 
 import logging
+import threading
 import tomllib
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ComicMetadata", "_split_aliases"]
+__all__ = ["ComicMetadata", "_split_aliases", "_clear_parse_cache"]
+
+
+# ── metadata.toml parse cache ─────────────────────────────────────────────────
+#
+# rebuild_from_tree re-parses every metadata.toml on each rebuild even when
+# nothing changed (#245). Entries are keyed by file identity —
+# (toml_path, st_mtime_ns, st_size) — so editing one file invalidates exactly
+# one entry. The stat that builds the key doubles as the existence check: a
+# missing/unreadable file caches None under (toml_path, None, None), and a
+# file that later appears simply resolves under its real stat key, so the
+# negative entries never go stale.
+#
+# Values are the raw parsed TOML dicts (None = absent or unparseable). They
+# are shared read-only: from_folder copies everything it keeps into fresh
+# lists, so callers may mutate the returned ComicMetadata freely and the next
+# parse of the same file still builds an independent record.
+#
+# Guarded by a lock because rebuilds run under run_in_threadpool.
+
+_TOML_CACHE_MAX = 10_000
+_TOML_CACHE: OrderedDict[tuple, dict | None] = OrderedDict()
+_TOML_CACHE_LOCK = threading.Lock()
+_CACHE_MISS = object()
+
+
+def _clear_parse_cache() -> None:
+    """Drop every cached metadata.toml parse (test isolation)."""
+    with _TOML_CACHE_LOCK:
+        _TOML_CACHE.clear()
+
+
+def _load_metadata_toml(toml_path: Path) -> dict | None:
+    """Return the parsed metadata.toml at *toml_path*, or None when absent/unparseable.
+
+    Memoized per file identity — ``(toml_path, st_mtime_ns, st_size)`` — so a
+    repeat index rebuild re-parses only files whose stat changed. The failed-
+    stat negative case is cached too (under ``(toml_path, None, None)``); the
+    stat is needed for the key anyway, and when the file appears its real
+    (mtime_ns, size) produces a different key.
+    """
+    try:
+        st = toml_path.stat()
+        key = (toml_path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        st = None
+        key = (toml_path, None, None)
+
+    with _TOML_CACHE_LOCK:
+        hit = _TOML_CACHE.get(key, _CACHE_MISS)
+        if hit is not _CACHE_MISS:
+            _TOML_CACHE.move_to_end(key)
+            return hit
+
+    data: dict | None = None
+    if st is not None:
+        try:
+            with open(toml_path, "rb") as fh:
+                data = tomllib.load(fh)
+        except Exception:
+            logger.warning("Failed to parse %s", toml_path)
+
+    with _TOML_CACHE_LOCK:
+        _TOML_CACHE[key] = data
+        _TOML_CACHE.move_to_end(key)
+        while len(_TOML_CACHE) > _TOML_CACHE_MAX:
+            _TOML_CACHE.popitem(last=False)
+    return data
 
 
 def _split_aliases(raw: list[str]) -> list[str]:
@@ -45,20 +114,9 @@ class ComicMetadata:
         *None* on unexpected errors.
         """
         folder_rel = str(folder_path.relative_to(downloads_base))
-        metadata_file = folder_path / "metadata.toml"
+        data = _load_metadata_toml(folder_path / "metadata.toml")
 
-        if not metadata_file.exists():
-            return cls(
-                folder_path=folder_rel,
-                folder_name=folder_path.name,
-                has_metadata=False,
-            )
-
-        try:
-            with open(metadata_file, "rb") as fh:
-                data = tomllib.load(fh)
-        except Exception:
-            logger.warning("Failed to parse %s", metadata_file)
+        if data is None:
             return cls(
                 folder_path=folder_rel,
                 folder_name=folder_path.name,
