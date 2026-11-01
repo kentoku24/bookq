@@ -41,6 +41,33 @@ def pytest_configure(config):
         pass
 
 
+def pytest_collection_modifyitems(config, items):
+    """Keep only the items belonging to shard BOOKQ_TEST_SHARD=k/N (1-based).
+
+    Round robin by test (index in collected order), not by file: file sizes
+    are very uneven (test_download_button.py alone ~120s), so per-test
+    sharding balances evenly. Collected order is deterministic, so xdist
+    workers derive identical sets. Unset/empty means run everything.
+    """
+    raw = os.environ.get("BOOKQ_TEST_SHARD", "").strip()
+    if not raw:
+        return
+    parts = raw.split("/")
+    try:
+        k, n = int(parts[0]), int(parts[1])
+        if len(parts) != 2 or not (1 <= k <= n):
+            raise ValueError
+    except (ValueError, IndexError):
+        raise pytest.UsageError(
+            f"BOOKQ_TEST_SHARD must be k/N with 1 <= k <= N, got {raw!r}"
+        )
+    kept = [item for i, item in enumerate(items) if i % n == k - 1]
+    deselected = [item for i, item in enumerate(items) if i % n != k - 1]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+    items[:] = kept
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _bookq_state_dir_sandbox(tmp_path_factory):
     """Point BOOKQ_STATE_DIR at a throwaway dir for the whole test session.
