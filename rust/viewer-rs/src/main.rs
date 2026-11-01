@@ -30,6 +30,7 @@ use std::path::PathBuf;
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
 mod folders;
+mod search;
 mod serve;
 mod state;
 mod tree;
@@ -314,6 +315,46 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
     }
 }
 
+/// `/api/v1/search` — relevance + filters over the shared index; hidden
+/// roots applied server-side (fail-closed).
+async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("search") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+        return proxy(&st.upstream, req).await;
+    };
+    let key = user.email.trim().to_lowercase();
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let headers = req.headers().clone();
+    match search::api_search(&st, &key, &q).await {
+        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+    }
+}
+
+/// `/api/v1/facets` — `{artists, tags}` scoped to `path`'s subtree; hidden
+/// roots applied server-side (fail-closed).
+async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("facets") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+        return proxy(&st.upstream, req).await;
+    };
+    let key = user.email.trim().to_lowercase();
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let headers = req.headers().clone();
+    match search::api_facets(&st, &key, &q).await {
+        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+    }
+}
+
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
 /// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
@@ -409,6 +450,8 @@ async fn main() {
         .route("/image/{*path}", any(serve_image))
         .route("/api/v1/tree", any(api_tree))
         .route("/api/v1/images", any(api_images))
+        .route("/api/v1/search", any(api_search))
+        .route("/api/v1/facets", any(api_facets))
         .route("/api/v1/reading-positions", any(reading_positions))
         .route("/api/v1/folder-visibility", any(folder_visibility))
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
