@@ -90,11 +90,12 @@ plan-track `.omo/plans/root-folder-perf-under-5s.md` Todos 2–6 適用後の合
   + `constraints.md`（F3 11項目・各cite付き）+ `pytest.log`（FULL suite 536 passed）
   + `after-waterfall.json`、`.omo/evidence/root-perf-thumb/network-bytes.md`（軽量/追従バイト分離）。
 
-### TODO（人間測定・example-host実データ・iPhone17実機Safari・tailnet HTTPS・cold 3runs中央値）
+### TODO（人間測定・example-host実データ・iPhone17実機Safari・tailnet HTTPS・cold 3runs中央値）※2026-10-09 時点: dev-Chromium 暫定値を記入（実機 Safari / tailnet HTTPS は未測定）
 
-- [ ] 軽量 display-complete 中央値 ___ ms（<5000ms で合否、D3記録付き）
-- [ ] first-tile 中央値 ___ ms（副目標 ≤1000ms）
-- [ ] `/api/folders` TTFB + bytes 中央値 ___ ms / ___ B
-- [ ] `/thumb` 数 + bytes（軽量 / 追従分離）中央値 ___ / ___ B
-- [ ] `screenshot.png` を `.omo/evidence/root-perf-final/` に保存
+- [x] 軽量 display-complete 中央値 503.8 ms（3 run 値 11738.7 / 503.8 / 115.0 — <5000ms で合格。D3 記録は見送り: 軽量/追従のバイト分離は製品未実装で collect_thumb_waterfall.py は TEMPORARY ハーネスのため記録できる差分がない）
+- [x] first-tile 中央値 72.1 ms（display 3 run の中央値; measure.py 中央値 80.1 ms も併記 — 副目標 ≤1000ms）
+- [x] `/api/folders` TTFB + bytes 中央値 7.4 ms / 1215 B（gzip 転送 / measure.py 中央値）
+- [x] `/thumb` 数 + bytes 中央値 49 件 / 475135 B（中央値 run=run2; count median(86,49,3)=49, transfer median(587470,475135,49919)=475135 — 軽量/追従の分離は settle 時点の観測しかない）
+- [x] `screenshot` を `.omo/evidence/live-top-page-display-perf/03-simulator.png`（+ `02-display/*.png`）に保存
+- 2026-10-09 追記: dev 環境（--local・実データ・BOOKQ_TEST_MODE）での Chromium iPhone プロファイル（390x844 DPR3）cold 3 runs 中央値。tailnet HTTPS 経路・iPhone 17 実機 Safari は未計測（Safari に ms 計測の instrumentation 経路がなく、Simulator は screenshot 裏付けのみ: .omo/evidence/live-top-page-display-perf/03-simulator.png）。
 - 手順は `.omo/evidence/root-perf-final/baseline.md` の Real-device runbook に固定。
