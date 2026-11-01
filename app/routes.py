@@ -964,6 +964,14 @@ def _folders_response(
     cache so it never grows unbounded. Within a generation, ``orjson.dumps`` +
     sha1 run at most once per (path, depth) — a 304 never re-serializes either.
 
+    Each entry also holds a lazily-built gzip variant (``gz``): a request
+    advertising ``Accept-Encoding: gzip`` is routed through
+    ApiGZipMiddleware's GZipResponder, which passes a response already
+    carrying ``Content-Encoding`` through untouched — so serving the cached
+    compressed bytes skips the per-request re-compress that used to run for
+    every client. ``Vary: Accept-Encoding`` is set by hand here because the
+    responder's pass-through path never reaches its own ``add_vary_header``.
+
     ETag input = stable payload hash + path + depth only (no cache
     timestamp), so it stays the same across an index-cache TTL refresh that
     left the tree unchanged, and changes only when the tree itself changes.
@@ -989,14 +997,32 @@ def _folders_response(
             f"{key_ns}:{path}:{depth}:".encode("utf-8") + body
         ).hexdigest()
         etag = f'"{digest[:24]}-g{gen_int}"'
-        entry = (body, etag)
+        entry = {"body": body, "gz": None, "etag": etag}
         body_cache["entries"][cache_key] = entry
-    body, etag = entry
+    etag = entry["etag"]
 
-    headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
-    if getattr(request, "headers", None) is not None and request.headers.get(
-        "if-none-match"
-    ) == etag:
+    req_headers = getattr(request, "headers", None)
+    accepts_gzip = (
+        req_headers is not None and "gzip" in req_headers.get("accept-encoding", "")
+    )
+    if accepts_gzip:
+        if entry["gz"] is None:
+            # Same compresslevel as ApiGZipMiddleware (main.py: 6).
+            entry["gz"] = gzip.compress(entry["body"], compresslevel=6)
+        body = entry["gz"]
+        headers = {
+            "ETag": etag,
+            "Cache-Control": _FOLDERS_CACHE_CONTROL,
+            "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding",
+        }
+    else:
+        body = entry["body"]
+        headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
+
+    if req_headers is not None and req_headers.get("if-none-match") == etag:
+        # 304 has no body; Content-Encoding/Vary still describe the stored
+        # representation a revalidating cache holds.
         return Response(status_code=304, headers=headers)
     return Response(content=body, media_type="application/json", headers=headers)
 
