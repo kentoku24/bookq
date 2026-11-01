@@ -488,6 +488,21 @@ def view_cache_namespace() -> Path:
     return cache_root() / "view"
 
 
+def pdf_cache_path_for(cache_dir: Path, key: str) -> Path:
+    """``<cache_dir>/pdf/<sha1(key)>.png`` — own namespace under the shared cap.
+
+    Rendered PDF pages served by the ``/image`` branch in ``app/routes.py``
+    (``/view``-style disk cache, PNG bytes stored verbatim — no re-encode).
+    """
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return cache_dir / "pdf" / f"{digest}.png"
+
+
+def pdf_cache_namespace() -> Path:
+    """Namespace dir for rendered PDF pages (batched-prune target)."""
+    return cache_root() / "pdf"
+
+
 def make_view_bytes(data: bytes) -> bytes:
     """Normalize any Pillow-decodable source to JPEG q85 (≤VIEW_MAX_WIDTH).
 

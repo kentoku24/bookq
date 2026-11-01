@@ -562,6 +562,78 @@ def test_serve_pdf_page_as_png(client):
     assert res.status_code == 200
 
 
+def test_serve_pdf_page_disk_cached(client, tmp_path: Path, monkeypatch):
+    """/image/<pdf>/<page> renders once; repeat requests hit the disk cache.
+
+    ``render_pdf_page`` is stubbed so the test needs no pypdfium2 and counts
+    renders deterministically; a fresh ``BOOKQ_THUMB_CACHE_DIR`` keeps the
+    ``pdf/`` namespace out of the shared tmpdir default.
+    """
+    import app.archive_pdf as pdf_mod
+
+    monkeypatch.setenv("BOOKQ_THUMB_CACHE_DIR", str(tmp_path / "thumbcache"))
+    calls: list[int] = []
+    fake_png = b"\x89PNG\r\n\x1a\nfake-pdf-page"
+
+    def _fake_render(path, index, scale=2.0):
+        calls.append(index)
+        return fake_png
+
+    monkeypatch.setattr(pdf_mod, "render_pdf_page", _fake_render)
+
+    res = client.get("/image/doc.pdf/p001.png")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    assert res.content == fake_png
+    assert calls == [0]
+    # Miss path wrote one PNG into the pdf/ cache namespace.
+    cached = list((tmp_path / "thumbcache" / "pdf").glob("*.png"))
+    assert len(cached) == 1 and cached[0].read_bytes() == fake_png
+    # Second request serves identical bytes without re-rendering.
+    res2 = client.get("/image/doc.pdf/p001.png")
+    assert res2.status_code == 200
+    assert res2.content == res.content
+    assert calls == [0]
+    # ETag/Cache-Control semantics are unchanged on a cache hit, and a
+    # revalidation still answers 304 before touching the cache.
+    assert res2.headers["ETag"] == res.headers["ETag"]
+    assert res2.headers["Cache-Control"].startswith("public")
+    res3 = client.get(
+        "/image/doc.pdf/p001.png", headers={"If-None-Match": res.headers["ETag"]}
+    )
+    assert res3.status_code == 304
+    assert calls == [0]
+
+
+def test_serve_pdf_page_cache_invalidates_on_mtime(
+    client, tmp_path: Path, monkeypatch, archive_tree: Path
+):
+    """A touched PDF (new st_mtime) misses the cached page and re-renders."""
+    import app.archive_pdf as pdf_mod
+
+    monkeypatch.setenv("BOOKQ_THUMB_CACHE_DIR", str(tmp_path / "thumbcache"))
+    calls: list[int] = []
+
+    def _fake_render(path, index, scale=2.0):
+        calls.append(index)
+        return b"\x89PNG\r\n\x1a\nfake-pdf-page"
+
+    monkeypatch.setattr(pdf_mod, "render_pdf_page", _fake_render)
+
+    assert client.get("/image/doc.pdf/p001.png").status_code == 200
+    assert calls == [0]
+    # +5s so the stat-keyed cache entry misses even on coarse-mtime
+    # filesystems (st_mtime is part of the sha1 cache key).
+    pdf = archive_tree / "doc.pdf"
+    st = pdf.stat()
+    os.utime(pdf, (st.st_atime, st.st_mtime + 5))
+    assert client.get("/image/doc.pdf/p001.png").status_code == 200
+    assert calls == [0, 0]
+    # The next request hits the NEW cache entry (no third render).
+    assert client.get("/image/doc.pdf/p001.png").status_code == 200
+    assert calls == [0, 0]
+
+
 def test_archive_errors_not_500(client):
     assert client.get("/image/work.zip/nope.png").status_code == 404
     assert client.get("/image/doc.pdf/p009.png").status_code == 404
