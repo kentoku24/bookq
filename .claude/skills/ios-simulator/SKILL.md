@@ -32,6 +32,7 @@ Not for: pure API/logic (`pytest`), Chromium motion (`video-verification`), 7-da
 | Screenshot | `./scripts/open-simulator.sh screenshot /tmp/sim.png` |
 | Video (Simulator) | `xcrun simctl io booted recordVideo /tmp/sim.mp4` |
 | Full verify | `./scripts/open-simulator.sh verify` |
+| **Teardown (必須)** | `./scripts/sim-teardown.sh [--dev-env <name>]` — shutdown + Clone 削除 + CPU 監査 (詳細 `references/teardown.md`) |
 | メモリ削減 | `brew install mobai-app/tap/simslim` — helper が boot 後に自動適用 (`--except web`); `SIMSLIM=0` で無効化 |
 
 Details: `references/quickstart.md`, `references/devices.md`.
@@ -47,13 +48,14 @@ Details: `references/quickstart.md`, `references/devices.md`.
    タップ・ゆるドリフト・スワイプまでエージェントが叩くなら `./scripts/sim-gesture-battery.sh <url>`
    (idb 必須, 方法論と罠は `references/tap-driving.md` — 座標はポイント, `?perf=1` は `#` の前, キャッシュ退避に shutdown→boot)。
 5. **Capture**: `./scripts/open-simulator.sh screenshot .omo/evidence/sim.png` (or `recordVideo`).
-6. **Cleanup (optional)**: `./scripts/open-simulator.sh shutdown` — avoids next `openurl booted` ambiguity.
+6. **Teardown (mandatory)**: `./scripts/sim-teardown.sh` — sim 検証の終了 = このスクリプトの実行 + CPU 監査合格。shutdown・Clone 削除・idb/diagnose 残留 kill をまとめて行い、sim 系プロセスが CPU を消費し続けていれば非0終了する。`--dev-env <name>` で検証用 dev 環境の down まで一括。詳細: `references/teardown.md`.
+   - `xcodebuild test` を検証に使った場合は**終了まで poll してから**片付けること — 完了後の `simctl diagnose` 収集段階で放置すると孤児 simruntime プロセスが CPU を空転させる (実害あり)。
 
 ## Constraints
 
 - 7-day LRU not reproducible in Simulator — verify `touch` logic only; real wait needs iPad hardware. Source: `README.md: Safari 7日注意`.
 - `video-verification` is Chromium-only; Simulator uses `recordVideo`.
-- Booted sim は ~160 の背景デーモンで数GBを常駐させる。`simslim` 導入済みなら `open-simulator.sh` が open 時に自動 slim (永続 override、実測 6.6GB→2.7GB)。`web` カテゴリは Safari 検証のため残す。検証後は `shutdown` で解放。
+- Booted sim は ~160 の背景デーモンで数GBを常駐させる。`simslim` 導入済みなら `open-simulator.sh` が open 時に自動 slim (永続 override、実測 6.6GB→2.7GB)。`web` カテゴリは Safari 検証のため残す。検証後は `./scripts/sim-teardown.sh` で解放 + CPU 監査まで行うこと (`references/teardown.md`)。`shutdown` だけでは `simctl diagnose` 孤児・テスト Clone デバイス・idb_companion が残り得る。
 
 ## Related
 

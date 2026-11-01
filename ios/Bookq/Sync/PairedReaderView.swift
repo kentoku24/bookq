@@ -26,7 +26,13 @@ struct PairedReaderView: View {
             // Leader closing the paired view = browsing the work list —
             // SET_ACTIVITY selecting (web sidebar-open equivalent). The
             // follower's close is a local look only; the pair stays.
-            if pair.role == .leader && pair.bound { pair.setActivity("selecting") }
+            // Only a close while `reading` is user intent — phase-driven
+            // dismissals (transient loading on SET_OFFSET/OPEN_WORK, paused,
+            // ended) must not flip the session to selecting (#216).
+            if pair.role == .leader && pair.bound &&
+                PairReaderGate.closeSignalsSelecting(pair.phase) {
+                pair.setActivity("selecting")
+            }
         }
     }
 
