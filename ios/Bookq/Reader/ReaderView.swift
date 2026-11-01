@@ -224,6 +224,7 @@ struct ReaderView: View {
                         Text(work.chapterInfo(at: currentIdx).name)
                             .font(.caption2).foregroundStyle(.white.opacity(0.8))
                             .lineLimit(1)
+                            .frame(maxWidth: 150)
                     }
                 }
                 .foregroundStyle(.white)
@@ -255,26 +256,38 @@ struct ReaderView: View {
                 }
                 .accessibilityLabel("spread offset")
             }
-            Button {
-                landscapeSpread.toggle()
-                rebuild()
-            } label: {
-                Image(systemName: pageMode == .spread ? "rectangle.split.2x1" : "rectangle.portrait")
-                    .padding(10)
-                    .background(.black.opacity(0.5), in: Circle())
+            // web: #spread-controls is only shown in landscape — a visible
+            // but inert toggle in portrait reads as a dead button.
+            if viewportSize.width >= viewportSize.height {
+                Button {
+                    landscapeSpread.toggle()
+                    rebuild()
+                } label: {
+                    Image(systemName: pageMode == .spread ? "rectangle.split.2x1" : "rectangle.portrait")
+                        .padding(10)
+                        .background(.black.opacity(0.5), in: Circle())
+                }
+                .accessibilityLabel("spread toggle")
             }
-            .accessibilityLabel("spread toggle")
-            // tapmode-controls equivalent: swaps the edge tap zones.
-            Button {
-                tapForwardLeft.toggle()
-            } label: {
-                Image(systemName: tapForwardLeft
-                      ? "arrowtriangle.left.fill" : "arrowtriangle.right.fill")
-                    .padding(10)
-                    .background(tapForwardLeft ? .black.opacity(0.5) : Color.accentColor,
-                                in: Circle())
+            // tapmode-controls equivalent: edge-zone direction selector.
+            // Both directions shown like the web's two corner buttons.
+            HStack(spacing: 0) {
+                Button { tapForwardLeft = true } label: {
+                    Image(systemName: "arrowtriangle.left.fill")
+                        .frame(width: 33, height: 36)
+                        .background(tapForwardLeft ? Color.accentColor : .clear,
+                                    in: Circle())
+                }
+                .accessibilityLabel("左タップで次へ")
+                Button { tapForwardLeft = false } label: {
+                    Image(systemName: "arrowtriangle.right.fill")
+                        .frame(width: 33, height: 36)
+                        .background(!tapForwardLeft ? Color.accentColor : .clear,
+                                    in: Circle())
+                }
+                .accessibilityLabel("右タップで次へ")
             }
-            .accessibilityLabel("タップ送り方向")
+            .background(.black.opacity(0.5), in: Capsule())
             Button {
                 showOverview = true
             } label: {
