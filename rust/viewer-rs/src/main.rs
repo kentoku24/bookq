@@ -766,6 +766,9 @@ async fn main() {
         .parse()
         .expect("BOOKQ_UPSTREAM must be http://host[:port]");
     let downloads = PathBuf::from(std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/app/downloads".into()));
+    // Canonicalize once — `is_within` treats this as the canonical base so
+    // per-request checks canonicalize only the target path.
+    let downloads = std::fs::canonicalize(&downloads).unwrap_or(downloads);
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
     let native = Native::from_env();
     let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
