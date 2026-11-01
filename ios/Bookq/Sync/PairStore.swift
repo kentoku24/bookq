@@ -780,7 +780,12 @@ final class PairStore: ObservableObject {
     }
 
     /// scenePhase wiring: suspended while backgrounded (web pagehide).
+    /// The local flag tracks the scene even while unbound — during a
+    /// reconnect `bound` is false and skipping the update left the flag
+    /// stale, so the RESUME bind re-asserted "suspended" for an app that
+    /// was already foregrounded, wedging the session paused (#216).
     func scenePhase(_ phase: ScenePhase) {
+        suspended = (phase != .active)
         guard bound else { return }
         setActivity(phase == .active ? "active" : "suspended")
     }

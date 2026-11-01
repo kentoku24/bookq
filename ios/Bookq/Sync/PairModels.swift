@@ -126,6 +126,27 @@ enum PairModel {
     }
 }
 
+/// Paired-reader cover rules shared by LibraryView.pairReaderBinding and
+/// PairedReaderView.onDisappear (#216).
+enum PairReaderGate {
+    /// Phases that keep the shared reader mounted. `loading` and `paused`
+    /// must stay presented: they are transient (manifest reload on
+    /// SET_OFFSET/OPEN_WORK, member away) and the view renders their own
+    /// overlays. `waiting` is excluded — the pair sheet owns that UX.
+    static func presents(_ phase: PairPhase?) -> Bool {
+        phase == .reading || phase == .loading ||
+            phase == .paused || phase == .selecting
+    }
+
+    /// Whether dismissing the cover in this phase is the leader's intent to
+    /// go browse (SET_ACTIVITY selecting). Phase-driven dismissals —
+    /// transient loading, paused, ended — are not a browse intent, so the
+    /// gate fires only when the close happened while `reading`.
+    static func closeSignalsSelecting(_ phase: PairPhase?) -> Bool {
+        phase == .reading
+    }
+}
+
 /// STATE.presence entry.
 struct PairPresenceEntry: Equatable {
     var role: PairRole

@@ -254,11 +254,14 @@ struct LibraryView: View {
     /// workEpoch; dismissing records the epoch so it stays browsable
     /// until the next shared work commit. `selecting` also presents —
     /// the leader's selecting overlay is where a new pick happens, and
-    /// without it the re-entry banner dead-ends.
+    /// without it the re-entry banner dead-ends. `loading`/`paused` stay
+    /// mounted too — they are transient phases with their own overlays;
+    /// dismissing on them makes the leader's onDisappear fire a spurious
+    /// SET_ACTIVITY selecting (#216).
     private var pairReaderBinding: Binding<Bool> {
         Binding(
             get: {
-                (pair.phase == .reading || pair.phase == .selecting) &&
+                PairReaderGate.presents(pair.phase) &&
                 pairSuppressedEpoch != pair.lastState?.workEpoch
             },
             set: { presented in

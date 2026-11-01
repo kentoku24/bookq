@@ -10,6 +10,7 @@ struct ReaderView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var progress: ReadingProgressStore
     @EnvironmentObject private var offline: OfflineStore
+    @EnvironmentObject private var ext: ExternalDisplayStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
 
@@ -33,8 +34,7 @@ struct ReaderView: View {
     @State private var tapForwardLeft = true
 
     private var pageMode: ReaderPageMode {
-        let landscape = viewportSize.width >= viewportSize.height
-        return (landscape && landscapeSpread) ? .spread : .single
+        ReaderWork.pageMode(for: viewportSize, landscapeSpread: landscapeSpread)
     }
 
     var body: some View {
@@ -57,7 +57,10 @@ struct ReaderView: View {
         .onDisappear {
             saveCurrentPosition()
             progress.sync?.flush()          // pagehide → flush pending PUT
+            ext.endPresentation()           // external display → back to mirroring
         }
+        .modifier(ExternalAccessoryModifier(ext: ext))
+        .onChange(of: pageAR) { _, _ in publishExternal() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
                 saveCurrentPosition()
@@ -109,9 +112,10 @@ struct ReaderView: View {
         // single-tap; zoom pan/pinch live inside ZoomableScrollView.
         .gesture(SpatialTapGesture().onEnded { ev in
             let frac = ev.location.x / max(size.width, 1)
-            if frac < 0.30 { turn(tapForwardLeft ? 1 : -1, in: work) }
-            else if frac > 0.70 { turn(tapForwardLeft ? -1 : 1, in: work) }
-            else { withAnimation { showChrome.toggle() } }
+            switch zoneAction(frac: frac, tapForwardLeft: tapForwardLeft) {
+            case .turn(let d): turn(d, in: work)
+            case .toggleChrome: withAnimation { showChrome.toggle() }
+            }
         })
         // Web keyboard parity (iPad/hardware keyboard): →=next, ←=prev,
         // Home/End = chapter edges, G = overview.
@@ -157,21 +161,15 @@ struct ReaderView: View {
     private func spreadCell(work: ReaderWork, spread s: Int,
                             pages: [Int], in size: CGSize) -> some View {
         let ars = pages.map { pageAR[$0] ?? 0.7 }
-        let arSum = max(ars.reduce(0, +), 0.001)
         let gap: CGFloat = 5
-        var h = size.height
-        var w = arSum * h + gap * CGFloat(ars.count - 1)
-        if w > size.width {
-            h = (size.width - gap * CGFloat(ars.count - 1)) / arSum
-            w = size.width
-        }
+        let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
         return HStack(spacing: gap) {
             ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in
                 pageView(work: work, idx: idx)
-                    .frame(width: ars[pos] * h, height: h)
+                    .frame(width: ars[pos] * fit.height, height: fit.height)
             }
         }
-        .frame(width: w, height: h)
+        .frame(width: fit.width, height: fit.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -224,6 +222,19 @@ struct ReaderView: View {
                         Text(work.chapterInfo(at: currentIdx).name)
                             .font(.caption2).foregroundStyle(.white.opacity(0.8))
                             .lineLimit(1)
+                            .frame(maxWidth: 150)
+                    }
+                    // External-display bring-up diagnostic (temporary):
+                    // mode/bounds when connected, else availability state.
+                    if let s = ext.externalScreen {
+                        Text(ExternalDisplayStore.describe(s))
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
+                    } else if ext.accessoryAvailable {
+                        Text("ext: display available")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
                 .foregroundStyle(.white)
@@ -255,26 +266,38 @@ struct ReaderView: View {
                 }
                 .accessibilityLabel("spread offset")
             }
-            Button {
-                landscapeSpread.toggle()
-                rebuild()
-            } label: {
-                Image(systemName: pageMode == .spread ? "rectangle.split.2x1" : "rectangle.portrait")
-                    .padding(10)
-                    .background(.black.opacity(0.5), in: Circle())
+            // web: #spread-controls is only shown in landscape — a visible
+            // but inert toggle in portrait reads as a dead button.
+            if viewportSize.width >= viewportSize.height {
+                Button {
+                    landscapeSpread.toggle()
+                    rebuild()
+                } label: {
+                    Image(systemName: pageMode == .spread ? "rectangle.split.2x1" : "rectangle.portrait")
+                        .padding(10)
+                        .background(.black.opacity(0.5), in: Circle())
+                }
+                .accessibilityLabel("spread toggle")
             }
-            .accessibilityLabel("spread toggle")
-            // tapmode-controls equivalent: swaps the edge tap zones.
-            Button {
-                tapForwardLeft.toggle()
-            } label: {
-                Image(systemName: tapForwardLeft
-                      ? "arrowtriangle.left.fill" : "arrowtriangle.right.fill")
-                    .padding(10)
-                    .background(tapForwardLeft ? .black.opacity(0.5) : Color.accentColor,
-                                in: Circle())
+            // tapmode-controls equivalent: edge-zone direction selector.
+            // Both directions shown like the web's two corner buttons.
+            HStack(spacing: 0) {
+                Button { tapForwardLeft = true } label: {
+                    Image(systemName: "arrowtriangle.left.fill")
+                        .frame(width: 33, height: 36)
+                        .background(tapForwardLeft ? Color.accentColor : .clear,
+                                    in: Circle())
+                }
+                .accessibilityLabel("左タップで次へ")
+                Button { tapForwardLeft = false } label: {
+                    Image(systemName: "arrowtriangle.right.fill")
+                        .frame(width: 33, height: 36)
+                        .background(!tapForwardLeft ? Color.accentColor : .clear,
+                                    in: Circle())
+                }
+                .accessibilityLabel("右タップで次へ")
             }
-            .accessibilityLabel("タップ送り方向")
+            .background(.black.opacity(0.5), in: Capsule())
             Button {
                 showOverview = true
             } label: {
@@ -283,6 +306,19 @@ struct ReaderView: View {
                     .background(.black.opacity(0.5), in: Circle())
             }
             .accessibilityLabel("複数ページ")
+            // External display toggle: shown while a display is attached
+            // or projecting, and stays while disabled so it can be re-enabled.
+            if ext.accessoryAvailable || ext.connected || !ext.userEnabled {
+                Button {
+                    ext.userEnabled.toggle()
+                } label: {
+                    Image(systemName: ext.connected && ext.userEnabled ? "tv.fill" : "tv")
+                        .padding(10)
+                        .background(ext.userEnabled ? Color.accentColor : .black.opacity(0.5),
+                                    in: Circle())
+                }
+                .accessibilityLabel("外部ディスプレイ")
+            }
         }
         .foregroundStyle(.white)
     }
@@ -356,6 +392,20 @@ struct ReaderView: View {
         currentIdx = idx
         scheduleSave()
         prefetch(around: idx, in: work)
+        publishExternal()
+    }
+
+    /// Publish the current snapshot to the external-display projection.
+    /// The store activates the session only while a screen is attached.
+    private func publishExternal() {
+        guard let work else { return }
+        ext.updatePresentation(.init(
+            work: work, currentIdx: currentIdx, pageAR: pageAR,
+            spreadOffset: spreadOffset, landscapeSpread: landscapeSpread,
+            urlFor: { [model] page in
+                model.api?.pageURL(folder: page.folder, name: page.name,
+                                   original: model.config.originalImages)
+            }))
     }
 
     private func prefetch(around idx: Int, in work: ReaderWork) {
@@ -382,6 +432,7 @@ struct ReaderView: View {
         }
         w = w.withMode(pageMode, offset: spreadOffset)
         work = w
+        publishExternal()
     }
 
     private func onOrientationChange() {
@@ -470,6 +521,7 @@ struct ReaderView: View {
             currentIdx = start
             work = w
             prefetch(around: start, in: w)
+            publishExternal()
         } catch APIError.status(let s) where [404, 401, 403].contains(s) {
             error = "フォルダが見つかりません (HTTP \(s))"
         } catch {
