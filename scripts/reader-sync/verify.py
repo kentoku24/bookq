@@ -333,7 +333,7 @@ def main(argv=None) -> int:
             # (iOS Safari / PWA webclip). Chrome ignores it harmlessly.
             urls = {cid: base_url
                     + ("&" if "?" in base_url else "?")
-                    + "pair_report=" + cid
+                    + "pair_report=" + cid + "&pair_reset=1"
                     for cid in clients}
 
         driver.launch(clients, urls, fx=fx)

@@ -983,7 +983,16 @@
   (function () {
     try {
       if (window.__BOOKQ_TEST_MODE__ !== 'true') return;
-      var cid = new URLSearchParams(location.search).get('pair_report');
+      var _qp = new URLSearchParams(location.search);
+      // ?pair_reset=1: drop stored resume credentials BEFORE
+      // PairController._boot runs (deferred scripts precede
+      // DOMContentLoaded), so each verify run starts unpaired instead
+      // of MATCH-joining a leftover session from a previous run.
+      if (_qp.get('pair_reset')) {
+        try { sessionStorage.removeItem('bookq.readerSync.v1'); }
+        catch (e) {}
+      }
+      var cid = _qp.get('pair_report');
       if (!cid) return;
       // Geometry + tap record for clients the runner cannot JS-eval:
       // Safari's AX tree exposes only native chrome, so the runner taps

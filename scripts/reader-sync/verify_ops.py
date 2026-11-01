@@ -805,13 +805,15 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         if r is not None:
             vp_h = float((rep.get("vp") or {}).get("h") or 0)
             if vp_h and (r["y"] < 0 or r["y"] + r["h"] > vp_h):
-                # tile below/above the fold — scroll the grid toward it
-                # and re-resolve on the next pass.
+                # tile below/above the fold — a slow drag is the scroll;
+                # a 150ms flick is consumed by WebKit without scrolling.
                 sw, sh = drv.screen_size(spec)
                 if r["y"] < 0:
-                    drv.swipe(spec, sw / 2, sh * 0.35, sw / 2, sh * 0.75)
+                    drv.swipe(spec, sw / 2, sh * 0.35, sw / 2, sh * 0.75,
+                              0.5)
                 else:
-                    drv.swipe(spec, sw / 2, sh * 0.75, sw / 2, sh * 0.35)
+                    drv.swipe(spec, sw / 2, sh * 0.75, sw / 2, sh * 0.35,
+                              0.5)
                 time.sleep(delay)
                 continue
             if off is None:
@@ -868,8 +870,10 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
                 "code field (follower)")
         ctx.driver.input_text(fsp, code)   # 6th digit auto-submits
     elif via == "match":
+        # No code read needed — the launcher's connect() either creates
+        # a waiting session or MATCH-joins an existing one; the poll
+        # below is the assert.
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
-        code = _wait_code_ui(ctx, lsp)
         _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)")
     else:
         raise UnsupportedError(f"pair via {via!r}")
