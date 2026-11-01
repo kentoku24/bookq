@@ -21,3 +21,6 @@ dev_fixture/
 *.pem
 .claude/settings.local.json
 .schemathesis/
+
+# Rust build artifacts (docker -v mounts can create this locally)
+rust/target/

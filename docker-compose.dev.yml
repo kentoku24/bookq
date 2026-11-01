@@ -58,6 +58,9 @@ services:
       com.bookq.branch: "${DEV_BRANCH:-unknown}"
       com.bookq.worktree: "${DEV_WORKTREE:-unknown}"
       com.bookq.dev-image-tag: "${DEV_IMAGE}"
+      # "rs" のとき tailscale serve は viewer-rs を指す（docker-compose.dev-rs.yml
+      # overlay、./dev.sh up --rs）。up の冪等再利用でもモードを復元する。
+      com.bookq.backend: "${DEV_BACKEND:-py}"
 
     # イメージは python:3.13-slim で curl が無いため python で叩く。
     healthcheck:

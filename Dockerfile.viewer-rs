@@ -1,0 +1,20 @@
+# viewer-rs — Rust backend (issue #163, parallel-backend track).
+# Two-stage: cargo build → slim runtime. The context is the repo root;
+# only rust/ is needed.
+
+FROM rust:1-slim AS rsbuilder
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY rust/ ./rust/
+RUN cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g && rm -rf /var/lib/apt/lists/*
+COPY --from=rsbuilder /src/rust/target/release/viewer-rs /usr/local/bin/viewer-rs
+
+# Upstream the proxy falls through to; overridden by compose.
+ENV BOOKQ_UPSTREAM=http://viewer:8080
+ENV BOOKQ_BIND=0.0.0.0:8080
+
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/viewer-rs"]

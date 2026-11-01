@@ -1,0 +1,26 @@
+[package]
+name = "viewer-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Rust backend for bookq — parallel deployment with proxy fall-through (issue #163)"
+license = "Proprietary"
+
+[dependencies]
+bookq-core = { path = "../bookq-core" }
+axum = "0.8"
+flate2 = { version = "1", features = ["zlib"] }
+hmac = "0.12"
+http-body-util = "0.1"
+httpdate = "1"
+percent-encoding = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
