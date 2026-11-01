@@ -28,10 +28,13 @@ services:
       - BOOKQ_UPSTREAM=http://viewer:8080
       - DOWNLOADS_DIR=/app/downloads
       - BOOKQ_STATE_DIR=/var/lib/bookq
-      # Same value as the viewer's env: native endpoints only activate where
-      # auth is bypassed; outside test mode every request proxies upstream.
-      - BOOKQ_TEST_MODE=true
-      # visibility owner HMAC — dev compose 側と同じ値。
+      # Same value as the viewer's env: native endpoints activate under the
+      # mock user. To exercise the Bearer path instead, drop TEST_MODE and
+      # set BOOKQ_RS_NATIVE + ALLOWED_EMAILS (Bearer JWT with SECRET_KEY).
+      - BOOKQ_TEST_MODE=${DEV_RS_TEST_MODE:-true}
+      - BOOKQ_RS_NATIVE=${DEV_RS_NATIVE:-all}
+      - ALLOWED_EMAILS=${DEV_RS_ALLOWED_EMAILS:-test@example.com}
+      # visibility owner HMAC + Bearer JWT key — dev compose 側と同じ値。
       - SECRET_KEY=dev-not-a-secret
 
     # dev.sh のプール管理は role=dev (viewer) のみを見る — このサービスは

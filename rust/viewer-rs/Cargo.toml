@@ -9,6 +9,7 @@ license = "Proprietary"
 [dependencies]
 bookq-core = { path = "../bookq-core" }
 axum = "0.8"
+base64 = "0.22"
 flate2 = { version = "1", features = ["zlib"] }
 hmac = "0.12"
 http-body-util = "0.1"
