@@ -640,12 +640,20 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     an ended panel. Chrome drives the DOM; the simulator driver walks
     the Safari AX tree."""
     via = op.get("via") or "match"
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if ctx.driver.name == "simulator":
+        # a prior suspend test can leave Safari backgrounded — bring it
+        # forward or every coordinate tap lands on SpringBoard.
+        for spec in (lsp, fsp):
+            try:
+                ctx.driver.foreground(spec)
+            except Exception:
+                pass
     # 'match' must start clean — a leftover session hijacks MATCH.
     # 'code' instead NEEDS the connected session a prior pair op made
     # (its flow reaches the join view via an ended panel).
     if via != "code":
         _ui_ensure_idle(ctx)
-    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
     if lsp.page is not None and fsp.page is not None:
         return _op_pair_ui_dom(ctx, via)
     if ctx.driver.name == "simulator":
@@ -802,20 +810,21 @@ _NEEDLE_SEL = {
 # parents that must be open for a control to exist — the rect tapped when
 # the target itself is absent (sidebar → menu, pair panel → strip).
 # Every chain is one level — _ui_tap fires at most one opener per poll,
-# so ["#pair-status", "#menu-btn"] means: use the strip when it has a
-# real rect (browse open), else open the sidebar drawer once via the
-# viewer's フォルダ一覧 button, after which the strip resolves.
+# so ["#pair-status", "#menu-btn", "#pair-btn"] means: strip when it has
+# a real rect, else the フォルダ一覧 drawer, then the 🔗 launcher — the
+# launcher is open()-only while status is non-idle.
 _OPENERS = {
     "#pair-btn": ["#menu-btn"],
     "#pair-status": ["#menu-btn"],
-    "#pair-swap": ["#pair-status", "#menu-btn"],
-    "#pair-leave": ["#pair-status", "#menu-btn"],
-    "#pair-join-open": ["#pair-status", "#menu-btn"],
-    "#pair-code-input": ["#pair-join-open", "#pair-status", "#menu-btn"],
-    "#pair-leader-cancel": ["#pair-status", "#menu-btn"],
-    "#pair-waiting-cancel": ["#pair-status", "#menu-btn"],
-    "#pair-error-leave": ["#pair-status", "#menu-btn"],
-    "#pair-join-back": ["#pair-status", "#menu-btn"],
+    "#pair-swap": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-leave": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-join-open": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-code-input": ["#pair-join-open", "#pair-status", "#menu-btn",
+                         "#pair-btn"],
+    "#pair-leader-cancel": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-waiting-cancel": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-error-leave": ["#pair-status", "#menu-btn", "#pair-btn"],
+    "#pair-join-back": ["#pair-status", "#menu-btn", "#pair-btn"],
     "#browse-header": ["#menu-btn"],
 }
 
@@ -867,7 +876,8 @@ def _ui_rect(rep: dict, needles) -> dict | None:
                     r = t["rect"]
                     break
         if r and r["w"] > 0 and r["h"] > 0 and \
-                r["x"] + r["w"] > 0 and r["y"] + r["h"] > 0:
+                r["x"] + r["w"] > 0 and r["y"] + r["h"] > 0 and \
+                r.get("top") is not False:
             return r
     return None
 
@@ -935,7 +945,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                 if op_sel in fired:
                     continue
                 orr = rects.get(op_sel)
-                if orr and orr["w"] > 0:
+                if orr and orr["w"] > 0 and orr.get("top") is not False:
                     fired.add(op_sel)
                     if off is None:
                         off = _ui_offset(ctx, spec)
@@ -1848,15 +1858,21 @@ def op_suspend(ctx: RunCtx, op: dict) -> None:
                 "() => window.PairController.client"
                 " && window.PairController.client.setActivity('suspended')")
         else:
-            # simulator: background Safari — the real suspend path
-            # (visibilitychange/pagehide → SET_ACTIVITY suspended).
-            ctx.driver.background(spec)
+            # simulator: backgrounding Safari neither freezes the page
+            # nor fires visibilitychange on the sim — the deterministic
+            # suspend terminal is a hard WS freeze (SIGSTOP the app's
+            # WebKit.Networking): silence -> heartbeat -> peer 'offline'.
+            ctx.driver.freeze_net(spec)
     else:
         ctx.cmd(actor, "set_activity", {"state": "suspended"})
+    # On a real device the graceful SET_ACTIVITY can lose the race against
+    # iOS freezing the page's WS — the peer then learns 'offline' via the
+    # 15s heartbeat silence instead. Both are the suspend terminal.
     ctx.poll(peer, lambda s: any(
-        m["role"] == ctx.clients[actor].role and m["status"] == "suspended"
+        m["role"] == ctx.clients[actor].role
+        and m["status"] in ("suspended", "offline")
         for m in s.get("presence", {}).values()),
-        what=f"{actor} suspended")
+        timeout=35, what=f"{actor} suspended/offline")
     ctx.note("suspended_seen", True, f"{peer} sees {actor} suspended")
 
 
@@ -1870,6 +1886,7 @@ def op_activate(ctx: RunCtx, op: dict) -> None:
                 "() => window.PairController.client"
                 " && window.PairController.client.setActivity('active')")
         else:
+            ctx.driver.thaw_net(spec)
             ctx.driver.foreground(spec)
     else:
         ctx.cmd(actor, "set_activity", {"state": "active"})
@@ -1933,20 +1950,22 @@ def op_bfcache(ctx: RunCtx, op: dict) -> None:
             spec.page.evaluate(
                 "() => window.dispatchEvent(new Event('pagehide'))")
         else:
-            ctx.driver.background(spec)      # real Safari pagehide
+            ctx.driver.freeze_net(spec)      # WS silence == pagehide peer signal
     else:
         ctx.cmd(actor, "lifecycle", {"type": "pagehide"})
     ctx.poll(peer, lambda s: any(
-        m["role"] == ctx.clients[actor].role and m["status"] == "suspended"
+        m["role"] == ctx.clients[actor].role
+        and m["status"] in ("suspended", "offline")
         for m in s.get("presence", {}).values()),
-        timeout=15, what="peer sees suspended after pagehide")
+        timeout=35, what="peer sees suspended after pagehide")
     ctx.note("bfcache_suspended", True, "pagehide -> peer saw suspended")
     if ctx.surface == "ui":
         if spec.page is not None:
             spec.page.evaluate(
                 "() => window.dispatchEvent(new Event('pageshow'))")
         else:
-            ctx.driver.foreground(spec)      # real Safari pageshow
+            ctx.driver.thaw_net(spec)        # link thaw == pageshow resume
+            ctx.driver.foreground(spec)
     else:
         ctx.cmd(actor, "lifecycle", {"type": "pageshow"})
     l, f = ctx.poll_both(

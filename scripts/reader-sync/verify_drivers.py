@@ -18,6 +18,8 @@ fixture session.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -396,6 +398,56 @@ class SimulatorDriver:
 
     def foreground(self, spec: ClientSpec) -> None:
         _simctl("launch", spec.udid, self.SAFARI)
+
+    # -- network freeze (suspend/offline verification) ----------------
+    # On the simulator, backgrounding Safari neither freezes the page's
+    # JS nor fires visibilitychange — the WS keeps answering PINGs and
+    # the member stays 'active' forever. The deterministic suspend signal
+    # a sim CAN produce is a hard network freeze: SIGSTOP the app's
+    # WebKit.Networking XPC so the WS falls silent and the server marks
+    # the member 'offline' after its heartbeat window, then SIGCONT to
+    # exercise the real reconnect → RESUME path end-to-end.
+
+    def _webkit_net_pid(self, spec: ClientSpec) -> int:
+        """PID of this device's com.apple.WebKit.Networking appex.
+
+        Sim processes are host processes. Safari's own pid comes from
+        in-sim `launchctl list`; its ppid is that device's launchd, and
+        the WebKit helper appexes share that same parent — so the pid
+        space partitions cleanly per simulator."""
+        out = _simctl("spawn", spec.udid, "launchctl", "list",
+                      timeout=30).stdout
+        safari_pid = None
+        for line in out.splitlines():
+            if "UIKitApplication:com.apple.mobilesafari" in line:
+                safari_pid = int(line.split()[0])
+                break
+        if not safari_pid:
+            raise EnvError(f"no mobilesafari pid on {spec.udid}")
+        launchd = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(safari_pid)],
+            capture_output=True, text=True, timeout=10)
+        parent = int(launchd.stdout.strip())
+        pids = []
+        ps = subprocess.run(
+            ["ps", "-Ao", "pid,ppid,command"],
+            capture_output=True, text=True, timeout=10)
+        for line in ps.stdout.splitlines():
+            if "WebKit.Networking" not in line:
+                continue
+            parts = line.split(None, 2)
+            if len(parts) >= 2 and int(parts[1]) == parent:
+                pids.append(int(parts[0]))
+        if len(pids) != 1:
+            raise EnvError(
+                f"WebKit.Networking pid ambiguous on {spec.udid}: {pids}")
+        return pids[0]
+
+    def freeze_net(self, spec: ClientSpec) -> None:
+        os.kill(self._webkit_net_pid(spec), signal.SIGSTOP)
+
+    def thaw_net(self, spec: ClientSpec) -> None:
+        os.kill(self._webkit_net_pid(spec), signal.SIGCONT)
 
     # -- PWA web clip (#86: Safari×Safari / PWA×PWA / Safari×PWA) -----
 

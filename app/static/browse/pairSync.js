@@ -1025,8 +1025,18 @@
             var el = document.querySelector(_SEL[i]);
             if (!el) continue;
             var r = el.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0)
-              rects[_SEL[i]] = {x: r.x, y: r.y, w: r.width, h: r.height};
+            if (r.width <= 0 || r.height <= 0) continue;
+            // top=false marks a rect that LOOKS mounted but whose tap
+            // would land on an overlapping element (auto-hidden chrome
+            // keeps pointer-events:none yet still reports a rect).
+            var topEl = null;
+            try {
+              topEl = document.elementFromPoint(
+                r.x + r.width / 2, r.y + r.height / 2);
+            } catch (e2) {}
+            rects[_SEL[i]] = {x: r.x, y: r.y, w: r.width, h: r.height,
+                              top: !!(topEl && (topEl === el ||
+                                                el.contains(topEl)))};
           }
         } catch (e) {}
         var tiles = [];
