@@ -740,3 +740,139 @@ def test_small_archive_cached_without_truncated_flag(tmp_path: Path, monkeypatch
     calls = _counting_zipfile(monkeypatch)
     assert list_archive_entries(zpath) == live
     assert len(calls) == 0
+
+
+# ── open-archive memoization (read_archive_entry hot path) ───────────────
+
+
+def _make_test_zip(path: Path, entries: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+
+
+@pytest.fixture
+def archive_memo():
+    """Isolated open-archive memo: cleared before and after the test."""
+    import app.archive as archive_mod
+
+    archive_mod._clear_open_archive_cache()
+    yield archive_mod
+    archive_mod._clear_open_archive_cache()
+
+
+def test_read_archive_entry_reuses_open_zip(tmp_path: Path, archive_memo, monkeypatch):
+    """Sequential reads of DIFFERENT entries share one open archive object —
+    the header parse happens once and both entries come back correct."""
+    from app.archive import read_archive_entry
+
+    zpath = tmp_path / "work.zip"
+    _make_test_zip(zpath, {"1.png": b"one", "2.png": b"two"})
+    calls = _counting_zipfile(monkeypatch)
+    assert read_archive_entry(zpath, "1.png") == b"one"
+    assert read_archive_entry(zpath, "2.png") == b"two"
+    assert len(calls) == 1
+
+
+def test_read_archive_entry_reopens_on_change(tmp_path: Path, archive_memo, monkeypatch):
+    """mtime is part of the cache key — a replaced archive is re-opened and
+    serves the NEW bytes, not the stale object."""
+    from app.archive import read_archive_entry
+
+    real_zip = zipfile.ZipFile
+    zpath = tmp_path / "work.zip"
+    _make_test_zip(zpath, {"1.png": b"one"})
+    calls = _counting_zipfile(monkeypatch)
+    assert read_archive_entry(zpath, "1.png") == b"one"
+    assert len(calls) == 1
+    # Rewrite the archive via the real class (bypasses the open counter) and
+    # bump mtime explicitly so the key changes even on coarse timestamp fs.
+    with real_zip(zpath, "w") as zf:
+        zf.writestr("1.png", b"replaced")
+    st = zpath.stat()
+    os.utime(zpath, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert read_archive_entry(zpath, "1.png") == b"replaced"
+    assert len(calls) == 2
+
+
+def test_open_archive_memo_eviction_bound(tmp_path: Path, archive_memo, monkeypatch):
+    """The LRU is bounded at _OPEN_ARCHIVE_CACHE_MAX: overflow evicts the
+    oldest entry and closes its file object."""
+    from app.archive import read_archive_entry
+
+    limit = archive_memo._OPEN_ARCHIVE_CACHE_MAX
+    paths = []
+    for i in range(limit + 2):
+        p = tmp_path / f"w{i}.zip"
+        _make_test_zip(p, {"1.png": f"d{i}".encode()})
+        paths.append(p)
+
+    # Counter only — never retain the ZipFile itself: holding objects alive
+    # lets __del__ fire the patched close during monkeypatch undo.
+    closed = [0]
+    real_close = zipfile.ZipFile.close
+
+    def close_spy(self):
+        closed[0] += 1
+        return real_close(self)
+
+    monkeypatch.setattr(zipfile.ZipFile, "close", close_spy)
+    calls = _counting_zipfile(monkeypatch)
+
+    for p in paths:
+        assert read_archive_entry(p, "1.png") is not None
+    assert len(archive_memo._open_archives) == limit
+    assert len(calls) == limit + 2  # every archive opened exactly once
+    assert closed[0] >= 2  # overflow entries were closed on eviction
+
+    # LRU order: w0/w1 evicted, the last archive still cached.
+    calls.clear()
+    assert read_archive_entry(paths[0], "1.png") is not None
+    assert len(calls) == 1  # w0 had been evicted — re-opens
+    assert read_archive_entry(paths[-1], "1.png") is not None
+    assert len(calls) == 1  # w_last still cached — no re-open
+
+
+def test_read_rar_entry_reuses_open_object(archive_tree: Path, archive_memo, monkeypatch):
+    """A cached RarFile serves repeated .read() of DIFFERENT entries through
+    one open — object reuse across requests is verified, not just caching."""
+    rarfile = pytest.importorskip("rarfile")
+    from app.archive import read_archive_entry
+
+    real = rarfile.RarFile
+    calls = []
+
+    class CountingRarFile(real):
+        def __init__(self, *a, **k):
+            calls.append(a)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(rarfile, "RarFile", CountingRarFile)
+    d1 = read_archive_entry(archive_tree / "book.cbr", "2.png")
+    d2 = read_archive_entry(archive_tree / "book.cbr", "ch1/1.png")
+    assert d1 == (archive_tree / "src_2.png").read_bytes()
+    assert d2 == (archive_tree / "src_1.png").read_bytes()
+    assert len(calls) == 1
+
+
+def test_read_archive_entry_concurrent_reads(tmp_path: Path, archive_memo, monkeypatch):
+    """run_in_threadpool serves entries on concurrent threads; the per-object
+    lock serializes the shared ZipFile without corrupting any read."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.archive import read_archive_entry
+
+    pages = {f"{i}.png": f"page-{i}".encode() for i in range(16)}
+    zpath = tmp_path / "work.zip"
+    _make_test_zip(zpath, pages)
+    calls = _counting_zipfile(monkeypatch)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(lambda i: read_archive_entry(zpath, f"{i}.png"), range(16)))
+    assert results == [f"page-{i}".encode() for i in range(16)]
+    # Racing first-opens are possible (the open runs outside the LRU lock and
+    # losers are closed unused) but only one object survives in the cache…
+    assert len(archive_memo._open_archives) == 1
+    opens_so_far = len(calls)
+    # …and follow-up reads hit it without any further open.
+    assert read_archive_entry(zpath, "0.png") == b"page-0"
+    assert len(calls) == opens_so_far
