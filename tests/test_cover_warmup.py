@@ -1,10 +1,11 @@
 """Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3).
 
-``warm_thumb_cache`` prepares one folder cover at one width in the thumb
-disk cache (fail-open: never raises); ``_enumerate_cover_jobs`` lists the
-``(cover_path, width)`` jobs for every folder's single ``thumb`` at w=200
-and w=400; ``_warm_covers`` runs those jobs right after startup with
-bounded concurrency and stops after quiet passes.
+``warm_thumb_cache``/``warm_thumb_cache_multi`` prepare folder covers in
+the thumb disk cache (fail-open: never raises) — one source read + one
+draft()-assisted decode feeds every width (issue #240);
+``_enumerate_cover_jobs`` lists the cover-path jobs for every folder's
+single ``thumb``; ``_warm_covers`` runs those jobs right after startup
+with bounded concurrency and stops after quiet passes.
 
 One asyncio.run() per test in a helper thread (same constraint as
 tests/test_ensure_index.py: Playwright leaves a running loop behind, and
@@ -36,7 +37,9 @@ from app.thumbs import (  # noqa: E402
     _store_thumb,
     cache_path_for,
     cache_root,
+    make_thumbnail,
     warm_thumb_cache,
+    warm_thumb_cache_multi,
 )
 
 from tests.fixtures.rar5 import make_rar5_store  # noqa: E402
@@ -96,13 +99,12 @@ def test_enumerate_cover_jobs_skips_none_and_never_splits_names():
             {"name": "sub", "type": "folder", "thumb": "a.png", "children": []},
         ]},
     ]
+    # One job per cover path — every _COVER_WARM_WIDTHS size renders from
+    # the same read + decode inside warm_thumb_cache_multi (issue #240).
     assert _enumerate_cover_jobs(tree) == [
-        ("wrap/inner/vol1/p1.png", 200),
-        ("wrap/inner/vol1/p1.png", 400),
-        ("series/cov.png", 200),
-        ("series/cov.png", 400),
-        ("series/sub/a.png", 200),
-        ("series/sub/a.png", 400),
+        "wrap/inner/vol1/p1.png",
+        "series/cov.png",
+        "series/sub/a.png",
     ]
     assert _enumerate_cover_jobs([]) == []
 
@@ -163,6 +165,164 @@ def test_warm_thumb_cache_bogus_path_returns_false(tmp_path, monkeypatch):
     assert drive(main())
 
 
+def _make_noise_jpeg(path: Path, w: int = 2000, h: int = 3600) -> bytes:
+    """Write a large noisy JPEG; return its bytes.
+
+    Sized so draft() can downscale-decode it (min(w//200, h//800) >= 2 and
+    min(w//400, h//1600) >= 2 — libjpeg 1/2 scale for both warm widths).
+    """
+    from PIL import Image
+
+    Image.frombytes("RGB", (w, h), os.urandom(w * h * 3)).save(
+        path, format="JPEG", quality=90
+    )
+    return path.read_bytes()
+
+
+def test_warm_thumb_cache_multi_decodes_once_for_all_widths(tmp_path, monkeypatch):
+    """One warm job opens + decodes the source ONCE for every width (#240).
+
+    The old (path, width) job pairs paid one open + one full decode per
+    width; the aggregated job must produce both cache files from a single
+    Image.open and a single real decode (later load() calls on the shared
+    frame early-return, so counting ``self._im is None`` isolates real
+    decodes — ``self.im`` is an asserting property, not a null check).
+    """
+    import PIL.Image
+    from PIL import ImageFile
+
+    monkeypatch.setenv("BOOKQ_THUMB_CACHE_DIR", str(tmp_path / "thumbcache"))
+    downloads = tmp_path / "downloads"
+    (downloads / "plain").mkdir(parents=True)
+    _make_noise_jpeg(downloads / "plain" / "a.jpg")
+
+    opens = []
+    real_open = PIL.Image.open
+
+    def _counting_open(fp, *args, **kwargs):
+        opens.append(fp)
+        return real_open(fp, *args, **kwargs)
+
+    decodes = []
+    real_load = ImageFile.ImageFile.load
+
+    def _counting_load(self):
+        if self._im is None:  # only the first load() actually decodes
+            decodes.append(self)
+        return real_load(self)
+
+    monkeypatch.setattr(PIL.Image, "open", _counting_open)
+    monkeypatch.setattr(ImageFile.ImageFile, "load", _counting_load)
+
+    async def main():
+        assert await warm_thumb_cache_multi(
+            downloads, "plain/a.jpg", (200, 400)
+        ) is True
+        return True
+
+    assert drive(main())
+    assert len(opens) == 1, f"cover warm re-opened the source per width: {opens}"
+    assert len(decodes) == 1, f"cover warm re-decoded the source per width: {decodes}"
+    for w in (200, 400):
+        dest = _cache_dest(downloads, "plain/a.jpg", w)
+        assert dest.is_file(), f"missing warmed cover w={w}"
+        with real_open(dest) as im:
+            assert im.size[0] == w, f"warmed cover w={w} is {im.size}"
+
+
+def test_warm_thumb_cache_multi_partial_hit_renders_only_missing(tmp_path, monkeypatch):
+    """An already-cached width is touched, not re-decoded; the rest share one decode."""
+    import PIL.Image
+    from PIL import ImageFile
+
+    monkeypatch.setenv("BOOKQ_THUMB_CACHE_DIR", str(tmp_path / "thumbcache"))
+    downloads = tmp_path / "downloads"
+    (downloads / "plain").mkdir(parents=True)
+    _make_noise_jpeg(downloads / "plain" / "a.jpg")
+
+    async def prewarm():
+        assert await warm_thumb_cache(downloads, "plain/a.jpg", 200) is True
+        return True
+
+    assert drive(prewarm())
+    body_200 = _cache_dest(downloads, "plain/a.jpg", 200).read_bytes()
+
+    decodes = []
+    real_load = ImageFile.ImageFile.load
+
+    def _counting_load(self):
+        if self._im is None:
+            decodes.append(self)
+        return real_load(self)
+
+    monkeypatch.setattr(ImageFile.ImageFile, "load", _counting_load)
+
+    async def main():
+        assert await warm_thumb_cache_multi(
+            downloads, "plain/a.jpg", (200, 400)
+        ) is True
+        return True
+
+    assert drive(main())
+    assert len(decodes) == 1, (
+        f"one missing width must not re-decode the cached one: {len(decodes)}"
+    )
+    assert _cache_dest(downloads, "plain/a.jpg", 400).is_file()
+    assert _cache_dest(downloads, "plain/a.jpg", 200).read_bytes() == body_200
+
+
+def test_make_thumbnail_invokes_draft_for_jpeg(tmp_path, monkeypatch):
+    """JPEG: draft("RGB", (w, w*4)) runs before load and shrinks the decode."""
+    import io
+
+    from PIL import Image, JpegImagePlugin
+
+    calls = []
+    real_draft = JpegImagePlugin.JpegImageFile.draft
+
+    def _spy(self, mode, size):
+        result = real_draft(self, mode, size)
+        calls.append((mode, size, self.size))
+        return result
+
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", _spy)
+    data = _make_noise_jpeg(tmp_path / "big.jpg", w=1600, h=2400)
+    thumb = make_thumbnail(data, 200)
+    # Box (200, 800) → libjpeg decodes at 1/2 scale (800x1200); the thumb
+    # itself still lands at the requested (200, 300).
+    assert calls == [("RGB", (200, 800), (800, 1200))]
+    with Image.open(io.BytesIO(thumb)) as im:
+        assert im.size == (200, 300)
+
+
+def test_make_thumbnail_draft_noop_for_webp_and_png(tmp_path, monkeypatch):
+    """webp/png have no draft hook — the call must be a harmless no-op."""
+    import io
+
+    from PIL import Image, ImageFile
+
+    calls = []
+    real_draft = ImageFile.ImageFile.draft
+
+    def _spy(self, mode, size):
+        calls.append((self.format, mode, size))
+        return real_draft(self, mode, size)
+
+    monkeypatch.setattr(ImageFile.ImageFile, "draft", _spy)
+    for fmt in ("PNG", "WEBP"):
+        src = tmp_path / f"src.{fmt.lower()}"
+        Image.frombytes("RGB", (900, 700), os.urandom(900 * 700 * 3)).save(
+            src, format=fmt
+        )
+        thumb = make_thumbnail(src.read_bytes(), 200)
+        with Image.open(io.BytesIO(thumb)) as im:
+            assert im.size[0] == 200 and im.size[1] < 200
+    assert calls == [
+        ("PNG", "RGB", (200, 800)),
+        ("WEBP", "RGB", (200, 800)),
+    ]
+
+
 def _cover_state(downloads: Path, tree: list[dict]):
     from app.metadata import MetadataIndex
 
@@ -190,7 +350,6 @@ def test_warm_covers_warms_every_single_thumb_and_terminates(tmp_path, monkeypat
     assert tree, "fixture must scan to a non-empty tree"
     jobs = _enumerate_cover_jobs(tree)
     assert jobs, "fixture tree must yield cover jobs"
-    assert {w for _, w in jobs} == {200, 400}
     state = _cover_state(downloads, tree)
 
     async def main():
@@ -200,8 +359,11 @@ def test_warm_covers_warms_every_single_thumb_and_terminates(tmp_path, monkeypat
 
     elapsed = drive(main())
     assert elapsed < 60, f"_warm_covers took {elapsed:.1f}s (quiet passes expected)"
-    for rel, width in jobs:
-        assert _cache_dest(downloads, rel, width).is_file(), f"unwarmed: {rel} w={width}"
+    for rel in jobs:
+        for width in _COVER_WARM_WIDTHS:
+            assert _cache_dest(downloads, rel, width).is_file(), (
+                f"unwarmed: {rel} w={width}"
+            )
 
 
 def test_warm_covers_never_raises_on_corrupt_sources(tmp_path, monkeypatch):
@@ -258,10 +420,10 @@ def test_warm_covers_returns_when_opaque_count_stable(tmp_path, monkeypatch):
 
     _fast_warm_monkeypatch(monkeypatch)
 
-    async def _noop(downloads_dir, path, width):
+    async def _noop(downloads_dir, path, widths):
         return True
 
-    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache", _noop)
+    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache_multi", _noop)
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     tree = [{"name": "arch", "type": "folder", "archive": True, "thumb": None, "children": []}]
@@ -282,10 +444,10 @@ def test_warm_covers_returns_when_no_opaque_nodes(tmp_path, monkeypatch):
 
     _fast_warm_monkeypatch(monkeypatch)
 
-    async def _noop(downloads_dir, path, width):
+    async def _noop(downloads_dir, path, widths):
         return True
 
-    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache", _noop)
+    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache_multi", _noop)
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     tree = [{"name": "plain", "type": "folder", "thumb": None, "children": []}]
@@ -305,7 +467,7 @@ def test_warm_covers_idle_gate_parks_jobs_while_requests_fresh(tmp_path, monkeyp
 
     Same last_request_at contract as _background_fill: with a fresh stamp
     and a long idle window the pass parks before the first
-    warm_thumb_cache call — interactive use never competes with warm.
+    warm_thumb_cache_multi call — interactive use never competes with warm.
     """
     import app.routes as routes_mod
     import app.thumbs as thumbs_mod
@@ -314,11 +476,11 @@ def test_warm_covers_idle_gate_parks_jobs_while_requests_fresh(tmp_path, monkeyp
     monkeypatch.setattr(routes_mod, "_FILL_IDLE_SECONDS", 3600.0)
     calls = []
 
-    async def _spy(downloads_dir, path, width):
-        calls.append((path, width))
+    async def _spy(downloads_dir, path, widths):
+        calls.append((path, widths))
         return True
 
-    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache", _spy)
+    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache_multi", _spy)
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     tree = [{"name": "plain", "type": "folder", "thumb": "a.png", "children": []}]
