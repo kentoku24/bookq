@@ -23,11 +23,18 @@ services:
       # M4: folder-visibility SQLite — viewer と同じ user-state volume を
       # 共有し、両バックエンドが同じ hidden_roots を読み書きする。
       - user-state:/var/lib/bookq
+      # M7: thumb/view/sprite ディスクキャッシュ — viewer と同じ
+      # thumb-cache volume を共有。viewer-rs は cache hit のみ native
+      # serve し、miss は upstream (Pillow) が同じ cache に生成する。
+      - thumb-cache:/var/cache/bookq-thumbs
 
     environment:
       - BOOKQ_UPSTREAM=http://viewer:8080
       - DOWNLOADS_DIR=/app/downloads
       - BOOKQ_STATE_DIR=/var/lib/bookq
+      # viewer と同じ値（docker-compose.dev.yml と対）。cache key/ファイル名は
+      # sha1(key) で backend 非依存 — どちらが書いたエントリも両側が読める。
+      - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # Same value as the viewer's env: native endpoints activate under the
       # mock user. To exercise the Bearer path instead, drop TEST_MODE and
       # set BOOKQ_RS_NATIVE + ALLOWED_EMAILS (Bearer JWT with SECRET_KEY).
