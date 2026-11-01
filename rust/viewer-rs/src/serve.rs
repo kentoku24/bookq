@@ -392,9 +392,10 @@ fn archive_bytes_response(
 
 // ── /api/images ───────────────────────────────────────────────────────────────
 
-/// `_list_folder_images` + the route's response shaping.
-/// Returns `Serve::Proxy` whenever a PDF is involved — pypdfium2 semantics
-/// cannot be reproduced natively yet.
+/// `_list_folder_images` + the v1 route's response shaping.
+/// Success = `{"folder": <raw query>, "images": [...]}`; errors keep the
+/// shared `{detail}` shape unwrapped. Returns `Serve::Proxy` whenever a PDF
+/// is involved — pypdfium2 semantics cannot be reproduced natively yet.
 pub fn api_images(downloads: &Path, folder: &str) -> Serve {
     let folder_path = downloads.join(folder);
     if !is_within(downloads, &folder_path) {
@@ -406,7 +407,7 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
     };
     if is_archive_file(&resolved) {
         let names = list_archive_entries(&resolved);
-        return Serve::Done(json_list(names));
+        return Serve::Done(json_list(folder, names));
     }
     if is_pdf_file(&resolved) {
         return Serve::Proxy; // pdf_page_count needs pypdfium2
@@ -429,7 +430,7 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
                 &format!("Folder not found: {folder}"),
             ));
         }
-        return Serve::Done(json_list(scoped));
+        return Serve::Done(json_list(folder, scoped));
     }
     if !resolved.is_dir() {
         return Serve::Done(detail(
@@ -437,12 +438,17 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
             &format!("Folder not found: {folder}"),
         ));
     }
-    Serve::Done(json_list(bookq_core::list_images(&resolved).unwrap_or_default()))
+    Serve::Done(json_list(folder, bookq_core::list_images(&resolved).unwrap_or_default()))
 }
 
 /// Compact JSON list matching Starlette's `json.dumps(..., separators=(",",":"))`.
-fn json_list(names: Vec<String>) -> Response {
-    let mut r = response(StatusCode::OK, Body::from(serde_json::to_string(&names).unwrap_or_else(|_| "[]".into())));
+/// v1 images envelope — `{"folder": folder, "images": [...]}` compact JSON.
+fn json_list(folder: &str, names: Vec<String>) -> Response {
+    let body = serde_json::json!({"folder": folder, "images": names});
+    let mut r = response(
+        StatusCode::OK,
+        Body::from(serde_json::to_string(&body).unwrap()),
+    );
     set_header(&mut r, header::CONTENT_TYPE, "application/json");
     r
 }

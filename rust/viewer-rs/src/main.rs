@@ -29,12 +29,9 @@ use std::path::PathBuf;
 // path containment, tree assembly, index cache) that M4–M7 wire onto the
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
-#[allow(dead_code)]
 mod folders;
-#[allow(dead_code)]
 mod serve;
 mod state;
-#[allow(dead_code)]
 mod tree;
 
 #[derive(Clone)]
@@ -213,10 +210,12 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
+    let headers = req.headers().clone();
     match *req.method() {
         axum::http::Method::GET => {
             let folder = q.get("folder").map(|s| s.as_str());
-            state::list_positions(&st.positions, &key, folder)
+            serve::maybe_gzip(&headers, state::list_positions(&st.positions, &key, folder), true)
+                .await
         }
         axum::http::Method::PUT => {
             // `folder` is required → missing keeps FastAPI's 422 upstream.
@@ -250,10 +249,12 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
     };
     // `user_key_for_email`: email.strip().lower()
     let key = user.email.trim().to_lowercase();
+    let headers = req.headers().clone();
     match *req.method() {
-        axum::http::Method::GET => state::get_folder_visibility(&st, &key).await,
+        axum::http::Method::GET => {
+            serve::maybe_gzip(&headers, state::get_folder_visibility(&st, &key).await, true).await
+        }
         axum::http::Method::PUT => {
-            let headers = req.headers().clone();
             let (parts, body) = req.into_parts();
             let body = match http_body_util::BodyExt::collect(body).await {
                 Ok(c) => c.to_bytes(),
@@ -265,6 +266,51 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
             state::put_folder_visibility(&st, &key, &headers, &body).await
         }
         _ => return proxy(&st.upstream, req).await,
+    }
+}
+
+/// `/api/v1/tree` — the v1 envelope `{kind, nodes, generation}` over the
+/// shared index cache (`_folder_tree(v1=True)`).
+async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("tree") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let headers = req.headers().clone();
+    match folders::api_tree(&st, &headers, q).await {
+        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+    }
+}
+
+/// `/api/v1/images` — `{folder, images[]}` over `_list_folder_images`.
+async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("images") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    // `folder` is a required Query param upstream → missing keeps the 422.
+    let Some(folder) = q.get("folder").cloned() else {
+        return proxy(&st.upstream, req).await;
+    };
+    let headers = req.headers().clone();
+    let downloads = st.downloads.clone();
+    let out = tokio::task::spawn_blocking(move || serve::api_images(&downloads, &folder))
+        .await
+        .unwrap_or(serve::Serve::Proxy);
+    match out {
+        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
     }
 }
 
@@ -361,6 +407,8 @@ async fn main() {
         // M3 skeleton: no v1 native handlers yet — everything proxies.
         // /image/{*path} is a v1 contract path (media, not versioned).
         .route("/image/{*path}", any(serve_image))
+        .route("/api/v1/tree", any(api_tree))
+        .route("/api/v1/images", any(api_images))
         .route("/api/v1/reading-positions", any(reading_positions))
         .route("/api/v1/folder-visibility", any(folder_visibility))
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
