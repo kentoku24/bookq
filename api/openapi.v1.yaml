@@ -58,6 +58,12 @@ info:
     該当データを含めてしまうため認めない。`include_hidden=true` は
     呼び出しユーザー自身の hidden セットにのみ適用される。
 
+    ## 振る舞いの正本
+
+    wire shape に表れない意味論（ETag 世代・positions LWW・
+    visibility owner HMAC・PKCE ライフサイクル・gzip 対象）は
+    **`api/v1-semantics.md`** が正本。spec と併せて読むこと。
+
   contact:
     name: bookq
 

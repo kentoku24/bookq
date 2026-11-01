@@ -6,6 +6,7 @@
 | ファイル | 内容 |
 |---|---|
 | `openapi.v1.yaml` | REST API (OpenAPI 3.1)。`/api/v1/*` 正規形 + deprecated v0 併記 |
+| `v1-semantics.md` | v1 REST の意味論正本 (ETag 世代・positions LWW・owner HMAC・PKCE ライフサイクル・gzip)。openapi.v1.yaml とセットで読む |
 | `asyncapi.yaml` | `/ws/reader-sync` のワイヤ形式 (AsyncAPI 3.0) |
 | `reader-sync-protocol.md` | reader-sync の振る舞い契約 (フェーズ機械・逐次化・拒否理由・MANIFEST)。asyncapi.yaml とセットで読む |
 
@@ -18,6 +19,8 @@
   各 operation の description を参照。
 - **wire-stable 文字列**: `reader-sync-protocol.md` §5 の拒否理由・enum 値は
   iOS/web が文字列一致で処理する契約面。リネーム禁止、追加のみ可。
-- **CI**: Spectral lint が PR で両 spec を検査する。ローカル確認:
+- **CI**: Spectral lint が PR で両 spec を検査し、Schemathesis が
+  `openapi.v1.yaml` の実装適合を property-based で検証する
+  (`.github/workflows/api-contract.yml`、意味的拒否は `schemathesis.toml` で許容)。
+  ローカル確認:
   `npx @stoplight/spectral-cli lint api/openapi.v1.yaml api/asyncapi.yaml`
-- 実装側の契約テスト (Schemathesis) は別 PR で追加予定。
