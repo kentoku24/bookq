@@ -268,3 +268,86 @@ def test_fill_count_trigger_bumps_mid_run(tmp_path, monkeypatch):
     bumps = state.metadata_index_cache["generation"] - gen0
     assert bumps == 2, f"count trigger + final flush expected 2 bumps, got {bumps}"
     assert bumps < 3
+
+
+def test_fill_discards_stale_result_when_node_filled_during_scan(tmp_path, monkeypatch):
+    """Lock-shrink guard: a slot materialized while the scan ran must not
+    be overwritten by the stale result, and must never be re-scanned.
+
+    The archive open runs outside _index_lock now, so the splice re-checks
+    that the node is still the same opaque placeholder. Here another actor
+    fills the node in place mid-scan; the fill must drop its own result.
+    """
+    routes_mod = _fast_fill(monkeypatch)
+    downloads = tmp_path / "downloads"
+    _make_zip(downloads / "series" / "vol-01.zip", ["01.png"])
+    (downloads / "plain").mkdir(parents=True)
+    state = _shallow_state(downloads)
+    calls = {"n": 0}
+
+    def _racing_scan(base, aname, downloads_root=None):
+        calls["n"] += 1
+        # Another actor materializes the same node while this fill's
+        # archive open is still in flight.
+        node = _find(state.metadata_index_cache["tree"], "series/vol-01.zip")
+        node["children"] = [{"name": "other.png", "type": "image", "children": None}]
+        node["thumb"] = "other.png"
+        return {"name": aname, "type": "folder", "thumb": "ours.png",
+                "archive": True,
+                "children": [{"name": "ours.png", "type": "image", "children": None}]}
+
+    monkeypatch.setattr(routes_mod, "_scan_archive_node", _racing_scan)
+
+    async def main():
+        await _background_fill(state)
+        return True
+
+    assert drive(main())
+    node = _find(state.metadata_index_cache["tree"], "series/vol-01.zip")
+    assert node["thumb"] == "other.png", (
+        "stale fill result overwrote a concurrently materialized node"
+    )
+    assert node["children"][0]["name"] == "other.png"
+    assert calls["n"] == 1, "already-materialized node must not be re-scanned"
+
+
+def test_fill_discards_result_when_tree_swapped_during_scan(tmp_path, monkeypatch):
+    """Lock-shrink guard: a rebuild swapping the tree mid-scan must drop
+    the result built against the old tree — and the node is re-materialized
+    in the NEW tree on a later pass.
+    """
+    routes_mod = _fast_fill(monkeypatch)
+    downloads = tmp_path / "downloads"
+    _make_zip(downloads / "series" / "vol-01.zip", ["01.png"])
+    (downloads / "plain").mkdir(parents=True)
+    state = _shallow_state(downloads)
+    swapped = {"done": False}
+
+    def _swapping_scan(base, aname, downloads_root=None):
+        if not swapped["done"]:
+            swapped["done"] = True
+            # An index rebuild lands a fresh cache (fresh opaque tree)
+            # while this fill's archive open is in flight.
+            new_tree = scan_tree(downloads, list_archives=False)
+            state.metadata_index_cache = {
+                "tree": new_tree,
+                "index": state.metadata_index_cache["index"],
+                "timestamp": time.time(),
+                "generation": 1,
+            }
+        return {"name": aname, "type": "folder", "thumb": "01.png",
+                "archive": True,
+                "children": [{"name": "01.png", "type": "image", "children": None}]}
+
+    monkeypatch.setattr(routes_mod, "_scan_archive_node", _swapping_scan)
+
+    async def main():
+        await _background_fill(state)
+        return True
+
+    assert drive(main())
+    node = _find(state.metadata_index_cache["tree"], "series/vol-01.zip")
+    assert node.get("children"), "node left opaque in the new tree"
+    assert node["thumb"] == "01.png", (
+        "new tree's node must be materialized by a later pass, not the stale splice"
+    )

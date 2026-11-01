@@ -555,10 +555,19 @@ def _refresh_ancestor_covers(chain: tuple) -> None:
 async def _background_fill(app_state) -> None:
     """Materialize shallow opaque archive nodes one by one (plan T3, fail-open).
 
-    Spawned once by lifespan after 起動完了; lives past yield. Each opaque
-    node is rebuilt with the same listing code the full scan uses
-    (_scan_archive_node/_scan_pdf_node) under _index_lock, swapped in place,
-    and the cache generation advances — coalesced to at most one bump per
+    Spawned once by lifespan after 起動完了; lives past yield. Each item
+    runs three phases: under _index_lock it picks the next opaque node and
+    captures its splice coordinates (a cheap tree walk — the lock keeps
+    that read consistent with the splice the same task performs), then the
+    archive/PDF open runs OUTSIDE the lock via run_in_threadpool
+    (_scan_archive_node/_scan_pdf_node are pure functions of their
+    arguments — a multi-second RAR/EPUB listing must never park the
+    tree-mutating paths the lock serializes), and a second locked section
+    splices the built node in place only after re-checking the slot is
+    still the same opaque placeholder — a rebuild may have swapped the
+    tree, or another actor may have filled the slot while the scan ran, in
+    which case the stale result is discarded. The cache generation
+    advances coalesced to at most one bump per
     _FILL_BUMP_INTERVAL_SECONDS, per _FILL_BUMP_EVERY_ITEMS materialized
     nodes, and always once after the final item, so ?since pollers see
     fewer, larger steps instead of a full-tree re-fetch per node. Between
@@ -589,6 +598,11 @@ async def _background_fill(app_state) -> None:
             await _wait_requests_idle(app_state)
             full: str | None = None
             try:
+                # Phase 1 (locked, cheap): pick the next opaque node and
+                # capture the splice coordinates. The walk stays under the
+                # lock so the chosen node is read consistently with the
+                # splice this task will perform — the expensive part is
+                # what moves out.
                 async with _index_lock:
                     cache = getattr(app_state, "metadata_index_cache", None)
                     if not isinstance(cache, dict) or "tree" not in cache:
@@ -607,35 +621,68 @@ async def _background_fill(app_state) -> None:
                         return
                     chain, full, is_pdf = found
                     nodes, idx = chain[-1]
-                    tree_name = nodes[idx].get("name")
-                    archive_file = downloads_path / full
-                    if is_pdf:
-                        filled = await run_in_threadpool(
-                            _scan_pdf_node, archive_file.parent, archive_file.name,
-                            downloads_path,
-                        )
-                    else:
-                        filled = await run_in_threadpool(
-                            _scan_archive_node, archive_file.parent, archive_file.name,
-                            downloads_path,
-                        )
-                    if tree_name is not None:
-                        # Flattened nodes carry the parent/child name the scan
-                        # hoisted ("wrap/v1.zip"); the built node only knows the
-                        # file's own name. Keeping the tree's name is what makes
-                        # the composed path resolve on disk for the client.
-                        filled["name"] = tree_name
-                    nodes[idx] = filled
-                    _refresh_ancestor_covers(chain)
-                    done.add(full)
-                    pending += 1
-                    now = time.monotonic()
+                    node = nodes[idx]
+                    tree_name = node.get("name")
+
+                # Phase 2 (UNLOCKED): the archive/PDF open. Holding
+                # _index_lock across this threadpool await used to park
+                # every tree-mutating path behind a seconds-long listing.
+                archive_file = downloads_path / full
+                if is_pdf:
+                    filled = await run_in_threadpool(
+                        _scan_pdf_node, archive_file.parent, archive_file.name,
+                        downloads_path,
+                    )
+                else:
+                    filled = await run_in_threadpool(
+                        _scan_archive_node, archive_file.parent, archive_file.name,
+                        downloads_path,
+                    )
+
+                # Phase 3 (locked): splice only if the slot is still the
+                # same opaque placeholder captured in phase 1 — the scan
+                # ran unlocked, so a rebuild or a racing fill may have
+                # beaten this result to it.
+                async with _index_lock:
+                    cache = getattr(app_state, "metadata_index_cache", None)
+                    if not isinstance(cache, dict) or "tree" not in cache:
+                        return
+                    same_tree = cache["tree"] is tree
+                    cur = nodes[idx] if same_tree and 0 <= idx < len(nodes) else None
                     if (
-                        pending >= _FILL_BUMP_EVERY_ITEMS
-                        or now - last_bump >= _FILL_BUMP_INTERVAL_SECONDS
+                        cur is node
+                        and node.get("archive") and not node.get("children")
                     ):
-                        cache["generation"] = int(cache.get("generation", 1) or 1) + 1
-                        pending, last_bump = 0, now
+                        if tree_name is not None:
+                            # Flattened nodes carry the parent/child name the
+                            # scan hoisted ("wrap/v1.zip"); the built node only
+                            # knows the file's own name. Keeping the tree's
+                            # name is what makes the composed path resolve on
+                            # disk for the client.
+                            filled["name"] = tree_name
+                        nodes[idx] = filled
+                        _refresh_ancestor_covers(chain)
+                        done.add(full)
+                        pending += 1
+                        now = time.monotonic()
+                        if (
+                            pending >= _FILL_BUMP_EVERY_ITEMS
+                            or now - last_bump >= _FILL_BUMP_INTERVAL_SECONDS
+                        ):
+                            cache["generation"] = int(cache.get("generation", 1) or 1) + 1
+                            pending, last_bump = 0, now
+                    elif same_tree and cur is not None and not (
+                        cur.get("archive") and not cur.get("children")
+                    ):
+                        # The slot was already materialized while the scan
+                        # ran — drop the duplicate result and never re-scan
+                        # the path.
+                        done.add(full)
+                    # Otherwise the tree was swapped mid-scan (chain/nodes
+                    # point into the old tree — splicing there would be
+                    # invisible) or the slot was replaced by a fresh opaque
+                    # node; either way the stale result is dropped and a
+                    # later pass re-scans the node in the current tree.
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
