@@ -24,7 +24,7 @@ from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entrie
 from app.auth import get_current_user, require_auth
 from app.folder_visibility import user_key_for_email, visibility_owner
 from app.metadata import MetadataIndex
-from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
+from app.scanner import IMAGE_EXTENSIONS, PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
 
 logger = logging.getLogger(__name__)
@@ -1549,6 +1549,12 @@ async def serve_image(
 
     file_path = file_path.resolve()
     if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # This endpoint is an image-serving boundary, not a general file server.
+    # Never serve HTML/XML/text or other active content from the downloads tree
+    # under the application's authenticated origin.
+    if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
         raise HTTPException(status_code=404, detail="File not found")
 
     stat = file_path.stat()
