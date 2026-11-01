@@ -54,7 +54,7 @@ python3 .claude/skills/rs-vs-py-perf/references/perf_compare.py http://127.0.0.1
 python3 .claude/skills/rs-vs-py-perf/references/perf_compare.py http://127.0.0.1:8099 [container-to-restart]
 ```
 
-- Optional 2nd arg `docker restart`s the viewer container first for **cold-index timing** (`bookq-dev-viewer-dev-NN` for py env, `bookq-dev-viewer-rs-dev-NN` for rs env).
+- Optional 2nd arg `docker restart`s the viewer container first — **this is what produces the cold index-build number** (`bookq-dev-viewer-dev-NN` for py env, `bookq-dev-viewer-rs-dev-NN` for rs env). The `== indexing ==` section then reports healthy→200 wall time; without it, the env's index is already warm and only a reminder prints.
 - The script auto-discovers a large image folder and an archive from `/api/v1/tree`, then measures: cold first-hits, warm API p50s (`v1/tree`, v0 `folders?depth=1`, `?since=<cur-gen>`, `v1/images` dir + archive), sequential `/image` reads (loose + archive entries), and a 16-parallel wall-clock probe.
 - Then `measure.py` for end-to-end tile view, 3 runs each, same as `perf-measurement`:
 

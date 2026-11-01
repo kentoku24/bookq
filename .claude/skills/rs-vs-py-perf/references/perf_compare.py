@@ -95,10 +95,22 @@ if RESTART:
         time.sleep(1)
     else:
         sys.exit("env never became healthy")
+    time.sleep(1)
 
-print("== index wait (202 → 200) ==")
-elapsed = wait_tree_200()
-print(f"  index build                    {elapsed:8.1f}s")
+print("== indexing ==")
+if RESTART:
+    # Cold build: healthy → first request triggers the lazy index build;
+    # poll the 202 building-envelope until it flips to 200.
+    elapsed = wait_tree_200()
+    print(f"  index build cold (200-reached) {elapsed:8.1f}s")
+else:
+    ms, _, st = get("/api/v1/tree")
+    if st == 200:
+        print("  index already warm — pass the viewer container name as arg 2")
+        print("  to docker-restart first and measure the cold build")
+    else:
+        elapsed = wait_tree_200()
+        print(f"  index build (env boot)         {elapsed:8.1f}s")
 
 tree, img_folder, n_imgs, archive = discover()
 gen = tree.get("generation")
