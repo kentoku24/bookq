@@ -637,12 +637,52 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     an ended panel. Chrome drives the DOM; the simulator driver walks
     the Safari AX tree."""
     via = op.get("via") or "match"
+    # 'match' must start clean — a leftover session hijacks MATCH.
+    # 'code' instead NEEDS the connected session a prior pair op made
+    # (its flow reaches the join view via an ended panel).
+    if via != "code":
+        _ui_ensure_idle(ctx)
     lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
     if lsp.page is not None and fsp.page is not None:
         return _op_pair_ui_dom(ctx, via)
     if ctx.driver.name == "simulator":
         return _op_pair_ui_ax(ctx, via)
     raise UnsupportedError("ui pair needs chrome DOM or simulator AX")
+
+
+def _ui_ensure_idle(ctx: RunCtx) -> None:
+    """Leftover sessions from a previous scenario/run hijack MATCH —
+    end any live session on both clients before a fresh pair op."""
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if lsp.page is not None and fsp.page is not None:
+        for p in (lsp.page, fsp.page):
+            p.evaluate(
+                "() => { const c = window.PairController;"
+                "  if (c && !['idle','ended'].includes(c.state.status))"
+                "    c.leave(); }")
+        for p in (lsp.page, fsp.page):
+            p.wait_for_function(
+                "() => !window.PairController"
+                " || ['idle','ended','error'].includes("
+                "      PairController.state.status)", timeout=15000)
+        return
+    if ctx.driver.name == "simulator":
+        for spec in (lsp, fsp):
+            deadline = time.monotonic() + 15 * ctx.tscale
+            while time.monotonic() < deadline:
+                try:
+                    st = (ctx._pair_report_state(spec.role)
+                          .get("pc") or {}).get("status")
+                except AssertError:
+                    st = None
+                if st in (None, "idle", "ended", "error"):
+                    break
+                try:
+                    _ui_tap(ctx, spec, ["解除"], "leave (stale)",
+                            tries=3, delay=0.4)
+                except EnvError:
+                    pass
+                time.sleep(0.8)
 
 
 def _wait_code_dom(page, timeout: float = 15000) -> str:
@@ -793,6 +833,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         needles = [needles]
     drv = ctx.driver
     off = None
+    prev_r = None
     for _ in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
@@ -805,15 +846,25 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         if r is not None:
             vp_h = float((rep.get("vp") or {}).get("h") or 0)
             if vp_h and (r["y"] < 0 or r["y"] + r["h"] > vp_h):
-                # tile below/above the fold — a slow drag is the scroll;
-                # a 150ms flick is consumed by WebKit without scrolling.
+                # drag just far enough to center the tile — a fixed full
+                # swipe overshoots and ping-pongs past the fold forever.
+                need = (r["y"] + r["h"] / 2) - vp_h * 0.5
                 sw, sh = drv.screen_size(spec)
-                if r["y"] < 0:
-                    drv.swipe(spec, sw / 2, sh * 0.35, sw / 2, sh * 0.75,
-                              0.5)
+                dist = min(max(abs(need), sh * 0.15), sh * 0.55)
+                if need > 0:
+                    drv.swipe(spec, sw / 2, sh * 0.65,
+                              sw / 2, sh * 0.65 - dist, 0.5)
                 else:
-                    drv.swipe(spec, sw / 2, sh * 0.75, sw / 2, sh * 0.35,
-                              0.5)
+                    drv.swipe(spec, sw / 2, sh * 0.35,
+                              sw / 2, sh * 0.35 + dist, 0.5)
+                prev_r = None
+                time.sleep(delay)
+                continue
+            # settle: only tap once the rect holds still across two
+            # consecutive reports — a momentum scroll would tap a stale
+            # coordinate and land on a different tile.
+            if prev_r is None or abs(r["y"] - prev_r["y"]) >= 3:
+                prev_r = r
                 time.sleep(delay)
                 continue
             if off is None:
@@ -824,6 +875,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             ctx.note(f"ui_tap_{needles[0]}", True,
                      f"{what} @({x:.0f},{y:.0f})")
             return needles[0]
+        prev_r = None
         rects = rep.get("rects") or {}
         for n in needles:
             sel = _NEEDLE_SEL.get(n)
@@ -1035,10 +1087,29 @@ def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
     else:
         # simulator: tap the work's browse tile — match the display
         # name OR the full data-path (flattened names like
-        # "parent/child" don't survive in .tile-name-text).
-        needles = [work.get("tile") or "", work["folder"]]
-        _ui_tap(ctx, lsp, [n for n in needles if n],
-                f"work tile {work.get('tile')}")
+        # "parent/child" don't survive in .tile-name-text). A tap that
+        # misses (overlay, late layout shift) gets one retry.
+        needles = [n for n in (work.get("tile") or "", work["folder"])
+                   if n]
+        _ui_tap(ctx, lsp, needles, f"work tile {work.get('tile')}")
+        try:
+            l, f = ctx.poll_both(
+                lambda a, b: a["phase"] == "reading"
+                and b["phase"] == "reading"
+                and a["applied"]["spreadId"],
+                timeout=20, what="ui phase=reading (first tap)")
+        except AssertError:
+            _ui_tap(ctx, lsp, needles,
+                    f"work tile retry {work.get('tile')}")
+            l, f = ctx.poll_both(
+                lambda a, b: a["phase"] == "reading"
+                and b["phase"] == "reading"
+                and a["applied"]["spreadId"],
+                timeout=30, what="ui phase=reading")
+        ctx.note("ui_open_work", True,
+                 f"spreadId={l['applied']['spreadId']} "
+                 f"rev={l['applied']['index']}")
+        return
     l, f = ctx.poll_both(
         lambda a, b: a["phase"] == "reading" and b["phase"] == "reading"
         and a["applied"]["spreadId"],
@@ -1088,16 +1159,33 @@ def _send_move_ax(ctx: RunCtx, actor: str, op: dict) -> dict:
     """ui surface on the simulator driver: REAL device input — edge-zone
     taps for TURN (the paired view's tap zones drive the intent), chrome
     button taps for offset, the pair panel for side swap."""
-    t = op["type"]
+    t = op["op"]
     spec = ctx.clients[actor]
     if t == "turn":
         w, h = ctx.driver.screen_size(spec)
         d = int(op.get("delta", 1))
         n = min(abs(d), 10)
-        # default tapdir: right edge = next spread, left edge = prev.
-        x = (w - 16.0) if d > 0 else 16.0
+        # tapForward decides which edge is "forward" — 'left' (the manga
+        # default) maps delta+1 to the LEFT zone, 'right' to the right.
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            rep = {}
+        fwd = rep.get("tapForward") or "left"
+        forward_left = (fwd == "left")
+        want_left = forward_left if d > 0 else not forward_left
+        sel = "#zone-prev" if want_left else "#zone-next"
+        r = ((rep.get("rects") or {}).get(sel)) or {}
+        if r.get("w"):
+            x = r["x"] + r["w"] / 2
+            y = r["y"] + r["h"] / 2
+            off = _ui_offset(ctx, spec)
+            x, y = x + off[0], y + off[1]
+        else:
+            x = 16.0 if want_left else (w - 16.0)
+            y = h * 0.5
         for _ in range(n):
-            ctx.driver.tap(spec, x, h * 0.5)
+            ctx.driver.tap(spec, x, y)
             time.sleep(0.3)
         return {"sent": True}
     if t == "swap_sides":

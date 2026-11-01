@@ -1046,6 +1046,8 @@
                                  lastTap: _lastTap,
                                  vp: {w: window.innerWidth,
                                       h: window.innerHeight},
+                                 tapForward: window.__tapForward
+                                   ? window.__tapForward() : null,
                                  code: cv ? cv.textContent.trim() : null});
         } catch (e) { return; }
         if (body === last) return;
