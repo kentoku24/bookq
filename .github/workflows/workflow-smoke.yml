@@ -10,6 +10,14 @@
 #
 # Manual dispatch, plus any PR that can change a pytest outcome. Deploy-script-only
 # PRs (dev.sh, rebuild.sh, tailscale/) intentionally do not gate.
+#
+# Runs once per PR, not on every push: when a non-draft PR is opened/reopened, or
+# when a draft is marked Ready for review. Draft PRs and pushes to an open PR
+# (synchronize) are skipped -- except dependabot PRs, whose auto-merge waits on
+# this green. To re-run after more pushes: convert to draft and back to ready, or
+# `gh workflow run workflow-smoke.yml --ref <branch>`.
+# The job-level `if` is repeated on every job; the concurrency group gives skipped
+# runs their own group so a skipped push cannot cancel the in-flight gate.
 name: workflow-smoke
 run-name: "oc-smoke #${{ github.event.pull_request.number || github.run_id }}"
 
@@ -18,6 +26,7 @@ on:
   # app/tests PRs are gated here (#230). A cheaper browser-free lane is not possible;
   # read #230 before trying one again.
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
     paths:
       - ".github/workflows/*.yml"
       - ".github/scripts/*.sh"
@@ -35,11 +44,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: oc-smoke-${{ github.event.pull_request.number || github.run_id }}
+  group: oc-smoke-${{ github.event.pull_request.number || github.run_id }}${{ github.event_name == 'pull_request' && (github.event.pull_request.draft || (github.event.action == 'synchronize' && github.event.pull_request.user.login != 'dependabot[bot]')) && format('-skip-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   validate:
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'synchronize' || github.event.pull_request.user.login == 'dependabot[bot]'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -60,6 +70,7 @@ jobs:
   # (implement / research / implement-direct / research-direct).
   uv-gate-shard:
     name: uv-gate (${{ matrix.shard }}/4)
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'synchronize' || github.event.pull_request.user.login == 'dependabot[bot]'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -97,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: uv-gate-shard
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'synchronize' || github.event.pull_request.user.login == 'dependabot[bot]')))
     steps:
       - name: Require all shards green
         run: |
