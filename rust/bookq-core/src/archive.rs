@@ -689,6 +689,13 @@ pub fn epub_raw(path: &Path) -> Option<(Vec<String>, Vec<String>)> {
         Ok(Some(e)) => e,
         _ => return None,
     };
+    epub_raw_with(&mut f, &entries)
+}
+
+/// `epub_raw` on an already-open file whose central directory is already
+/// parsed — the memoized path's single-open form (no second fd, and no
+/// window where the file could change between the two opens).
+fn epub_raw_with(f: &mut File, entries: &[ZipEntry]) -> Option<(Vec<String>, Vec<String>)> {
     let raw: Vec<String> = entries.iter().map(|e| e.filename.clone()).collect();
 
     // ElementTree tolerates <!DOCTYPE ...>; roxmltree's default does not.
@@ -705,12 +712,12 @@ pub fn epub_raw(path: &Path) -> Option<(Vec<String>, Vec<String>)> {
 
     let spine = (|| -> Option<Vec<String>> {
         let read_entry = |f: &mut File, name: &str| -> Option<Vec<u8>> {
-            match zip_read_with(f, &entries, name) {
+            match zip_read_with(f, entries, name) {
                 ReadOutcome::Data(b) => Some(b),
                 _ => None,
             }
         };
-        let container_bytes = read_entry(&mut f, "META-INF/container.xml")?;
+        let container_bytes = read_entry(f, "META-INF/container.xml")?;
         let doc = parse_xml(&container_bytes)?;
         let root_el = doc.root_element();
         // container.find(".//{ns}rootfile") — descendants only, doc order
@@ -728,7 +735,7 @@ pub fn epub_raw(path: &Path) -> Option<(Vec<String>, Vec<String>)> {
         }
         let opf_path = posix_normpath(full_path);
         let opf_dir = posix_dirname(&opf_path);
-        let opf_bytes = read_entry(&mut f, &opf_path)?;
+        let opf_bytes = read_entry(f, &opf_path)?;
         let opf = parse_xml(&opf_bytes)?;
 
         // manifest: opf.iter("{ns}item") — includes the root element
@@ -764,7 +771,7 @@ pub fn epub_raw(path: &Path) -> Option<(Vec<String>, Vec<String>)> {
                 None => continue,
             };
             let doc_path = epub_resolve(&opf_dir, &href);
-            let page_bytes = match read_entry(&mut f, &doc_path) {
+            let page_bytes = match read_entry(f, &doc_path) {
                 Some(b) => b,
                 None => continue,
             };
@@ -2139,35 +2146,29 @@ fn archive_suffix(path: &Path) -> String {
 /// Parse *path*'s headers by format — `None` when any step fails (the
 /// failure is not cached; the next request retries).
 fn parse_archive(path: &Path) -> Option<Parsed> {
-    match archive_suffix(path).as_str() {
+    let suffix = archive_suffix(path);
+    match suffix.as_str() {
         ".rar" | ".cbr" => Some(Parsed::Rar {
             names: rar_names(path)?,
         }),
-        ".epub" => {
-            let mut f = File::open(path).ok()?;
-            let entries = match read_cd(&mut f) {
-                Ok(Some(e)) => e,
-                _ => return None,
-            };
-            let epub = epub_raw(path);
-            Some(Parsed::Zip {
-                file: Mutex::new(f),
-                name_idx: name_index(&entries),
-                entries,
-                epub,
-            })
-        }
         _ => {
             let mut f = File::open(path).ok()?;
             let entries = match read_cd(&mut f) {
                 Ok(Some(e)) => e,
                 _ => return None,
             };
+            // .epub derives its spine on the same open fd — no second open
+            // and no window where the file could change mid-parse.
+            let epub = if suffix == ".epub" {
+                epub_raw_with(&mut f, &entries)
+            } else {
+                None
+            };
             Some(Parsed::Zip {
                 file: Mutex::new(f),
                 name_idx: name_index(&entries),
                 entries,
-                epub: None,
+                epub,
             })
         }
     }
