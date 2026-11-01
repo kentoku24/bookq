@@ -2,7 +2,7 @@
 api/reader-sync-cases.json and assert the exact wire frames each link emits.
 
 The same case file is executed by the viewer-rs adapter
-(rust/viewer-rs/tests/golden_reader_sync.rs), so a protocol change must move
+(rust/viewer-rs/src/reader_sync/golden.rs), so a protocol change must move
 both implementations in lockstep — drift fails one side's harness.
 
 Dynamic server values (session/member/link ids, codes, resume tokens,
@@ -247,8 +247,6 @@ def run_case(doc: dict, case: dict) -> None:
                 f"{at}: frame mismatch\n"
                 f"--- want ---\n{json.dumps(want, indent=1)}\n"
                 f"--- got ----\n{json.dumps(got, indent=1)}")
-        elif op == "detach":
-            reg.detach_link(need_link(step["link"]).link)
         elif op == "tick":
             clock[0] += step.get("by", 0)
             reg.tick()
