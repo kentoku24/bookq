@@ -18,6 +18,11 @@ struct FolderLevelView: View {
     @Environment(\.horizontalSizeClass) private var hSize
     @State private var query = ""
     @State private var saveError: String?
+    /// Rightward travel of the root-marker row while the showAll drag is
+    /// armed (web `_bindEntryGesture` translateX parity).
+    @State private var rootDragX: CGFloat = 0
+    /// Transient bottom pill — the showAll toggle feedback toast.
+    @State private var notice: String?
 
     var body: some View {
         if searchExternal {
@@ -65,24 +70,69 @@ struct FolderLevelView: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(.ultraThinMaterial, in: Capsule())
             .padding(.bottom, 14)
-        } else if let saveError {
-            Text(saveError).font(.caption)
+        } else if let t = saveError ?? notice {
+            Text(t).font(.caption)
                 .padding(.horizontal, 12).padding(.vertical, 6)
                 .background(.ultraThinMaterial, in: Capsule())
                 .padding(.bottom, 14)
                 .onAppear {
                     Task {
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        self.saveError = nil
+                        saveError = nil
+                        notice = nil
                     }
                 }
         }
     }
 
+    /// `📁 bookq` — the root marker kept one level above the entries at
+    /// every depth (web `#browse-root-icon` parity). Hidden entry gesture:
+    /// drag it rightward to the screen's right edge to toggle 全表示モード;
+    /// the same gesture exits. Nothing about the row advertises that.
+    @ViewBuilder
+    private var rootMarkerRow: some View {
+        GeometryReader { geo in
+            HStack(spacing: 5) {
+                Text("📁")
+                Text("bookq").font(.subheadline).fontWeight(.semibold)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .offset(x: max(0, rootDragX))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { v in
+                        let dx = v.translation.width, dy = v.translation.height
+                        // Arm only on a clearly rightward move — a vertical
+                        // scroll or left flick releases the gesture instead
+                        // of hijacking it (web arm/disarm parity).
+                        if rootDragX == 0,
+                           !(dx > 12 && dx > abs(dy) * 1.2) { return }
+                        rootDragX = max(0, dx)
+                    }
+                    .onEnded { v in
+                        defer { rootDragX = 0 }
+                        // Web parity: activation waits for release AT the
+                        // right edge (≥90% of the row's full width).
+                        guard v.location.x >= geo.size.width * 0.9 else { return }
+                        visibility.showAll.toggle()
+                        notice = visibility.showAll
+                            ? "全表示モード（再読み込みで解除）"
+                            : "通常モードに戻しました"
+                    }
+            )
+        }
+        .frame(height: 24)
+        .padding(.horizontal, 12)
+    }
+
     @ViewBuilder
     private func grid(folders: [(path: String, node: TreeNode)],
                       selfTiles: [(path: String, node: TreeNode)]) -> some View {
-        ScrollView {
+        VStack(spacing: 0) {
+            rootMarkerRow
+            ScrollView {
             // #folder-count equivalent
             Text("\(folders.count + selfTiles.count) 件")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -147,6 +197,7 @@ struct FolderLevelView: View {
             // stale per-item frames when an existing id shifts cells.
             .id(folders.map(\.path) + selfTiles.map(\.path))
             .padding(8)
+            }
         }
     }
 

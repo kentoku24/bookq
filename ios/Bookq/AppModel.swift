@@ -52,12 +52,35 @@ final class AppModel: ObservableObject {
     private(set) var library: LibraryStore?
 
     init() {
+        // `devicectl process launch -e '{"BOOKQ_SERVER_URL": "..."}'` (or a
+        // `-serverURL <url>` argv pair) injects a URL that only shadows the
+        // stored value for that one session — the next cold start falls
+        // back to the stale one. Writing it through @AppStorage makes the
+        // injected URL persist.
+        if let injected = Self.injectedServerURL(),
+           injected != config.serverURLString {
+            print("[bookq] serverURL injected → \(injected)")
+            config.serverURLString = injected
+        }
         auth.restore()
         if config.baseURL != nil {
             configureAPI()
             phase = .booting
             Task { await boot() }
         }
+    }
+
+    /// `BOOKQ_SERVER_URL` env var or `-serverURL <url>` argv pair, or nil.
+    static func injectedServerURL() -> String? {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_SERVER_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+            return e
+        }
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-serverURL"), i + 1 < args.count
+        else { return nil }
+        let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
     }
 
     /// (Re)build the API client after a server URL change or login.
@@ -149,12 +172,16 @@ final class AppModel: ObservableObject {
     /// Probe the server. 401 → login required; 200 → ready.
     /// `GET /api/v1/version` doubles as the auth probe — v1 has no /me,
     /// identity comes from the access-token JWT claims instead.
+    /// The probe is time-boxed: a dead tailnet host blackholes TCP inside
+    /// the default connection timeout (~75 s), leaving the spinner up with
+    /// no way out. 15 s is far above any healthy probe RTT.
     func boot() async {
         guard let api else { phase = .onboarding; return }
         phase = .booting
         bootError = nil
+        print("[bookq] boot: probing \(api.baseURL)")
         do {
-            _ = try await api.version()
+            _ = try await Self.withTimeout(seconds: 15) { try await api.version() }
             // Account switch — the previous user's per-account state
             // (visibility, offline records) must not bleed through. The
             // store itself knows the previous owner (auth.user is nil
@@ -165,15 +192,53 @@ final class AppModel: ObservableObject {
             phase = .ready
             Task { await progress.syncWithServer() }
             pair.bootResume()
+            print("[bookq] boot: ready")
         } catch APIError.unauthorized {
             phase = .login
+            print("[bookq] boot: unauthorized → login")
         } catch {
             bootError = error.localizedDescription
             // Web parity: a dead server is not a setup problem when we hold
             // a tree snapshot — enter the library offline (SW cache parity)
             // instead of dumping the user on the onboarding screen.
             phase = (library?.tree.isEmpty == false) ? .ready : .onboarding
+            print("[bookq] boot: \(error) → \(phase == .ready ? "ready(offline)" : "onboarding")")
         }
+    }
+
+    /// Timeout marker for the boot probe.
+    private struct BootTimeout: Error {}
+
+    /// Race `work` against a deadline; the loser is cancelled.
+    private static func withTimeout<T: Sendable>(
+        seconds: UInt64,
+        work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                try Task.checkCancellation()
+                throw BootTimeout()
+            }
+            defer { group.cancelAll() }
+            guard let r = try await group.next() else { throw BootTimeout() }
+            return r
+        }
+    }
+
+    /// `bookq://config?server=<url>` — deep link to (re)point the app at a
+    /// server; works through `devicectl device process openURL`, a QR code,
+    /// or a web link. Server switches always log out first, so a hostile
+    /// link can never smuggle a Bearer token to another host.
+    func handleDeepLink(_ url: URL) {
+        guard url.scheme == "bookq", url.host == "config",
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let server = comps.queryItems?.first(where: { $0.name == "server" })?.value,
+              !server.isEmpty else { return }
+        print("[bookq] deep link: server → \(server)")
+        config.serverURLString = server
+        serverURLChanged()
     }
 
     /// Server URL was saved in onboarding/settings → rebuild and probe.

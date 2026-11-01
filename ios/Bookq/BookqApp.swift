@@ -15,6 +15,7 @@ struct BookqApp: App {
                 .environmentObject(model.pair)
                 .environmentObject(model.external)
                 .preferredColorScheme(.dark)
+                .onOpenURL { model.handleDeepLink($0) }
         }
     }
 }
