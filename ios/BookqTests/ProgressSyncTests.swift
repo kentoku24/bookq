@@ -105,6 +105,8 @@ final class ProgressSyncTests: XCTestCase {
         StubURLProtocol.handler = { _ in StubURLProtocol.json([:], status: 404) }
         sync.push(.init(folder: "A", page: 1, total: 10, ts: 1))
         sync.flush()
+        await waitPuts(1)
+        // Drop (not retry) proof needs a window where a retry could have fired.
         try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }

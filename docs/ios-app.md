@@ -38,10 +38,20 @@ xcrun simctl launch <udid> dev.bookq.reader -serverURL http://localhost:8080
 
 ## 認証
 
-`GET /auth/login?native=1` → ASWebAuthenticationSession（システムブラウザ）→
-Google OAuth → `bookq://auth/callback?token=...` コールバック → Bearer トークンを
-Keychain 保存し全 API に `Authorization: Bearer` で付与。TEST_MODE サーバーでは
-Google なしで即トークンを返すため、アプリ側フローは dev 環境でも検証可能。
+RFC 8252 PKCE（`app/auth_token.py` が契約）。`GET /auth/login?client=native`
+`&code_challenge=<S256>&code_challenge_method=S256&state=<csrf>` →
+ASWebAuthenticationSession（システムブラウザ）→ Google OAuth →
+`bookq://auth?code=<one-time>&state=…` コールバック（state 照合必須）→
+`POST /api/v1/auth/token` で `authorization_code` + `code_verifier` を交換し、
+access JWT（1h）+ refresh（30d、rotation 付き）の pair を 1 Keychain item に
+原子保存。全 API に `Authorization: Bearer` で付与し、401 → refresh → 1 回 retry
+（single-flight coalescing）。API セッションは cookie storage を明示的に無効化
+（Bearer 一本）。identity は JWT claims（`sub`/`name`/`picture`）由来の `AuthUser`
+— `/api/me` のような検証 endpoint は存在しない。
+
+native フローは TEST_MODE でも Google OAuth を通る（`?client=native` は
+`_TEST_MODE` をバイパスしない）。dev 環境でのアプリ側フロー検証には
+`AuthManager.testSeed(_:)` フックか実 OAuth が必要。
 
 ## 構成
 
@@ -80,7 +90,7 @@ Google なしで即トークンを返すため、アプリ側フローは dev �
   単一子 flatten、self-tile（直下画像・混合フォルダの「このフォルダを読む」）、
   `N 件` カウンタ、`続きから: <name> p.<page>` ピル。
 - ツリー自動更新: web の fill-poll 相当（15s 間隔・active 時のみ、
-  `?since=<gen>` 差分）。手動「再読み込み」は /api/refresh + 強制再取得。
+  `?since=<gen>` 差分）。手動「再読み込み」は /api/v1/index/refresh + 強制再取得。
 - 隠しルート: GET で読み取り、トップレベルでフィルタ +
   「隠しルートを表示」トグル（web の 全表示 相当）。hide/unhide 操作 UI は Phase 5。
 
@@ -92,14 +102,14 @@ Google なしで即トークンを返すため、アプリ側フローは dev �
 - タップ: idle→即DL / downloading→中断(部分保持→partial) / partial→
   「続きをDL or 削除」シート / complete→確認armed(3s)→再タップで削除。
 - 列挙: leaf フォルダをツリーから展開（親が直接画像を持つ場合は自身も leaf）。
-  各 leaf を `/api/images?folder=` で listing → `/view/`（原本設定時 `/image/`）で
+  各 leaf を `/api/v1/images?folder=` で listing → `/view/`（原本設定時 `/image/`）で
   `Documents/BookqOffline/<enc(folder)>/<name>` へ逐次保存。
   records は leaf 毎に works.json へ永続化 {pageCount,cachedCount,bytes,names,…}。
 - 読み出し: `RemoteImageLoader` が remote URL (`/view/`,`/image/`,`/thumb/`) を
   folder+name に戻してローカル優先（SW cache-first 相当）。Reader の leaf
-  listing も `/api/images` 失敗時は record の names ∩ 実在ファイルで代替。
+  listing も `/api/v1/images` 失敗時は record の names ∩ 実在ファイルで代替。
 - オフライン起動: ツリーは最終成功取得を Application Support に snapshot
-  (`tree-<host>.json`)。/api/me 失敗でも snapshot があれば `.ready` で
+  (`tree-<host>.json`)。boot probe（`/api/v1/version`）失敗でも snapshot があれば `.ready` で
   ライブラリを開き、ダウンロード済み作品を読める（web の SW cache parity）。
   バックグラウンド refresh 失敗はツリーが空の時だけエラー画面にする
   （stale ツリーがある限り閲覧継続 = web の SW NetworkFirst 相当）。
