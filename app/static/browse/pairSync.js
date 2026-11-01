@@ -972,4 +972,39 @@
   } else if (typeof document !== 'undefined') {
     _init();
   }
+
+  // #142 — reader-sync verification hook (test envs only): with
+  // ?pair_report=<cid> in the URL, POST the raw PairController/PairedView
+  // state to the same-origin /api/v1/pair-report endpoint on every change.
+  // The runner reads it back over HTTP — the only structured-state channel
+  // available on iOS Simulator Safari / PWA webclips, which have no
+  // JS-eval automation path. No-op in production (param absent, test flag
+  // off, or the endpoint 404s).
+  (function () {
+    try {
+      if (window.__BOOKQ_TEST_MODE__ !== 'true') return;
+      var cid = new URLSearchParams(location.search).get('pair_report');
+      if (!cid) return;
+      var last = '';
+      setInterval(function () {
+        var pc = null, pv = null;
+        try {
+          pc = window.PairController ? window.PairController.state : null;
+          pv = window.PairedView ? window.PairedView.state() : null;
+        } catch (e) { return; }
+        var body;
+        try {
+          body = JSON.stringify({id: cid, pc: pc, pv: pv,
+                                 solo: !(pv && pv.active)});
+        } catch (e) { return; }
+        if (body === last) return;
+        last = body;
+        fetch('/api/v1/pair-report', {
+          method: 'POST', cache: 'no-store', keepalive: true,
+          headers: {'Content-Type': 'application/json'},
+          body: body,
+        }).catch(function () { last = ''; });
+      }, 400);
+    } catch (e) {}
+  })();
 })();

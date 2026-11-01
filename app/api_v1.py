@@ -45,6 +45,42 @@ async def v1_health():
     return {"status": "ok"}
 
 
+# ── pair-report (#142) ─────────────────────────────────────────────────
+# Test-only state bridge for the dual-reader verification runner: the
+# in-page ?pair_report=<cid> hook (pairSync.js, test mode only) POSTs its
+# raw PairController/PairedView state here so the runner can read back
+# structured state from clients it cannot JS-eval — iOS Simulator Safari
+# and PWA webclips. Same-origin, so it survives https dev envs where an
+# http:// fixture-server POST would be mixed-content-blocked. Deliberately
+# NOT in api/openapi.v1.yaml — it is a test hook, not API contract.
+_PAIR_REPORTS: dict[str, dict] = {}
+
+
+def _pair_report_gate() -> None:
+    from app import auth as _auth
+    if not _auth._TEST_MODE:
+        raise HTTPException(status_code=404)
+
+
+@router.post("/api/v1/pair-report", include_in_schema=False)
+async def v1_post_pair_report(request: Request):
+    _pair_report_gate()
+    body = await request.json()
+    cid = str(body.get("id") or "")[:64]
+    if not cid:
+        raise HTTPException(status_code=400, detail="id required")
+    body.pop("id", None)
+    body["received_at"] = time.time()
+    _PAIR_REPORTS[cid] = body
+    return {"ok": True}
+
+
+@router.get("/api/v1/pair-report", include_in_schema=False)
+async def v1_get_pair_report(id: str = Query(...)):
+    _pair_report_gate()
+    return {"state": _PAIR_REPORTS.get(id)}
+
+
 @router.get("/api/v1/version")
 async def v1_version(request: Request, _user: dict = Depends(require_auth)):
     """Version info."""
