@@ -266,16 +266,52 @@ async def _load_archive_source(
     return data, stat.st_mtime, float(stat.st_size), f"{archive}|{inner}|{stat.st_mtime}|{stat.st_size}"
 
 
+def _open_drafted(data: bytes, width: int):
+    """Image.open *data* with ``draft()`` aimed at the (width, width*4) box.
+
+    ``draft()`` must run after open but before the first load()/thumbnail()
+    — and before ``exif_transpose``, whose internal ``transpose()`` would
+    otherwise trigger a full-size decode on rotated sources. libjpeg then
+    decodes at 1/2–1/8 scale, returning the nearest size still covering the
+    target; for formats without a draft hook (webp/avif/png, i.e. most
+    plugins) it is a no-op returning None. Pillow never drafts below the
+    target, but a plugin that did would leave the frame inside the box —
+    ``thumbnail()`` only shrinks, so such an image is re-opened undrafted.
+    """
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(data))
+    original = im.size
+    try:
+        im.draft("RGB", (width, width * 4))
+    except Exception:
+        # A draft() failure may leave the decoder half-configured —
+        # re-open for a guaranteed clean image rather than guess.
+        return Image.open(io.BytesIO(data))
+    if (
+        im.size != original
+        and im.size[0] <= width
+        and im.size[1] <= width * 4
+    ):
+        # draft() shrank the frame until it fit inside the target box —
+        # the thumb would come out undersized, so decode at full size.
+        return Image.open(io.BytesIO(data))
+    return im
+
+
 def make_thumbnail(data: bytes, width: int) -> bytes:
     """EXIF-aware shrink to *width* (aspect kept) → JPEG quality 70.
 
     Animated sources keep first frame only; non-image bytes raise
-    HTTPException 404 like the ``/image/*`` flow.
+    HTTPException 404 like the ``/image/*`` flow. The decode is
+    ``draft()``-assisted (see _open_drafted): JPEG sources are decoded by
+    libjpeg at 1/2–1/8 scale toward the target box, cutting decode cost on
+    both the cover warm and the on-demand ``/thumb`` paths.
     """
     from PIL import Image, ImageOps
 
     try:
-        im = Image.open(io.BytesIO(data))
+        im = _open_drafted(data, width)
         im = ImageOps.exif_transpose(im)
         im.thumbnail((width, width * 4), Image.LANCZOS)
         if im.mode not in ("RGB", "L"):
