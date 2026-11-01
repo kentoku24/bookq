@@ -1006,7 +1006,8 @@
                   '#pair-change-work', '#pair-picker-back',
                   '#pair-swap', '#pair-leave', '#pair-close',
                   '#spread-shift', '#zone-prev', '#zone-next',
-                  '#pair-code-value'];
+                  '#pair-code-value', '#browse-header', '#menu-btn',
+                  '#search-input'];
       var _lastTap = null;
       document.addEventListener('pointerdown', function (e) {
         _lastTap = {x: e.clientX, y: e.clientY, t: Date.now()};
@@ -1043,10 +1044,13 @@
         } catch (e) {}
         var cv = document.getElementById('pair-code-value');
         var ci = document.getElementById('pair-code-input');
+        var bh = document.getElementById('browse-header');
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
                                  joinCode: ci ? ci.value : null,
+                                 browseHeader: bh
+                                   ? bh.textContent : null,
                                  solo: !(pv && pv.active),
                                  rects: rects, tiles: tiles,
                                  lastTap: _lastTap,

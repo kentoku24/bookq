@@ -697,6 +697,29 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
             else:
                 raise EnvError(
                     f"ensure-idle: {spec.role} stuck at status={st!r}")
+            _ui_close_panel(ctx, spec)
+
+
+def _ui_close_panel(ctx: RunCtx, spec, timeout: float = 8.0) -> None:
+    """Leave the pair panel shut — a still-open overlay swallows the next
+    launcher tap as a backdrop close() and connect() never fires."""
+    deadline = time.monotonic() + timeout * ctx.tscale
+    while time.monotonic() < deadline:
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            time.sleep(0.5)
+            continue
+        rects = rep.get("rects") or {}
+        r = (rects.get("#pair-close") or rects.get("#pair-error-close"))
+        if not (r and r.get("w")):
+            return
+        try:
+            _ui_tap(ctx, spec, ["#pair-close", "#pair-error-close"],
+                    "panel close", tries=3, delay=0.4)
+        except EnvError:
+            return
+        time.sleep(0.5)
 
 
 def _wait_code_dom(page, timeout: float = 15000) -> str:
@@ -778,15 +801,22 @@ _NEEDLE_SEL = {
 }
 # parents that must be open for a control to exist — the rect tapped when
 # the target itself is absent (sidebar → menu, pair panel → strip).
+# Every chain is one level — _ui_tap fires at most one opener per poll,
+# so ["#pair-status", "#menu-btn"] means: use the strip when it has a
+# real rect (browse open), else open the sidebar drawer once via the
+# viewer's フォルダ一覧 button, after which the strip resolves.
 _OPENERS = {
     "#pair-btn": ["#menu-btn"],
-    "#pair-swap": ["#pair-status"], "#pair-leave": ["#pair-status"],
-    "#pair-join-open": ["#pair-status"],
-    "#pair-code-input": ["#pair-join-open"],
-    "#pair-leader-cancel": ["#pair-status"],
-    "#pair-waiting-cancel": ["#pair-status"],
-    "#pair-error-leave": ["#pair-status"],
-    "#pair-join-back": ["#pair-status"],
+    "#pair-status": ["#menu-btn"],
+    "#pair-swap": ["#pair-status", "#menu-btn"],
+    "#pair-leave": ["#pair-status", "#menu-btn"],
+    "#pair-join-open": ["#pair-status", "#menu-btn"],
+    "#pair-code-input": ["#pair-join-open", "#pair-status", "#menu-btn"],
+    "#pair-leader-cancel": ["#pair-status", "#menu-btn"],
+    "#pair-waiting-cancel": ["#pair-status", "#menu-btn"],
+    "#pair-error-leave": ["#pair-status", "#menu-btn"],
+    "#pair-join-back": ["#pair-status", "#menu-btn"],
+    "#browse-header": ["#menu-btn"],
 }
 
 
@@ -852,6 +882,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
     drv = ctx.driver
     off = None
     prev_r = None
+    fired = set()
     for _ in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
@@ -895,29 +926,64 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             return needles[0]
         prev_r = None
         rects = rep.get("rects") or {}
+        # fire ONE opener per poll and each opener at most once per call —
+        # #menu-btn is a toggle, so re-firing it every iteration would
+        # flip the sidebar open/shut forever.
         for n in needles:
-            sel = _NEEDLE_SEL.get(n)
+            sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
             for op_sel in (_OPENERS.get(sel) or []):
+                if op_sel in fired:
+                    continue
                 orr = rects.get(op_sel)
                 if orr and orr["w"] > 0:
+                    fired.add(op_sel)
                     if off is None:
                         off = _ui_offset(ctx, spec)
                     drv.tap(spec, orr["x"] + orr["w"] / 2 + off[0],
                             orr["y"] + orr["h"] / 2 + off[1])
                     break
+            else:
+                continue
+            break
         time.sleep(delay)
     raise EnvError(
         f"ui tap: {what} not found on screen (needles={needles})")
 
 
+def _ui_browse_root(ctx: RunCtx, spec, pops: int = 8) -> bool:
+    """Pop the browse drill-down back to the root grid: #browse-header
+    renders '↩ <name>' inside a subfolder (tap = pop one level) and
+    '📁 フォルダ' at root (no-op). Drawer stays shut while reading, so
+    the header resolves through the #menu-btn opener when needed."""
+    for _ in range(pops):
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            rep = {}
+        hdr = rep.get("browseHeader") or ""
+        if "フォルダ" in hdr:
+            return True
+        try:
+            _ui_tap(ctx, spec, ["#browse-header"], "browse up",
+                    tries=4, delay=0.5)
+        except EnvError:
+            return False
+        time.sleep(0.6)
+    return False
+
+
 def _wait_code_ui(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
+    """The session code from PairController.state (canonical) — NOT the
+    #pair-code-value DOM text, which can still show the previous
+    session's digits when the panel re-opens."""
     deadline = time.monotonic() + timeout * ctx.tscale
     while time.monotonic() < deadline:
         try:
-            c = (ctx._pair_report_state(spec.role).get("code") or "")
+            c = ((ctx._pair_report_state(spec.role).get("pc") or {})
+                 .get("code") or "")
         except AssertError:
             c = ""
-        c = c.strip()
+        c = str(c).strip()
         if len(c) == 6 and c.isdigit():
             return c
         time.sleep(0.6)
@@ -933,6 +999,7 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         _ui_tap(ctx, fsp, _STRIP_NEEDLES, "status strip (follower)")
         _ui_tap(ctx, lsp, _STRIP_NEEDLES, "status strip (leader)")
         _ui_tap(ctx, lsp, ["解除"], "leave button (leader)")
+        _ui_close_panel(ctx, lsp)
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
         code = _wait_code_ui(ctx, lsp)
         _ui_tap(ctx, fsp, ["参加"], "join open (follower)")
@@ -960,7 +1027,10 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
     elif via == "match":
         # No code read needed — the launcher's connect() either creates
         # a waiting session or MATCH-joins an existing one; the poll
-        # below is the assert.
+        # below is the assert. A still-open overlay eats the launcher
+        # tap as a backdrop close, so shut any stray panel first.
+        for spec in (lsp, fsp):
+            _ui_close_panel(ctx, spec)
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
         _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)")
     else:
@@ -970,6 +1040,8 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         and b["status"] == "connected",
         timeout=30, what="paired via real UI")
     ctx.note("paired_both", True, f"UI-sim({via}): both connected")
+    for spec in (lsp, fsp):
+        _ui_close_panel(ctx, spec)
 
 
 def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
@@ -1127,6 +1199,9 @@ def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
         # misses (overlay, late layout shift) gets one retry.
         needles = [n for n in (work.get("tile") or "", work["folder"])
                    if n]
+        # a leftover session/reader leaves the browse grid inside some
+        # subfolder — pop back to root so the work tile is reachable.
+        _ui_browse_root(ctx, lsp)
         _ui_tap(ctx, lsp, needles, f"work tile {work.get('tile')}")
         try:
             l, f = ctx.poll_both(
