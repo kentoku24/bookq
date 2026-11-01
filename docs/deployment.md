@@ -206,6 +206,53 @@ docker rm -f <迷子のコンテナ名>
 
 `./rebuild.sh prd build` / `./rebuild.sh prd deploy` は最後に公開 URL を叩くので、この障害を自動で検出する。
 
+### viewer-rs strangler 導入（#163/#211）
+
+本番への viewer-rs 導入は **compose profile `rs` + `TS_SERVE_TARGET` の 2 段**に分けてある。既定の `./prd.sh up` では viewer-rs コンテナは**起動しない**（profile 外なので `docker compose up` の対象にすらならない）ため、通常運用への影響はゼロ。
+
+構成:
+
+- `docker-compose.yml` の `viewer-rs` サービスは `profiles: ["rs"]` — opt-in 専用。`user-state` volume と downloads（ro）を viewer と共有し、`BOOKQ_UPSTREAM=http://viewer:8080` で未実装パスをフォールスルーする。
+- `tailscale` サービスの `TS_SERVE_TARGET`（未設定 = `http://viewer:8080`、空文字 = serve を外部管理、は entrypoint と同じ `${VAR-default}` セマンティクス）が唯一の traffic 切替点。
+- `./prd.sh up`（= `rebuild.sh prd build`）はその ref に `Dockerfile.viewer-rs` があれば `bookq-prd-viewer-rs:<sha12>` もビルドする — 無い ref への rollback を壊さないための条件付き。
+
+#### 有効化手順
+
+前提: #199 の gateway-contract CI が対象 ref で green であること（全 endpoint の応答形状が契約検証済み）。
+
+```bash
+./prd.sh up --ref <ref>                      # 通常デプロイ（rs イメージも同時ビルド）
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml \
+    --profile rs up -d --no-build viewer-rs  # viewer-rs 起動（まだ traffic は来ない）
+# .env に TS_SERVE_TARGET=http://viewer-rs:8080 を設定
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
+```
+
+serve の向き替えは tailscale コンテナの再作成を伴うため、数秒の断はある。切替後の確認:
+
+```bash
+curl -s https://bookq.<tailnet>.ts.net/api/health        # 200（viewer-rs 経由で proxy→viewer）
+docker compose --profile rs logs -f viewer-rs          # proxy/native の振分ログ
+docker compose ps -q tailscale | xargs docker exec tailscale serve status
+```
+
+#### endpoint 単位 rollout
+
+`.env` の `BOOKQ_RS_NATIVE` に native 化する endpoint 名をカンマ区切りで追加し、`docker compose --profile rs up -d viewer-rs` で再作成する。空 = 全 proxy（traffic-shape のみ検証する段階）。1 endpoint ずつ増やし、各段階で公開 URL + 実画面を確認する。native 側が契約外を返した場合は該当 endpoint だけリストから外して戻せる。
+
+#### rollback
+
+完全切り戻しは設定のみで完結する（コード・イメージの変更は不要）:
+
+```bash
+# .env の TS_SERVE_TARGET を削除（または http://viewer:8080 に戻す）
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
+# 任意: viewer-rs 自体も止める場合
+docker compose --profile rs stop viewer-rs
+```
+
+切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions は per-process で揮発**（py 側も in-memory dict で再起動で消える既存仕様）のため、切替/切戻しの瞬間に「どこまで読んだか」は失われる — ユーザー影響として許容する判断（最終ページは手動で戻れる、永続破壊ではない）。
+
 ---
 
 ## オフライン / PWA 配信

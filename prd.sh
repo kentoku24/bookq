@@ -110,17 +110,20 @@ cmd_up() {
     # worktree ガードはこのスクリプト（prd.sh）の責務で、上の case で済ませている。
     # 二段化が必須: read ... <<< "$(...)" の一発形は、コマンド置換の失敗が
     # read の成功にマスクされ set -e が発火しない。
-    local out viewer_tag sidecar_tag
+    local out viewer_tag sidecar_tag rs_tag
     out="$("$SCRIPT_DIR/rebuild.sh" prd build "$sha")" || die "prd build に失敗しました（ref=${ref}）"
-    read viewer_tag sidecar_tag <<< "$out"
+    read viewer_tag sidecar_tag rs_tag <<< "$out"
     export PRD_VIEWER_IMAGE="$viewer_tag" PRD_TAILSCALE_IMAGE="$sidecar_tag" PRD_EXPECT_SHA="${sha:0:12}"
+    # Dockerfile.viewer-rs がその ref にあったときのみ pin（無い ref への
+    # rollback を壊さない）。空なら prd-image.yml の :- 既定値が効く。
+    [ -n "$rs_tag" ] && export PRD_RS_IMAGE="$rs_tag"
     "$SCRIPT_DIR/rebuild.sh" prd deploy
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "✅ bookq (本番) が動いています"
     echo "   $(base_url)"
-    echo "   今回: $viewer_tag / $sidecar_tag ($sha12)"
+    echo "   今回: $viewer_tag / $sidecar_tag${rs_tag:+ / $rs_tag} ($sha12)"
     echo "   前回: ${prev_image:-（なし・初回デプロイの可能性）}"
     echo ""
     echo "戻す場合（自動ロールバックはしません）:"

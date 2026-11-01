@@ -295,6 +295,15 @@ final class OfflineStore: ObservableObject {
         }
     }
 
+    /// Task.cancel() mid-`URLSession.data(for:)` surfaces as
+    /// `URLError.cancelled`, not `CancellationError` — both mean "user
+    /// aborted" for the partial-keep path.
+    private func isAbort(_ e: Error) -> Bool {
+        if e is CancellationError { return true }
+        let n = e as NSError
+        return n.domain == NSURLErrorDomain && n.code == NSURLErrorCancelled
+    }
+
     private func runDownload(path: String, leaves: [String]) async {
         defer {
             tasks[path] = nil
@@ -353,16 +362,19 @@ final class OfflineStore: ObservableObject {
                     }
                     putRecord(leaf: leaf, pageCount: names.count, cached: cached,
                               bytes: bytes, thumb: names.first, names: names)
-                } catch let e as CancellationError {
-                    if cached > 0 {
-                        putRecord(leaf: leaf, pageCount: names.count, cached: cached,
-                                  bytes: bytes, thumb: names.first, names: names)
+                } catch {
+                    if isAbort(error) {
+                        if cached > 0 {
+                            putRecord(leaf: leaf, pageCount: names.count, cached: cached,
+                                      bytes: bytes, thumb: names.first, names: names)
+                        }
+                        throw CancellationError()
                     }
-                    throw e
+                    throw error
                 }
             }
             showToast("DL完了")
-        } catch is CancellationError {
+        } catch let e where isAbort(e) {
             // aborted — partial records already written
         } catch let e as NSError where e.domain == NSCocoaErrorDomain
                     && e.code == NSFileWriteOutOfSpaceError {
