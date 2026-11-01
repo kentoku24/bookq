@@ -8,7 +8,7 @@
 
 use axum::{
     body::Body,
-    extract::{Query, Request, State},
+    extract::{FromRequestParts, Query, Request, State},
     http::{header, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -30,6 +30,7 @@ use std::path::PathBuf;
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
 mod folders;
+mod reader_sync;
 mod search;
 mod serve;
 mod state;
@@ -106,6 +107,8 @@ pub(crate) struct AppState {
     /// `BOOKQ_GIT_SHA` / `BOOKQ_BUILD_DATE` — `/api/v1/version` fields.
     pub(crate) git_sha: String,
     pub(crate) build_date: String,
+    /// M8: dual-reader session registry (`app.state.reader_sync`).
+    pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -564,6 +567,137 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
     }
 }
 
+// ── M8: /ws/reader-sync ────────────────────────────────────────────────────
+
+/// Native `/ws/reader-sync` — gated by "reader-sync"; a non-upgrade or
+/// gated-out request goes upstream so Python's own socket serves it.
+/// Unauthenticated handshakes get starlette's pre-accept close → HTTP 403.
+async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("reader-sync") || !is_upgrade(&req) {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(user) = auth::resolve_ws_user(
+        req.headers(),
+        st.native.test_mode,
+        &st.secret_key,
+        &st.allowed_emails,
+    ) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let (mut parts, _body) = req.into_parts();
+    match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &st).await {
+        Ok(wsu) => {
+            let st2 = st.clone();
+            wsu.on_upgrade(move |socket| reader_sync_conn(socket, st2, user))
+        }
+        Err(rej) => rej.into_response(),
+    }
+}
+
+/// One link per connection: register → drain task → receive loop → detach.
+/// Registry-initiated closes come through the drain's watch channel.
+async fn reader_sync_conn(
+    socket: axum::extract::ws::WebSocket,
+    st: AppState,
+    user: serde_json::Value,
+) {
+    use axum::extract::ws::Message;
+    use futures_util::StreamExt;
+    let (ws_tx, mut ws_rx) = socket.split();
+    let (outq_tx, outq_rx) = tokio::sync::mpsc::channel(st.registry.send_queue_max());
+    let (close_tx, close_rx) = tokio::sync::watch::channel(None);
+    let reg = st.registry.clone();
+    let link = reader_sync::Link::new(
+        outq_tx,
+        close_tx,
+        Some(user),
+        std::time::Instant::now(),
+        reg.heartbeat_interval(),
+    );
+    let bulk = link.bulk.clone();
+    let link_id = {
+        let mut g = reg.inner.lock().await;
+        g.register_link(link, reg.heartbeat_interval())
+    };
+    let drain = tokio::spawn(reader_sync_drain(ws_tx, outq_rx, bulk, close_rx));
+    let reg2 = reg.clone();
+    let lid = link_id.clone();
+    let mut recv = tokio::spawn(async move {
+        while let Some(msg) = ws_rx.next().await {
+            match msg {
+                Ok(Message::Text(t)) => reg2.handle_raw(&lid, t.as_bytes()).await,
+                Ok(Message::Binary(b)) => reg2.handle_raw(&lid, &b).await,
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+    let mut drain = drain;
+    tokio::select! {
+        _ = &mut recv => { drain.abort(); }
+        _ = &mut drain => { recv.abort(); }
+    }
+    reg.detach_link(&link_id).await;
+}
+
+/// Outbound pump: control frames + bulk (manifest) blocks + registry-close.
+/// Close is polled first (biased) so it bypasses queued frames like the
+/// Python drain-cancel + socket-close path.
+async fn reader_sync_drain(
+    mut ws_tx: futures_util::stream::SplitSink<
+        axum::extract::ws::WebSocket,
+        axum::extract::ws::Message,
+    >,
+    mut outq: tokio::sync::mpsc::Receiver<reader_sync::OutItem>,
+    bulk: std::sync::Arc<std::sync::Mutex<reader_sync::BulkQ>>,
+    mut close: tokio::sync::watch::Receiver<Option<(u16, String)>>,
+) {
+    use axum::extract::ws::{CloseFrame, Message};
+    use futures_util::SinkExt;
+    loop {
+        tokio::select! {
+            biased;
+            changed = close.changed() => {
+                match changed {
+                    Ok(()) => {
+                        let val = close.borrow().clone();
+                        if let Some((code, reason)) = val {
+                            let _ = ws_tx
+                                .send(Message::Close(Some(CloseFrame {
+                                    code,
+                                    reason: reason.into(),
+                                })))
+                                .await;
+                        }
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            item = outq.recv() => {
+                match item {
+                    None => break,
+                    Some(reader_sync::OutItem::Text(raw)) => {
+                        if ws_tx.send(Message::Text(raw.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(reader_sync::OutItem::Bulk) => {
+                        bulk.lock().unwrap().pending = false;
+                        loop {
+                            let raw = { bulk.lock().unwrap().pop() };
+                            let Some(raw) = raw else { break };
+                            if ws_tx.send(Message::Text(raw.into())).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -591,6 +725,11 @@ async fn main() {
         .collect();
 
     let index = std::sync::Arc::new(folders::IndexState::new());
+    let registry = reader_sync::Registry::new(index.clone(), downloads.clone());
+    {
+        let reg_ticker = registry.clone();
+        tokio::spawn(async move { reg_ticker.run_ticker().await });
+    }
     let state_dir = PathBuf::from(
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
@@ -606,6 +745,7 @@ async fn main() {
         positions: std::sync::Arc::new(state::Positions::default()),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
+        registry: registry.clone(),
         thumb_cache: PathBuf::from(
             std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
         ),
@@ -643,6 +783,9 @@ async fn main() {
         .route("/api/v1/health", any(api_health))
         .route("/api/v1/version", any(api_version))
         .route("/api/v1/index/refresh", any(api_refresh))
+        // M8: dual-reader sync socket — native under "reader-sync" gate;
+        // otherwise the upgrade is spliced to Python unchanged.
+        .route("/ws/reader-sync", any(reader_sync_ws))
         // /api/v1/auth/token is proxy-only by design: its auth-code and
         // refresh stores are written by the OAuth callback in app/auth.py
         // (app.state); sharing them natively would require touching the

@@ -125,13 +125,13 @@ fn claims_valid(claims: &serde_json::Map<String, Value>, now: f64) -> bool {
     true
 }
 
-/// `_user_from_bearer` on an already-extracted token.
-/// `allowlist` is `ALLOWED_EMAILS` (trim+lowercase, empties dropped).
-pub fn validate_bearer(
+/// The validated JWT claims object — shared by `validate_bearer` and the
+/// WebSocket handshake's `bearer_user`.
+fn bearer_claims(
     token: &str,
     secret: &str,
     allowlist: &HashSet<String>,
-) -> Option<Identity> {
+) -> Option<serde_json::Map<String, Value>> {
     if secret.is_empty() {
         return None;
     }
@@ -148,15 +148,24 @@ pub fn validate_bearer(
         return None;
     }
     let claims: Value = serde_json::from_slice(&b64url(p)?).ok()?;
-    let obj = claims.as_object()?;
-    if !claims_valid(obj, now_secs_f64()) {
+    let obj = claims.as_object()?.clone();
+    if !claims_valid(&obj, now_secs_f64()) {
         return None;
     }
     let email = obj.get("sub")?.as_str()?.to_lowercase();
     if email.is_empty() || !allowlist.contains(&email) {
         return None;
     }
-    Some(Identity { email })
+    Some(obj)
+}
+
+/// `_user_from_bearer` on an already-extracted token.
+/// `allowlist` is `ALLOWED_EMAILS` (trim+lowercase, empties dropped).
+pub fn validate_bearer(token: &str, secret: &str, allowlist: &HashSet<String>) -> Option<Identity> {
+    let claims = bearer_claims(token, secret, allowlist)?;
+    Some(Identity {
+        email: claims.get("sub")?.as_str()?.to_lowercase(),
+    })
 }
 
 /// Resolve the caller for a native handler. `test_mode` returns the mock
@@ -192,6 +201,130 @@ pub fn resolve(
         Some(id) => Caller::User(id),
         None => Caller::Delegate,
     }
+}
+
+// ── WebSocket handshake auth (reader_sync) ────────────────────────────────
+//
+// `SessionMiddleware` cookie verification — starlette signs
+// `base64url(json) + "." + ts_b64` with itsdangerous.TimestampSigner:
+// salt `itsdangerous.Signer`, key derivation `django-concat`
+// (`SHA1(salt + b"signer" + secret)` is the HMAC-SHA1 key), signature
+// `b64url(HMAC-SHA1(key, payload + "." + ts))`. main.py overrides the
+// default 14-day max_age with `86400 * 7`.
+
+pub const SESSION_MAX_AGE: i64 = 86400 * 7;
+
+fn now_secs_i64() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The raw `session` cookie value, if present.
+fn session_cookie_value(headers: &HeaderMap) -> Option<String> {
+    for v in headers.get_all(header::COOKIE) {
+        let Ok(v) = v.to_str() else { continue };
+        for kv in v.split(';') {
+            if let Some(rest) = kv.trim().strip_prefix("session=") {
+                return Some(rest.trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `TimestampSigner(secret).unsign(data, max_age)` → the session payload
+/// bytes (the `{"user": {...}}` JSON document). Future timestamps and ages
+/// over max_age are rejected, matching itsdangerous.
+pub fn unsign_session(secret: &str, data: &str, max_age: i64, now: i64) -> Option<Vec<u8>> {
+    use sha1::{Digest, Sha1};
+    let mut parts = data.rsplitn(3, '.');
+    let sig_b64 = parts.next()?;
+    let ts_b64 = parts.next()?;
+    let value_b64 = parts.next()?;
+    let mut kd = Sha1::new();
+    kd.update(b"itsdangerous.Signer");
+    kd.update(b"signer");
+    kd.update(secret.as_bytes());
+    let key = kd.finalize();
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key).expect("hmac key");
+    mac.update(value_b64.as_bytes());
+    mac.update(b".");
+    mac.update(ts_b64.as_bytes());
+    let sig = b64url(sig_b64)?;
+    if mac.verify_slice(&sig).is_err() {
+        return None;
+    }
+    let ts_b = b64url(ts_b64)?;
+    if ts_b.len() > 8 {
+        return None;
+    }
+    let mut ts: u64 = 0;
+    for &b in &ts_b {
+        ts = (ts << 8) | b as u64;
+    }
+    let age = now - ts as i64;
+    if age > max_age || age < 0 {
+        return None;
+    }
+    b64url(value_b64)
+}
+
+/// `user_from_connection` for the WS handshake: TEST_MODE mock → signed
+/// session cookie's `user` → Bearer (returning the py-shaped
+/// {email,name,picture} dict — member names come from `name`).
+pub fn resolve_ws_user(
+    headers: &HeaderMap,
+    test_mode: bool,
+    secret: &str,
+    allowlist: &HashSet<String>,
+) -> Option<Value> {
+    if test_mode {
+        let mut u = serde_json::Map::new();
+        u.insert("email".into(), Value::String(TEST_USER_EMAIL.into()));
+        u.insert("name".into(), Value::String("Test User".into()));
+        u.insert("picture".into(), Value::String("".into()));
+        return Some(Value::Object(u));
+    }
+    if let Some(raw) = session_cookie_value(headers) {
+        if let Some(payload) = unsign_session(secret, &raw, SESSION_MAX_AGE, now_secs_i64()) {
+            if let Ok(session) = serde_json::from_slice::<Value>(&payload) {
+                match session.get("user") {
+                    Some(u) if !u.is_null() => return Some(u.clone()),
+                    _ => {}
+                }
+            }
+        }
+        // Invalid or userless session → falls to Bearer (py: session={}).
+    }
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (scheme, token) = match auth.split_once(' ') {
+        Some((s, t)) => (s, t),
+        None => (auth, ""),
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
+        return None;
+    }
+    let claims = bearer_claims(token.trim(), secret, allowlist)?;
+    let email = claims.get("sub")?.as_str()?.to_lowercase();
+    let mut u = serde_json::Map::new();
+    u.insert("email".into(), Value::String(email.clone()));
+    let name = claims.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    u.insert(
+        "name".into(),
+        Value::String(if name.is_empty() {
+            email.clone()
+        } else {
+            name.to_string()
+        }),
+    );
+    let picture = claims.get("picture").and_then(|v| v.as_str()).unwrap_or("");
+    u.insert("picture".into(), Value::String(picture.to_string()));
+    Some(Value::Object(u))
 }
 
 #[cfg(test)]
@@ -314,5 +447,56 @@ mod tests {
             );
             assert!(validate_bearer(&t, SECRET, &allowlist()).is_some(), "{alg}");
         }
+    }
+}
+
+#[cfg(test)]
+mod ws_tests {
+    use super::*;
+
+    // Golden itsdangerous.TimestampSigner vector — generated by
+    // TimestampSigner("ci-not-a-secret") at ts=1700000000, verified by
+    // unsign(max_age=604800) in a Python container.
+    const COOKIE: &str = "eyJ1c2VyIjp7ImVtYWlsIjoiYUBleGFtcGxlLmNvbSIsIm5hbWUiOiJBbGljZSIsInBpY3R1cmUiOiJwIn0sImV4dHJhIjoxfQ.ZVPxAA.SMJzSX9igsW-JCDo_GlMdykBDtA";
+
+    #[test]
+    fn session_cookie_verifies() {
+        let payload =
+            unsign_session("ci-not-a-secret", COOKIE, SESSION_MAX_AGE, 1700001000).unwrap();
+        let session: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(session["user"]["email"], "a@example.com");
+        assert_eq!(session["user"]["name"], "Alice");
+    }
+
+    #[test]
+    fn session_cookie_rejects_tamper_wrong_key_and_expiry() {
+        assert!(unsign_session("wrong-secret", COOKIE, SESSION_MAX_AGE, 1700001000).is_none());
+        let mut tampered = COOKIE.to_string();
+        tampered.replace_range(tampered.len() - 1.., "B");
+        assert!(
+            unsign_session("ci-not-a-secret", &tampered, SESSION_MAX_AGE, 1700001000).is_none()
+        );
+        let mut tampered_mid = COOKIE.to_string();
+        tampered_mid.replace_range(5..6, "x");
+        assert!(unsign_session(
+            "ci-not-a-secret",
+            &tampered_mid,
+            SESSION_MAX_AGE,
+            1700001000
+        )
+        .is_none());
+        // past max_age and future timestamps both fail (itsdangerous).
+        assert!(unsign_session(
+            "ci-not-a-secret",
+            COOKIE,
+            SESSION_MAX_AGE,
+            1700000000 + 86400 * 7 + 1
+        )
+        .is_none());
+        assert!(unsign_session("ci-not-a-secret", COOKIE, SESSION_MAX_AGE, 1699990000).is_none());
+        // truncated / malformed structures never panic
+        assert!(unsign_session("ci-not-a-secret", "a.b", SESSION_MAX_AGE, 0).is_none());
+        assert!(unsign_session("ci-not-a-secret", "", SESSION_MAX_AGE, 0).is_none());
+        assert!(unsign_session("ci-not-a-secret", "x.y.z", SESSION_MAX_AGE, 0).is_none());
     }
 }
