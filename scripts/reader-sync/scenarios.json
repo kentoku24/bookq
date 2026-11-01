@@ -1237,6 +1237,159 @@
      "op": "leave"
     }
    ]
+  },
+  {
+   "name": "sim_ui_match_pair_turns",
+   "drivers": [
+    "simulator"
+   ],
+   "surface": "ui",
+   "requires": [
+    "ui"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair",
+     "via": "match"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "turn",
+     "delta": -1
+    },
+    {
+     "op": "swap_sides"
+    },
+    {
+     "op": "screenshot",
+     "label": "sim-ui-reading"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "sim_ui_code_pair",
+   "drivers": [
+    "simulator"
+   ],
+   "surface": "ui",
+   "requires": [
+    "ui"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "pair",
+     "via": "code"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "screenshot",
+     "label": "sim-ui-code-repair"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "sim_ui_suspend_resume",
+   "drivers": [
+    "simulator"
+   ],
+   "surface": "ui",
+   "requires": [
+    "ui"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "suspend",
+     "actor": "follower"
+    },
+    {
+     "op": "activate",
+     "actor": "follower"
+    },
+    {
+     "op": "turn",
+     "delta": 1
+    },
+    {
+     "op": "screenshot",
+     "label": "sim-ui-resumed"
+    },
+    {
+     "op": "leave"
+    }
+   ]
+  },
+  {
+   "name": "sim_ui_reload_resume",
+   "drivers": [
+    "simulator"
+   ],
+   "surface": "ui",
+   "requires": [
+    "ui"
+   ],
+   "work": {
+    "discover": true,
+    "minPages": 6
+   },
+   "ops": [
+    {
+     "op": "pair"
+    },
+    {
+     "op": "open_work"
+    },
+    {
+     "op": "reload",
+     "actor": "follower",
+     "allow_solo": true
+    },
+    {
+     "op": "screenshot",
+     "label": "sim-ui-reloaded"
+    },
+    {
+     "op": "leave",
+     "actor": "leader"
+    }
+   ]
   }
  ]
 }

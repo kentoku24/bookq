@@ -300,3 +300,45 @@ def test_folder_visibility_v1_put_roundtrip(server):
     )
     assert status == 200
     assert "long" not in body["hiddenRoots"]
+
+
+# ── pair-report (test-only #142 bridge) ──────────────────────────────
+
+
+def test_pair_report_post_get_roundtrip(server):
+    payload = {"id": "pytest-bridge", "pc": {"phase": "reading"}, "pv": {"left": "1"}}
+    status, body, _ = _req(server, "POST", "/api/v1/pair-report", payload)
+    assert status == 200
+    assert body == {"ok": True}
+
+    status, body, _ = _get(server, "/api/v1/pair-report?id=pytest-bridge")
+    assert status == 200
+    state = body["state"]
+    assert state["pc"] == {"phase": "reading"}
+    assert state["pv"] == {"left": "1"}
+    assert "id" not in state            # id is the key, not part of the state
+    assert state["received_at"] > 0     # stamped by the endpoint
+
+
+def test_pair_report_unknown_id_returns_null_state(server):
+    status, body, _ = _get(server, "/api/v1/pair-report?id=never-posted")
+    assert status == 200
+    assert body == {"state": None}
+
+
+def test_pair_report_post_requires_id(server):
+    status, _, _ = _req(server, "POST", "/api/v1/pair-report", {"pc": {}})
+    assert status == 400
+
+
+def test_pair_report_gate_blocks_non_test_mode(monkeypatch):
+    """Outside test mode the endpoint must not exist (404)."""
+    from fastapi import HTTPException
+
+    from app import auth
+    from app.api_v1 import _pair_report_gate
+
+    monkeypatch.setattr(auth, "_TEST_MODE", False)
+    with pytest.raises(HTTPException) as ei:
+        _pair_report_gate()
+    assert ei.value.status_code == 404

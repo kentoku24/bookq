@@ -545,7 +545,7 @@ body.landscape-single #spread-shift{display:none}
 #pair-qr{align-self:center;border-radius:8px}
 .pair-err{color:#ffb4b4}
 #pair-scan-video{width:100%;max-height:45vh;aspect-ratio:4/3;object-fit:cover;border-radius:10px;background:#000}
-#pair-session-info{text-align:center}
+#pair-session-info{text-align:center;white-space:nowrap;min-height:1.5em}
 @media (prefers-reduced-motion:reduce){
   #pair-btn{transition-duration:0.01ms !important}
   #pair-panel button{transition-duration:0.01ms !important}

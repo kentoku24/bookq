@@ -45,6 +45,65 @@ async def v1_health():
     return {"status": "ok"}
 
 
+# ── pair-report (#142) ─────────────────────────────────────────────────
+# Test-only state bridge for the dual-reader verification runner: the
+# in-page ?pair_report=<cid> hook (pairSync.js, test mode only) POSTs its
+# raw PairController/PairedView state here so the runner can read back
+# structured state from clients it cannot JS-eval — iOS Simulator Safari
+# and PWA webclips. Same-origin, so it survives https dev envs where an
+# http:// fixture-server POST would be mixed-content-blocked. Deliberately
+# NOT in api/openapi.v1.yaml — it is a test hook, not API contract.
+_PAIR_REPORTS: dict[str, dict] = {}
+
+
+def _pair_report_gate() -> None:
+    from app import auth as _auth
+    if not _auth._TEST_MODE:
+        raise HTTPException(status_code=404)
+
+
+@router.post("/api/v1/pair-report", include_in_schema=False)
+async def v1_post_pair_report(request: Request):
+    _pair_report_gate()
+    body = await request.json()
+    cid = str(body.get("id") or "")[:64]
+    if not cid:
+        raise HTTPException(status_code=400, detail="id required")
+    body.pop("id", None)
+    # Parked tabs from a previous run keep their stale hook POSTing the
+    # same client id — keep only the newest generation (rpt_gen in the
+    # launch URL). Gen-less posts (old hooks) lose to any gen'd report.
+    gen = int(body.get("gen") or 0)
+    cur = _PAIR_REPORTS.get(cid)
+    if cur is not None and gen < int(cur.get("gen") or 0):
+        return {"ok": True, "dropped": True}
+    body["received_at"] = time.time()
+    _PAIR_REPORTS[cid] = body
+    return {"ok": True}
+
+
+@router.get("/api/v1/pair-report", include_in_schema=False)
+async def v1_get_pair_report(id: str = Query(...)):
+    _pair_report_gate()
+    return {"state": _PAIR_REPORTS.get(id)}
+
+
+@router.post("/api/v1/pair-reset", include_in_schema=False)
+async def v1_post_pair_reset(request: Request):
+    """End every live reader-sync session. A simulator client that went
+    idle by link-drop never LEAVEd — its server-side session lingers in
+    the resume window and hijacks the next MATCH (the new connect joins
+    a stale 'reading' session instead of creating a fresh waiter)."""
+    _pair_report_gate()
+    rs = getattr(request.app.state, "reader_sync", None)
+    n = 0
+    if rs is not None:
+        for session in list(rs.sessions.values()):
+            rs._end_session(session, "reset")
+            n += 1
+    return {"ended": n}
+
+
 @router.get("/api/v1/version")
 async def v1_version(request: Request, _user: dict = Depends(require_auth)):
     """Version info."""

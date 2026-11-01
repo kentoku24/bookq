@@ -166,47 +166,116 @@ class RunCtx:
             f"leader={json.dumps(la, ensure_ascii=False)[:250] if la else None} "
             f"follower={json.dumps(fa, ensure_ascii=False)[:250] if fa else None}")
 
-    # -- ui-surface observation (chrome driver only) -------------------
+    # -- ui-surface observation ----------------------------------------
+    # chrome reads PairController/PairedView over page.evaluate; surfaces
+    # without JS-eval (iOS Simulator Safari / PWA webclip) get the same
+    # shape through the in-page ?pair_report=<cid> hook, which POSTs the
+    # raw {pc,pv,solo} to the same-origin test endpoint (#142).
 
     def _ui_state(self, role: str) -> dict:
         spec = self.clients[role]
-        if spec.page is None:
-            raise UnsupportedError("ui surface needs the chrome driver")
-        d = spec.page.evaluate(
-            """() => {
-              const pc = window.PairController
-                ? window.PairController.state : {status: 'missing'};
-              const pv = window.PairedView ? window.PairedView.state() : null;
-              return {pc: pc, pv: pv,
-                      solo: !(pv && pv.active)};
-            }""")
-        pc, pv = d.get("pc") or {}, d.get("pv") or {}
-        return {
-            "status": pc.get("status"), "phase": pc.get("phase"),
-            "sessionId": pc.get("sessionId"), "role": pc.get("role")
-                or (pv or {}).get("role"),
-            "side": pc.get("side") or (pv or {}).get("side"),
-            "transport": pc.get("transport"),
-            "spreadId": pc.get("spreadId") or (pv or {}).get("spreadId"),
-            "revision": pc.get("revision") if pc.get("revision") is not None
-                else (pv or {}).get("revision"),
-            "workEpoch": pc.get("workEpoch") if pc.get("workEpoch") is not None
-                else (pv or {}).get("workEpoch"),
-            "manifestVersion": pc.get("manifestVersion")
-                or (pv or {}).get("manifestVersion"),
-            "presence": pc.get("presence") or {},
-            "pending": pc.get("joinRequest"),
-            "error": pc.get("error"), "endReason": pc.get("endReason"),
-            "applied": {"index": (pv or {}).get("spreadIndex", -1),
-                        "spreadId": (pv or {}).get("spreadId"),
-                        "leaderSide": (pv or {}).get("leaderSide"),
-                        "total": (pv or {}).get("spreadTotal")},
-            "view": {"ref": (pv or {}).get("ref"),
-                     "anchorRef": (pv or {}).get("anchorRef"),
-                     "side": (pv or {}).get("side"),
-                     "active": (pv or {}).get("active"),
-                     "blank": (pv or {}).get("blank")},
-        }
+        if spec.page is not None:
+            d = spec.page.evaluate(
+                """() => {
+                  const pc = window.PairController
+                    ? window.PairController.state : {status: 'missing'};
+                  const pv = window.PairedView
+                    ? window.PairedView.state() : null;
+                  return {pc: pc, pv: pv,
+                          solo: !(pv && pv.active)};
+                }""")
+        else:
+            d = self._pair_report_state(role)
+        return _normalize_ui_state(d)
+
+    def _pair_report_state(self, role: str) -> dict:
+        cid = self.clients[role].id
+        try:
+            d = _api_json(self, "/api/v1/pair-report?id=" + cid,
+                          timeout=10)
+        except Exception as e:
+            raise AssertError(
+                f"pair-report[{cid}]: endpoint read failed: {e}")
+        st = (d or {}).get("state")
+        if st is None:
+            raise AssertError(
+                f"pair-report[{cid}]: no report yet — is the page open "
+                "with ?pair_report= ?")
+        spec = self.clients[role]
+        # A tab-focus loss (openurl reusing a stray same-host tab,
+        # Safari parking the bookq page in the background) freezes the
+        # page's JS — reports go stale. Refocus the bookq tab once per
+        # ~25s; never while a suspend op froze this client's net on
+        # purpose (spec.net_frozen) — staleness IS the test there.
+        age = time.time() - float(st.get("received_at") or 0)
+        if age < 15:
+            spec._refocus_n = 0
+        elif (not getattr(spec, "net_frozen", False)
+              and time.monotonic() - getattr(spec, "_refocus_at", 0) > 25):
+            spec._refocus_at = time.monotonic()
+            spec._refocus_n = getattr(spec, "_refocus_n", 0) + 1
+            self.note("ui_refocus", True,
+                      f"{role} report stale {age:.0f}s — refocus "
+                      f"attempt {spec._refocus_n}")
+            from verify_drivers import _simctl
+            try:
+                if spec._refocus_n >= 3:    # openurl keeps missing the tab
+                    _simctl("terminate", spec.udid, "com.apple.mobilesafari",
+                            check=False)
+                    time.sleep(1.0)
+                _simctl("openurl", spec.udid, spec.launch_url)
+            except Exception:
+                pass
+        return st
+
+
+def _report_fresh(ctx: "RunCtx", role: str, max_age: float) -> bool:
+    """True when the client's pair-report is live (posted within
+    max_age seconds). Goes through _pair_report_state so a stale
+    report also gets the refocus/terminate heal's side effect."""
+    try:
+        st = ctx._pair_report_state(role)
+    except AssertError:
+        return False
+    try:
+        return time.time() - float(st.get("received_at") or 0) <= max_age
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_ui_state(d: dict) -> dict:
+    """{pc,pv,solo} (from page.evaluate or the pair-report hook) -> the
+    canonical state dict every ui-surface assert consumes."""
+    pc, pv = d.get("pc") or {}, d.get("pv") or {}
+    return {
+        "status": pc.get("status"), "phase": pc.get("phase"),
+        "sessionId": pc.get("sessionId"), "role": pc.get("role")
+            or (pv or {}).get("role"),
+        "side": pc.get("side") or (pv or {}).get("side"),
+        "transport": pc.get("transport"),
+        "spreadId": pc.get("spreadId") or (pv or {}).get("spreadId"),
+        "revision": pc.get("revision") if pc.get("revision") is not None
+            else (pv or {}).get("revision"),
+        "workEpoch": pc.get("workEpoch") if pc.get("workEpoch") is not None
+            else (pv or {}).get("workEpoch"),
+        "manifestVersion": pc.get("manifestVersion")
+            or (pv or {}).get("manifestVersion"),
+        "presence": pc.get("presence") or {},
+        "pending": pc.get("joinRequest"),
+        "error": pc.get("error"), "endReason": pc.get("endReason"),
+        "applied": {"index": (pv or {}).get("spreadIndex", -1),
+                    "spreadId": (pv or {}).get("spreadId"),
+                    "leaderSide": (pv or {}).get("leaderSide"),
+                    "total": (pv or {}).get("spreadTotal"),
+                    "revision": pc.get("revision")
+                        if pc.get("revision") is not None
+                        else (pv or {}).get("revision")},
+        "view": {"ref": (pv or {}).get("ref"),
+                 "anchorRef": (pv or {}).get("anchorRef"),
+                 "side": (pv or {}).get("side"),
+                 "active": (pv or {}).get("active"),
+                 "blank": (pv or {}).get("blank")},
+    }
 
 
 # ────────────────────────── shared asserts ───────────────────────────
@@ -604,41 +673,633 @@ def op_pair(ctx: RunCtx, op: dict) -> None:
 
 
 def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
-    """Real-app pairing UI surface (S09 PairController wiring)."""
+    """Real-app pairing UI surface — the PRODUCTION gesture (#142):
+    sidebar launcher (#pair-btn, in #sidebar-header) → one-tap
+    connect() → MATCH auto-join, or the code-entry view reached through
+    an ended panel. Chrome drives the DOM; the simulator driver walks
+    the Safari AX tree."""
+    via = op.get("via") or "match"
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if ctx.driver.name == "simulator":
+        # a prior suspend test can leave Safari backgrounded — bring it
+        # forward or every coordinate tap lands on SpringBoard.
+        for spec in (lsp, fsp):
+            try:
+                ctx.driver.foreground(spec)
+            except Exception:
+                pass
+    # 'match' must start clean — a leftover session hijacks MATCH.
+    # 'code' instead NEEDS the connected session a prior pair op made
+    # (its flow reaches the join view via an ended panel).
+    if via != "code":
+        _ui_ensure_idle(ctx)
+    if lsp.page is not None and fsp.page is not None:
+        return _op_pair_ui_dom(ctx, via)
+    if ctx.driver.name == "simulator":
+        return _op_pair_ui_ax(ctx, via)
+    raise UnsupportedError("ui pair needs chrome DOM or simulator AX")
+
+
+def _ui_ensure_idle(ctx: RunCtx) -> None:
+    """Leftover sessions from a previous scenario/run hijack MATCH —
+    end any live session on both clients before a fresh pair op."""
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if lsp.page is not None and fsp.page is not None:
+        for p in (lsp.page, fsp.page):
+            p.evaluate(
+                "() => { const c = window.PairController;"
+                "  if (c && !['idle','ended'].includes(c.state.status))"
+                "    c.leave(); }")
+        for p in (lsp.page, fsp.page):
+            p.wait_for_function(
+                "() => !window.PairController"
+                " || ['idle','ended','error'].includes("
+                "      PairController.state.status)", timeout=15000)
+        return
+    if ctx.driver.name == "simulator":
+        # A sim client that went idle by link-drop never sent LEAVE —
+        # its server-side session lingers inside the resume window and
+        # the next MATCH joins THAT stale (already-reading) session
+        # instead of creating a fresh waiter. Wipe the store first.
+        try:
+            _api_post(ctx, "/api/v1/pair-reset", timeout=5)
+        except Exception:
+            pass
+        # a live-but-stranded session can sit in ANY panel section —
+        # leader-waiting (#pair-leader-cancel), follower-waiting
+        # (#pair-waiting-cancel), session (#pair-leave) or error
+        # (#pair-error-leave). Tap whichever cancel is mounted, via the
+        # status strip opener when the panel itself is closed.
+        _CANCEL_NEEDLES = ["解除", "#pair-leader-cancel",
+                           "#pair-waiting-cancel", "#pair-error-leave",
+                           "#pair-join-back"]
+        for spec in (lsp, fsp):
+            deadline = time.monotonic() + 20 * ctx.tscale
+            stuck = 0
+            while time.monotonic() < deadline:
+                try:
+                    st = (ctx._pair_report_state(spec.role)
+                          .get("pc") or {}).get("status")
+                except AssertError:
+                    st = None
+                if st in (None, "idle", "ended"):
+                    break
+                try:
+                    _ui_tap(ctx, spec, _CANCEL_NEEDLES, "cancel (stale)",
+                            tries=3, delay=0.4,
+                            expect_el=["#pair-leave",
+                                       "#pair-leader-cancel",
+                                       "#pair-waiting-cancel",
+                                       "#pair-error-leave",
+                                       "#pair-join-back"])
+                    stuck = 0
+                except EnvError:
+                    stuck += 1
+                    if stuck >= 3:
+                        # 'connecting' with no reachable strip: an open
+                        # sidebar or auto-hidden chrome can cover it.
+                        # The launcher re-opens the panel onto whatever
+                        # section matches the live status — its own
+                        # #menu-btn chain handles the sidebar.
+                        stuck = 0
+                        try:
+                            _ui_tap(ctx, spec, ["#pair-btn"],
+                                    "launcher (panel reopen)",
+                                    tries=4, delay=0.4)
+                        except EnvError:
+                            pass
+                time.sleep(0.8)
+            else:
+                raise EnvError(
+                    f"ensure-idle: {spec.role} stuck at status={st!r}")
+            _ui_close_panel(ctx, spec)
+            # an 'ended' session leaves the reader mounted and the
+            # launcher unreachable (zone taps instead of connect()).
+            _ui_browse_root(ctx, spec)
+
+
+def _ui_close_panel(ctx: RunCtx, spec, timeout: float = 8.0) -> None:
+    """Leave the pair panel shut — a still-open overlay swallows the next
+    launcher tap as a backdrop close() and connect() never fires."""
+    deadline = time.monotonic() + timeout * ctx.tscale
+    while time.monotonic() < deadline:
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            time.sleep(0.5)
+            continue
+        rects = rep.get("rects") or {}
+        r = (rects.get("#pair-close") or rects.get("#pair-error-close"))
+        if not (r and r.get("w")):
+            return
+        try:
+            _ui_tap(ctx, spec, ["#pair-close", "#pair-error-close"],
+                    "panel close", tries=3, delay=0.4)
+        except EnvError:
+            return
+        time.sleep(0.5)
+
+
+def _wait_code_dom(page, timeout: float = 15000) -> str:
+    page.wait_for_function(
+        "() => /^\\d{6}$/.test((document.getElementById('pair-code-value')"
+        "  .textContent || '').trim())", timeout=timeout)
+    return page.text_content("#pair-code-value").strip()
+
+
+def _open_sidebar_dom(page) -> None:
+    """The launcher lives in #sidebar-header — a closed sidebar puts it
+    outside the viewport (that was the original #pair-btn env_unavailable:
+    the old op closed the sidebar first and could never click it)."""
+    page.evaluate(
+        "() => { const s = document.getElementById('sidebar');"
+        "  const v = document.getElementById('viewer');"
+        "  if (s) { s.classList.add('open');"
+        "    v && v.classList.add('sidebar-open'); } }")
+
+
+def _op_pair_ui_dom(ctx: RunCtx, via: str) -> None:
     leader = ctx.clients["leader"].page
     follower = ctx.clients["follower"].page
-    if leader is None or follower is None:
-        raise UnsupportedError("ui surface needs DOM access (chrome driver)")
     has = leader.evaluate("() => !!window.PairController")
     if not has:
         raise UnsupportedError(
-            "ui surface requires the S09 PairController wiring (#84)")
-    leader.evaluate("window.closeSidebar && window.closeSidebar()")
-    follower.evaluate("window.closeSidebar && window.closeSidebar()")
-    leader.click("#pair-btn")
-    leader.click("#pair-create")
-    leader.wait_for_function(
-        "() => /^\\d{6}$/.test((document.getElementById('pair-code-value')"
-        "  .textContent || '').trim())",
-        timeout=15000)
-    code = leader.text_content("#pair-code-value").strip()
-    follower.click("#pair-btn")
-    follower.click("#pair-join-open")
-    follower.fill("#pair-code-input", code)
-    follower.click("#pair-join-submit")
-    # #114: the leader auto-approves on JOIN_REQUEST — no approve click.
-    leader.wait_for_function(
-        "() => document.getElementById('pair-status')"
-        "  .dataset.status === 'connected'", timeout=15000)
-    follower.wait_for_function(
-        "() => document.getElementById('pair-status')"
-        "  .dataset.status === 'connected'", timeout=15000)
-    ctx.note("paired_both", True, "UI: both status chips connected")
+            "ui surface requires the PairController wiring (#84)")
+    _open_sidebar_dom(leader)
+    _open_sidebar_dom(follower)
+    if via == "code":
+        # The code-entry view is reachable in production ONLY from an
+        # 'ended' panel's choice section — an idle/ended launcher tap
+        # fires connect() and MATCH intercepts it. Deterministic reach:
+        # follower opens its panel (secSession), leader leaves through
+        # the real UI, then connect()s for a fresh code; the follower's
+        # still-open panel falls back to secChoice → 参加 → code entry.
+        follower.click("#pair-status")
+        leader.click("#pair-status")
+        leader.click("#pair-leave")
+        leader.click("#pair-btn")
+        code = _wait_code_dom(leader)
+        follower.click("#pair-join-open")
+        follower.fill("#pair-code-input", code)
+        # sanitizeCode auto-submits on the 6th digit — no submit click.
+    elif via == "match":
+        leader.click("#pair-btn")          # open() + connect()
+        code = _wait_code_dom(leader)
+        follower.click("#pair-btn")        # MATCH joins + auto-approves
+    else:
+        raise UnsupportedError(f"pair via {via!r}")
+    for p in (leader, follower):
+        p.wait_for_function(
+            "() => document.getElementById('pair-status')"
+            "  .dataset.status === 'connected'", timeout=15000)
+    ctx.note("paired_both", True, f"UI-dom({via}): both chips connected")
+
+
+# ── simulator real-input path ─────────────────────────────────────────
+# Safari exposes only NATIVE chrome in the AX tree — web content has no
+# AX labels, so tap_element can never hit page elements. The
+# ?pair_report= hook posts each known control's client rect plus the
+# last pointerdown; the runner calibrates screen->client once (same idea
+# as the fixture's _stable_offset) and taps real coordinates.
+
+_PAIR_LAUNCHER = ["2台で見開き"]
+_STRIP_NEEDLES = ["接続済", "相手不在", "再接続中", "読み込み中"]
+
+_NEEDLE_SEL = {
+    "2台で見開き": "#pair-btn",
+    "接続済": "#pair-status", "相手不在": "#pair-status",
+    "再接続中": "#pair-status", "読み込み中": "#pair-status",
+    "解除": "#pair-leave", "左右交換": "#pair-swap",
+    "参加": "#pair-join-open", "コードで参加する": "#pair-leader-join",
+    "6桁のコードを入力": "#pair-code-input",
+    "コードを入力": "#pair-code-input",
+    "フォルダ一覧": "#menu-btn", "閉じる": "#pair-close",
+    "見開きペアリング切替": "#spread-shift",
+    "次のページ": "#zone-next", "前のページ": "#zone-prev",
+}
+# parents that must be open for a control to exist — the rect tapped when
+# the target itself is absent (sidebar → menu, pair panel → strip).
+# Every chain is one level — _ui_tap fires at most one opener per poll,
+# so ["#pair-status", "#menu-btn", "#pair-btn"] means: strip when it has
+# a real rect, else the フォルダ一覧 drawer, then the 🔗 launcher — the
+# launcher is open()-only while status is non-idle.
+# Panel-section controls chain ONLY through #pair-status — the sidebar
+# openers used to fall through to #menu-btn while the modal covered the
+# strip (top:false), and a sidebar open on a CONNECTED leader fires
+# SET_ACTIVITY selecting, which reading-gates SWAP_SIDES/TURN into
+# silent no-ops. The modal owns the screen; wait for the target rect
+# instead of flapping parents.
+_OPENERS = {
+    "#pair-btn": ["#menu-btn"],
+    "#pair-status": [],
+    "#pair-swap": ["#pair-status"],
+    "#pair-leave": ["#pair-status"],
+    "#pair-join-open": ["#pair-status"],
+    "#pair-code-input": ["#pair-join-open", "#pair-status"],
+    "#pair-leader-cancel": ["#pair-status"],
+    "#pair-waiting-cancel": ["#pair-status"],
+    "#pair-error-leave": ["#pair-status"],
+    "#pair-join-back": ["#pair-status"],
+    "#browse-header": ["#menu-btn"],
+}
+
+# Selectors that live on the BROWSE chrome — a zombie reader covering
+# them warrants a hash-nav escape. Pair-panel / session / zone controls
+# are deliberately absent: during real reading the reader is the
+# legitimate foreground and escaping would destroy the driven session.
+_BROWSE_SELS = {"#pair-btn", "#browse-header", "#menu-btn",
+                "#filter-btn", "#search-input"}
+
+
+def _browse_needle(n: str) -> bool:
+    """True when the needle only exists in browse context — a raw tile
+    name (no '#') or a selector that lives on the browse chrome."""
+    sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
+    return True if sel is None else sel in _BROWSE_SELS
+
+
+def _browse_escape_url(spec) -> str:
+    """Hash-nav URL back to the browse grid — WITHOUT pair_reset. A
+    same-doc nav is harmless either way, but if Safari turns the
+    openurl into a full reload, pair_reset=1 would wipe the resume
+    credential and idle an otherwise-live session."""
+    base = (spec.launch_url or "").split("#")[0]
+    base = base.replace("pair_reset=1&", "").replace("&pair_reset=1", "")
+    return base + "#/browse/"
+
+
+def _ui_offset(ctx: RunCtx, spec) -> tuple:
+    """Screen->client offset: probe the page top until a pointerdown
+    registers in the hook, then cache the delta on the ctx."""
+    off_map = getattr(ctx, "_ui_off", None)
+    if off_map is None:
+        off_map = ctx._ui_off = {}
+    if spec.role in off_map:
+        return off_map[spec.role]
+    drv = ctx.driver
+    w, h = drv.screen_size(spec)
+    cy = 60.0
+    while cy < h * 0.45:
+        t0 = int(time.time() * 1000)
+        drv.tap(spec, w / 2, cy)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            try:
+                lt = (ctx._pair_report_state(spec.role).get("lastTap")
+                      or {})
+            except AssertError:
+                lt = {}
+            if lt.get("t", 0) >= t0 - 200 and lt.get("x") is not None:
+                off = (w / 2 - float(lt["x"]), cy - float(lt["y"]))
+                off_map[spec.role] = off
+                ctx.note("ui_offset", True,
+                         f"{spec.role} offset=({off[0]:.0f},{off[1]:.0f})")
+                return off
+            time.sleep(0.25)
+        cy += 24.0
+    raise EnvError(f"ui offset: no pointerdown reached the page "
+                   f"({spec.role})")
+
+
+def _ui_rect(rep: dict, needles) -> dict | None:
+    """Resolve a needle to a client rect — a known control selector, a
+    raw '#sel' needle, or a browse tile (data-path / display name)."""
+    rects = rep.get("rects") or {}
+    tiles = rep.get("tiles") or []
+    for n in needles:
+        sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
+        r = rects.get(sel) if sel else None
+        if r is None:
+            for t in tiles:
+                if n == t.get("path") or n in (t.get("name") or ""):
+                    r = t["rect"]
+                    break
+        if r and r["w"] > 0 and r["h"] > 0 and \
+                r["x"] + r["w"] > 0 and \
+                r.get("top") is not False:
+            # no vertical bound check — the caller scrolls toward
+            # offscreen targets in EITHER direction; rejecting an
+            # above-the-fold tile here skips that recovery entirely
+            # (browse scroll pos persists across scenarios at ~3000px).
+            return r
+    return None
+
+
+def _ui_tap(ctx: RunCtx, spec, needles, what: str,
+            tries: int = 16, delay: float = 0.7,
+            expect_el=None) -> str:
+    """Tap a real UI control on the simulator: resolve the needle to a
+    client rect via the pair-report hook, open a parent surface when the
+    control isn't mounted yet, tap the calibrated screen point.
+    expect_el (str|list): verify the tap actually hit one of these ids
+    via the hook's lastTap.el — a rect sampled before a transient
+    overlay mounts (auto-hide chrome, zombie reader zones) would
+    otherwise land on the wrong control silently."""
+    if expect_el is not None and not isinstance(expect_el, (list, tuple)):
+        expect_el = [expect_el]
+    if not isinstance(needles, (list, tuple)):
+        needles = [needles]
+    drv = ctx.driver
+    off = None
+    prev_r = None
+    fired = {}
+    last_rep = None
+    for it in range(tries):
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            # page not loaded yet / hook not armed — keep polling, a
+            # miss after all tries below is the real EnvError.
+            time.sleep(delay)
+            continue
+        r = _ui_rect(rep, needles)
+        if r is not None:
+            vp_h = float((rep.get("vp") or {}).get("h") or 0)
+            if vp_h and (r["y"] < 0 or r["y"] + r["h"] > vp_h):
+                # drag just far enough to center the tile — a fixed full
+                # swipe overshoots and ping-pongs past the fold forever.
+                need = (r["y"] + r["h"] / 2) - vp_h * 0.5
+                sw, sh = drv.screen_size(spec)
+                dist = min(max(abs(need), sh * 0.15), sh * 0.55)
+                if need > 0:
+                    drv.swipe(spec, sw / 2, sh * 0.65,
+                              sw / 2, sh * 0.65 - dist, 0.5)
+                else:
+                    drv.swipe(spec, sw / 2, sh * 0.35,
+                              sw / 2, sh * 0.35 + dist, 0.5)
+                prev_r = None
+                time.sleep(delay)
+                continue
+            # settle: only tap once the rect holds still across two
+            # consecutive reports — a momentum scroll or an async
+            # layout shift (pair-session-info reflow) would tap a stale
+            # coordinate and land on a different control.
+            if prev_r is None or abs(r["y"] - prev_r["y"]) >= 3 \
+                    or abs(r["x"] - prev_r["x"]) >= 3:
+                prev_r = r
+                time.sleep(delay)
+                continue
+            if off is None:
+                off = _ui_offset(ctx, spec)
+            x = r["x"] + r["w"] / 2 + off[0]
+            y = r["y"] + r["h"] / 2 + off[1]
+            t0 = int(time.time() * 1000)
+            drv.tap(spec, x, y)
+            ctx.note(f"ui_tap_{needles[0]}", True,
+                     f"{what} @({x:.0f},{y:.0f})")
+            if expect_el is None:
+                return needles[0]
+            # Verify what the tap actually hit — a rect sampled before
+            # an async re-layout lands on the WRONG control (the pair
+            # session-info reflow slid 作品変更 under the 左右交換
+            # coordinate). The hook's lastTap.el names the real target;
+            # a mistap re-enters the poll so the opener chain reopens
+            # the surface and the next report supplies a fresh rect.
+            hit = None
+            vdead = time.monotonic() + 3.0
+            while time.monotonic() < vdead:
+                try:
+                    lt = (ctx._pair_report_state(spec.role)
+                          .get("lastTap") or {})
+                except AssertError:
+                    lt = {}
+                if lt.get("t", 0) >= t0 - 300 and lt.get("el"):
+                    hit = lt["el"]
+                    break
+                time.sleep(0.3)
+            if hit in expect_el:
+                return needles[0]
+            ctx.note("ui_mistap", True,
+                     f"{what} @({x:.0f},{y:.0f}) hit {hit or '?'} "
+                     f"(want {expect_el}) — retrying")
+            prev_r = None
+            time.sleep(delay)
+            continue
+        prev_r = None
+        last_rep = rep
+        # A zombie reader (leave/resume aftermath) mounts AFTER the
+        # scenario's cleanup pass and covers every control below it —
+        # escape back to browse instead of burning the poll budget on
+        # openers that can't pierce a full-screen tap zone. Only
+        # browse-context needles may trigger this: escaping during a
+        # legit reading-phase tap (swap/strip — readerView=True by
+        # DESIGN then) would hash-nav or even reload the page and wipe
+        # the very session the tap was meant to drive.
+        if rep.get("readerView") and spec.kind == "safari" \
+                and all(_browse_needle(n) for n in needles):
+            from verify_drivers import _simctl
+            _simctl("openurl", spec.udid, _browse_escape_url(spec))
+            time.sleep(1.2)
+            continue
+        rects = rep.get("rects") or {}
+        # fire ONE opener per poll, and each opener at most once per ~5
+        # polls — #menu-btn is a toggle, so re-firing every iteration
+        # would flap the sidebar; but a tap that missed (overlay race,
+        # mid-animation) must get to try again or the call is doomed.
+        # While the pair modal is open it owns the screen — poking the
+        # strip/sidebar/launcher under it either toggles the panel shut
+        # or (menu-btn on a connected leader) pauses the session at
+        # 'selecting'. Suppress external openers and wait for the rect.
+        panel_open = bool((rects.get("#pair-close") or {}).get("w"))
+        for n in needles:
+            sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
+            for op_sel in (_OPENERS.get(sel) or []):
+                if it - fired.get(op_sel, -99) < 5:
+                    continue
+                if panel_open and op_sel in ("#pair-status", "#menu-btn",
+                                             "#pair-btn"):
+                    continue
+                orr = rects.get(op_sel)
+                if orr and orr["w"] > 0 and orr.get("top") is not False:
+                    fired[op_sel] = it
+                    if off is None:
+                        off = _ui_offset(ctx, spec)
+                    drv.tap(spec, orr["x"] + orr["w"] / 2 + off[0],
+                            orr["y"] + orr["h"] / 2 + off[1])
+                    break
+            else:
+                continue
+            break
+        time.sleep(delay)
+    # dump the page context that made the needle unresolvable — the
+    # failure mode differs entirely between 'inside a subfolder',
+    # 'reader covering the grid' and 'page dead / stale report'.
+    _pc = (last_rep or {}).get("pc") or {}
+    _tiles = [t.get("path") or (t.get("name") or "")[:16]
+              for t in ((last_rep or {}).get("tiles") or [])][:10]
+    _age = (time.time() - float((last_rep or {}).get("received_at") or 0)
+            if last_rep else -1)
+    raise EnvError(
+        f"ui tap: {what} not found on screen (needles={needles}) "
+        f"[phase={_pc.get('phase')} status={_pc.get('status')} "
+        f"hdr={(last_rep or {}).get('browseHeader')!r} "
+        f"reader={(last_rep or {}).get('readerView')} "
+        f"tiles={_tiles} repAge={_age:.0f}s]")
+
+
+def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
+    """Get the page back to the ROOT browse grid.
+
+    Three distinct states can block a work-tile tap:
+    - drill-down: browseHeader reads '↩ <name>' — tap it to pop a level
+    - reader view: after leave the page keeps showing the solo reader
+      (#/view/…); the browse grid is unmounted so tiles vanish even
+      though browseHeader still reports the folder state. Mounted
+      #zone-prev rects mean the reader is on screen. The escape path
+      is a same-document hash nav to #/browse/ — the in-app path
+      (sidebar root header) is a no-op at root because it only moves
+      the browse tree, never the view mode.
+    - a stray pair modal over the grid — close it on the way out."""
+    for _ in range(pops):
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            rep = {}
+        hdr = rep.get("browseHeader") or ""
+        in_reader = bool(rep.get("readerView"))
+        if in_reader and spec.kind == "safari":
+            from verify_drivers import _simctl
+            _simctl("openurl", spec.udid, _browse_escape_url(spec))
+            time.sleep(1.2)
+            continue
+        if "フォルダ" in hdr:
+            _ui_close_panel(ctx, spec)
+            return True
+        try:
+            _ui_tap(ctx, spec, ["#browse-header"], "browse up",
+                    tries=5, delay=0.5, expect_el="#browse-header")
+        except EnvError:
+            return False
+        time.sleep(0.6)
+    return False
+
+
+def _ui_open_pair_panel(ctx: RunCtx, spec) -> None:
+    """Ensure the pair panel is open — the strip tap exists only to open
+    it, and an already-open panel (ended view, live session) makes the
+    strip unreachable behind the modal."""
+    try:
+        rep = ctx._pair_report_state(spec.role)
+    except AssertError:
+        rep = {}
+    rects = rep.get("rects") or {}
+    if (rects.get("#pair-close") or {}).get("w"):
+        return
+    _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip",
+            expect_el="#pair-status")
+
+
+def _wait_code_ui(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
+    """The session code from PairController.state (canonical) — NOT the
+    #pair-code-value DOM text, which can still show the previous
+    session's digits when the panel re-opens."""
+    deadline = time.monotonic() + timeout * ctx.tscale
+    while time.monotonic() < deadline:
+        try:
+            c = ((ctx._pair_report_state(spec.role).get("pc") or {})
+                 .get("code") or "")
+        except AssertError:
+            c = ""
+        c = str(c).strip()
+        if len(c) == 6 and c.isdigit():
+            return c
+        time.sleep(0.6)
+    raise EnvError("pair code never appeared on the leader")
+
+
+def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if via == "code":
+        # Same deterministic reach as the DOM path: follower panel open
+        # (secSession) → leader ends via the real UI → leader reconnects
+        # for a fresh code → follower panel is on secChoice → 参加.
+        _ui_open_pair_panel(ctx, fsp)
+        _ui_open_pair_panel(ctx, lsp)
+        _ui_tap(ctx, lsp, ["解除"], "leave button (leader)",
+                expect_el="#pair-leave")
+        _ui_close_panel(ctx, lsp)
+        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
+                expect_el="#pair-btn")
+        code = _wait_code_ui(ctx, lsp)
+        for attempt in range(2):
+            _ui_tap(ctx, fsp, ["参加"], "join open (follower)",
+                    expect_el="#pair-join-open")
+            try:
+                _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
+                        "code field (follower)",
+                        expect_el="#pair-code-input")
+                break
+            except EnvError:
+                if attempt:
+                    raise
+                # the leader's leave flips the follower panel to the
+                # 'ended' section mid-tap — reopen it onto secChoice
+                # and run the join path once more.
+                _ui_tap(ctx, fsp, _STRIP_NEEDLES,
+                        "status strip (follower, reopen)",
+                        expect_el="#pair-status", tries=6, delay=0.5)
+        # idb ui text types into whatever holds focus — if the field
+        # lost focus (panel re-render, soft-keyboard timing) the digits
+        # go nowhere. Watch joinCode and retype until the 6th digit
+        # lands (sanitizeCode auto-submits at length 6).
+        typed = ""
+        for _ in range(6):
+            ctx.driver.input_text(fsp, code)
+            time.sleep(1.2)
+            try:
+                rep = ctx._pair_report_state(fsp.role)
+            except AssertError:
+                rep = {}
+            typed = rep.get("joinCode")
+            st = (rep.get("pc") or {}).get("status")
+            if st == "connected" or (typed is not None and len(typed) >= 6):
+                break
+            if typed is None:
+                # joinCode null = the field UNMOUNTED — sanitizeCode
+                # auto-submits at 6 digits, so a vanished field means
+                # JOIN already fired; let the paired poll arbitrate.
+                break
+            try:
+                _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
+                        "code field (follower, retry)", tries=4, delay=0.5)
+            except EnvError:
+                # field unmounted between report and tap — submitted.
+                break
+        ctx.note("code_typed", True,
+                 f"joinCode={'submitted' if typed is None else 'len=' + str(len(typed))}")
+    elif via == "match":
+        # No code read needed — the launcher's connect() either creates
+        # a waiting session or MATCH-joins an existing one; the poll
+        # below is the assert. A still-open overlay eats the launcher
+        # tap as a backdrop close, so shut any stray panel first.
+        for spec in (lsp, fsp):
+            _ui_close_panel(ctx, spec)
+        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
+                expect_el="#pair-btn")
+        _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)",
+                expect_el="#pair-btn")
+    else:
+        raise UnsupportedError(f"pair via {via!r}")
+    ctx.poll_both(
+        lambda a, b: a["status"] == "connected"
+        and b["status"] == "connected",
+        timeout=30, what="paired via real UI")
+    ctx.note("paired_both", True, f"UI-sim({via}): both connected")
+    for spec in (lsp, fsp):
+        _ui_close_panel(ctx, spec)
 
 
 def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
     with urllib.request.urlopen(
             ctx.base_url.rstrip("/") + path, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def _api_post(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
+    req = urllib.request.Request(
+        ctx.base_url.rstrip("/") + path, method="POST", data=b"{}",
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
@@ -693,7 +1354,10 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
         name = node.get("name", "")
         p = f"{path}/{name}".strip("/") if path else name
         if node.get("type") == "folder":
-            cands.append(p)
+            # (path, tile label): the browse tile shows node.name, which
+            # flattening can rewrite to "parent/child" — keep it for the
+            # AX tap path.
+            cands.append((p, name))
             for ch in node.get("children") or []:
                 if isinstance(ch, dict) and ch.get("type") == "folder":
                     walk(ch, p)
@@ -702,7 +1366,7 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
             else (folders or {}).get("folders") or []:
         walk(top, "")
     cands.sort()
-    for folder in cands:
+    for folder, tile in cands:
         try:
             imgs = _api_json(
                 ctx, "/api/images?folder=" +
@@ -717,7 +1381,7 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
         names = [n for n in names if n]
         if len(names) >= min_pages:
             if index <= 0:
-                return {"folder": folder,
+                return {"folder": folder, "tile": tile,
                         "page": {"folder": folder,
                                  "name": sorted(names)[0]},
                         "offset": offset}
@@ -773,12 +1437,53 @@ def op_open_work(ctx: RunCtx, op: dict) -> None:
 
 
 def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
-    leader = ctx.clients["leader"].page
+    lsp = ctx.clients["leader"]
     page = work["page"]
-    leader.evaluate(
-        "([folder, page]) => window.ViewerNavigation.request("
-        "  {type: 'openWork', folder: folder, page: page, via: 'runner'})",
-        [work["folder"], page])
+    if lsp.page is not None:
+        lsp.page.evaluate(
+            "([folder, page]) => window.ViewerNavigation.request("
+            "  {type: 'openWork', folder: folder, page: page,"
+            "  via: 'runner'})",
+            [work["folder"], page])
+    else:
+        # simulator: tap the work's browse tile — match the display
+        # name OR the full data-path (flattened names like
+        # "parent/child" don't survive in .tile-name-text). A tap that
+        # misses (overlay, late layout shift) gets one retry.
+        needles = [n for n in (work.get("tile") or "", work["folder"])
+                   if n]
+        # a leftover session/reader leaves the browse grid inside some
+        # subfolder — pop back to root so the work tile is reachable.
+        _ui_browse_root(ctx, lsp)
+        _ui_tap(ctx, lsp, needles, f"work tile {work.get('tile')}")
+        reading = (
+            lambda a, b: a["phase"] == "reading"
+            and b["phase"] == "reading"
+            and a["applied"]["spreadId"])
+        try:
+            l, f = ctx.poll_both(
+                reading, timeout=25, what="ui phase=reading (first tap)")
+        except AssertError:
+            # the reader leaves the browse DOM the moment it mounts —
+            # a slow manifest apply on real WebKit looks exactly like
+            # this. Grace-poll before blaming the tap: re-tapping when
+            # the open is already in flight is guaranteed-doomed.
+            try:
+                l, f = ctx.poll_both(
+                    reading, timeout=20,
+                    what="ui phase=reading (open in flight)")
+            except AssertError:
+                # a mistap on an adjacent folder tile drills INTO that
+                # folder — re-root before the retry or 'long' is gone.
+                _ui_browse_root(ctx, lsp)
+                _ui_tap(ctx, lsp, needles,
+                        f"work tile retry {work.get('tile')}")
+                l, f = ctx.poll_both(
+                    reading, timeout=30, what="ui phase=reading")
+        ctx.note("ui_open_work", True,
+                 f"spreadId={l['applied']['spreadId']} "
+                 f"rev={l['applied']['index']}")
+        return
     l, f = ctx.poll_both(
         lambda a, b: a["phase"] == "reading" and b["phase"] == "reading"
         and a["applied"]["spreadId"],
@@ -801,7 +1506,7 @@ def _send_move(ctx: RunCtx, op: dict) -> dict:
     if ctx.surface == "ui":
         page = ctx.clients[actor].page
         if page is None:
-            raise UnsupportedError("ui surface needs the chrome driver")
+            return _send_move_ax(ctx, actor, op)
         if t == "turn":
             ok = page.evaluate(
                 "([d, cc]) => window.ViewerNavigation.request({type: 'turn',"
@@ -822,6 +1527,51 @@ def _send_move(ctx: RunCtx, op: dict) -> dict:
                 int(op["offset"]))
         return {"sent": bool(ok)}
     return ctx.cmd(actor, _CMD_FOR_OP[t], params) or {"sent": True}
+
+
+def _send_move_ax(ctx: RunCtx, actor: str, op: dict) -> dict:
+    """ui surface on the simulator driver: REAL device input — edge-zone
+    taps for TURN (the paired view's tap zones drive the intent), chrome
+    button taps for offset, the pair panel for side swap."""
+    t = op["op"]
+    spec = ctx.clients[actor]
+    if t == "turn":
+        w, h = ctx.driver.screen_size(spec)
+        d = int(op.get("delta", 1))
+        n = min(abs(d), 10)
+        # tapForward decides which edge is "forward" — 'left' (the manga
+        # default) maps delta+1 to the LEFT zone, 'right' to the right.
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError:
+            rep = {}
+        fwd = rep.get("tapForward") or "left"
+        forward_left = (fwd == "left")
+        want_left = forward_left if d > 0 else not forward_left
+        sel = "#zone-prev" if want_left else "#zone-next"
+        r = ((rep.get("rects") or {}).get(sel)) or {}
+        if r.get("w"):
+            x = r["x"] + r["w"] / 2
+            y = r["y"] + r["h"] / 2
+            off = _ui_offset(ctx, spec)
+            x, y = x + off[0], y + off[1]
+        else:
+            x = 16.0 if want_left else (w - 16.0)
+            y = h * 0.5
+        for _ in range(n):
+            ctx.driver.tap(spec, x, y)
+            time.sleep(0.3)
+        return {"sent": True}
+    if t == "swap_sides":
+        _ui_tap(ctx, spec, ["左右交換"], "swap button",
+                expect_el="#pair-swap")
+        return {"sent": True}
+    if t == "set_offset":
+        # #spread-shift toggles the offset (0<->1) — the chrome button
+        # is the real input path; scenario uses offset:1 for the toggle.
+        _ui_tap(ctx, spec, ["見開きペアリング切替"], "spread-shift button")
+        return {"sent": True}
+    raise UnsupportedError(f"ui-ax move {t!r} has no device gesture")
 
 
 def _assert_reject_or_blocked(ctx: RunCtx, op: dict, send_res: dict,
@@ -919,6 +1669,10 @@ def _assert_ui_views(ctx: RunCtx, l: dict, f: dict) -> None:
              "same spread anchor on both devices")
     for role, st in (("leader", l), ("follower", f)):
         spec = ctx.clients[role]
+        if spec.page is None:
+            # no DOM-eval on the simulator — member-view asserts
+            # (side/anchor/ref/blank) + screenshots are the evidence.
+            continue
         ok = spec.page.evaluate(
             """() => {
               const pv = window.PairedView ? window.PairedView.state() : null;
@@ -975,6 +1729,20 @@ def op_goto(ctx: RunCtx, op: dict) -> None:
 
 def op_swap_sides(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
+    if ctx.surface == "ui":
+        before = ctx.state(actor)["applied"].get("leaderSide") or "left"
+        want = "left" if before == "right" else "right"
+        _send_move(ctx, op)
+        l, f = ctx.poll_both(
+            lambda a, b: a["applied"].get("leaderSide") == want
+            and b["applied"].get("leaderSide") == want
+            and _committed_same(a, b),
+            timeout=20, what="ui sides swapped")
+        ctx.note("sides_swapped", True, f"leaderSide={want}")
+        _assert_pair_ids(ctx, l, f, "swap_sides")
+        for st, role in ((l, "leader"), (f, "follower")):
+            _assert_member_view(ctx, st, role)
+        return
     _need_table(ctx, "swap_sides")
     cur = ctx.state(actor)["applied"].get("spreadId")
     before = ctx.state(actor)["applied"].get("leaderSide") or "left"
@@ -1337,15 +2105,27 @@ def op_suspend(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     peer = "follower" if actor == "leader" else "leader"
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.PairController.client"
-            " && window.PairController.client.setActivity('suspended')")
+        spec = ctx.clients[actor]
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.PairController.client"
+                " && window.PairController.client.setActivity('suspended')")
+        else:
+            # simulator: backgrounding Safari neither freezes the page
+            # nor fires visibilitychange on the sim — the deterministic
+            # suspend terminal is a hard WS freeze (SIGSTOP the app's
+            # WebKit.Networking): silence -> heartbeat -> peer 'offline'.
+            ctx.driver.freeze_net(spec)
     else:
         ctx.cmd(actor, "set_activity", {"state": "suspended"})
+    # On a real device the graceful SET_ACTIVITY can lose the race against
+    # iOS freezing the page's WS — the peer then learns 'offline' via the
+    # 15s heartbeat silence instead. Both are the suspend terminal.
     ctx.poll(peer, lambda s: any(
-        m["role"] == ctx.clients[actor].role and m["status"] == "suspended"
+        m["role"] == ctx.clients[actor].role
+        and m["status"] in ("suspended", "offline")
         for m in s.get("presence", {}).values()),
-        what=f"{actor} suspended")
+        timeout=35, what=f"{actor} suspended/offline")
     ctx.note("suspended_seen", True, f"{peer} sees {actor} suspended")
 
 
@@ -1353,9 +2133,14 @@ def op_activate(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     peer = "follower" if actor == "leader" else "leader"
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.PairController.client"
-            " && window.PairController.client.setActivity('active')")
+        spec = ctx.clients[actor]
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.PairController.client"
+                " && window.PairController.client.setActivity('active')")
+        else:
+            ctx.driver.thaw_net(spec)
+            ctx.driver.foreground(spec)
     else:
         ctx.cmd(actor, "set_activity", {"state": "active"})
     ctx.poll(peer, lambda s: all(
@@ -1374,15 +2159,46 @@ def op_reload(ctx: RunCtx, op: dict) -> None:
     peer = "follower" if actor == "leader" else "leader"
     pre = ctx.state(actor)
     pre_sid, pre_spread = pre.get("sessionId"), pre["applied"]["spreadId"]
+    pre_boot = None
+    if ctx.driver.name == "simulator" and spec.page is None:
+        try:
+            pre_boot = ctx._pair_report_state(actor).get("boot")
+        except AssertError:
+            pre_boot = None
     seq = ctx.fx.hello_seq(spec.id) if ctx.surface == "fixture" else 0
     ctx.driver.reload(spec)
+    if pre_boot is not None:
+        # Prove the page actually re-evaluated — a reload gesture that
+        # never re-ran the scripts (missed toolbar tap, parked tab)
+        # would silently skip the resume path under test.
+        bdead = time.monotonic() + 25 * ctx.tscale
+        boot = None
+        while time.monotonic() < bdead:
+            try:
+                boot = ctx._pair_report_state(actor).get("boot")
+            except AssertError:
+                boot = None
+            if boot is not None and boot != pre_boot:
+                break
+            time.sleep(0.6)
+        else:
+            raise EnvError(
+                f"reload never re-evaluated the page ({actor})")
+        ctx.note("page_reloaded", True, f"boot {pre_boot} -> {boot}")
     if ctx.surface == "fixture":
         ctx.fx.wait_hello(spec.id, timeout=60, min_seq=seq + 1)
         ctx.note("reloaded", True, f"hello seq>{seq}")
     st = ctx.poll(actor, lambda s: (
         (s.get("sessionId") == pre_sid and len(s.get("presence", {})) == 2
          and all(m["status"] == "active" for m in s["presence"].values()))
-        or s.get("endReason") is not None),
+        or s.get("endReason") is not None
+        # simulator cold-start: terminate+openurl loses sessionStorage —
+        # a clean idle IS the credentials_lost terminal (driver comment),
+        # but it never sets endReason, so without this arm the poll just
+        # times out on the defined terminal.
+        or (ctx.driver.name == "simulator"
+            and s.get("sessionId") is None
+            and s.get("status") == "idle")),
                   timeout=60, what="post-reload resume")
     if st.get("sessionId") != pre_sid:
         if op.get("allow_solo") or ctx.driver.name == "simulator":
@@ -1412,19 +2228,28 @@ def op_bfcache(ctx: RunCtx, op: dict) -> None:
     peer = "follower" if actor == "leader" else "leader"
     pre = ctx.state(actor)
     pre_spread = pre["applied"]["spreadId"]
+    spec = ctx.clients[actor]
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.dispatchEvent(new Event('pagehide'))")
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.dispatchEvent(new Event('pagehide'))")
+        else:
+            ctx.driver.freeze_net(spec)      # WS silence == pagehide peer signal
     else:
         ctx.cmd(actor, "lifecycle", {"type": "pagehide"})
     ctx.poll(peer, lambda s: any(
-        m["role"] == ctx.clients[actor].role and m["status"] == "suspended"
+        m["role"] == ctx.clients[actor].role
+        and m["status"] in ("suspended", "offline")
         for m in s.get("presence", {}).values()),
-        timeout=15, what="peer sees suspended after pagehide")
+        timeout=35, what="peer sees suspended after pagehide")
     ctx.note("bfcache_suspended", True, "pagehide -> peer saw suspended")
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.dispatchEvent(new Event('pageshow'))")
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.dispatchEvent(new Event('pageshow'))")
+        else:
+            ctx.driver.thaw_net(spec)        # link thaw == pageshow resume
+            ctx.driver.foreground(spec)
     else:
         ctx.cmd(actor, "lifecycle", {"type": "pageshow"})
     l, f = ctx.poll_both(
@@ -1788,8 +2613,43 @@ def op_wait(ctx: RunCtx, op: dict) -> None:
 def op_leave(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.PairController.leave()")
+        spec = ctx.clients[actor]
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.PairController.leave()")
+        else:
+            # simulator: real UI leave — strip → pair panel → 解除 — on
+            # BOTH sides that still hold a session. A peer that already
+            # dropped can't end the other's session, so whoever still
+            # shows connected gets the tap. The state read is retried:
+            # a transient endpoint hiccup used to silently skip the
+            # leave and the END poll then timed out with a healthy
+            # leader still connected.
+            peer = "follower" if actor == "leader" else "leader"
+            for cspec in (ctx.clients[actor], ctx.clients[peer]):
+                _st = None
+                for _try in range(4):
+                    try:
+                        _st = ctx._ui_state(cspec.role)
+                        break
+                    except AssertError:
+                        time.sleep(0.8)
+                if _st is None:
+                    ctx.note("leave_state_unread", True,
+                             f"{cspec.role} state unread — leave skipped")
+                    continue
+                if _st.get("sessionId") or _st.get("status") == "connected":
+                    try:
+                        # A leftover-open panel covers the strip — skip
+                        # the explicit strip tap and let the opener
+                        # chain reach 解除 either way.
+                        _ui_tap(ctx, cspec, ["解除"], "leave button",
+                                expect_el="#pair-leave")
+                    except EnvError:
+                        # END raced ahead of the tap — the peer's own
+                        # leave already closed this side, which is the
+                        # terminal the poll below checks anyway.
+                        pass
     else:
         ctx.cmd(actor, "leave")
     ctx.poll_both(
@@ -1854,6 +2714,56 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
               "duration_ms": 0}
     t0 = _now_ms()
     try:
+        # sim+ui runs die quietly when a client's page is still loading
+        # or frozen in a stray tab — gate op#1 on fresh reports from
+        # both clients (this also gives the _pair_report_state heal time
+        # to refocus/terminate-recover a lost tab before the clock).
+        if ctx.driver.name == "simulator" and ctx.surface == "ui":
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                # poll EVERY client each round — the freshness read is
+                # also the heal trigger, and all() short-circuit would
+                # starve the second client's refocus attempts.
+                if all([_report_fresh(ctx, spec.role, 10)
+                        for spec in ctx.clients.values()]):
+                    break
+                time.sleep(1.0)
+            else:
+                raise EnvError(
+                    "client pages never came live at run start")
+            # SWR serves /static/* from cache — a page loaded between a
+            # rebuild and the new SW's precache refresh keeps the OLD
+            # hook (no 'boot' field). One more reload lands on the
+            # activated SW's fresh assets; without this the run drives
+            # yesterday's geometry hook.
+            from verify_drivers import _simctl
+            for spec in ctx.clients.values():
+                if spec.page is not None or spec.kind != "safari":
+                    continue
+                for attempt in range(2):
+                    try:
+                        have = (ctx._pair_report_state(spec.role) or {})
+                    except AssertError:
+                        have = {}
+                    if have.get("hookV") == 2:
+                        break
+                    _simctl("openurl", spec.udid, spec.launch_url)
+                    bdead = time.monotonic() + 25
+                    while time.monotonic() < bdead:
+                        try:
+                            if (ctx._pair_report_state(spec.role) or {}
+                                    ).get("hookV") == 2:
+                                break
+                        except AssertError:
+                            pass
+                        time.sleep(0.7)
+                    else:
+                        continue  # second openurl — the watchdog's own
+                        # repair reload may need a nudge first
+                    break
+                else:
+                    raise EnvError(
+                        f"{spec.role}: stale hook persists after reload")
         for op in scenario["ops"]:
             fn = OPS[op["op"]]
             try:
@@ -1880,6 +2790,16 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
         result["status"] = "env_unavailable"
         ctx.note("error", False, f"{type(e).__name__}: {e}")
     result["duration_ms"] = _now_ms() - t0
+    # a frozen client must never leak past its run — an abort between
+    # freeze_net and thaw_net (env_unavailable mid-suspend) would keep
+    # WebKit.Networking SIGSTOPped and poison every following run.
+    if ctx.driver.name == "simulator":
+        for spec in ctx.clients.values():
+            if getattr(spec, "net_frozen", False):
+                try:
+                    ctx.driver.thaw_net(spec)
+                except Exception:
+                    spec.net_frozen = False
     # a recorded ok=False assertion (e.g. pixel mismatch, soft notes) fails
     # the scenario even when no exception fired — the spec's いずれの失敗も
     # exit 0 にしない applies to recorded assertions too.

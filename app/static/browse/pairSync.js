@@ -972,4 +972,152 @@
   } else if (typeof document !== 'undefined') {
     _init();
   }
+
+  // #142 — reader-sync verification hook (test envs only): with
+  // ?pair_report=<cid> in the URL, POST the raw PairController/PairedView
+  // state to the same-origin /api/v1/pair-report endpoint on every change.
+  // The runner reads it back over HTTP — the only structured-state channel
+  // available on iOS Simulator Safari / PWA webclips, which have no
+  // JS-eval automation path. No-op in production (param absent, test flag
+  // off, or the endpoint 404s).
+  (function () {
+    try {
+      if (window.__BOOKQ_TEST_MODE__ !== 'true') return;
+      var _qp = new URLSearchParams(location.search);
+      // ?pair_reset=1: drop stored resume credentials BEFORE
+      // PairController._boot runs (deferred scripts precede
+      // DOMContentLoaded), so each verify run starts unpaired instead
+      // of MATCH-joining a leftover session from a previous run.
+      if (_qp.get('pair_reset')) {
+        try { sessionStorage.removeItem('bookq.readerSync.v1'); }
+        catch (e) {}
+      }
+      var cid = _qp.get('pair_report');
+      if (!cid) return;
+      // Hook freshness marker — the deploy watchdog asserts this so a
+      // stale SWR-cached copy of this file (which lacks the field) is
+      // detected and self-repaired even under TEST_MODE + pair_report.
+      window.__BOOKQ_PAIR_HOOK_V = 2;
+      // report generation: a parked tab from a previous run keeps its
+      // OLD hook POSTing under the same client id and silently clobbers
+      // the fresh tab's state. The endpoint keeps only the newest gen.
+      var _gen = parseInt(_qp.get('rpt_gen') || '0', 10) || 0;
+      // Geometry + tap record for clients the runner cannot JS-eval:
+      // Safari's AX tree exposes only native chrome, so the runner taps
+      // real coordinates — element rects here plus the last pointerdown
+      // let it calibrate screen->client the same way the fixture does.
+      var _SEL = ['#pair-btn', '#pair-status', '#menu-btn', '#filter-btn',
+                  '#pair-code-input', '#pair-join-open', '#pair-join-submit',
+                  '#pair-join-back', '#pair-leader-join', '#pair-create',
+                  '#pair-leader-cancel', '#pair-waiting-cancel',
+                  '#pair-error-leave', '#pair-error-close',
+                  '#pair-change-work', '#pair-picker-back',
+                  '#pair-swap', '#pair-leave', '#pair-close',
+                  '#spread-shift', '#zone-prev', '#zone-next',
+                  '#zone-toggle',
+                  '#pair-code-value', '#browse-header', '#menu-btn',
+                  '#search-input'];
+      var _lastTap = null;
+      // boot marker so the runner can tell a reload actually happened —
+      // a 'reload' that never re-evals this script silently skips the
+      // resume path the scenario exists to cover.
+      var _boot = Date.now();
+      document.addEventListener('pointerdown', function (e) {
+        // Record the nearest ancestor that is a KNOWN control — inner
+        // spans (e.g. #pair-side inside the #pair-status strip) would
+        // otherwise shadow the real target and trip mistap detection.
+        var el = e.target, known = null, firstId = null;
+        for (var p = el; p && p !== document.documentElement;
+             p = p.parentElement) {
+          if (!p.id) continue;
+          if (!firstId) firstId = p;
+          if (_SEL.indexOf('#' + p.id) !== -1) { known = p; break; }
+        }
+        var rep = known ? '#' + known.id
+                  : firstId ? '#' + firstId.id
+                  : (el && el.tagName ? el.tagName.toLowerCase() : null);
+        _lastTap = {x: e.clientX, y: e.clientY, t: Date.now(), el: rep};
+      }, true);
+      var last = '', lastPost = 0;
+      setInterval(function () {
+        var pc = null, pv = null;
+        try {
+          pc = window.PairController ? window.PairController.state : null;
+          pv = window.PairedView ? window.PairedView.state() : null;
+        } catch (e) { return; }
+        var rects = {};
+        try {
+          for (var i = 0; i < _SEL.length; i++) {
+            var el = document.querySelector(_SEL[i]);
+            if (!el) continue;
+            var r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) continue;
+            // top=false marks a rect that LOOKS mounted but whose tap
+            // would land on an overlapping element (auto-hidden chrome
+            // keeps pointer-events:none yet still reports a rect).
+            var topEl = null;
+            try {
+              topEl = document.elementFromPoint(
+                r.x + r.width / 2, r.y + r.height / 2);
+            } catch (e2) {}
+            rects[_SEL[i]] = {x: r.x, y: r.y, w: r.width, h: r.height,
+                              top: !!(topEl && (topEl === el ||
+                                                el.contains(topEl)))};
+          }
+        } catch (e) {}
+        var tiles = [];
+        try {
+          document.querySelectorAll('.tile,.item[data-path],.card')
+            .forEach(function (el) {
+              var r = el.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0) return;
+              var nm = el.querySelector('.tile-name-text');
+              tiles.push({
+                path: el.dataset ? el.dataset.path : null,
+                name: nm ? nm.textContent : el.textContent,
+                rect: {x: r.x, y: r.y, w: r.width, h: r.height}});
+            });
+        } catch (e) {}
+        var cv = document.getElementById('pair-code-value');
+        var ci = document.getElementById('pair-code-input');
+        var bh = document.getElementById('browse-header');
+        // the reader is the only view that marks #page-slider-wrap
+        // .visible; a zombie reader (ended session leaves the viewer
+        // mounted) has lost .visible but its centre tap zone still
+        // covers the grid — union the two so neither slips through.
+        var psw = document.getElementById('page-slider-wrap');
+        var body;
+        try {
+          body = JSON.stringify({id: cid, pc: pc, pv: pv,
+                                 boot: _boot, gen: _gen, hookV: 2,
+                                 joinCode: ci ? ci.value : null,
+                                 browseHeader: bh
+                                   ? bh.textContent : null,
+                                 solo: !(pv && pv.active),
+                                 readerView: !!((psw && psw.classList
+                                                .contains('visible'))
+                                                || ((rects['#zone-toggle'] || {})
+                                                    .top === true)),
+                                 rects: rects, tiles: tiles,
+                                 lastTap: _lastTap,
+                                 vp: {w: window.innerWidth,
+                                      h: window.innerHeight},
+                                 tapForward: window.__tapForward
+                                   ? window.__tapForward() : null,
+                                 code: cv ? cv.textContent.trim() : null});
+        } catch (e) { return; }
+        // change-skip keeps traffic low, but an unchanged body must still
+        // heartbeat — the runner reads received_at age as the liveness
+        // signal for "page JS frozen / tab parked" detection.
+        if (body === last && Date.now() - lastPost < 5000) return;
+        last = body;
+        lastPost = Date.now();
+        fetch('/api/v1/pair-report', {
+          method: 'POST', cache: 'no-store', keepalive: true,
+          headers: {'Content-Type': 'application/json'},
+          body: body,
+        }).catch(function () { last = ''; });
+      }, 400);
+    } catch (e) {}
+  })();
 })();
