@@ -96,6 +96,15 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - 既定 `iPhone 13`（`SIMULATOR_DEVICE` で変更可）、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。`simslim` (`brew install mobai-app/tap/simslim`) 導入時は open 時に自動 slim されメモリが ~4x 削減される（`SIMSLIM=0` で無効化）。
 - **検証終了時は必ず `./scripts/sim-teardown.sh` を実行して CPU 監査に合格させること**（sim shutdown + Clone 削除 + 残留 diagnose/idb 整理を一括。`--dev-env <name>` で検証用 dev 環境の down まで）。`simctl shutdown` だけでは孤児化した診断・runtime プロセスが残りホスト CPU を食い潰すことがある。xcodebuild test を使った検証は終了まで poll してから片付けること。詳細: `.claude/skills/ios-simulator/references/teardown.md`。
 
+### Android (`android/`)
+
+- Kotlin + Compose (M3) ネイティブクライアント。minSdk 35、modules `:core` (純 Kotlin) / `:data` (OkHttp+Keystore) / `:app`。詳細は `docs/android-app.md`。
+- 必須 env: `JAVA_HOME=$(brew --prefix openjdk@21)` `ANDROID_HOME=$HOME/Library/Android/sdk`。`android/local.properties` に `sdk.dir`。
+- テスト+ビルド: `cd android && ./gradlew :core:test :data:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`。
+- UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://10.0.2.2:8080`）。
+- 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
+- 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
+
 ## 8. 並行作業の隔離
 
 - 書き込みを伴う作業は単発でも必ず別 worktree (`ai/<N>-<slug> OR ai/<slug>` ごとに1つ、`.worktrees/` 内)。1 issue/plan = 1 worktree を維持する (2026-10-05 以降、単発作業の除外なし)。
