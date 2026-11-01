@@ -985,6 +985,19 @@
       if (window.__BOOKQ_TEST_MODE__ !== 'true') return;
       var cid = new URLSearchParams(location.search).get('pair_report');
       if (!cid) return;
+      // Geometry + tap record for clients the runner cannot JS-eval:
+      // Safari's AX tree exposes only native chrome, so the runner taps
+      // real coordinates — element rects here plus the last pointerdown
+      // let it calibrate screen->client the same way the fixture does.
+      var _SEL = ['#pair-btn', '#pair-status', '#menu-btn', '#filter-btn',
+                  '#pair-code-input', '#pair-join-open', '#pair-join-submit',
+                  '#pair-leader-join', '#pair-create', '#pair-swap',
+                  '#pair-leave', '#pair-close', '#spread-shift',
+                  '#zone-prev', '#zone-next', '#pair-code-value'];
+      var _lastTap = null;
+      document.addEventListener('pointerdown', function (e) {
+        _lastTap = {x: e.clientX, y: e.clientY, t: Date.now()};
+      }, true);
       var last = '';
       setInterval(function () {
         var pc = null, pv = null;
@@ -992,10 +1005,37 @@
           pc = window.PairController ? window.PairController.state : null;
           pv = window.PairedView ? window.PairedView.state() : null;
         } catch (e) { return; }
+        var rects = {};
+        try {
+          for (var i = 0; i < _SEL.length; i++) {
+            var el = document.querySelector(_SEL[i]);
+            if (!el) continue;
+            var r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0)
+              rects[_SEL[i]] = {x: r.x, y: r.y, w: r.width, h: r.height};
+          }
+        } catch (e) {}
+        var tiles = [];
+        try {
+          document.querySelectorAll('.tile,.item[data-path],.card')
+            .forEach(function (el) {
+              var r = el.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0) return;
+              var nm = el.querySelector('.tile-name-text');
+              tiles.push({
+                path: el.dataset ? el.dataset.path : null,
+                name: nm ? nm.textContent : el.textContent,
+                rect: {x: r.x, y: r.y, w: r.width, h: r.height}});
+            });
+        } catch (e) {}
+        var cv = document.getElementById('pair-code-value');
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
-                                 solo: !(pv && pv.active)});
+                                 solo: !(pv && pv.active),
+                                 rects: rects, tiles: tiles,
+                                 lastTap: _lastTap,
+                                 code: cv ? cv.textContent.trim() : null});
         } catch (e) { return; }
         if (body === last) return;
         last = body;

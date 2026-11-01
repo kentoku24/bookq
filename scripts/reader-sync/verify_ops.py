@@ -700,55 +700,142 @@ def _op_pair_ui_dom(ctx: RunCtx, via: str) -> None:
     ctx.note("paired_both", True, f"UI-dom({via}): both chips connected")
 
 
-# ── simulator AX path ─────────────────────────────────────────────────
+# ── simulator real-input path ─────────────────────────────────────────
+# Safari exposes only NATIVE chrome in the AX tree — web content has no
+# AX labels, so tap_element can never hit page elements. The
+# ?pair_report= hook posts each known control's client rect plus the
+# last pointerdown; the runner calibrates screen->client once (same idea
+# as the fixture's _stable_offset) and taps real coordinates.
 
 _PAIR_LAUNCHER = ["2台で見開き"]
 _STRIP_NEEDLES = ["接続済", "相手不在", "再接続中", "読み込み中"]
 
+_NEEDLE_SEL = {
+    "2台で見開き": "#pair-btn",
+    "接続済": "#pair-status", "相手不在": "#pair-status",
+    "再接続中": "#pair-status", "読み込み中": "#pair-status",
+    "解除": "#pair-leave", "左右交換": "#pair-swap",
+    "参加": "#pair-join-open", "コードで参加する": "#pair-leader-join",
+    "6桁のコードを入力": "#pair-code-input",
+    "コードを入力": "#pair-code-input",
+    "フォルダ一覧": "#menu-btn", "閉じる": "#pair-close",
+    "見開きペアリング切替": "#spread-shift",
+    "次のページ": "#zone-next", "前のページ": "#zone-prev",
+}
+# parents that must be open for a control to exist — the rect tapped when
+# the target itself is absent (sidebar → menu, pair panel → strip).
+_OPENERS = {
+    "#pair-btn": ["#menu-btn"],
+    "#pair-swap": ["#pair-status"], "#pair-leave": ["#pair-status"],
+    "#pair-join-open": ["#pair-status"],
+    "#pair-code-input": ["#pair-join-open"],
+}
 
-def _ax_texts(node):
-    if isinstance(node, dict):
-        for k in ("label", "name", "value", "title", "text"):
-            v = node.get(k)
-            if isinstance(v, str) and v:
-                yield v
-        for v in node.values():
-            if isinstance(v, (dict, list)):
-                yield from _ax_texts(v)
-    elif isinstance(node, list):
-        for c in node:
-            yield from _ax_texts(c)
+
+def _ui_offset(ctx: RunCtx, spec) -> tuple:
+    """Screen->client offset: probe the page top until a pointerdown
+    registers in the hook, then cache the delta on the ctx."""
+    off_map = getattr(ctx, "_ui_off", None)
+    if off_map is None:
+        off_map = ctx._ui_off = {}
+    if spec.role in off_map:
+        return off_map[spec.role]
+    drv = ctx.driver
+    w, h = drv.screen_size(spec)
+    cy = 60.0
+    while cy < h * 0.45:
+        t0 = int(time.time() * 1000)
+        drv.tap(spec, w / 2, cy)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            try:
+                lt = (ctx._pair_report_state(spec.role).get("lastTap")
+                      or {})
+            except AssertError:
+                lt = {}
+            if lt.get("t", 0) >= t0 - 200 and lt.get("x") is not None:
+                off = (w / 2 - float(lt["x"]), cy - float(lt["y"]))
+                off_map[spec.role] = off
+                ctx.note("ui_offset", True,
+                         f"{spec.role} offset=({off[0]:.0f},{off[1]:.0f})")
+                return off
+            time.sleep(0.25)
+        cy += 24.0
+    raise EnvError(f"ui offset: no pointerdown reached the page "
+                   f"({spec.role})")
+
+
+def _ui_rect(rep: dict, needles) -> dict | None:
+    """Resolve a needle to a client rect — a known control selector or a
+    browse tile (data-path / display name match)."""
+    rects = rep.get("rects") or {}
+    tiles = rep.get("tiles") or []
+    for n in needles:
+        sel = _NEEDLE_SEL.get(n)
+        r = rects.get(sel) if sel else None
+        if r is None:
+            for t in tiles:
+                if n == t.get("path") or n in (t.get("name") or ""):
+                    r = t["rect"]
+                    break
+        if r and r["w"] > 0 and r["h"] > 0 and \
+                r["x"] + r["w"] > 0 and r["y"] + r["h"] > 0:
+            return r
+    return None
 
 
 def _ui_tap(ctx: RunCtx, spec, needles, what: str,
-            tries: int = 14, delay: float = 0.7) -> str:
-    """Tap the first AX element matching any needle; retries while the
-    sheet/panel animates in."""
+            tries: int = 16, delay: float = 0.7) -> str:
+    """Tap a real UI control on the simulator: resolve the needle to a
+    client rect via the pair-report hook, open a parent surface when the
+    control isn't mounted yet, tap the calibrated screen point."""
+    if not isinstance(needles, (list, tuple)):
+        needles = [needles]
+    drv = ctx.driver
+    off = None
     for _ in range(tries):
-        for n in (needles if isinstance(needles, (list, tuple)) else [needles]):
-            try:
-                if ctx.driver.tap_element(spec, n):
-                    return n
-            except EnvError:
-                break
+        try:
+            rep = ctx._pair_report_state(spec.role)
+        except AssertError as e:
+            raise EnvError(str(e))
+        r = _ui_rect(rep, needles)
+        if r is not None:
+            if off is None:
+                off = _ui_offset(ctx, spec)
+            x = r["x"] + r["w"] / 2 + off[0]
+            y = r["y"] + r["h"] / 2 + off[1]
+            drv.tap(spec, x, y)
+            ctx.note(f"ui_tap_{needles[0]}", True,
+                     f"{what} @({x:.0f},{y:.0f})")
+            return needles[0]
+        rects = rep.get("rects") or {}
+        for n in needles:
+            sel = _NEEDLE_SEL.get(n)
+            for op_sel in (_OPENERS.get(sel) or []):
+                orr = rects.get(op_sel)
+                if orr and orr["w"] > 0:
+                    if off is None:
+                        off = _ui_offset(ctx, spec)
+                    drv.tap(spec, orr["x"] + orr["w"] / 2 + off[0],
+                            orr["y"] + orr["h"] / 2 + off[1])
+                    break
         time.sleep(delay)
     raise EnvError(
-        f"ui tap: {what} not found in AX tree (needles={needles})")
+        f"ui tap: {what} not found on screen (needles={needles})")
 
 
-def _wait_code_ax(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
+def _wait_code_ui(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
     deadline = time.monotonic() + timeout * ctx.tscale
     while time.monotonic() < deadline:
         try:
-            tree = ctx.driver.describe_all(spec) or []
-        except EnvError:
-            tree = []
-        for t in _ax_texts(tree):
-            s = t.strip()
-            if len(s) == 6 and s.isdigit():
-                return s
-        time.sleep(0.8)
-    raise EnvError("pair code never appeared in the leader AX tree")
+            c = (ctx._pair_report_state(spec.role).get("code") or "")
+        except AssertError:
+            c = ""
+        c = c.strip()
+        if len(c) == 6 and c.isdigit():
+            return c
+        time.sleep(0.6)
+    raise EnvError("pair code never appeared on the leader")
 
 
 def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
@@ -761,21 +848,22 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         _ui_tap(ctx, lsp, _STRIP_NEEDLES, "status strip (leader)")
         _ui_tap(ctx, lsp, ["解除"], "leave button (leader)")
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
-        code = _wait_code_ax(ctx, lsp)
+        code = _wait_code_ui(ctx, lsp)
         _ui_tap(ctx, fsp, ["参加"], "join open (follower)")
         _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
                 "code field (follower)")
         ctx.driver.input_text(fsp, code)   # 6th digit auto-submits
     elif via == "match":
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
-        code = _wait_code_ax(ctx, lsp)
+        code = _wait_code_ui(ctx, lsp)
         _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)")
     else:
         raise UnsupportedError(f"pair via {via!r}")
     ctx.poll_both(
-        lambda a, b: a["status"] == "connected" and b["status"] == "connected",
-        timeout=30, what="paired via AX UI")
-    ctx.note("paired_both", True, f"UI-ax({via}): both connected")
+        lambda a, b: a["status"] == "connected"
+        and b["status"] == "connected",
+        timeout=30, what="paired via real UI")
+    ctx.note("paired_both", True, f"UI-sim({via}): both connected")
 
 
 def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
