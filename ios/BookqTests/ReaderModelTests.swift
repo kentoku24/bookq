@@ -165,4 +165,50 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertFalse(cross)
         XCTAssertEqual(list[0].images.count, 1)   // direct images only
     }
+
+    // MARK: - chapter labels (test_chapter_labels: windowed labels that
+    // follow page turns → chapterStartSpreads flag each boundary spread)
+
+    func testChapterStartFlaggedOnEveryBoundary() {
+        // 3 chapters (4p,4p,2p), spread mode — every chapter-start spread
+        // except chapter0's gets the label flag (labels "follow" turns).
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 4),
+                                               chapter("02", "w/02", 4),
+                                               chapter("03", "w/03", 2)],
+                                    pageMode: .spread, spreadOffset: 0)
+        // spreads: [0,1][2,3][4,5][6,7][8,9] — chapter starts at globals 4,8
+        XCTAssertEqual(w.boundaries, [0, 4, 8])
+        XCTAssertTrue(w.chapterStartSpreads.contains(w.spreadOf(4)))
+        XCTAssertTrue(w.chapterStartSpreads.contains(w.spreadOf(8)))
+        XCTAssertFalse(w.chapterStartSpreads.contains(w.spreadOf(0)))
+        // Non-boundary spreads carry no label.
+        XCTAssertFalse(w.chapterStartSpreads.contains(w.spreadOf(2)))
+    }
+
+    // MARK: - tap zones (test_viewer_tapmode: L/R modes + center chrome)
+
+    func testZoneActionLeftMode() {
+        XCTAssertEqual(zoneAction(frac: 0.10, tapForwardLeft: true), .turn(1))
+        XCTAssertEqual(zoneAction(frac: 0.90, tapForwardLeft: true), .turn(-1))
+    }
+
+    func testZoneActionRightMode() {
+        XCTAssertEqual(zoneAction(frac: 0.10, tapForwardLeft: false), .turn(-1))
+        XCTAssertEqual(zoneAction(frac: 0.90, tapForwardLeft: false), .turn(1))
+    }
+
+    func testZoneActionCenterTogglesChrome() {
+        XCTAssertEqual(zoneAction(frac: 0.50, tapForwardLeft: true), .toggleChrome)
+        XCTAssertEqual(zoneAction(frac: 0.50, tapForwardLeft: false), .toggleChrome)
+    }
+
+    /// Boundary taps land on the declared 30%/70% edges — a tap exactly on
+    /// the line goes to the outer side of the band it belongs to.
+    func testZoneActionBoundaries() {
+        XCTAssertEqual(zoneAction(frac: 0.29, tapForwardLeft: true), .turn(1))
+        XCTAssertEqual(zoneAction(frac: 0.71, tapForwardLeft: true), .turn(-1))
+        XCTAssertEqual(zoneAction(frac: 0.30, tapForwardLeft: true), .toggleChrome)
+        XCTAssertEqual(zoneAction(frac: 0.70, tapForwardLeft: true), .toggleChrome)
+    }
 }

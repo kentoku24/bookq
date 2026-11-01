@@ -21,6 +21,20 @@ enum ReaderPageMode: String, Equatable {
     case single, spread
 }
 
+/// Tap-zone verdict — `zoneActionAt` (app/static/app.js).
+/// Edge 30% zones turn pages in the direction `tapForwardLeft` selects
+/// (web default: left = forward), the center band toggles chrome.
+enum ZoneAction: Equatable {
+    case turn(Int)      // +1 forward, -1 back
+    case toggleChrome
+}
+
+func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
+    if frac < 0.30 { return .turn(tapForwardLeft ? 1 : -1) }
+    if frac > 0.70 { return .turn(tapForwardLeft ? -1 : 1) }
+    return .toggleChrome
+}
+
 struct ReaderWork: Equatable {
     var clickedPath: String
     var images: [PageRef]             // global, including spacers
@@ -208,6 +222,26 @@ struct ReaderWork: Equatable {
         var w = self
         w.pageMode = mode
         return w.rebuildSpreads(offset: offset)
+    }
+
+    /// Page-mode rule shared by the device reader and the external-display
+    /// projection: landscape viewport + spread enabled → .spread.
+    static func pageMode(for viewport: CGSize, landscapeSpread: Bool) -> ReaderPageMode {
+        (viewport.width >= viewport.height && landscapeSpread) ? .spread : .single
+    }
+
+    /// `spreadMetrics` equivalent — fit a spread into the viewport: pages
+    /// share one height, each width = ar*h (+gap). Shared by ReaderView's
+    /// spreadCell and ExternalReaderView so both lay out identically.
+    static func spreadFit(ars: [CGFloat], gap: CGFloat, in size: CGSize) -> CGSize {
+        let arSum = max(ars.reduce(0, +), 0.001)
+        var h = size.height
+        var w = arSum * h + gap * CGFloat(ars.count - 1)
+        if w > size.width {
+            h = (size.width - gap * CGFloat(ars.count - 1)) / arSum
+            w = size.width
+        }
+        return CGSize(width: w, height: h)
     }
 
     /// `spreadOf` — spread containing global index.

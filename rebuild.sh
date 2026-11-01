@@ -324,7 +324,22 @@ prd_build_image() {
         docker build -q -t "$sidecar_tag" "$tmp/tailscale" >/dev/null \
             || die "sidecar のビルドに失敗しました (sha=$sha)"
     fi
-    printf '%s %s' "$viewer_tag" "$sidecar_tag"
+    # viewer-rs (#211): Dockerfile.viewer-rs がその ref に存在するときのみ
+    # ビルドする — 存在しない旧 ref への rollback を壊さないため。タグが
+    # 無い場合の compose 側は docker-compose.prd-image.yml の :- 既定値で
+    # parse-safe（profile rs は opt-in で既定起動しない）。
+    local rs_tag=""
+    if [ -f "$tmp/Dockerfile.viewer-rs" ]; then
+        rs_tag="bookq-prd-viewer-rs:${sha12}"
+        if docker image inspect "$rs_tag" >/dev/null 2>&1; then
+            info "イメージ再利用: $rs_tag"
+        else
+            info "ビルド中: ${sha12} → $rs_tag"
+            docker build -q -f "$tmp/Dockerfile.viewer-rs" -t "$rs_tag" "$tmp" >/dev/null \
+                || die "viewer-rs のビルドに失敗しました (sha=$sha)"
+        fi
+    fi
+    printf '%s %s %s' "$viewer_tag" "$sidecar_tag" "$rs_tag"
 }
 
 # prd deploy の事後検証: /api/version の sha が期待 sha と一致すること。

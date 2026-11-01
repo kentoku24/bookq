@@ -288,17 +288,12 @@ pub fn delete_positions(pos: &Positions, user_key: &str, folder: Option<&str>) -
 
 // ── folder visibility (shared SQLite store) ──────────────────────────────────
 
-const VIS_SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS visibility_users (
-  user_key TEXT PRIMARY KEY,
-  revision INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS hidden_roots (
-  user_key TEXT NOT NULL,
-  root TEXT NOT NULL,
-  PRIMARY KEY (user_key, root)
-);
-";
+// The DDL lives in one shared file (#200) — api/user-state-schema.sql is
+// the single source FastAPI and viewer-rs both apply. VIS_SCHEMA_VERSION
+// must equal the file's `PRAGMA user_version` stamp; a DB stamped newer
+// than it is refused rather than silently downgraded.
+const VIS_SCHEMA: &str = include_str!("../../../api/user-state-schema.sql");
+const VIS_SCHEMA_VERSION: i64 = 1;
 
 pub struct VisibilityStore {
     path: PathBuf,
@@ -332,7 +327,22 @@ impl VisibilityStore {
                 let conn = rusqlite::Connection::open(&self.path)?;
                 conn.pragma_update(None, "journal_mode", "WAL")?;
                 conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)?;
+                let current: i64 =
+                    conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+                assert!(
+                    current <= VIS_SCHEMA_VERSION,
+                    "user-state schema v{current} is newer than supported \
+                     v{VIS_SCHEMA_VERSION} — refusing to downgrade"
+                );
                 conn.execute_batch(VIS_SCHEMA)?;
+                let stamped: i64 =
+                    conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+                assert_eq!(
+                    stamped, VIS_SCHEMA_VERSION,
+                    "user-state schema file stamped v{stamped}; this build \
+                     expects v{VIS_SCHEMA_VERSION} — bump VIS_SCHEMA_VERSION \
+                     with the DDL"
+                );
                 drop(conn);
                 let _ = std::fs::set_permissions(
                     &self.path,
@@ -591,5 +601,43 @@ pub async fn put_folder_visibility(
     match snap {
         Some(s) => vis_response(&owner, &s),
         None => vis_detail(StatusCode::SERVICE_UNAVAILABLE, "visibility store unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vis_schema_version_matches_file_stamp() {
+        let needle = "PRAGMA user_version = ";
+        let pos = VIS_SCHEMA.find(needle).expect("schema file must stamp user_version");
+        let digits: String = VIS_SCHEMA[pos + needle.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let stamped: i64 = digits.parse().expect("user_version stamp must be an integer");
+        assert_eq!(stamped, VIS_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn store_init_stamps_schema_version() {
+        let dir = std::env::temp_dir().join(format!(
+            "bookq-vis-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = VisibilityStore::new(&dir);
+        let snap = store.read("alice@example.com").unwrap();
+        assert_eq!(snap.revision, 0);
+        let conn = rusqlite::Connection::open(dir.join("folder-visibility.sqlite3")).unwrap();
+        let stamped: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stamped, VIS_SCHEMA_VERSION);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -38,6 +38,25 @@ struct ComicMetadata: Codable, Hashable {
     var displayTitle: String {
         !title_jp.isEmpty ? title_jp : (!title_en.isEmpty ? title_en : folder_name)
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case folder_path, folder_name, title_jp, title_en
+        case artist, tags, source, has_metadata, total_pages
+    }
+
+    // Spec marks title_jp/title_en optional — tolerate their absence.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        folder_path = try c.decode(String.self, forKey: .folder_path)
+        folder_name = try c.decode(String.self, forKey: .folder_name)
+        title_jp = try c.decodeIfPresent(String.self, forKey: .title_jp) ?? ""
+        title_en = try c.decodeIfPresent(String.self, forKey: .title_en) ?? ""
+        artist = try c.decode([String].self, forKey: .artist)
+        tags = try c.decode([String].self, forKey: .tags)
+        source = try c.decode(String.self, forKey: .source)
+        has_metadata = try c.decode(Bool.self, forKey: .has_metadata)
+        total_pages = try c.decode(Int.self, forKey: .total_pages)
+    }
 }
 
 /// Authenticated user identity — decoded locally from the access-token

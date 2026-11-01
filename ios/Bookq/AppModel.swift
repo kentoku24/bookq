@@ -39,6 +39,9 @@ final class AppModel: ObservableObject {
     private(set) lazy var search = SearchModel(
         apiProvider: { [weak self] in self?.api },
         showAll: { [weak self] in self?.visibility.showAll ?? false })
+    /// External-display projection (USB-C → monitor). Singleton shared
+    /// with the scene delegate, which cannot receive environment objects.
+    let external = ExternalDisplayStore.shared
     /// Dual-reader sync (reader_sync server-ws equivalent).
     private(set) lazy var pair = PairStore(
         url: { [weak self] in self?.api?.readerSyncURL },
