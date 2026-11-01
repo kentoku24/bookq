@@ -11,10 +11,10 @@
 //!   (`app/folder_visibility.py`): WAL, busy_timeout 5s, revision bumps only
 //!   on an actual change, fresh connection per operation.
 //!
-//! Caller identity: native handlers only activate under BOOKQ_TEST_MODE,
-//! where `require_auth` returns the constant mock user — the Rust side pins
-//! the same `test@example.com` key. Real session/JWT resolution lands with
-//! M9; until then non-test deployments keep proxying upstream.
+//! Caller identity: handlers take the resolved user key (`_position_user_key`
+//! / `user_key_for_email` equivalents) — test mode's mock user or a Bearer
+//! JWT's `sub` (see `auth.rs`). Unidentified callers never reach this file:
+//! main.rs delegates them upstream.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,8 +36,6 @@ const POSITION_MAX_FOLDERS: usize = 512;
 const POSITION_TS_FUTURE_SLACK_MS: i64 = 300_000;
 const MAX_ROOT_LENGTH: usize = 2048;
 const BUSY_TIMEOUT_MS: u64 = 5000;
-/// BOOKQ_TEST_MODE mock user (`app/auth.py:61`).
-const TEST_USER_KEY: &str = "test@example.com";
 
 fn now_secs() -> f64 {
     SystemTime::now()
@@ -128,9 +126,9 @@ fn as_int(v: &Value) -> Option<i64> {
     None
 }
 
-pub fn list_positions(pos: &Positions, folder: Option<&str>) -> Response {
+pub fn list_positions(pos: &Positions, user_key: &str, folder: Option<&str>) -> Response {
     let map = pos.map.lock().unwrap();
-    let slot = map.get(TEST_USER_KEY);
+    let slot = map.get(user_key);
     let recs: Vec<&Rec> = match (slot, folder) {
         (Some(s), Some(f)) => s
             .folders
@@ -160,7 +158,7 @@ pub fn list_positions(pos: &Positions, folder: Option<&str>) -> Response {
     res
 }
 
-pub fn put_position(pos: &Positions, folder: &str, body_bytes: &[u8]) -> Response {
+pub fn put_position(pos: &Positions, user_key: &str, folder: &str, body_bytes: &[u8]) -> Response {
     if !valid_folder_param(folder) {
         return detail(StatusCode::BAD_REQUEST, "invalid folder");
     }
@@ -187,7 +185,7 @@ pub fn put_position(pos: &Positions, folder: &str, body_bytes: &[u8]) -> Respons
     }
     let updated_at = now_secs();
     let mut map = pos.map.lock().unwrap();
-    if !map.contains_key(TEST_USER_KEY) && map.len() >= POSITION_MAX_USERS {
+    if !map.contains_key(user_key) && map.len() >= POSITION_MAX_USERS {
         let stalest = map
             .iter()
             .min_by(|a, b| a.1.updated_at.partial_cmp(&b.1.updated_at).unwrap())
@@ -195,7 +193,7 @@ pub fn put_position(pos: &Positions, folder: &str, body_bytes: &[u8]) -> Respons
             .unwrap();
         map.remove(&stalest);
     }
-    let slot = map.entry(TEST_USER_KEY.to_string()).or_default();
+    let slot = map.entry(user_key.to_string()).or_default();
     // _store_position_v1: reject at-or-below the delete-all tombstone, and
     // older/equal ts for the SAME folder (per-folder last-writer-wins).
     let stale = if ts <= slot.tombstone_ts {
@@ -247,14 +245,14 @@ pub fn put_position(pos: &Positions, folder: &str, body_bytes: &[u8]) -> Respons
     json_response(StatusCode::OK, &serde_json::json!({"status": "ok"}))
 }
 
-pub fn delete_positions(pos: &Positions, folder: Option<&str>) -> Response {
+pub fn delete_positions(pos: &Positions, user_key: &str, folder: Option<&str>) -> Response {
     if let Some(f) = folder {
         if !valid_folder_param(f) {
             return detail(StatusCode::BAD_REQUEST, "invalid folder");
         }
     }
     let mut map = pos.map.lock().unwrap();
-    let slot = map.entry(TEST_USER_KEY.to_string()).or_default();
+    let slot = map.entry(user_key.to_string()).or_default();
     slot.updated_at = now_secs();
     match folder {
         Some(f) => {
@@ -496,19 +494,20 @@ pub fn covered_by_roots(path: &str, roots: &[String]) -> bool {
 use crate::folders::ensure_tree_and_index_wait;
 use crate::AppState;
 
-fn owner_token(st: &AppState) -> String {
-    visibility_owner(TEST_USER_KEY, &st.secret_key)
+fn owner_token(st: &AppState, user_key: &str) -> String {
+    visibility_owner(user_key, &st.secret_key)
 }
 
 /// GET /api/v1/folder-visibility
-pub async fn get_folder_visibility(st: &AppState) -> Response {
+pub async fn get_folder_visibility(st: &AppState, user_key: &str) -> Response {
     let store = st.visibility.clone();
-    let snap = tokio::task::spawn_blocking(move || store.read(TEST_USER_KEY))
+    let key = user_key.to_string();
+    let snap = tokio::task::spawn_blocking(move || store.read(&key))
         .await
         .ok()
         .and_then(|r| r.ok());
     match snap {
-        Some(s) => vis_response(&owner_token(st), &s),
+        Some(s) => vis_response(&owner_token(st, user_key), &s),
         None => vis_detail(StatusCode::SERVICE_UNAVAILABLE, "visibility store unavailable"),
     }
 }
@@ -517,10 +516,11 @@ pub async fn get_folder_visibility(st: &AppState) -> Response {
 /// membership + revision-bump semantics of the v0 handler.
 pub async fn put_folder_visibility(
     st: &AppState,
+    user_key: &str,
     headers: &HeaderMap,
     body: &[u8],
 ) -> Response {
-    let owner = owner_token(st);
+    let owner = owner_token(st, user_key);
     let header_owner = headers.get("x-bookq-visibility-owner");
     let Some(header_owner) = header_owner else {
         return vis_detail(StatusCode::FORBIDDEN, "visibility owner header required");
@@ -567,7 +567,8 @@ pub async fn put_folder_visibility(
         // Read first; only a root not already hidden needs tree membership.
         let snap = tokio::task::spawn_blocking({
             let store = store.clone();
-            move || store.read(TEST_USER_KEY)
+            let key = user_key.to_string();
+            move || store.read(&key)
         })
         .await
         .ok()
@@ -593,7 +594,8 @@ pub async fn put_folder_visibility(
         }
     }
     let root2 = root.to_string();
-    let snap = tokio::task::spawn_blocking(move || store.set_hidden(TEST_USER_KEY, &root2, hidden))
+    let key = user_key.to_string();
+    let snap = tokio::task::spawn_blocking(move || store.set_hidden(&key, &root2, hidden))
         .await
         .ok()
         .and_then(|r| r.ok());

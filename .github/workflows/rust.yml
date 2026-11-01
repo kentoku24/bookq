@@ -1,0 +1,51 @@
+# Rust gate: cargo test over rust/** plus the viewer-rs image build.
+# Independent of the uv/FastAPI gates — only fires on Rust-side changes
+# (issue #163 parallel-backend track).
+name: rust
+
+on:
+  pull_request:
+    paths:
+      - "rust/**"
+      - "Dockerfile.viewer-rs"
+      - "docker-compose.*-rs.yml"
+      - ".github/workflows/rust.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: System deps (zlib for flate2)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo test
+        working-directory: rust
+        run: cargo test --workspace
+
+  image-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: docker build viewer-rs
+        run: docker build -f Dockerfile.viewer-rs .

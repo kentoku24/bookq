@@ -28,6 +28,7 @@ use std::path::PathBuf;
 // serve/tree/folders hold the contract-independent core (archive listing,
 // path containment, tree assembly, index cache) that M4–M7 wire onto the
 // v1 envelopes; until then their exports are intentionally unused.
+mod auth;
 #[allow(dead_code)]
 mod folders;
 #[allow(dead_code)]
@@ -42,14 +43,57 @@ struct Upstream {
     authority: hyper::http::uri::Authority,
 }
 
+/// Which native surfaces are live. `BOOKQ_TEST_MODE=true` enables every
+/// native route with the mock user (unchanged dev/test posture). Outside
+/// test mode, `BOOKQ_RS_NATIVE` is a comma-separated list of endpoint ids
+/// (`positions`, `visibility`, `image`, `tree`, …); `all`/`1`/`true`/`*`
+/// enables the full native surface. Anything not enabled, plus any
+/// request we cannot positively identify (session cookie, missing/bad
+/// Bearer), falls through to upstream — production rollout is per
+/// endpoint via config only.
+pub(crate) struct Native {
+    pub(crate) test_mode: bool,
+    all: bool,
+    set: std::collections::HashSet<String>,
+}
+
+impl Native {
+    fn from_env() -> Self {
+        let test_mode = std::env::var("BOOKQ_TEST_MODE")
+            .unwrap_or_default()
+            .eq_ignore_ascii_case("true");
+        let mut all = test_mode;
+        let mut set = std::collections::HashSet::new();
+        for tok in std::env::var("BOOKQ_RS_NATIVE")
+            .unwrap_or_default()
+            .split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
+            match tok.as_str() {
+                "1" | "true" | "all" | "*" => all = true,
+                other => {
+                    set.insert(other.to_string());
+                }
+            }
+        }
+        Self { test_mode, all, set }
+    }
+
+    pub(crate) fn enabled(&self, ep: &str) -> bool {
+        self.all || self.set.contains(ep)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     upstream: Upstream,
     /// Downloads root, resolved once (symlinks collapsed like the Python side).
     pub(crate) downloads: PathBuf,
-    /// `BOOKQ_TEST_MODE=true` — native endpoints only activate when the
-    /// Python side would also skip auth; everything else proxies upstream.
-    native: bool,
+    /// Native-surface gate — see `Native`.
+    pub(crate) native: std::sync::Arc<Native>,
+    /// `ALLOWED_EMAILS` (trim+lowercase) — Bearer allowlist, fail-closed.
+    pub(crate) allowed_emails: std::sync::Arc<std::collections::HashSet<String>>,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
     /// M4: per-process reading positions (`app.state.reading_positions`).
@@ -140,19 +184,39 @@ async fn proxy(st: &Upstream, mut req: Request<Body>) -> Response {
     forward(req, st).await
 }
 
+/// Resolve the caller for a native route: unidentified requests (session
+/// cookie present, no/invalid Bearer) always proxy upstream, which applies
+/// its own cookie → Bearer → 401 chain.
+fn caller_or_proxy(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
+    match auth::resolve(
+        headers,
+        st.native.test_mode,
+        &st.secret_key,
+        &st.allowed_emails,
+    ) {
+        auth::Caller::User(u) => Some(u),
+        auth::Caller::Delegate => None,
+    }
+}
+
 /// `/api/v1/reading-positions` — M4: per-folder LWW + tombstones, fully
 /// native (positions are per-process ephemeral upstream as well).
 async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native {
+    if !st.native.enabled("positions") {
         return proxy(&st.upstream, req).await;
     }
+    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+        return proxy(&st.upstream, req).await;
+    };
+    // `_position_user_key`: str(email or "unknown").lower()
+    let key = user.email.to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     match *req.method() {
         axum::http::Method::GET => {
             let folder = q.get("folder").map(|s| s.as_str());
-            state::list_positions(&st.positions, folder)
+            state::list_positions(&st.positions, &key, folder)
         }
         axum::http::Method::PUT => {
             // `folder` is required → missing keeps FastAPI's 422 upstream.
@@ -167,10 +231,10 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
                         .await
                 }
             };
-            state::put_position(&st.positions, &folder, &body)
+            state::put_position(&st.positions, &key, &folder, &body)
         }
         axum::http::Method::DELETE => {
-            state::delete_positions(&st.positions, q.get("folder").map(|s| s.as_str()))
+            state::delete_positions(&st.positions, &key, q.get("folder").map(|s| s.as_str()))
         }
         _ => return proxy(&st.upstream, req).await,
     }
@@ -178,11 +242,16 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
 
 /// `/api/v1/folder-visibility` — M4: shared SQLite store + owner HMAC.
 async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native {
+    if !st.native.enabled("visibility") {
         return proxy(&st.upstream, req).await;
     }
+    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+        return proxy(&st.upstream, req).await;
+    };
+    // `user_key_for_email`: email.strip().lower()
+    let key = user.email.trim().to_lowercase();
     match *req.method() {
-        axum::http::Method::GET => state::get_folder_visibility(&st).await,
+        axum::http::Method::GET => state::get_folder_visibility(&st, &key).await,
         axum::http::Method::PUT => {
             let headers = req.headers().clone();
             let (parts, body) = req.into_parts();
@@ -193,7 +262,7 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
                         .await
                 }
             };
-            state::put_folder_visibility(&st, &headers, &body).await
+            state::put_folder_visibility(&st, &key, &headers, &body).await
         }
         _ => return proxy(&st.upstream, req).await,
     }
@@ -203,7 +272,12 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
 /// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    // /image requires auth upstream too — only positively identified
+    // callers may be served natively.
+    if caller_or_proxy(&st, req.headers()).is_none() {
         return proxy(&st.upstream, req).await;
     }
     // The URI path is still percent-encoded; decode per-segment like
@@ -245,9 +319,13 @@ async fn main() {
         .expect("BOOKQ_UPSTREAM must be http://host[:port]");
     let downloads = PathBuf::from(std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/app/downloads".into()));
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
-    let native = std::env::var("BOOKQ_TEST_MODE")
+    let native = Native::from_env();
+    let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
         .unwrap_or_default()
-        .eq_ignore_ascii_case("true");
+        .split(',')
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
 
     let index = std::sync::Arc::new(folders::IndexState::new());
     let state_dir = PathBuf::from(
@@ -259,17 +337,24 @@ async fn main() {
             authority,
         },
         downloads: downloads.clone(),
-        native,
+        native: std::sync::Arc::new(native),
+        allowed_emails: std::sync::Arc::new(allowed_emails),
         index: index.clone(),
         positions: std::sync::Arc::new(state::Positions::default()),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
     };
-    if native {
+    if st.native.enabled("visibility") || st.native.enabled("tree") {
         // warmup_metadata_index — lifespan kicks the same cold-miss path.
         index.spawn_warmup(downloads.clone());
     }
-    tracing::info!(native = st.native, downloads = %st.downloads.display(), "read-path endpoints");
+    tracing::info!(
+        test_mode = st.native.test_mode,
+        native_all = st.native.all,
+        native_set = ?st.native.set,
+        downloads = %st.downloads.display(),
+        "read-path endpoints"
+    );
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
