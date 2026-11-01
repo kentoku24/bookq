@@ -21,7 +21,7 @@ enum ReaderPageMode: String, Equatable {
     case single, spread
 }
 
-/// Tap-zone verdict — `zoneActionAt` (app/static/viewer/navigation.js).
+/// Tap-zone verdict — `zoneActionAt` (app/static/app.js).
 /// Edge 30% zones turn pages in the direction `tapForwardLeft` selects
 /// (web default: left = forward), the center band toggles chrome.
 enum ZoneAction: Equatable {
