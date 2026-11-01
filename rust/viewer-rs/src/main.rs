@@ -654,6 +654,35 @@ async fn reader_sync_drain(
 ) {
     use axum::extract::ws::{CloseFrame, Message};
     use futures_util::SinkExt;
+
+    /// Feed one queued item into the sink without flushing — a Bulk
+    /// marker expands to every queued bulk frame, in order.
+    async fn feed_item(
+        ws_tx: &mut futures_util::stream::SplitSink<
+            axum::extract::ws::WebSocket,
+            Message,
+        >,
+        bulk: &std::sync::Mutex<reader_sync::BulkQ>,
+        item: reader_sync::OutItem,
+    ) -> bool {
+        match item {
+            reader_sync::OutItem::Text(raw) => {
+                ws_tx.feed(Message::Text(raw.into())).await.is_ok()
+            }
+            reader_sync::OutItem::Bulk => {
+                bulk.lock().unwrap().pending = false;
+                loop {
+                    let raw = { bulk.lock().unwrap().pop() };
+                    let Some(raw) = raw else { break };
+                    if ws_tx.feed(Message::Text(raw.into())).await.is_err() {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             biased;
@@ -677,20 +706,19 @@ async fn reader_sync_drain(
             item = outq.recv() => {
                 match item {
                     None => break,
-                    Some(reader_sync::OutItem::Text(raw)) => {
-                        if ws_tx.send(Message::Text(raw.into())).await.is_err() {
-                            break;
+                    Some(it) => {
+                        if !feed_item(&mut ws_tx, &bulk, it).await { break; }
+                        // Collapse bursts: frames enqueued by one dispatch
+                        // (ACK→STATE→MANIFEST) are fed back-to-back and
+                        // flushed in a single write — mirroring the Python
+                        // drain, where a handler's outbound burst leaves
+                        // the transport in one event-loop turn. A close
+                        // request still preempts remaining frames.
+                        while let Ok(next) = outq.try_recv() {
+                            if close.has_changed().unwrap_or(false) { break; }
+                            if !feed_item(&mut ws_tx, &bulk, next).await { return; }
                         }
-                    }
-                    Some(reader_sync::OutItem::Bulk) => {
-                        bulk.lock().unwrap().pending = false;
-                        loop {
-                            let raw = { bulk.lock().unwrap().pop() };
-                            let Some(raw) = raw else { break };
-                            if ws_tx.send(Message::Text(raw.into())).await.is_err() {
-                                return;
-                            }
-                        }
+                        if ws_tx.flush().await.is_err() { break; }
                     }
                 }
             }
