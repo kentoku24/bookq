@@ -50,10 +50,11 @@ pub struct CacheData {
     pub generation: i64,
     /// `signature` — the post-scan compute_signature the next expiry gates on.
     pub signature: Option<String>,
-    /// `folders_body_cache` — (path, depth) → (body, etag). Lives per-swap;
-    /// an in-place timestamp re-stamp keeps the tree identical so hits stay
-    /// semantically correct.
-    body_cache: Mutex<HashMap<(String, Option<i64>), (Vec<u8>, String)>>,
+    /// `folders_body_cache` — (key_ns, path, depth) → (body, etag). Lives
+    /// per-swap; an in-place timestamp re-stamp keeps the tree identical so
+    /// hits stay semantically correct. `key_ns` mirrors Python's namespace
+    /// ("v1" payloads vs the "v1-since" stale-poll envelope).
+    body_cache: Mutex<HashMap<(String, String, Option<i64>), (Vec<u8>, String)>>,
 }
 
 impl CacheData {
@@ -351,18 +352,20 @@ fn not_modified(cache_control: &'static str, etag: Option<&str>) -> Response {
     res
 }
 
-/// `_folders_response` (v1): sha1(f"v1:{path}:{depth}:{body}")[:24] +
+/// `_folders_response` (v1): sha1(f"{key_ns}:{path}:{depth}:{body}")[:24] +
 /// "-g{gen_int}", 304 on exact If-None-Match. Payload is the v1 envelope
 /// `{kind, nodes, generation}` — `key_ns` is part of the digest so the v0
-/// and v1 shapes can never collide.
+/// and v1 shapes can never collide, and so the "v1-since" stale-poll
+/// envelope never aliases the bare full-tree body cached under "v1".
 async fn folders_response(
     data: &Arc<CacheData>,
     payload: &Value,
     path: &str,
     depth: Option<i64>,
     headers: &HeaderMap,
+    key_ns: &str,
 ) -> Response {
-    let key = (path.to_string(), depth);
+    let key = (key_ns.to_string(), path.to_string(), depth);
     let cached = {
         let bc = data.body_cache.lock().await;
         bc.get(&key).cloned()
@@ -374,7 +377,7 @@ async fn folders_response(
             // to_string already produces that exact byte shape (UTF-8 verbatim).
             let body_str = serde_json::to_string(payload).unwrap();
             let digest = Sha1::digest(
-                format!("v1:{path}:{}:{body_str}", depth_repr(depth)).as_bytes(),
+                format!("{key_ns}:{path}:{}:{body_str}", depth_repr(depth)).as_bytes(),
             );
             let etag = format!("\"{}-g{}\"", &hex24(&digest), data.generation);
             let body = body_str.into_bytes();
@@ -513,24 +516,27 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
             return Serve::Done(not_modified(FOLDERS_CACHE_CONTROL, None));
         }
         if since.is_some() {
-            // Stale poll → {"kind":"tree","nodes":tree,"generation":gen} (no ETag).
+            // Stale poll → same envelope, but through the body cache
+            // (#221 port): the mismatch body is the whole tree plus the
+            // generation — identical for every poll within a generation —
+            // so serialize+sha1 once instead of a multi-MB json.dumps per
+            // poller. The "v1-since" namespace keeps this dict envelope
+            // from aliasing the bare-list full-tree body cached under
+            // "v1"; a generation change swaps CacheData wholesale so a
+            // stale body can't be served under new coordinates. The newly
+            // attached ETag/Cache-Control is safe for the fill-poller —
+            // it only reads body.generation and treats 304 as unchanged.
             let payload = serde_json::json!({
                 "kind": "tree", "nodes": data.tree, "generation": gen_int
             });
-            let mut res = Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(serde_json::to_string(&payload).unwrap()))
-                .unwrap();
-            res.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
+            return Serve::Done(
+                folders_response(&data, &payload, "", None, &headers, "v1-since").await,
             );
-            return Serve::Done(res);
         }
         let payload = serde_json::json!({
             "kind": "tree", "nodes": data.tree, "generation": gen_int
         });
-        return Serve::Done(folders_response(&data, &payload, "", None, &headers).await);
+        return Serve::Done(folders_response(&data, &payload, "", None, &headers, "v1").await);
     }
 
     // ── Shallow mode (depth >= 1).
@@ -568,7 +574,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
             let payload = serde_json::json!({
                 "kind": "children", "nodes": shallow, "generation": data.generation
             });
-            Serve::Done(folders_response(&data, &payload, &norm, Some(depth), &headers).await)
+            Serve::Done(folders_response(&data, &payload, &norm, Some(depth), &headers, "v1").await)
         }
         // Cold/stale → live-FS one-level listing (never waits on the scan).
         // fallback_gen = cache's generation when a (stale) cache exists, else 0.
@@ -608,4 +614,99 @@ pub async fn ensure_tree_and_index_wait(
         n.notified().await;
     }
     st.current().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    fn test_data(tree: Vec<Value>, generation: i64) -> Arc<CacheData> {
+        Arc::new(CacheData {
+            tree,
+            comics: Vec::new(),
+            timestamp_micros: AtomicU64::new((now_secs() * 1e6) as u64),
+            generation,
+            signature: None,
+            body_cache: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn body_bytes(res: Response) -> Vec<u8> {
+        res.into_body().collect().await.unwrap().to_bytes().to_vec()
+    }
+
+    /// #221 port: the ?since stale-poll envelope rides the body cache —
+    /// one serialization per generation, ETag/304/Cache-Control attached,
+    /// namespaced so it can never alias the bare full-tree body.
+    #[tokio::test]
+    async fn since_payload_is_cached_with_conditional_headers() {
+        let data = test_data(vec![serde_json::json!({"name": "a", "type": "folder"})], 7);
+        let payload = serde_json::json!({
+            "kind": "tree", "nodes": data.tree, "generation": data.generation
+        });
+        let empty = HeaderMap::new();
+
+        // First stale poll: serialized + etag minted.
+        let r1 = folders_response(&data, &payload, "", None, &empty, "v1-since").await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        let etag = r1
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(etag.starts_with('"') && etag.ends_with("-g7\""), "{etag}");
+        assert_eq!(
+            r1.headers().get(header::CACHE_CONTROL).unwrap(),
+            FOLDERS_CACHE_CONTROL
+        );
+        let body1 = body_bytes(r1).await;
+        let v1: Value = serde_json::from_slice(&body1).unwrap();
+        assert_eq!(v1["kind"], "tree");
+        assert_eq!(v1["generation"], 7);
+
+        // Second poll: the cached body is served byte-identically.
+        let r2 = folders_response(&data, &payload, "", None, &empty, "v1-since").await;
+        assert_eq!(r2.headers().get(header::ETAG).unwrap(), &etag);
+        assert_eq!(body_bytes(r2).await, body1);
+        assert_eq!(data.body_cache.lock().await.len(), 1);
+
+        // If-None-Match → 304 with the generation-suffixed etag echoed.
+        let mut inm = HeaderMap::new();
+        inm.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
+        let r3 = folders_response(&data, &payload, "", None, &inm, "v1-since").await;
+        assert_eq!(r3.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(r3.headers().get(header::ETAG).unwrap(), &etag);
+        assert!(body_bytes(r3).await.is_empty());
+    }
+
+    /// The "v1-since" envelope can never alias the bare full-tree body:
+    /// identical payload under a different namespace yields a different ETag.
+    #[tokio::test]
+    async fn namespace_separates_cached_bodies() {
+        let data = test_data(vec![], 3);
+        let payload = serde_json::json!({"kind": "tree", "nodes": [], "generation": 3});
+        let empty = HeaderMap::new();
+
+        let rs = folders_response(&data, &payload, "", None, &empty, "v1-since").await;
+        let rv = folders_response(&data, &payload, "", None, &empty, "v1").await;
+        let e_since = rs
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let e_v1 = rv
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(e_since, e_v1);
+        assert_eq!(data.body_cache.lock().await.len(), 2);
+    }
 }
