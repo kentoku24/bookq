@@ -172,7 +172,7 @@ fn load_source_bytes(
             py_float(mtime),
             size as u64
         );
-        return match bookq_core::zip_read_entry(&archive, &inner) {
+        return match crate::serve::archive_read_entry(&archive, &inner) {
             Some(data) => Ok(Some((data, mtime, size, key))),
             None => Err(detail(StatusCode::NOT_FOUND, "File not found")),
         };

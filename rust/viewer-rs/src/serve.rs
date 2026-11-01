@@ -194,10 +194,16 @@ fn finalize(names: impl IntoIterator<Item = String>, keep_order: bool) -> Vec<St
 /// `list_archive_entries` without the disk cache (read-path parity only;
 /// the warm cache is a performance layer whose output is identical).
 /// Unreadable archives yield `[]`, matching Python's never-raise contract.
+///
+/// Header parsing rides `bookq_core::open_archive` (#217 port): a memoized
+/// parsed archive answers repeat listings/reads without re-walking the
+/// headers — same object the entry-read path shares.
 pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
+    let memo = bookq_core::open_archive(path);
     match suffix_lower(path).as_str() {
         ".rar" | ".cbr" => finalize(
-            bookq_core::rar_names(path)
+            memo.and_then(|a| a.rar_names())
+                .or_else(|| bookq_core::rar_names(path))
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|(_, is_dir)| !is_dir)
@@ -205,7 +211,10 @@ pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
             false,
         ),
         ".epub" => {
-            let (raw, spine) = bookq_core::epub_raw(path).unwrap_or_default();
+            let (raw, spine) = memo
+                .and_then(|a| a.epub_raw())
+                .or_else(|| bookq_core::epub_raw(path))
+                .unwrap_or_default();
             let present: HashSet<&String> = raw.iter().collect();
             let ordered = finalize(spine.into_iter().filter(|n| present.contains(n)), true);
             if !ordered.is_empty() {
@@ -213,12 +222,29 @@ pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
             }
             finalize(raw, false)
         }
-        _ => finalize(bookq_core::zip_names(path).unwrap_or_default(), false),
+        _ => finalize(
+            memo.and_then(|a| a.zip_names())
+                .or_else(|| bookq_core::zip_names(path))
+                .unwrap_or_default(),
+            false,
+        ),
+    }
+}
+
+/// `read_archive_entry` read path (#217 port): the memoized open archive
+/// answers repeat page reads without re-parsing the central directory.
+/// `None` covers every non-proven read exactly like `zip_read_entry` —
+/// unstat'able paths fall through to the uncached one-shot open, and a
+/// failed parse yields `None` just as Python propagates the open failure.
+pub(crate) fn archive_read_entry(archive: &Path, inner: &str) -> Option<Vec<u8>> {
+    match bookq_core::open_archive(archive) {
+        Some(oa) => oa.read_zip_entry(inner),
+        None => bookq_core::zip_read_entry(archive, inner),
     }
 }
 
 /// `_list_archive_prefix`: entries under an inner prefix, relative to it.
-fn list_archive_prefix(archive: &Path, inner: &str) -> Vec<String> {
+pub(crate) fn list_archive_prefix(archive: &Path, inner: &str) -> Vec<String> {
     let prefix = inner.trim_matches('/');
     if prefix.is_empty()
         || prefix == "."
@@ -531,7 +557,7 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
     }
-    let data = match bookq_core::zip_read_entry(archive, inner) {
+    let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
         None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
     };

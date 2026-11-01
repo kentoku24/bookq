@@ -16,6 +16,8 @@ on:
       - "app/**"
       - "requirements*.txt"
       - ".github/workflows/api-contract.yml"
+      # expected-statuses overrides — a toml-only edit must still run the suite.
+      - "schemathesis.toml"
   workflow_dispatch:
 
 permissions:

@@ -18,5 +18,11 @@ COPY --from=rsbuilder /src/rust/target/release/viewer-rs /usr/local/bin/viewer-r
 ENV BOOKQ_UPSTREAM=http://viewer:8080
 ENV BOOKQ_BIND=0.0.0.0:8080
 
+# Same build-arg contract as Dockerfile — /api/v1/version reports these.
+ARG GIT_SHA=""
+ARG BUILD_DATE=""
+ENV BOOKQ_GIT_SHA=$GIT_SHA
+ENV BOOKQ_BUILD_DATE=$BUILD_DATE
+
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/viewer-rs"]

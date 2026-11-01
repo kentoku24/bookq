@@ -8,8 +8,8 @@
 
 use axum::{
     body::Body,
-    extract::{Query, Request, State},
-    http::{header, StatusCode, Uri},
+    extract::{FromRequestParts, Query, Request, State},
+    http::{header, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
     Router,
@@ -30,6 +30,7 @@ use std::path::PathBuf;
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
 mod folders;
+mod reader_sync;
 mod search;
 mod serve;
 mod state;
@@ -103,6 +104,11 @@ pub(crate) struct AppState {
     pub(crate) secret_key: String,
     /// M7: shared thumb-cache root (`BOOKQ_THUMB_CACHE_DIR`).
     pub(crate) thumb_cache: PathBuf,
+    /// `BOOKQ_GIT_SHA` / `BOOKQ_BUILD_DATE` — `/api/v1/version` fields.
+    pub(crate) git_sha: String,
+    pub(crate) build_date: String,
+    /// M8: dual-reader session registry (`app.state.reader_sync`).
+    pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -358,6 +364,80 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
     }
 }
 
+/// `/api/v1/health` — public (`security: []`); `{status:"ok"}`.
+async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("health") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    let headers = req.headers().clone();
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from("{\"status\":\"ok\"}"))
+        .unwrap();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    serve::maybe_gzip(&headers, res, true).await
+}
+
+/// `/api/v1/version` — authed; `{version,sha,build_date}` + `no-store`.
+async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("version") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    // Key order is the wire contract: version, sha, build_date.
+    let body = format!(
+        "{{\"version\":\"2.0.0\",\"sha\":{},\"build_date\":{}}}",
+        serde_json::to_string(&st.git_sha).unwrap_or("\"\"".into()),
+        serde_json::to_string(&st.build_date).unwrap_or("\"\"".into())
+    );
+    let headers = req.headers().clone();
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(body))
+        .unwrap();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    serve::maybe_gzip(&headers, res, true).await
+}
+
+/// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
+/// same swap semantics as the background gate, `{status,folders}`.
+async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("refresh") || req.method() != axum::http::Method::POST {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let headers = req.headers().clone();
+    match folders::force_rebuild(&st.index, &st.downloads).await {
+        Some(folders) => {
+            let mut res = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(format!("{{\"status\":\"ok\",\"folders\":{folders}}}")))
+                .unwrap();
+            res.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            serve::maybe_gzip(&headers, res, true).await
+        }
+        // Build failure propagates upstream in Python — proxy for parity.
+        None => proxy(&st.upstream, req).await,
+    }
+}
+
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
 /// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
@@ -487,6 +567,188 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
     }
 }
 
+// ── M8: /ws/reader-sync ────────────────────────────────────────────────────
+
+/// Native `/ws/reader-sync` — gated by "reader-sync"; a non-upgrade or
+/// gated-out request goes upstream so Python's own socket serves it.
+/// Unauthenticated handshakes get starlette's pre-accept close → HTTP 403.
+async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("reader-sync") || !is_upgrade(&req) {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(user) = auth::resolve_ws_user(
+        req.headers(),
+        st.native.test_mode,
+        &st.secret_key,
+        &st.allowed_emails,
+    ) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let (mut parts, _body) = req.into_parts();
+    match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &st).await {
+        Ok(wsu) => {
+            let st2 = st.clone();
+            wsu.on_upgrade(move |socket| reader_sync_conn(socket, st2, user))
+        }
+        Err(rej) => rej.into_response(),
+    }
+}
+
+/// One link per connection: register → drain task → receive loop → detach.
+/// Registry-initiated closes come through the drain's watch channel.
+async fn reader_sync_conn(
+    socket: axum::extract::ws::WebSocket,
+    st: AppState,
+    user: serde_json::Value,
+) {
+    use axum::extract::ws::Message;
+    use futures_util::StreamExt;
+    let (ws_tx, mut ws_rx) = socket.split();
+    let (outq_tx, outq_rx) = tokio::sync::mpsc::channel(st.registry.send_queue_max());
+    let (close_tx, close_rx) = tokio::sync::watch::channel(None);
+    let reg = st.registry.clone();
+    let link = reader_sync::Link::new(
+        outq_tx,
+        close_tx,
+        Some(user),
+        std::time::Instant::now(),
+        reg.heartbeat_interval(),
+    );
+    let bulk = link.bulk.clone();
+    let link_id = {
+        let mut g = reg.inner.lock().await;
+        g.register_link(link, reg.heartbeat_interval())
+    };
+    let drain = tokio::spawn(reader_sync_drain(ws_tx, outq_rx, bulk, close_rx));
+    let reg2 = reg.clone();
+    let lid = link_id.clone();
+    let mut recv = tokio::spawn(async move {
+        while let Some(msg) = ws_rx.next().await {
+            match msg {
+                Ok(Message::Text(t)) => reg2.handle_raw(&lid, t.as_bytes()).await,
+                Ok(Message::Binary(b)) => reg2.handle_raw(&lid, &b).await,
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+    let mut drain = drain;
+    tokio::select! {
+        _ = &mut recv => { drain.abort(); }
+        _ = &mut drain => { recv.abort(); }
+    }
+    reg.detach_link(&link_id).await;
+}
+
+/// Outbound pump: control frames + bulk (manifest) blocks + registry-close.
+/// Close is polled first (biased) so it bypasses queued frames like the
+/// Python drain-cancel + socket-close path.
+async fn reader_sync_drain(
+    mut ws_tx: futures_util::stream::SplitSink<
+        axum::extract::ws::WebSocket,
+        axum::extract::ws::Message,
+    >,
+    mut outq: tokio::sync::mpsc::Receiver<reader_sync::OutItem>,
+    bulk: std::sync::Arc<std::sync::Mutex<reader_sync::BulkQ>>,
+    mut close: tokio::sync::watch::Receiver<Option<(u16, String)>>,
+) {
+    use axum::extract::ws::{CloseFrame, Message};
+    use futures_util::SinkExt;
+
+    /// Feed one queued item into the sink without flushing — a Bulk
+    /// marker expands to every queued bulk frame, in order.
+    async fn feed_item(
+        ws_tx: &mut futures_util::stream::SplitSink<
+            axum::extract::ws::WebSocket,
+            Message,
+        >,
+        bulk: &std::sync::Mutex<reader_sync::BulkQ>,
+        item: reader_sync::OutItem,
+    ) -> bool {
+        match item {
+            reader_sync::OutItem::Text(raw) => {
+                ws_tx.feed(Message::Text(raw.into())).await.is_ok()
+            }
+            reader_sync::OutItem::Bulk => {
+                bulk.lock().unwrap().pending = false;
+                loop {
+                    let raw = { bulk.lock().unwrap().pop() };
+                    let Some(raw) = raw else { break };
+                    if ws_tx.feed(Message::Text(raw.into())).await.is_err() {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    loop {
+        tokio::select! {
+            biased;
+            changed = close.changed() => {
+                match changed {
+                    Ok(()) => {
+                        let val = close.borrow().clone();
+                        if let Some((code, reason)) = val {
+                            let _ = ws_tx
+                                .send(Message::Close(Some(CloseFrame {
+                                    code,
+                                    reason: reason.into(),
+                                })))
+                                .await;
+                        }
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            item = outq.recv() => {
+                match item {
+                    None => break,
+                    Some(it) => {
+                        if !feed_item(&mut ws_tx, &bulk, it).await { break; }
+                        // Collapse bursts: frames enqueued by one dispatch
+                        // (ACK→STATE→MANIFEST) are fed back-to-back and
+                        // flushed in a single write — mirroring the Python
+                        // drain, where a handler's outbound burst leaves
+                        // the transport in one event-loop turn. A close
+                        // request still preempts remaining frames.
+                        while let Ok(next) = outq.try_recv() {
+                            if close.has_changed().unwrap_or(false) { break; }
+                            if !feed_item(&mut ws_tx, &bulk, next).await { return; }
+                        }
+                        if ws_tx.flush().await.is_err() { break; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Accepted sockets get TCP_NODELAY — small WS frames must not wait on
+/// Nagle's delayed-ACK timer (asyncio/uvicorn do this by default).
+struct NoDelayListener(tokio::net::TcpListener);
+
+impl axum::serve::Listener for NoDelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok((io, addr)) if io.set_nodelay(true).is_ok() => return (io, addr),
+                Ok(_) => {}
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -514,6 +776,11 @@ async fn main() {
         .collect();
 
     let index = std::sync::Arc::new(folders::IndexState::new());
+    let registry = reader_sync::Registry::new(index.clone(), downloads.clone());
+    {
+        let reg_ticker = registry.clone();
+        tokio::spawn(async move { reg_ticker.run_ticker().await });
+    }
     let state_dir = PathBuf::from(
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
@@ -529,9 +796,14 @@ async fn main() {
         positions: std::sync::Arc::new(state::Positions::default()),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
+        registry: registry.clone(),
         thumb_cache: PathBuf::from(
             std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
         ),
+        // config.py getenv defaults are "unknown" (env unset); the image's
+        // ARG ""→ENV path yields "" — same two-state contract.
+        git_sha: std::env::var("BOOKQ_GIT_SHA").unwrap_or_else(|_| "unknown".into()),
+        build_date: std::env::var("BOOKQ_BUILD_DATE").unwrap_or_else(|_| "unknown".into()),
     };
     if st.native.enabled("visibility") || st.native.enabled("tree") {
         // warmup_metadata_index — lifespan kicks the same cold-miss path.
@@ -559,6 +831,16 @@ async fn main() {
         .route("/api/v1/facets", any(api_facets))
         .route("/api/v1/reading-positions", any(reading_positions))
         .route("/api/v1/folder-visibility", any(folder_visibility))
+        .route("/api/v1/health", any(api_health))
+        .route("/api/v1/version", any(api_version))
+        .route("/api/v1/index/refresh", any(api_refresh))
+        // M8: dual-reader sync socket — native under "reader-sync" gate;
+        // otherwise the upgrade is spliced to Python unchanged.
+        .route("/ws/reader-sync", any(reader_sync_ws))
+        // /api/v1/auth/token is proxy-only by design: its auth-code and
+        // refresh stores are written by the OAuth callback in app/auth.py
+        // (app.state); sharing them natively would require touching the
+        // Python backend, which is out of bounds.
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await
         }))
@@ -567,7 +849,7 @@ async fn main() {
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");
     tracing::info!(%addr, %upstream, "viewer-rs listening");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
-    axum::serve(listener, app)
+    axum::serve(NoDelayListener(listener), app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

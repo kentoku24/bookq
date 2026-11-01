@@ -12,6 +12,8 @@ on:
       - ".github/workflows/rust.yml"
       # gateway-contract inputs (#199): the OpenAPI spec + expected-statuses
       # overrides drive the suite, and the job builds the Python Dockerfile.
+      # api/** also covers api/reader-sync-cases.json — the cargo golden
+      # harness input (#210), so a case-file-only edit still triggers this.
       - "api/**"
       - "schemathesis.toml"
       - "Dockerfile"
@@ -113,9 +115,10 @@ jobs:
             -v "$PWD/.ci-dl:/app/downloads:ro" \
             -v bookq-ci-state:/var/lib/bookq -v bookq-ci-thumbs:/var/cache/bookq-thumbs \
             bookq-ci:viewer-rs
-          # /api/v1/health proxies upstream — a 200 proves the whole chain.
+          # /api/folders is v0 → always proxied — a 200 proves the whole
+          # chain (viewer-rs up AND upstream reachable).
           for i in $(seq 1 90); do
-            curl -sf http://127.0.0.1:8080/api/v1/health && break || sleep 1
+            curl -sf http://127.0.0.1:8080/api/folders && break || sleep 1
           done
           curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null \
             || { docker logs viewer-rs viewer; echo "gateway never healthy"; exit 1; }
@@ -147,6 +150,7 @@ jobs:
               except urllib.error.HTTPError as e:
                   return e.code, e.headers
           NATIVE = [
+              "/api/v1/health", "/api/v1/version",
               "/api/v1/tree", "/api/v1/tree?depth=1",
               "/api/v1/images?folder=Series/vol1",
               "/api/v1/search?q=p", "/api/v1/facets",
@@ -156,7 +160,8 @@ jobs:
               "/thumb/Series/vol1/p00.jpg?w=200",
               "/api/v1/thumb-sprite?folder=Manga%2Fpack.zip&names=01.jpg,02.jpg",
           ]
-          PROXY = ["/api/v1/health", "/api/folders"]  # fall-through controls
+          # Fall-through controls (v0 surface — never native).
+          PROXY = ["/api/folders", "/api/health"]
           failed = []
           for p in NATIVE + PROXY:
               for _ in range(2):  # 1st warms the shared cache; 2nd must be native
