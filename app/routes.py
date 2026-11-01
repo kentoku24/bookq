@@ -1080,9 +1080,27 @@ async def _folder_tree(
         subtree = index.subtree_facets()
         _attach_subtree_facets(tree, subtree, "")
         if since is not None:
-            if v1:
-                return JSONResponse({"kind": "tree", "nodes": tree, "generation": gen_int})
-            return JSONResponse({"tree": tree, "generation": gen_int})
+            # Stale-generation poll: the mismatch body is the whole tree plus
+            # the generation — identical for every poll within a generation,
+            # so serialize+ETag it once through the shared body cache instead
+            # of paying a multi-MB json.dumps per request per poller. The
+            # "-since" key namespace keeps this dict envelope from aliasing
+            # the bare-list full-tree body cached under (key_ns, "", None);
+            # no other _folders_response caller uses a suffixed namespace.
+            # (gen, gen_int) coordinates come from the same cache_data read
+            # as *tree* with no intervening await, so a fill/rebuild's
+            # generation bump discards this entry wholesale before any stale
+            # body can be served under new coordinates. The newly attached
+            # ETag/Cache-Control is safe for the fill-poller: _fillPollTick
+            # only needs body.generation and treats any 304 as unchanged.
+            since_payload = (
+                _wrap(tree, "tree", gen_int)
+                if v1
+                else {"tree": tree, "generation": gen_int}
+            )
+            return _folders_response(
+                request, since_payload, "", None, gen, gen_int, key_ns + "-since"
+            )
         return _folders_response(request, _wrap(tree, "tree", gen_int), "", None, gen, gen_int, key_ns)
     norm = path.rstrip("/")
     downloads_path = request.app.state.settings.downloads_path
