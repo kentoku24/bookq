@@ -21,6 +21,20 @@ enum ReaderPageMode: String, Equatable {
     case single, spread
 }
 
+/// Tap-zone verdict — `zoneActionAt` (app/static/viewer/navigation.js).
+/// Edge 30% zones turn pages in the direction `tapForwardLeft` selects
+/// (web default: left = forward), the center band toggles chrome.
+enum ZoneAction: Equatable {
+    case turn(Int)      // +1 forward, -1 back
+    case toggleChrome
+}
+
+func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
+    if frac < 0.30 { return .turn(tapForwardLeft ? 1 : -1) }
+    if frac > 0.70 { return .turn(tapForwardLeft ? -1 : 1) }
+    return .toggleChrome
+}
+
 struct ReaderWork: Equatable {
     var clickedPath: String
     var images: [PageRef]             // global, including spacers
