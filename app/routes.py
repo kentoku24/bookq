@@ -1456,6 +1456,41 @@ def _archive_bytes_response(
     return Response(content=data, media_type=media_type, headers=headers)
 
 
+def _render_pdf_page_cached(archive: Path, stat: os.stat_result, idx: int) -> bytes | None:
+    """Return rendered PNG bytes for one PDF page, backed by a disk cache.
+
+    Rendered pages live in the ``pdf/`` namespace under the thumbs
+    ``cache_root()`` (same root/env override as thumbs/view/sprites), keyed
+    by sha1 of ``archive|idx|st_mtime|st_size`` — a changed PDF is an
+    automatic miss, so stale pages are never served. A hit skips the
+    pypdfium2 open + scale-2.0 render + PNG encode entirely (the ``/view``
+    path already had this; ``/image`` re-rendered every request). Stores go
+    through ``_store_thumb`` — unique tmp + atomic replace, then a per-write
+    prune of the namespace back under ``THUMB_CACHE_MAX_FILES``. Fail-open:
+    a cache read or write failure falls back to a live render, so the cache
+    can never break serving. ``None`` still means "rendering unavailable"
+    (no pypdfium2) — the caller maps it to 501.
+    """
+    from app.archive_pdf import render_pdf_page
+    from app.thumbs import _store_thumb, cache_root, pdf_cache_path_for
+
+    key = f"{archive}|{idx}|{stat.st_mtime}|{stat.st_size}"
+    dest = pdf_cache_path_for(cache_root(), key)
+    try:
+        if dest.is_file():
+            return dest.read_bytes()
+    except OSError:
+        pass  # unreadable cache entry → fall through to a live render
+    data = render_pdf_page(archive, idx)
+    if data is None:
+        return None
+    try:
+        _store_thumb(dest, data)
+    except Exception:
+        pass  # a cache-store failure must not fail the request
+    return data
+
+
 async def _serve_archive_entry(
     archive: Path, inner: str, request: Request
 ) -> Response:
@@ -1463,9 +1498,11 @@ async def _serve_archive_entry(
 
     Entries carry ETag/Last-Modified with conditional (304) and Range (206)
     support so the viewer and offline cache revalidate instead of refetching.
+    Rendered PDF pages are disk-cached (``_render_pdf_page_cached``) so only
+    the first request pays the pypdfium2 render.
     """
     from app.archive import ArchiveToolMissing, _is_image_entry, read_archive_entry
-    from app.archive_pdf import parse_pdf_page_name, pdf_page_count, render_pdf_page
+    from app.archive_pdf import parse_pdf_page_name, pdf_page_count
 
     if not inner or inner.startswith("/") or ".." in inner.split("/"):
         raise HTTPException(status_code=400, detail="Invalid image path")
@@ -1486,7 +1523,7 @@ async def _serve_archive_entry(
         etag = f'"{stat.st_mtime:.0f}-{stat.st_size}-pdf{idx}"'
         if _not_modified(request, etag, stat.st_mtime):
             return Response(status_code=304)
-        data = await run_in_threadpool(render_pdf_page, archive, idx)
+        data = await run_in_threadpool(_render_pdf_page_cached, archive, stat, idx)
         if data is None:
             raise HTTPException(
                 status_code=501,
