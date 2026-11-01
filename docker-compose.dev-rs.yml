@@ -23,11 +23,16 @@ services:
       # M4: folder-visibility SQLite — viewer と同じ user-state volume を
       # 共有し、両バックエンドが同じ hidden_roots を読み書きする。
       - user-state:/var/lib/bookq
+      # M7: thumb/sprite hit-path cache — viewer と共有しないと native
+      # thumb は常に container-local miss で proxy 落ちし、hit-path の
+      # 検証が空転する (prod compose / #206 CI と同じ構成)。
+      - thumb-cache:/var/cache/bookq-thumbs
 
     environment:
       - BOOKQ_UPSTREAM=http://viewer:8080
       - DOWNLOADS_DIR=/app/downloads
       - BOOKQ_STATE_DIR=/var/lib/bookq
+      - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # Same value as the viewer's env: native endpoints only activate where
       # auth is bypassed; outside test mode every request proxies upstream.
       - BOOKQ_TEST_MODE=true
