@@ -15,7 +15,10 @@ free.
   (Python) / `VIS_SCHEMA_VERSION` (Rust) must match the file's stamp. A
   side that finds the DB stamped *newer* than its own constant refuses
   rather than silently downgrading — that is the drift detector for
-  mixed-version deployments.
+  mixed-version deployments. The check runs only at store init (first
+  connect) — a long-running process does not notice a mid-flight schema
+  upgrade, so the real protection is boot ordering: upgrade the schema
+  with a release, then restart everything that holds a connection.
 - This is a migration-period arrangement. When FastAPI retires, the file
   and the DB volume pass to viewer-rs unchanged; nothing about the
   client-facing API (`api/openapi.v1.yaml`) is affected.
