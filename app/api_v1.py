@@ -81,6 +81,22 @@ async def v1_get_pair_report(id: str = Query(...)):
     return {"state": _PAIR_REPORTS.get(id)}
 
 
+@router.post("/api/v1/pair-reset", include_in_schema=False)
+async def v1_post_pair_reset(request: Request):
+    """End every live reader-sync session. A simulator client that went
+    idle by link-drop never LEAVEd — its server-side session lingers in
+    the resume window and hijacks the next MATCH (the new connect joins
+    a stale 'reading' session instead of creating a fresh waiter)."""
+    _pair_report_gate()
+    rs = getattr(request.app.state, "reader_sync", None)
+    n = 0
+    if rs is not None:
+        for session in list(rs.sessions.values()):
+            rs._end_session(session, "reset")
+            n += 1
+    return {"ended": n}
+
+
 @router.get("/api/v1/version")
 async def v1_version(request: Request, _user: dict = Depends(require_auth)):
     """Version info."""

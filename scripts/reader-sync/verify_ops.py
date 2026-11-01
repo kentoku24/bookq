@@ -717,6 +717,14 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                 "      PairController.state.status)", timeout=15000)
         return
     if ctx.driver.name == "simulator":
+        # A sim client that went idle by link-drop never sent LEAVE —
+        # its server-side session lingers inside the resume window and
+        # the next MATCH joins THAT stale (already-reading) session
+        # instead of creating a fresh waiter. Wipe the store first.
+        try:
+            _api_post(ctx, "/api/v1/pair-reset", timeout=5)
+        except Exception:
+            pass
         # a live-but-stranded session can sit in ANY panel section —
         # leader-waiting (#pair-leader-cancel), follower-waiting
         # (#pair-waiting-cancel), session (#pair-leave) or error
@@ -1217,6 +1225,14 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
 def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
     with urllib.request.urlopen(
             ctx.base_url.rstrip("/") + path, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def _api_post(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
+    req = urllib.request.Request(
+        ctx.base_url.rstrip("/") + path, method="POST", data=b"{}",
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
