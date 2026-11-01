@@ -6,11 +6,16 @@ Nothing here ever raises for a bad archive: listing yields ``[]`` and reading
 yields ``None`` so the API renders an empty message / 404 instead of a 500.
 """
 
+import hashlib
 import logging
+import os
 import posixpath
+import shutil
 import threading
+import time
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -463,6 +468,393 @@ def _clear_open_archive_cache() -> None:
         _close_open_archive(entry)
 
 
+# ── RAR sequential-extract tmp cache (issue #246) ────────────────────────
+#
+# RAR entries that need the external extractor used to spawn it once per
+# page request. For a SOLID archive each entry n additionally re-decompresses
+# 0..n internally, so reading a P-page chapter cost O(P²) of extractor work.
+# Two tmp-file caches under ``thumbs.cache_root()/rar-ext/`` turn that into
+# O(P):
+#
+# - Solid archives: on the first compressed/solid read, ONE extractor pass
+#   (``7z x`` / ``unar -D`` / ``unrar x`` / ``bsdtar -x`` — whichever tool
+#   rarfile itself resolved via ``tool_setup()``) unpacks the whole archive
+#   into a staging dir; verified entries are then published atomically under
+#   ``<dir>/x/<sanitized name>`` and later reads serve plain files.
+# - Compressed non-solid entries: the first successful ``rf.read`` bytes are
+#   stored at ``<dir>/s/<sha1(inner)>`` (unique tmp + ``os.replace``), so a
+#   re-read never respawns.
+# - Stored entries keep the in-process direct read untouched.
+#
+# Layout: ``<cache_root>/rar-ext/<sha1(resolved|mtime_ns|size)>/`` — an
+# edited archive is a different digest, which is the invalidation story
+# (mirrors the thumbs ``path|mtime|size`` key). Per-archive state
+# (``_rar_ext_states``, LRU like ``_open_archives``) holds an "extraction
+# attempted" flag so a failed extraction never retries: missing entries fall
+# through to the legacy per-request ``rf.read``, i.e. never a regression vs
+# today. Reads of one archive serialize on the memoized ``_OpenArchive``
+# lock, so concurrent first reads run a single extraction; the uncached
+# fallback serializes on the state's own lock instead.
+#
+# ``_prune_rar_ext`` mirrors ``thumbs.prune_cache_dir``'s lazy
+# prune-back-under-cap regime, but the eviction unit is one archive-version
+# directory (a whole extracted chapter), not one file.
+
+_RAR_EXT_STATE_MAX = 8  # mirrors _OPEN_ARCHIVE_CACHE_MAX
+# Max archive-version dirs kept under rar-ext/. Unlike the thumbs cap (5000
+# *files*) one dir holds a whole chapter, so a small count bounds disk use.
+_RAR_EXT_MAX_DIRS = 16
+# Staging dirs older than this are crash leftovers — safe to reap.
+_RAR_EXT_STALE_STAGE_SEC = 3600
+
+
+class _RarExtState:
+    """Per-archive-version extraction state: done flag + target dir."""
+
+    __slots__ = ("lock", "ext_dir", "extracted")
+
+    def __init__(self, ext_dir: Path) -> None:
+        self.lock = threading.Lock()
+        self.ext_dir = ext_dir
+        # A preexisting dir means an extraction already ran for this exact
+        # archive version (possibly a previous process) — never re-run.
+        self.extracted = ext_dir.is_dir()
+
+
+_rar_ext_states: "OrderedDict[tuple[str, int, int], _RarExtState]" = OrderedDict()
+_rar_ext_states_lock = threading.Lock()
+
+
+def _rar_ext_dir_from_key(key: tuple[str, int, int]) -> Path:
+    """``<cache_root>/rar-ext/<sha1(resolved|mtime_ns|size)>`` for *key*."""
+    digest = hashlib.sha1(
+        f"{key[0]}|{key[1]}|{key[2]}".encode("utf-8")
+    ).hexdigest()
+    from app.thumbs import cache_root
+
+    return cache_root() / "rar-ext" / digest
+
+
+def _rar_ext_dir(path: Path) -> Path | None:
+    key = _archive_cache_key(path)
+    if key is None:
+        return None
+    return _rar_ext_dir_from_key(key)
+
+
+def _rar_ext_state(path: Path) -> _RarExtState | None:
+    """Return the extraction state for *path*, creating it on miss."""
+    key = _archive_cache_key(path)
+    if key is None:
+        return None
+    ext_dir = _rar_ext_dir_from_key(key)
+    with _rar_ext_states_lock:
+        st = _rar_ext_states.get(key)
+        if st is None:
+            st = _RarExtState(ext_dir)
+            _rar_ext_states[key] = st
+            if len(_rar_ext_states) > _RAR_EXT_STATE_MAX:
+                _rar_ext_states.popitem(last=False)
+        else:
+            _rar_ext_states.move_to_end(key)
+    return st
+
+
+def _clear_rar_ext_state() -> None:
+    """Drop in-memory extraction states (test isolation; disk cache stays)."""
+    with _rar_ext_states_lock:
+        _rar_ext_states.clear()
+
+
+def _rar_read_mode(rf, info, rarfile) -> str:
+    """Classify a RAR entry: ``solid`` / ``compressed`` / ``stored``.
+
+    Solid wins over stored: when the archive-level flag (or the entry's own
+    solid bit) is set, whole-archive extraction is the strategy for every
+    entry — in a real solid archive all entries are compressed anyway, and a
+    stored entry inside one extracts just as correctly. ``compress_type`` is
+    normalized across RAR3/RAR5 (``RAR_M0`` = stored); ``RAR_FILE_SOLID`` is
+    the normalized per-entry bit (RAR5 ``RAR5_COMPR_SOLID`` maps onto it).
+    """
+    try:
+        if rf.is_solid() or (info.flags & rarfile.RAR_FILE_SOLID):
+            return "solid"
+    except Exception:
+        pass
+    if getattr(info, "compress_type", None) == rarfile.RAR_M0:
+        return "stored"
+    return "compressed"
+
+
+def _rar_extract_all_cmdline(rarfile, setup, archive: str, destdir: str) -> list[str] | None:
+    """Extract-everything-to-*destdir* argv for the SAME tool rarfile picked.
+
+    ``setup.setup["open_cmd"][0]`` names the module global holding the tool
+    executable (e.g. ``"SEVENZIP_TOOL"`` → ``rarfile.SEVENZIP_TOOL``); each
+    tool's ``x``/extract verb keeps inner paths. The ``no_password`` args
+    mirror rarfile's tool configs (our archives carry no passwords — a
+    password-flagged entry fails here and falls back like today). ``None``
+    means "unknown tool" → caller skips extraction and falls back.
+    """
+    tool = setup.setup["open_cmd"][0]
+    exe = getattr(rarfile, tool, None)
+    if exe is None:
+        return None
+    if tool == "UNRAR_TOOL":
+        # `x` = extract with full paths; trailing sep marks destdir as a dir.
+        return [exe, "x", "-o+", "-inul", "-p-", "--", archive, destdir + os.sep]
+    if tool == "UNAR_TOOL":
+        # -D: never wrap output in an archive-named dir (deterministic layout);
+        # -nr: don't recurse into nested archives.
+        return [exe, "-D", "-nr", "-f", "-q", "-o", destdir, "-p", "", "--", archive]
+    if tool in ("SEVENZIP_TOOL", "SEVENZIP2_TOOL"):
+        return [exe, "x", "-y", "-aoa", "-bb0", "-p", f"-o{destdir}", "--", archive]
+    if tool == "BSDTAR_TOOL":
+        # bsdtar cannot do solid archives; a failure is fail-open (fallback).
+        return [exe, "-x", "-f", archive, "-C", destdir]
+    return None
+
+
+def _rar_verified_extract(info, cand: Path) -> bool:
+    """True when extracted *cand* provably matches *info* (size, then CRC32).
+
+    CRC is verified only "where available": RAR5 entries may carry Blake2sp
+    instead of CRC32 (``blake2sp_hash`` set, ``CRC`` None) and stdlib has no
+    blake2sp — size is the check there. A successful tool already CRC-checked
+    on its side; this guards partial output (never serve a truncated page).
+    """
+    try:
+        if not cand.is_file() or cand.stat().st_size != info.file_size:
+            return False
+        crc = getattr(info, "CRC", None)
+        if crc is None or getattr(info, "blake2sp_hash", None) is not None:
+            return True
+        return (zlib.crc32(cand.read_bytes()) & 0xFFFFFFFF) == (crc & 0xFFFFFFFF)
+    except OSError:
+        return False
+
+
+def _rar_publish_extracted(rf, stage: Path, ext_dir: Path, rarfile) -> None:
+    """Publish verified entries from *stage* into ``<ext_dir>/x/`` atomically.
+
+    Only entries the archive itself lists (``is_file``, ``_is_image_entry``,
+    no link/redir placeholders) are candidates; each must pass the
+    size/CRC check and a path-containment re-check (a symlink member inside
+    the archive could otherwise point a candidate outside *stage*).
+    Publishing is per file via ``os.replace`` — a racing reader either sees
+    the complete file or nothing, and partial extraction (tool died midway)
+    still publishes whatever landed verified.
+    """
+    try:
+        infos = rf.infolist()
+    except Exception:
+        return
+    try:
+        stage_root = stage.resolve()
+    except OSError:
+        return
+    for info in infos:
+        try:
+            if not info.is_file() or getattr(info, "file_redir", None) is not None:
+                continue
+            name = info.filename
+            if not _is_image_entry(name):
+                continue
+            rel = rarfile.sanitize_filename(name, os.path.sep, rarfile.WIN32)
+            if not rel:
+                continue
+            cand = None
+            for relname in (rel, name):
+                probe = stage / relname
+                try:
+                    resolved = probe.resolve()
+                except OSError:
+                    continue
+                if resolved != stage_root and str(resolved).startswith(
+                    str(stage_root) + os.sep
+                ) and probe.is_file():
+                    cand = probe
+                    break
+            if cand is None or not _rar_verified_extract(info, cand):
+                continue
+            dest = ext_dir / "x" / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(cand, dest)
+        except Exception:
+            continue
+
+
+def _rar_extract_all(rf, path: Path, st: _RarExtState, rarfile) -> None:
+    """Run ONE extractor pass unpacking *path* into a staging dir, then publish.
+
+    Sets ``st.extracted`` first: extraction is attempted at most once per
+    archive version — on any failure the missing entries keep the legacy
+    per-request ``rf.read`` path. Never raises: a missing tool just means no
+    tmp files (the fallback then raises ArchiveToolMissing from ``rf.read``
+    exactly as before — and stored entries still serve in-process).
+    """
+    st.extracted = True
+    try:
+        setup = rarfile.tool_setup()
+    except Exception as exc:
+        logger.debug("RAR extract-all skipped for %s: %r", path, exc)
+        return
+    stage = st.ext_dir.parent / (
+        f"{st.ext_dir.name}.part-{os.getpid()}.{os.urandom(6).hex()}"
+    )
+    try:
+        stage.mkdir(parents=True)
+    except OSError:
+        return
+    try:
+        cmd = _rar_extract_all_cmdline(rarfile, setup, str(path), str(stage))
+        if cmd is not None:
+            try:
+                proc = rarfile.custom_popen(cmd)
+                out, _ = proc.communicate()
+            except Exception as exc:
+                logger.warning("RAR extract-all failed for %s: %r", path, exc)
+            else:
+                if proc.returncode != 0:
+                    logger.warning(
+                        "RAR extract-all rc=%s for %s: %r",
+                        proc.returncode,
+                        path,
+                        out[-300:],
+                    )
+        _rar_publish_extracted(rf, stage, st.ext_dir, rarfile)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    _prune_rar_ext(st.ext_dir.parent)
+
+
+def _rar_extracted_file(ext_dir: Path, name: str, rarfile) -> Path | None:
+    """Published tmp file for archive entry *name*, or None (miss/unsafe)."""
+    try:
+        rel = rarfile.sanitize_filename(name, os.path.sep, rarfile.WIN32)
+    except Exception:
+        return None
+    if not rel:
+        return None
+    dest = ext_dir / "x" / rel
+    try:
+        root = (ext_dir / "x").resolve()
+        resolved = dest.resolve()
+        if resolved != root and not str(resolved).startswith(str(root) + os.sep):
+            return None
+        return dest if dest.is_file() else None
+    except OSError:
+        return None
+
+
+def _touch_rar_ext(ext_dir: Path) -> None:
+    """Refresh dir mtime so a hot archive isn't the first prune victim."""
+    try:
+        os.utime(ext_dir)
+    except OSError:
+        pass
+
+
+def _rar_solid_entry_bytes(rf, info, path: Path, rarfile) -> bytes | None:
+    """Serve a solid-archive entry from the extract-all tmp dir, or None."""
+    st = _rar_ext_state(path)
+    if st is None:
+        return None
+    if not st.extracted:
+        with st.lock:
+            if not st.extracted:
+                _rar_extract_all(rf, path, st, rarfile)
+    dest = _rar_extracted_file(st.ext_dir, info.filename, rarfile)
+    if dest is None:
+        return None
+    try:
+        data = dest.read_bytes()
+    except OSError:
+        return None
+    _touch_rar_ext(st.ext_dir)
+    return data
+
+
+def _rar_single_entry_bytes(path: Path, inner: str) -> bytes | None:
+    """Serve a compressed non-solid entry from its per-entry tmp file."""
+    ext_dir = _rar_ext_dir(path)
+    if ext_dir is None:
+        return None
+    dest = ext_dir / "s" / hashlib.sha1(inner.encode("utf-8")).hexdigest()
+    try:
+        if not dest.is_file():
+            return None
+        data = dest.read_bytes()
+    except OSError:
+        return None
+    _touch_rar_ext(ext_dir)
+    return data
+
+
+def _rar_store_single_entry(path: Path, inner: str, data: bytes) -> None:
+    """Persist one extracted entry as ``<ext_dir>/s/<sha1(inner)>`` (fail-open).
+
+    Unique sibling tmp + ``os.replace`` so a half-written page is never
+    published; mirrors ``thumbs._store_thumb``'s write pattern.
+    """
+    ext_dir = _rar_ext_dir(path)
+    if ext_dir is None:
+        return
+    dest = ext_dir / "s" / hashlib.sha1(inner.encode("utf-8")).hexdigest()
+    tmp = None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.parent / f".{dest.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    except OSError:
+        return
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    _prune_rar_ext(ext_dir.parent)
+
+
+def _prune_rar_ext(namespace_dir: Path, cap: int | None = None) -> None:
+    """Prune *namespace_dir* (``rar-ext/``) back under *cap* archive dirs.
+
+    Mirrors ``thumbs.prune_cache_dir`` (lazy, oldest-mtime-first, fail-open)
+    with two differences: the eviction unit is a DIRECTORY (one extracted
+    archive version, removed via rmtree) and stale ``*.part-*`` staging dirs
+    older than ``_RAR_EXT_STALE_STAGE_SEC`` are crash leftovers reaped on
+    sight. Read at call time so a monkeypatched cap takes effect.
+    """
+    if cap is None:
+        cap = _RAR_EXT_MAX_DIRS
+    try:
+        entries = [p for p in namespace_dir.iterdir() if p.is_dir()]
+    except Exception:
+        return
+    now = time.time()
+    dirs: list[Path] = []
+    for p in entries:
+        if ".part-" in p.name:
+            try:
+                stale = now - p.stat().st_mtime > _RAR_EXT_STALE_STAGE_SEC
+            except OSError:
+                stale = False
+            if stale:
+                shutil.rmtree(p, ignore_errors=True)
+            continue
+        dirs.append(p)
+    if len(dirs) <= cap:
+        return
+    try:
+        dirs.sort(key=lambda p: p.stat().st_mtime)
+    except Exception:
+        return
+    for stale in dirs[: len(dirs) - cap]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def _zip_entry_bytes(zf: zipfile.ZipFile, inner: str) -> bytes | None:
     try:
         info = zf.getinfo(inner)
@@ -498,7 +890,12 @@ def _read_zip(path: Path, inner: str) -> bytes | None:
 
 def _rar_entry_bytes(rf, inner: str, path: Path, rarfile) -> bytes | None:
     """Read *inner* from an open RarFile. Raises ArchiveToolMissing when the
-    external extractor is absent; every other failure logs and yields None."""
+    external extractor is absent; every other failure logs and yields None.
+
+    Solid/compressed entries first consult the rar-ext tmp cache (#246):
+    a hit serves plain file bytes, a miss falls through to the legacy
+    ``rf.read`` below — never a regression vs the pre-cache behavior.
+    """
     try:
         info = rf.getinfo(inner)
     except rarfile.NoRarEntry:
@@ -506,8 +903,17 @@ def _rar_entry_bytes(rf, inner: str, path: Path, rarfile) -> bytes | None:
     except Exception as exc:
         logger.debug("RAR list failed for %s: %r", path, exc)
         return None
+    mode = _rar_read_mode(rf, info, rarfile)
+    if mode == "solid":
+        data = _rar_solid_entry_bytes(rf, info, path, rarfile)
+        if data is not None:
+            return data
+    elif mode == "compressed":
+        data = _rar_single_entry_bytes(path, inner)
+        if data is not None:
+            return data
     try:
-        return rf.read(info)
+        data = rf.read(info)
     except rarfile.RarCannotExec as exc:
         raise ArchiveToolMissing(
             "RAR extraction requires 7-Zip (7z) or unrar on PATH"
@@ -515,6 +921,9 @@ def _rar_entry_bytes(rf, inner: str, path: Path, rarfile) -> bytes | None:
     except Exception as exc:
         logger.warning("RAR extraction failed for %s!%s: %r", path, inner, exc)
         return None
+    if data is not None and mode == "compressed":
+        _rar_store_single_entry(path, inner, data)
+    return data
 
 
 def _read_rar_uncached(path: Path, inner: str, rarfile) -> bytes | None:
