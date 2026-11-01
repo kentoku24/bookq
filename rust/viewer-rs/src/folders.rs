@@ -317,11 +317,13 @@ fn not_modified(cache_control: &'static str, etag: Option<&str>) -> Response {
     res
 }
 
-/// `_folders_response`: sha1(f"{path}:{depth}:{body}")[:24] + "-g{gen_int}",
-/// 304 on exact If-None-Match. Payload is a bare list (tree or shallow).
+/// `_folders_response` (v1): sha1(f"v1:{path}:{depth}:{body}")[:24] +
+/// "-g{gen_int}", 304 on exact If-None-Match. Payload is the v1 envelope
+/// `{kind, nodes, generation}` — `key_ns` is part of the digest so the v0
+/// and v1 shapes can never collide.
 async fn folders_response(
     data: &Arc<CacheData>,
-    payload: &Vec<Value>,
+    payload: &Value,
     path: &str,
     depth: Option<i64>,
     headers: &HeaderMap,
@@ -338,7 +340,7 @@ async fn folders_response(
             // to_string already produces that exact byte shape (UTF-8 verbatim).
             let body_str = serde_json::to_string(payload).unwrap();
             let digest = Sha1::digest(
-                format!("{path}:{}:{body_str}", depth_repr(depth)).as_bytes(),
+                format!("v1:{path}:{}:{body_str}", depth_repr(depth)).as_bytes(),
             );
             let etag = format!("\"{}-g{}\"", &hex24(&digest), data.generation);
             let body = body_str.into_bytes();
@@ -371,12 +373,15 @@ fn depth_repr(depth: Option<i64>) -> String {
     }
 }
 
-/// Live-FS fallback tail of `api_folders` (cold cache + depth): a single
+/// Live-FS fallback tail of `_folder_tree` (cold cache + depth): a single
 /// iterdir level, suffix-classified, no body cache, etag without -g suffix.
+/// v1: `{"kind":"children", nodes, generation: fallback_gen}` where
+/// fallback_gen is the cache's generation or 0 when there is no cache.
 fn live_fs_response(
     downloads: &Path,
     norm: &str,
     depth: i64,
+    fallback_gen: i64,
     headers: &HeaderMap,
 ) -> Response {
     let target = if norm.is_empty() {
@@ -391,8 +396,11 @@ fn live_fs_response(
     } else {
         Vec::new() // existing non-dir (archive/pdf file) → []
     };
-    let body_str = serde_json::to_string(&shallow).unwrap();
-    let digest = Sha1::digest(format!("{norm}:{depth}:{body_str}").as_bytes());
+    let payload = serde_json::json!({
+        "kind": "children", "nodes": shallow, "generation": fallback_gen
+    });
+    let body_str = serde_json::to_string(&payload).unwrap();
+    let digest = Sha1::digest(format!("v1:{norm}:{depth}:{body_str}").as_bytes());
     let etag = format!("\"{}\"", hex24(&digest));
     if headers
         .get(header::IF_NONE_MATCH)
@@ -416,8 +424,8 @@ fn parse_i64(v: Option<&String>) -> Result<Option<i64>, ()> {
     }
 }
 
-/// GET /api/folders — native port of `app/routes.py::api_folders`.
-pub async fn api_folders(st: &AppState, headers: &HeaderMap, q: HashMap<String, String>) -> Serve {
+/// GET /api/v1/tree — native port of `_folder_tree(v1=True)`.
+pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, String>) -> Serve {
     // Query types: path:str, depth:int|None, since:int|None. Non-integer
     // depth/since → FastAPI 422 — fall through to the upstream renderer.
     let path = q.get("path").cloned().unwrap_or_default();
@@ -471,8 +479,10 @@ pub async fn api_folders(st: &AppState, headers: &HeaderMap, q: HashMap<String, 
             return Serve::Done(not_modified(FOLDERS_CACHE_CONTROL, None));
         }
         if since.is_some() {
-            // Stale poll → {"tree": tree, "generation": gen_int} (no ETag).
-            let payload = serde_json::json!({"tree": data.tree, "generation": gen_int});
+            // Stale poll → {"kind":"tree","nodes":tree,"generation":gen} (no ETag).
+            let payload = serde_json::json!({
+                "kind": "tree", "nodes": data.tree, "generation": gen_int
+            });
             let mut res = Response::builder()
                 .status(StatusCode::OK)
                 .body(Body::from(serde_json::to_string(&payload).unwrap()))
@@ -483,7 +493,10 @@ pub async fn api_folders(st: &AppState, headers: &HeaderMap, q: HashMap<String, 
             );
             return Serve::Done(res);
         }
-        return Serve::Done(folders_response(&data, &data.tree, "", None, &headers).await);
+        let payload = serde_json::json!({
+            "kind": "tree", "nodes": data.tree, "generation": gen_int
+        });
+        return Serve::Done(folders_response(&data, &payload, "", None, &headers).await);
     }
 
     // ── Shallow mode (depth >= 1).
@@ -518,10 +531,26 @@ pub async fn api_folders(st: &AppState, headers: &HeaderMap, q: HashMap<String, 
                 }
             };
             let shallow = tree::shallow_from_tree(children);
-            Serve::Done(folders_response(&data, &shallow, &norm, Some(depth), &headers).await)
+            let payload = serde_json::json!({
+                "kind": "children", "nodes": shallow, "generation": data.generation
+            });
+            Serve::Done(folders_response(&data, &payload, &norm, Some(depth), &headers).await)
         }
         // Cold/stale → live-FS one-level listing (never waits on the scan).
-        _ => Serve::Done(live_fs_response(&st.downloads, &norm, depth, &headers)),
+        // fallback_gen = cache's generation when a (stale) cache exists, else 0.
+        other => {
+            let fallback_gen = match &other {
+                Some(d) => d.generation,
+                None => 0,
+            };
+            Serve::Done(live_fs_response(
+                &st.downloads,
+                &norm,
+                depth,
+                fallback_gen,
+                &headers,
+            ))
+        }
     }
 }
 
