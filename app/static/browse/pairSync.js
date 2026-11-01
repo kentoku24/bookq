@@ -1009,6 +1009,10 @@
                   '#pair-code-value', '#browse-header', '#menu-btn',
                   '#search-input'];
       var _lastTap = null;
+      // boot marker so the runner can tell a reload actually happened —
+      // a 'reload' that never re-evals this script silently skips the
+      // resume path the scenario exists to cover.
+      var _boot = Date.now();
       document.addEventListener('pointerdown', function (e) {
         var el = e.target && e.target.closest
           ? (e.target.closest('button,input,a,[id]') || e.target) : e.target;
@@ -1067,6 +1071,7 @@
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
+                                 boot: _boot,
                                  joinCode: ci ? ci.value : null,
                                  browseHeader: bh
                                    ? bh.textContent : null,

@@ -671,8 +671,16 @@ class SimulatorDriver:
         if hit is not None:
             self.tap(spec, hit["x"] + hit["w"] / 2, hit["y"] + hit["h"] / 2)
             return
-        # fallback: terminate + reopen — sessionStorage is gone, so the
-        # client lands at the defined solo/credentials_lost terminal.
+        # The toolbar button leaves the AX tree whenever iOS collapses
+        # the chrome (auto-hide after scroll). openurl to the SAME url
+        # reloads the page inside the same tab — sessionStorage survives,
+        # so the credential-resume path is still the one under test.
+        # Terminate stays the last resort (cold boot, defined terminal).
+        try:
+            _simctl("openurl", spec.udid, spec.launch_url)
+            return
+        except Exception:
+            pass
         _simctl("terminate", spec.udid, self.SAFARI, check=False)
         time.sleep(1.0)
         _simctl("openurl", spec.udid, spec.launch_url)

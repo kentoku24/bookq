@@ -727,6 +727,7 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                            "#pair-join-back"]
         for spec in (lsp, fsp):
             deadline = time.monotonic() + 20 * ctx.tscale
+            stuck = 0
             while time.monotonic() < deadline:
                 try:
                     st = (ctx._pair_report_state(spec.role)
@@ -738,13 +739,30 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                 try:
                     _ui_tap(ctx, spec, _CANCEL_NEEDLES, "cancel (stale)",
                             tries=3, delay=0.4)
+                    stuck = 0
                 except EnvError:
-                    pass
+                    stuck += 1
+                    if stuck >= 3:
+                        # 'connecting' with no reachable strip: an open
+                        # sidebar or auto-hidden chrome can cover it.
+                        # The launcher re-opens the panel onto whatever
+                        # section matches the live status — its own
+                        # #menu-btn chain handles the sidebar.
+                        stuck = 0
+                        try:
+                            _ui_tap(ctx, spec, ["#pair-btn"],
+                                    "launcher (panel reopen)",
+                                    tries=4, delay=0.4)
+                        except EnvError:
+                            pass
                 time.sleep(0.8)
             else:
                 raise EnvError(
                     f"ensure-idle: {spec.role} stuck at status={st!r}")
             _ui_close_panel(ctx, spec)
+            # an 'ended' session leaves the reader mounted and the
+            # launcher unreachable (zone taps instead of connect()).
+            _ui_browse_root(ctx, spec)
 
 
 def _ui_close_panel(ctx: RunCtx, spec, timeout: float = 8.0) -> None:
@@ -2037,15 +2055,46 @@ def op_reload(ctx: RunCtx, op: dict) -> None:
     peer = "follower" if actor == "leader" else "leader"
     pre = ctx.state(actor)
     pre_sid, pre_spread = pre.get("sessionId"), pre["applied"]["spreadId"]
+    pre_boot = None
+    if ctx.driver.name == "simulator" and spec.page is None:
+        try:
+            pre_boot = ctx._pair_report_state(actor).get("boot")
+        except AssertError:
+            pre_boot = None
     seq = ctx.fx.hello_seq(spec.id) if ctx.surface == "fixture" else 0
     ctx.driver.reload(spec)
+    if pre_boot is not None:
+        # Prove the page actually re-evaluated — a reload gesture that
+        # never re-ran the scripts (missed toolbar tap, parked tab)
+        # would silently skip the resume path under test.
+        bdead = time.monotonic() + 25 * ctx.tscale
+        boot = None
+        while time.monotonic() < bdead:
+            try:
+                boot = ctx._pair_report_state(actor).get("boot")
+            except AssertError:
+                boot = None
+            if boot is not None and boot != pre_boot:
+                break
+            time.sleep(0.6)
+        else:
+            raise EnvError(
+                f"reload never re-evaluated the page ({actor})")
+        ctx.note("page_reloaded", True, f"boot {pre_boot} -> {boot}")
     if ctx.surface == "fixture":
         ctx.fx.wait_hello(spec.id, timeout=60, min_seq=seq + 1)
         ctx.note("reloaded", True, f"hello seq>{seq}")
     st = ctx.poll(actor, lambda s: (
         (s.get("sessionId") == pre_sid and len(s.get("presence", {})) == 2
          and all(m["status"] == "active" for m in s["presence"].values()))
-        or s.get("endReason") is not None),
+        or s.get("endReason") is not None
+        # simulator cold-start: terminate+openurl loses sessionStorage —
+        # a clean idle IS the credentials_lost terminal (driver comment),
+        # but it never sets endReason, so without this arm the poll just
+        # times out on the defined terminal.
+        or (ctx.driver.name == "simulator"
+            and s.get("sessionId") is None
+            and s.get("status") == "idle")),
                   timeout=60, what="post-reload resume")
     if st.get("sessionId") != pre_sid:
         if op.get("allow_solo") or ctx.driver.name == "simulator":
