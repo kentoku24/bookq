@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import Bookq
 
 /// Canonical-JSON + manifest-digest golden tests — the fixtures below are
@@ -418,6 +419,42 @@ final class PairStoreTests: XCTestCase {
             XCTFail("expected ended"); return
         }
         XCTAssertNil(UserDefaults.standard.data(forKey: key))
+    }
+
+    /// #216: background → link drop → foreground during the reconnect must
+    /// not re-assert "suspended" on RESUME. Before the fix, scenePhase
+    /// guarded on `bound`, so .active during .connecting never cleared the
+    /// local flag and the RESUME bind re-sent suspended — wedging both
+    /// members in `paused` (verified live on sim pair).
+    func testActiveDuringReconnectDoesNotReassertSuspended() async throws {
+        try await enterReading()
+        store.scenePhase(.background)
+        let sent1 = await waitForSent(3)
+        let susp = try XCTUnwrap(sent1.last)
+        XCTAssertEqual(susp["type"] as? String, "SET_ACTIVITY")
+        XCTAssertEqual(
+            (susp["payload"] as? [String: Any])?["state"] as? String,
+            "suspended")
+        await fake.drop()
+        for _ in 0..<200 where await fake.connectCount < 2 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        // Foreground while the reconnect is in flight — bound==false here
+        // (status==.connecting) but the flag must still clear.
+        store.scenePhase(.active)
+        await hello()
+        let sent2 = await waitForSent(4)
+        let resume = try XCTUnwrap(sent2.last)
+        XCTAssertEqual(resume["type"] as? String, "RESUME")
+        await ack(resume["requestId"] as! String, request: "RESUME",
+                  data: bindData)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let all = decoded(await fake.sent())
+        let postResume = all.drop { $0["type"] as? String != "RESUME" }
+            .dropFirst()
+        XCTAssertFalse(postResume.contains {
+            ($0["payload"] as? [String: Any])?["state"] as? String == "suspended"
+        }, "RESUME must not re-assert suspended for a foregrounded app")
     }
 
     // MARK: - Intent matrix (test_viewer_navigation parity)

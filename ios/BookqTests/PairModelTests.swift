@@ -100,4 +100,28 @@ final class PairModelTests: XCTestCase {
         XCTAssertNil(fol.ref)
         XCTAssertEqual(fol.side, PairSide.left)
     }
+
+    // MARK: - PairReaderGate (#216)
+
+    /// The cover must survive transient phases — loading (SET_OFFSET /
+    /// OPEN_WORK manifest reload) and paused — so the leader's onDisappear
+    /// cannot mistake a phase-driven dismiss for a browse intent.
+    func testReaderGatePresentsTransientPhases() {
+        XCTAssertTrue(PairReaderGate.presents(.reading))
+        XCTAssertTrue(PairReaderGate.presents(.loading))
+        XCTAssertTrue(PairReaderGate.presents(.paused))
+        XCTAssertTrue(PairReaderGate.presents(.selecting))
+        XCTAssertFalse(PairReaderGate.presents(.waiting))
+        XCTAssertFalse(PairReaderGate.presents(nil))
+    }
+
+    /// Only a close while `reading` is the leader's browse intent; closing
+    /// during loading/paused/selecting must not emit SET_ACTIVITY selecting.
+    func testReaderGateCloseSignalsSelectingOnlyWhileReading() {
+        XCTAssertTrue(PairReaderGate.closeSignalsSelecting(.reading))
+        for ph in [PairPhase.loading, .paused, .selecting, .waiting] {
+            XCTAssertFalse(PairReaderGate.closeSignalsSelecting(ph), "\(ph)")
+        }
+        XCTAssertFalse(PairReaderGate.closeSignalsSelecting(nil))
+    }
 }
