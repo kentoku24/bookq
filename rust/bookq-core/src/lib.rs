@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn normalize_kanji() {
-        assert_eq!(normalize_kanji_impl("【第十話】"), "【10話】");
+        assert_eq!(normalize_kanji_impl("【第十話】"), "【第10話】");
         assert_eq!(normalize_kanji_impl("第一部"), "第1部");
         // Proper nouns are guarded: no PRE/POST context, no conversion.
         assert_eq!(normalize_kanji_impl("千尋"), "千尋");

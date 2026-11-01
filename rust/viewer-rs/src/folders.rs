@@ -524,3 +524,25 @@ pub async fn api_folders(st: &AppState, headers: &HeaderMap, q: HashMap<String, 
         _ => Serve::Done(live_fs_response(&st.downloads, &norm, depth, &headers)),
     }
 }
+
+/// `wait=True` variant — PUT handlers can't answer 202, so they ride an
+/// in-flight build to completion (no await budget).
+pub async fn ensure_tree_and_index_wait(
+    st: &Arc<IndexState>,
+    downloads: &PathBuf,
+) -> Option<Arc<CacheData>> {
+    match ensure_tree_and_index(st, downloads).await {
+        Ensure::Fresh(c) | Ensure::Stale(c) => return Some(c),
+        Ensure::Failed => return None,
+        Ensure::Building => {}
+    }
+    // Build already in flight by someone else — wait on its Notify.
+    let follower = {
+        let b = st.building.lock().await;
+        b.as_ref().cloned()
+    };
+    if let Some(n) = follower {
+        n.notified().await;
+    }
+    st.current().await
+}

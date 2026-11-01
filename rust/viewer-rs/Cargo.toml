@@ -10,9 +10,12 @@ license = "Proprietary"
 bookq-core = { path = "../bookq-core" }
 axum = "0.8"
 flate2 = { version = "1", features = ["zlib"] }
+hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
 percent-encoding = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 serde_json = { version = "1", features = ["preserve_order"] }

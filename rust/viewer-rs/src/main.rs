@@ -8,7 +8,7 @@
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -19,6 +19,7 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::{TokioExecutor, TokioIo},
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -31,6 +32,7 @@ use std::path::PathBuf;
 mod folders;
 #[allow(dead_code)]
 mod serve;
+mod state;
 #[allow(dead_code)]
 mod tree;
 
@@ -50,6 +52,12 @@ pub(crate) struct AppState {
     native: bool,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
+    /// M4: per-process reading positions (`app.state.reading_positions`).
+    pub(crate) positions: std::sync::Arc<state::Positions>,
+    /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
+    pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
+    /// `SECRET_KEY` — needed for the visibility owner HMAC.
+    pub(crate) secret_key: String,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -132,6 +140,65 @@ async fn proxy(st: &Upstream, mut req: Request<Body>) -> Response {
     forward(req, st).await
 }
 
+/// `/api/v1/reading-positions` — M4: per-folder LWW + tombstones, fully
+/// native (positions are per-process ephemeral upstream as well).
+async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    match *req.method() {
+        axum::http::Method::GET => {
+            let folder = q.get("folder").map(|s| s.as_str());
+            state::list_positions(&st.positions, folder)
+        }
+        axum::http::Method::PUT => {
+            // `folder` is required → missing keeps FastAPI's 422 upstream.
+            let Some(folder) = q.get("folder").cloned() else {
+                return proxy(&st.upstream, req).await;
+            };
+            let (parts, body) = req.into_parts();
+            let body = match http_body_util::BodyExt::collect(body).await {
+                Ok(c) => c.to_bytes(),
+                Err(_) => {
+                    return proxy(&st.upstream, Request::from_parts(parts, Body::empty()))
+                        .await
+                }
+            };
+            state::put_position(&st.positions, &folder, &body)
+        }
+        axum::http::Method::DELETE => {
+            state::delete_positions(&st.positions, q.get("folder").map(|s| s.as_str()))
+        }
+        _ => return proxy(&st.upstream, req).await,
+    }
+}
+
+/// `/api/v1/folder-visibility` — M4: shared SQLite store + owner HMAC.
+async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native {
+        return proxy(&st.upstream, req).await;
+    }
+    match *req.method() {
+        axum::http::Method::GET => state::get_folder_visibility(&st).await,
+        axum::http::Method::PUT => {
+            let headers = req.headers().clone();
+            let (parts, body) = req.into_parts();
+            let body = match http_body_util::BodyExt::collect(body).await {
+                Ok(c) => c.to_bytes(),
+                Err(_) => {
+                    return proxy(&st.upstream, Request::from_parts(parts, Body::empty()))
+                        .await
+                }
+            };
+            state::put_folder_visibility(&st, &headers, &body).await
+        }
+        _ => return proxy(&st.upstream, req).await,
+    }
+}
+
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
 /// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
@@ -183,6 +250,9 @@ async fn main() {
         .eq_ignore_ascii_case("true");
 
     let index = std::sync::Arc::new(folders::IndexState::new());
+    let state_dir = PathBuf::from(
+        std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
+    );
     let st = AppState {
         upstream: Upstream {
             client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
@@ -191,6 +261,9 @@ async fn main() {
         downloads: downloads.clone(),
         native,
         index: index.clone(),
+        positions: std::sync::Arc::new(state::Positions::default()),
+        visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
+        secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
     };
     if native {
         // warmup_metadata_index — lifespan kicks the same cold-miss path.
@@ -203,6 +276,8 @@ async fn main() {
         // M3 skeleton: no v1 native handlers yet — everything proxies.
         // /image/{*path} is a v1 contract path (media, not versioned).
         .route("/image/{*path}", any(serve_image))
+        .route("/api/v1/reading-positions", any(reading_positions))
+        .route("/api/v1/folder-visibility", any(folder_visibility))
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await
         }))

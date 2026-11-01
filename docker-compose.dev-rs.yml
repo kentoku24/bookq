@@ -20,13 +20,19 @@ services:
     volumes:
       # R1 以降で scan_fs/meta_walk が参照する実データ（viewer と同じ ro マウント）。
       - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      # M4: folder-visibility SQLite — viewer と同じ user-state volume を
+      # 共有し、両バックエンドが同じ hidden_roots を読み書きする。
+      - user-state:/var/lib/bookq
 
     environment:
       - BOOKQ_UPSTREAM=http://viewer:8080
       - DOWNLOADS_DIR=/app/downloads
+      - BOOKQ_STATE_DIR=/var/lib/bookq
       # Same value as the viewer's env: native endpoints only activate where
       # auth is bypassed; outside test mode every request proxies upstream.
       - BOOKQ_TEST_MODE=true
+      # visibility owner HMAC — dev compose 側と同じ値。
+      - SECRET_KEY=dev-not-a-secret
 
     # dev.sh のプール管理は role=dev (viewer) のみを見る — このサービスは
     # dev-rs として識別し、slot/名前ラベルは gc の参照判定用に共有する。
