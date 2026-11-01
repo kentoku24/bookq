@@ -1,6 +1,9 @@
 """Folder scanning utilities for the image viewer."""
 
+import errno
+import os
 import re
+import stat as statmod
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -216,6 +219,74 @@ def _timed_pdf_node(base: Path, pname: str, downloads_root=None) -> tuple[dict, 
     return node, (time.perf_counter() - t0) * 1000
 
 
+# Directory-walk fan-out: scandir+stat classification is I/O-bound over the
+# downloads volume (virtiofs latency dominates on the host), so one pool per
+# call walks each BFS level concurrently — the same pattern
+# tree_signature.compute_signature uses.
+_WALK_MAX_WORKERS = 8
+
+
+def _walk_dir(path: Path) -> dict | None:
+    """Scan ONE directory's immediate entries for the parallel walk.
+
+    Runs inside the shared pool (pure function of *path* — no ``_visited``
+    contact). Returns the four classification lists: ``files`` /
+    ``archives`` / ``pdfs`` fully sorted (their order is claim-independent)
+    and ``dirs`` as ``(name, (st_dev, st_ino))`` pairs in raw scandir order
+    — the visited-claim decision belongs to the main thread, which must
+    replay the serial loop's scandir-order claim sequence, so the worker
+    neither sorts nor filters this list. ``archive_nodes``/``pdf_nodes``
+    start empty and are filled later by the archive fan-out futures.
+
+    Returns ``None`` when the directory vanished before listing
+    (``ENOENT``/``ENOTDIR``): the serial recursion's ``base.exists()``
+    guard maps the same condition to an empty subtree. Any other
+    ``OSError`` (``EACCES`` etc.) propagates — the serial ``iterdir``
+    would raise it too.
+
+    Per entry, ONE ``entry.stat()`` covers classification AND the visited
+    identity. ``Path.is_dir``/``is_file`` delegate to ``os.path.isdir``/
+    ``isfile``, which swallow every stat ``OSError``/``ValueError`` into
+    ``False`` (Python 3.14+), so a failed stat maps to "not a dir, not a
+    file" — exactly the entry the serial loop drops. The serial loop's
+    per-entry stat calls (``is_dir`` → ``stat`` → ``is_file``) collapse
+    into this one.
+    """
+    from app.archive import ARCHIVE_EXTENSIONS
+
+    try:
+        with os.scandir(path) as it:
+            entries = [e for e in it if not e.name.startswith(".")]
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return None
+        raise
+    files: list[str] = []
+    archives: list[str] = []
+    pdfs: list[str] = []
+    dirs: list[tuple[str, tuple[int, int]]] = []
+    for entry in entries:
+        try:
+            st = entry.stat()  # follows symlinks; cached on the DirEntry
+        except (OSError, ValueError):
+            continue  # Path.is_dir()/is_file() → False → serial drops it
+        if statmod.S_ISDIR(st.st_mode):
+            dirs.append((entry.name, (st.st_dev, st.st_ino)))
+        elif statmod.S_ISREG(st.st_mode):
+            suffix = Path(entry.name).suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                files.append(entry.name)
+            elif suffix in ARCHIVE_EXTENSIONS:
+                archives.append(entry.name)
+            elif suffix in PDF_EXTENSIONS:
+                pdfs.append(entry.name)
+    files.sort(key=lambda f: (_sort_key(f), f))
+    archives.sort(key=lambda a: (natural_key(a), a))
+    pdfs.sort(key=lambda a: (natural_key(a), a))
+    return {"files": files, "archives": archives, "pdfs": pdfs,
+            "dirs": dirs, "archive_nodes": {}, "pdf_nodes": {}}
+
+
 def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
               _phases: dict[str, float] | None = None,
               _downloads_root=None, list_archives: bool = True) -> list[dict]:
@@ -236,36 +307,197 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
 
     Symlinked directories are followed (a top-level symlinked collection stays
     browsable), but each visited directory is recorded by its ``(st_dev, st_ino)``
-    identity — shared through ``_visited`` across the recursion — so a symlink
+    identity — shared through ``_visited`` across the walk — so a symlink
     cycle is traversed only once instead of recursing forever. Identity uses the
     following ``stat()``, never ``lstat`` (which would return the link's own
     inode and miss the cycle). Unreadable entries (``OSError``) are skipped.
 
+    Parallel walk (#242): the traversal is a level-synchronous BFS over ONE
+    ``ThreadPoolExecutor`` per call (same pattern as
+    ``tree_signature.compute_signature`` — no nested submissions, so no
+    deadlock): each level's directories run their scandir+stat+sort
+    classification concurrently in :func:`_walk_dir` while the main thread
+    alone owns ``_visited`` and expands the next level. The output stays
+    byte-identical to :func:`_scan_tree_serial` because claiming is
+    two-phase: the walk claims each inode once so the SAME reachability
+    closure of directories gets scanned as the serial DFS visits (the
+    first-seen path may differ where one inode is aliased at different
+    depths, but the inode's contents are identical under any alias), then
+    ``_assemble`` replays the serial claim order — each directory's
+    scandir-order children are claimed before recursion walks its sorted
+    ``dirs`` (DFS preorder) — on a fresh ``emitted`` set, so every alias
+    resolves to the same winning path the serial walk picks and the
+    resulting tree is identical node-for-node. ``_visited`` itself ends
+    holding the same final set the serial walk leaves behind.
+
+    Archive/PDF virtual-folder nodes are built by the same pure helpers
+    (``_timed_archive_node`` / ``_timed_pdf_node``), fanned out on the same
+    pool as each level's record lands — results key by directory and name,
+    so enumeration overlaps the walk tail without changing any node.
+
     Phase timing (pure observation, output-identical): when ``_phases`` is
-    given, wall-time is accumulated into it across the whole recursion —
-    ``walk_ms`` (iterdir+stat+sort classification per directory level),
-    ``archive_ms`` (every ``_scan_archive_node`` future's own wall span,
-    summed), ``pdf_ms`` (same for ``_scan_pdf_node``). The archive/pdf sums
-    inflate with ThreadPoolExecutor overlap: they are CPU-span sums, not
-    the critical path. Callers that need the totals pass their own dict in
+    given, ``walk_ms`` accumulates the main-thread wall time of each BFS
+    level (the number that drops with parallelization), while
+    ``archive_ms``/``pdf_ms`` keep summing every archive/pdf future's own
+    wall span — CPU-span sums that inflate with overlap, never the
+    critical path. Callers that need the totals pass their own dict in
     (explicit param — no globals); a bare ``scan_tree(root)`` call
     accumulates into a throwaway.
 
     Disk-cache key root: ``_downloads_root`` defaults to the top-level
-    *base* and is passed unchanged through the recursion (subdirectory
-    levels do NOT re-root it) into the archive/pdf node helpers, so cache
-    keys stay ``r:``-relative to the scan root even when ``DOWNLOADS_DIR``
-    is unset in the container. A bare ``scan_tree(root)`` call and every
-    existing 1–3 positional-arg call shape work unchanged.
+    *base* and is passed unchanged into the archive/pdf node helpers, so
+    cache keys stay ``r:``-relative to the scan root even when
+    ``DOWNLOADS_DIR`` is unset in the container. A bare ``scan_tree(root)``
+    call and every existing 1–3 positional-arg call shape work unchanged.
 
-    Shallow mode (``list_archives=False``): the archives/pdfs enumeration
-    loops are skipped entirely — archives/PDFs are appended as opaque
-    nodes (``{"name", "type": "folder", "children": [], "thumb": None,
+    Shallow mode (``list_archives=False``): the archive/pdf enumeration is
+    skipped entirely — archives/PDFs are appended as opaque nodes
+    (``{"name", "type": "folder", "children": [], "thumb": None,
     "archive": True}``, PDFs additionally ``"pdf": True``) in the SAME
     sorted files→archives→pdfs→dirs positions. files/dirs
     classification, all four sorts, single-child flattening and
     ``_visited`` handling are byte-identical to the full scan; only the
     warmup path uses this (request path keeps the default True).
+    """
+    if _downloads_root is None:
+        _downloads_root = base
+    if _phases is None:
+        _phases = {"walk_ms": 0.0, "archive_ms": 0.0, "pdf_ms": 0.0}
+    if not base.exists():
+        return []
+    try:
+        root_st = base.stat()
+    except OSError:
+        root_st = None
+    if _visited is None:
+        _visited = set()
+        if root_st is not None:
+            _visited.add((root_st.st_dev, root_st.st_ino))
+    # scans is keyed by the claimed (st_dev, st_ino); the root's key is its
+    # stat identity when known, else a non-inode sentinel (the serial walk
+    # proceeds identically without it — a descendant symlink may still
+    # claim the real inode later, which then scans and emits normally).
+    root_key: tuple = (root_st.st_dev, root_st.st_ino) if root_st is not None \
+        else ("<scan-root>", -1)
+    # emitted replays the serial claim order during assembly (DFS preorder:
+    # a directory's scandir-order children are claimed before the recursion
+    # descends its sorted dirs). _visited drives the walk's dedup and ends
+    # with the identical final contents; emitted is snapshot-copied so the
+    # BFS claims cannot leak into the output ordering.
+    emitted: set = set(_visited)
+    scans: dict[tuple, dict | None] = {}
+    archive_futs: list = []
+    pdf_futs: list = []
+    level = [(base, root_key)]
+    with ThreadPoolExecutor(max_workers=_WALK_MAX_WORKERS) as pool:
+        while level:
+            walk_start = time.perf_counter()
+            futs = [(key, pool.submit(_walk_dir, path)) for path, key in level]
+            next_level: list[tuple[Path, tuple[int, int]]] = []
+            for (path, key), (_key, fut) in zip(level, futs):
+                rec = fut.result()  # OSError propagates like serial's iterdir
+                if rec is None:
+                    if path == base:
+                        # Root listing failed — serial raises iterdir's
+                        # OSError here (its exists() check already passed).
+                        with os.scandir(path):
+                            pass
+                    scans[key] = None
+                    continue
+                scans[key] = rec
+                if list_archives:
+                    for aname in rec["archives"]:
+                        archive_futs.append(
+                            (rec, aname, pool.submit(
+                                _timed_archive_node, path, aname, _downloads_root)))
+                    for pname in rec["pdfs"]:
+                        pdf_futs.append(
+                            (rec, pname, pool.submit(
+                                _timed_pdf_node, path, pname, _downloads_root)))
+                for cname, cident in rec["dirs"]:
+                    if cident in _visited:
+                        continue
+                    _visited.add(cident)
+                    next_level.append((path / cname, cident))
+            _phases["walk_ms"] += (time.perf_counter() - walk_start) * 1000
+            level = next_level
+        # Archive/pdf enumeration overlapped the walk tail on the same
+        # pool; collect per-future spans exactly like the serial fan-out.
+        for rec, aname, fut in archive_futs:
+            node, span_ms = fut.result()
+            rec["archive_nodes"][aname] = node
+            _phases["archive_ms"] += span_ms
+        for rec, pname, fut in pdf_futs:
+            node, span_ms = fut.result()
+            rec["pdf_nodes"][pname] = node
+            _phases["pdf_ms"] += span_ms
+
+    def _assemble(key) -> list[dict]:
+        """Build one directory's entry list from its collected scan record.
+
+        Reproduces _scan_tree_serial's per-directory node construction
+        verbatim — files→archives→pdfs→dirs append order, the scandir-order
+        claim filter feeding the natural_key dir sort, and single-child
+        flattening — so the emitted tree is byte-identical.
+        """
+        rec = scans[key]
+        if rec is None:
+            return []
+        files = rec["files"]
+        archives = rec["archives"]
+        pdfs = rec["pdfs"]
+        entries: list[dict] = []
+        for fname in files:
+            entries.append({"name": fname, "type": "image", "children": None})
+        archive_nodes = rec["archive_nodes"]
+        for aname in archives:
+            if list_archives:
+                entries.append(archive_nodes[aname])
+            else:
+                entries.append({"name": aname, "type": "folder", "children": [],
+                                "thumb": None, "archive": True})
+        pdf_nodes = rec["pdf_nodes"]
+        for pname in pdfs:
+            if list_archives:
+                entries.append(pdf_nodes[pname])
+            else:
+                entries.append({"name": pname, "type": "folder", "children": [],
+                                "thumb": None, "archive": True, "pdf": True})
+        pairs: list[tuple[str, tuple[int, int]]] = []
+        for cname, cident in rec["dirs"]:
+            if cident in emitted:
+                continue
+            emitted.add(cident)
+            pairs.append((cname, cident))
+        pairs.sort(key=lambda t: (natural_key(t[0]), t[0]))
+        for dname, cident in pairs:
+            child = _assemble(cident)
+            if not files and not archives and not pdfs and len(pairs) == 1:
+                for c in child:
+                    c["name"] = dname + "/" + c["name"]
+                entries.extend(child)
+            else:
+                thumb, sub_thumbs = folder_cover_fields(child)
+                entry: dict = {"name": dname, "type": "folder", "children": child,
+                               "thumb": thumb}
+                if sub_thumbs is not None:
+                    entry["thumbs"] = sub_thumbs
+                entries.append(entry)
+        return entries
+
+    return _assemble(root_key)
+
+
+def _scan_tree_serial(base: Path, _visited: set[tuple[int, int]] | None = None,
+                      _phases: dict[str, float] | None = None,
+                      _downloads_root=None, list_archives: bool = True) -> list[dict]:
+    """Serial ``scan_tree`` kept verbatim as the byte-parity reference (#242).
+
+    This is the pre-parallelization implementation: the same recursion,
+    the same claim order, the same node construction. ``scan_tree``'s
+    parallel BFS + assembly must produce an identical tree; tests pin that
+    equivalence on fixture trees (including symlink cycles and cross-depth
+    inode aliases, where BFS and DFS claim order diverge).
     """
     from app.archive import ARCHIVE_EXTENSIONS
 
@@ -364,8 +596,8 @@ def scan_tree(base: Path, _visited: set[tuple[int, int]] | None = None,
                             "thumb": None, "archive": True, "pdf": True})
 
     for dname in dirs:
-        child = scan_tree(base / dname, _visited, _phases, _downloads_root,
-                          list_archives=list_archives)
+        child = _scan_tree_serial(base / dname, _visited, _phases, _downloads_root,
+                                  list_archives=list_archives)
         if not files and not archives and not pdfs and len(dirs) == 1:
             for c in child:
                 c["name"] = dname + "/" + c["name"]
