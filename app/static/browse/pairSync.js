@@ -1000,9 +1000,13 @@
       // let it calibrate screen->client the same way the fixture does.
       var _SEL = ['#pair-btn', '#pair-status', '#menu-btn', '#filter-btn',
                   '#pair-code-input', '#pair-join-open', '#pair-join-submit',
-                  '#pair-leader-join', '#pair-create', '#pair-swap',
-                  '#pair-leave', '#pair-close', '#spread-shift',
-                  '#zone-prev', '#zone-next', '#pair-code-value'];
+                  '#pair-join-back', '#pair-leader-join', '#pair-create',
+                  '#pair-leader-cancel', '#pair-waiting-cancel',
+                  '#pair-error-leave', '#pair-error-close',
+                  '#pair-change-work', '#pair-picker-back',
+                  '#pair-swap', '#pair-leave', '#pair-close',
+                  '#spread-shift', '#zone-prev', '#zone-next',
+                  '#pair-code-value'];
       var _lastTap = null;
       document.addEventListener('pointerdown', function (e) {
         _lastTap = {x: e.clientX, y: e.clientY, t: Date.now()};
@@ -1038,9 +1042,11 @@
             });
         } catch (e) {}
         var cv = document.getElementById('pair-code-value');
+        var ci = document.getElementById('pair-code-input');
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
+                                 joinCode: ci ? ci.value : null,
                                  solo: !(pv && pv.active),
                                  rects: rects, tiles: tiles,
                                  lastTap: _lastTap,

@@ -227,7 +227,10 @@ def _normalize_ui_state(d: dict) -> dict:
         "applied": {"index": (pv or {}).get("spreadIndex", -1),
                     "spreadId": (pv or {}).get("spreadId"),
                     "leaderSide": (pv or {}).get("leaderSide"),
-                    "total": (pv or {}).get("spreadTotal")},
+                    "total": (pv or {}).get("spreadTotal"),
+                    "revision": pc.get("revision")
+                        if pc.get("revision") is not None
+                        else (pv or {}).get("revision")},
         "view": {"ref": (pv or {}).get("ref"),
                  "anchorRef": (pv or {}).get("anchorRef"),
                  "side": (pv or {}).get("side"),
@@ -667,22 +670,33 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                 "      PairController.state.status)", timeout=15000)
         return
     if ctx.driver.name == "simulator":
+        # a live-but-stranded session can sit in ANY panel section —
+        # leader-waiting (#pair-leader-cancel), follower-waiting
+        # (#pair-waiting-cancel), session (#pair-leave) or error
+        # (#pair-error-leave). Tap whichever cancel is mounted, via the
+        # status strip opener when the panel itself is closed.
+        _CANCEL_NEEDLES = ["解除", "#pair-leader-cancel",
+                           "#pair-waiting-cancel", "#pair-error-leave",
+                           "#pair-join-back"]
         for spec in (lsp, fsp):
-            deadline = time.monotonic() + 15 * ctx.tscale
+            deadline = time.monotonic() + 20 * ctx.tscale
             while time.monotonic() < deadline:
                 try:
                     st = (ctx._pair_report_state(spec.role)
                           .get("pc") or {}).get("status")
                 except AssertError:
                     st = None
-                if st in (None, "idle", "ended", "error"):
+                if st in (None, "idle", "ended"):
                     break
                 try:
-                    _ui_tap(ctx, spec, ["解除"], "leave (stale)",
+                    _ui_tap(ctx, spec, _CANCEL_NEEDLES, "cancel (stale)",
                             tries=3, delay=0.4)
                 except EnvError:
                     pass
                 time.sleep(0.8)
+            else:
+                raise EnvError(
+                    f"ensure-idle: {spec.role} stuck at status={st!r}")
 
 
 def _wait_code_dom(page, timeout: float = 15000) -> str:
@@ -769,6 +783,10 @@ _OPENERS = {
     "#pair-swap": ["#pair-status"], "#pair-leave": ["#pair-status"],
     "#pair-join-open": ["#pair-status"],
     "#pair-code-input": ["#pair-join-open"],
+    "#pair-leader-cancel": ["#pair-status"],
+    "#pair-waiting-cancel": ["#pair-status"],
+    "#pair-error-leave": ["#pair-status"],
+    "#pair-join-back": ["#pair-status"],
 }
 
 
@@ -806,12 +824,12 @@ def _ui_offset(ctx: RunCtx, spec) -> tuple:
 
 
 def _ui_rect(rep: dict, needles) -> dict | None:
-    """Resolve a needle to a client rect — a known control selector or a
-    browse tile (data-path / display name match)."""
+    """Resolve a needle to a client rect — a known control selector, a
+    raw '#sel' needle, or a browse tile (data-path / display name)."""
     rects = rep.get("rects") or {}
     tiles = rep.get("tiles") or []
     for n in needles:
-        sel = _NEEDLE_SEL.get(n)
+        sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
         r = rects.get(sel) if sel else None
         if r is None:
             for t in tiles:
@@ -920,7 +938,25 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         _ui_tap(ctx, fsp, ["参加"], "join open (follower)")
         _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
                 "code field (follower)")
-        ctx.driver.input_text(fsp, code)   # 6th digit auto-submits
+        # idb ui text types into whatever holds focus — if the field
+        # lost focus (panel re-render, soft-keyboard timing) the digits
+        # go nowhere. Watch joinCode and retype until the 6th digit
+        # lands (sanitizeCode auto-submits at length 6).
+        typed = ""
+        for _ in range(6):
+            ctx.driver.input_text(fsp, code)
+            time.sleep(1.2)
+            try:
+                rep = ctx._pair_report_state(fsp.role)
+            except AssertError:
+                rep = {}
+            typed = rep.get("joinCode") or ""
+            if len(typed) >= 6 or \
+                    (rep.get("pc") or {}).get("status") == "connected":
+                break
+            _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
+                    "code field (follower, retry)", tries=4, delay=0.5)
+        ctx.note("code_typed", True, f"joinCode len={len(typed)}")
     elif via == "match":
         # No code read needed — the launcher's connect() either creates
         # a waiting session or MATCH-joins an existing one; the poll
