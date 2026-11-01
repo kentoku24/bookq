@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -292,6 +293,24 @@ class SimulatorDriver:
             if udid not in self._pre_booted:
                 _simctl("boot", udid, check=False)   # already-booted → rc!=0
             self._wait_booted(udid)
+        for cid, spec in clients.items():
+            if spec.kind != "safari":
+                continue
+            # Fresh browser state per run: parked tabs keep their stale
+            # hook POSTing under the same client id, the SW/SWR cache can
+            # serve pre-deploy js indefinitely (the watchdog's own
+            # sessionStorage guard survives on a restored tab), and
+            # leftover tabs poison taps. Wiping Safari's data container
+            # is the only clean-room a simulator offers.
+            _simctl("terminate", spec.udid, self.SAFARI, check=False)
+            try:
+                data = _simctl("get_app_container", spec.udid,
+                               self.SAFARI, "data").strip()
+                if data and "/Containers/Data/Application/" in data:
+                    shutil.rmtree(data, ignore_errors=True)
+            except Exception:
+                pass
+            time.sleep(0.5)
         for cid, spec in clients.items():
             _simctl("openurl", spec.udid, urls[cid])
             if spec.kind == "pwa":
