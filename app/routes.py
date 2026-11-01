@@ -705,25 +705,27 @@ async def _background_fill(app_state) -> None:
 _COVER_WARM_WIDTHS = (200, 400)
 
 
-def _enumerate_cover_jobs(tree: list[dict], parent: str = "") -> list[tuple[str, int]]:
-    """List ``(cover_path, width)`` warm jobs for every folder's single thumb.
+def _enumerate_cover_jobs(tree: list[dict], parent: str = "") -> list[str]:
+    """List cover-source warm jobs — one per folder's single ``thumb``.
 
     Each folder node carrying a ``thumb`` (folder-relative first image)
-    yields the job at w=200 and w=400; ``thumb is None`` nodes are skipped.
-    Full paths compose as parent/name — flattened names contain "/", so
-    neither side is ever split (same rule as _find_tree_node). Multi-thumb
-    ``thumbs[]`` lists and sprites are deliberately out of scope: only the
-    single cover behind the first paint is warmed.
+    yields ONE job for the whole path; ``_warm_covers`` renders every
+    ``_COVER_WARM_WIDTHS`` size from a single source read + decode (issue
+    #240 — per-width jobs used to decode the same source twice). ``thumb
+    is None`` nodes are skipped. Full paths compose as parent/name —
+    flattened names contain "/", so neither side is ever split (same rule
+    as _find_tree_node). Multi-thumb ``thumbs[]`` lists and sprites are
+    deliberately out of scope: only the single cover behind the first
+    paint is warmed.
     """
-    jobs: list[tuple[str, int]] = []
+    jobs: list[str] = []
     for node in tree:
         if node.get("type") != "folder":
             continue
         full = f"{parent}/{node['name']}" if parent else node["name"]
         thumb = node.get("thumb")
         if thumb:
-            for width in _COVER_WARM_WIDTHS:
-                jobs.append((f"{full}/{thumb}", width))
+            jobs.append(f"{full}/{thumb}")
         children = node.get("children") or []
         if children:
             jobs.extend(_enumerate_cover_jobs(children, full))
@@ -760,7 +762,11 @@ def _count_opaque_nodes(nodes: list[dict]) -> int:
 # small yield after each, and every job idle-gates on
 # app_state.last_request_at through the same _FILL_IDLE_SECONDS window the
 # background fill uses (plan fill-pacing) — while requests are fresh the
-# pass parks itself instead of competing with interactive use. A pillow
+# pass parks itself instead of competing with interactive use. One job now
+# covers a whole cover source — every _COVER_WARM_WIDTHS size renders from
+# a single read and a single draft()-assisted decode (issue #240); the old
+# per-width jobs decoded the same bytes twice, and decode is the storm's
+# dominant cost. A pillow
 # decode/resize is CPU- and memory-heavy (a full
 # scanned page decodes to tens of MB), so several in flight at once starve
 # the serving event loop (observed ~10s /api/folders stalls at concurrency
@@ -783,7 +789,9 @@ async def _warm_covers(app_state) -> None:
 
     Spawned once by lifespan after 起動完了; lives past yield. Waits for
     the index cache to hold a tree (polls, gives up after the wait cap),
-    then warms each enumerated job with bounded concurrency — each job is
+    then warms each enumerated cover job (one path → all
+    ``_COVER_WARM_WIDTHS`` from a single decode) with bounded concurrency
+    — each job is
     independently fail-open, so one corrupt source never aborts the pass.
     A pass snapshots (tree, generation) up front, so a concurrent index
     swap is safe (the next pass picks it up). Every job idle-gates on
@@ -797,7 +805,11 @@ async def _warm_covers(app_state) -> None:
     opaque count have been stable for _WARM_COVERS_QUIET_PASSES, or at the
     total time cap. Never raises except on cancellation.
     """
-    from app.thumbs import prune_cache_dir, thumb_cache_namespace, warm_thumb_cache
+    from app.thumbs import (
+        prune_cache_dir,
+        thumb_cache_namespace,
+        warm_thumb_cache_multi,
+    )
 
     try:
         waited = 0.0
@@ -826,20 +838,22 @@ async def _warm_covers(app_state) -> None:
             opaque = _count_opaque_nodes(tree)
             jobs = _enumerate_cover_jobs(tree)
 
-            async def _one(job_path: str, job_width: int) -> None:
+            async def _one(job_path: str) -> None:
                 async with sem:
                     # Idle-gate INSIDE the semaphore: at most one job parks
                     # here, so a burst of requests pauses the whole pass
                     # without a herd of sleeping coroutines.
                     await _wait_requests_idle(app_state)
                     try:
-                        await warm_thumb_cache(downloads_path, job_path, job_width)
+                        await warm_thumb_cache_multi(
+                            downloads_path, job_path, _COVER_WARM_WIDTHS
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
                         logger.warning(
-                            "cover warm skip %s w=%d error=%s: %s",
-                            job_path, job_width, type(exc).__name__, exc,
+                            "cover warm skip %s error=%s: %s",
+                            job_path, type(exc).__name__, exc,
                         )
                     # Yield the loop after every job: the pillow work runs in
                     # the threadpool but holds the GIL in chunks, so without a
@@ -847,7 +861,7 @@ async def _warm_covers(app_state) -> None:
                     await asyncio.sleep(_WARM_COVERS_JOB_SLEEP_SECONDS)
 
             try:
-                await asyncio.gather(*(_one(job_path, job_width) for job_path, job_width in jobs))
+                await asyncio.gather(*(_one(job_path) for job_path in jobs))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

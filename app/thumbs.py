@@ -266,16 +266,52 @@ async def _load_archive_source(
     return data, stat.st_mtime, float(stat.st_size), f"{archive}|{inner}|{stat.st_mtime}|{stat.st_size}"
 
 
+def _open_drafted(data: bytes, width: int):
+    """Image.open *data* with ``draft()`` aimed at the (width, width*4) box.
+
+    ``draft()`` must run after open but before the first load()/thumbnail()
+    — and before ``exif_transpose``, whose internal ``transpose()`` would
+    otherwise trigger a full-size decode on rotated sources. libjpeg then
+    decodes at 1/2–1/8 scale, returning the nearest size still covering the
+    target; for formats without a draft hook (webp/avif/png, i.e. most
+    plugins) it is a no-op returning None. Pillow never drafts below the
+    target, but a plugin that did would leave the frame inside the box —
+    ``thumbnail()`` only shrinks, so such an image is re-opened undrafted.
+    """
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(data))
+    original = im.size
+    try:
+        im.draft("RGB", (width, width * 4))
+    except Exception:
+        # A draft() failure may leave the decoder half-configured —
+        # re-open for a guaranteed clean image rather than guess.
+        return Image.open(io.BytesIO(data))
+    if (
+        im.size != original
+        and im.size[0] <= width
+        and im.size[1] <= width * 4
+    ):
+        # draft() shrank the frame until it fit inside the target box —
+        # the thumb would come out undersized, so decode at full size.
+        return Image.open(io.BytesIO(data))
+    return im
+
+
 def make_thumbnail(data: bytes, width: int) -> bytes:
     """EXIF-aware shrink to *width* (aspect kept) → JPEG quality 70.
 
     Animated sources keep first frame only; non-image bytes raise
-    HTTPException 404 like the ``/image/*`` flow.
+    HTTPException 404 like the ``/image/*`` flow. The decode is
+    ``draft()``-assisted (see _open_drafted): JPEG sources are decoded by
+    libjpeg at 1/2–1/8 scale toward the target box, cutting decode cost on
+    both the cover warm and the on-demand ``/thumb`` paths.
     """
     from PIL import Image, ImageOps
 
     try:
-        im = Image.open(io.BytesIO(data))
+        im = _open_drafted(data, width)
         im = ImageOps.exif_transpose(im)
         im.thumbnail((width, width * 4), Image.LANCZOS)
         if im.mode not in ("RGB", "L"):
@@ -283,6 +319,43 @@ def make_thumbnail(data: bytes, width: int) -> bytes:
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=JPEG_QUALITY)
         return buf.getvalue()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+def make_thumbnails(data: bytes, widths: list[int] | tuple[int, ...]) -> dict[int, bytes]:
+    """One decode of *data* → JPEG thumb bytes per width in *widths*.
+
+    The cover warm needs the same source at 200 and 400; opening and
+    decoding it per width paid the full decode twice (issue #240). Here a
+    single draft()-assisted decode — configured for the LARGEST target so
+    every output still meets its box — feeds all widths: each width resizes
+    its own copy of the shared decoded frame. A single width delegates to
+    make_thumbnail so the ``/thumb`` path and warm share one render.
+    """
+    from PIL import Image, ImageOps
+
+    uniq = sorted({int(w) for w in widths})
+    if not uniq:
+        return {}
+    if len(uniq) == 1:
+        return {uniq[0]: make_thumbnail(data, uniq[0])}
+    try:
+        im = _open_drafted(data, uniq[-1])
+        im = ImageOps.exif_transpose(im)
+        im.load()  # the single decode every width shares
+        out: dict[int, bytes] = {}
+        for w in uniq:
+            thumb = im.copy()
+            thumb.thumbnail((w, w * 4), Image.LANCZOS)
+            if thumb.mode not in ("RGB", "L"):
+                thumb = thumb.convert("RGB")
+            buf = io.BytesIO()
+            thumb.save(buf, format="JPEG", quality=JPEG_QUALITY)
+            out[w] = buf.getvalue()
+        return out
     except HTTPException:
         raise
     except Exception:
@@ -297,6 +370,18 @@ def _make_thumb_bytes(data: bytes, is_svg: bool, width: int) -> bytes:
     through make_thumbnail (non-image bytes raise 404 there).
     """
     return data if is_svg else make_thumbnail(data, width)
+
+
+def _make_thumb_bytes_multi(
+    data: bytes, is_svg: bool, widths: list[int] | tuple[int, ...]
+) -> dict[int, bytes]:
+    """Per-width variant of _make_thumb_bytes — one decode feeds all widths.
+
+    SVG still passes through (the same original bytes under each width's
+    cache suffix); raster sources go through make_thumbnails so the cover
+    warm pays one source read + one decode for the whole width set.
+    """
+    return {w: data for w in widths} if is_svg else make_thumbnails(data, widths)
 
 
 def _store_thumb(dest: Path, thumb_bytes: bytes, *, prune: bool = True) -> None:
@@ -354,36 +439,71 @@ def thumb_cache_namespace(width: int) -> Path:
 async def warm_thumb_cache(downloads_dir: Path, path: str, width: int) -> bool:
     """Prepare the disk-cache thumb for *path* at *width*; True when cached.
 
-    Stat-only hit check first (no archive open on a hit), miss path loads
-    the source bytes and stores via the same _make_thumb_bytes/_store_thumb
-    helpers handle_thumb uses, so warmed files are byte-identical to served
-    ones. A hit refreshes the cache file's mtime (see _touch_thumb) so the
-    warmed covers are not the first victims of namespace pruning. Both heavy
-    steps run in the threadpool: the Pillow decode/resize is CPU-bound and
-    would otherwise starve concurrent requests for the whole pass. Stores
+    Single-width wrapper over :func:`warm_thumb_cache_multi` — same
+    stat-first / decode-once / prune-free-store flow.
+    """
+    return await warm_thumb_cache_multi(downloads_dir, path, (width,))
+
+
+async def warm_thumb_cache_multi(
+    downloads_dir: Path, path: str, widths: list[int] | tuple[int, ...]
+) -> bool:
+    """Prepare disk-cache thumbs for *path* at every width; True when cached.
+
+    The cover warm needs the same source at every ``_COVER_WARM_WIDTHS``
+    size; the old per-width jobs opened and decoded the same bytes once
+    per width (issue #240 — the dominant cost of the startup storm). Here
+    ALL widths share one stat, one ``load_source_bytes`` read, and one
+    draft()-assisted decode; only widths whose cache file is missing are
+    rendered, cached widths are mtime-touched (see _touch_thumb) exactly
+    like the old hit path. The same _make_thumb_bytes_multi/_store_thumb
+    helpers as handle_thumb keep warmed files equivalent to served ones.
+    Both heavy steps run in the threadpool (Pillow decode is CPU-bound and
+    would otherwise starve concurrent requests for the whole pass). Stores
     pass ``prune=False``; the warm pass prunes each namespace once per pass.
     Fail-open: ANY exception (missing source, corrupt bytes, missing
     extractor, unwritable cache) is swallowed and reported as False —
     warming must never break serving or startup.
     """
+    wanted = sorted({int(w) for w in widths})
+    if not wanted:
+        return True
+
     try:
-        mtime, size, key = _stat_source(downloads_dir, path)
+        _mtime, _size, key = _stat_source(downloads_dir, path)
         is_svg = Path(path).suffix.lower() == ".svg"
-        dest = cache_path_for(cache_root(), width, key)
-        if is_svg:
-            dest = dest.with_suffix(".svg")
-        if dest.is_file():
-            _touch_thumb(dest)
+
+        def _hits_and_misses() -> tuple[list[int], dict[int, Path]]:
+            dests = {}
+            for w in wanted:
+                dest = cache_path_for(cache_root(), w, key)
+                dests[w] = dest.with_suffix(".svg") if is_svg else dest
+            missing = []
+            for w in wanted:
+                if dests[w].is_file():
+                    _touch_thumb(dests[w])  # a hit counts as recent use
+                else:
+                    missing.append(w)
+            return missing, dests
+
+        pending, dests = _hits_and_misses()
+        if not pending:
             return True
         data, _mtime, _size, key = await load_source_bytes(downloads_dir, path)
-        dest = cache_path_for(cache_root(), width, key)
-        if is_svg:
-            dest = dest.with_suffix(".svg")
-        if dest.is_file():
-            _touch_thumb(dest)
+        # A writer may have stored a width while the source loaded — the
+        # post-load recheck touches it and drops it from the render list.
+        pending, dests = _hits_and_misses()
+        if not pending:
             return True
-        thumb = await run_in_threadpool(_make_thumb_bytes, data, is_svg, width)
-        await run_in_threadpool(_store_thumb, dest, thumb, prune=False)
+        thumbs = await run_in_threadpool(
+            _make_thumb_bytes_multi, data, is_svg, pending
+        )
+
+        def _store_all() -> None:
+            for w, body in thumbs.items():
+                _store_thumb(dests[w], body, prune=False)
+
+        await run_in_threadpool(_store_all)
         return True
     except Exception:
         return False
