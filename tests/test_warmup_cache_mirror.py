@@ -30,10 +30,13 @@ from app import warmup_cache  # noqa: E402
 
 
 def _isolate(tmp_path, monkeypatch):
-    """Point the disk cache at tmp_path and reset the memory mirror."""
+    """Point the disk cache at tmp_path and reset mirror + debounce state."""
     monkeypatch.setenv("BOOKQ_CACHE_DIR", str(tmp_path / "cache"))
     warmup_cache._MEM_CACHE = None
     warmup_cache._MEM_SIG = None
+    # Drop pending entries/armed timers left over from earlier tests —
+    # they belong to a different cache dir (plan warmup-cache-batch).
+    warmup_cache._reset_debounce()
 
 
 def test_consecutive_lookups_parse_the_file_at_most_once(
@@ -61,6 +64,7 @@ def test_consecutive_lookups_parse_the_file_at_most_once(
 def test_external_rewrite_is_picked_up_on_next_lookup(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     warmup_cache.put_pdf_count("ext-key", 1)
+    warmup_cache.flush()  # persist now — a pending entry would shadow the rewrite
     assert warmup_cache.get_pdf_count("ext-key") == 1  # warms the mirror
 
     # External (cross-process) rewrite: brand-new JSON, so content and
@@ -87,11 +91,15 @@ def test_mirror_works_with_monkeypatched_cache_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("BOOKQ_CACHE_DIR", str(first))
     warmup_cache._MEM_CACHE = None
     warmup_cache._MEM_SIG = None
+    warmup_cache._reset_debounce()
     warmup_cache.put_archive_entries("a-key", ["a.jpg"])
     assert warmup_cache.get_archive_entries("a-key") == ["a.jpg"]
 
     # Repoint at a fresh dir: the stale mirror (other file's sig/entry)
     # must not leak across; the new dir starts empty, then mirrors itself.
+    # Flush FIRST so pending "a-key" lands in cache-a — pending entries are
+    # global and would otherwise shadow the miss below (plan warmup-cache-batch).
+    warmup_cache.flush()
     second = tmp_path / "cache-b"
     monkeypatch.setenv("BOOKQ_CACHE_DIR", str(second))
     assert warmup_cache.get_archive_entries("a-key") is None

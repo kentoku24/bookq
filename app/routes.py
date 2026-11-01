@@ -20,6 +20,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.concurrency import run_in_threadpool
 
 from app import auth as auth_module
+from app import warmup_cache
 from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
 from app.folder_visibility import user_key_for_email, visibility_owner
@@ -201,6 +202,10 @@ async def _scan_and_rebuild(
         scan_ms, rebuild_ms, folders, images, archives, epubs, rars, pdfs,
         phases["walk_ms"], phases["archive_ms"], phases["pdf_ms"],
     )
+    # Boundary flush (plan warmup-cache-batch): archive/pdf node scans during
+    # this pass buffer entries in warmup_cache._PENDING — persist them now
+    # rather than waiting for the trailing timer. Fail-open; never raises.
+    warmup_cache.flush()
     return tree, index, folders, images, archives, epubs, rars, pdfs
 
 
@@ -604,6 +609,11 @@ async def _background_fill(app_state) -> None:
         logger.warning(
             "background fill abort error=%s: %s", type(exc).__name__, exc,
         )
+    finally:
+        # Boundary flush (plan warmup-cache-batch): node scans above buffer
+        # entries in warmup_cache._PENDING — persist the tail on every exit
+        # (completion, cancellation, abort). Fail-open; never raises.
+        warmup_cache.flush()
 
 
 # Single-cover warm widths: 200 (tile first paint) and 400 (list/card).

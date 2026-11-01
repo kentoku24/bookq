@@ -37,6 +37,9 @@ _REPEATS = 3  # puts per thread: widens the load-modify-save race window
 
 def test_parallel_puts_lose_no_entries(tmp_path, monkeypatch):
     monkeypatch.setenv("BOOKQ_CACHE_DIR", str(tmp_path / "cache"))
+    # Drop debounce leftovers from earlier tests (pending entries/armed
+    # timers) — they belong to a different cache dir.
+    warmup_cache._reset_debounce()
     barrier = threading.Barrier(_N_THREADS)
     errors: list = []
 
@@ -63,6 +66,9 @@ def test_parallel_puts_lose_no_entries(tmp_path, monkeypatch):
     assert not any(t.is_alive() for t in threads), "worker threads hung"
     assert not errors, f"workers raised: {errors!r}"
 
+    # Stores are debounced now (plan warmup-cache-batch): persist the pending
+    # tail deterministically before reading the file.
+    warmup_cache.flush()
     with open(warmup_cache.cache_file_path(), encoding="utf-8") as fh:
         data = json.load(fh)
     missing = [
