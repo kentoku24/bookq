@@ -54,6 +54,35 @@ services:
       start_period: 2s
     restart: unless-stopped
 
+  # viewer-rs (#163/#211 strangler): profile `rs` で opt-in — 既定の
+  # `prd.sh up` ではコンテナ自体が起動しない。有効化すると全 traffic が
+  # これを通り（tailscale serve → viewer-rs）、BOOKQ_RS_NATIVE に列挙した
+  # endpoint のみ native 処理、残りは viewer へフォールスルーする。
+  # 詳細は docs/deployment.md「viewer-rs strangler 導入」。
+  viewer-rs:
+    profiles: ["rs"]
+    build:
+      context: .
+      dockerfile: Dockerfile.viewer-rs
+    container_name: bookq-prd-viewer-rs
+    volumes:
+      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      # folder-visibility SQLite — viewer と同じ user-state volume を共有。
+      - user-state:/var/lib/bookq
+    environment:
+      - BOOKQ_UPSTREAM=http://viewer:8080
+      - DOWNLOADS_DIR=/app/downloads
+      - BOOKQ_STATE_DIR=/var/lib/bookq
+      # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
+      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-}
+      # visibility owner HMAC — viewer と同じ値が必須。
+      - SECRET_KEY=${SECRET_KEY}
+      - BOOKQ_GIT_SHA=${GIT_SHA:-}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS}
+    restart: unless-stopped
+    depends_on:
+      - viewer
+
   tailscale:
     build: ./tailscale
     container_name: bookq-prd-tailscaleGateway
@@ -64,6 +93,9 @@ services:
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_HOSTNAME=bookq
+      # 未設定 → viewer 直結（従来どおり）。http://viewer-rs:8080 で gateway
+      # 経由に切替。空文字 = serve を外部管理（entrypoint の escape hatch）。
+      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer:8080}
     volumes:
       - tailscale-state:/var/lib/tailscale
     restart: unless-stopped
