@@ -46,22 +46,22 @@ pub(crate) const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".cbz", ".rar", ".cbr",
 pub(crate) const PDF_EXTENSIONS: &[&str] = &[".pdf"];
 const MAX_ARCHIVE_ENTRIES: usize = 2000;
 
-fn suffix_lower(p: &Path) -> String {
+pub(crate) fn suffix_lower(p: &Path) -> String {
     p.extension()
         .and_then(|e| e.to_str())
         .map(|e| format!(".{}", e.to_lowercase()))
         .unwrap_or_default()
 }
 
-fn is_archive_file(p: &Path) -> bool {
+pub(crate) fn is_archive_file(p: &Path) -> bool {
     p.is_file() && ARCHIVE_EXTENSIONS.contains(&suffix_lower(p).as_str())
 }
 
-fn is_pdf_file(p: &Path) -> bool {
+pub(crate) fn is_pdf_file(p: &Path) -> bool {
     p.is_file() && PDF_EXTENSIONS.contains(&suffix_lower(p).as_str())
 }
 
-fn is_rar_path(p: &Path) -> bool {
+pub(crate) fn is_rar_path(p: &Path) -> bool {
     matches!(suffix_lower(p).as_str(), ".rar" | ".cbr")
 }
 
@@ -72,7 +72,7 @@ fn is_rar_path(p: &Path) -> bool {
 /// resolved prefix, missing components pass through. Errors only on symlink
 /// loops / cwd failure — which `_is_within` maps to "outside" like Python's
 /// OSError/RuntimeError catch.
-fn realpath(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn realpath(path: &Path) -> io::Result<PathBuf> {
     let mut out = if path.is_absolute() {
         PathBuf::from("/")
     } else {
@@ -130,12 +130,14 @@ pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
 /// `_resolve_archive`: longest prefix of `rel` that resolves to an
 /// archive/PDF file → `(archive_path, inner_path)`. `.` and empty components
 /// are dropped; any `..` rejects the whole path.
-fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, String)> {
     let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
     if parts.iter().any(|p| *p == "..") {
         return None;
     }
-    for i in (1..=parts.len()).rev() {
+    // `range(len(parts) - 1, 0, -1)` — the inner entry is mandatory: a bare
+    // archive filename is an ordinary file (plain-file branch downstream).
+    for i in (1..parts.len()).rev() {
         let cand = downloads.join(parts[..i].join("/"));
         if is_archive_file(&cand) || is_pdf_file(&cand) {
             return Some((cand, parts[i..].join("/")));
@@ -158,7 +160,7 @@ fn is_safe_entry(name: &str) -> bool {
 }
 
 /// `_is_image_entry`: exposable image inside an archive.
-fn is_image_entry(name: &str) -> bool {
+pub(crate) fn is_image_entry(name: &str) -> bool {
     if !is_safe_entry(name) || name.ends_with('/') {
         return false;
     }
@@ -235,16 +237,16 @@ fn list_archive_prefix(archive: &Path, inner: &str) -> Vec<String> {
 
 // ── HTTP primitives (dates, etags, conditional, ranges, mime) ─────────────────
 
-fn fmt_mtime(mtime: f64) -> String {
+pub(crate) fn fmt_mtime(mtime: f64) -> String {
     format!("{mtime:.0}")
 }
 
-fn http_date(secs_f64: f64) -> String {
+pub(crate) fn http_date(secs_f64: f64) -> String {
     httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs_f64.max(0.0)))
 }
 
 /// `_not_modified` for archive entries (`int(mtime)` truncation).
-fn archive_not_modified(headers: &HeaderMap, etag: &str, mtime: f64) -> bool {
+pub(crate) fn archive_not_modified(headers: &HeaderMap, etag: &str, mtime: f64) -> bool {
     if let Some(v) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
         if v == etag {
             return true;
@@ -309,7 +311,7 @@ fn parse_archive_range(header: &str, size: u64) -> Option<(u64, u64)> {
 }
 
 /// Minimal `mimetypes.guess_type` for the extensions this app serves.
-fn guess_type(name: &str) -> &'static str {
+pub(crate) fn guess_type(name: &str) -> &'static str {
     match suffix_lower(Path::new(name)).as_str() {
         ".jpg" | ".jpeg" => "image/jpeg",
         ".png" => "image/png",
@@ -321,7 +323,9 @@ fn guess_type(name: &str) -> &'static str {
         ".tif" | ".tiff" => "image/tiff",
         ".ico" => "image/vnd.microsoft.icon",
         ".pdf" => "application/pdf",
-        ".zip" | ".cbz" => "application/zip",
+        ".zip" => "application/zip",
+        ".epub" => "application/epub+zip",
+        ".rar" => "application/vnd.rar",
         ".json" => "application/json",
         ".txt" => "text/plain",
         ".html" | ".htm" => "text/html",

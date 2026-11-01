@@ -33,6 +33,7 @@ mod folders;
 mod search;
 mod serve;
 mod state;
+mod thumbs;
 mod tree;
 
 #[derive(Clone)]
@@ -100,6 +101,8 @@ pub(crate) struct AppState {
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
     /// `SECRET_KEY` — needed for the visibility owner HMAC.
     pub(crate) secret_key: String,
+    /// M7: shared thumb-cache root (`BOOKQ_THUMB_CACHE_DIR`).
+    pub(crate) thumb_cache: PathBuf,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -388,6 +391,102 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
     }
 }
 
+/// `/thumb/{*path}` — v1 contract path. Native answers validation, the
+/// 304 fast path and shared-cache hits; misses proxy to Pillow upstream.
+async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("thumb") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(raw) = req.uri().path().strip_prefix("/thumb/") else {
+        return proxy(&st.upstream, req).await;
+    };
+    let Ok(path) = percent_decode_str(raw).decode_utf8() else {
+        return proxy(&st.upstream, req).await;
+    };
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let headers = req.headers().clone();
+    let downloads = st.downloads.clone();
+    let cache = st.thumb_cache.clone();
+    let path = path.into_owned();
+    let out =
+        tokio::task::spawn_blocking(move || thumbs::thumb(&downloads, &cache, &path, q.get("w"), &headers))
+            .await
+            .unwrap_or(serve::Serve::Proxy);
+    match out {
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+        serve::Serve::Done(res) => res, // /thumb is outside the gzip prefixes
+    }
+}
+
+/// `/view/{*path}` — passthrough formats serve natively; normalized
+/// formats answer shared-cache hits; everything else proxies.
+async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(raw) = req.uri().path().strip_prefix("/view/") else {
+        return proxy(&st.upstream, req).await;
+    };
+    let Ok(path) = percent_decode_str(raw).decode_utf8() else {
+        return proxy(&st.upstream, req).await;
+    };
+    let headers = req.headers().clone();
+    let downloads = st.downloads.clone();
+    let cache = st.thumb_cache.clone();
+    let path = path.into_owned();
+    let out = tokio::task::spawn_blocking(move || thumbs::view(&downloads, &cache, &path, &headers))
+        .await
+        .unwrap_or(serve::Serve::Proxy);
+    match out {
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+        serve::Serve::Done(res) => res, // /view is outside the gzip prefixes
+    }
+}
+
+/// `/api/v1/thumb-sprite` — v1 contract (v0 `/api/thumb-sprite` proxies).
+/// Native answers validation, 304s and shared-cache hits; misses proxy.
+async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("thumb-sprite") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let query_string = req.uri().query().unwrap_or("").to_string();
+    let headers = req.headers().clone();
+    let headers2 = headers.clone();
+    let downloads = st.downloads.clone();
+    let cache = st.thumb_cache.clone();
+    let out = tokio::task::spawn_blocking(move || {
+        thumbs::thumb_sprite(&downloads, &cache, &q, &query_string, &headers2)
+    })
+    .await
+    .unwrap_or(serve::Serve::Proxy);
+    match out {
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+        // image/* responses are excluded from ApiGZipMiddleware by content type.
+        serve::Serve::Done(res) => {
+            let compressible = !res
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.starts_with("image/"));
+            serve::maybe_gzip(&headers, res, compressible).await
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -430,6 +529,9 @@ async fn main() {
         positions: std::sync::Arc::new(state::Positions::default()),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
+        thumb_cache: PathBuf::from(
+            std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
+        ),
     };
     if st.native.enabled("visibility") || st.native.enabled("tree") {
         // warmup_metadata_index — lifespan kicks the same cold-miss path.
@@ -448,6 +550,9 @@ async fn main() {
         // M3 skeleton: no v1 native handlers yet — everything proxies.
         // /image/{*path} is a v1 contract path (media, not versioned).
         .route("/image/{*path}", any(serve_image))
+        .route("/thumb/{*path}", any(serve_thumb))
+        .route("/view/{*path}", any(serve_view))
+        .route("/api/v1/thumb-sprite", any(api_thumb_sprite))
         .route("/api/v1/tree", any(api_tree))
         .route("/api/v1/images", any(api_images))
         .route("/api/v1/search", any(api_search))
