@@ -9,7 +9,7 @@
 use axum::{
     body::Body,
     extract::{Query, Request, State},
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{any, get},
     Router,
@@ -103,6 +103,9 @@ pub(crate) struct AppState {
     pub(crate) secret_key: String,
     /// M7: shared thumb-cache root (`BOOKQ_THUMB_CACHE_DIR`).
     pub(crate) thumb_cache: PathBuf,
+    /// `BOOKQ_GIT_SHA` / `BOOKQ_BUILD_DATE` — `/api/v1/version` fields.
+    pub(crate) git_sha: String,
+    pub(crate) build_date: String,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -358,6 +361,80 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
     }
 }
 
+/// `/api/v1/health` — public (`security: []`); `{status:"ok"}`.
+async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("health") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    let headers = req.headers().clone();
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from("{\"status\":\"ok\"}"))
+        .unwrap();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    serve::maybe_gzip(&headers, res, true).await
+}
+
+/// `/api/v1/version` — authed; `{version,sha,build_date}` + `no-store`.
+async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("version") || req.method() != axum::http::Method::GET {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    // Key order is the wire contract: version, sha, build_date.
+    let body = format!(
+        "{{\"version\":\"2.0.0\",\"sha\":{},\"build_date\":{}}}",
+        serde_json::to_string(&st.git_sha).unwrap_or("\"\"".into()),
+        serde_json::to_string(&st.build_date).unwrap_or("\"\"".into())
+    );
+    let headers = req.headers().clone();
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(body))
+        .unwrap();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    serve::maybe_gzip(&headers, res, true).await
+}
+
+/// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
+/// same swap semantics as the background gate, `{status,folders}`.
+async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("refresh") || req.method() != axum::http::Method::POST {
+        return proxy(&st.upstream, req).await;
+    }
+    if caller_or_proxy(&st, req.headers()).is_none() {
+        return proxy(&st.upstream, req).await;
+    }
+    let headers = req.headers().clone();
+    match folders::force_rebuild(&st.index, &st.downloads).await {
+        Some(folders) => {
+            let mut res = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(format!("{{\"status\":\"ok\",\"folders\":{folders}}}")))
+                .unwrap();
+            res.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            serve::maybe_gzip(&headers, res, true).await
+        }
+        // Build failure propagates upstream in Python — proxy for parity.
+        None => proxy(&st.upstream, req).await,
+    }
+}
+
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
 /// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
 /// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
@@ -532,6 +609,10 @@ async fn main() {
         thumb_cache: PathBuf::from(
             std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
         ),
+        // config.py getenv defaults are "unknown" (env unset); the image's
+        // ARG ""→ENV path yields "" — same two-state contract.
+        git_sha: std::env::var("BOOKQ_GIT_SHA").unwrap_or_else(|_| "unknown".into()),
+        build_date: std::env::var("BOOKQ_BUILD_DATE").unwrap_or_else(|_| "unknown".into()),
     };
     if st.native.enabled("visibility") || st.native.enabled("tree") {
         // warmup_metadata_index — lifespan kicks the same cold-miss path.
@@ -559,6 +640,13 @@ async fn main() {
         .route("/api/v1/facets", any(api_facets))
         .route("/api/v1/reading-positions", any(reading_positions))
         .route("/api/v1/folder-visibility", any(folder_visibility))
+        .route("/api/v1/health", any(api_health))
+        .route("/api/v1/version", any(api_version))
+        .route("/api/v1/index/refresh", any(api_refresh))
+        // /api/v1/auth/token is proxy-only by design: its auth-code and
+        // refresh stores are written by the OAuth callback in app/auth.py
+        // (app.state); sharing them natively would require touching the
+        // Python backend, which is out of bounds.
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await
         }))

@@ -170,6 +170,33 @@ async fn background_index_refresh(st: &IndexState, downloads: &Path) {
     }
 }
 
+/// `refresh_index` — unconditional synchronous rebuild (NOT signature
+/// gated): the caller waits for the swap before replying, matching
+/// `async with _index_lock` + `_scan_and_rebuild`. Generation follows the
+/// same rule as the background path — verified signature change bumps
+/// `prev+1`, otherwise `prev` — so `since=` tokens stay honest about a
+/// tree that actually changed.
+pub async fn force_rebuild(st: &Arc<IndexState>, downloads: &Path) -> Option<usize> {
+    let mut data = tokio::task::spawn_blocking({
+        let d = downloads.to_path_buf();
+        move || build_cache(&d)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let folders = data.comics.len();
+    {
+        let mut c = st.cache.lock().await;
+        let prev_gen = c.as_ref().map(|d| d.generation).unwrap_or(1);
+        let prev_sig = c.as_ref().and_then(|d| d.signature.clone());
+        let changed = prev_sig.is_some()
+            && data.signature.as_deref() != prev_sig.as_deref();
+        data.generation = if changed { prev_gen + 1 } else { prev_gen };
+        *c = Some(Arc::new(data));
+    }
+    Some(folders)
+}
+
 /// `_scan_and_rebuild` — full tree + metadata + attaches in one walk.
 fn build_cache(downloads: &Path) -> Option<CacheData> {
     let mut t = tree::scan_tree(downloads)?;
