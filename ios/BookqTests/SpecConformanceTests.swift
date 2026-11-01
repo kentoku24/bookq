@@ -61,6 +61,17 @@ final class SpecConformanceTests: XCTestCase {
         try assertModel(TokenPairResponse.self, against: token)
     }
 
+    /// Malformed/unsupported YAML must surface as ParseError — never crash,
+    /// hang, or silently mis-parse, or the guard could pass on a spec it
+    /// never actually read (#198 parser contract).
+    func testParserRejectsUnsupportedYaml() {
+        for bad in ["k: {a: 1", "k: [1, 2", "k: {a:1} tail", "k: {a: 'x",
+                    "k: {,}", "k: &anchor v", "k: *alias", "k: !!str v"] {
+            XCTAssertThrowsError(try Yaml.parse(bad), "should throw: \(bad)")
+        }
+        XCTAssertThrowsError(try Yaml.parse("<<: *merged"))
+    }
+
     // MARK: - Decode + re-encode assertion
 
     private func assertModel<T: Codable>(_ type: T.Type,
@@ -319,6 +330,9 @@ private indirect enum Yaml {
             guard let (key, rest) = splitKey(lines[i].text) else {
                 throw ParseError(msg: "expected key: \(lines[i].text)")
             }
+            if key == "<<" {
+                throw ParseError(msg: "yaml merge key unsupported")
+            }
             i += 1
             if rest.isEmpty {
                 if i < lines.count, lines[i].indent > indent {
@@ -391,6 +405,9 @@ private indirect enum Yaml {
             return try p.parse()
         }
         if t.hasPrefix("\"") || t.hasPrefix("'") { return .scalar(unquote(t)) }
+        if t.hasPrefix("&") || t.hasPrefix("*") || t.hasPrefix("!") {
+            throw ParseError(msg: "yaml anchor/alias/tag unsupported: \(t)")
+        }
         switch t {
         case "null", "~", "Null", "NULL": return .null
         default: return .scalar(t)
@@ -417,7 +434,14 @@ private indirect enum Yaml {
 
         init(_ s: String) { self.s = s; self.i = s.startIndex }
 
-        mutating func parse() throws -> Yaml { try value() }
+        mutating func parse() throws -> Yaml {
+            let v = try value()
+            ws()
+            guard i == s.endIndex else {
+                throw ParseError(msg: "trailing content after flow value in \(s)")
+            }
+            return v
+        }
 
         private mutating func ws() {
             while i < s.endIndex, s[i] == " " { i = s.index(after: i) }
@@ -429,8 +453,13 @@ private indirect enum Yaml {
             switch s[i] {
             case "{": return try mapLit()
             case "[": return try listLit()
-            case "\"", "'": return .scalar(quoted())
-            default: return .scalar(bare())
+            case "\"", "'": return .scalar(try quoted())
+            default:
+                let tok = bare()
+                if tok.hasPrefix("&") || tok.hasPrefix("*") || tok.hasPrefix("!") {
+                    throw ParseError(msg: "yaml anchor/alias/tag unsupported: \(tok)")
+                }
+                return .scalar(tok)
             }
         }
 
@@ -439,8 +468,16 @@ private indirect enum Yaml {
             var pairs: [(String, Yaml)] = []
             while true {
                 ws()
-                if i < s.endIndex, s[i] == "}" { i = s.index(after: i); return .map(pairs) }
-                let key = (s[i] == "\"" || s[i] == "'") ? quoted() : bare(stopAt: ":,}")
+                guard i < s.endIndex else {
+                    throw ParseError(msg: "unterminated flow map in \(s)")
+                }
+                if s[i] == "}" { i = s.index(after: i); return .map(pairs) }
+                let key: String
+                if s[i] == "\"" || s[i] == "'" {
+                    key = try quoted()
+                } else {
+                    key = bare(stopAt: ":,}")
+                }
                 ws()
                 guard i < s.endIndex, s[i] == ":" else {
                     throw ParseError(msg: "flow map missing ':' in \(s)")
@@ -448,7 +485,14 @@ private indirect enum Yaml {
                 i = s.index(after: i)
                 pairs.append((key, try value()))
                 ws()
-                if i < s.endIndex, s[i] == "," { i = s.index(after: i) }
+                guard i < s.endIndex else {
+                    throw ParseError(msg: "unterminated flow map in \(s)")
+                }
+                if s[i] == "," {
+                    i = s.index(after: i)
+                } else if s[i] != "}" {
+                    throw ParseError(msg: "expected ',' or '}' in \(s)")
+                }
             }
         }
 
@@ -457,14 +501,24 @@ private indirect enum Yaml {
             var items: [Yaml] = []
             while true {
                 ws()
-                if i < s.endIndex, s[i] == "]" { i = s.index(after: i); return .list(items) }
+                guard i < s.endIndex else {
+                    throw ParseError(msg: "unterminated flow list in \(s)")
+                }
+                if s[i] == "]" { i = s.index(after: i); return .list(items) }
                 items.append(try value())
                 ws()
-                if i < s.endIndex, s[i] == "," { i = s.index(after: i) }
+                guard i < s.endIndex else {
+                    throw ParseError(msg: "unterminated flow list in \(s)")
+                }
+                if s[i] == "," {
+                    i = s.index(after: i)
+                } else if s[i] != "]" {
+                    throw ParseError(msg: "expected ',' or ']' in \(s)")
+                }
             }
         }
 
-        private mutating func quoted() -> String {
+        private mutating func quoted() throws -> String {
             let q = s[i]; var out = ""
             i = s.index(after: i)
             while i < s.endIndex {
@@ -473,7 +527,7 @@ private indirect enum Yaml {
                 if c == q { return out }
                 out.append(c)
             }
-            return out
+            throw ParseError(msg: "unterminated quote in \(s)")
         }
 
         private mutating func bare(stopAt: String = ",}]") -> String {
