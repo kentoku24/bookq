@@ -994,6 +994,10 @@
       }
       var cid = _qp.get('pair_report');
       if (!cid) return;
+      // Hook freshness marker — the deploy watchdog asserts this so a
+      // stale SWR-cached copy of this file (which lacks the field) is
+      // detected and self-repaired even under TEST_MODE + pair_report.
+      window.__BOOKQ_PAIR_HOOK_V = 1;
       // Geometry + tap record for clients the runner cannot JS-eval:
       // Safari's AX tree exposes only native chrome, so the runner taps
       // real coordinates — element rects here plus the last pointerdown

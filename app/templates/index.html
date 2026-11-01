@@ -192,7 +192,9 @@
         window.BOOKQ_BROWSE_SYNC === true &&
         window.BOOKQ_UI_SYNC_V2 === true &&
         window.FolderVisibility && window.FolderVisibility.apiVersion === 1 &&
-        window.__BOOKQ_VISIBILITY === true);
+        window.__BOOKQ_VISIBILITY === true &&
+        (!/[?&]pair_report=/.test(location.search) ||
+         window.__BOOKQ_PAIR_HOOK_V === 1));
   }
   try { window.__shellStale = stale; } catch (e) {}
   function dropStaleJs() {
@@ -215,7 +217,10 @@
   try { window.__shellDropStaleJs = dropStaleJs; } catch (e) {}
   window.addEventListener('DOMContentLoaded', function () {
     var KEY = 'bookq-wd-reloaded';
-    if (window.__BOOKQ_TEST_MODE__ === 'true') return;
+    // Test mode skips repair — except pair-report harness pages, whose
+    // runner cannot JS-eval and relies on the hook being deploy-fresh.
+    if (window.__BOOKQ_TEST_MODE__ === 'true' &&
+        !/[?&]pair_report=/.test(location.search)) return;
     if (!stale()) {
       try { sessionStorage.removeItem(KEY); } catch (e) {}
       return;
