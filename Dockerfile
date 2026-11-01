@@ -1,5 +1,5 @@
 # Build stage: install dependencies into an isolated venv
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 WORKDIR /build
 
@@ -9,7 +9,7 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Runtime stage: copy only the venv + application code
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # RAR/CBR extraction backends for rarfile. 7-Zip alone cannot decode some
 # proprietary RAR methods ("Unsupported Method" -> rarfile BadRarFile ->
