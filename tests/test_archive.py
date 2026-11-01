@@ -661,6 +661,11 @@ def _make_big_zip(path: Path, count: int) -> None:
 def _isolate_cache(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("BOOKQ_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path / "downloads"))
+    # Drop debounce leftovers (pending entries/armed timers) from earlier
+    # tests — they belong to a different cache dir (plan warmup-cache-batch).
+    from app import warmup_cache
+
+    warmup_cache._reset_debounce()
     downloads = tmp_path / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
     return downloads

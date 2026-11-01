@@ -43,6 +43,11 @@ def _isolate(tmp_path, monkeypatch):
     """Point the (future) disk cache at tmp_path; never the real tmpdir."""
     monkeypatch.setenv("BOOKQ_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path / "downloads"))
+    # Drop debounce leftovers (pending entries/armed timers) from earlier
+    # tests — they belong to a different cache dir (plan warmup-cache-batch).
+    import app.warmup_cache as warmup_cache
+
+    warmup_cache._reset_debounce()
 
 
 def _counting_uncached(monkeypatch):

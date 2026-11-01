@@ -188,8 +188,13 @@ def test_warmup_baseline_fixed_scale(tmp_path, caplog):
     # dir → elapsed_ms/import_ms. Fresh state => cache-miss rescan; fresh
     # cache dir + memo clear => disk/in-process caches cannot warm-hit.
     from app import archive_pdf
+    from app import warmup_cache
 
     archive_pdf.clear_pdf_page_count_memo()
+    # Drain phase-1 puts into cache_a BEFORE repointing — pending entries are
+    # process-global and would otherwise warm-hit phase 2 via the in-memory
+    # pending map even though cache_b is empty (plan warmup-cache-batch).
+    warmup_cache.flush()
     cache_b = tmp_path / "cache-b"
     cache_b.mkdir()
     os.environ["BOOKQ_CACHE_DIR"] = str(cache_b)
