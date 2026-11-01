@@ -67,9 +67,13 @@ final class AppModel: ObservableObject {
         }
         // No shared URLCache for the authed API session — cached error
         // responses (e.g. a 404 caught during a server restart) must not be
-        // replayed to later boots, and authed bodies stay off disk.
+        // replayed to later boots, and authed bodies stay off disk. Cookies
+        // stay off too: native auth is Bearer-only, and a stray Set-Cookie
+        // session would win over the Bearer header server-side.
         let cfg = URLSessionConfiguration.default
         cfg.urlCache = nil
+        cfg.httpCookieStorage = nil
+        cfg.httpShouldSetCookies = false
         auth.baseURLProvider = { [weak self] in self?.config.baseURL }
         let api = BookqAPI(baseURL: base,
                            session: URLSession(configuration: cfg),
