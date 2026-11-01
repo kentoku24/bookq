@@ -218,17 +218,17 @@ def test_etag_changes_when_tree_changes(client, downloads_tree):
 def test_body_serialized_once_per_index_generation(client, monkeypatch):
     import app.routes as routes
     calls = {"n": 0}
-    real = routes.json.dumps
+    real = routes.orjson.dumps
     def counting(*a, **kw):
         calls["n"] += 1
         return real(*a, **kw)
-    monkeypatch.setattr(routes.json, "dumps", counting)
+    monkeypatch.setattr(routes.orjson, "dumps", counting)
     client.get("/api/folders")
     first = calls["n"]
     assert first >= 1
     client.get("/api/folders")
     client.get("/api/folders", headers={"If-None-Match": client.get("/api/folders").headers["etag"]})
-    assert calls["n"] == first, "TTL 内の再リクエストで json.dumps が再実行されている"
+    assert calls["n"] == first, "TTL 内の再リクエストで orjson.dumps が再実行されている"
 
 
 def test_full_tree_body_is_compact_json_and_matches_payload(client):

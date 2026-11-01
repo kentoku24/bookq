@@ -5,7 +5,6 @@ import datetime
 import gzip
 import hashlib
 import inspect
-import json
 import logging
 import math
 import mimetypes
