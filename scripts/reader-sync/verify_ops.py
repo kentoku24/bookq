@@ -951,8 +951,12 @@ def _ui_rect(rep: dict, needles) -> dict | None:
                     r = t["rect"]
                     break
         if r and r["w"] > 0 and r["h"] > 0 and \
-                r["x"] + r["w"] > 0 and r["y"] + r["h"] > 0 and \
+                r["x"] + r["w"] > 0 and \
                 r.get("top") is not False:
+            # no vertical bound check — the caller scrolls toward
+            # offscreen targets in EITHER direction; rejecting an
+            # above-the-fold tile here skips that recovery entirely
+            # (browse scroll pos persists across scenarios at ~3000px).
             return r
     return None
 
