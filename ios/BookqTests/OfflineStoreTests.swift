@@ -25,6 +25,12 @@ final class OfflineStoreTests: XCTestCase {
             thumb: names.first, names: names, addedAt: 1, lastReadAt: 1))
     }
 
+    /// Stub-API store — image bytes via StubURLProtocol.
+    private func wiredStore() -> OfflineStore {
+        let api = StubURLProtocol.api()
+        return OfflineStore(apiProvider: { api }, root: root)
+    }
+
     // MARK: buttonState ordering (confirm > deleting > stopping >
     // downloading > partial > complete > idle)
 
@@ -252,6 +258,53 @@ final class OfflineStoreTests: XCTestCase {
     }
 
     // MARK: confirm arm consumes second tap
+
+    // MARK: - abort semantics (test_download_button 03/04 parity)
+
+    /// Single-tap stop mid-download keeps the pages already on disk as a
+    /// partial record (web: tap while DOWNLOADING → abort, keep partial).
+    func testStopKeepsPartial() async throws {
+        StubURLProtocol.handler = { req in
+            let path = req.url?.path ?? ""
+            if path == "/api/v1/images" {
+                return StubURLProtocol.json(["folder": "w", "images": ["p1.jpg", "p2.jpg", "p3.jpg"]])
+            }
+            // p1 instant; p2/p3 slow so stop() lands mid-flight.
+            if path.hasSuffix("p1.jpg") {
+                return .init(status: 200, body: Data([1]))
+            }
+            Thread.sleep(forTimeInterval: 1.0)
+            return .init(status: 200, body: Data([1]))
+        }
+        let s = wiredStore()
+        s.download(path: "w", leaves: ["w"])
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        s.stop(path: "w")
+        try? await Task.sleep(nanoseconds: 1_600_000_000)
+        // The in-flight image finishes (URLProtocol sleep isn't
+        // interruptible); the record keeps whatever landed — partial.
+        let rec = s.records["w"]
+        XCTAssertNotNil(rec)
+        XCTAssertLessThan(rec!.cachedCount, rec!.pageCount)
+        XCTAssertEqual(s.buttonState("w", leaves: ["w"]), .partial)
+    }
+
+    /// Abort during the listing phase returns to idle and clears the
+    /// listing flag (web: listing abort → IDLE + is-listing removed).
+    func testListingAbortReturnsIdle() async throws {
+        StubURLProtocol.handler = { _ in
+            Thread.sleep(forTimeInterval: 1.0)
+            return StubURLProtocol.json(["folder": "w", "images": ["p1.jpg"]])
+        }
+        let s = wiredStore()
+        s.download(path: "w", leaves: ["w"])
+        XCTAssertTrue(s.listing.contains("w"))
+        s.stop(path: "w")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(s.records["w"])
+        XCTAssertFalse(s.listing.contains("w"))
+        XCTAssertEqual(s.buttonState("w", leaves: ["w"]), .idle)
+    }
 
     func testArmConfirmSecondTapFires() {
         var fired = 0

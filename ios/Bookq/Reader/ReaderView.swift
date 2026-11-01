@@ -109,9 +109,10 @@ struct ReaderView: View {
         // single-tap; zoom pan/pinch live inside ZoomableScrollView.
         .gesture(SpatialTapGesture().onEnded { ev in
             let frac = ev.location.x / max(size.width, 1)
-            if frac < 0.30 { turn(tapForwardLeft ? 1 : -1, in: work) }
-            else if frac > 0.70 { turn(tapForwardLeft ? -1 : 1, in: work) }
-            else { withAnimation { showChrome.toggle() } }
+            switch zoneAction(frac: frac, tapForwardLeft: tapForwardLeft) {
+            case .turn(let d): turn(d, in: work)
+            case .toggleChrome: withAnimation { showChrome.toggle() }
+            }
         })
         // Web keyboard parity (iPad/hardware keyboard): →=next, ←=prev,
         // Home/End = chapter edges, G = overview.
