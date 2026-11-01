@@ -32,7 +32,7 @@ final class SearchModelTests: XCTestCase {
     /// Query → debounce → results populate + active.
     func testSearchPopulates() async {
         StubURLProtocol.handler = { req in
-            req.url!.path == "/api/search"
+            req.url!.path == "/api/v1/search"
                 ? StubURLProtocol.json(self.searchBody(["x"]))
                 : StubURLProtocol.json([:])
         }
@@ -64,7 +64,7 @@ final class SearchModelTests: XCTestCase {
             return StubURLProtocol.json(self.searchBody(["r\(calls)"]))
         }
         let first = Task { @MainActor in await self.model.search("a") }
-        for _ in 0..<100 where StubURLProtocol.hits(path: "api/search") < 1 {
+        for _ in 0..<100 where StubURLProtocol.hits(path: "api/v1/search") < 1 {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         let second = Task { @MainActor in await self.model.search("b") }
@@ -123,7 +123,7 @@ final class SearchModelTests: XCTestCase {
         }
         let f1 = Task { @MainActor in await self.model.loadFacets() }
         for _ in 0..<100
-            where StubURLProtocol.hits(path: "api/metadata/facets") < 1 {
+            where StubURLProtocol.hits(path: "api/v1/facets") < 1 {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         let f2 = Task { @MainActor in await self.model.loadFacets() }

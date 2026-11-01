@@ -23,10 +23,12 @@ final class RemoteImageLoaderTests: XCTestCase {
         async let pending = loader.load(url)
         try? await Task.sleep(nanoseconds: 50_000_000)
         loader.clear()
-        XCTAssertNil(await pending)              // stale fetch dropped
+        let stale = await pending
+        XCTAssertNil(stale)                      // stale fetch dropped
         XCTAssertNil(loader.image(for: url))     // and never re-cached
         loader.fetcher = { _ in png }
-        XCTAssertNotNil(await loader.load(url))  // new epoch refetches
+        let fresh = await loader.load(url)
+        XCTAssertNotNil(fresh)                   // new epoch refetches
         XCTAssertNotNil(loader.image(for: url))
     }
 
@@ -36,8 +38,10 @@ final class RemoteImageLoaderTests: XCTestCase {
         var calls = 0
         loader.fetcher = { _ in calls += 1; return png }
         let url = URL(string: "https://x.example/image/a/1.jpg")!
-        XCTAssertNotNil(await loader.load(url))
-        XCTAssertNotNil(await loader.load(url))  // cache hit
+        let first = await loader.load(url)
+        let second = await loader.load(url)
+        XCTAssertNotNil(first)
+        XCTAssertNotNil(second)                  // cache hit
         XCTAssertEqual(calls, 1)
     }
 }

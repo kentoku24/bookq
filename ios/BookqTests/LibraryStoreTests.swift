@@ -2,7 +2,7 @@ import XCTest
 @testable import Bookq
 
 /// LibraryStore tree snapshot — offline-launch parity with the web SW's
-/// NetworkFirst `/api/folders` cache: save → new instance restores the
+/// NetworkFirst `/api/v1/tree` cache: save → new instance restores the
 /// last-known tree before any network.
 @MainActor
 final class LibraryStoreTests: XCTestCase {
@@ -35,14 +35,19 @@ final class LibraryStoreTests: XCTestCase {
             ["name": "p2.png", "type": "image"]]]]
     }
 
+    /// v1 envelope: every /api/v1/tree 200 body is {kind,nodes,generation}.
+    nonisolated private func envelope(_ gen: Int) -> [String: Any] {
+        ["kind": "tree", "nodes": treeJSON, "generation": gen]
+    }
+
     /// API requests must bypass URLCache — RFC 7231 heuristically caches
     /// error responses, so a transient 404 (e.g. during a server restart)
     /// would otherwise replay on every later boot and skip server sync.
     func testRequestsBypassURLCache() async {
-        StubURLProtocol.handler = { _ in StubURLProtocol.json(self.treeJSON) }
+        StubURLProtocol.handler = { _ in StubURLProtocol.json(self.envelope(1)) }
         let s = LibraryStore(api: api())
         await s.load()
-        let rec = StubURLProtocol.last(path: "api/folders")
+        let rec = StubURLProtocol.last(path: "api/v1/tree")
         XCTAssertEqual(rec?.request.cachePolicy, .reloadIgnoringLocalCacheData)
     }
 
@@ -50,7 +55,7 @@ final class LibraryStoreTests: XCTestCase {
     /// (e.g. next launch, offline) restores it before any network.
     func testSnapshotRestoreOnInit() async {
         StubURLProtocol.handler = { req in
-            StubURLProtocol.json(self.treeJSON)
+            StubURLProtocol.json(self.envelope(1))
         }
         let s1 = LibraryStore(api: api())
         await s1.load()
@@ -67,32 +72,31 @@ final class LibraryStoreTests: XCTestCase {
     }
 
     /// Full fetch → delta fetch: generation advances and since= is sent.
+    /// v1 envelopes always carry `generation` in the body (a `since`
+    /// mismatch re-sends kind="tree" with the new gen — no ETag parse).
     func testDeltaMergeGeneration() async {
         var calls = 0
         StubURLProtocol.handler = { req in
             calls += 1
             if req.url?.query?.contains("since=") == true {
-                return StubURLProtocol.json(
-                    ["tree": self.treeJSON, "generation": 7])
+                return StubURLProtocol.json(self.envelope(7))
             }
-            return StubURLProtocol.json(self.treeJSON,
+            return StubURLProtocol.json(self.envelope(42),
                                         headers: ["ETag": "\"abc123def-g42\""])
         }
         let s = LibraryStore(api: api())
         await s.load()
-        // Review fix — server ETag is "<digest24>-g<gen>"; digits inside
-        // the digest must not corrupt the parsed generation.
-        XCTAssertEqual(s.generation, 42)   // from ETag -g suffix
+        XCTAssertEqual(s.generation, 42)   // from envelope body
         await s.load()
-        XCTAssertEqual(s.generation, 7)    // from delta
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/folders"), 2)
+        XCTAssertEqual(s.generation, 7)    // from re-sent envelope
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/tree"), 2)
     }
 
     /// Fetch failure keeps the snapshot tree and surfaces error —
     /// offline launch degrades to browsing, not a dead screen.
     func testFailedLoadKeepsSnapshot() async {
         StubURLProtocol.handler = { _ in
-            StubURLProtocol.json(self.treeJSON)
+            StubURLProtocol.json(self.envelope(1))
         }
         let s1 = LibraryStore(api: api())
         await s1.load()

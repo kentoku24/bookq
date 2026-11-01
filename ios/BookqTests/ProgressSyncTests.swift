@@ -22,7 +22,7 @@ final class ProgressSyncTests: XCTestCase {
                           file: StaticString = #filePath,
                           line: UInt = #line) async {
         for _ in 0..<200 {
-            if StubURLProtocol.hits(path: "api/reading-position") >= n { return }
+            if StubURLProtocol.hits(path: "api/v1/reading-positions") >= n { return }
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTFail("expected \(n) reading-position requests", file: file, line: line)
@@ -42,7 +42,7 @@ final class ProgressSyncTests: XCTestCase {
         sync.push(.init(folder: "A", page: 1, total: 10, ts: 1500))
         sync.flush()
         await waitPuts(1)
-        let body = getJSON(StubURLProtocol.last(path: "api/reading-position"))
+        let body = getJSON(StubURLProtocol.last(path: "api/v1/reading-positions"))
         XCTAssertEqual(body?["ts"] as? Int, 1000)
     }
 
@@ -53,7 +53,7 @@ final class ProgressSyncTests: XCTestCase {
         sync.push(.init(folder: "A", page: 5, total: 10, ts: 2000))
         sync.flush()
         await waitPuts(1)
-        let body = getJSON(StubURLProtocol.last(path: "api/reading-position"))
+        let body = getJSON(StubURLProtocol.last(path: "api/v1/reading-positions"))
         XCTAssertEqual(body?["page"] as? Int, 5)
         XCTAssertEqual(body?["ts"] as? Int, 2000)
     }
@@ -67,7 +67,24 @@ final class ProgressSyncTests: XCTestCase {
         await waitPuts(1)
         sync.push(r); sync.flush()
         try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 1)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
+    }
+
+    /// v1 wire shape — `folder` travels as `?folder=` query param, the
+    /// body is exactly {page,total,ts} (folder must NOT be in the body).
+    func testPutSendsFolderInQueryNotBody() async {
+        StubURLProtocol.handler = { _ in StubURLProtocol.json(["status": "ok"]) }
+        sync.push(.init(folder: "Works/vol 1", page: 3, total: 10, ts: 42))
+        sync.flush()
+        await waitPuts(1)
+        let rec = StubURLProtocol.last(path: "api/v1/reading-positions")
+        XCTAssertTrue(rec?.request.url?.query?.contains("folder=") == true)
+        XCTAssertTrue(rec?.request.url?.query?.contains("vol%201") == true
+                      || rec?.request.url?.query?.contains("vol+1") == true)
+        let body = getJSON(rec)
+        XCTAssertNil(body?["folder"])
+        XCTAssertEqual(body?["page"] as? Int, 3)
+        XCTAssertEqual(body?["ts"] as? Int, 42)
     }
 
     // MARK: - Failure handling
@@ -88,8 +105,10 @@ final class ProgressSyncTests: XCTestCase {
         StubURLProtocol.handler = { _ in StubURLProtocol.json([:], status: 404) }
         sync.push(.init(folder: "A", page: 1, total: 10, ts: 1))
         sync.flush()
+        await waitPuts(1)
+        // Drop (not retry) proof needs a window where a retry could have fired.
         try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 1)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }
 
     /// Transient 503 → same record retried until success; ts preserved.
@@ -104,7 +123,7 @@ final class ProgressSyncTests: XCTestCase {
         sync.push(.init(folder: "A", page: 2, total: 10, ts: 777))
         sync.flush()
         await waitPuts(3)
-        let body = getJSON(StubURLProtocol.last(path: "api/reading-position"))
+        let body = getJSON(StubURLProtocol.last(path: "api/v1/reading-positions"))
         XCTAssertEqual(body?["ts"] as? Int, 777)
     }
 
@@ -113,8 +132,8 @@ final class ProgressSyncTests: XCTestCase {
     /// pull distinguishes empty-from-fetch-failure via `ok`.
     func testPullOkVsFail() async {
         StubURLProtocol.handler = { _ in
-            StubURLProtocol.json(["position": ["folder": "B", "page": 4,
-                                               "total": 9, "ts": 55]])
+            StubURLProtocol.json(["positions": [["folder": "B", "page": 4,
+                                                 "total": 9, "ts": 55]]])
         }
         var res = await sync.pull()
         XCTAssertTrue(res.ok)
@@ -140,7 +159,7 @@ final class ProgressSyncTests: XCTestCase {
         XCTAssertTrue(sawDelete)
         sync.flush()
         try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 1)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }
 
     // MARK: - ReadingProgressStore (local + boot merge)
@@ -170,7 +189,7 @@ final class ProgressSyncTests: XCTestCase {
         XCTAssertEqual(store.entries["A"]?.ts, ts1)
         await waitPuts(1)
         try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 1)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }
 
     /// mergeRemote writes the position WITHOUT re-pushing (no echo loop).
@@ -181,15 +200,15 @@ final class ProgressSyncTests: XCTestCase {
         store.mergeRemote(path: "A", page: 7, total: 10, ts: 999)
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(store.entries["A"]?.page, 7)
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 0)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 0)
     }
 
     /// Boot merge: remote newer → adopt; pull-fail → local untouched.
     func testSyncAdoptsNewerRemote() async {
         StubURLProtocol.handler = { req in
             req.httpMethod == "GET"
-                ? StubURLProtocol.json(["position": ["folder": "A", "page": 8,
-                                                     "total": 10, "ts": 9999]])
+                ? StubURLProtocol.json(["positions": [["folder": "A", "page": 8,
+                                                       "total": 10, "ts": 9999]]])
                 : StubURLProtocol.json([:])
         }
         let store = ReadingProgressStore()
@@ -204,7 +223,7 @@ final class ProgressSyncTests: XCTestCase {
     func testSyncPushesNewerLocal() async {
         StubURLProtocol.handler = { req in
             req.httpMethod == "GET"
-                ? StubURLProtocol.json(["position": nil])
+                ? StubURLProtocol.json(["positions": []])
                 : StubURLProtocol.json([:])
         }
         let store = ReadingProgressStore()
@@ -222,7 +241,7 @@ final class ProgressSyncTests: XCTestCase {
         store.mergeRemote(path: "A", page: 2, total: 10, ts: 50)
         await store.syncWithServer()
         XCTAssertEqual(store.entries["A"]?.page, 2)
-        XCTAssertEqual(StubURLProtocol.hits(path: "api/reading-position"), 1)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }
 
     /// lastRead = max ts across all folders.

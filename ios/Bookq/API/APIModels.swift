@@ -1,6 +1,6 @@
 import Foundation
 
-/// One node of the `/api/folders` tree. `name` may itself contain "/"
+/// One node of the `/api/v1/tree` tree. `name` may itself contain "/"
 /// (single-child flattening, `app/scanner.py`) — never split on it.
 struct TreeNode: Codable, Hashable {
     var name: String
@@ -40,20 +40,22 @@ struct ComicMetadata: Codable, Hashable {
     }
 }
 
-struct MeResponse: Codable, Hashable {
+/// Authenticated user identity — decoded locally from the access-token
+/// JWT claims (`sub`/`name`/`picture`); v1 has no /me endpoint.
+struct AuthUser: Codable, Hashable {
     var email: String
     var name: String
     var picture: String?
 }
 
+/// `/api/v1/version` — {version, sha, build_date}.
 struct VersionResponse: Codable, Hashable {
     var version: String
-    var latest: String?
-    var updateAvailable: Bool?
-    var releaseURL: String?
+    var sha: String?
+    var build_date: String?
 }
 
-/// `/api/folder-visibility` response (per-user snapshot).
+/// `/api/v1/folder-visibility` response (per-user snapshot).
 /// Wire shape: {owner, revision, hiddenRoots} — verified against
 /// `app/folder_visibility_routes.py` `_respond`.
 struct VisibilitySnapshot: Codable, Hashable {
@@ -62,21 +64,33 @@ struct VisibilitySnapshot: Codable, Hashable {
     var hiddenRoots: [String]
 }
 
-/// `/api/reading-position` record — single latest position per user.
-/// PUT body: {folder, page, total, ts}; GET wraps it in {"position": rec?}.
+/// `/api/v1/reading-positions` record — per-folder LWW, opaque folder
+/// string. GET wraps in {positions:[…]} newest-first; PUT takes `folder`
+/// on the query and {page,total,ts} in the body.
 struct ReadingPosition: Codable, Hashable {
     var folder: String
     var page: Int
     var total: Int
     var ts: Int                    // client timestamp (ms)
-    var updated_at: Double?        // server-assigned write time
 }
 
-struct PositionEnvelope: Codable {
-    var position: ReadingPosition?
+struct PositionsResponse: Codable {
+    var positions: [ReadingPosition]
 }
 
-/// `/api/search` response — {query, total, results:[ComicMetadata]}.
+/// PUT body — `folder` travels on the query, never in the body (v1).
+struct PositionBody: Codable {
+    var page: Int
+    var total: Int
+    var ts: Int
+}
+
+/// PUT/DELETE position response — {"status":"ok"|"stale"}.
+struct PositionStatus: Codable {
+    var status: String
+}
+
+/// `/api/v1/search` response — {query, total, results:[ComicMetadata]}.
 /// Results serialize `ComicMetadata.to_dict()` (snake_case keys).
 struct SearchResponse: Codable {
     var query: String
@@ -84,46 +98,31 @@ struct SearchResponse: Codable {
     var results: [ComicMetadata]
 }
 
-/// `/api/facets` response — union of subtree_facets.
+/// `/api/v1/facets` response — union of subtree_facets.
 struct Facets: Codable {
     var artists: [String] = []
     var tags: [String] = []
 }
 
-/// `/api/folders?since=` incremental payload (full response is a bare array).
-struct FoldersDelta: Codable {
-    var tree: [TreeNode]
+/// `/api/v1/tree` response — every mode returns the same envelope:
+/// `kind` "tree" (全木 / since-mismatch re-send) or "children" (depth
+/// mode). `since` unchanged → bare 304 with no body.
+struct TreeResponse: Codable {
+    var kind: String
+    var nodes: [TreeNode]
     var generation: Int
 }
 
-/// `/api/folders` payload: either bare `[TreeNode]` (full) or delta object.
-enum FoldersPayload: Codable {
-    case full([TreeNode], generation: Int?)
-    case delta(tree: [TreeNode], generation: Int)
+/// `/api/v1/images` response — direct children only, non-recursive.
+struct ImagesResponse: Codable {
+    var folder: String
+    var images: [String]
+}
 
-    init(from decoder: Decoder) throws {
-        if let arr = try? [TreeNode](from: decoder) {
-            self = .full(arr, generation: nil)
-            return
-        }
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self = .delta(tree: try c.decode([TreeNode].self, forKey: .tree),
-                      generation: try c.decode(Int.self, forKey: .generation))
-    }
-
-    func encode(to encoder: Encoder) throws {
-        switch self {
-        case .full(let arr, _):
-            var c = encoder.unkeyedContainer()
-            try c.encode(contentsOf: arr)
-        case .delta(let tree, let generation):
-            var c = encoder.container(keyedBy: CodingKeys.self)
-            try c.encode(tree, forKey: .tree)
-            try c.encode(generation, forKey: .generation)
-        }
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case tree, generation
-    }
+/// `/api/v1/auth/token` response — short-lived access + rotating refresh.
+struct TokenPairResponse: Codable {
+    var access_token: String
+    var token_type: String
+    var expires_in: Int
+    var refresh_token: String?
 }

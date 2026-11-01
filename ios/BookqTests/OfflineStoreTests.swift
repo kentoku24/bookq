@@ -193,6 +193,8 @@ final class OfflineStoreTests: XCTestCase {
     /// logged-out boot leaves legacy data in place until the real
     /// account arrives.
     func testLegacyNotMigratedForAnonScope() throws {
+        try FileManager.default.createDirectory(
+            at: root, withIntermediateDirectories: true)
         let rec = OfflineStore.LeafRecord(
             folder: "w", pageCount: 1, cachedCount: 1, bytes: 1,
             thumb: nil, names: ["p1.jpg"], addedAt: 1, lastReadAt: 1)

@@ -5,7 +5,7 @@ import SwiftUI
 final class AppModel: ObservableObject {
     enum Phase {
         case onboarding     // no server URL yet
-        case booting        // checking /api/me
+        case booting        // checking /api/v1/version
         case login          // server demands auth, no valid token
         case ready          // authenticated (or TEST_MODE server)
     }
@@ -67,12 +67,20 @@ final class AppModel: ObservableObject {
         }
         // No shared URLCache for the authed API session — cached error
         // responses (e.g. a 404 caught during a server restart) must not be
-        // replayed to later boots, and authed bodies stay off disk.
+        // replayed to later boots, and authed bodies stay off disk. Cookies
+        // stay off too: native auth is Bearer-only, and a stray Set-Cookie
+        // session would win over the Bearer header server-side.
         let cfg = URLSessionConfiguration.default
         cfg.urlCache = nil
+        cfg.httpCookieStorage = nil
+        cfg.httpShouldSetCookies = false
+        auth.baseURLProvider = { [weak self] in self?.config.baseURL }
         let api = BookqAPI(baseURL: base,
                            session: URLSession(configuration: cfg),
-                           tokenProvider: { [box = auth.tokenBox] in box.token })
+                           tokenProvider: { [box = auth.tokenBox] in box.token },
+                           tokenRefresher: { [weak self] in
+                               await self?.auth.refreshAccessToken()
+                           })
         self.api = api
         self.library = LibraryStore(api: api)
         self.library?.visibility = visibility
@@ -103,7 +111,7 @@ final class AppModel: ObservableObject {
     }
 
     /// `_resolveInitialPageRef` — leaf folders take all children, mixed
-    /// folders image children only, others fall back to /api/images.
+    /// folders image children only, others fall back to /api/v1/images.
     /// Index = saved resume page clamped into range (web _pickRef).
     func resolveInitialPageRef(_ folder: String) async -> PairPageRef? {
         await Self.initialPageRef(
@@ -136,19 +144,20 @@ final class AppModel: ObservableObject {
     }
 
     /// Probe the server. 401 → login required; 200 → ready.
+    /// `GET /api/v1/version` doubles as the auth probe — v1 has no /me,
+    /// identity comes from the access-token JWT claims instead.
     func boot() async {
         guard let api else { phase = .onboarding; return }
         phase = .booting
         bootError = nil
         do {
-            let me = try await api.me()
+            _ = try await api.version()
             // Account switch — the previous user's per-account state
             // (visibility, offline records) must not bleed through. The
             // store itself knows the previous owner (auth.user is nil
             // until now): a same-account reboot must keep its cached
             // snapshot.
-            visibility.accountChanged(knownOwner: me.email)
-            auth.apply(user: me)
+            visibility.accountChanged(knownOwner: auth.user?.email)
             offline.scopeChanged()
             phase = .ready
             Task { await progress.syncWithServer() }
