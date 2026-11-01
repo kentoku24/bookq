@@ -98,6 +98,22 @@ _FILL_IDLE_SECONDS = 10.0
 _FILL_STEP_SECONDS = 0.2
 
 
+async def _wait_requests_idle(app_state) -> None:
+    """Sleep until no request has arrived for ``_FILL_IDLE_SECONDS``.
+
+    Shared pacing gate for the startup background tasks (_background_fill,
+    _warm_covers). ``app_state.last_request_at`` is stamped by /api/folders,
+    /thumb/, /view/ and /api/thumb-sprite, so any recent client activity
+    holds background CPU/disk work back instead of competing with
+    interactive use. A missing/zero stamp means no request has ever arrived
+    — proceed immediately.
+    """
+    last = getattr(app_state, "last_request_at", 0.0) or 0.0
+    while time.time() - float(last) < _FILL_IDLE_SECONDS:
+        await asyncio.sleep(1.0)
+        last = getattr(app_state, "last_request_at", 0.0) or 0.0
+
+
 def _is_within(base: Path, target: Path) -> bool:
     """Return True if *target* is inside *base* (resolves symlinks, guards prefix bypass)."""
     try:
@@ -549,10 +565,7 @@ async def _background_fill(app_state) -> None:
         tree = cache["tree"]
         done: set[str] = set()
         while True:
-            last = getattr(app_state, "last_request_at", 0.0) or 0.0
-            while time.time() - float(last) < _FILL_IDLE_SECONDS:
-                await asyncio.sleep(1.0)
-                last = getattr(app_state, "last_request_at", 0.0) or 0.0
+            await _wait_requests_idle(app_state)
             full: str | None = None
             try:
                 async with _index_lock:
@@ -659,10 +672,14 @@ def _count_opaque_nodes(nodes: list[dict]) -> int:
 
 
 # Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3): the
-# first pass runs IMMEDIATELY once the tree exists (no idle gating — cold
-# covers would otherwise each pay a live archive open on first view), but
-# the pass is deliberately gentle: ONE job at a time with a small yield
-# after each. A pillow decode/resize is CPU- and memory-heavy (a full
+# first pass runs IMMEDIATELY once the tree exists (waiting until serving
+# went idle first would leave cold covers paying a live decode on first
+# view), but the pass is deliberately gentle: ONE job at a time with a
+# small yield after each, and every job idle-gates on
+# app_state.last_request_at through the same _FILL_IDLE_SECONDS window the
+# background fill uses (plan fill-pacing) — while requests are fresh the
+# pass parks itself instead of competing with interactive use. A pillow
+# decode/resize is CPU- and memory-heavy (a full
 # scanned page decodes to tens of MB), so several in flight at once starve
 # the serving event loop (observed ~10s /api/folders stalls at concurrency
 # 4 on a memory-pressured box) — the opposite of this plan's first-paint
@@ -687,7 +704,10 @@ async def _warm_covers(app_state) -> None:
     then warms each enumerated job with bounded concurrency — each job is
     independently fail-open, so one corrupt source never aborts the pass.
     A pass snapshots (tree, generation) up front, so a concurrent index
-    swap is safe (the next pass picks it up). Each pass then sleeps one
+    swap is safe (the next pass picks it up). Every job idle-gates on
+    ``app_state.last_request_at`` (the same _FILL_IDLE_SECONDS window the
+    background fill uses), so a pass parks itself while requests are fresh
+    instead of competing with interactive use. Each pass then sleeps one
     poll interval before re-enumerating, so the startup background fill can
     materialize archives instead of racing a back-to-back tree re-walk, and
     prunes each thumb namespace once per pass (stores pass ``prune=False``).
@@ -726,6 +746,10 @@ async def _warm_covers(app_state) -> None:
 
             async def _one(job_path: str, job_width: int) -> None:
                 async with sem:
+                    # Idle-gate INSIDE the semaphore: at most one job parks
+                    # here, so a burst of requests pauses the whole pass
+                    # without a herd of sleeping coroutines.
+                    await _wait_requests_idle(app_state)
                     try:
                         await warm_thumb_cache(downloads_path, job_path, job_width)
                     except asyncio.CancelledError:

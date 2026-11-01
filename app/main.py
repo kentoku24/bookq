@@ -172,7 +172,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_background_fill(app.state))
     # Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3):
     # warm every folder's single cover into the thumb disk cache right
-    # away (no idle gating). Same fire-and-forget shape as the fill above;
+    # away, each job idle-gated on last_request_at the same way as the
+    # fill. Same fire-and-forget shape as the fill above;
     # all warm errors are swallowed per job inside the task.
     asyncio.create_task(_warm_covers(app.state))
     yield

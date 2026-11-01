@@ -300,6 +300,46 @@ def test_warm_covers_returns_when_no_opaque_nodes(tmp_path, monkeypatch):
     assert elapsed < 10, f"_warm_covers spun instead of returning ({elapsed:.1f}s)"
 
 
+def test_warm_covers_idle_gate_parks_jobs_while_requests_fresh(tmp_path, monkeypatch):
+    """A request inside the idle window must hold every warm job back.
+
+    Same last_request_at contract as _background_fill: with a fresh stamp
+    and a long idle window the pass parks before the first
+    warm_thumb_cache call — interactive use never competes with warm.
+    """
+    import app.routes as routes_mod
+    import app.thumbs as thumbs_mod
+
+    _fast_warm_monkeypatch(monkeypatch)
+    monkeypatch.setattr(routes_mod, "_FILL_IDLE_SECONDS", 3600.0)
+    calls = []
+
+    async def _spy(downloads_dir, path, width):
+        calls.append((path, width))
+        return True
+
+    monkeypatch.setattr(thumbs_mod, "warm_thumb_cache", _spy)
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    tree = [{"name": "plain", "type": "folder", "thumb": "a.png", "children": []}]
+    state = _cover_state(downloads, tree)
+    state.last_request_at = time.time()  # a request just arrived
+
+    async def main():
+        task = asyncio.create_task(_warm_covers(state))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return calls
+
+    assert drive(main()) == [], (
+        "warm jobs ran while a request was fresh inside the idle window"
+    )
+
+
 def test_warm_thumb_cache_pillow_runs_off_event_loop(tmp_path, monkeypatch):
     """Pillow decode/resize must run in a worker thread, never on the event loop."""
     import io
