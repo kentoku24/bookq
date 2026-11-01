@@ -1060,6 +1060,10 @@
         var cv = document.getElementById('pair-code-value');
         var ci = document.getElementById('pair-code-input');
         var bh = document.getElementById('browse-header');
+        // the reader is the only view that marks #page-slider-wrap
+        // .visible — zone rects stay topmost in browse (transparent
+        // side-margin overlays), so they cannot detect reader state.
+        var psw = document.getElementById('page-slider-wrap');
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
@@ -1067,6 +1071,8 @@
                                  browseHeader: bh
                                    ? bh.textContent : null,
                                  solo: !(pv && pv.active),
+                                 readerView: !!(psw && psw.classList
+                                                .contains('visible')),
                                  rects: rects, tiles: tiles,
                                  lastTap: _lastTap,
                                  vp: {w: window.innerWidth,

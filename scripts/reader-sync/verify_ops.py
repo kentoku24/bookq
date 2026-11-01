@@ -1012,25 +1012,42 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         f"ui tap: {what} not found on screen (needles={needles}) "
         f"[phase={_pc.get('phase')} status={_pc.get('status')} "
         f"hdr={(last_rep or {}).get('browseHeader')!r} "
+        f"reader={(last_rep or {}).get('readerView')} "
         f"tiles={_tiles} repAge={_age:.0f}s]")
 
 
-def _ui_browse_root(ctx: RunCtx, spec, pops: int = 8) -> bool:
-    """Pop the browse drill-down back to the root grid: #browse-header
-    renders '↩ <name>' inside a subfolder (tap = pop one level) and
-    '📁 フォルダ' at root (no-op). Drawer stays shut while reading, so
-    the header resolves through the #menu-btn opener when needed."""
+def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
+    """Get the page back to the ROOT browse grid.
+
+    Three distinct states can block a work-tile tap:
+    - drill-down: browseHeader reads '↩ <name>' — tap it to pop a level
+    - reader view: after leave the page keeps showing the solo reader
+      (#/view/…); the browse grid is unmounted so tiles vanish even
+      though browseHeader still reports the folder state. Mounted
+      #zone-prev rects mean the reader is on screen. The escape path
+      is a same-document hash nav to #/browse/ — the in-app path
+      (sidebar root header) is a no-op at root because it only moves
+      the browse tree, never the view mode.
+    - a stray pair modal over the grid — close it on the way out."""
     for _ in range(pops):
         try:
             rep = ctx._pair_report_state(spec.role)
         except AssertError:
             rep = {}
         hdr = rep.get("browseHeader") or ""
+        in_reader = bool(rep.get("readerView"))
+        if in_reader and spec.kind == "safari":
+            from verify_drivers import _simctl
+            _simctl("openurl", spec.udid,
+                    (spec.launch_url or "").split("#")[0] + "#/browse/")
+            time.sleep(1.2)
+            continue
         if "フォルダ" in hdr:
+            _ui_close_panel(ctx, spec)
             return True
         try:
             _ui_tap(ctx, spec, ["#browse-header"], "browse up",
-                    tries=4, delay=0.5)
+                    tries=5, delay=0.5)
         except EnvError:
             return False
         time.sleep(0.6)
