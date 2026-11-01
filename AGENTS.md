@@ -94,6 +94,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 
 - **Source of truth: `.claude/skills/ios-simulator/SKILL.md`**。エージェントはスキル経由で実行。詳細は `references/` を参照。薄い人間向け要約は `docs/ios-simulator.md`。
 - 既定 `iPhone 13`（`SIMULATOR_DEVICE` で変更可）、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。`simslim` (`brew install mobai-app/tap/simslim`) 導入時は open 時に自動 slim されメモリが ~4x 削減される（`SIMSLIM=0` で無効化）。
+- **検証終了時は必ず `./scripts/sim-teardown.sh` を実行して CPU 監査に合格させること**（sim shutdown + Clone 削除 + 残留 diagnose/idb 整理を一括。`--dev-env <name>` で検証用 dev 環境の down まで）。`simctl shutdown` だけでは孤児化した診断・runtime プロセスが残りホスト CPU を食い潰すことがある。xcodebuild test を使った検証は終了まで poll してから片付けること。詳細: `.claude/skills/ios-simulator/references/teardown.md`。
 
 ## 8. 並行作業の隔離
 
