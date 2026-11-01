@@ -37,8 +37,8 @@ jobs:
       # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
       - name: Install Android SDK packages
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37.2" "build-tools;37.0.0" "platform-tools"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "build-tools;37.0.0" "platform-tools"
 
       - name: Unit tests, lint, assemble
         run: >-
@@ -83,8 +83,8 @@ jobs:
       - name: Install Android SDK packages
         working-directory: android
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-37.2" "build-tools;37.0.0"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "build-tools;37.0.0"
 
       # Synthetic tree — Series/vol1 flattens to one "Series/vol1" node;
       # Other/ has direct images so its top-level name stays "Other".
