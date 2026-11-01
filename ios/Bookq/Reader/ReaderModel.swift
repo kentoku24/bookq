@@ -224,6 +224,26 @@ struct ReaderWork: Equatable {
         return w.rebuildSpreads(offset: offset)
     }
 
+    /// Page-mode rule shared by the device reader and the external-display
+    /// projection: landscape viewport + spread enabled → .spread.
+    static func pageMode(for viewport: CGSize, landscapeSpread: Bool) -> ReaderPageMode {
+        (viewport.width >= viewport.height && landscapeSpread) ? .spread : .single
+    }
+
+    /// `spreadMetrics` equivalent — fit a spread into the viewport: pages
+    /// share one height, each width = ar*h (+gap). Shared by ReaderView's
+    /// spreadCell and ExternalReaderView so both lay out identically.
+    static func spreadFit(ars: [CGFloat], gap: CGFloat, in size: CGSize) -> CGSize {
+        let arSum = max(ars.reduce(0, +), 0.001)
+        var h = size.height
+        var w = arSum * h + gap * CGFloat(ars.count - 1)
+        if w > size.width {
+            h = (size.width - gap * CGFloat(ars.count - 1)) / arSum
+            w = size.width
+        }
+        return CGSize(width: w, height: h)
+    }
+
     /// `spreadOf` — spread containing global index.
     func spreadOf(_ idx: Int) -> Int {
         guard idx >= 0 && idx < idxToSpread.count else { return 0 }

@@ -64,6 +64,7 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 | `Library/` | ツリー保持・ブラウズルール（flatten/self-tile/multiThumb）・進捗 |
 | `Browse/` | タイル/リスト/カードグリッド・認証付き画像ローダ |
 | `Reader/` | リーダー（`ReaderModel`=spread/chapter 組立、`ReaderView`=UI、`ZoomableScrollView`=ズーム、`ProgressSync`=進捗同期、`OverviewView`=複数ページグリッド） |
+| `External/` | 外部ディスプレイ投影（USB-C→モニタ）|`ExternalDisplayStore`=投影状態+モード選択、`ExternalDisplayView`=accessory 宣言+フルスクリーン描画 |
 
 ## リーダー仕様（web parity）
 
@@ -140,10 +141,40 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   PairedReaderView が全画面自動表示、手動 dismiss は workEpoch 毎に
   記憶され「同期中」バナーから再入室。
 
+## 外部ディスプレイ投影（USB-C → モニタ）
+
+- iOS 27+ の `ExternalNonInteractiveAccessory`（SwiftUI `.sceneAccessory`）
+  を `ReaderView` に宣言。システムが接続ディスプレイに accessory シーンを
+  作成して投影（ミラーリング解除）。非対話のため操作は端末側のみ。
+- 発動: リーダー表示中にディスプレイ接続すると自動投影（accessory の
+  `isEnabled` = `userEnabled` 既定 ON）。リーダー内クロームの tv ボタンで
+  ON/OFF（OFF は `isEnabled=false` → ミラーリングに復帰）。リーダーを
+  閉じると accessory 宣言ごと除去 → ミラーリングに復帰。抜き差しは
+  `onAvailabilityChange` が追跡し tv ボタンの表示を駆動。
+- 解像度: accessory シーンには delegate が無いため、view 内の
+  `ScreenProbe`（0 サイズ UIViewRepresentable）が
+  `window.windowScene.screen` から UIScreen を取得し、
+  `screen.availableModes` 中の最大画素モードを `screen.currentMode` に
+  設定（native 4K を強制）。`overscanCompensation = .none` でフルパネル
+  使用 — `.insetBounds` はオーバースキャン報告ディスプレイで外周に黒枠が
+  残るため（TV では端クリップの可能性あり）。
+- `ExternalDisplayRootView`/`ExternalReaderView` は端末リーダーと同じ
+  規則で描画（外部 geometry から pageMode 決定、`work.withMode` で
+  spread 再構成、`ReaderWork.spreadFit` 共有、RTL、chrome/gesture なし）。
+  画像は `RemoteImageLoader.shared` のキャッシュをそのまま共用。
+  accessory シーンには environment object が届かないため状態は
+  `ExternalDisplayStore.shared`（シングルトン）経由。
+- `ReaderView` が `Presentation`（work/currentIdx/pageAR/spreadOffset/
+  landscapeSpread/urlFor）を `ExternalDisplayStore.shared` に公開。
+  paired（dual-reader）中は投影しない（solo リーダーのみ）。
+- iOS <27 では accessory API が無いため外部投影は無効（tv ボタン非表示）。
+
 ## 既知の制約
 
 - webrtc-dc データプレーン・UI_SYNC ブラウズ同期・QR スキャンは非対応
   （server-ws plane とコード/MATCH 入力で代替）
 - ページ画像は既定 `/view/`（web 既定は `/image/`。原本モードは設定で切替可）
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
+- 外部ディスプレイはシミュレータで生成できないため投影経路は実機 QA のみ
+  （単体テストは state machine/レイアウト helper のみカバー）
 - UI 自動テストなし（単体テストのみ）
