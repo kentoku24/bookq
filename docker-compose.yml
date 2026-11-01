@@ -69,10 +69,15 @@ services:
       - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
       # folder-visibility SQLite — viewer と同じ user-state volume を共有。
       - user-state:/var/lib/bookq
+      # thumb/sprite hit-path cache — 共有しないと native thumb は常に
+      # container-local miss で proxy 落ちし、media rollout が空転する
+      # (#206 gateway-contract CI と同じ構成)。
+      - thumb-cache:/var/cache/bookq-thumbs
     environment:
       - BOOKQ_UPSTREAM=http://viewer:8080
       - DOWNLOADS_DIR=/app/downloads
       - BOOKQ_STATE_DIR=/var/lib/bookq
+      - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
       - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-}
       # visibility owner HMAC — viewer と同じ値が必須。
@@ -81,7 +86,8 @@ services:
       - ALLOWED_EMAILS=${ALLOWED_EMAILS}
     restart: unless-stopped
     depends_on:
-      - viewer
+      viewer:
+        condition: service_healthy
 
   tailscale:
     build: ./tailscale
