@@ -1089,7 +1089,7 @@
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
-                                 boot: _boot, gen: _gen,
+                                 boot: _boot, gen: _gen, hookV: 2,
                                  joinCode: ci ? ci.value : null,
                                  browseHeader: bh
                                    ? bh.textContent : null,

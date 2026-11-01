@@ -903,6 +903,30 @@ _OPENERS = {
     "#browse-header": ["#menu-btn"],
 }
 
+# Selectors that live on the BROWSE chrome — a zombie reader covering
+# them warrants a hash-nav escape. Pair-panel / session / zone controls
+# are deliberately absent: during real reading the reader is the
+# legitimate foreground and escaping would destroy the driven session.
+_BROWSE_SELS = {"#pair-btn", "#browse-header", "#menu-btn",
+                "#filter-btn", "#search-input"}
+
+
+def _browse_needle(n: str) -> bool:
+    """True when the needle only exists in browse context — a raw tile
+    name (no '#') or a selector that lives on the browse chrome."""
+    sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
+    return True if sel is None else sel in _BROWSE_SELS
+
+
+def _browse_escape_url(spec) -> str:
+    """Hash-nav URL back to the browse grid — WITHOUT pair_reset. A
+    same-doc nav is harmless either way, but if Safari turns the
+    openurl into a full reload, pair_reset=1 would wipe the resume
+    credential and idle an otherwise-live session."""
+    base = (spec.launch_url or "").split("#")[0]
+    base = base.replace("pair_reset=1&", "").replace("&pair_reset=1", "")
+    return base + "#/browse/"
+
 
 def _ui_offset(ctx: RunCtx, spec) -> tuple:
     """Screen->client offset: probe the page top until a pointerdown
@@ -1056,13 +1080,15 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         # A zombie reader (leave/resume aftermath) mounts AFTER the
         # scenario's cleanup pass and covers every control below it —
         # escape back to browse instead of burning the poll budget on
-        # openers that can't pierce a full-screen tap zone. Legit
-        # reader-surface taps never reach this branch: their needle
-        # resolves above (zones are topmost during real reading).
-        if rep.get("readerView") and spec.kind == "safari":
+        # openers that can't pierce a full-screen tap zone. Only
+        # browse-context needles may trigger this: escaping during a
+        # legit reading-phase tap (swap/strip — readerView=True by
+        # DESIGN then) would hash-nav or even reload the page and wipe
+        # the very session the tap was meant to drive.
+        if rep.get("readerView") and spec.kind == "safari" \
+                and all(_browse_needle(n) for n in needles):
             from verify_drivers import _simctl
-            _simctl("openurl", spec.udid,
-                    (spec.launch_url or "").split("#")[0] + "#/browse/")
+            _simctl("openurl", spec.udid, _browse_escape_url(spec))
             time.sleep(1.2)
             continue
         rects = rep.get("rects") or {}
@@ -1133,8 +1159,7 @@ def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
         in_reader = bool(rep.get("readerView"))
         if in_reader and spec.kind == "safari":
             from verify_drivers import _simctl
-            _simctl("openurl", spec.udid,
-                    (spec.launch_url or "").split("#")[0] + "#/browse/")
+            _simctl("openurl", spec.udid, _browse_escape_url(spec))
             time.sleep(1.2)
             continue
         if "フォルダ" in hdr:
@@ -2686,22 +2711,27 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
             for spec in ctx.clients.values():
                 if spec.page is not None or spec.kind != "safari":
                     continue
-                try:
-                    have = (ctx._pair_report_state(spec.role) or {})
-                except AssertError:
-                    have = {}
-                if have.get("boot"):
-                    continue
-                _simctl("openurl", spec.udid, spec.launch_url)
-                bdead = time.monotonic() + 25
-                while time.monotonic() < bdead:
+                for attempt in range(2):
                     try:
-                        if (ctx._pair_report_state(spec.role) or {}
-                                ).get("boot"):
-                            break
+                        have = (ctx._pair_report_state(spec.role) or {})
                     except AssertError:
-                        pass
-                    time.sleep(0.7)
+                        have = {}
+                    if have.get("hookV") == 2:
+                        break
+                    _simctl("openurl", spec.udid, spec.launch_url)
+                    bdead = time.monotonic() + 25
+                    while time.monotonic() < bdead:
+                        try:
+                            if (ctx._pair_report_state(spec.role) or {}
+                                    ).get("hookV") == 2:
+                                break
+                        except AssertError:
+                            pass
+                        time.sleep(0.7)
+                    else:
+                        continue  # second openurl — the watchdog's own
+                        # repair reload may need a nudge first
+                    break
                 else:
                     raise EnvError(
                         f"{spec.role}: stale hook persists after reload")
