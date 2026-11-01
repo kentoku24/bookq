@@ -18,17 +18,32 @@ OWNER_PURPOSE = "folder-visibility:v1:"
 MAX_ROOT_LENGTH = 2048
 _BUSY_TIMEOUT_MS = 5000
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS visibility_users (
-  user_key TEXT PRIMARY KEY,
-  revision INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS hidden_roots (
-  user_key TEXT NOT NULL,
-  root TEXT NOT NULL,
-  PRIMARY KEY (user_key, root)
-);
-"""
+# The DDL lives in one shared file (#200) — api/user-state-schema.sql is
+# the single source FastAPI and viewer-rs both apply. This constant must
+# equal the file's `PRAGMA user_version` stamp; a DB stamped newer than
+# it is refused rather than silently downgraded.
+SCHEMA_VERSION = 1
+_SCHEMA_PATH = (
+    Path(__file__).resolve().parent.parent / "api" / "user-state-schema.sql"
+)
+
+
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    """Idempotently apply the shared user-state DDL and verify the schema
+    version — refuses a DB stamped newer than this build understands."""
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"user-state schema v{current} is newer than supported "
+            f"v{SCHEMA_VERSION} — refusing to downgrade"
+        )
+    conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    stamped = conn.execute("PRAGMA user_version").fetchone()[0]
+    if stamped != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"user-state schema file stamped v{stamped}; this build "
+            f"expects v{SCHEMA_VERSION} — bump SCHEMA_VERSION with the DDL"
+        )
 
 
 @dataclass(frozen=True)
@@ -122,7 +137,7 @@ class FolderVisibilityStore:
                     try:
                         conn.execute("PRAGMA journal_mode=WAL")
                         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-                        conn.executescript(_SCHEMA)
+                        _apply_schema(conn)
                     finally:
                         conn.close()
                     try:

@@ -41,6 +41,9 @@ WORKDIR /app
 
 # Copy application code
 COPY app/ ./app/
+# Shared contract files (api/user-state-schema.sql is read at runtime by
+# app/folder_visibility.py — #200)
+COPY api/ ./api/
 
 # Create downloads mount point
 RUN mkdir -p /app/downloads
