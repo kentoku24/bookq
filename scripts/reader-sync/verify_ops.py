@@ -1174,6 +1174,21 @@ def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
     return False
 
 
+def _ui_open_pair_panel(ctx: RunCtx, spec) -> None:
+    """Ensure the pair panel is open — the strip tap exists only to open
+    it, and an already-open panel (ended view, live session) makes the
+    strip unreachable behind the modal."""
+    try:
+        rep = ctx._pair_report_state(spec.role)
+    except AssertError:
+        rep = {}
+    rects = rep.get("rects") or {}
+    if (rects.get("#pair-close") or {}).get("w"):
+        return
+    _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip",
+            expect_el="#pair-status")
+
+
 def _wait_code_ui(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
     """The session code from PairController.state (canonical) — NOT the
     #pair-code-value DOM text, which can still show the previous
@@ -1198,10 +1213,8 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         # Same deterministic reach as the DOM path: follower panel open
         # (secSession) → leader ends via the real UI → leader reconnects
         # for a fresh code → follower panel is on secChoice → 参加.
-        _ui_tap(ctx, fsp, _STRIP_NEEDLES, "status strip (follower)",
-                expect_el="#pair-status")
-        _ui_tap(ctx, lsp, _STRIP_NEEDLES, "status strip (leader)",
-                expect_el="#pair-status")
+        _ui_open_pair_panel(ctx, fsp)
+        _ui_open_pair_panel(ctx, lsp)
         _ui_tap(ctx, lsp, ["解除"], "leave button (leader)",
                 expect_el="#pair-leave")
         _ui_close_panel(ctx, lsp)
