@@ -1075,10 +1075,28 @@ async def _folder_tree(
         gen_int = int(cache_data.get("generation", 1) or 1)
         if since is not None and since == gen_int:
             return Response(status_code=304, headers={"Cache-Control": _FOLDERS_CACHE_CONTROL})
-        lookup = {c.folder_path: c for c in index.comics}
-        _attach_metadata(tree, lookup, "")
-        subtree = index.subtree_facets()
-        _attach_subtree_facets(tree, subtree, "")
+        # Attach once per cache generation (#244). Both walks mutate the
+        # shared cached tree in place and their output depends only on
+        # (tree, index) — fixed for the whole generation — so re-walking on
+        # every request (~17ms measured on the live library) was pure waste.
+        # cache_data["attach_gen"] records the (timestamp, generation) pair
+        # the last attach ran under; a mismatch runs exactly one attach:
+        #  - rebuild / warmup / /api/refresh swap in a fresh dict — no marker;
+        #  - _background_fill bumps ``generation`` per materialized node;
+        #  - the signature gate re-stamps ``timestamp`` in place on an
+        #    unchanged-tree TTL refresh (a cheap self-heal once per cycle).
+        # Both attaches are idempotent (same inputs, same keys written), and
+        # no await sits between the check and the stamp, so a concurrent
+        # double-attach cannot interleave anyway. Accepted gap: a node
+        # spliced in by the fill briefly serves un-attached until its
+        # (possibly coalesced) generation bump lands — bounded by the bump
+        # interval, and before coalescing that window was per-request anyway.
+        if cache_data.get("attach_gen") != (gen, gen_int):
+            lookup = {c.folder_path: c for c in index.comics}
+            _attach_metadata(tree, lookup, "")
+            subtree = index.subtree_facets()
+            _attach_subtree_facets(tree, subtree, "")
+            cache_data["attach_gen"] = (gen, gen_int)
         if since is not None:
             # Stale-generation poll: the mismatch body is the whole tree plus
             # the generation — identical for every poll within a generation,
