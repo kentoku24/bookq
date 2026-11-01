@@ -1208,10 +1208,23 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
                 expect_el="#pair-btn")
         code = _wait_code_ui(ctx, lsp)
-        _ui_tap(ctx, fsp, ["参加"], "join open (follower)",
-                expect_el="#pair-join-open")
-        _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
-                "code field (follower)", expect_el="#pair-code-input")
+        for attempt in range(2):
+            _ui_tap(ctx, fsp, ["参加"], "join open (follower)",
+                    expect_el="#pair-join-open")
+            try:
+                _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
+                        "code field (follower)",
+                        expect_el="#pair-code-input")
+                break
+            except EnvError:
+                if attempt:
+                    raise
+                # the leader's leave flips the follower panel to the
+                # 'ended' section mid-tap — reopen it onto secChoice
+                # and run the join path once more.
+                _ui_tap(ctx, fsp, _STRIP_NEEDLES,
+                        "status strip (follower, reopen)",
+                        expect_el="#pair-status", tries=6, delay=0.5)
         # idb ui text types into whatever holds focus — if the field
         # lost focus (panel re-render, soft-keyboard timing) the digits
         # go nowhere. Watch joinCode and retype until the 6th digit
@@ -1447,6 +1460,9 @@ def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
                     reading, timeout=20,
                     what="ui phase=reading (open in flight)")
             except AssertError:
+                # a mistap on an adjacent folder tile drills INTO that
+                # folder — re-root before the retry or 'long' is gone.
+                _ui_browse_root(ctx, lsp)
                 _ui_tap(ctx, lsp, needles,
                         f"work tile retry {work.get('tile')}")
                 l, f = ctx.poll_both(
