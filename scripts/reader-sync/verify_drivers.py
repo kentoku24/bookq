@@ -445,9 +445,11 @@ class SimulatorDriver:
 
     def freeze_net(self, spec: ClientSpec) -> None:
         os.kill(self._webkit_net_pid(spec), signal.SIGSTOP)
+        spec.net_frozen = True
 
     def thaw_net(self, spec: ClientSpec) -> None:
         os.kill(self._webkit_net_pid(spec), signal.SIGCONT)
+        spec.net_frozen = False
 
     # -- PWA web clip (#86: Safari×Safari / PWA×PWA / Safari×PWA) -----
 

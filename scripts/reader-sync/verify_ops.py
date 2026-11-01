@@ -201,6 +201,28 @@ class RunCtx:
             raise AssertError(
                 f"pair-report[{cid}]: no report yet — is the page open "
                 "with ?pair_report= ?")
+        spec = self.clients[role]
+        # A tab-focus loss (openurl reusing a stray same-host tab,
+        # Safari parking the bookq page in the background) freezes the
+        # page's JS — reports go stale. Refocus the bookq tab once per
+        # ~25s; never while a suspend op froze this client's net on
+        # purpose (spec.net_frozen) — staleness IS the test there.
+        age = time.time() - float(st.get("received_at") or 0)
+        if age < 15:
+            spec._refocus_n = 0
+        elif (not getattr(spec, "net_frozen", False)
+              and time.monotonic() - getattr(spec, "_refocus_at", 0) > 25):
+            spec._refocus_at = time.monotonic()
+            spec._refocus_n = getattr(spec, "_refocus_n", 0) + 1
+            from verify_drivers import _simctl
+            try:
+                if spec._refocus_n >= 3:    # openurl keeps missing the tab
+                    _simctl("terminate", spec.udid, "com.apple.mobilesafari",
+                            check=False)
+                    time.sleep(1.0)
+                _simctl("openurl", spec.udid, spec.launch_url)
+            except Exception:
+                pass
         return st
 
 
@@ -2434,6 +2456,16 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
         result["status"] = "env_unavailable"
         ctx.note("error", False, f"{type(e).__name__}: {e}")
     result["duration_ms"] = _now_ms() - t0
+    # a frozen client must never leak past its run — an abort between
+    # freeze_net and thaw_net (env_unavailable mid-suspend) would keep
+    # WebKit.Networking SIGSTOPped and poison every following run.
+    if ctx.driver.name == "simulator":
+        for spec in ctx.clients.values():
+            if getattr(spec, "net_frozen", False):
+                try:
+                    ctx.driver.thaw_net(spec)
+                except Exception:
+                    spec.net_frozen = False
     # a recorded ok=False assertion (e.g. pixel mismatch, soft notes) fails
     # the scenario even when no exception fired — the spec's いずれの失敗も
     # exit 0 にしない applies to recorded assertions too.
