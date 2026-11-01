@@ -1012,7 +1012,7 @@
       document.addEventListener('pointerdown', function (e) {
         _lastTap = {x: e.clientX, y: e.clientY, t: Date.now()};
       }, true);
-      var last = '';
+      var last = '', lastPost = 0;
       setInterval(function () {
         var pc = null, pv = null;
         try {
@@ -1070,8 +1070,12 @@
                                    ? window.__tapForward() : null,
                                  code: cv ? cv.textContent.trim() : null});
         } catch (e) { return; }
-        if (body === last) return;
+        // change-skip keeps traffic low, but an unchanged body must still
+        // heartbeat — the runner reads received_at age as the liveness
+        // signal for "page JS frozen / tab parked" detection.
+        if (body === last && Date.now() - lastPost < 5000) return;
         last = body;
+        lastPost = Date.now();
         fetch('/api/v1/pair-report', {
           method: 'POST', cache: 'no-store', keepalive: true,
           headers: {'Content-Type': 'application/json'},

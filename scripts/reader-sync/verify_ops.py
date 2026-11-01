@@ -214,6 +214,9 @@ class RunCtx:
               and time.monotonic() - getattr(spec, "_refocus_at", 0) > 25):
             spec._refocus_at = time.monotonic()
             spec._refocus_n = getattr(spec, "_refocus_n", 0) + 1
+            self.note("ui_refocus", True,
+                      f"{role} report stale {age:.0f}s — refocus "
+                      f"attempt {spec._refocus_n}")
             from verify_drivers import _simctl
             try:
                 if spec._refocus_n >= 3:    # openurl keeps missing the tab
@@ -1049,13 +1052,19 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
                 rep = ctx._pair_report_state(fsp.role)
             except AssertError:
                 rep = {}
-            typed = rep.get("joinCode") or ""
-            if len(typed) >= 6 or \
-                    (rep.get("pc") or {}).get("status") == "connected":
+            typed = rep.get("joinCode")
+            st = (rep.get("pc") or {}).get("status")
+            if st == "connected" or (typed is not None and len(typed) >= 6):
+                break
+            if typed is None:
+                # joinCode null = the field UNMOUNTED — sanitizeCode
+                # auto-submits at 6 digits, so a vanished field means
+                # JOIN already fired; let the paired poll arbitrate.
                 break
             _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
                     "code field (follower, retry)", tries=4, delay=0.5)
-        ctx.note("code_typed", True, f"joinCode len={len(typed)}")
+        ctx.note("code_typed", True,
+                 f"joinCode={'submitted' if typed is None else 'len=' + str(len(typed))}")
     elif via == "match":
         # No code read needed — the launcher's connect() either creates
         # a waiting session or MATCH-joins an existing one; the poll
