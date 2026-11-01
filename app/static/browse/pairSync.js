@@ -1035,6 +1035,8 @@
                                  solo: !(pv && pv.active),
                                  rects: rects, tiles: tiles,
                                  lastTap: _lastTap,
+                                 vp: {w: window.innerWidth,
+                                      h: window.innerHeight},
                                  code: cv ? cv.textContent.trim() : null});
         } catch (e) { return; }
         if (body === last) return;

@@ -796,10 +796,24 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
     for _ in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
-        except AssertError as e:
-            raise EnvError(str(e))
+        except AssertError:
+            # page not loaded yet / hook not armed — keep polling, a
+            # miss after all tries below is the real EnvError.
+            time.sleep(delay)
+            continue
         r = _ui_rect(rep, needles)
         if r is not None:
+            vp_h = float((rep.get("vp") or {}).get("h") or 0)
+            if vp_h and (r["y"] < 0 or r["y"] + r["h"] > vp_h):
+                # tile below/above the fold — scroll the grid toward it
+                # and re-resolve on the next pass.
+                sw, sh = drv.screen_size(spec)
+                if r["y"] < 0:
+                    drv.swipe(spec, sw / 2, sh * 0.35, sw / 2, sh * 0.75)
+                else:
+                    drv.swipe(spec, sw / 2, sh * 0.75, sw / 2, sh * 0.35)
+                time.sleep(delay)
+                continue
             if off is None:
                 off = _ui_offset(ctx, spec)
             x = r["x"] + r["w"] / 2 + off[0]
@@ -1015,9 +1029,11 @@ def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
             "  via: 'runner'})",
             [work["folder"], page])
     else:
-        # simulator: tap the work's browse tile by its display name —
-        # the leader's real pick gesture (selecting → OPEN_WORK).
-        _ui_tap(ctx, lsp, [work.get("tile") or work["folder"]],
+        # simulator: tap the work's browse tile — match the display
+        # name OR the full data-path (flattened names like
+        # "parent/child" don't survive in .tile-name-text).
+        needles = [work.get("tile") or "", work["folder"]]
+        _ui_tap(ctx, lsp, [n for n in needles if n],
                 f"work tile {work.get('tile')}")
     l, f = ctx.poll_both(
         lambda a, b: a["phase"] == "reading" and b["phase"] == "reading"
