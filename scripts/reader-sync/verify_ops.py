@@ -945,9 +945,11 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                 time.sleep(delay)
                 continue
             # settle: only tap once the rect holds still across two
-            # consecutive reports — a momentum scroll would tap a stale
-            # coordinate and land on a different tile.
-            if prev_r is None or abs(r["y"] - prev_r["y"]) >= 3:
+            # consecutive reports — a momentum scroll or an async
+            # layout shift (pair-session-info reflow) would tap a stale
+            # coordinate and land on a different control.
+            if prev_r is None or abs(r["y"] - prev_r["y"]) >= 3 \
+                    or abs(r["x"] - prev_r["x"]) >= 3:
                 prev_r = r
                 time.sleep(delay)
                 continue
@@ -1061,8 +1063,12 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
                 # auto-submits at 6 digits, so a vanished field means
                 # JOIN already fired; let the paired poll arbitrate.
                 break
-            _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
-                    "code field (follower, retry)", tries=4, delay=0.5)
+            try:
+                _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
+                        "code field (follower, retry)", tries=4, delay=0.5)
+            except EnvError:
+                # field unmounted between report and tap — submitted.
+                break
         ctx.note("code_typed", True,
                  f"joinCode={'submitted' if typed is None else 'len=' + str(len(typed))}")
     elif via == "match":

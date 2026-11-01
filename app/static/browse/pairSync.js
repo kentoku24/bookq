@@ -1010,7 +1010,12 @@
                   '#search-input'];
       var _lastTap = null;
       document.addEventListener('pointerdown', function (e) {
-        _lastTap = {x: e.clientX, y: e.clientY, t: Date.now()};
+        var el = e.target && e.target.closest
+          ? (e.target.closest('button,input,a,[id]') || e.target) : e.target;
+        _lastTap = {x: e.clientX, y: e.clientY, t: Date.now(),
+                    el: el && el.id ? '#' + el.id
+                       : (el && el.tagName ? el.tagName.toLowerCase()
+                                           : null)};
       }, true);
       var last = '', lastPost = 0;
       setInterval(function () {
