@@ -1006,6 +1006,7 @@
                   '#pair-change-work', '#pair-picker-back',
                   '#pair-swap', '#pair-leave', '#pair-close',
                   '#spread-shift', '#zone-prev', '#zone-next',
+                  '#zone-toggle',
                   '#pair-code-value', '#browse-header', '#menu-btn',
                   '#search-input'];
       var _lastTap = null;
@@ -1065,8 +1066,9 @@
         var ci = document.getElementById('pair-code-input');
         var bh = document.getElementById('browse-header');
         // the reader is the only view that marks #page-slider-wrap
-        // .visible — zone rects stay topmost in browse (transparent
-        // side-margin overlays), so they cannot detect reader state.
+        // .visible; a zombie reader (ended session leaves the viewer
+        // mounted) has lost .visible but its centre tap zone still
+        // covers the grid — union the two so neither slips through.
         var psw = document.getElementById('page-slider-wrap');
         var body;
         try {
@@ -1076,8 +1078,10 @@
                                  browseHeader: bh
                                    ? bh.textContent : null,
                                  solo: !(pv && pv.active),
-                                 readerView: !!(psw && psw.classList
-                                                .contains('visible')),
+                                 readerView: !!((psw && psw.classList
+                                                .contains('visible'))
+                                                || ((rects['#zone-toggle'] || {})
+                                                    .top === true)),
                                  rects: rects, tiles: tiles,
                                  lastTap: _lastTap,
                                  vp: {w: window.innerWidth,

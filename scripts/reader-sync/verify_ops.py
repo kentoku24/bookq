@@ -738,7 +738,12 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                     break
                 try:
                     _ui_tap(ctx, spec, _CANCEL_NEEDLES, "cancel (stale)",
-                            tries=3, delay=0.4)
+                            tries=3, delay=0.4,
+                            expect_el=["#pair-leave",
+                                       "#pair-leader-cancel",
+                                       "#pair-waiting-cancel",
+                                       "#pair-error-leave",
+                                       "#pair-join-back"])
                     stuck = 0
                 except EnvError:
                     stuck += 1
@@ -946,10 +951,16 @@ def _ui_rect(rep: dict, needles) -> dict | None:
 
 def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             tries: int = 16, delay: float = 0.7,
-            expect_el: str | None = None) -> str:
+            expect_el=None) -> str:
     """Tap a real UI control on the simulator: resolve the needle to a
     client rect via the pair-report hook, open a parent surface when the
-    control isn't mounted yet, tap the calibrated screen point."""
+    control isn't mounted yet, tap the calibrated screen point.
+    expect_el (str|list): verify the tap actually hit one of these ids
+    via the hook's lastTap.el — a rect sampled before a transient
+    overlay mounts (auto-hide chrome, zombie reader zones) would
+    otherwise land on the wrong control silently."""
+    if expect_el is not None and not isinstance(expect_el, (list, tuple)):
+        expect_el = [expect_el]
     if not isinstance(needles, (list, tuple)):
         needles = [needles]
     drv = ctx.driver
@@ -1020,7 +1031,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                     hit = lt["el"]
                     break
                 time.sleep(0.3)
-            if hit == expect_el:
+            if hit in expect_el:
                 return needles[0]
             ctx.note("ui_mistap", True,
                      f"{what} @({x:.0f},{y:.0f}) hit {hit or '?'} "
@@ -1107,7 +1118,7 @@ def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
             return True
         try:
             _ui_tap(ctx, spec, ["#browse-header"], "browse up",
-                    tries=5, delay=0.5)
+                    tries=5, delay=0.5, expect_el="#browse-header")
         except EnvError:
             return False
         time.sleep(0.6)
@@ -1138,15 +1149,20 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         # Same deterministic reach as the DOM path: follower panel open
         # (secSession) → leader ends via the real UI → leader reconnects
         # for a fresh code → follower panel is on secChoice → 参加.
-        _ui_tap(ctx, fsp, _STRIP_NEEDLES, "status strip (follower)")
-        _ui_tap(ctx, lsp, _STRIP_NEEDLES, "status strip (leader)")
-        _ui_tap(ctx, lsp, ["解除"], "leave button (leader)")
+        _ui_tap(ctx, fsp, _STRIP_NEEDLES, "status strip (follower)",
+                expect_el="#pair-status")
+        _ui_tap(ctx, lsp, _STRIP_NEEDLES, "status strip (leader)",
+                expect_el="#pair-status")
+        _ui_tap(ctx, lsp, ["解除"], "leave button (leader)",
+                expect_el="#pair-leave")
         _ui_close_panel(ctx, lsp)
-        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
+        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
+                expect_el="#pair-btn")
         code = _wait_code_ui(ctx, lsp)
-        _ui_tap(ctx, fsp, ["参加"], "join open (follower)")
+        _ui_tap(ctx, fsp, ["参加"], "join open (follower)",
+                expect_el="#pair-join-open")
         _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
-                "code field (follower)")
+                "code field (follower)", expect_el="#pair-code-input")
         # idb ui text types into whatever holds focus — if the field
         # lost focus (panel re-render, soft-keyboard timing) the digits
         # go nowhere. Watch joinCode and retype until the 6th digit
@@ -1183,8 +1199,10 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         # tap as a backdrop close, so shut any stray panel first.
         for spec in (lsp, fsp):
             _ui_close_panel(ctx, spec)
-        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
-        _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)")
+        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
+                expect_el="#pair-btn")
+        _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)",
+                expect_el="#pair-btn")
     else:
         raise UnsupportedError(f"pair via {via!r}")
     ctx.poll_both(
@@ -2627,6 +2645,34 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
             else:
                 raise EnvError(
                     "client pages never came live at run start")
+            # SWR serves /static/* from cache — a page loaded between a
+            # rebuild and the new SW's precache refresh keeps the OLD
+            # hook (no 'boot' field). One more reload lands on the
+            # activated SW's fresh assets; without this the run drives
+            # yesterday's geometry hook.
+            from verify_drivers import _simctl
+            for spec in ctx.clients.values():
+                if spec.page is not None or spec.kind != "safari":
+                    continue
+                try:
+                    have = (ctx._pair_report_state(spec.role) or {})
+                except AssertError:
+                    have = {}
+                if have.get("boot"):
+                    continue
+                _simctl("openurl", spec.udid, spec.launch_url)
+                bdead = time.monotonic() + 25
+                while time.monotonic() < bdead:
+                    try:
+                        if (ctx._pair_report_state(spec.role) or {}
+                                ).get("boot"):
+                            break
+                    except AssertError:
+                        pass
+                    time.sleep(0.7)
+                else:
+                    raise EnvError(
+                        f"{spec.role}: stale hook persists after reload")
         for op in scenario["ops"]:
             fn = OPS[op["op"]]
             try:
