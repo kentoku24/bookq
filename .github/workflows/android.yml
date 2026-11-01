@@ -1,0 +1,130 @@
+# Android native client — JVM unit tests + lint + debug APK, and an
+# emulator UI smoke test against a TEST_MODE server (api-contract.yml
+# builds the same synthetic tree).
+name: android
+
+on:
+  pull_request:
+    paths:
+      - "android/**"
+      - "api/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      # Installed platform on this repo is android-37.2 (minor release);
+      # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37.2" "build-tools;37.0.0" "platform-tools"
+
+      - name: Unit tests, lint, assemble
+        run: >-
+          ./gradlew :core:test :data:testDebugUnitTest
+          :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bookq-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-test-reports
+          path: |
+            android/core/build/reports/tests/
+            android/data/build/reports/tests/
+            android/app/build/reports/tests/
+          if-no-files-found: ignore
+
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Install Android SDK packages
+        working-directory: android
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-37.2" "build-tools;37.0.0"
+
+      # Synthetic tree — Series/vol1 flattens to one "Series/vol1" node;
+      # Other/ has direct images so its top-level name stays "Other".
+      - name: Build synthetic downloads tree
+        run: |
+          mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Other /tmp/bookq-state
+          uv run --with pillow python - <<'PYEOF'
+          from PIL import Image
+          for i in range(3):
+              Image.new("RGB", (80, 120), (i * 60, 0, 0)).save(f"/tmp/dl/Series/vol1/p{i:02d}.jpg")
+          Image.new("RGB", (80, 120), (0, 120, 0)).save("/tmp/dl/Other/p00.jpg")
+          PYEOF
+
+      - name: Start bookq (test mode)
+        run: |
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
+            uv run --with-requirements requirements-dev.txt \
+            uvicorn app.main:app --host 127.0.0.1 --port 8080 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
+          done
+          echo "server did not become healthy" && exit 1
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Emulator reaches the host uvicorn via 10.0.2.2 (cleartext allowed
+      # for that host in the debug network security config).
+      - name: Emulator UI test
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          working-directory: android
+          script: >-
+            ./gradlew :app:connectedDebugAndroidTest
+            -Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=http://10.0.2.2:8080
+            -Pandroid.testInstrumentationRunnerArguments.bookqExpectedFolder=Other
