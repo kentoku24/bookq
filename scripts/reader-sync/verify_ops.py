@@ -918,6 +918,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
     off = None
     prev_r = None
     fired = set()
+    last_rep = None
     for _ in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
@@ -962,6 +963,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                      f"{what} @({x:.0f},{y:.0f})")
             return needles[0]
         prev_r = None
+        last_rep = rep
         rects = rep.get("rects") or {}
         # fire ONE opener per poll and each opener at most once per call —
         # #menu-btn is a toggle, so re-firing it every iteration would
@@ -983,8 +985,19 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                 continue
             break
         time.sleep(delay)
+    # dump the page context that made the needle unresolvable — the
+    # failure mode differs entirely between 'inside a subfolder',
+    # 'reader covering the grid' and 'page dead / stale report'.
+    _pc = (last_rep or {}).get("pc") or {}
+    _tiles = [t.get("path") or (t.get("name") or "")[:16]
+              for t in ((last_rep or {}).get("tiles") or [])][:10]
+    _age = (time.time() - float((last_rep or {}).get("received_at") or 0)
+            if last_rep else -1)
     raise EnvError(
-        f"ui tap: {what} not found on screen (needles={needles})")
+        f"ui tap: {what} not found on screen (needles={needles}) "
+        f"[phase={_pc.get('phase')} status={_pc.get('status')} "
+        f"hdr={(last_rep or {}).get('browseHeader')!r} "
+        f"tiles={_tiles} repAge={_age:.0f}s]")
 
 
 def _ui_browse_root(ctx: RunCtx, spec, pops: int = 8) -> bool:
