@@ -418,12 +418,20 @@ pub struct Registry {
     pub index: Arc<IndexState>,
     pub downloads: PathBuf,
     pub manifest_cache: Mutex<catalog::ManifestCache>,
+    /// Test-only work-resolver override (golden-frame harness, #210):
+    /// replaces `resolve_work` wholesale, like py's `work_resolver` param.
+    #[cfg(test)]
+    test_resolver: std::sync::Mutex<Option<TestResolver>>,
     heartbeat_interval: Duration,
     code_ttl: Duration,
     match_window: Duration,
     load_timeout: Duration,
     send_queue_max: usize,
 }
+
+#[cfg(test)]
+pub type TestResolver =
+    Arc<dyn Fn(&LoadJob) -> Result<Value, catalog::ManifestError> + Send + Sync>;
 
 pub struct Inner {
     sessions: Vec<PairSession>, // insertion-ordered — presence/member order is wire-visible
@@ -452,6 +460,8 @@ impl Registry {
             index,
             downloads,
             manifest_cache: Mutex::new(catalog::ManifestCache::new()),
+            #[cfg(test)]
+            test_resolver: std::sync::Mutex::new(None),
             heartbeat_interval: Duration::from_secs_f64(HEARTBEAT_INTERVAL),
             code_ttl: Duration::from_secs_f64(CODE_TTL_SECONDS),
             match_window: Duration::from_secs_f64(MATCH_WINDOW_SECONDS),
@@ -462,6 +472,10 @@ impl Registry {
 
     pub fn send_queue_max(&self) -> usize {
         self.send_queue_max
+    }
+    #[cfg(test)]
+    pub fn set_test_resolver(&self, f: TestResolver) {
+        *self.test_resolver.lock().unwrap() = Some(f);
     }
     pub fn heartbeat_interval(&self) -> Duration {
         self.heartbeat_interval
@@ -503,6 +517,10 @@ impl Registry {
         self: &Arc<Self>,
         job: &LoadJob,
     ) -> Result<Value, catalog::ManifestError> {
+        #[cfg(test)]
+        if let Some(f) = self.test_resolver.lock().unwrap().clone() {
+            return f(job);
+        }
         let (folder, pref) =
             catalog::validate_args(&Value::String(job.folder.clone()), &job.page, &job.offset)?;
         let cache =
@@ -2435,3 +2453,6 @@ mod tests {
         assert_eq!(ack["data"]["role"], "leader");
     }
 }
+
+#[cfg(test)]
+mod golden;

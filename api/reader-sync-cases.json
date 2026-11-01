@@ -1,0 +1,564 @@
+{
+  "format": 1,
+  "doc": "Canonical golden-frame cases for /ws/reader-sync (#210). Every implementation adapter drives its in-process session core through `steps` and must emit the exact frame sequence in each `expect`. Dynamic values use @bindings harvested from received frames: @<link>.link, @<link>.member, @<link>.token, @session, @code, @digest, @leader.member, @follower.member, @manifest.canonical (canonical JSON text of the case's resolver manifest; single-chunk cases only). Ops: link/send/expect/drain/detach/tick. Every client request carries the full request envelope {v, requestId, sessionId, workEpoch, baseRevision, type, payload} — lifecycle ops use sessionId:null workEpoch:0 baseRevision:0. requestIds must be unique within a case: .member/.token bindings resolve the sending link by requestId alone, so a second link reusing an id mis-attributes. tick is currently py-adapter-only — the rs adapter panics on it (real-clock core), so cases must not use it until both sides implement it.",
+  "resolver": {
+    "work": {
+      "folder": "work",
+      "offset": 0,
+      "chapters": [
+        {"name": "c0", "folder": "work",
+         "pages": ["p001.png", "p002.png", "p003.png", "p004.png", "p005.png"]}
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "pairing_create_join_approve",
+      "title": "CREATE -> code ACK -> JOIN -> pending -> APPROVE -> paired selecting",
+      "steps": [
+        {"op": "link", "as": "L1",
+         "user": {"email": "alice@example.com", "name": "Alice", "picture": ""}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "HELLO", "link": "@L1.link"}]},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "c1", "sessionId": null, "workEpoch": 0,
+          "baseRevision": 0, "type": "CREATE", "payload": {}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "c1", "request": "CREATE",
+           "sessionId": "@session",
+           "data": {"sessionId": "@session", "code": "@code",
+                    "memberId": "@L1.member", "role": "leader",
+                    "resumeToken": "@L1.token", "expiresInSec": 300}},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 1,
+           "workEpoch": 0, "manifestVersion": 0, "phase": "waiting",
+           "spreadId": null, "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {"@L1.member": {"role": "leader", "status": "active",
+                                     "name": "Alice", "ready": false}}}]},
+        {"op": "link", "as": "L2",
+         "user": {"email": "bob@example.com", "name": "Bob", "picture": ""}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "HELLO", "link": "@L2.link"}]},
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "j1", "sessionId": null, "workEpoch": 0,
+          "baseRevision": 0, "type": "JOIN", "payload": {"code": "@code"}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "j1", "request": "JOIN",
+           "sessionId": "@session",
+           "data": {"sessionId": "@session", "memberId": "@L2.member",
+                    "role": "follower", "resumeToken": "@L2.token",
+                    "leaderName": "Alice"}}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "JOIN_REQUEST", "sessionId": "@session",
+           "memberId": "@L2.member", "name": "Bob"}]},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "a1", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 1, "type": "APPROVE",
+          "payload": {"memberId": "@L2.member"}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "a1", "request": "APPROVE",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 2,
+           "workEpoch": 0, "manifestVersion": 0, "phase": "selecting",
+           "spreadId": null, "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": false},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}}]},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 2,
+           "workEpoch": 0, "manifestVersion": 0, "phase": "selecting",
+           "spreadId": null, "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": false},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}}]}
+      ]
+    },
+    {
+      "id": "open_work_manifest_ready_reading",
+      "title": "OPEN_WORK -> loading -> MANIFEST chunks -> READY x2 -> reading",
+      "resolver": "work",
+      "steps": [
+        {"op": "link", "as": "L1",
+         "user": {"email": "alice@example.com", "name": "Alice", "picture": ""}},
+        {"op": "drain", "link": "L1"},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "c1", "sessionId": null, "workEpoch": 0,
+          "baseRevision": 0, "type": "CREATE", "payload": {}}},
+        {"op": "drain", "link": "L1"},
+        {"op": "link", "as": "L2",
+         "user": {"email": "bob@example.com", "name": "Bob", "picture": ""}},
+        {"op": "drain", "link": "L2"},
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "j1", "sessionId": null, "workEpoch": 0,
+          "baseRevision": 0, "type": "JOIN", "payload": {"code": "@code"}}},
+        {"op": "drain", "link": "L1"},
+        {"op": "drain", "link": "L2"},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "a1", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 1, "type": "APPROVE",
+          "payload": {"memberId": "@L2.member"}}},
+        {"op": "drain", "link": "L1"},
+        {"op": "drain", "link": "L2"},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "o1", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 2, "type": "OPEN_WORK",
+          "payload": {"folder": "work",
+                      "page": {"folder": "work", "name": "p001.png"},
+                      "offset": 0}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "o1", "request": "OPEN_WORK",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "o1", "revision": 3, "by": "leader"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 3,
+           "workEpoch": 0, "manifestVersion": 0, "phase": "loading",
+           "spreadId": null, "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": false},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}},
+          {"v": 1, "kind": "manifest-chunk", "digest": "@digest",
+           "index": 0, "count": 1, "data": "@manifest.canonical",
+           "type": "MANIFEST", "sessionId": "@session",
+           "workEpoch": 1, "manifestVersion": 1},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 4,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": false},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}}]},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "r1", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 4, "type": "READY",
+          "payload": {"manifestVersion": 1}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "o1", "revision": 3, "by": "leader"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 3,
+           "workEpoch": 0, "manifestVersion": 0, "phase": "loading",
+           "spreadId": null, "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": false},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}},
+          {"v": 1, "kind": "manifest-chunk", "digest": "@digest",
+           "index": 0, "count": 1, "data": "@manifest.canonical",
+           "type": "MANIFEST", "sessionId": "@session",
+           "workEpoch": 1, "manifestVersion": 1},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 4,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": false},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "r1", "revision": 5, "by": "leader"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 5,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "r1", "request": "READY",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "r1", "revision": 5, "by": "leader"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 5,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}}]},
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "r2", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 5, "type": "READY",
+          "payload": {"manifestVersion": 1}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "r2", "request": "READY",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "r2", "revision": 6, "by": "follower"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 6,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "r2", "revision": 6, "by": "follower"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 6,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]}
+      ]
+    },
+    {
+      "id": "turn_goto_commits",
+      "title": "reading: leader TURN rev7 + follower GOTO rev8",
+      "setup": "reading", "resolver": "work",
+      "steps": [
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "t1", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 6, "type": "TURN",
+          "payload": {"delta": 1, "crossChapter": true}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "t1", "request": "TURN",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "t1", "revision": 7, "by": "leader"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s1", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "t1", "revision": 7, "by": "leader"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s1", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]},
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "g1", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 7, "type": "GOTO",
+          "payload": {"page": {"folder": "work", "name": "p005.png"}}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "g1", "request": "GOTO",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "g1", "revision": 8, "by": "follower"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s2", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "g1", "revision": 8, "by": "follower"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s2", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]}
+      ]
+    },
+    {
+      "id": "dedup_replay_and_stale_rejects",
+      "title": "resend replays ACK; stale revision/epoch -> REJECT + snapshot",
+      "setup": "reading", "resolver": "work",
+      "steps": [
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "t1", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 6, "type": "TURN",
+          "payload": {"delta": 1, "crossChapter": true}}},
+        {"op": "drain", "link": "L1"}, {"op": "drain", "link": "L2"},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "t1", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 6, "type": "TURN",
+          "payload": {"delta": 1, "crossChapter": true}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "t1", "request": "TURN",
+           "sessionId": "@session", "data": {}}]},
+        {"op": "expect", "link": "L2", "frames": []},
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "t2", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 6, "type": "GOTO",
+          "payload": {"page": {"folder": "work", "name": "p003.png"}}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "REJECT", "requestId": "t2", "request": "GOTO",
+           "reason": "stale_revision", "sessionId": "@session",
+           "snapshot": {"sessionId": "@session", "revision": 7,
+                        "workEpoch": 1, "manifestVersion": 1,
+                        "phase": "reading", "spreadId": "c0:s1",
+                        "offset": 0, "leaderSide": "left",
+                        "dataPlane": "server-ws"}}]},
+        {"op": "expect", "link": "L1", "frames": []},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "g1", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 7, "type": "GOTO",
+          "payload": {"page": {"folder": "work", "name": "p005.png"}}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "REJECT", "requestId": "g1", "request": "GOTO",
+           "reason": "stale_epoch", "sessionId": "@session",
+           "snapshot": {"sessionId": "@session", "revision": 7,
+                        "workEpoch": 1, "manifestVersion": 1,
+                        "phase": "reading", "spreadId": "c0:s1",
+                        "offset": 0, "leaderSide": "left",
+                        "dataPlane": "server-ws"}}]}
+      ]
+    },
+    {
+      "id": "transport_flip_server_ws_to_webrtc_dc_and_back",
+      "title": "both up -> webrtc-dc (STATE rev7 + TRANSPORT_STATE), one down -> back",
+      "setup": "reading", "resolver": "work",
+      "steps": [
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "u1", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 6, "type": "TRANSPORT_STATE",
+          "payload": {"state": "up"}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "u1",
+           "request": "TRANSPORT_STATE", "sessionId": "@session",
+           "data": {}}]},
+        {"op": "expect", "link": "L2", "frames": []},
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "u2", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 6, "type": "TRANSPORT_STATE",
+          "payload": {"state": "up"}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "u2",
+           "request": "TRANSPORT_STATE", "sessionId": "@session",
+           "data": {}},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "webrtc-dc",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}},
+          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
+           "dataPlane": "webrtc-dc", "revision": 7}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "webrtc-dc",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}},
+          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
+           "dataPlane": "webrtc-dc", "revision": 7}]},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "u3", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 7, "type": "TRANSPORT_STATE",
+          "payload": {"state": "down"}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "u3",
+           "request": "TRANSPORT_STATE", "sessionId": "@session",
+           "data": {}},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}},
+          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
+           "dataPlane": "server-ws", "revision": 8}]},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}},
+          {"v": 1, "type": "TRANSPORT_STATE", "sessionId": "@session",
+           "dataPlane": "server-ws", "revision": 8}]}
+      ]
+    },
+    {
+      "id": "detach_resume_reloads_manifest",
+      "title": "detach -> paused/offline; RESUME -> manifest unicast -> READY -> reading",
+      "setup": "reading", "resolver": "work",
+      "steps": [
+        {"op": "detach", "link": "L2"},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 7,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "paused",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "offline",
+                            "name": "Bob", "ready": false}}}]},
+        {"op": "link", "as": "L3",
+         "user": {"email": "bob@example.com", "name": "Bob", "picture": ""}},
+        {"op": "expect", "link": "L3", "frames": [
+          {"v": 1, "type": "HELLO", "link": "@L3.link"}]},
+        {"op": "send", "link": "L3", "frame": {
+          "v": 1, "requestId": "r3", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 0, "type": "RESUME",
+          "payload": {"memberId": "@L2.member",
+                      "resumeToken": "@L2.token"}}},
+        {"op": "expect", "link": "L3", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "r3", "request": "RESUME",
+           "sessionId": "@session",
+           "data": {"sessionId": "@session", "memberId": "@L2.member",
+                    "role": "follower", "resumeToken": "@L2.token"}},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}},
+          {"v": 1, "kind": "manifest-chunk", "digest": "@digest",
+           "index": 0, "count": 1, "data": "@manifest.canonical",
+           "type": "MANIFEST", "sessionId": "@session",
+           "workEpoch": 1, "manifestVersion": 1}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 8,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "loading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": false}}}]},
+        {"op": "send", "link": "L3", "frame": {
+          "v": 1, "requestId": "r4", "sessionId": "@session", "workEpoch": 1,
+          "baseRevision": 8, "type": "READY",
+          "payload": {"manifestVersion": 1}}},
+        {"op": "expect", "link": "L3", "frames": [
+          {"v": 1, "type": "ACK", "requestId": "r4", "request": "READY",
+           "sessionId": "@session", "data": {}},
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "r4", "revision": 9, "by": "follower"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 9,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "APPLIED", "sessionId": "@session",
+           "requestId": "r4", "revision": 9, "by": "follower"},
+          {"v": 1, "type": "STATE", "sessionId": "@session", "revision": 9,
+           "workEpoch": 1, "manifestVersion": 1, "phase": "reading",
+           "spreadId": "c0:s0", "offset": 0, "leaderSide": "left",
+           "dataPlane": "server-ws",
+           "presence": {
+             "@L1.member": {"role": "leader", "status": "active",
+                            "name": "Alice", "ready": true},
+             "@L2.member": {"role": "follower", "status": "active",
+                            "name": "Bob", "ready": true}}}]}
+      ]
+    },
+    {
+      "id": "leave_ends_session_for_all",
+      "title": "LEAVE -> END(reason=left) to every member, no ACK",
+      "setup": "pairing",
+      "steps": [
+        {"op": "send", "link": "L2", "frame": {
+          "v": 1, "requestId": "l1", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 2, "type": "LEAVE", "payload": {}}},
+        {"op": "expect", "link": "L2", "frames": [
+          {"v": 1, "type": "END", "sessionId": "@session",
+           "reason": "left"}]},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "END", "sessionId": "@session",
+           "reason": "left"}]}
+      ]
+    },
+    {
+      "id": "error_paths",
+      "title": "bad code / malformed / not_paired / no_pending REJECTs",
+      "steps": [
+        {"op": "link", "as": "X",
+         "user": {"email": "carol@example.com", "name": "Carol",
+                  "picture": ""}},
+        {"op": "drain", "link": "X"},
+        {"op": "send", "link": "X", "frame": {
+          "v": 1, "requestId": "jx", "sessionId": null, "workEpoch": 0,
+          "baseRevision": 0, "type": "JOIN", "payload": {"code": "999999"}}},
+        {"op": "expect", "link": "X", "frames": [
+          {"v": 1, "type": "REJECT", "requestId": "jx", "request": "JOIN",
+           "reason": "bad_code", "sessionId": null}]},
+        {"op": "send", "link": "X", "frame": {"v": 1, "requestId": "m1"}},
+        {"op": "expect", "link": "X", "frames": [
+          {"v": 1, "type": "REJECT", "requestId": "m1", "request": null,
+           "reason": "malformed", "sessionId": null}]},
+        {"op": "link", "as": "L1",
+         "user": {"email": "alice@example.com", "name": "Alice",
+                  "picture": ""}},
+        {"op": "drain", "link": "L1"},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "c1", "sessionId": null, "workEpoch": 0,
+          "baseRevision": 0, "type": "CREATE", "payload": {}}},
+        {"op": "drain", "link": "L1"},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "o1", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 1, "type": "OPEN_WORK",
+          "payload": {"folder": "work",
+                      "page": {"folder": "work", "name": "p001.png"},
+                      "offset": 0}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "REJECT", "requestId": "o1",
+           "request": "OPEN_WORK", "reason": "not_paired",
+           "sessionId": null}]},
+        {"op": "send", "link": "L1", "frame": {
+          "v": 1, "requestId": "a9", "sessionId": "@session", "workEpoch": 0,
+          "baseRevision": 1, "type": "APPROVE",
+          "payload": {"memberId": "deadbeef"}}},
+        {"op": "expect", "link": "L1", "frames": [
+          {"v": 1, "type": "REJECT", "requestId": "a9", "request": "APPROVE",
+           "reason": "no_pending", "sessionId": "@session"}]}
+      ]
+    }
+  ]
+}

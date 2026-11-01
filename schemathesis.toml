@@ -19,6 +19,23 @@ checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
 ]
 
+# The v1 `folder` query param carries semantic constraints `type: string`
+# can't express (non-empty, ≤2048 chars, no leading "/", no NUL bytes —
+# app/routes.py::_validate_folder_param), so schema-valid-but-rejected
+# input legitimately 400s.
+
+[[operations]]
+include-name = "GET /api/v1/reading-positions"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
+[[operations]]
+include-name = "DELETE /api/v1/reading-positions"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+]
+
 # /image's `Range` header is declared with the `^bytes=` prefix pattern; the
 # full Range grammar (and range validity vs. file size) can't be expressed in
 # the schema, so a malformed-but-pattern-matching value legitimately 400s.

@@ -10,6 +10,9 @@ on:
       - "Dockerfile.viewer-rs"
       - "docker-compose.*-rs.yml"
       - ".github/workflows/rust.yml"
+      # cargo golden harness input (#210) — a case-file-only edit must still
+      # run reader_sync::golden.
+      - "api/reader-sync-cases.json"
   workflow_dispatch:
 
 permissions:
