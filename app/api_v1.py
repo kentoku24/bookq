@@ -70,6 +70,13 @@ async def v1_post_pair_report(request: Request):
     if not cid:
         raise HTTPException(status_code=400, detail="id required")
     body.pop("id", None)
+    # Parked tabs from a previous run keep their stale hook POSTing the
+    # same client id — keep only the newest generation (rpt_gen in the
+    # launch URL). Gen-less posts (old hooks) lose to any gen'd report.
+    gen = int(body.get("gen") or 0)
+    cur = _PAIR_REPORTS.get(cid)
+    if cur is not None and gen < int(cur.get("gen") or 0):
+        return {"ok": True, "dropped": True}
     body["received_at"] = time.time()
     _PAIR_REPORTS[cid] = body
     return {"ok": True}

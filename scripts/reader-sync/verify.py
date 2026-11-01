@@ -334,6 +334,7 @@ def main(argv=None) -> int:
             urls = {cid: base_url
                     + ("&" if "?" in base_url else "?")
                     + "pair_report=" + cid + "&pair_reset=1"
+                    + "&rpt_gen=" + str(int(time.time() * 1000))
                     for cid in clients}
 
         driver.launch(clients, urls, fx=fx)

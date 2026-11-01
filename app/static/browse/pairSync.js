@@ -998,6 +998,10 @@
       // stale SWR-cached copy of this file (which lacks the field) is
       // detected and self-repaired even under TEST_MODE + pair_report.
       window.__BOOKQ_PAIR_HOOK_V = 1;
+      // report generation: a parked tab from a previous run keeps its
+      // OLD hook POSTing under the same client id and silently clobbers
+      // the fresh tab's state. The endpoint keeps only the newest gen.
+      var _gen = parseInt(_qp.get('rpt_gen') || '0', 10) || 0;
       // Geometry + tap record for clients the runner cannot JS-eval:
       // Safari's AX tree exposes only native chrome, so the runner taps
       // real coordinates — element rects here plus the last pointerdown
@@ -1077,7 +1081,7 @@
         var body;
         try {
           body = JSON.stringify({id: cid, pc: pc, pv: pv,
-                                 boot: _boot,
+                                 boot: _boot, gen: _gen,
                                  joinCode: ci ? ci.value : null,
                                  browseHeader: bh
                                    ? bh.textContent : null,
