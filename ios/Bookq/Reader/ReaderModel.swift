@@ -83,7 +83,7 @@ struct ReaderWork: Equatable {
     }
 
     /// Chapter list construction — mirrors loadImages' sibling/mixed/fallback
-    /// branching. `images(folder:)` fetches /api/images only for the plain
+    /// branching. `images(folder:)` fetches /api/v1/images only for the plain
     /// fallback case (tree leaf and mixed-self use direct children).
     static func chapters(for path: String, in roots: [TreeNode]) -> (list: [ReaderChapter], cross: Bool) {
         let siblings = siblingLeaves(of: path, in: roots) ?? []
@@ -117,7 +117,7 @@ struct ReaderWork: Equatable {
                 .map { PageRef(name: $0.name, folder: path) }
             return ([ReaderChapter(name: leafName, fullPath: path, images: imgs)], false)
         }
-        // Plain fallback — caller fills images from /api/images.
+        // Plain fallback — caller fills images from /api/v1/images.
         return ([ReaderChapter(name: leafName, fullPath: path, images: [])], false)
     }
 

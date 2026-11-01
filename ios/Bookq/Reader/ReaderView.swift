@@ -443,7 +443,7 @@ struct ReaderView: View {
             (viewport.width >= viewport.height && landscapeSpread) ? .spread : .single
         do {
             var (chapters, _) = ReaderWork.chapters(for: path, in: library.tree)
-            // Plain fallback: no tree data → fetch /api/images (web behavior)
+            // Plain fallback: no tree data → fetch /api/v1/images (web behavior)
             if chapters.count == 1 && chapters[0].images.isEmpty {
                 let names = try await namesForLeaf(path)
                 chapters[0].images = names.map { PageRef(name: $0, folder: path) }

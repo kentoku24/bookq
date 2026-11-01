@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// First-run / reconfigure screen: enter the Tailscale HTTPS URL, probe
-/// /api/health, then move on to login or library.
+/// /api/v1/health, then move on to login or library.
 struct ServerURLView: View {
     @EnvironmentObject private var model: AppModel
     @State private var text = ""

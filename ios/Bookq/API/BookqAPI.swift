@@ -1,17 +1,22 @@
 import Foundation
 
 /// HTTP client for the bookq API. Attaches `Authorization: Bearer` when a
-/// token is present and handles the `/api/folders` 202 rebuild handshake.
+/// token is present and handles the `/api/v1/tree` 202 rebuild handshake.
 final class BookqAPI: Sendable {
     let baseURL: URL
     private let session: URLSession
     private let tokenProvider: @Sendable () -> String?
+    /// 401 recovery: refresh the access token and return the new Bearer.
+    /// Nil return = refresh failed → the 401 propagates (→ re-login).
+    private let tokenRefresher: (@Sendable () async -> String?)?
 
     init(baseURL: URL, session: URLSession = .shared,
-         tokenProvider: @escaping @Sendable () -> String?) {
+         tokenProvider: @escaping @Sendable () -> String?,
+         tokenRefresher: (@Sendable () async -> String?)? = nil) {
         self.baseURL = baseURL
         self.session = session
         self.tokenProvider = tokenProvider
+        self.tokenRefresher = tokenRefresher
     }
 
     /// `ws(s)://<host>/ws/reader-sync` — the dual-reader sync endpoint.
@@ -43,8 +48,8 @@ final class BookqAPI: Sendable {
         var req = URLRequest(url: comps.url!)
         req.httpMethod = method
         // Bearer-authed JSON must never replay from URLCache — RFC 7231
-        // heuristically caches error responses, and a stale 404 on /api/me
-        // poisons every later boot until the entry expires.
+        // heuristically caches error responses, and a stale 404 caught
+        // during a server restart poisons later boots until it expires.
         req.cachePolicy = .reloadIgnoringLocalCacheData
         if let token = tokenProvider() {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -54,9 +59,22 @@ final class BookqAPI: Sendable {
     }
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse else {
+        var (data, resp) = try await session.data(for: req)
+        guard var http = resp as? HTTPURLResponse else {
             throw APIError.protocolError
+        }
+        // RFC 6750: an expired access token answers 401 — refresh once and
+        // replay the request with the rotated Bearer (refresh rotation is
+        // serialized inside AuthManager, so parallel 401s coalesce).
+        if http.statusCode == 401, let tokenRefresher,
+           let fresh = await tokenRefresher() {
+            var retry = req
+            retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
+            (data, resp) = try await session.data(for: retry)
+            guard let h2 = resp as? HTTPURLResponse else {
+                throw APIError.protocolError
+            }
+            http = h2
         }
         return (data, http)
     }
@@ -80,28 +98,24 @@ final class BookqAPI: Sendable {
 
     // MARK: - Endpoints
 
-    /// GET /api/me — 401 means "login required" (or TEST_MODE off-server).
-    func me() async throws -> MeResponse {
-        let (data, resp) = try await send(makeRequest(path: "api/me"))
-        return try decode(MeResponse.self, data, resp)
-    }
-
-    /// GET /api/health — unauthenticated liveness.
+    /// GET /api/v1/health — unauthenticated liveness.
     func health() async throws {
-        let (_, resp) = try await send(makeRequest(path: "api/health"))
+        let (_, resp) = try await send(makeRequest(path: "api/v1/health"))
         guard resp.statusCode == 200 else { throw APIError.status(resp.statusCode) }
     }
 
+    /// GET /api/v1/version — also the boot auth probe: 401 = login needed.
     func version() async throws -> VersionResponse {
-        let (data, resp) = try await send(makeRequest(path: "api/version"))
+        let (data, resp) = try await send(makeRequest(path: "api/v1/version"))
         return try decode(VersionResponse.self, data, resp)
     }
 
-    /// GET /api/folders. Retries through 202 rebuild responses using
-    /// `Retry-After`. Without `since` returns the bare tree array; with
-    /// `since` returns 304 or `{tree,generation}`.
-    func folders(since generation: Int? = nil,
-                 etag: String? = nil) async throws -> FoldersResult {
+    /// GET /api/v1/tree. Retries through 202 rebuild responses using
+    /// `Retry-After`. All 200 bodies are the {kind,nodes,generation}
+    /// envelope — a `since` mismatch re-sends kind="tree" with the new
+    /// generation, so callers always get a generation without parsing ETag.
+    func tree(since generation: Int? = nil,
+              etag: String? = nil) async throws -> TreeResult {
         var attempt = 0
         while true {
             var query: [URLQueryItem] = []
@@ -111,7 +125,7 @@ final class BookqAPI: Sendable {
             var headers: [String: String] = [:]
             if let etag { headers["If-None-Match"] = etag }
             let (data, resp) = try await send(makeRequest(
-                path: "api/folders", query: query, headers: headers))
+                path: "api/v1/tree", query: query, headers: headers))
             switch resp.statusCode {
             case 202:
                 attempt += 1
@@ -124,13 +138,13 @@ final class BookqAPI: Sendable {
             case 401, 403:
                 throw APIError.unauthorized(status: resp.statusCode)
             case 200..<300:
-                let payload = try JSONDecoder().decode(FoldersPayload.self, from: data)
-                let newETag = resp.value(forHTTPHeaderField: "ETag")
-                switch payload {
-                case .full(let tree, _):
-                    return .full(tree: tree, etag: newETag)
-                case .delta(let tree, let gen):
-                    return .delta(tree: tree, generation: gen, etag: newETag)
+                do {
+                    let env = try JSONDecoder().decode(TreeResponse.self, from: data)
+                    let newETag = resp.value(forHTTPHeaderField: "ETag")
+                    return .nodes(kind: env.kind, nodes: env.nodes,
+                                  generation: env.generation, etag: newETag)
+                } catch {
+                    throw APIError.decode(error)
                 }
             default:
                 throw APIError.status(resp.statusCode)
@@ -138,12 +152,12 @@ final class BookqAPI: Sendable {
         }
     }
 
-    /// GET /api/images?folder= — direct image entries of a leaf (files,
+    /// GET /api/v1/images?folder= — direct image entries of a leaf (files,
     /// archive entries or PDF pages). `folder` is a composed path.
     func images(folder: String) async throws -> [String] {
         let q = [URLQueryItem(name: "folder", value: folder)]
-        let (data, resp) = try await send(makeRequest(path: "api/images", query: q))
-        return try decode([String].self, data, resp)
+        let (data, resp) = try await send(makeRequest(path: "api/v1/images", query: q))
+        return try decode(ImagesResponse.self, data, resp).images
     }
 
     // MARK: - Image URLs
@@ -171,7 +185,7 @@ final class BookqAPI: Sendable {
     /// from `BrowseModel.multiThumbSpec`.
     func thumbSpriteURL(folder: String, names: [String], rows: [Int], w: Int = 400) -> URL {
         var comps = URLComponents(
-            url: baseURL.appendingPathComponent("api/thumb-sprite"),
+            url: baseURL.appendingPathComponent("api/v1/thumb-sprite"),
             resolvingAgainstBaseURL: false)!
         let encodedNames = names.map(ImageURL.encodeSegment).joined(separator: ",")
         comps.queryItems = [
@@ -201,6 +215,7 @@ final class BookqAPI: Sendable {
     /// Authenticated image fetch used by `RemoteImageView`.
     func imageData(url: URL) async throws -> Data {
         var req = URLRequest(url: url)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         if let token = tokenProvider() {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -213,40 +228,58 @@ final class BookqAPI: Sendable {
 
     // MARK: - Reading position / visibility
 
-    func readingPosition() async throws -> ReadingPosition? {
-        let (data, resp) = try await send(makeRequest(path: "api/reading-position"))
-        return try decode(PositionEnvelope.self, data, resp).position
+    /// GET /api/v1/reading-positions — `{positions[]}` newest-first;
+    /// `folder` scopes to one work.
+    func readingPositions(folder: String? = nil) async throws -> [ReadingPosition] {
+        var q: [URLQueryItem] = []
+        if let folder { q.append(URLQueryItem(name: "folder", value: folder)) }
+        let (data, resp) = try await send(
+            makeRequest(path: "api/v1/reading-positions", query: q))
+        return try decode(PositionsResponse.self, data, resp).positions
     }
 
-    func putReadingPosition(_ pos: ReadingPosition) async throws {
-        var req = makeRequest(path: "api/reading-position", method: "PUT")
+    /// PUT /api/v1/reading-positions?folder=… — `folder` rides the query,
+    /// body is exactly {page,total,ts}. 2xx = accepted ("ok"/"stale" is
+    /// informational — web treats any 2xx as sent); decode best-effort.
+    func putReadingPosition(_ pos: ReadingPosition) async throws -> PositionStatus? {
+        var req = makeRequest(path: "api/v1/reading-positions",
+                              query: [URLQueryItem(name: "folder", value: pos.folder)],
+                              method: "PUT")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONEncoder().encode(pos)
-        let (_, resp) = try await send(req)
+        req.httpBody = try JSONEncoder().encode(
+            PositionBody(page: pos.page, total: pos.total, ts: pos.ts))
+        let (data, resp) = try await send(req)
+        if resp.statusCode == 401 || resp.statusCode == 403 {
+            throw APIError.unauthorized(status: resp.statusCode)
+        }
         guard (200..<300).contains(resp.statusCode) else {
             throw APIError.status(resp.statusCode)
         }
+        return try? JSONDecoder().decode(PositionStatus.self, from: data)
     }
 
-    func deleteReadingPosition() async throws {
+    /// DELETE /api/v1/reading-positions — `folder` nil wipes all records.
+    func deleteReadingPosition(folder: String? = nil) async throws {
+        var q: [URLQueryItem] = []
+        if let folder { q.append(URLQueryItem(name: "folder", value: folder)) }
         let (_, resp) = try await send(
-            makeRequest(path: "api/reading-position", method: "DELETE"))
+            makeRequest(path: "api/v1/reading-positions", query: q, method: "DELETE"))
         guard (200..<300).contains(resp.statusCode) else {
             throw APIError.status(resp.statusCode)
         }
     }
 
     func folderVisibility() async throws -> VisibilitySnapshot {
-        let (data, resp) = try await send(makeRequest(path: "api/folder-visibility"))
+        let (data, resp) = try await send(makeRequest(path: "api/v1/folder-visibility"))
         return try decode(VisibilitySnapshot.self, data, resp)
     }
 
-    /// PUT /api/folder-visibility — body exactly {root,hidden}, owner proof
+    /// PUT /api/v1/folder-visibility — body exactly {root,hidden}, owner proof
     /// via `X-Bookq-Visibility-Owner`. 409 = owner mismatch (stale account),
     /// 404 = root not a current top-level folder (hide only). The response
     /// is the authoritative post-write snapshot.
     func setFolderVisibility(root: String, hidden: Bool, owner: String) async throws -> VisibilitySnapshot {
-        var req = makeRequest(path: "api/folder-visibility", method: "PUT")
+        var req = makeRequest(path: "api/v1/folder-visibility", method: "PUT")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue(owner, forHTTPHeaderField: "X-Bookq-Visibility-Owner")
         struct Body: Encodable { var root: String; var hidden: Bool }
@@ -274,7 +307,7 @@ final class BookqAPI: Sendable {
         return nil
     }
 
-    /// GET /api/search — `doSearch` equivalent. Filters: artist/tag comma-
+    /// GET /api/v1/search — `doSearch` equivalent. Filters: artist/tag comma-
     /// joined (server ANDs keys, ORs within a key), sort fixed relevance.
     /// `includeHidden` opts out of the caller's hidden-root exclusion
     /// (owner-scoped server-side — never another user's set). nil = still
@@ -287,33 +320,34 @@ final class BookqAPI: Sendable {
         query.append(URLQueryItem(name: "sort", value: "relevance"))
         if includeHidden { query.append(URLQueryItem(name: "include_hidden", value: "1")) }
         guard let (data, resp) = try await fetchBuilding(
-            path: "api/search", query: query) else { return nil }
+            path: "api/v1/search", query: query) else { return nil }
         return try decode(SearchResponse.self, data, resp)
     }
 
-    /// GET /api/metadata/facets — `loadFacets` equivalent. `path` scopes to
+    /// GET /api/v1/facets — `loadFacets` equivalent. `path` scopes to
     /// a subtree ("" = whole library).
     func facets(path: String = "", includeHidden: Bool) async throws -> Facets? {
         var query: [URLQueryItem] = []
         if !path.isEmpty { query.append(URLQueryItem(name: "path", value: path)) }
         if includeHidden { query.append(URLQueryItem(name: "include_hidden", value: "1")) }
         guard let (data, resp) = try await fetchBuilding(
-            path: "api/metadata/facets", query: query) else { return nil }
+            path: "api/v1/facets", query: query) else { return nil }
         return try decode(Facets.self, data, resp)
     }
 
-    /// POST /api/refresh — full metadata rebuild.
+    /// POST /api/v1/index/refresh — synchronous metadata rebuild.
     func refresh() async throws {
-        let (_, resp) = try await send(makeRequest(path: "api/refresh", method: "POST"))
+        let (_, resp) = try await send(makeRequest(path: "api/v1/index/refresh", method: "POST"))
         guard (200..<300).contains(resp.statusCode) else {
             throw APIError.status(resp.statusCode)
         }
     }
 }
 
-enum FoldersResult {
-    case full(tree: [TreeNode], etag: String?)
-    case delta(tree: [TreeNode], generation: Int, etag: String?)
+enum TreeResult {
+    /// `kind` is "tree" (full) or "children" (shallow); generation always
+    /// present in v1 envelopes.
+    case nodes(kind: String, nodes: [TreeNode], generation: Int, etag: String?)
     case notModified
 }
 

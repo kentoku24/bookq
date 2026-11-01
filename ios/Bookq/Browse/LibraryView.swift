@@ -64,7 +64,7 @@ struct LibraryView: View {
         .overlay {
             // Error overlay only when there is nothing to show — a failed
             // background poll must not blank usable (stale) tree data, the
-            // same way the web keeps browsing off its cached /api/folders.
+            // same way the web keeps browsing off its cached /api/v1/tree.
             if let err = model.library?.error,
                model.library?.tree.isEmpty ?? true {
                 errorOverlay(err)

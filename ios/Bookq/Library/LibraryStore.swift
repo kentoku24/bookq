@@ -3,7 +3,7 @@ import Foundation
 import UIKit
 
 /// Folder tree + hidden-root state. Loaded on boot, refreshed via
-/// `/api/refresh` + generation tracking.
+/// `/api/v1/index/refresh` + generation tracking.
 @MainActor
 final class LibraryStore: ObservableObject {
     @Published private(set) var tree: [TreeNode] = []
@@ -23,7 +23,7 @@ final class LibraryStore: ObservableObject {
     private var loadedOnce = false
 
     /// Snapshot of the last good tree — the web equivalent is the SW
-    /// NetworkFirst cache of `/api/folders`, which lets the PWA browse (and
+    /// NetworkFirst cache of `/api/v1/tree`, which lets the PWA browse (and
     /// open downloaded works) while offline. Keyed per server base URL so
     /// switching servers can't leak the previous server's tree.
     private let snapshotURL: URL
@@ -47,22 +47,18 @@ final class LibraryStore: ObservableObject {
         defer { loading = false }
         error = nil
         do {
-            let result: FoldersResult
+            let result: TreeResult
             if loadedOnce && !force {
-                result = try await api.folders(since: generation, etag: etag)
+                result = try await api.tree(since: generation, etag: etag)
             } else {
-                result = try await api.folders()
+                result = try await api.tree()
             }
             switch result {
-            case .full(let tree, let etag):
+            case .nodes(_, let tree, let gen, let etag):
                 self.tree = tree
+                self.generation = gen      // v1 envelope carries it — no ETag parse
                 self.etag = etag
                 loadedOnce = true
-                generation = extractGeneration(etag: etag) ?? generation
-            case .delta(let tree, let gen, let etag):
-                self.tree = tree
-                self.generation = gen
-                self.etag = etag
             case .notModified:
                 break
             }
@@ -99,7 +95,7 @@ final class LibraryStore: ObservableObject {
     }
 
     /// Pre-populate `tree` before the first fetch — offline launches get
-    /// last-known folders immediately (SW-cached /api/folders parity).
+    /// last-known folders immediately (SW-cached /api/v1/tree parity).
     private func restoreSnapshot() {
         struct Env: Decodable { var snapshot: Snapshot }
         guard let data = try? Data(contentsOf: snapshotURL),
@@ -128,7 +124,7 @@ final class LibraryStore: ObservableObject {
         }
     }
 
-    /// POST /api/refresh (server rescan) then reload unconditionally.
+    /// POST /api/v1/index/refresh (server rescan) then reload unconditionally.
     func refresh() async {
         do { try await api.refresh() } catch {
             self.error = error.localizedDescription
@@ -136,17 +132,6 @@ final class LibraryStore: ObservableObject {
         }
         loadedOnce = false
         await load(force: true)
-    }
-
-    /// ETag embeds the generation as `"<digest24>-g<gen>"` — parse only
-    /// the `-g` suffix or digest digits corrupt `since` into a
-    /// never-matching value and every poll refetches the full tree.
-    private func extractGeneration(etag: String?) -> Int? {
-        guard let etag,
-              let g = etag.components(separatedBy: "-g").last else { return nil }
-        // Suffix may carry a trailing quote — digits only.
-        let digits = g.prefix { $0.isNumber }
-        return Int(digits)
     }
 
     // MARK: - Queries

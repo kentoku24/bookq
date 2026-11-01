@@ -73,7 +73,7 @@ final class ProgressSync {
         Task {
             let outcome: String
             do {
-                try await api.putReadingPosition(ReadingPosition(
+                _ = try await api.putReadingPosition(ReadingPosition(
                     folder: rec.folder, page: rec.page, total: rec.total, ts: rec.ts))
                 lastSentKey = key(rec)
                 outcome = "sent"
@@ -95,13 +95,13 @@ final class ProgressSync {
         }
     }
 
-    /// GET the stored position. Returns nil when server empty or fetch
-    /// failed — callers must distinguish (pull-fail ≠ empty) via `ok`.
+    /// GET the stored position. v1 returns `{positions[]}` newest-first —
+    /// web's `latestPositionOf` picks `positions[0]`; same here. nil =
+    /// server empty or fetch failed (pull-fail ≠ empty, callers use `ok`).
     func pull() async -> (ok: Bool, position: Record?) {
         do {
-            guard let pos = try await api.readingPosition() else {
-                return (true, nil)
-            }
+            let pos = try await api.readingPositions().first
+            guard let pos else { return (true, nil) }
             return (true, Record(folder: pos.folder, page: pos.page,
                                  total: pos.total, ts: pos.ts))
         } catch {
