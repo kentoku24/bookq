@@ -997,3 +997,146 @@ def test_rebuild_from_tree_imageless_chain_follows_tree(tmp_path):
             "artists": [],
             "tags": [],
         }
+
+
+# ── #245: per-file metadata.toml parse cache ──────────────────────────────────
+
+
+def _toml_parse_spy(monkeypatch):
+    """Wrap tomllib.load with a counter; return the list of parsed file names."""
+    from app.metadata import models as _models
+
+    calls: list[str] = []
+    real_load = _models.tomllib.load
+
+    def _spy(fh, *args, **kwargs):
+        calls.append(str(getattr(fh, "name", fh)))
+        return real_load(fh, *args, **kwargs)
+
+    monkeypatch.setattr(_models.tomllib, "load", _spy)
+    return calls
+
+
+def test_parse_cache_second_tree_rebuild_does_not_reparse(tmp_path, monkeypatch):
+    """#245: a second rebuild_from_tree over unchanged files performs zero parses."""
+    from app.scanner import scan_tree
+
+    dl = tmp_path / "dl"
+    for name in ("a", "b"):
+        d = dl / name
+        d.mkdir(parents=True)
+        (d / "1.png").write_bytes(b"")
+        (d / "metadata.toml").write_text(f'[comic]\ntitle_jp = "{name}"\n')
+
+    calls = _toml_parse_spy(monkeypatch)
+
+    first = MetadataIndex()
+    first.rebuild_from_tree(scan_tree(dl), dl)
+    assert len(calls) == 2  # one open+parse per existing toml
+
+    calls.clear()
+    second = MetadataIndex()
+    second.rebuild_from_tree(scan_tree(dl), dl)
+
+    assert calls == []
+    assert [c.to_dict() for c in second.comics] == [
+        c.to_dict() for c in first.comics
+    ]
+    assert second.facets == first.facets
+
+
+def test_parse_cache_negative_entries_also_cached(tmp_path, monkeypatch):
+    """#245: folders without metadata.toml never reach tomllib.load at all."""
+    dl = tmp_path / "dl"
+    for name in ("p1", "p2"):
+        d = dl / name
+        d.mkdir(parents=True)
+        (d / "1.png").write_bytes(b"")
+
+    calls = _toml_parse_spy(monkeypatch)
+    MetadataIndex().rebuild(dl)
+    MetadataIndex().rebuild(dl)
+    assert calls == []
+
+
+def test_parse_cache_reparses_only_changed_toml(tmp_path, monkeypatch):
+    """#245: editing one toml (new mtime) re-parses only that file."""
+    import os
+
+    dl = tmp_path / "dl"
+    pa = dl / "a" / "metadata.toml"
+    pb = dl / "b" / "metadata.toml"
+    for p, title in ((pa, "A"), (pb, "B")):
+        p.parent.mkdir(parents=True)
+        p.write_text(f'[comic]\ntitle_jp = "{title}"\n')
+
+    calls = _toml_parse_spy(monkeypatch)
+    MetadataIndex().rebuild(dl)
+    assert len(calls) == 2
+
+    calls.clear()
+    pb.write_text('[comic]\ntitle_jp = "B-edited"\n')
+    # Deterministic identity change: bump mtime explicitly so the test is
+    # immune to coarse filesystem mtime granularity and equal file sizes.
+    st = pb.stat()
+    os.utime(pb, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    second = MetadataIndex()
+    second.rebuild(dl)
+
+    assert calls == [str(pb)]
+    assert next(c for c in second.comics if c.folder_path == "b").title_jp == "B-edited"
+    assert next(c for c in second.comics if c.folder_path == "a").title_jp == "A"
+
+
+def test_parse_cache_output_identical_warm_vs_cold(tmp_path):
+    """#245: warm-cache and cold-cache rebuilds produce identical index output."""
+    from app.metadata.models import _clear_parse_cache
+
+    dl = tmp_path / "dl"
+    good = dl / "good"
+    good.mkdir(parents=True)
+    (good / "metadata.toml").write_text(
+        '[tags]\nartist = ["x"]\n\n[comic]\ntitle_jp = "G"\ntotal_pages = 12\n'
+    )
+    broken = dl / "broken"
+    broken.mkdir()
+    (broken / "metadata.toml").write_text("this is not valid toml [[[")
+    (dl / "plain").mkdir()
+
+    _clear_parse_cache()
+    cold = MetadataIndex()
+    cold.rebuild(dl)
+
+    warm = MetadataIndex()
+    warm.rebuild(dl)  # every entry is a cache hit, incl. the broken-toml negative
+
+    assert [c.to_dict() for c in warm.comics] == [c.to_dict() for c in cold.comics]
+    assert warm.facets == cold.facets
+    assert warm.subtree_facets() == cold.subtree_facets()
+
+    _clear_parse_cache()
+    cold2 = MetadataIndex()
+    cold2.rebuild(dl)
+    assert [c.to_dict() for c in cold2.comics] == [c.to_dict() for c in cold.comics]
+    assert cold2.facets == cold.facets
+
+
+def test_parse_cache_records_not_shared(tmp_path):
+    """#245: mutating a record built on the cache-hit path leaks into no other.
+
+    The cache holds the raw parsed TOML dict; each from_folder call derives
+    fresh artist/tags lists from it, so per-record mutation is safe.
+    """
+    folder = tmp_path / "work"
+    folder.mkdir()
+    (folder / "metadata.toml").write_text('[tags]\nartist = ["a"]\ntag = ["t"]\n')
+
+    first = ComicMetadata.from_folder(folder, tmp_path)
+    first.artist.append("MUT")
+    first.tags.append("MUT")
+
+    second = ComicMetadata.from_folder(folder, tmp_path)  # cache-hit path
+    assert second is not first
+    assert second.artist == ["a"]
+    assert second.tags == ["t"]
