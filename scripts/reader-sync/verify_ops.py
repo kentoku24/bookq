@@ -229,6 +229,20 @@ class RunCtx:
         return st
 
 
+def _report_fresh(ctx: "RunCtx", role: str, max_age: float) -> bool:
+    """True when the client's pair-report is live (posted within
+    max_age seconds). Goes through _pair_report_state so a stale
+    report also gets the refocus/terminate heal's side effect."""
+    try:
+        st = ctx._pair_report_state(role)
+    except AssertError:
+        return False
+    try:
+        return time.time() - float(st.get("received_at") or 0) <= max_age
+    except (TypeError, ValueError):
+        return False
+
+
 def _normalize_ui_state(d: dict) -> dict:
     """{pc,pv,solo} (from page.evaluate or the pair-report hook) -> the
     canonical state dict every ui-surface assert consumes."""
@@ -917,9 +931,9 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
     drv = ctx.driver
     off = None
     prev_r = None
-    fired = set()
+    fired = {}
     last_rep = None
-    for _ in range(tries):
+    for it in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
         except AssertError:
@@ -965,17 +979,18 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
         prev_r = None
         last_rep = rep
         rects = rep.get("rects") or {}
-        # fire ONE opener per poll and each opener at most once per call —
-        # #menu-btn is a toggle, so re-firing it every iteration would
-        # flip the sidebar open/shut forever.
+        # fire ONE opener per poll, and each opener at most once per ~5
+        # polls — #menu-btn is a toggle, so re-firing every iteration
+        # would flap the sidebar; but a tap that missed (overlay race,
+        # mid-animation) must get to try again or the call is doomed.
         for n in needles:
             sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
             for op_sel in (_OPENERS.get(sel) or []):
-                if op_sel in fired:
+                if it - fired.get(op_sel, -99) < 5:
                     continue
                 orr = rects.get(op_sel)
                 if orr and orr["w"] > 0 and orr.get("top") is not False:
-                    fired.add(op_sel)
+                    fired[op_sel] = it
                     if off is None:
                         off = _ui_offset(ctx, spec)
                     drv.tap(spec, orr["x"] + orr["w"] / 2 + off[0],
@@ -2391,9 +2406,17 @@ def op_leave(ctx: RunCtx, op: dict) -> None:
             spec.page.evaluate(
                 "() => window.PairController.leave()")
         else:
-            # simulator: real UI leave — strip → pair panel → 解除
-            _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip")
-            _ui_tap(ctx, spec, ["解除"], "leave button")
+            # simulator: real UI leave — strip → pair panel → 解除. A
+            # session that already ended (peer left, server END after a
+            # suspend/resume edge) shows no strip — idle IS the terminal
+            # the END poll below checks.
+            try:
+                _st = ctx._ui_state(spec.role)
+            except AssertError:
+                _st = {}
+            if _st.get("sessionId") or _st.get("status") == "connected":
+                _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip")
+                _ui_tap(ctx, spec, ["解除"], "leave button")
     else:
         ctx.cmd(actor, "leave")
     ctx.poll_both(
@@ -2458,6 +2481,23 @@ def run_scenario(ctx: RunCtx, scenario: dict, transport: str,
               "duration_ms": 0}
     t0 = _now_ms()
     try:
+        # sim+ui runs die quietly when a client's page is still loading
+        # or frozen in a stray tab — gate op#1 on fresh reports from
+        # both clients (this also gives the _pair_report_state heal time
+        # to refocus/terminate-recover a lost tab before the clock).
+        if ctx.driver.name == "simulator" and ctx.surface == "ui":
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                # poll EVERY client each round — the freshness read is
+                # also the heal trigger, and all() short-circuit would
+                # starve the second client's refocus attempts.
+                if all([_report_fresh(ctx, spec.role, 10)
+                        for spec in ctx.clients.values()]):
+                    break
+                time.sleep(1.0)
+            else:
+                raise EnvError(
+                    "client pages never came live at run start")
         for op in scenario["ops"]:
             fn = OPS[op["op"]]
             try:
