@@ -349,13 +349,35 @@ fn walk_dir(
 /// `folders` are RELATIVE paths under `base`; outer None → Python does
 /// the whole batch (Poison anywhere).
 pub fn parse_metadata_batch(base: &Path, folders: &[String]) -> Option<Vec<Option<ComicRec>>> {
-    let mut out = Vec::with_capacity(folders.len());
-    for rel in folders {
-        match parse_one(&base.join(rel), base) {
-            Folder::Rec(r) => out.push(Some(r)),
-            Folder::Skip => out.push(None),
-            Folder::Poison => return None,
+    // Per-folder `metadata.toml` reads are independent and I/O-bound — chunk
+    // the list across worker threads; results are concatenated in input
+    // order so output is identical to the sequential pass. A Poison anywhere
+    // still collapses the whole batch to None (same as sequential — the only
+    // difference is we don't early-exit).
+    const WORKERS: usize = 8;
+    let n = folders.len();
+    let workers = WORKERS.min(n).max(1);
+    let chunk = n.div_ceil(workers);
+    let parts = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for c in folders.chunks(chunk) {
+            handles.push(s.spawn(move || -> Option<Vec<Option<ComicRec>>> {
+                let mut out = Vec::with_capacity(c.len());
+                for rel in c {
+                    match parse_one(&base.join(rel), base) {
+                        Folder::Rec(r) => out.push(Some(r)),
+                        Folder::Skip => out.push(None),
+                        Folder::Poison => return None,
+                    }
+                }
+                Some(out)
+            }));
         }
+        handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
+    });
+    let mut out = Vec::with_capacity(n);
+    for part in parts {
+        out.extend(part.ok()??);
     }
     Some(out)
 }
