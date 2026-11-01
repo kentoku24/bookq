@@ -238,7 +238,7 @@ fn assemble(dir: &FsDir, base: &Path) -> Vec<Value> {
 
 /// `ComicMetadata.to_dict()` — `asdict` order: folder_path, folder_name,
 /// title_jp, title_en, artist, tags, source, has_metadata, total_pages.
-fn comic_to_json(c: &ComicRec) -> Value {
+pub fn comic_to_json(c: &ComicRec) -> Value {
     let (path, name, tj, te, artist, tags, source, has, pages) = c;
     obj(vec![
         ("folder_path", Value::String(path.clone())),
@@ -377,6 +377,60 @@ pub fn find_tree_node<'a>(nodes: &'a [Value], target: &str, parent_path: &str) -
         }
     }
     None
+}
+
+/// `MetadataIndex.rebuild_from_tree` — parse every folder node's own path
+/// plus each ancestor prefix of a flattened name (``"a/b/c"`` → ``"a"``,
+/// ``"a/b"``, ``"a/b/c"``), on folder nodes AND on image-node dir prefixes
+/// (the image filename itself is never parsed). Deduped by first-seen
+/// prefix in DFS order — each folder is parsed at most once even when
+/// nested nodes repeat an ancestor. Paths under archive nodes are phantom
+/// FS paths by design (``x.rar/InnerDir`` parses to a minimal record).
+pub fn rebuild_index_from_tree(nodes: &[Value], base: &Path) -> Vec<ComicRec> {
+    fn visit(nodes: &[Value], parent: &str, seen: &mut HashSet<String>, folders: &mut Vec<String>) {
+        for node in nodes {
+            let Some(name) = node["name"].as_str() else {
+                continue;
+            };
+            let rel = if parent.is_empty() {
+                name.to_string()
+            } else {
+                format!("{parent}/{name}")
+            };
+            let parts: Vec<&str> = rel.split('/').collect();
+            match node["type"].as_str() {
+                Some("folder") => {
+                    for d in 1..=parts.len() {
+                        let p = parts[..d].join("/");
+                        if seen.insert(p.clone()) {
+                            folders.push(p);
+                        }
+                    }
+                    if let Some(children) = node["children"].as_array() {
+                        visit(children, &rel, seen, folders);
+                    }
+                }
+                Some("image") => {
+                    for d in 1..parts.len() {
+                        let p = parts[..d].join("/");
+                        if seen.insert(p.clone()) {
+                            folders.push(p);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut folders = Vec::new();
+    visit(nodes, "", &mut seen, &mut folders);
+    // `_parse_folder` swallows per-folder errors → None; a batch-level
+    // Poison (unprovable) falls back to the empty index, matching the
+    // caller's `unwrap_or_default` posture.
+    bookq_core::parse_metadata_batch(base, &folders)
+        .map(|v| v.into_iter().flatten().collect())
+        .unwrap_or_default()
 }
 
 // ── Live-FS shallow listing (no index required) ───────────────────────────────

@@ -469,7 +469,6 @@ fn vis_detail(status: StatusCode, msg: &str) -> Response {
 
 /// `covered_by_roots` — `path == K` or `path` under `K + "/"`.
 /// Consumed by M6's search/facets hidden-root filtering.
-#[allow(dead_code)]
 pub fn covered_by_roots(path: &str, roots: &[String]) -> bool {
     if path.is_empty() {
         return false;

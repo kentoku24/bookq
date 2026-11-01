@@ -39,6 +39,9 @@ pub struct IndexState {
 
 pub struct CacheData {
     pub tree: Vec<Value>,
+    /// `index.comics` — `rebuild_from_tree`'s ComicMetadata rows; M6
+    /// search/facets read them straight off the cache like the Python index.
+    pub comics: Vec<ComicRec>,
     /// `timestamp` — epoch seconds (float precision as f64 micros); re-stamped
     /// in place by the signature gate on an unchanged tree.
     timestamp_micros: AtomicU64,
@@ -170,7 +173,10 @@ async fn background_index_refresh(st: &IndexState, downloads: &Path) {
 /// `_scan_and_rebuild` — full tree + metadata + attaches in one walk.
 fn build_cache(downloads: &Path) -> Option<CacheData> {
     let mut t = tree::scan_tree(downloads)?;
-    let comics = bookq_core::meta_walk(downloads).unwrap_or_default();
+    // `rebuild_from_tree` (NOT `_walk`): tree-driven parse — archive
+    // nodes' internal dirs produce phantom minimal records, and real
+    // dirs absent from the tree are never indexed.
+    let comics = tree::rebuild_index_from_tree(&t, downloads);
     let lookup: HashMap<String, ComicRec> =
         comics.iter().map(|c| (c.0.clone(), c.clone())).collect();
     tree::attach_metadata(&mut t, &lookup, "");
@@ -180,6 +186,7 @@ fn build_cache(downloads: &Path) -> Option<CacheData> {
     let signature = bookq_core::tree_signature(downloads);
     Some(CacheData {
         tree: t,
+        comics,
         timestamp_micros: AtomicU64::new((now_secs() * 1e6) as u64),
         generation,
         signature,
