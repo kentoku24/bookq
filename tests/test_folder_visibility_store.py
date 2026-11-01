@@ -201,3 +201,45 @@ def test_validate_root_rejects(bad):
 
 def test_validate_root_accepts_max_length():
     assert validate_root("x" * 2048) == "x" * 2048
+
+
+# ── shared schema file / version pinning (#200) ──────────────────────
+
+_SCHEMA_SQL = (
+    Path(__file__).resolve().parent.parent / "api" / "user-state-schema.sql"
+)
+
+
+def test_schema_version_matches_file_stamp():
+    import re
+
+    from app.folder_visibility import SCHEMA_VERSION
+
+    sql = _SCHEMA_SQL.read_text(encoding="utf-8")
+    stamp = re.search(r"PRAGMA\s+user_version\s*=\s*(\d+)", sql)
+    assert stamp is not None, "schema file must stamp PRAGMA user_version"
+    assert int(stamp.group(1)) == SCHEMA_VERSION
+
+
+def test_store_init_stamps_schema_version(db_path: Path):
+    from app.folder_visibility import SCHEMA_VERSION
+
+    FolderVisibilityStore(db_path).read("alice@example.com")
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        conn.close()
+
+
+def test_store_refuses_newer_schema(db_path: Path):
+    from app.folder_visibility import SCHEMA_VERSION
+
+    FolderVisibilityStore(db_path).read("alice@example.com")
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    finally:
+        conn.close()
+    with pytest.raises(RuntimeError, match="newer than supported"):
+        FolderVisibilityStore(db_path).read("alice@example.com")
