@@ -21,6 +21,9 @@ on:
       - "requirements-dev.txt"
       - "Dockerfile"
       - "docker-compose*.yml"
+      # pytest golden-frame harness input (#210) — a case-file-only edit must
+      # still run tests/test_reader_sync_golden.py.
+      - "api/reader-sync-cases.json"
 
 permissions:
   contents: read
