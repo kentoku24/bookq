@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">bookq</string>
+
+    <string name="onboarding_title">bookq</string>
+    <string name="onboarding_hint">サーバーの URL を入力\n（Tailscale 経由の https アドレス）</string>
+    <string name="onboarding_url_placeholder">https://bookq.tail-xxx.ts.net</string>
+    <string name="onboarding_connect">接続</string>
+    <string name="onboarding_connecting">接続確認中…</string>
+    <string name="onboarding_error_invalid">URL が不正です</string>
+    <string name="onboarding_error_http">http:// は localhost のみ利用できます（認証トークン保護のため https が必要です）</string>
+    <string name="onboarding_error_unreachable">接続できません</string>
+
+    <string name="boot_connecting">接続中…</string>
+    <string name="boot_retry">再試行</string>
+    <string name="boot_change_server">サーバー変更</string>
+
+    <string name="login_title">ログイン</string>
+    <string name="login_google">Google でログイン</string>
+    <string name="login_cancelled">ログインがキャンセルされました</string>
+
+    <string name="home_title">bookq</string>
+    <string name="home_loading">読み込み中…</string>
+    <string name="home_error">読み込みに失敗しました</string>
+    <string name="home_reload">再読み込み</string>
+
+    <string name="settings_title">設定</string>
+    <string name="settings_server">サーバー</string>
+    <string name="settings_change">変更</string>
+    <string name="settings_cancel">キャンセル</string>
+    <string name="settings_server_url">サーバー URL</string>
+    <string name="settings_original_images">原本画像を使う（/image）</string>
+    <string name="settings_browse_layout">ブラウズ表示</string>
+    <string name="settings_layout_tile">タイル</string>
+    <string name="settings_layout_list">リスト</string>
+    <string name="settings_layout_card">カード</string>
+    <string name="settings_volume_keys">音量キーでページ送り</string>
+    <string name="settings_dynamic_color">ダイナミックカラー</string>
+    <string name="settings_perf_hud">FPS を表示（デバッグ）</string>
+    <string name="settings_logout">ログアウト</string>
+    <string name="settings_app_version">アプリバージョン</string>
+    <string name="settings_server_version">サーバーバージョン</string>
+    <string name="settings_unknown">不明</string>
+    <string name="settings_user">ユーザー</string>
+    <string name="settings_email">メール</string>
+</resources>
