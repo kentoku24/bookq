@@ -166,47 +166,74 @@ class RunCtx:
             f"leader={json.dumps(la, ensure_ascii=False)[:250] if la else None} "
             f"follower={json.dumps(fa, ensure_ascii=False)[:250] if fa else None}")
 
-    # -- ui-surface observation (chrome driver only) -------------------
+    # -- ui-surface observation ----------------------------------------
+    # chrome reads PairController/PairedView over page.evaluate; surfaces
+    # without JS-eval (iOS Simulator Safari / PWA webclip) get the same
+    # shape through the in-page ?pair_report=<cid> hook, which POSTs the
+    # raw {pc,pv,solo} to the same-origin test endpoint (#142).
 
     def _ui_state(self, role: str) -> dict:
         spec = self.clients[role]
-        if spec.page is None:
-            raise UnsupportedError("ui surface needs the chrome driver")
-        d = spec.page.evaluate(
-            """() => {
-              const pc = window.PairController
-                ? window.PairController.state : {status: 'missing'};
-              const pv = window.PairedView ? window.PairedView.state() : null;
-              return {pc: pc, pv: pv,
-                      solo: !(pv && pv.active)};
-            }""")
-        pc, pv = d.get("pc") or {}, d.get("pv") or {}
-        return {
-            "status": pc.get("status"), "phase": pc.get("phase"),
-            "sessionId": pc.get("sessionId"), "role": pc.get("role")
-                or (pv or {}).get("role"),
-            "side": pc.get("side") or (pv or {}).get("side"),
-            "transport": pc.get("transport"),
-            "spreadId": pc.get("spreadId") or (pv or {}).get("spreadId"),
-            "revision": pc.get("revision") if pc.get("revision") is not None
-                else (pv or {}).get("revision"),
-            "workEpoch": pc.get("workEpoch") if pc.get("workEpoch") is not None
-                else (pv or {}).get("workEpoch"),
-            "manifestVersion": pc.get("manifestVersion")
-                or (pv or {}).get("manifestVersion"),
-            "presence": pc.get("presence") or {},
-            "pending": pc.get("joinRequest"),
-            "error": pc.get("error"), "endReason": pc.get("endReason"),
-            "applied": {"index": (pv or {}).get("spreadIndex", -1),
-                        "spreadId": (pv or {}).get("spreadId"),
-                        "leaderSide": (pv or {}).get("leaderSide"),
-                        "total": (pv or {}).get("spreadTotal")},
-            "view": {"ref": (pv or {}).get("ref"),
-                     "anchorRef": (pv or {}).get("anchorRef"),
-                     "side": (pv or {}).get("side"),
-                     "active": (pv or {}).get("active"),
-                     "blank": (pv or {}).get("blank")},
-        }
+        if spec.page is not None:
+            d = spec.page.evaluate(
+                """() => {
+                  const pc = window.PairController
+                    ? window.PairController.state : {status: 'missing'};
+                  const pv = window.PairedView
+                    ? window.PairedView.state() : null;
+                  return {pc: pc, pv: pv,
+                          solo: !(pv && pv.active)};
+                }""")
+        else:
+            d = self._pair_report_state(role)
+        return _normalize_ui_state(d)
+
+    def _pair_report_state(self, role: str) -> dict:
+        cid = self.clients[role].id
+        try:
+            d = _api_json(self, "/api/v1/pair-report?id=" + cid,
+                          timeout=10)
+        except Exception as e:
+            raise AssertError(
+                f"pair-report[{cid}]: endpoint read failed: {e}")
+        st = (d or {}).get("state")
+        if st is None:
+            raise AssertError(
+                f"pair-report[{cid}]: no report yet — is the page open "
+                "with ?pair_report= ?")
+        return st
+
+
+def _normalize_ui_state(d: dict) -> dict:
+    """{pc,pv,solo} (from page.evaluate or the pair-report hook) -> the
+    canonical state dict every ui-surface assert consumes."""
+    pc, pv = d.get("pc") or {}, d.get("pv") or {}
+    return {
+        "status": pc.get("status"), "phase": pc.get("phase"),
+        "sessionId": pc.get("sessionId"), "role": pc.get("role")
+            or (pv or {}).get("role"),
+        "side": pc.get("side") or (pv or {}).get("side"),
+        "transport": pc.get("transport"),
+        "spreadId": pc.get("spreadId") or (pv or {}).get("spreadId"),
+        "revision": pc.get("revision") if pc.get("revision") is not None
+            else (pv or {}).get("revision"),
+        "workEpoch": pc.get("workEpoch") if pc.get("workEpoch") is not None
+            else (pv or {}).get("workEpoch"),
+        "manifestVersion": pc.get("manifestVersion")
+            or (pv or {}).get("manifestVersion"),
+        "presence": pc.get("presence") or {},
+        "pending": pc.get("joinRequest"),
+        "error": pc.get("error"), "endReason": pc.get("endReason"),
+        "applied": {"index": (pv or {}).get("spreadIndex", -1),
+                    "spreadId": (pv or {}).get("spreadId"),
+                    "leaderSide": (pv or {}).get("leaderSide"),
+                    "total": (pv or {}).get("spreadTotal")},
+        "view": {"ref": (pv or {}).get("ref"),
+                 "anchorRef": (pv or {}).get("anchorRef"),
+                 "side": (pv or {}).get("side"),
+                 "active": (pv or {}).get("active"),
+                 "blank": (pv or {}).get("blank")},
+    }
 
 
 # ────────────────────────── shared asserts ───────────────────────────
@@ -604,36 +631,151 @@ def op_pair(ctx: RunCtx, op: dict) -> None:
 
 
 def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
-    """Real-app pairing UI surface (S09 PairController wiring)."""
+    """Real-app pairing UI surface — the PRODUCTION gesture (#142):
+    sidebar launcher (#pair-btn, in #sidebar-header) → one-tap
+    connect() → MATCH auto-join, or the code-entry view reached through
+    an ended panel. Chrome drives the DOM; the simulator driver walks
+    the Safari AX tree."""
+    via = op.get("via") or "match"
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if lsp.page is not None and fsp.page is not None:
+        return _op_pair_ui_dom(ctx, via)
+    if ctx.driver.name == "simulator":
+        return _op_pair_ui_ax(ctx, via)
+    raise UnsupportedError("ui pair needs chrome DOM or simulator AX")
+
+
+def _wait_code_dom(page, timeout: float = 15000) -> str:
+    page.wait_for_function(
+        "() => /^\\d{6}$/.test((document.getElementById('pair-code-value')"
+        "  .textContent || '').trim())", timeout=timeout)
+    return page.text_content("#pair-code-value").strip()
+
+
+def _open_sidebar_dom(page) -> None:
+    """The launcher lives in #sidebar-header — a closed sidebar puts it
+    outside the viewport (that was the original #pair-btn env_unavailable:
+    the old op closed the sidebar first and could never click it)."""
+    page.evaluate(
+        "() => { const s = document.getElementById('sidebar');"
+        "  const v = document.getElementById('viewer');"
+        "  if (s) { s.classList.add('open');"
+        "    v && v.classList.add('sidebar-open'); } }")
+
+
+def _op_pair_ui_dom(ctx: RunCtx, via: str) -> None:
     leader = ctx.clients["leader"].page
     follower = ctx.clients["follower"].page
-    if leader is None or follower is None:
-        raise UnsupportedError("ui surface needs DOM access (chrome driver)")
     has = leader.evaluate("() => !!window.PairController")
     if not has:
         raise UnsupportedError(
-            "ui surface requires the S09 PairController wiring (#84)")
-    leader.evaluate("window.closeSidebar && window.closeSidebar()")
-    follower.evaluate("window.closeSidebar && window.closeSidebar()")
-    leader.click("#pair-btn")
-    leader.click("#pair-create")
-    leader.wait_for_function(
-        "() => /^\\d{6}$/.test((document.getElementById('pair-code-value')"
-        "  .textContent || '').trim())",
-        timeout=15000)
-    code = leader.text_content("#pair-code-value").strip()
-    follower.click("#pair-btn")
-    follower.click("#pair-join-open")
-    follower.fill("#pair-code-input", code)
-    follower.click("#pair-join-submit")
-    # #114: the leader auto-approves on JOIN_REQUEST — no approve click.
-    leader.wait_for_function(
-        "() => document.getElementById('pair-status')"
-        "  .dataset.status === 'connected'", timeout=15000)
-    follower.wait_for_function(
-        "() => document.getElementById('pair-status')"
-        "  .dataset.status === 'connected'", timeout=15000)
-    ctx.note("paired_both", True, "UI: both status chips connected")
+            "ui surface requires the PairController wiring (#84)")
+    _open_sidebar_dom(leader)
+    _open_sidebar_dom(follower)
+    if via == "code":
+        # The code-entry view is reachable in production ONLY from an
+        # 'ended' panel's choice section — an idle/ended launcher tap
+        # fires connect() and MATCH intercepts it. Deterministic reach:
+        # follower opens its panel (secSession), leader leaves through
+        # the real UI, then connect()s for a fresh code; the follower's
+        # still-open panel falls back to secChoice → 参加 → code entry.
+        follower.click("#pair-status")
+        leader.click("#pair-status")
+        leader.click("#pair-leave")
+        leader.click("#pair-btn")
+        code = _wait_code_dom(leader)
+        follower.click("#pair-join-open")
+        follower.fill("#pair-code-input", code)
+        # sanitizeCode auto-submits on the 6th digit — no submit click.
+    elif via == "match":
+        leader.click("#pair-btn")          # open() + connect()
+        code = _wait_code_dom(leader)
+        follower.click("#pair-btn")        # MATCH joins + auto-approves
+    else:
+        raise UnsupportedError(f"pair via {via!r}")
+    for p in (leader, follower):
+        p.wait_for_function(
+            "() => document.getElementById('pair-status')"
+            "  .dataset.status === 'connected'", timeout=15000)
+    ctx.note("paired_both", True, f"UI-dom({via}): both chips connected")
+
+
+# ── simulator AX path ─────────────────────────────────────────────────
+
+_PAIR_LAUNCHER = ["2台で見開き"]
+_STRIP_NEEDLES = ["接続済", "相手不在", "再接続中", "読み込み中"]
+
+
+def _ax_texts(node):
+    if isinstance(node, dict):
+        for k in ("label", "name", "value", "title", "text"):
+            v = node.get(k)
+            if isinstance(v, str) and v:
+                yield v
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                yield from _ax_texts(v)
+    elif isinstance(node, list):
+        for c in node:
+            yield from _ax_texts(c)
+
+
+def _ui_tap(ctx: RunCtx, spec, needles, what: str,
+            tries: int = 14, delay: float = 0.7) -> str:
+    """Tap the first AX element matching any needle; retries while the
+    sheet/panel animates in."""
+    for _ in range(tries):
+        for n in (needles if isinstance(needles, (list, tuple)) else [needles]):
+            try:
+                if ctx.driver.tap_element(spec, n):
+                    return n
+            except EnvError:
+                break
+        time.sleep(delay)
+    raise EnvError(
+        f"ui tap: {what} not found in AX tree (needles={needles})")
+
+
+def _wait_code_ax(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
+    deadline = time.monotonic() + timeout * ctx.tscale
+    while time.monotonic() < deadline:
+        try:
+            tree = ctx.driver.describe_all(spec) or []
+        except EnvError:
+            tree = []
+        for t in _ax_texts(tree):
+            s = t.strip()
+            if len(s) == 6 and s.isdigit():
+                return s
+        time.sleep(0.8)
+    raise EnvError("pair code never appeared in the leader AX tree")
+
+
+def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
+    lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
+    if via == "code":
+        # Same deterministic reach as the DOM path: follower panel open
+        # (secSession) → leader ends via the real UI → leader reconnects
+        # for a fresh code → follower panel is on secChoice → 参加.
+        _ui_tap(ctx, fsp, _STRIP_NEEDLES, "status strip (follower)")
+        _ui_tap(ctx, lsp, _STRIP_NEEDLES, "status strip (leader)")
+        _ui_tap(ctx, lsp, ["解除"], "leave button (leader)")
+        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
+        code = _wait_code_ax(ctx, lsp)
+        _ui_tap(ctx, fsp, ["参加"], "join open (follower)")
+        _ui_tap(ctx, fsp, ["6桁のコードを入力", "コードを入力"],
+                "code field (follower)")
+        ctx.driver.input_text(fsp, code)   # 6th digit auto-submits
+    elif via == "match":
+        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)")
+        code = _wait_code_ax(ctx, lsp)
+        _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)")
+    else:
+        raise UnsupportedError(f"pair via {via!r}")
+    ctx.poll_both(
+        lambda a, b: a["status"] == "connected" and b["status"] == "connected",
+        timeout=30, what="paired via AX UI")
+    ctx.note("paired_both", True, f"UI-ax({via}): both connected")
 
 
 def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
@@ -693,7 +835,10 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
         name = node.get("name", "")
         p = f"{path}/{name}".strip("/") if path else name
         if node.get("type") == "folder":
-            cands.append(p)
+            # (path, tile label): the browse tile shows node.name, which
+            # flattening can rewrite to "parent/child" — keep it for the
+            # AX tap path.
+            cands.append((p, name))
             for ch in node.get("children") or []:
                 if isinstance(ch, dict) and ch.get("type") == "folder":
                     walk(ch, p)
@@ -702,7 +847,7 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
             else (folders or {}).get("folders") or []:
         walk(top, "")
     cands.sort()
-    for folder in cands:
+    for folder, tile in cands:
         try:
             imgs = _api_json(
                 ctx, "/api/images?folder=" +
@@ -717,7 +862,7 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
         names = [n for n in names if n]
         if len(names) >= min_pages:
             if index <= 0:
-                return {"folder": folder,
+                return {"folder": folder, "tile": tile,
                         "page": {"folder": folder,
                                  "name": sorted(names)[0]},
                         "offset": offset}
@@ -773,12 +918,19 @@ def op_open_work(ctx: RunCtx, op: dict) -> None:
 
 
 def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
-    leader = ctx.clients["leader"].page
+    lsp = ctx.clients["leader"]
     page = work["page"]
-    leader.evaluate(
-        "([folder, page]) => window.ViewerNavigation.request("
-        "  {type: 'openWork', folder: folder, page: page, via: 'runner'})",
-        [work["folder"], page])
+    if lsp.page is not None:
+        lsp.page.evaluate(
+            "([folder, page]) => window.ViewerNavigation.request("
+            "  {type: 'openWork', folder: folder, page: page,"
+            "  via: 'runner'})",
+            [work["folder"], page])
+    else:
+        # simulator: tap the work's browse tile by its display name —
+        # the leader's real pick gesture (selecting → OPEN_WORK).
+        _ui_tap(ctx, lsp, [work.get("tile") or work["folder"]],
+                f"work tile {work.get('tile')}")
     l, f = ctx.poll_both(
         lambda a, b: a["phase"] == "reading" and b["phase"] == "reading"
         and a["applied"]["spreadId"],
@@ -801,7 +953,7 @@ def _send_move(ctx: RunCtx, op: dict) -> dict:
     if ctx.surface == "ui":
         page = ctx.clients[actor].page
         if page is None:
-            raise UnsupportedError("ui surface needs the chrome driver")
+            return _send_move_ax(ctx, actor, op)
         if t == "turn":
             ok = page.evaluate(
                 "([d, cc]) => window.ViewerNavigation.request({type: 'turn',"
@@ -822,6 +974,34 @@ def _send_move(ctx: RunCtx, op: dict) -> dict:
                 int(op["offset"]))
         return {"sent": bool(ok)}
     return ctx.cmd(actor, _CMD_FOR_OP[t], params) or {"sent": True}
+
+
+def _send_move_ax(ctx: RunCtx, actor: str, op: dict) -> dict:
+    """ui surface on the simulator driver: REAL device input — edge-zone
+    taps for TURN (the paired view's tap zones drive the intent), chrome
+    button taps for offset, the pair panel for side swap."""
+    t = op["type"]
+    spec = ctx.clients[actor]
+    if t == "turn":
+        w, h = ctx.driver.screen_size(spec)
+        d = int(op.get("delta", 1))
+        n = min(abs(d), 10)
+        # default tapdir: right edge = next spread, left edge = prev.
+        x = (w - 16.0) if d > 0 else 16.0
+        for _ in range(n):
+            ctx.driver.tap(spec, x, h * 0.5)
+            time.sleep(0.3)
+        return {"sent": True}
+    if t == "swap_sides":
+        _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip")
+        _ui_tap(ctx, spec, ["左右交換"], "swap button")
+        return {"sent": True}
+    if t == "set_offset":
+        # #spread-shift toggles the offset (0<->1) — the chrome button
+        # is the real input path; scenario uses offset:1 for the toggle.
+        _ui_tap(ctx, spec, ["見開きペアリング切替"], "spread-shift button")
+        return {"sent": True}
+    raise UnsupportedError(f"ui-ax move {t!r} has no device gesture")
 
 
 def _assert_reject_or_blocked(ctx: RunCtx, op: dict, send_res: dict,
@@ -919,6 +1099,10 @@ def _assert_ui_views(ctx: RunCtx, l: dict, f: dict) -> None:
              "same spread anchor on both devices")
     for role, st in (("leader", l), ("follower", f)):
         spec = ctx.clients[role]
+        if spec.page is None:
+            # no DOM-eval on the simulator — member-view asserts
+            # (side/anchor/ref/blank) + screenshots are the evidence.
+            continue
         ok = spec.page.evaluate(
             """() => {
               const pv = window.PairedView ? window.PairedView.state() : null;
@@ -975,6 +1159,20 @@ def op_goto(ctx: RunCtx, op: dict) -> None:
 
 def op_swap_sides(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "leader")
+    if ctx.surface == "ui":
+        before = ctx.state(actor)["applied"].get("leaderSide") or "left"
+        want = "left" if before == "right" else "right"
+        _send_move(ctx, op)
+        l, f = ctx.poll_both(
+            lambda a, b: a["applied"].get("leaderSide") == want
+            and b["applied"].get("leaderSide") == want
+            and _committed_same(a, b),
+            timeout=20, what="ui sides swapped")
+        ctx.note("sides_swapped", True, f"leaderSide={want}")
+        _assert_pair_ids(ctx, l, f, "swap_sides")
+        for st, role in ((l, "leader"), (f, "follower")):
+            _assert_member_view(ctx, st, role)
+        return
     _need_table(ctx, "swap_sides")
     cur = ctx.state(actor)["applied"].get("spreadId")
     before = ctx.state(actor)["applied"].get("leaderSide") or "left"
@@ -1337,9 +1535,15 @@ def op_suspend(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     peer = "follower" if actor == "leader" else "leader"
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.PairController.client"
-            " && window.PairController.client.setActivity('suspended')")
+        spec = ctx.clients[actor]
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.PairController.client"
+                " && window.PairController.client.setActivity('suspended')")
+        else:
+            # simulator: background Safari — the real suspend path
+            # (visibilitychange/pagehide → SET_ACTIVITY suspended).
+            ctx.driver.background(spec)
     else:
         ctx.cmd(actor, "set_activity", {"state": "suspended"})
     ctx.poll(peer, lambda s: any(
@@ -1353,9 +1557,13 @@ def op_activate(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     peer = "follower" if actor == "leader" else "leader"
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.PairController.client"
-            " && window.PairController.client.setActivity('active')")
+        spec = ctx.clients[actor]
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.PairController.client"
+                " && window.PairController.client.setActivity('active')")
+        else:
+            ctx.driver.foreground(spec)
     else:
         ctx.cmd(actor, "set_activity", {"state": "active"})
     ctx.poll(peer, lambda s: all(
@@ -1412,9 +1620,13 @@ def op_bfcache(ctx: RunCtx, op: dict) -> None:
     peer = "follower" if actor == "leader" else "leader"
     pre = ctx.state(actor)
     pre_spread = pre["applied"]["spreadId"]
+    spec = ctx.clients[actor]
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.dispatchEvent(new Event('pagehide'))")
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.dispatchEvent(new Event('pagehide'))")
+        else:
+            ctx.driver.background(spec)      # real Safari pagehide
     else:
         ctx.cmd(actor, "lifecycle", {"type": "pagehide"})
     ctx.poll(peer, lambda s: any(
@@ -1423,8 +1635,11 @@ def op_bfcache(ctx: RunCtx, op: dict) -> None:
         timeout=15, what="peer sees suspended after pagehide")
     ctx.note("bfcache_suspended", True, "pagehide -> peer saw suspended")
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.dispatchEvent(new Event('pageshow'))")
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.dispatchEvent(new Event('pageshow'))")
+        else:
+            ctx.driver.foreground(spec)      # real Safari pageshow
     else:
         ctx.cmd(actor, "lifecycle", {"type": "pageshow"})
     l, f = ctx.poll_both(
@@ -1788,8 +2003,14 @@ def op_wait(ctx: RunCtx, op: dict) -> None:
 def op_leave(ctx: RunCtx, op: dict) -> None:
     actor = op.get("actor", "follower")
     if ctx.surface == "ui":
-        ctx.clients[actor].page.evaluate(
-            "() => window.PairController.leave()")
+        spec = ctx.clients[actor]
+        if spec.page is not None:
+            spec.page.evaluate(
+                "() => window.PairController.leave()")
+        else:
+            # simulator: real UI leave — strip → pair panel → 解除
+            _ui_tap(ctx, spec, _STRIP_NEEDLES, "status strip")
+            _ui_tap(ctx, spec, ["解除"], "leave button")
     else:
         ctx.cmd(actor, "leave")
     ctx.poll_both(

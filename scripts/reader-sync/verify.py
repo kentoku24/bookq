@@ -218,10 +218,6 @@ def main(argv=None) -> int:
         if args.leader_udid == args.follower_udid:
             print("[verify] leader/follower UDIDs must differ", file=sys.stderr)
             return EXIT_UNSUPPORTED
-    if args.surface == "ui" and args.driver == "simulator":
-        print("[verify] --surface ui is not implemented for the simulator "
-              "driver (real-UI AX driving lands with S09)", file=sys.stderr)
-        return EXIT_UNSUPPORTED
     if args.surface == "ui" and args.driver == "real":
         print("[verify] --surface ui is not implemented for the real "
               "driver (the real-UI DOM has no automation path on a "
@@ -331,7 +327,14 @@ def main(argv=None) -> int:
                                         host=fx_url_host)
                     for cid, spec in clients.items()}
         else:
-            urls = {cid: base_url for cid in clients}
+            # ui surface: the ?pair_report=<cid> param arms the in-page
+            # test-mode state hook (pairSync.js -> /api/v1/pair-report) —
+            # the state channel for clients the runner cannot JS-eval
+            # (iOS Safari / PWA webclip). Chrome ignores it harmlessly.
+            urls = {cid: base_url
+                    + ("&" if "?" in base_url else "?")
+                    + "pair_report=" + cid
+                    for cid in clients}
 
         driver.launch(clients, urls, fx=fx)
         result["devices"] = driver.devices(clients)
