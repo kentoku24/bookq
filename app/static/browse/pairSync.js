@@ -997,7 +997,7 @@
       // Hook freshness marker — the deploy watchdog asserts this so a
       // stale SWR-cached copy of this file (which lacks the field) is
       // detected and self-repaired even under TEST_MODE + pair_report.
-      window.__BOOKQ_PAIR_HOOK_V = 1;
+      window.__BOOKQ_PAIR_HOOK_V = 2;
       // report generation: a parked tab from a previous run keeps its
       // OLD hook POSTing under the same client id and silently clobbers
       // the fresh tab's state. The endpoint keeps only the newest gen.
@@ -1023,12 +1023,20 @@
       // resume path the scenario exists to cover.
       var _boot = Date.now();
       document.addEventListener('pointerdown', function (e) {
-        var el = e.target && e.target.closest
-          ? (e.target.closest('button,input,a,[id]') || e.target) : e.target;
-        _lastTap = {x: e.clientX, y: e.clientY, t: Date.now(),
-                    el: el && el.id ? '#' + el.id
-                       : (el && el.tagName ? el.tagName.toLowerCase()
-                                           : null)};
+        // Record the nearest ancestor that is a KNOWN control — inner
+        // spans (e.g. #pair-side inside the #pair-status strip) would
+        // otherwise shadow the real target and trip mistap detection.
+        var el = e.target, known = null, firstId = null;
+        for (var p = el; p && p !== document.documentElement;
+             p = p.parentElement) {
+          if (!p.id) continue;
+          if (!firstId) firstId = p;
+          if (_SEL.indexOf('#' + p.id) !== -1) { known = p; break; }
+        }
+        var rep = known ? '#' + known.id
+                  : firstId ? '#' + firstId.id
+                  : (el && el.tagName ? el.tagName.toLowerCase() : null);
+        _lastTap = {x: e.clientX, y: e.clientY, t: Date.now(), el: rep};
       }, true);
       var last = '', lastPost = 0;
       setInterval(function () {

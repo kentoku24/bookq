@@ -1053,6 +1053,18 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             continue
         prev_r = None
         last_rep = rep
+        # A zombie reader (leave/resume aftermath) mounts AFTER the
+        # scenario's cleanup pass and covers every control below it —
+        # escape back to browse instead of burning the poll budget on
+        # openers that can't pierce a full-screen tap zone. Legit
+        # reader-surface taps never reach this branch: their needle
+        # resolves above (zones are topmost during real reading).
+        if rep.get("readerView") and spec.kind == "safari":
+            from verify_drivers import _simctl
+            _simctl("openurl", spec.udid,
+                    (spec.launch_url or "").split("#")[0] + "#/browse/")
+            time.sleep(1.2)
+            continue
         rects = rep.get("rects") or {}
         # fire ONE opener per poll, and each opener at most once per ~5
         # polls — #menu-btn is a toggle, so re-firing every iteration

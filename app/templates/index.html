@@ -187,7 +187,7 @@
     // view — viewer-mode loads have no #tile-grid, which would blind the
     // check below and leave a stale sim-driving hook in place forever.
     if (/[?&]pair_report=/.test(location.search) &&
-        window.__BOOKQ_PAIR_HOOK_V !== 1) return true;
+        window.__BOOKQ_PAIR_HOOK_V !== 2) return true;
     if (!document.getElementById('tile-grid')) return false;
     return !(window.PairController &&
         typeof window.PairController.sendUiSync === 'function' &&
