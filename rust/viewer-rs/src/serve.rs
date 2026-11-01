@@ -218,7 +218,7 @@ pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
 }
 
 /// `_list_archive_prefix`: entries under an inner prefix, relative to it.
-fn list_archive_prefix(archive: &Path, inner: &str) -> Vec<String> {
+pub(crate) fn list_archive_prefix(archive: &Path, inner: &str) -> Vec<String> {
     let prefix = inner.trim_matches('/');
     if prefix.is_empty()
         || prefix == "."
