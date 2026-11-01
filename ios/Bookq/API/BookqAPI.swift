@@ -1,0 +1,334 @@
+import Foundation
+
+/// HTTP client for the bookq API. Attaches `Authorization: Bearer` when a
+/// token is present and handles the `/api/folders` 202 rebuild handshake.
+final class BookqAPI: Sendable {
+    let baseURL: URL
+    private let session: URLSession
+    private let tokenProvider: @Sendable () -> String?
+
+    init(baseURL: URL, session: URLSession = .shared,
+         tokenProvider: @escaping @Sendable () -> String?) {
+        self.baseURL = baseURL
+        self.session = session
+        self.tokenProvider = tokenProvider
+    }
+
+    /// `ws(s)://<host>/ws/reader-sync` — the dual-reader sync endpoint.
+    /// Bearer auth rides the upgrade request (server accepts it on the WS
+    /// handshake exactly like HTTP routes).
+    var readerSyncURL: URL? {
+        guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        else { return nil }
+        switch comps.scheme {
+        case "https": comps.scheme = "wss"
+        case "http": comps.scheme = "ws"
+        default: return nil
+        }
+        comps.path = "/ws/reader-sync"
+        comps.query = nil
+        return comps.url
+    }
+
+    // MARK: - Requests
+
+    private func makeRequest(path: String,
+                             query: [URLQueryItem] = [],
+                             method: String = "GET",
+                             headers: [String: String] = [:]) -> URLRequest {
+        var comps = URLComponents(
+            url: baseURL.appendingPathComponent(path),
+            resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { comps.queryItems = query }
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = method
+        // Bearer-authed JSON must never replay from URLCache — RFC 7231
+        // heuristically caches error responses, and a stale 404 on /api/me
+        // poisons every later boot until the entry expires.
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        if let token = tokenProvider() {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        return req
+    }
+
+    private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw APIError.protocolError
+        }
+        return (data, http)
+    }
+
+    /// Decode JSON or map a non-2xx status to APIError.
+    private func decode<T: Decodable>(_ type: T.Type,
+                                      _ data: Data,
+                                      _ resp: HTTPURLResponse) throws -> T {
+        if resp.statusCode == 401 || resp.statusCode == 403 {
+            throw APIError.unauthorized(status: resp.statusCode)
+        }
+        guard (200..<300).contains(resp.statusCode) else {
+            throw APIError.status(resp.statusCode)
+        }
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
+            throw APIError.decode(error)
+        }
+    }
+
+    // MARK: - Endpoints
+
+    /// GET /api/me — 401 means "login required" (or TEST_MODE off-server).
+    func me() async throws -> MeResponse {
+        let (data, resp) = try await send(makeRequest(path: "api/me"))
+        return try decode(MeResponse.self, data, resp)
+    }
+
+    /// GET /api/health — unauthenticated liveness.
+    func health() async throws {
+        let (_, resp) = try await send(makeRequest(path: "api/health"))
+        guard resp.statusCode == 200 else { throw APIError.status(resp.statusCode) }
+    }
+
+    func version() async throws -> VersionResponse {
+        let (data, resp) = try await send(makeRequest(path: "api/version"))
+        return try decode(VersionResponse.self, data, resp)
+    }
+
+    /// GET /api/folders. Retries through 202 rebuild responses using
+    /// `Retry-After`. Without `since` returns the bare tree array; with
+    /// `since` returns 304 or `{tree,generation}`.
+    func folders(since generation: Int? = nil,
+                 etag: String? = nil) async throws -> FoldersResult {
+        var attempt = 0
+        while true {
+            var query: [URLQueryItem] = []
+            if let generation {
+                query.append(URLQueryItem(name: "since", value: String(generation)))
+            }
+            var headers: [String: String] = [:]
+            if let etag { headers["If-None-Match"] = etag }
+            let (data, resp) = try await send(makeRequest(
+                path: "api/folders", query: query, headers: headers))
+            switch resp.statusCode {
+            case 202:
+                attempt += 1
+                guard attempt < 20 else { throw APIError.status(202) }
+                let wait = Double(resp.value(forHTTPHeaderField: "Retry-After") ?? "2") ?? 2
+                try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                continue
+            case 304:
+                return .notModified
+            case 401, 403:
+                throw APIError.unauthorized(status: resp.statusCode)
+            case 200..<300:
+                let payload = try JSONDecoder().decode(FoldersPayload.self, from: data)
+                let newETag = resp.value(forHTTPHeaderField: "ETag")
+                switch payload {
+                case .full(let tree, _):
+                    return .full(tree: tree, etag: newETag)
+                case .delta(let tree, let gen):
+                    return .delta(tree: tree, generation: gen, etag: newETag)
+                }
+            default:
+                throw APIError.status(resp.statusCode)
+            }
+        }
+    }
+
+    /// GET /api/images?folder= — direct image entries of a leaf (files,
+    /// archive entries or PDF pages). `folder` is a composed path.
+    func images(folder: String) async throws -> [String] {
+        let q = [URLQueryItem(name: "folder", value: folder)]
+        let (data, resp) = try await send(makeRequest(path: "api/images", query: q))
+        return try decode([String].self, data, resp)
+    }
+
+    // MARK: - Image URLs
+
+    /// Build a URL from an *already-encoded* path (via ImageURL.encodePath).
+    /// `appendingPathComponent` would re-encode "%" → "%25", so use
+    /// percentEncodedPath directly.
+    private func encodedURL(_ encodedPath: String, query: [URLQueryItem] = []) -> URL {
+        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+        var base = comps.percentEncodedPath
+        if base == "/" { base = "" }
+        comps.percentEncodedPath = base + "/" + encodedPath
+        if !query.isEmpty { comps.queryItems = query }
+        return comps.url!
+    }
+
+    func thumbURL(folder: String, name: String, w: Int = 400) -> URL {
+        let rel = folder.isEmpty ? name : folder + "/" + name
+        return encodedURL("thumb/" + ImageURL.encodePath(rel),
+                          query: [URLQueryItem(name: "w", value: String(w))])
+    }
+
+    /// Multi-thumb composite sprite — one request for the whole tile grid.
+    /// `names` are `thumbs[]` entries (each may contain "/"), `rows` comes
+    /// from `BrowseModel.multiThumbSpec`.
+    func thumbSpriteURL(folder: String, names: [String], rows: [Int], w: Int = 400) -> URL {
+        var comps = URLComponents(
+            url: baseURL.appendingPathComponent("api/thumb-sprite"),
+            resolvingAgainstBaseURL: false)!
+        let encodedNames = names.map(ImageURL.encodeSegment).joined(separator: ",")
+        comps.queryItems = [
+            URLQueryItem(name: "folder", value: folder),
+            URLQueryItem(name: "w", value: String(w)),
+            URLQueryItem(name: "v", value: "2"),
+            URLQueryItem(name: "rows", value: rows.map(String.init).joined(separator: ",")),
+        ]
+        // names must be percent-encoded *inside* the query manually because
+        // URLQueryItem would encode "," too.
+        var s = comps.url!.absoluteString
+        s += "&names=\(encodedNames)"
+        return URL(string: s)!
+    }
+
+    /// Reader page URL — `/view/` (normalized) or `/image/` (original).
+    func pageURL(folder: String, name: String, original: Bool) -> URL {
+        let rel = folder.isEmpty ? name : folder + "/" + name
+        return encodedURL("\(original ? "image" : "view")/" + ImageURL.encodePath(rel))
+    }
+
+    /// Absolute URL for an already-encoded API path + optional query.
+    func absolute(_ encodedPath: String, query: [URLQueryItem] = []) -> URL {
+        encodedURL(encodedPath, query: query)
+    }
+
+    /// Authenticated image fetch used by `RemoteImageView`.
+    func imageData(url: URL) async throws -> Data {
+        var req = URLRequest(url: url)
+        if let token = tokenProvider() {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, resp) = try await send(req)
+        guard resp.statusCode == 200 else {
+            throw APIError.status(resp.statusCode)
+        }
+        return data
+    }
+
+    // MARK: - Reading position / visibility
+
+    func readingPosition() async throws -> ReadingPosition? {
+        let (data, resp) = try await send(makeRequest(path: "api/reading-position"))
+        return try decode(PositionEnvelope.self, data, resp).position
+    }
+
+    func putReadingPosition(_ pos: ReadingPosition) async throws {
+        var req = makeRequest(path: "api/reading-position", method: "PUT")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(pos)
+        let (_, resp) = try await send(req)
+        guard (200..<300).contains(resp.statusCode) else {
+            throw APIError.status(resp.statusCode)
+        }
+    }
+
+    func deleteReadingPosition() async throws {
+        let (_, resp) = try await send(
+            makeRequest(path: "api/reading-position", method: "DELETE"))
+        guard (200..<300).contains(resp.statusCode) else {
+            throw APIError.status(resp.statusCode)
+        }
+    }
+
+    func folderVisibility() async throws -> VisibilitySnapshot {
+        let (data, resp) = try await send(makeRequest(path: "api/folder-visibility"))
+        return try decode(VisibilitySnapshot.self, data, resp)
+    }
+
+    /// PUT /api/folder-visibility — body exactly {root,hidden}, owner proof
+    /// via `X-Bookq-Visibility-Owner`. 409 = owner mismatch (stale account),
+    /// 404 = root not a current top-level folder (hide only). The response
+    /// is the authoritative post-write snapshot.
+    func setFolderVisibility(root: String, hidden: Bool, owner: String) async throws -> VisibilitySnapshot {
+        var req = makeRequest(path: "api/folder-visibility", method: "PUT")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(owner, forHTTPHeaderField: "X-Bookq-Visibility-Owner")
+        struct Body: Encodable { var root: String; var hidden: Bool }
+        req.httpBody = try JSONEncoder().encode(Body(root: root, hidden: hidden))
+        let (data, resp) = try await send(req)
+        return try decode(VisibilitySnapshot.self, data, resp)
+    }
+
+    // MARK: - Search / facets
+
+    /// `_fetchBuilding` equivalent (search/facets.js): 202 index-building
+    /// responses retry on `min(1500*(n+1),5000)` backoff, max 10 attempts.
+    /// Staleness is the caller's generation guard — Task cancellation also
+    /// aborts a retry loop mid-flight.
+    private func fetchBuilding(path: String, query: [URLQueryItem])
+        async throws -> (Data, HTTPURLResponse)? {
+        for attempt in 0..<10 {
+            try Task.checkCancellation()
+            let (data, resp) = try await send(makeRequest(path: path, query: query))
+            try Task.checkCancellation()
+            if resp.statusCode != 202 { return (data, resp) }
+            let wait = min(1.5 * Double(attempt + 1), 5.0)
+            try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+        }
+        return nil
+    }
+
+    /// GET /api/search — `doSearch` equivalent. Filters: artist/tag comma-
+    /// joined (server ANDs keys, ORs within a key), sort fixed relevance.
+    /// `includeHidden` opts out of the caller's hidden-root exclusion
+    /// (owner-scoped server-side — never another user's set). nil = still
+    /// building after 10 attempts or cancelled.
+    func search(q: String, artist: [String], tag: [String],
+                includeHidden: Bool) async throws -> SearchResponse? {
+        var query = [URLQueryItem(name: "q", value: q)]
+        if !artist.isEmpty { query.append(URLQueryItem(name: "artist", value: artist.joined(separator: ","))) }
+        if !tag.isEmpty { query.append(URLQueryItem(name: "tag", value: tag.joined(separator: ","))) }
+        query.append(URLQueryItem(name: "sort", value: "relevance"))
+        if includeHidden { query.append(URLQueryItem(name: "include_hidden", value: "1")) }
+        guard let (data, resp) = try await fetchBuilding(
+            path: "api/search", query: query) else { return nil }
+        return try decode(SearchResponse.self, data, resp)
+    }
+
+    /// GET /api/metadata/facets — `loadFacets` equivalent. `path` scopes to
+    /// a subtree ("" = whole library).
+    func facets(path: String = "", includeHidden: Bool) async throws -> Facets? {
+        var query: [URLQueryItem] = []
+        if !path.isEmpty { query.append(URLQueryItem(name: "path", value: path)) }
+        if includeHidden { query.append(URLQueryItem(name: "include_hidden", value: "1")) }
+        guard let (data, resp) = try await fetchBuilding(
+            path: "api/metadata/facets", query: query) else { return nil }
+        return try decode(Facets.self, data, resp)
+    }
+
+    /// POST /api/refresh — full metadata rebuild.
+    func refresh() async throws {
+        let (_, resp) = try await send(makeRequest(path: "api/refresh", method: "POST"))
+        guard (200..<300).contains(resp.statusCode) else {
+            throw APIError.status(resp.statusCode)
+        }
+    }
+}
+
+enum FoldersResult {
+    case full(tree: [TreeNode], etag: String?)
+    case delta(tree: [TreeNode], generation: Int, etag: String?)
+    case notModified
+}
+
+enum APIError: LocalizedError {
+    case unauthorized(status: Int)
+    case status(Int)
+    case decode(Error)
+    case protocolError
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthorized(let s): return "認証が必要です (HTTP \(s))"
+        case .status(let s): return "サーバーエラー (HTTP \(s))"
+        case .decode(let e): return "レスポンス解析エラー: \(e.localizedDescription)"
+        case .protocolError: return "不正なレスポンス"
+        }
+    }
+}
