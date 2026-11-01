@@ -726,6 +726,29 @@ async fn reader_sync_drain(
     }
 }
 
+/// Accepted sockets get TCP_NODELAY — small WS frames must not wait on
+/// Nagle's delayed-ACK timer (asyncio/uvicorn do this by default).
+struct NoDelayListener(tokio::net::TcpListener);
+
+impl axum::serve::Listener for NoDelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok((io, addr)) if io.set_nodelay(true).is_ok() => return (io, addr),
+                Ok(_) => {}
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -826,7 +849,7 @@ async fn main() {
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");
     tracing::info!(%addr, %upstream, "viewer-rs listening");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
-    axum::serve(listener, app)
+    axum::serve(NoDelayListener(listener), app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
