@@ -1213,20 +1213,27 @@ def _op_open_work_ui(ctx: RunCtx, work: dict) -> None:
         # subfolder — pop back to root so the work tile is reachable.
         _ui_browse_root(ctx, lsp)
         _ui_tap(ctx, lsp, needles, f"work tile {work.get('tile')}")
+        reading = (
+            lambda a, b: a["phase"] == "reading"
+            and b["phase"] == "reading"
+            and a["applied"]["spreadId"])
         try:
             l, f = ctx.poll_both(
-                lambda a, b: a["phase"] == "reading"
-                and b["phase"] == "reading"
-                and a["applied"]["spreadId"],
-                timeout=20, what="ui phase=reading (first tap)")
+                reading, timeout=25, what="ui phase=reading (first tap)")
         except AssertError:
-            _ui_tap(ctx, lsp, needles,
-                    f"work tile retry {work.get('tile')}")
-            l, f = ctx.poll_both(
-                lambda a, b: a["phase"] == "reading"
-                and b["phase"] == "reading"
-                and a["applied"]["spreadId"],
-                timeout=30, what="ui phase=reading")
+            # the reader leaves the browse DOM the moment it mounts —
+            # a slow manifest apply on real WebKit looks exactly like
+            # this. Grace-poll before blaming the tap: re-tapping when
+            # the open is already in flight is guaranteed-doomed.
+            try:
+                l, f = ctx.poll_both(
+                    reading, timeout=20,
+                    what="ui phase=reading (open in flight)")
+            except AssertError:
+                _ui_tap(ctx, lsp, needles,
+                        f"work tile retry {work.get('tile')}")
+                l, f = ctx.poll_both(
+                    reading, timeout=30, what="ui phase=reading")
         ctx.note("ui_open_work", True,
                  f"spreadId={l['applied']['spreadId']} "
                  f"rev={l['applied']['index']}")
