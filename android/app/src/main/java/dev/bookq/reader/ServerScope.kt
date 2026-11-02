@@ -10,6 +10,7 @@ import dev.bookq.data.TreeRepository
 import dev.bookq.data.VisibilityRepository
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -35,9 +36,12 @@ class ServerScope(
 ) {
     private val stateDir = File(context.filesDir, "state")
 
-    /** Repo jobs die with the scope — not on screen teardown. */
+    /** Repo jobs die with the scope — not on screen teardown. IO-bound:
+     *  inherits the parent's job but runs on Dispatchers.IO so
+     *  decode/Retry-After sleeps never touch the main thread. */
     val ioScope = CoroutineScope(
-        parent.coroutineContext + SupervisorJob(parent.coroutineContext[Job]))
+        parent.coroutineContext + SupervisorJob(parent.coroutineContext[Job]) +
+            Dispatchers.IO)
 
     val tree = TreeRepository(
         api = api,

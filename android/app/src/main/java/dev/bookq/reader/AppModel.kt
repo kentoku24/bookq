@@ -86,10 +86,12 @@ class AppModel<T : VersionProbe>(
             } catch (e: ApiException.Unauthorized) {
                 _phase.value = AppPhase.Login
             } catch (e: Exception) {
-                _phase.value = if (hasOfflineSnapshot()) {
-                    AppPhase.Ready
+                if (hasOfflineSnapshot()) {
+                    // Offline fallback still needs a scope or browse spins forever.
+                    _scopeValue.value = currentScope()
+                    _phase.value = AppPhase.Ready
                 } else {
-                    AppPhase.BootError(e.message ?: "接続できませんでした")
+                    _phase.value = AppPhase.BootError(e.message ?: "接続できませんでした")
                 }
             }
         }

@@ -307,27 +307,32 @@ private fun BrowseBody(
                                 stringResource(R.string.browse_search))
                         }
                     }
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Default.List,
-                            stringResource(R.string.settings_browse_layout))
-                    }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        BrowseLayout.entries.forEach { mode ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(when (mode) {
-                                        BrowseLayout.TILE -> stringResource(R.string.settings_layout_tile)
-                                        BrowseLayout.LIST -> stringResource(R.string.settings_layout_list)
-                                        BrowseLayout.CARD -> stringResource(R.string.settings_layout_card)
-                                    })
-                                },
-                                onClick = {
-                                    coroutineScope.launch {
-                                        graph.settings.setBrowseLayout(mode)
-                                    }
-                                    menuOpen = false
-                                },
-                            )
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Default.List,
+                                stringResource(R.string.settings_browse_layout))
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
+                            BrowseLayout.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(when (mode) {
+                                            BrowseLayout.TILE -> stringResource(R.string.settings_layout_tile)
+                                            BrowseLayout.LIST -> stringResource(R.string.settings_layout_list)
+                                            BrowseLayout.CARD -> stringResource(R.string.settings_layout_card)
+                                        })
+                                    },
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            graph.settings.setBrowseLayout(mode)
+                                        }
+                                        menuOpen = false
+                                    },
+                                )
+                            }
                         }
                     }
                     IconButton(onClick = onSettings) {

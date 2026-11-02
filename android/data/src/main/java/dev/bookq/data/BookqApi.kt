@@ -14,7 +14,9 @@ import dev.bookq.core.api.TreeNode
 import dev.bookq.core.api.TreeResponse
 import dev.bookq.core.api.VersionResponse
 import dev.bookq.core.api.VisibilitySnapshot
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl
@@ -70,18 +72,20 @@ class BookqApi(
     private fun get(url: HttpUrl): Request =
         Request.Builder().url(url).get().build()
 
-    /** Decode JSON or map a non-2xx status to [ApiException]. */
-    private inline fun <reified T> Response.decode(): T {
-        use {
+    /** Decode JSON or map a non-2xx status to [ApiException]. The body
+     *  read hops to IO — callers may resume on the main dispatcher. */
+    private suspend inline fun <reified T> Response.decode(): T {
+        val text = use {
             when {
                 code == 401 || code == 403 -> throw ApiException.Unauthorized(code)
                 code !in 200..299 -> throw ApiException.Status(code)
             }
-            return try {
-                json.decodeFromString<T>(body.string())
-            } catch (e: Exception) {
-                throw ApiException.Decode(e)
-            }
+            withContext(Dispatchers.IO) { body.string() }
+        }
+        return try {
+            json.decodeFromString<T>(text)
+        } catch (e: Exception) {
+            throw ApiException.Decode(e)
         }
     }
 
@@ -176,7 +180,8 @@ class BookqApi(
                 it.code !in 200..299 -> throw ApiException.Status(it.code)
             }
             return try {
-                json.decodeFromString<PositionStatus>(it.body.string())
+                json.decodeFromString<PositionStatus>(
+                    withContext(Dispatchers.IO) { it.body.string() })
             } catch (e: Exception) {
                 null // ok/stale is informational — any 2xx counts as accepted
             }
