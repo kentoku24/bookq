@@ -16,11 +16,12 @@
 //! not ported yet, so outside test mode everything proxies upstream.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     io,
     io::Write,
     path::{Component, Path, PathBuf},
+    sync::{LazyLock, Mutex},
 };
 
 use axum::{
@@ -120,9 +121,13 @@ pub(crate) fn realpath(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `_is_within`: target inside base after resolving both.
+/// `base` must already be canonical — `AppState` canonicalizes `downloads`
+/// once at startup. Only `target` pays a per-call realpath (required for
+/// symlink-escape safety); canonicalizing `base` per request was a
+/// stat-walk on every hot-path call.
 pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
-    match (realpath(base), realpath(target)) {
-        (Ok(b), Ok(t)) => t.starts_with(&b),
+    match realpath(target) {
+        Ok(t) => t.starts_with(base),
         _ => false,
     }
 }
@@ -468,7 +473,58 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
             &format!("Folder not found: {folder}"),
         ));
     }
-    Serve::Done(json_list(folder, bookq_core::list_images(&resolved).unwrap_or_default()))
+    Serve::Done(json_list(folder, dir_images_cached(&resolved)))
+}
+
+/// Directory image-listing memo keyed on dir mtime — a readdir of a large
+/// folder on a slow volume costs tens of ms, while a single metadata call
+/// costs ~µs. Dir mtime changes on add/remove/rename (file-content edits
+/// do not affect the name list, so they need no invalidation).
+static DIR_IMAGES_MEMO: LazyLock<Mutex<DirImagesMemo>> = LazyLock::new(|| {
+    Mutex::new(DirImagesMemo {
+        map: HashMap::new(),
+        lru: VecDeque::new(),
+    })
+});
+const DIR_IMAGES_MEMO_CAP: usize = 128;
+
+struct DirImagesMemo {
+    map: HashMap<PathBuf, (u128, Vec<String>)>,
+    lru: VecDeque<PathBuf>,
+}
+
+fn dir_mtime_key(dir: &Path) -> Option<u128> {
+    dir.metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+}
+
+fn dir_images_cached(dir: &Path) -> Vec<String> {
+    let mt = dir_mtime_key(dir);
+    if let Some(mt) = mt {
+        if let Ok(g) = DIR_IMAGES_MEMO.lock() {
+            if let Some((k, names)) = g.map.get(dir) {
+                if *k == mt {
+                    return names.clone();
+                }
+            }
+        }
+    }
+    let names = bookq_core::list_images(dir).unwrap_or_default();
+    if let Some(mt) = mt {
+        if let Ok(mut g) = DIR_IMAGES_MEMO.lock() {
+            g.map.insert(dir.to_path_buf(), (mt, names.clone()));
+            g.lru.push_back(dir.to_path_buf());
+            while g.map.len() > DIR_IMAGES_MEMO_CAP {
+                if let Some(old) = g.lru.pop_front() {
+                    g.map.remove(&old);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Compact JSON list matching Starlette's `json.dumps(..., separators=(",",":"))`.
@@ -649,11 +705,14 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
     set_header(&mut r, header::CONTENT_TYPE, guess_type(&path.to_string_lossy()));
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
     match plan_range(headers, size) {
-        RangePlan::Full => match std::fs::File::open(path) {
-            Ok(f) => {
+        RangePlan::Full => match std::fs::read(path) {
+            // Whole-buffer read: ReaderStream's 8KB chunks pay a per-chunk
+            // wake through the spawn_blocking → Body stream bridge — ~1ms
+            // per chunk vs hypercorn's sendfile — so a single memcpy is
+            // cheaper at typical page sizes (100KB–a few MB).
+            Ok(bytes) => {
                 set_header(&mut r, header::CONTENT_LENGTH, &size.to_string());
-                let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(f));
-                *r.body_mut() = Body::from_stream(stream);
+                *r.body_mut() = Body::from(bytes);
                 Serve::Done(r)
             }
             Err(_) => Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
