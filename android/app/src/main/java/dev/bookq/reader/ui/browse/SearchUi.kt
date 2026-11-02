@@ -2,6 +2,8 @@ package dev.bookq.reader.ui.browse
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -192,11 +194,14 @@ fun FacetSheet(
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
+            // heightIn BEFORE verticalScroll — the cap must bound the
+            // scroll container; inside it would measure children past
+            // 480dp at height 0, hiding the tag section and footer.
             Modifier
+                .heightIn(max = 480.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
-                .padding(bottom = 16.dp)
-                .heightIn(max = 480.dp),
+                .padding(bottom = 16.dp),
         ) {
             Text(stringResource(R.string.facet_artists),
                 style = MaterialTheme.typography.titleSmall)
@@ -220,6 +225,7 @@ fun FacetSheet(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FacetChips(
     options: List<String>,
@@ -227,20 +233,20 @@ private fun FacetChips(
     onToggle: (String) -> Unit,
     kind: String,
 ) {
-    // Chips wrap — FlowRow unavailable, so chunk into fixed rows.
-    options.chunked(4).forEach { row ->
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(vertical = 2.dp),
-        ) {
-            row.forEach { v ->
-                FilterChip(
-                    selected = v in selected,
-                    onClick = { onToggle(v) },
-                    label = { Text(v, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    modifier = Modifier.testTag("facetChip:$kind:$v"),
-                )
-            }
+    // FlowRow wraps chips by width — fixed chunked(n) rows would crush
+    // long artist names to a few dp on narrow screens.
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier.padding(vertical = 2.dp),
+    ) {
+        options.forEach { v ->
+            FilterChip(
+                selected = v in selected,
+                onClick = { onToggle(v) },
+                label = { Text(v, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                modifier = Modifier.testTag("facetChip:$kind:$v"),
+            )
         }
     }
 }

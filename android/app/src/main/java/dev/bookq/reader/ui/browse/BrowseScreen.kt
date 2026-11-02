@@ -66,6 +66,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
@@ -108,6 +109,7 @@ fun BrowseScreen(
     onOpenReader: (String, Int) -> Unit,
     onSettings: () -> Unit,
     onBack: () -> Unit,
+    onTop: () -> Unit,
 ) {
     val scopeState by graph.serverScope.collectAsStateWithLifecycle()
     val scope = scopeState ?: run {
@@ -119,7 +121,7 @@ fun BrowseScreen(
     val controller = remember(scope) { BrowseController() }
     BrowseBody(
         scope, controller, entry, path,
-        onNavigate, onOpenReader, onSettings, onBack, graph,
+        onNavigate, onOpenReader, onSettings, onBack, onTop, graph,
     )
 }
 
@@ -134,6 +136,7 @@ private fun BrowseBody(
     onOpenReader: (String, Int) -> Unit,
     onSettings: () -> Unit,
     onBack: () -> Unit,
+    onTop: () -> Unit,
     graph: AppGraph,
 ) {
     val tree by scope.tree.state.collectAsStateWithLifecycle()
@@ -161,9 +164,30 @@ private fun BrowseBody(
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var facetOpen by remember { mutableStateOf(false) }
 
+    // Back while searching closes the search before unwinding the level —
+    // query/results live on ServerScope, so a parent entry would otherwise
+    // surface the result grid with no field to close it.
+    BackHandler(enabled = searchOpen || searchActive) {
+        scope.search.clear()
+        filter = ""
+        searchOpen = false
+    }
+
     // Editable roots = current top-level tree paths (web setTopLevelPaths).
     LaunchedEffect(tree.nodes) {
         vis.setTopLevelPaths(BrowseRules.foldersAt("", tree.nodes).map { it.first })
+    }
+
+    // `_visibilityOnChange` parity: any snapshot/mode change re-runs an
+    // active search (include_hidden + result visibility moved); leaving
+    // show-all under a hidden root bounces to the top instead of
+    // stranding on an empty level (web redirectHiddenToTop).
+    LaunchedEffect(visVersion) {
+        if (searchActive) scope.search.filtersChanged()
+        if (!vis.showAll && path.isNotEmpty() &&
+            vis.guardPath(path) == VisibilityState.Guard.HIDDEN) {
+            onTop()
+        }
     }
 
     // ── offline downloads (M5) ──
@@ -262,13 +286,15 @@ private fun BrowseBody(
         }
     }
 
-    // Search-result tap → same tap path as a folder tile (nav/open).
+    // Search-result tap → same tap path as a folder tile (nav/open). An
+    // unresolvable node (shallow window / flattened mid-path) defers the
+    // open-vs-navigate decision to the drain.
     fun openResult(meta: dev.bookq.core.api.ComicMetadata) {
         scope.search.clear()
         searchOpen = false
         val node = BrowseRules.nodeAt(meta.folderPath, tree.nodes)
         handle(controller.tap(meta.folderPath,
-            node?.let { BrowseRules.drillsDown(it) } ?: false, tree, vis))
+            node?.let { BrowseRules.drillsDown(it) }, tree, vis))
     }
 
     fun tap(item: LevelModel.Item) {
@@ -335,8 +361,11 @@ private fun BrowseBody(
         }
     }
 
-    // Drain the shallow/PENDING navigation queue once the tree is usable.
-    LaunchedEffect(tree.treeLoaded, visVersion) {
+    // Drain the shallow/PENDING navigation queue once the tree is usable —
+    // `pending` keys the effect too: a queue-on-arrival tap (unknown node
+    // on a loaded tree) must resolve without waiting for new state.
+    val pendingAction by controller.pending.collectAsStateWithLifecycle()
+    LaunchedEffect(tree.treeLoaded, visVersion, pendingAction) {
         controller.drain(tree.nodes, tree, vis)?.let(::handle)
     }
 
@@ -449,14 +478,16 @@ private fun BrowseBody(
                             Icon(Icons.Default.Search,
                                 stringResource(R.string.browse_search))
                         }
-                        // Facet sheet — web `#filter-btn`; badge dot when armed.
-                        IconButton(onClick = {
-                            scope.search.loadFacets(if (searchActive) "" else path)
-                            facetOpen = true
-                        }, modifier = Modifier.testTag("facetBtn")) {
-                            Icon(Icons.Default.FilterList,
-                                stringResource(R.string.browse_filters))
-                        }
+                    }
+                    // Facet sheet — web `#filter-btn` stays available in
+                    // search mode (search × facet compose); badge dot
+                    // when armed.
+                    IconButton(onClick = {
+                        scope.search.loadFacets(if (searchActive) "" else path)
+                        facetOpen = true
+                    }, modifier = Modifier.testTag("facetBtn")) {
+                        Icon(Icons.Default.FilterList,
+                            stringResource(R.string.browse_filters))
                     }
                     Box {
                         IconButton(onClick = { menuOpen = true },
@@ -532,9 +563,20 @@ private fun BrowseBody(
                     scope.search.removeFilter(k, v)
                 }
                 scope.visibility.statusText()?.let { s ->
-                    Text(s, style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(horizontal = 16.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 16.dp)) {
+                        Text(s, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline)
+                        // Web `_updateStatusDom` retry affordance.
+                        if (scope.visibility.lastError != null ||
+                            vis.status == VisibilityState.Status.ERROR) {
+                            TextButton(onClick = { scope.visibility.retry() },
+                                modifier = Modifier.testTag("visRetry")) {
+                                Text(stringResource(R.string.home_reload),
+                                    style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
                 }
                 // 続きから resume pill — root level only (web parity).
                 if (path.isEmpty() && !searchActive) {
@@ -557,10 +599,16 @@ private fun BrowseBody(
                         }
                     }
                 }
+                // `_visibleResults` — render-time isVisible on top of the
+                // server list, so a hidden root drops out the moment the
+                // show-all toggle flips (before the re-search lands).
+                val visibleResults = remember(searchResults, visVersion) {
+                    searchResults.filter { vis.isVisible(it.folderPath) }
+                }
                 when {
                     // Global search results replace the level grid.
                     searchActive -> SearchResultGrid(
-                        results = searchResults,
+                        results = visibleResults,
                         nodes = tree.nodes,
                         scope = scope,
                         coverW = coverW,
@@ -649,7 +697,10 @@ private fun VisOverlayFor(
     // changes.
     scope.visibility.version.collectAsStateWithLifecycle().value
     if (!vis.showAll) return
-    val pres = vis.presentation(item.path)
+    // ReadSelf tiles never own the eye toggle (web render.js: read-child
+    // passes editable=false) — only the Folder tile may write.
+    val pres = vis.presentation(item.path,
+        editable = if (item is LevelModel.Item.ReadSelf) false else null)
     if (pres.badge == null && !pres.toggle) return
     val cs = rememberCoroutineScope()
     val busy = scope.visibility.saving
@@ -660,8 +711,19 @@ private fun VisOverlayFor(
         pres = pres, path = item.path, busy = busy,
         onToggle = {
             cs.launch {
+                // Web `setHidden` parity: unhide only on a SELF match and
+                // send the SERVER-stored key — `set_hidden` deletes by
+                // exact-match, so the NFC/lowercase display path would
+                // 0-row the unhide of a differently-cased stored root.
+                val match = vis.hiddenMatch(item.path)
+                val (target, hidden) =
+                    if (match?.kind == VisibilityState.MatchKind.SELF) {
+                        match.key to false
+                    } else {
+                        item.path to true
+                    }
                 try {
-                    scope.visibility.setHidden(item.path, !pres.hidden)
+                    scope.visibility.setHidden(target, hidden)
                 } catch (e: dev.bookq.data.VisibilityRepository.SaveException) {
                     snackbar.showSnackbar(when (e.error) {
                         dev.bookq.data.VisibilityRepository.SaveError.CONFLICT ->

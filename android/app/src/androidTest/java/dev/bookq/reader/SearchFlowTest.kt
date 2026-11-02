@@ -58,39 +58,54 @@ class SearchFlowTest {
         ).putExtra("serverURL", url)
 
         ActivityScenario.launch<MainActivity>(intent).use {
-            waitTag("tile:$top")
+            check(waitTag("tile:$top")) { "browse grid never rendered" }
             composeRule.onNodeWithTag("tile:$top").assertIsDisplayed()
 
             // ── search: field → grid swap → restore ──
             composeRule.onNodeWithTag("searchBtn").performClick()
-            waitTag("searchField")
+            check(waitTag("searchField")) { "search field did not open" }
             composeRule.onNodeWithTag("searchField")
                 .performTextInput("zzz-no-match-zzz")
             // Even a zero-hit query flips to result mode — browse tiles
             // must leave the tree.
-            goneTag("tile:$top")
+            check(goneTag("tile:$top")) {
+                "search results did not replace the browse grid" }
             composeRule.onNodeWithTag("searchClose").performClick()
-            waitTag("tile:$top")
+            check(waitTag("tile:$top")) { "browse grid did not return" }
 
             // ── facet sheet ──
             composeRule.onNodeWithTag("facetBtn").performClick()
-            waitTag("facetApply")
+            check(waitTag("facetApply")) { "facet sheet did not open" }
             composeRule.onNodeWithTag("facetReset").assertExists()
             composeRule.onNodeWithTag("facetApply").performClick()
-            goneTag("facetApply")
+            check(goneTag("facetApply")) { "facet sheet did not close" }
 
             // ── show-all + hide/unhide round-trip ──
             composeRule.onNodeWithTag("layoutMenuBtn").performClick()
-            waitTag("showAllMenuItem")
+            check(waitTag("showAllMenuItem")) { "menu did not open" }
             composeRule.onNodeWithTag("showAllMenuItem").performClick()
 
             // In showAll the top tile gets an eye toggle.
-            waitTag("visToggle:$top")
-            composeRule.onNodeWithTag("visToggle:$top").performClick()
-            waitTag("visBadge:$top")
-            // Restore — second eye tap unhides.
-            composeRule.onNodeWithTag("visToggle:$top").performClick()
-            goneTag("visBadge:$top", 10_000)
+            check(waitTag("visToggle:$top")) {
+                "no visToggle on the top tile in show-all" }
+            try {
+                composeRule.onNodeWithTag("visToggle:$top").performClick()
+                check(waitTag("visBadge:$top")) {
+                    "hide did not mark the top tile" }
+            } finally {
+                // Restore only when the tile is actually marked — a blind
+                // second tap would HIDE it when the first write failed.
+                val marked = composeRule.onAllNodesWithTag("visBadge:$top")
+                    .fetchSemanticsNodes().isNotEmpty()
+                if (marked) {
+                    runCatching {
+                        composeRule.onNodeWithTag("visToggle:$top")
+                            .performClick()
+                    }
+                    check(goneTag("visBadge:$top", 10_000)) {
+                        "unhide did not clear the badge" }
+                }
+            }
         }
     }
 }
