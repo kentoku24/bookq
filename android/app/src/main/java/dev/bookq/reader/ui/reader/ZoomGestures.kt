@@ -118,6 +118,7 @@ fun Modifier.zoomGestures(
 
         fun endPan() {
             val (armedTurn, dir) = zs.panEnd()
+            zlog { "endPan armed=$armedTurn dir=$dir canTurn=${canTurn(dir)} tx=${zs.tx} zoom=${zs.zoom}" }
             panId = null
             if (armedTurn && canTurn(dir)) {
                 onEdgeTurn(dir)
@@ -233,6 +234,7 @@ fun Modifier.zoomGestures(
                         val dy = t.position.y - panOrigin.y
                         val r = zs.panMove(dx, dy)
                         if (r[2] == 1f) { // decided — pan is owned by zoom now
+                            if (!panMoved) zlog { "pan decided dx=$dx dy=$dy tx=${zs.tx} armed=${zs.panArmed}" }
                             panMoved = true
                             apply(zs.zoom, r[0], r[1])
                             if (zs.panArmed && !panVibrated) {

@@ -66,6 +66,11 @@ import dev.bookq.data.BookqApi
 import dev.bookq.reader.R
 import kotlin.math.abs
 
+private const val OTAG = "ZoomDbg"
+private inline fun olog(msg: () -> String) {
+    if (dev.bookq.reader.BuildConfig.DEBUG) android.util.Log.d(OTAG, msg())
+}
+
 /** overview.js: pinch-out exits once the cumulative ratio exceeds 1.3. */
 private const val PINCH_OUT = 1.3f
 /** overview.js cell geometry: 3:4 cells, min column ~150 px. */
@@ -276,12 +281,15 @@ private fun OverviewGrid(
             .onGloballyPositioned { onGridRoot(it.boundsInRoot().topLeft) }
             // Pinch-out → exit at the cell under the fingers
             // (overview.js attach). Initial pass so the two-finger
-            // tracking pre-empts the grid's own scroll claim.
-            .pointerInput(work, curKey) {
+            // tracking pre-empts the grid's own scroll claim. The key
+            // must be stable — work/curKey can recompose mid-gesture
+            // and a pointerInput restart drops the whole gesture.
+            .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false,
                         pass = PointerEventPass.Initial)
                     var acc = 1f
+                    var sawMulti = false
                     var mid = Offset.Zero
                     // Fire as soon as the ratio crosses (web exits live,
                     // not on release) — a cell's clickable can claim the
@@ -292,6 +300,7 @@ private fun OverviewGrid(
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
                         val pressed = ev.changes.filter { it.pressed }
                         if (pressed.size >= 2) {
+                            sawMulti = true
                             val a = pressed[0]
                             val b = pressed[1]
                             val cur = (a.position - b.position).getDistance()
@@ -304,6 +313,7 @@ private fun OverviewGrid(
                         }
                         if (ev.changes.none { it.pressed }) break
                     }
+                    olog { "gesture end sawMulti=$sawMulti acc=$acc fired=$fired mid=$mid" }
                     if (fired) {
                         // elementFromPoint → the grid cell under lastMid.
                         // The fillMaxSize Box and the grid share bounds,
