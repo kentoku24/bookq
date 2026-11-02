@@ -46,6 +46,21 @@ class SearchFlowTest {
         true
     }.getOrDefault(false)
 
+    /** Every testTag in the merged tree — failure diagnostics only. */
+    private fun allTags(): List<String> {
+        val out = mutableListOf<String>()
+        fun walk(n: androidx.compose.ui.semantics.SemanticsNode) {
+            val k = androidx.compose.ui.semantics.SemanticsProperties.TestTag
+            if (k in n.config) out.add(n.config[k])
+            n.children.forEach(::walk)
+        }
+        return runCatching {
+            composeRule.onAllNodes(androidx.compose.ui.test.isRoot())
+                .fetchSemanticsNodes().forEach(::walk)
+            out
+        }.getOrDefault(out)
+    }
+
     @Test
     fun searchFacetAndShowAllFlow() {
         val args = InstrumentationRegistry.getArguments()
@@ -91,7 +106,7 @@ class SearchFlowTest {
             try {
                 composeRule.onNodeWithTag("visToggle:$top").performClick()
                 check(waitTag("visBadge:$top")) {
-                    "hide did not mark the top tile" }
+                    "hide did not mark the top tile — tags: " + allTags() }
             } finally {
                 // Restore only when the tile is actually marked — a blind
                 // second tap would HIDE it when the first write failed.
