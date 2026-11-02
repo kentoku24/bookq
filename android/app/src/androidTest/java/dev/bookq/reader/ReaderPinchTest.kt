@@ -260,36 +260,43 @@ class ReaderPinchTest {
         // ── 2.5. edge-turn: a pan that STARTS at a clamped edge and
         //     keeps going past EDGE_PX arms a page turn (web
         //     commitSwipeTurn band). First drag rides the clamp out to
-        //     an edge; the second drags on from there → turn. ──
-        val edgeX0 = 60f
-        val edgeX1 = d.displayWidth - 60f
+        //     an edge; the second drags on from there → turn. A book
+        //     with a single page has no turn in either direction — the
+        //     CI fixture is exactly that, so skip when total <= 1. ──
         val preEdge = counterText()
-        var turned = false
-        for (dir in intArrayOf(1, -1)) {
-            val (x0, x1) = if (dir > 0) edgeX0 to edgeX1 else edgeX1 to edgeX0
-            swipe(instr, decor, x0, x1, cy, steps = 14)
-            Thread.sleep(300)
-            swipe(instr, decor, x0, x1, cy, steps = 14)
-            turned = waitUntil(
-                { counterText() != preEdge || (zoomScale() ?: 9f) <= 1f },
-                5_000)
-            if (turned) break
-        }
-        assertTrue("edge-drag turn never moved the page " +
-            "(counter=$preEdge → ${counterText()}, zoom=${zoomScale()})",
-            turned)
-        // The settle reset the layer to 1x — re-zoom for the
-        // reset-tap check below.
-        var reZoomed = false
-        for (attempt in 0..1) {
-            doubleTap(instr, decor, cx, cy)
-            if (waitUntil(
-                    { (zoomScale() ?: 1f) > 1.05f }, 2_500)) {
-                reZoomed = true; break
+        val edgeTotal = preEdge?.substringAfterLast('/')
+            ?.trim()?.toIntOrNull() ?: 0
+        if (edgeTotal > 1) {
+            val edgeX0 = 60f
+            val edgeX1 = d.displayWidth - 60f
+            var turned = false
+            for (dir in intArrayOf(1, -1)) {
+                val (x0, x1) =
+                    if (dir > 0) edgeX0 to edgeX1 else edgeX1 to edgeX0
+                swipe(instr, decor, x0, x1, cy, steps = 14)
+                Thread.sleep(300)
+                swipe(instr, decor, x0, x1, cy, steps = 14)
+                turned = waitUntil(
+                    { counterText() != preEdge || (zoomScale() ?: 9f) <= 1f },
+                    5_000)
+                if (turned) break
             }
+            assertTrue("edge-drag turn never moved the page " +
+                "(counter=$preEdge → ${counterText()}, zoom=${zoomScale()})",
+                turned)
+            // The settle reset the layer to 1x — re-zoom for the
+            // reset-tap check below.
+            var reZoomed = false
+            for (attempt in 0..1) {
+                doubleTap(instr, decor, cx, cy)
+                if (waitUntil(
+                        { (zoomScale() ?: 1f) > 1.05f }, 2_500)) {
+                    reZoomed = true; break
+                }
+            }
+            assertTrue("re-zoom after edge-turn failed", reZoomed)
+            Thread.sleep(400)
         }
-        assertTrue("re-zoom after edge-turn failed", reZoomed)
-        Thread.sleep(400)
 
         // ── 3. center tap while zoomed → snaps back to 1x. Wait out
         //     the 400ms pan-decided tap suppression first, and wait
