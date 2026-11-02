@@ -21,9 +21,9 @@ sha2 = "0.10"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 # default-features off: default pulls ~40 unused crates (ravif/rav1e AVIF
-# encoder, exr, tiff, qoi, moxcms, rayon). Min 0.25.5 for
-# ImageDecoder::orientation / DynamicImage::apply_orientation.
-image = { version = "0.25.5", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+# encoder, exr, tiff, qoi, moxcms, rayon). Min = locked version, which is
+# what we build/test (ImageDecoder::orientation landed in 0.25.5).
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
 tokio = { version = "1", features = ["full"] }
