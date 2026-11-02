@@ -131,4 +131,12 @@ class ReaderControllerTest {
         c.recordAR(1, -1f) // invalid — ignored
         assertEquals(0.71f, c.arOf(1), 0.001f)
     }
+
+    @Test fun recordErrorMarksFailedPages() = runTest {
+        val c = ReaderController()
+        c.recordError(4)
+        c.recordError(4) // dedupe
+        c.recordError(9)
+        assertEquals(setOf(4, 9), c.failedPages.value)
+    }
 }

@@ -188,6 +188,12 @@ fun ReaderScreen(
     }
 
     Immersive(chrome)
+    // Keep the screen lit while reading (plan: FLAG_KEEP_SCREEN_ON).
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
 }
 
 private fun goBack(nav: NavController, clickedPath: String) {
@@ -244,8 +250,9 @@ private fun ReaderBody(
         if (now - lastNavAt > 250) {
             lastNavAt = now
             pendingSpread = target
+            // Instant strip — plan: tap turns snap, no animation.
             navJob = compose.launch {
-                pager.animateScrollToPage(target)
+                pager.scrollToPage(target)
                 pendingSpread = null
             }
         } else {
@@ -255,7 +262,7 @@ private fun ReaderBody(
                 kotlinx.coroutines.delay(160)
                 pendingSpread?.let { t ->
                     lastNavAt = android.os.SystemClock.uptimeMillis()
-                    pager.animateScrollToPage(t)
+                    pager.scrollToPage(t)
                     pendingSpread = null
                 }
             }
@@ -347,11 +354,11 @@ private fun ReaderBody(
                     work = work,
                     spreadIdx = spreadIdx,
                     controller = controller,
-                    original = original,
                     viewW = viewW,
                     viewH = viewH,
                     urlOf = ::pageUrl,
                     imageLoader = sc.imageLoader,
+                    onError = { controller.recordError(it) },
                 )
             }
         }
@@ -443,21 +450,24 @@ private fun ReaderBody(
                         )
                     }
                     // iOS counterText: chapter-local when cross-chapter,
-                    // else global real index.
+                    // else global real index. ⚠ marks a failed page in
+                    // the current spread (web counter semantics).
+                    val failed by controller.failedPages.collectAsStateWithLifecycle()
+                    val gi = work.spreads.getOrNull(pager.settledPage)?.first() ?: 0
                     Text(
-                        run {
-                            val gi = work.spreads.getOrNull(pager.settledPage)
-                                ?.first() ?: 0
+                        buildString {
                             if (work.isCrossChapter) {
                                 val inf = work.chapterInfo(gi)
-                                stringResource(R.string.reader_counter,
+                                append(stringResource(R.string.reader_counter,
                                     inf.localIdx + 1,
                                     work.chapters.getOrNull(inf.chapterIdx)
-                                        ?.images?.size ?: 0)
+                                        ?.images?.size ?: 0))
                             } else {
-                                stringResource(R.string.reader_counter,
-                                    work.realIndex(gi) + 1, work.realCount)
+                                append(stringResource(R.string.reader_counter,
+                                    work.realIndex(gi) + 1, work.realCount))
                             }
+                            if (work.spreads.getOrNull(pager.settledPage)
+                                    ?.any { it in failed } == true) append(" ⚠")
                         },
                         color = Color.White,
                         style = MaterialTheme.typography.labelLarge,
@@ -475,11 +485,11 @@ private fun SpreadCell(
     work: ReaderWork,
     spreadIdx: Int,
     controller: ReaderController,
-    original: Boolean,
     viewW: Float,
     viewH: Float,
     urlOf: (Int) -> String,
     imageLoader: coil3.ImageLoader,
+    onError: (Int) -> Unit,
 ) {
     val pages = work.spreads.getOrNull(spreadIdx) ?: return
     val ars by controller.pageAR.collectAsStateWithLifecycle()
@@ -506,6 +516,7 @@ private fun SpreadCell(
                         spreadIdx in work.chapterStartSpreads,
                     chapterName = work.chapterInfo(idx).name,
                     onAR = { a -> controller.recordAR(idx, a) },
+                    onError = { onError(idx) },
                 )
             }
         }
@@ -522,6 +533,7 @@ private fun PageCell(
     isChapterStart: Boolean,
     chapterName: String,
     onAR: (Float) -> Unit,
+    onError: () -> Unit,
 ) {
     val context = LocalContext.current
     val request = remember(url) { ImageRequest.Builder(context).data(url).build() }
@@ -538,6 +550,7 @@ private fun PageCell(
                 val s = state.painter.intrinsicSize
                 if (s.width > 0f && s.height > 0f) onAR(s.width / s.height)
             },
+            onError = { onError() },
             loading = {},
             error = {
                 // Web's ⚠ marker on a failed page cell.

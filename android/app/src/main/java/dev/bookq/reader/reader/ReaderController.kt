@@ -56,6 +56,15 @@ class ReaderController {
 
     fun arOf(globalIdx: Int): Float = _pageAR.value[globalIdx] ?: lastAR
 
+    // ── failed pages (web marks ⚠ on the cell + counter) ──
+    private val _failedPages = MutableStateFlow<Set<Int>>(emptySet())
+    val failedPages = _failedPages.asStateFlow()
+
+    fun recordError(globalIdx: Int) {
+        if (globalIdx in _failedPages.value) return
+        _failedPages.value = _failedPages.value + globalIdx
+    }
+
     /**
      * Assemble the work — `loadImages` port. Tree nodes provide leaf/mixed
      * chapter images; the plain fallback calls [imageLister]
