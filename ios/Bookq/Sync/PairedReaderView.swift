@@ -91,15 +91,6 @@ struct PairedReaderView: View {
         .focusable().focusEffectDisabled()
         .onKeyPress(.rightArrow) { turn(1, cross: false); return .handled }
         .onKeyPress(.leftArrow) { turn(-1, cross: false); return .handled }
-        .overlay(alignment: .trailing) { chapterPill(p) }
-    }
-
-    private func chapterPill(_ p: PairProjection) -> some View {
-        Text(p.chapterName)
-            .font(.caption).foregroundStyle(.white)
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.black.opacity(0.55), in: Capsule())
-            .padding(.trailing, 12)
     }
 
     private func turn(_ delta: Int, cross: Bool = true) {
