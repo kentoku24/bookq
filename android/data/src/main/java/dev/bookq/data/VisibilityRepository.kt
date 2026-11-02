@@ -51,6 +51,20 @@ class VisibilityRepository(
     private var queued = false
     private val repoScope = scope
 
+    // ── write-path state (web `_saving`/`_lastError`/`_coalesceTimer`) ──
+
+    enum class LastError { FETCH, AUTH, SAVE, OWNER }
+    /** `setHidden` rejection reasons — caller toasts accordingly. */
+    enum class SaveError { INVALID, BUSY, OFFLINE, CONFLICT, SAVE, NET }
+
+    /** One in-flight PUT (web `_saving` + `vis-busy` lock). */
+    @Volatile var saving = false
+        private set
+    @Volatile var lastError: LastError? = null
+        private set
+    private var coalesceJob: Job? = null
+    private var convergenceSent = false
+
     interface CacheIO {
         fun read(): String?
         fun write(text: String)
@@ -68,8 +82,27 @@ class VisibilityRepository(
     }
 
     fun setShowAll(v: Boolean) {
+        if (vis.showAll == v) return
         vis.setShowAll(v)
         bump()
+        scheduleRefresh() // web: mode switch re-syncs against the server
+    }
+
+    /** `_scheduleRefresh` — coalesced re-refresh (400 ms): mode toggles,
+     *  foreground regains, post-stale-write convergence. */
+    fun scheduleRefresh() {
+        coalesceJob?.cancel()
+        coalesceJob = repoScope.launch {
+            kotlinx.coroutines.delay(400)
+            refresh().join()
+        }
+    }
+
+    /** Error-state retry — status stays ERROR while in flight (web parity). */
+    fun retry() {
+        lastError = null
+        bump()
+        refresh()
     }
 
     fun refresh(): Job {
@@ -136,6 +169,80 @@ class VisibilityRepository(
             }
         }
     }
+
+    // ── write path: one in-flight PUT, server snapshot commits verbatim ──
+
+    /**
+     * `setHidden` — iOS `VisibilityStore.setHidden` / web `setHidden`.
+     * Throws [SaveException] with the [SaveError] kind so the caller can
+     * toast the right failure. The response body IS the authoritative
+     * post-write snapshot; a stale payload (another device's GET landed
+     * mid-flight) is dropped in favour of exactly one convergence GET.
+     */
+    suspend fun setHidden(root: String, hidden: Boolean) {
+        val target = vis.validRootPath(root) ?: throw SaveException(SaveError.INVALID)
+        if (saving) throw SaveException(SaveError.BUSY)
+        if (vis.readOnly) throw SaveException(SaveError.OFFLINE)
+        saving = true
+        bump()
+        try {
+            val snap = api.setFolderVisibility(
+                root = target, hidden = hidden, owner = vis.owner)
+            vis.setStatus(VisibilityState.Status.READY, readOnly = false)
+            lastError = null
+            if (snap.owner != vis.owner || snap.revision >= vis.revision) {
+                vis.applySnapshot(
+                    snap.owner.ifEmpty { vis.owner }, snap.revision,
+                    snap.hiddenRoots,
+                    force = snap.owner.isNotEmpty() && snap.owner != vis.owner,
+                    allowDownrev = true,
+                )
+                writeCache(vis.snapshot())
+                convergenceSent = false
+            } else if (!convergenceSent) {
+                convergenceSent = true
+                scheduleRefresh()
+            }
+            bump()
+        } catch (e: ApiException.Unauthorized) {
+            vis.setStatus(VisibilityState.Status.ERROR)
+            lastError = LastError.AUTH
+            bump()
+            throw SaveException(SaveError.SAVE)
+        } catch (e: ApiException.Status) {
+            if (e.code == 409) {
+                // Booted owner is stale — pull the server's authoritative
+                // owner/snapshot instead of writing to another account.
+                vis.setStatus(VisibilityState.Status.ERROR)
+                lastError = LastError.OWNER
+                refresh()
+                bump()
+                throw SaveException(SaveError.CONFLICT)
+            }
+            lastError = LastError.SAVE
+            bump()
+            throw SaveException(SaveError.SAVE)
+        } catch (e: Exception) {
+            lastError = LastError.SAVE
+            bump()
+            throw SaveException(SaveError.NET)
+        } finally {
+            saving = false
+            bump()
+        }
+    }
+
+    /** `statusText` — web `_updateStatusDom` labels (null = hidden row). */
+    fun statusText(): String? = when {
+        saving -> "保存中…"
+        vis.status == VisibilityState.Status.LOADING -> "読込中…"
+        vis.readOnly -> "オフライン（変更不可）"
+        vis.status == VisibilityState.Status.ERROR -> "取得失敗"
+        lastError == LastError.SAVE -> "保存失敗"
+        else -> null
+    }
+
+    class SaveException(val error: SaveError) : Exception()
 
     private fun bump() {
         _version.value++
