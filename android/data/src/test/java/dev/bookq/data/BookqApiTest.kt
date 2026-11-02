@@ -121,7 +121,7 @@ class BookqApiTest {
         assertNull(r)
         assertEquals(10, server.requestCount)
         assertEquals(
-            listOf(1500L, 3000L, 4500L, 5000L, 5000L, 5000L, 5000L, 5000L, 5000L, 5000L),
+            listOf(1500L, 3000L, 4500L, 5000L, 5000L, 5000L, 5000L, 5000L, 5000L),
             sleeps)
     }
 

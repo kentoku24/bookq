@@ -104,6 +104,37 @@ class RepositoryTest {
         assertFalse(repo.state.value.treeLoaded)
     }
 
+    @Test fun shallowDoesNotClobberRestoredSnapshot() = runBlocking {
+        // A restored FULL snapshot must never be swapped for the shallow
+        // envelope — if stage 2 then fails the grid would lose data and
+        // stay shallow forever (polling only runs when treeLoaded).
+        server.enqueue(json(500, "{}"))
+        val snap = TreeRepository.MemorySnapshotIO().apply {
+            text = """{"nodes":[{"name":"cached","type":"folder"}],"generation":9}"""
+        }
+        val repo = TreeRepository(api(), java.io.File("."), testScope(), snapshot = snap)
+        assertTrue(repo.restoreSnapshot())
+        withTimeout(5_000) { repo.load().join() }
+        val st = repo.state.value
+        assertTrue(st.treeLoaded)
+        assertFalse(st.shallow)
+        assertEquals("cached", st.nodes[0].name)
+        assertEquals(9, st.generation)
+        // The depth=1 stage was skipped entirely — one full fetch only.
+        assertFalse(server.takeRequest().url.toString().contains("depth"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun refreshJobCompletesOnIndexFailure() = runBlocking {
+        // The pull-to-refresh spinner is cleared via Job completion, so
+        // a refreshIndex failure must still complete the Job.
+        server.enqueue(json(500, "{}"))
+        val repo = TreeRepository(api(), java.io.File("."), testScope(),
+            snapshot = TreeRepository.MemorySnapshotIO())
+        withTimeout(5_000) { repo.refresh().join() }
+        assertNotNull(repo.state.value.error)
+    }
+
     @Test fun staleLoadResultDiscardedByEpoch() = runBlocking {
         // A second load() supersedes the first — its full-tree result must
         // not clobber the newer state (app.js `_loadFoldersGen`). Each
@@ -240,6 +271,27 @@ class RepositoryTest {
         assertEquals("PUT", put.method)
     }
 
+    @Test fun progressPullMergeStillPushesLocalNewest() = runBlocking {
+        // Remote wins f/b while local f/a is newer than anything remote —
+        // BOTH must happen: merge f/b AND catch-up PUT f/a. An early
+        // return after the merge would swallow the push (sync.js pushes
+        // regardless of whether the merge applied).
+        server.enqueue(json(200, positionsBody(pos("f/b", 3, 40, 5000))))
+        server.enqueue(json(200, """{"status":"ok"}"""))
+        val store = ProgressRepository.MemoryStoreIO().apply {
+            text = """{"f/a":{"page":7,"total":20,"ts":9000},
+                |"f/b":{"page":1,"total":40,"ts":100}}""".trimMargin()
+        }
+        val repo = ProgressRepository(api(), testScope(), store)
+        assertTrue(repo.pull())
+        assertEquals(3, repo.book["f/b"]!!.page) // remote merged
+        assertEquals(7, repo.book["f/a"]!!.page) // local kept
+        assertEquals("GET", server.takeRequest().method)
+        val put = server.takeRequest()
+        assertEquals("PUT", put.method)
+        assertEquals("f/a", put.url.queryParameter("folder"))
+    }
+
     @Test fun progressPullNetworkErrorIsNoop() = runBlocking {
         server.enqueue(json(503, "{}"))
         val store = ProgressRepository.MemoryStoreIO().apply {
@@ -259,5 +311,24 @@ class RepositoryTest {
         withTimeout(5_000) { repo.flush().join() }
         val req = server.takeRequest()
         assertEquals("PUT", req.method)
+    }
+
+    @Test fun flushDuringInFlightPutDoesNotCancel() = runBlocking {
+        // PUT1 in flight when a second save + flush lands: the flight
+        // must finish (sync.js never cancels a send), then re-arm the
+        // queued record — 2 PUTs total, no wedged inFlight.
+        server.enqueue(MockResponse.Builder().code(200)
+            .bodyDelay(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .body("""{"status":"ok"}""").build())
+        server.enqueue(json(200, """{"status":"ok"}"""))
+        val repo = ProgressRepository(api(), testScope(),
+            ProgressRepository.MemoryStoreIO(), pushDebounceMs = 1)
+        repo.save("f/a", 1, 20)
+        assertEquals("PUT", server.takeRequest().method) // PUT1 flying
+        repo.save("f/a", 2, 20)                          // queues behind it
+        withTimeout(5_000) { repo.flush().join() }       // must not kill PUT1
+        val put2 = server.takeRequest()
+        assertEquals("PUT", put2.method)
+        assertEquals("f/a", put2.url.queryParameter("folder"))
     }
 }

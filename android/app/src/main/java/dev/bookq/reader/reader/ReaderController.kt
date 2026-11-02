@@ -4,6 +4,7 @@ import dev.bookq.core.api.TreeNode
 import dev.bookq.core.reader.PageRef
 import dev.bookq.core.reader.ReaderChapter
 import dev.bookq.core.reader.ReaderWork
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -65,6 +66,13 @@ class ReaderController {
         _failedPages.value = _failedPages.value + globalIdx
     }
 
+    /** A retry/reload that rendered — drop the ⚠ (web rewrites the
+     *  counter on every turn; a marker may never outlive its failure). */
+    fun clearError(globalIdx: Int) {
+        if (globalIdx !in _failedPages.value) return
+        _failedPages.value = _failedPages.value - globalIdx
+    }
+
     /**
      * Assemble the work — `loadImages` port. Tree nodes provide leaf/mixed
      * chapter images; the plain fallback calls [imageLister]
@@ -86,6 +94,10 @@ class ReaderController {
             if (ch.images.isNotEmpty()) ch else try {
                 ReaderChapter(ch.name, ch.fullPath,
                     imageLister(ch.fullPath).map { PageRef(it, ch.fullPath) })
+            } catch (e: CancellationException) {
+                // Scope switch / leaving the screen — propagate, never
+                // publish an Error state from a dead load.
+                throw e
             } catch (e: Exception) {
                 _load.value = LoadState.Error(
                     e.message ?: "画像を読み込めませんでした")
