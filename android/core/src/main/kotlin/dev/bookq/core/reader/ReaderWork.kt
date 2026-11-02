@@ -253,8 +253,13 @@ data class ReaderWork(
                     boundaries.add(images.size)
                     images.addAll(ch.images)
                 }
-                // app.js: pad = (startIdx - spreadOff + 2) % 2, spacer
-                // before each chapter boundary; later boundaries shift.
+                // Deliberate divergence from app.js: web computes
+                // `startIdx = boundaries[c] + spacersSoFar` — double-
+                // counting earlier pads so later chapters can land on
+                // odd boundaries (and offset=1 leaves c0 unpadded).
+                // Here every chapter boundary pads to pair alignment on
+                // the POST-shift index — a chapter always opens on its
+                // own right page, which is the intent of the spacers.
                 val spreadOff = if (pageMode == ReaderPageMode.SPREAD) spreadOffset else 0
                 for (c in chapters.indices) {
                     val startIdx = boundaries[c]

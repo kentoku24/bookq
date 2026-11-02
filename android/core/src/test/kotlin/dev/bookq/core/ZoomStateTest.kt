@@ -66,8 +66,15 @@ class ZoomStateTest {
         val s = z()
         s.pinchStart(600f, 960f)
         assertTrue(s.pinchMove(0.4f, 600f, 960f) is ZoomEvent.FireOverview)
-        // Second move at ≤FIRE must not re-fire.
-        assertTrue(s.pinchMove(0.45f, 600f, 960f) is ZoomEvent.Apply)
+        // Below FIRE the transform must NOT move — web's onMove applies
+        // the shrink band only while target > FIRE (post-fire drift
+        // returns Apply with the layer's last transform unchanged).
+        val z0 = s.zoom; val x0 = s.tx; val y0 = s.ty
+        val ev = s.pinchMove(0.45f, 600f, 960f)
+        assertTrue(ev is ZoomEvent.Apply)
+        assertEquals(z0, s.zoom, 0.0001f)
+        assertEquals(x0, s.tx, 0.0001f)
+        assertEquals(y0, s.ty, 0.0001f)
         // Re-arm above 0.7, then ≤0.5 fires again.
         s.pinchMove(0.75f, 600f, 960f)
         assertTrue(s.pinchMove(0.45f, 600f, 960f) is ZoomEvent.FireOverview)

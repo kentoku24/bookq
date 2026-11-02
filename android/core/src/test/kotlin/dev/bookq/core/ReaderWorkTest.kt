@@ -92,8 +92,11 @@ class ReaderWorkTest {
     }
 
     @Test fun crossChapterOffset1Chapter0GetsLeadingSpacer() {
-        // web quirk preserved: pad=(0-1+2)%2=1 → cover is NOT solo in
-        // cross-chapter mode; chapters start on pair boundaries instead.
+        // Intentional divergence from web (not a quirk port): app.js
+        // double-counts earlier spacers in its startIdx, so offset=1
+        // leaves c0 unpadded and can park later chapters on odd
+        // boundaries. Here every boundary aligns post-shift — chapters
+        // always open on their own right page (iOS agrees).
         val w = ReaderWork.assemble("w/01",
             listOf(chapter("01", "w/01", 3), chapter("02", "w/02", 2)),
             ReaderPageMode.SPREAD, 1)

@@ -21,6 +21,10 @@ import java.util.Locale
  *  - ancestor matches (a path that is an ancestor of a hidden key) are
  *    hidden in normal mode too — a provisional tile whose entire subtree
  *    is hidden shows nothing.
+ *
+ * Thread safety: the repository applies snapshots on IO while Compose
+ * reads predicates on Main — scalars are @Volatile, collection state is
+ * serialized on [lock] (in-memory work only; contention negligible).
  */
 class VisibilityState {
 
@@ -31,18 +35,20 @@ class VisibilityState {
     data class Snapshot(val owner: String, val revision: Int, val hiddenRoots: List<String>)
     data class Match(val key: String, val kind: MatchKind)
 
-    var status: Status = Status.IDLE
+    @Volatile var status: Status = Status.IDLE
         private set
-    var owner: String = ""
+    @Volatile var owner: String = ""
         private set
-    var revision: Int = 0
+    @Volatile var revision: Int = 0
         private set
-    var readOnly: Boolean = false
+    @Volatile var readOnly: Boolean = false
         private set
-    var showAll: Boolean = false
+    @Volatile var showAll: Boolean = false
         private set
-    var hasSnapshot: Boolean = false
+    @Volatile var hasSnapshot: Boolean = false
         private set
+
+    private val lock = Any()
 
     /** Hidden roots in original (display) form, insertion order preserved. */
     private val hidden = linkedSetOf<String>()
@@ -66,9 +72,11 @@ class VisibilityState {
         roots: List<String>,
         force: Boolean = false,
         allowDownrev: Boolean = false,
-    ): Boolean {
-        if (!force && owner.isNotEmpty() && this.owner.isNotEmpty() && owner != this.owner) return false
-        if (!allowDownrev && hasSnapshot && revision < this.revision) return false
+    ): Boolean = synchronized(lock) {
+        if (!force && owner.isNotEmpty() && this.owner.isNotEmpty() && owner != this.owner) {
+            return@synchronized false
+        }
+        if (!allowDownrev && hasSnapshot && revision < this.revision) return@synchronized false
         val sameOwner = this.owner == owner
         val changed = !sameOwner || this.revision != revision ||
             hidden.toList() != roots.distinct()
@@ -80,7 +88,7 @@ class VisibilityState {
             if (hidden.add(r)) hiddenNorm[normKey(r)] = r
         }
         hasSnapshot = true
-        return changed
+        return@synchronized changed
     }
 
     fun setStatus(s: Status, readOnly: Boolean = this.readOnly) {
@@ -92,7 +100,9 @@ class VisibilityState {
         showAll = v
     }
 
-    fun snapshot(): Snapshot = Snapshot(owner, revision, hidden.toList())
+    fun snapshot(): Snapshot = synchronized(lock) {
+        Snapshot(owner, revision, hidden.toList())
+    }
 
     // ── path normalization ──
 
@@ -136,25 +146,27 @@ class VisibilityState {
         val norm = normalizePath(path)
         if (norm.isNullOrEmpty()) return null
         val nkey = normKey(norm)
-        var bestCover: String? = null
-        var bestAnc: String? = null
-        for ((kn, orig) in hiddenNorm) {
-            if (nkey == kn || nkey.startsWith("$kn/")) {
-                if (bestCover == null || kn.length > bestCover!!.length) bestCover = kn
-            } else if (kn.startsWith("$nkey/")) {
-                if (bestAnc == null || kn.length < bestAnc.length) bestAnc = kn
+        synchronized(lock) {
+            var bestCover: String? = null
+            var bestAnc: String? = null
+            for ((kn, orig) in hiddenNorm) {
+                if (nkey == kn || nkey.startsWith("$kn/")) {
+                    if (bestCover == null || kn.length > bestCover!!.length) bestCover = kn
+                } else if (kn.startsWith("$nkey/")) {
+                    if (bestAnc == null || kn.length < bestAnc.length) bestAnc = kn
+                }
             }
+            if (bestCover != null) {
+                return Match(
+                    key = hiddenNorm[bestCover] ?: bestCover,
+                    kind = if (bestCover == nkey) MatchKind.SELF else MatchKind.DESCENDANT,
+                )
+            }
+            if (bestAnc != null) {
+                return Match(key = hiddenNorm[bestAnc] ?: bestAnc, kind = MatchKind.ANCESTOR)
+            }
+            return null
         }
-        if (bestCover != null) {
-            return Match(
-                key = hiddenNorm[bestCover] ?: bestCover,
-                kind = if (bestCover == nkey) MatchKind.SELF else MatchKind.DESCENDANT,
-            )
-        }
-        if (bestAnc != null) {
-            return Match(key = hiddenNorm[bestAnc] ?: bestAnc, kind = MatchKind.ANCESTOR)
-        }
-        return null
     }
 
     /** The hidden key covering path (self/descendant only — ancestor does
@@ -180,10 +192,12 @@ class VisibilityState {
     // ── top-level node set (editable roots; used by badges in M6) ──
 
     fun setTopLevelPaths(paths: Collection<String>) {
-        topLevel = paths.filterTo(LinkedHashSet()) { it.isNotEmpty() }
+        synchronized(lock) {
+            topLevel = paths.filterTo(LinkedHashSet()) { it.isNotEmpty() }
+        }
     }
 
-    fun isTopLevel(path: String): Boolean = path in topLevel
+    fun isTopLevel(path: String): Boolean = synchronized(lock) { path in topLevel }
 
     /** Shared deny/queue gate for every navigation entry. */
     fun guardPath(path: String?): Guard {

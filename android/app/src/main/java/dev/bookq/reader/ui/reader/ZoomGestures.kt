@@ -61,10 +61,14 @@ fun Modifier.zoomGestures(
     animSlot: MutableRef<Job?>,
 ): Modifier = pointerInput(zs) {
     fun settleTo(s: Float, x: Float, y: Float, ms: Int) {
+        // Web order: apply the TARGET to the model first, then animate
+        // the display toward it — a new gesture mid-slide reads the
+        // destination, and the killTransition snap lands exactly there.
         val z0 = zs.zoom
         val x0 = zs.tx
         val y0 = zs.ty
         animSlot.value?.cancel()
+        zs.apply(s, x, y)
         animSlot.value = scope.launch {
             Animatable(0f).animateTo(
                 1f,
@@ -76,7 +80,7 @@ fun Modifier.zoomGestures(
                     y0 + (y - y0) * value,
                 )
             }
-            zs.apply(s, x, y)
+            apply(s, x, y)
         }
     }
 
@@ -118,15 +122,20 @@ fun Modifier.zoomGestures(
             if (armedTurn && canTurn(dir)) {
                 onEdgeTurn(dir)
             } else if (zs.isZoomed) {
-                // No turn (unarmed, or armed at the first/last spread) —
-                // clamp the rubber band back like web's settle fallthrough.
+                // No turn — web clamps the rubber band back INSTANTLY
+                // (zoom.js settle fallthrough); an animation here was a
+                // same→same no-op anyway since panSettle pre-applied.
                 zs.panSettle()
-                settleTo(zs.zoom, zs.tx, zs.ty, ZoomK.BOUNCE_MS)
+                apply(zs.zoom, zs.tx, zs.ty)
             }
             if (panMoved) onSuppressTap()
         }
 
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        // killTransition — a new gesture kills any settle/zoom animation
+        // and snaps the layer to the model's truth (web onStart).
+        animSlot.value?.cancel()
+        apply(zs.zoom, zs.tx, zs.ty)
         starts[down.id] = down.position
         if (isPalmEdge(down.position)) palms += down.id
         if (zs.isZoomed && down.id !in palms) seedPan(down.id, down.position)
@@ -134,6 +143,11 @@ fun Modifier.zoomGestures(
 
         while (true) {
             val ev = awaitPointerEvent(PointerEventPass.Initial)
+            // The overview can take the screen mid-gesture (FireOverview).
+            // Web's onMove/onEnd early-return while it is open — we keep
+            // consuming events (nothing leaks to the pager) but apply
+            // and settle nothing for the rest of this gesture.
+            val live = enabled()
             for (c in ev.changes) {
                 if (c.changedToDownIgnoreConsumed()) {
                     starts[c.id] = c.position
@@ -166,27 +180,32 @@ fun Modifier.zoomGestures(
                     val b = active[1]
                     val d = (a.position - b.position).getDistance()
                     val mid = (a.position + b.position) / 2f
-                    val dt = driftTarget()
-                    when (val r = zs.pinchMove(d / dist0, mid.x, mid.y, dt?.first, dt?.second)) {
-                        is ZoomEvent.FireOverview -> {
-                            zlog { "FireOverview d=$d ratio=${d / dist0}" }
-                            onOverviewFire()
+                    if (live) {
+                        val dt = driftTarget()
+                        when (val r = zs.pinchMove(
+                            d / dist0, mid.x, mid.y, dt?.first, dt?.second)) {
+                            is ZoomEvent.FireOverview -> {
+                                zlog { "FireOverview d=$d ratio=${d / dist0}" }
+                                onOverviewFire()
+                            }
+                            is ZoomEvent.Apply -> apply(r.s, r.x, r.y)
                         }
-                        is ZoomEvent.Apply -> apply(r.s, r.x, r.y)
                     }
                     a.consume(); b.consume()
                 } else {
                     val v = zs.pinchEnd()
                     zlog { "pinchEnd -> $v zoom=${zs.zoom}" }
-                    when (v) {
-                        ZoomEnd.PERSIST -> {}
-                        ZoomEnd.SNAP_TO_ONE -> settleTo(1f, 0f, 0f, ZoomK.SLIDE_MS)
-                        ZoomEnd.BOUNCE_TO_ONE -> settleTo(1f, 0f, 0f, ZoomK.BOUNCE_MS)
+                    if (live) {
+                        when (v) {
+                            ZoomEnd.PERSIST -> {}
+                            ZoomEnd.SNAP_TO_ONE -> settleTo(1f, 0f, 0f, ZoomK.SLIDE_MS)
+                            ZoomEnd.BOUNCE_TO_ONE -> settleTo(1f, 0f, 0f, ZoomK.BOUNCE_MS)
+                        }
                     }
                     pinching = false
                     // 2→1: the still-down finger becomes the pan finger.
                     active.firstOrNull()?.let { r ->
-                        if (zs.isZoomed) seedPan(r.id, r.position)
+                        if (live && zs.isZoomed) seedPan(r.id, r.position)
                     }
                 }
             } else if (active.size >= 2) {
@@ -194,7 +213,8 @@ fun Modifier.zoomGestures(
                 val b = active[1]
                 val sa = starts[a.id] ?: a.position
                 val sb = starts[b.id] ?: b.position
-                if ((a.position - sa).getDistance() >= ZoomK.ARM_PX &&
+                if (live &&
+                    (a.position - sa).getDistance() >= ZoomK.ARM_PX &&
                     (b.position - sb).getDistance() >= ZoomK.ARM_PX) {
                     dist0 = (sa - sb).getDistance().coerceAtLeast(0.0001f)
                     val mid0 = (sa + sb) / 2f
@@ -206,7 +226,7 @@ fun Modifier.zoomGestures(
             } else if (active.size == 1 && panId != null) {
                 val t = ev.changes.firstOrNull { it.id == panId && it.pressed }
                 if (t != null && t.positionChange() != Offset.Zero) {
-                    if (!zs.isZoomed) {
+                    if (!live || !zs.isZoomed) {
                         panId = null
                     } else {
                         val dx = t.position.x - panOrigin.x
@@ -227,10 +247,12 @@ fun Modifier.zoomGestures(
             // pan finger lifted while other touches remain → end that pan.
             if (panId != null &&
                 ev.changes.any { it.id == panId && !it.pressed }) {
-                endPan()
+                if (live) endPan() else panId = null
             }
             if (ev.changes.none { it.pressed }) break
         }
-        if (panId != null) endPan()
+        if (panId != null) {
+            if (enabled()) endPan() else panId = null
+        }
     }
 }
