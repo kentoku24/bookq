@@ -21,6 +21,13 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
@@ -43,7 +50,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -87,9 +97,12 @@ fun OverviewOverlay(
     imageLoader: ImageLoader,
     onJump: (Int) -> Unit,
     onClose: () -> Unit,
+    onCellCenter: (Float, Float) -> Unit = { _, _ -> },
 ) {
     BackHandler { onClose() }
-    val context = LocalContext.current
+    val padPx = with(LocalDensity.current) { PAD.toPx() }
+    val navBottom = WindowInsets.navigationBars.asPaddingValues()
+        .calculateBottomPadding()
 
     // Flat item list — (header chapterIdx | page globalIdx) entries in
     // reading order (OverviewRules.flatItems — overview.js buildGrid).
@@ -129,19 +142,17 @@ fun OverviewOverlay(
         }
     }
 
-    // Prefetch the ±IMG_WINDOW thumb band once on open (huge-book rule:
-    // images hydrate only near the current position).
-    LaunchedEffect(work, curKey) {
-        if (curKey < 0) return@LaunchedEffect
-        for (p in OverviewRules.imgWindow(reals, curKey)) {
-            val im = work.images[reals[p]]
-            imageLoader.enqueue(ImageRequest.Builder(context)
-                .data(api.thumbUrl(im.folder, im.name, THUMB_W).toString())
-                .build())
-        }
-    }
+    // No bulk prefetch — web thumbs load via <img loading="lazy">, the
+    // grid's own virtualization is the bound (the ±IMG_WINDOW attach
+    // gate above is the huge-book rule, not a prefetch).
 
-    // scrollCurToThird — land the current cell's top on the 1/3 line.
+    // The grid's top-left in root coords — needed to hand the reader
+    // a drift target in the zoom layer's coordinate space.
+    val gridRoot = remember { MutableRef(Offset.Zero) }
+
+    // scrollCurToThird — land the current cell's CENTER on the 1/3 line
+    // (web: offsetTop - H/3 + h/2), then report its measured center so
+    // the next pinch-in drifts toward it (web curCenter).
     LaunchedEffect(curItem) {
         if (curItem < 0) return@LaunchedEffect
         gridState.scrollToItem(curItem)
@@ -152,7 +163,20 @@ fun OverviewOverlay(
         val cell = info.visibleItemsInfo.firstOrNull { it.index == curItem }
             ?: return@LaunchedEffect
         val viewport = info.viewportEndOffset - info.viewportStartOffset
-        gridState.scroll { scrollBy(cell.offset.y - viewport / 3f) }
+        gridState.scroll {
+            scrollBy(cell.offset.y + cell.size.height / 2f - viewport / 3f)
+        }
+        withFrameNanos { }
+        val info2 = gridState.layoutInfo
+        val cell2 = info2.visibleItemsInfo.firstOrNull { it.index == curItem }
+            ?: return@LaunchedEffect
+        // item.offset sits inside beforeContentPadding; padStart on the
+        // cross axis. Root coords = grid root + padding + offset + half.
+        onCellCenter(
+            gridRoot.value.x + padPx + cell2.offset.x + cell2.size.width / 2f,
+            gridRoot.value.y + info2.beforeContentPadding +
+                cell2.offset.y + cell2.size.height / 2f,
+        )
     }
 
     // updateChip — leafName local+1/total [・ 通算 pos+1/reals].
@@ -180,7 +204,14 @@ fun OverviewOverlay(
             // Eat taps so nothing leaks to the reader's tap zones below.
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
-        Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                // Header under the status bar; the grid takes the nav
+                // bar itself via its bottom content padding below.
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(
+                    WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
+        ) {
             Surface(color = Color(0xCC1A1A1A)) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 4.dp),
@@ -217,8 +248,10 @@ fun OverviewOverlay(
                 attachImage = if (huge) {
                     { g: Int -> abs(posOf[g] - band) <= IMG_WINDOW }
                 } else null,
+                navBottom = navBottom,
                 onJump = onJump,
                 onExit = onClose,
+                onGridRoot = { gridRoot.value = it },
             )
         }
     }
@@ -234,12 +267,16 @@ private fun OverviewGrid(
     imageLoader: ImageLoader,
     gridState: LazyGridState,
     attachImage: ((Int) -> Boolean)?,
+    navBottom: androidx.compose.ui.unit.Dp,
     onJump: (Int) -> Unit,
     onExit: () -> Unit,
+    onGridRoot: (Offset) -> Unit,
 ) {
+    val padPx = with(LocalDensity.current) { PAD.toPx() }
     Box(
         Modifier
             .fillMaxSize()
+            .onGloballyPositioned { onGridRoot(it.boundsInRoot().topLeft) }
             // Pinch-out → exit at the cell under the fingers
             // (overview.js attach). Initial pass so the two-finger
             // tracking pre-empts the grid's own scroll claim.
@@ -268,13 +305,20 @@ private fun OverviewGrid(
                     }
                     if (multi && acc > PINCH_OUT) {
                         // elementFromPoint → the grid cell under lastMid.
-                        val hit = gridState.layoutInfo.visibleItemsInfo
+                        // item.offset lives INSIDE the content padding —
+                        // mid is Box-local, so shift it into item space:
+                        // beforeContentPadding on the main axis, the
+                        // horizontal content padding on the cross axis.
+                        val info = gridState.layoutInfo
+                        val hx = mid.x - padPx
+                        val hy = mid.y - info.beforeContentPadding
+                        val hit = info.visibleItemsInfo
                             .firstOrNull { item ->
                                 (item.key as? String)?.startsWith("g") == true &&
-                                    mid.x >= item.offset.x &&
-                                    mid.x < item.offset.x + item.size.width &&
-                                    mid.y >= item.offset.y &&
-                                    mid.y < item.offset.y + item.size.height
+                                    hx >= item.offset.x &&
+                                    hx < item.offset.x + item.size.width &&
+                                    hy >= item.offset.y &&
+                                    hy < item.offset.y + item.size.height
                             }
                         val g = (hit?.key as? String)
                             ?.removePrefix("g")?.toIntOrNull()
@@ -286,7 +330,9 @@ private fun OverviewGrid(
         LazyVerticalGrid(
             state = gridState,
             columns = GridCells.Adaptive(CELL_MIN),
-            contentPadding = PaddingValues(PAD),
+            // Last row scrolls clear of the nav bar (3-button/gesture).
+            contentPadding = PaddingValues(
+                start = PAD, top = PAD, end = PAD, bottom = PAD + navBottom),
             horizontalArrangement = Arrangement.spacedBy(GAP),
             verticalArrangement = Arrangement.spacedBy(GAP),
             modifier = Modifier.fillMaxSize(),
@@ -351,6 +397,7 @@ private fun OverviewCell(
         Modifier
             .aspectRatio(CELL_AR)
             .background(Color(0xFF161616))
+            .testTag("ovcell:$g")
             .then(
                 if (isCur) Modifier.border(2.dp,
                     MaterialTheme.colorScheme.primary)

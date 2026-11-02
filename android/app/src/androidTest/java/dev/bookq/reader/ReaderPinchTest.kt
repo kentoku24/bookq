@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.regex.Pattern
 import kotlin.math.abs
+import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -57,6 +58,17 @@ import org.junit.runner.RunWith
 class ReaderPinchTest {
 
     private val readerCounter = Pattern.compile("\\d+ / \\d+")
+    // Registered lifecycle callbacks — torn down even when a step
+    // fails, or a stale callback keeps dispatching into dead refs.
+    private var callbacks: Application.ActivityLifecycleCallbacks? = null
+
+    @After fun tearDown() {
+        val cb = callbacks ?: return
+        val instr = InstrumentationRegistry.getInstrumentation()
+        val app = instr.targetContext.applicationContext as Application
+        instr.runOnMainSync { app.unregisterActivityLifecycleCallbacks(cb) }
+        callbacks = null
+    }
 
     @Test
     fun pinchZoomAndOverviewFlow() {
@@ -72,24 +84,23 @@ class ReaderPinchTest {
         val decorRef = AtomicReference<View?>()
         val actRef = AtomicReference<MainActivity?>()
         val resumed = CountDownLatch(1)
-        instr.runOnMainSync {
-            app.registerActivityLifecycleCallbacks(
-                object : Application.ActivityLifecycleCallbacks {
-                    override fun onActivityResumed(a: Activity) {
-                        if (a is MainActivity) {
-                            decorRef.set(a.window.decorView)
-                            actRef.set(a)
-                            resumed.countDown()
-                        }
-                    }
-                    override fun onActivityCreated(a: Activity, b: Bundle?) {}
-                    override fun onActivityStarted(a: Activity) {}
-                    override fun onActivityPaused(a: Activity) {}
-                    override fun onActivityStopped(a: Activity) {}
-                    override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
-                    override fun onActivityDestroyed(a: Activity) {}
-                })
+        val cbs = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityResumed(a: Activity) {
+                if (a is MainActivity) {
+                    decorRef.set(a.window.decorView)
+                    actRef.set(a)
+                    resumed.countDown()
+                }
+            }
+            override fun onActivityCreated(a: Activity, b: Bundle?) {}
+            override fun onActivityStarted(a: Activity) {}
+            override fun onActivityPaused(a: Activity) {}
+            override fun onActivityStopped(a: Activity) {}
+            override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
+            override fun onActivityDestroyed(a: Activity) {}
         }
+        callbacks = cbs
+        instr.runOnMainSync { app.registerActivityLifecycleCallbacks(cbs) }
 
         // Tailscale's zombie window holds window focus after
         // instrumentation restarts the app — go HOME first so the
@@ -180,27 +191,16 @@ class ReaderPinchTest {
         }
         val before = counterText() ?: error("no counter text")
 
-        // ── 0.5. sanity: dispatched taps reach the zones. Boundary
-        //     pages may not move — try both sides, restore if moved.
-        //     Edge taps sit 80px in from the screen edge so they land
-        //     in the outer zones on any display width. ──
-        val edgeL = 80f
-        val edgeR = d.displayWidth - 80f
-        tap(instr, decor, edgeL, cy)
-        Thread.sleep(400)
-        var afterTap = counterText()
-        if (afterTap == before) {
-            tap(instr, decor, edgeR, cy)
-            Thread.sleep(400)
-            afterTap = counterText()
-            if (afterTap != before) {
-                tap(instr, decor, edgeL, cy) // restore
-                Thread.sleep(400)
-            }
-        } else {
-            tap(instr, decor, edgeR, cy) // restore
-            Thread.sleep(400)
-        }
+        // ── 0.5. sanity: a center tap toggles the chrome — proves
+        //     dispatched taps reach the zone layer no matter which page
+        //     we landed on (edge-zone taps can't be verified at chapter
+        //     boundaries: a turn may legitimately be a no-op). ──
+        tap(instr, decor, cx, cy)
+        assertTrue("center tap did not hide the reader chrome",
+            waitUntil({ !anyText(readerCounter) }, 3_000))
+        tap(instr, decor, cx, cy)
+        assertTrue("second tap did not restore the reader chrome",
+            waitUntil({ anyText(readerCounter) }, 3_000))
 
         // ── 1. pinch-OUT — verdict read straight from the layer:
         //     scale > 1 means it armed (no counter inference — a
@@ -230,6 +230,40 @@ class ReaderPinchTest {
             waitUntil({
                 (zoomScale() ?: 0f) > 1.05f && abs(panX() ?: 0f) > 30f
             }, 2_500))
+
+        // ── 2.5. edge-turn: a pan that STARTS at a clamped edge and
+        //     keeps going past EDGE_PX arms a page turn (web
+        //     commitSwipeTurn band). First drag rides the clamp out to
+        //     an edge; the second drags on from there → turn. ──
+        val edgeX0 = 60f
+        val edgeX1 = d.displayWidth - 60f
+        val preEdge = counterText()
+        var turned = false
+        for (dir in intArrayOf(1, -1)) {
+            val (x0, x1) = if (dir > 0) edgeX0 to edgeX1 else edgeX1 to edgeX0
+            swipe(instr, decor, x0, x1, cy, steps = 14)
+            Thread.sleep(300)
+            swipe(instr, decor, x0, x1, cy, steps = 14)
+            turned = waitUntil(
+                { counterText() != preEdge || (zoomScale() ?: 9f) <= 1f },
+                5_000)
+            if (turned) break
+        }
+        assertTrue("edge-drag turn never moved the page " +
+            "(counter=$preEdge → ${counterText()}, zoom=${zoomScale()})",
+            turned)
+        // The settle reset the layer to 1x — re-zoom for the
+        // reset-tap check below.
+        var reZoomed = false
+        for (attempt in 0..1) {
+            doubleTap(instr, decor, cx, cy)
+            if (waitUntil(
+                    { (zoomScale() ?: 1f) > 1.05f }, 2_500)) {
+                reZoomed = true; break
+            }
+        }
+        assertTrue("re-zoom after edge-turn failed", reZoomed)
+        Thread.sleep(400)
 
         // ── 3. center tap while zoomed → snaps back to 1x. Wait out
         //     the 400ms pan-decided tap suppression first, and wait
@@ -290,12 +324,88 @@ class ReaderPinchTest {
                 nodes().mapNotNull { textOf(it) }.take(40))
         }
 
-        // ── 6. Back → grid closes, reader restored. In-process back —
-        // OS-injected pressBack goes to whatever has window focus, and
-        // Tailscale's zombie window keeps stealing it on this device.
-        // The tag-gone check matters: the reader chrome stays composed
-        // underneath the overlay, so its counter alone can't prove the
-        // overlay actually closed.
+        // ── 5.5. cell tap → exits to that cell's page: the .pg badge
+        //     carries the chapter-local page number the counter must
+        //     then show. ──
+        val cellNode = nodes().lastOrNull {
+            tagOf(it)?.startsWith("ovcell:") == true
+        } ?: run {
+            d.executeShellCommand("screencap -p /sdcard/m4-nocell.png")
+            error("no overview cell tagged")
+        }
+        val badge = flatten(cellNode).mapNotNull { textOf(it) }
+            .firstOrNull { t -> t.isNotEmpty() && t.all { c -> c.isDigit() } }
+        tapTag(tagOf(cellNode)!!)
+        assertTrue("cell tap did not exit to the reader",
+            waitUntil({
+                nodes().none { tagOf(it) == "overviewGrid" } &&
+                    anyText(readerCounter)
+            }, 8_000))
+        if (badge != null) {
+            assertTrue(
+                "cell tap landed on the wrong page " +
+                    "(badge=$badge counter=${counterText()})",
+                waitUntil({
+                    counterText()?.trim()?.startsWith("$badge ") == true
+                }, 5_000))
+        }
+
+        // ── 5.7. re-open, then pinch-OUT on the grid → exits at the
+        //     cell under the finger midpoint (elementFromPoint). ──
+        for (attempt in 0..1) {
+            pinch(instr, decor, cx, cy,
+                startHalf = pinchInStart,
+                endHalf = pinchInStart * 0.25f, steps = 14)
+            if (waitForTag("overviewGrid", 6_000)) break
+        }
+        assertTrue("overview did not re-open",
+            waitForTag("overviewGrid", 8_000))
+        // The cell under the pinch midpoint is the expected landing.
+        val midCell = nodes().firstOrNull {
+            tagOf(it)?.startsWith("ovcell:") == true &&
+                it.boundsInWindow.let { b ->
+                    cx >= b.left && cx <= b.right &&
+                        cy >= b.top && cy <= b.bottom
+                }
+        }
+        val midBadge = midCell?.let { n ->
+            flatten(n).mapNotNull { textOf(it) }
+                .firstOrNull { t ->
+                    t.isNotEmpty() && t.all { c -> c.isDigit() }
+                }
+        }
+        pinch(instr, decor, cx, cy,
+            startHalf = 150f,
+            endHalf = minOf(cx * 0.85f, cx - 30f), steps = 12)
+        assertTrue("overview pinch-out did not exit to the reader",
+            waitUntil({
+                nodes().none { tagOf(it) == "overviewGrid" } &&
+                    anyText(readerCounter)
+            }, 8_000))
+        if (midBadge != null) {
+            assertTrue(
+                "pinch-out landed on a different cell " +
+                    "(badge=$midBadge counter=${counterText()})",
+                waitUntil({
+                    counterText()?.trim()
+                        ?.startsWith("$midBadge ") == true
+                }, 5_000))
+        }
+
+        // ── 6. re-open + Back → grid closes, reader restored.
+        //     In-process back — OS-injected pressBack goes to whatever
+        //     has window focus, and Tailscale's zombie window keeps
+        //     stealing it on this device. The tag-gone check matters:
+        //     the reader chrome stays composed underneath the overlay,
+        //     so its counter alone can't prove the overlay closed. ──
+        for (attempt in 0..1) {
+            pinch(instr, decor, cx, cy,
+                startHalf = pinchInStart,
+                endHalf = pinchInStart * 0.25f, steps = 14)
+            if (waitForTag("overviewGrid", 6_000)) break
+        }
+        assertTrue("overview did not re-open for the Back check",
+            waitForTag("overviewGrid", 8_000))
         instr.runOnMainSync {
             actRef.get()!!.onBackPressedDispatcher.onBackPressed()
         }

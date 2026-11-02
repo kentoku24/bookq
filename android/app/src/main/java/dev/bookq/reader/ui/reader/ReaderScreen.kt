@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -337,10 +338,16 @@ private fun ReaderBody(
     var overviewOpen by remember { mutableStateOf(false) }
     var suppressTapUntil by remember { mutableLongStateOf(0L) }
     // pointerInput captures values at launch — keep live flags.
-    val zoomedNow by rememberUpdatedState(zoomF > 1f)
+    // derivedStateOf: the 1x boundary is the only recompose trigger —
+    // a raw zoomF read would recompose ReaderBody every gesture frame.
+    val zoomedNow by remember { derivedStateOf { zoomF > 1f } }
     // One cancellable animation job shared with the gesture layer —
     // reset and bounce can never race.
     val zoomAnim = remember { MutableRef<Job?>(null) }
+    // Drift target for the shrink band: the overview reports its current
+    // cell's measured center (web curCenter → Zoom.driftTarget). Before
+    // the first measurement the viewport upper third stands in.
+    val driftRef = remember { MutableRef<Pair<Float, Float>?>(null) }
 
     fun applyZoom(s: Float, x: Float, y: Float) {
         zoomF = s; txF = x; tyF = y
@@ -449,9 +456,12 @@ private fun ReaderBody(
             }
             onCurrent(idx)
             pendingSpread = null
-            // A page settle resets the layer (web snapTo → Zoom.reset).
-            if (zoomF != 1f || txF != 0f || tyF != 0f) {
-                zs.reset(); applyZoom(1f, 0f, 0f)
+            // A page settle resets the layer (web snapTo → Zoom.reset)
+            // — INCLUDING any running zoom animation, or a double-tap
+            // slide would land its 2.5x on the NEW page.
+            if (zoomF != 1f || txF != 0f || tyF != 0f ||
+                zoomAnim.value?.isActive == true) {
+                resetZoom(animated = false)
             }
             if (!saveArmed) {
                 if (s == anchorSpread) return@collect
@@ -495,13 +505,15 @@ private fun ReaderBody(
             .onKeyEvent { e ->
                 val down = e.type == KeyEventType.KeyDown
                 if (overviewOpen) {
-                    // The grid owns keys — G/Esc exit, everything else is
-                    // swallowed so the reader below can't move.
+                    // The grid owns only its exit keys — web's overview
+                    // keydown handles just Escape/G. Volume keys in
+                    // particular MUST fall through to the OS or the
+                    // overlay mutes the device.
                     return@onKeyEvent when (e.key) {
                         Key.G, Key.Escape -> {
                             if (down) exitOverview(curGlobalIdx()); true
                         }
-                        else -> true
+                        else -> false
                     }
                 }
                 when (e.key) {
@@ -537,7 +549,10 @@ private fun ReaderBody(
                     suppressTapUntil =
                         android.os.SystemClock.uptimeMillis() + 400
                 },
-                driftTarget = { (viewW / 2f) to (viewH / 3f) },
+                // The overview shares its measured cell center (web
+                // curCenter); before any open the upper-third default
+                // approximates it.
+                driftTarget = { driftRef.value ?: ((viewW / 2f) to (viewH / 3f)) },
                 scope = compose,
                 animSlot = zoomAnim,
             )
@@ -738,6 +753,9 @@ private fun ReaderBody(
                 imageLoader = sc.imageLoader,
                 onJump = ::exitOverview,
                 onClose = { exitOverview(curGlobalIdx()) },
+                // web curCenter → Zoom.driftTarget: the next pinch-in
+                // shrinks toward where this cell actually sat.
+                onCellCenter = { x, y -> driftRef.value = x to y },
             )
         }
     }

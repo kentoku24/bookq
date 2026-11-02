@@ -135,9 +135,11 @@ class ZoomState {
             val ny = midY - k * (mid0y - startTy)
             val c = clampPan(nx, ny, target)
             apply(target, c[0], c[1])
-        } else {
+        } else if (target > ZoomK.FIRE) {
             // shrink band — scale follows, center drifts toward the
             // overview cell. p goes 0→1 as target goes 1→0.5.
+            // Web applies the band ONLY above FIRE — below it the
+            // transform stays put (the overview owns the screen).
             val W = box.viewW
             val H = box.viewH
             val c0x = W / 2f
