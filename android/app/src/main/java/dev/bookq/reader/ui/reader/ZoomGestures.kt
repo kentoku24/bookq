@@ -1,5 +1,6 @@
 package dev.bookq.reader.ui.reader
 
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -16,6 +17,7 @@ import dev.bookq.core.reader.ZoomEnd
 import dev.bookq.core.reader.ZoomEvent
 import dev.bookq.core.reader.ZoomK
 import dev.bookq.core.reader.ZoomState
+import dev.bookq.reader.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -24,6 +26,11 @@ import kotlinx.coroutines.launch
  *  one cancellable animation job without dragging Compose state into
  *  [ZoomState]-level plumbing. */
 class MutableRef<T>(var value: T)
+
+private const val ZTAG = "ZoomDbg"
+private inline fun zlog(msg: () -> String) {
+    if (BuildConfig.DEBUG) Log.d(ZTAG, msg())
+}
 
 /**
  * Compose wiring for [ZoomState] — the touch side of viewer/zoom.js +
@@ -123,6 +130,7 @@ fun Modifier.zoomGestures(
         starts[down.id] = down.position
         if (isPalmEdge(down.position)) palms += down.id
         if (zs.isZoomed && down.id !in palms) seedPan(down.id, down.position)
+        zlog { "gesture start down=${down.position} zoomed=${zs.isZoomed}" }
 
         while (true) {
             val ev = awaitPointerEvent(PointerEventPass.Initial)
@@ -160,12 +168,17 @@ fun Modifier.zoomGestures(
                     val mid = (a.position + b.position) / 2f
                     val dt = driftTarget()
                     when (val r = zs.pinchMove(d / dist0, mid.x, mid.y, dt?.first, dt?.second)) {
-                        is ZoomEvent.FireOverview -> onOverviewFire()
+                        is ZoomEvent.FireOverview -> {
+                            zlog { "FireOverview d=$d ratio=${d / dist0}" }
+                            onOverviewFire()
+                        }
                         is ZoomEvent.Apply -> apply(r.s, r.x, r.y)
                     }
                     a.consume(); b.consume()
                 } else {
-                    when (zs.pinchEnd()) {
+                    val v = zs.pinchEnd()
+                    zlog { "pinchEnd -> $v zoom=${zs.zoom}" }
+                    when (v) {
                         ZoomEnd.PERSIST -> {}
                         ZoomEnd.SNAP_TO_ONE -> settleTo(1f, 0f, 0f, ZoomK.SLIDE_MS)
                         ZoomEnd.BOUNCE_TO_ONE -> settleTo(1f, 0f, 0f, ZoomK.BOUNCE_MS)
@@ -188,6 +201,7 @@ fun Modifier.zoomGestures(
                     zs.pinchStart(mid0.x, mid0.y)
                     pinching = true
                     panId = null
+                    zlog { "pinch armed dist0=$dist0 mid=$mid0 zoom=${zs.zoom}" }
                 }
             } else if (active.size == 1 && panId != null) {
                 val t = ev.changes.firstOrNull { it.id == panId && it.pressed }

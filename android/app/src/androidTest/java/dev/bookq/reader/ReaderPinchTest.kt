@@ -279,7 +279,9 @@ class ReaderPinchTest {
         // ── 5. overview grid opened ──
         if (!waitForTag("overviewGrid", 8_000)) {
             d.executeShellCommand("screencap -p /sdcard/m4-noov.png")
-            error("pinch-in did not fire the overview grid — texts: " +
+            val dbg = d.executeShellCommand("logcat -d -t 300 -s ZoomDbg:D")
+            error("pinch-in did not fire the overview grid — " +
+                "scale=${zoomScale()} dbg=$dbg texts=" +
                 nodes().mapNotNull { textOf(it) }.take(40))
         }
 
