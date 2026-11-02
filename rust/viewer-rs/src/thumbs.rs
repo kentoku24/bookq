@@ -297,10 +297,13 @@ fn flatten_on_white(im: &image::DynamicImage) -> image::RgbImage {
 }
 
 /// `im.thumbnail((bw, bh), LANCZOS)` — fit inside the box keeping aspect,
-/// never upscale (unlike `DynamicImage::thumbnail`, which does).
+/// never upscale. `resize` shares `thumbnail`'s fit-in-box dimensions but
+/// takes a filter: `thumbnail` itself is nearest-neighbour (one source
+/// pixel per target), which aliases visibly on line art — Pillow uses
+/// LANCZOS, so we do too.
 fn thumbnail_box(im: image::DynamicImage, bw: u32, bh: u32) -> image::DynamicImage {
     if im.width() > bw || im.height() > bh {
-        im.thumbnail(bw, bh)
+        im.resize(bw, bh, image::imageops::FilterType::Lanczos3)
     } else {
         im
     }
@@ -872,6 +875,29 @@ mod tests {
         assert!((251..=255).contains(&px[0]));
         assert!((123..=131).contains(&px[1]));
         assert!((px[1] as i16 - px[2] as i16).abs() <= 2);
+    }
+
+    /// Lanczos, not nearest: a 1px checkerboard downscaled 2x must average
+    /// to mid-grey — nearest sampling would alias to pure black/white.
+    #[test]
+    fn thumb_downscale_averages_not_samples() {
+        let mut im = image::RgbImage::new(400, 400);
+        for (x, y, p) in im.enumerate_pixels_mut() {
+            *p = if (x + y) % 2 == 0 {
+                image::Rgb([0, 0, 0])
+            } else {
+                image::Rgb([255, 255, 255])
+            };
+        }
+        let mut src = Vec::new();
+        image::DynamicImage::ImageRgb8(im)
+            .write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+            .unwrap();
+        let jpg = make_thumb(&src, 200).unwrap();
+        let decoded = image::load_from_memory(&jpg).unwrap().to_rgb8();
+        let mean: u32 = decoded.pixels().map(|p| p[0] as u32).sum::<u32>()
+            / (decoded.width() * decoded.height());
+        assert!((100..=155).contains(&mean), "mean {mean} — not averaged");
     }
 
     /// `_store_thumb` + `prune_cache_dir`: atomic land, oldest-mtime evict.
