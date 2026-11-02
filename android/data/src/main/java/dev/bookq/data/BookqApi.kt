@@ -106,7 +106,7 @@ class BookqApi(
      * `Retry-After` (default 2s, max 20 attempts). 304 → [TreeResult.NotModified].
      */
     suspend fun tree(since: Int? = null, etag: String? = null): TreeResult {
-        repeat(20) {
+        repeat(20) { attempt ->
             val ub = baseUrl.newBuilder().addPathSegments("api/v1/tree")
             if (since != null) ub.addQueryParameter("since", since.toString())
             val rb = Request.Builder().url(ub.build()).get()
@@ -116,7 +116,8 @@ class BookqApi(
                 202 -> {
                     val waitS = resp.header("Retry-After")?.toDoubleOrNull() ?: 2.0
                     resp.close()
-                    sleep((waitS * 1000).toLong())
+                    // No trailing sleep after the last 202 (web parity).
+                    if (attempt < 19) sleep((waitS * 1000).toLong())
                 }
                 304 -> {
                     resp.close()
@@ -227,6 +228,9 @@ class BookqApi(
             val resp = send(get(url))
             if (resp.code != 202) return resp
             resp.close()
+            // web's `_fetchBuilding` returns after the 10th 202 without
+            // sleeping — 9 waits, not 10.
+            if (attempt == 9) return null
             val waitS = minOf(1.5 * (attempt + 1), 5.0)
             sleep((waitS * 1000).toLong())
         }
