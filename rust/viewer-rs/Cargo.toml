@@ -20,7 +20,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
-image = "0.25"
+# default-features off: default pulls ~40 unused crates (ravif/rav1e AVIF
+# encoder, exr, tiff, qoi, moxcms, rayon). Min 0.25.5 for
+# ImageDecoder::orientation / DynamicImage::apply_orientation.
+image = { version = "0.25.5", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
 tokio = { version = "1", features = ["full"] }

@@ -472,7 +472,8 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/thumb/{*path}` — v1 contract path. Native answers validation, the
-/// 304 fast path and shared-cache hits; misses proxy to Pillow upstream.
+/// 304 fast path and shared-cache hits; misses render in-process (image
+/// crate) with upstream fallback for sources/decodes it can't reach.
 async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("thumb") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
@@ -504,7 +505,8 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/view/{*path}` — passthrough formats serve natively; normalized
-/// formats answer shared-cache hits; everything else proxies.
+/// formats answer shared-cache hits and render misses in-process;
+/// undecodable/unreachable sources still proxy.
 async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;

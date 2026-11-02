@@ -387,7 +387,7 @@ fn detail(status: StatusCode, msg: &str) -> Response {
     r
 }
 
-fn not_modified() -> Response {
+pub(crate) fn not_modified() -> Response {
     response(StatusCode::NOT_MODIFIED, Body::empty())
 }
 
