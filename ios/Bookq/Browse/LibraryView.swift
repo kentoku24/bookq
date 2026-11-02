@@ -191,6 +191,9 @@ struct LibraryView: View {
         ToolbarItem(placement: .principal) {
             Text("bookq")
                 .font(.headline)
+                // web parity: body.fv-showall shifts the root icon to a
+                // red hue — the only visible trace of the hidden mode.
+                .foregroundStyle(visibility.showAll ? Color.red : Color.primary)
                 .onGeometryChange(for: CGFloat.self) {
                     $0.frame(in: .global).minX
                 } action: {
