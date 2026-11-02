@@ -17,7 +17,7 @@ from app.auth import router as auth_router, init_oauth
 from app.auth_token import token_router
 from app.folder_visibility import FolderVisibilityStore
 from app.folder_visibility_routes import router as folder_visibility_router
-from app.routes import _background_fill, _warm_covers, api_router, warmup_metadata_index
+from app.routes import _background_fill, _index_disabled, _warm_covers, api_router, warmup_metadata_index
 from app.reader_sync.sessions import SessionRegistry
 from app.reader_sync.transport import reader_sync_ws, resolve_reader_work
 from app.static_files import NoCacheStaticFiles
@@ -169,12 +169,15 @@ async def lifespan(app: FastAPI):
     # archive nodes in the background, one at a time, pausing under request
     # load. Fire-and-forget past yield — never blocks serving or shutdown
     # semantics; all fill errors are swallowed per item inside the task.
-    asyncio.create_task(_background_fill(app.state))
     # Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3):
     # warm every folder's single cover into the thumb disk cache right
     # away (no idle gating). Same fire-and-forget shape as the fill above;
     # all warm errors are swallowed per job inside the task.
-    asyncio.create_task(_warm_covers(app.state))
+    # #320: both tasks only exist to enrich the tree — under
+    # BOOKQ_DISABLE_INDEX there is no tree, so they are never spawned.
+    if not _index_disabled():
+        asyncio.create_task(_background_fill(app.state))
+        asyncio.create_task(_warm_covers(app.state))
     yield
     # reader-sync teardown (#78/S03): close every link/socket, cancel the
     # ticker and per-link drain tasks — zero reader-sync tasks or sessions
