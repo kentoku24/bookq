@@ -622,6 +622,10 @@ private fun VisOverlayFor(
     scope: ServerScope,
     snackbar: SnackbarHostState,
 ) {
+    // LazyGrid skips cells whose item is structurally equal — reading the
+    // repo version registers a recompose dependency for showAll/snapshot
+    // changes.
+    scope.visibility.version.collectAsStateWithLifecycle().value
     if (!vis.showAll) return
     val pres = vis.presentation(item.path)
     if (pres.badge == null && !pres.toggle) return
