@@ -87,7 +87,8 @@ class SearchRepositoryTest {
         server.enqueue(json(200, """{"artists":["a1"],"tags":["t1"]}"""))
         val repo = SearchRepository(api(), testScope()) { showAll }
         repo.loadFacets("series")
-        withTimeout(5_000) { while (server.requestCount < 1) delay(10) }
+        // Response applies on the repo dispatcher — wait on the outcome.
+        withTimeout(5_000) { while (repo.facets.value == null) delay(10) }
         val url = server.takeRequest().url.toString()
         assertTrue(url.contains("path=series"))
         assertTrue(repo.facets.value?.artists?.contains("a1") == true)
