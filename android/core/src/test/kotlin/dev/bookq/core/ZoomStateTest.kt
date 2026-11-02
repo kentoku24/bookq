@@ -175,4 +175,28 @@ class ZoomStateTest {
         s.panStart()
         assertEquals(2, s.noRoomDirAtStart())
     }
+
+    // ── double-tap ──
+
+    @Test fun doubleTapKeepsTappedPointFixed() {
+        val s = z()
+        val t = s.doubleTapTarget(600f, 960f)
+        assertEquals(ZoomK.DOUBLE_TAP, t[0], 0.001f)
+        // Container point 600 stays under the finger: layer pt = 600-0,
+        // scaled to 2.5 → 1500 + tx = 600 → tx = -900 (inside clamp).
+        assertEquals(-900f, t[1], 0.01f)
+        assertEquals(-1440f, t[2], 0.01f)
+    }
+
+    @Test fun doubleTapClampsAtEdge() {
+        val s = z()
+        // Tapping near the right/top edge — the anchored point would
+        // over-slide, so the pan clamp pins the spread edges instead.
+        val t = s.doubleTapTarget(900f, 480f)
+        assertEquals(ZoomK.DOUBLE_TAP, t[0], 0.001f)
+        // minX = 1200 - (285*2.5 + 630*2.5) = -1087.5; minY = -1605,
+        // maxY = -1275 → ty clamps to maxY (spread top at viewport top).
+        assertEquals(-1087.5f, t[1], 0.01f)
+        assertEquals(-1275f, t[2], 0.01f)
+    }
 }

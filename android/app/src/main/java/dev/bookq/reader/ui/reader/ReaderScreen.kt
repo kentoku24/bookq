@@ -97,6 +97,7 @@ import dev.bookq.reader.ui.browse.RETURN_ANCHOR_KEY
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -337,6 +338,24 @@ private fun ReaderBody(
         }
     }
 
+    // Double-tap zoom-in — same cubic slide as resetZoom, to an
+    // arbitrary target (s, x, y) from the model.
+    fun animateZoomTo(s: Float, x: Float, y: Float) {
+        val s0 = zoomF; val x0 = txF; val y0 = tyF
+        zoomAnim.value?.cancel()
+        zoomAnim.value = compose.launch {
+            Animatable(0f).animateTo(
+                1f,
+                tween(ZoomK.SLIDE_MS,
+                    easing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)),
+            ) {
+                applyZoom(s0 + (s - s0) * value,
+                    x0 + (x - x0) * value, y0 + (y - y0) * value)
+            }
+            zs.apply(s, x, y); applyZoom(s, x, y)
+        }
+    }
+
     fun curGlobalIdx() =
         work.spreads.getOrNull(pager.settledPage)?.first() ?: anchorIdx
 
@@ -447,17 +466,41 @@ private fun ReaderBody(
                 animSlot = zoomAnim,
             )
             .pointerInput(tapForwardLeft, work) {
+                var lastCenterTapAt = 0L
+                var lastCenterTapX = 0f
+                var lastCenterTapY = 0f
                 detectTapGestures { off ->
                     // A decided pan leaves a trailing tap — the web's
                     // suppressClickFor(400).
-                    if (android.os.SystemClock.uptimeMillis() < suppressTapUntil)
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now < suppressTapUntil)
                         return@detectTapGestures
                     when (val a = zoneAction(off.x / size.width, tapForwardLeft)) {
                         is ZoneAction.Turn -> if (!zoomedNow) turn(a.delta)
                         // Zoomed center tap drops back to 1x (plan).
-                        ZoneAction.ToggleChrome ->
-                            if (zoomedNow) resetZoom(animated = true)
-                            else onChrome(!currentChrome)
+                        ZoneAction.ToggleChrome -> when {
+                            zoomedNow -> resetZoom(animated = true)
+                            // Double-tap (Android convention — issue spec):
+                            // the first tap toggled chrome instantly, so
+                            // re-toggling restores it, then zoom in at
+                            // the tapped point. Edge double-taps stay
+                            // rapid turns — no added tap latency.
+                            now - lastCenterTapAt < ZoomK.DOUBLE_TAP_MS &&
+                                abs(off.x - lastCenterTapX) <
+                                    ZoomK.DOUBLE_TAP_PX &&
+                                abs(off.y - lastCenterTapY) <
+                                    ZoomK.DOUBLE_TAP_PX -> {
+                                lastCenterTapAt = 0L
+                                onChrome(!currentChrome)
+                                val t = zs.doubleTapTarget(off.x, off.y)
+                                animateZoomTo(t[0], t[1], t[2])
+                            }
+                            else -> {
+                                lastCenterTapAt = now
+                                lastCenterTapX = off.x; lastCenterTapY = off.y
+                                onChrome(!currentChrome)
+                            }
+                        }
                     }
                 }
             },

@@ -30,7 +30,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +53,7 @@ import dev.bookq.core.reader.OverviewRules
 import dev.bookq.core.reader.ReaderWork
 import dev.bookq.data.BookqApi
 import dev.bookq.reader.R
+import kotlin.math.abs
 
 /** overview.js: pinch-out exits once the cumulative ratio exceeds 1.3. */
 private const val PINCH_OUT = 1.3f
@@ -60,8 +65,11 @@ private val GAP = 8.dp
 private val PAD = 16.dp
 /** overview.js thumb width for cells. */
 private const val THUMB_W = 400
-/** overview.js IMG_WINDOW — thumbs prefetch band around the current page. */
+/** overview.js IMG_WINDOW — thumbs prefetch band around the scroll pos. */
 private const val IMG_WINDOW = 200
+/** overview.js HUGE — works larger than this only attach <img> inside
+ *  the ±IMG_WINDOW band. */
+private const val HUGE = 600
 
 /**
  * The web `#overview` grid: every real page as a 3:4 cell, chapter
@@ -92,11 +100,38 @@ fun OverviewOverlay(
     }
     val curKey = if (curItem >= 0) flat[curItem].second else -1
 
+    val reals = remember(work) { OverviewRules.realIndices(work) }
+    val huge = reals.size > HUGE
+    // globalIdx → position in `reals`, for O(1) band checks.
+    val posOf = remember(work, reals) {
+        IntArray(work.images.size).also { a ->
+            reals.forEachIndexed { p, g -> a[g] = p }
+        }
+    }
+    // Huge-book scroll-anchored <img> band (overview.js updates it from
+    // the scroll position). Anchored at the current page on open.
+    var band by remember { mutableIntStateOf(0) }
+    LaunchedEffect(curKey) {
+        if (curKey < 0) return@LaunchedEffect
+        band = reals.indexOfFirst { it >= curKey }
+            .let { if (it < 0) reals.lastIndex else it }
+    }
+
+    val gridState = rememberLazyGridState()
+    LaunchedEffect(huge) {
+        if (!huge) return@LaunchedEffect
+        snapshotFlow {
+            gridState.firstVisibleItemIndex
+        }.collect { fi ->
+            val item = flat.getOrNull(fi) ?: return@collect
+            if (!item.first) band = posOf[item.second]
+        }
+    }
+
     // Prefetch the ±IMG_WINDOW thumb band once on open (huge-book rule:
     // images hydrate only near the current position).
     LaunchedEffect(work, curKey) {
         if (curKey < 0) return@LaunchedEffect
-        val reals = OverviewRules.realIndices(work)
         for (p in OverviewRules.imgWindow(reals, curKey)) {
             val im = work.images[reals[p]]
             imageLoader.enqueue(ImageRequest.Builder(context)
@@ -104,8 +139,6 @@ fun OverviewOverlay(
                 .build())
         }
     }
-
-    val gridState = rememberLazyGridState()
 
     // scrollCurToThird — land the current cell's top on the 1/3 line.
     LaunchedEffect(curItem) {
@@ -179,6 +212,9 @@ fun OverviewOverlay(
                 api = api,
                 imageLoader = imageLoader,
                 gridState = gridState,
+                attachImage = if (huge) {
+                    { g: Int -> abs(posOf[g] - band) <= IMG_WINDOW }
+                } else null,
                 onJump = onJump,
                 onExit = onClose,
             )
@@ -195,6 +231,7 @@ private fun OverviewGrid(
     api: BookqApi,
     imageLoader: ImageLoader,
     gridState: LazyGridState,
+    attachImage: ((Int) -> Boolean)?,
     onJump: (Int) -> Unit,
     onExit: () -> Unit,
 ) {
@@ -279,6 +316,7 @@ private fun OverviewGrid(
                         work = work,
                         g = start + l,
                         isCur = start + l == curKey,
+                        attachImage = attachImage?.invoke(start + l) ?: true,
                         api = api,
                         imageLoader = imageLoader,
                         onJump = onJump,
@@ -294,6 +332,7 @@ private fun OverviewCell(
     work: ReaderWork,
     g: Int,
     isCur: Boolean,
+    attachImage: Boolean,
     api: BookqApi,
     imageLoader: ImageLoader,
     onJump: (Int) -> Unit,
@@ -318,15 +357,17 @@ private fun OverviewCell(
             .clickable { onJump(g) },
         contentAlignment = Alignment.Center,
     ) {
-        SubcomposeAsyncImage(
-            model = request,
-            imageLoader = imageLoader,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-            loading = {},
-            error = { Text("⚠", color = Color(0xFF808080)) },
-        )
+        if (attachImage) {
+            SubcomposeAsyncImage(
+                model = request,
+                imageLoader = imageLoader,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                loading = {},
+                error = { Text("⚠", color = Color(0xFF808080)) },
+            )
+        }
         // web `.pg` badge — chapter-local page number.
         Text(
             "${info.localIdx + 1}",

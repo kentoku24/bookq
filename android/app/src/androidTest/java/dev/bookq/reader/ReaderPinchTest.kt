@@ -160,6 +160,23 @@ class ReaderPinchTest {
         tap(instr, decor, cx, cy)
         Thread.sleep(900)
 
+        // ── 3.5. center double-tap → zooms in at the tap point
+        //     (Android convention — ZoomK.DOUBLE_TAP). Same zoomed
+        //     discriminator: a horizontal drag must pan, not turn. ──
+        tap(instr, decor, cx, cy)
+        Thread.sleep(80)
+        tap(instr, decor, cx, cy)
+        Thread.sleep(700)
+        val preDtDrag = d.findObject(By.text(readerCounter))?.text
+        d.drag(cx.toInt(), cy.toInt(), (cx - 400).toInt(), cy.toInt(), 50)
+        Thread.sleep(600)
+        assertEquals(
+            "double-tap did not zoom — the drag turned a page",
+            preDtDrag, d.findObject(By.text(readerCounter))?.text)
+        // Zoomed center tap → back to 1x for the pinch-in below.
+        tap(instr, decor, cx, cy)
+        Thread.sleep(900)
+
         // ── 4. pinch-IN: 900px → 280px — crosses the <=0.5 FIRE band ──
         pinch(instr, decor, cx, cy, startHalf = 450f, endHalf = 140f, steps = 14)
 

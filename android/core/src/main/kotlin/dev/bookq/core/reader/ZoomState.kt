@@ -27,6 +27,11 @@ object ZoomK {
     const val ARM_PX = 10f
     const val PALM_EDGE = 20f
     const val PAN_DECIDE_PX = 8f
+    /** Android convention (no web analog) — double-tap zooms in at the
+     *  tapped point. */
+    const val DOUBLE_TAP = 2.5f
+    const val DOUBLE_TAP_MS = 300L
+    const val DOUBLE_TAP_PX = 48f
 }
 
 private fun clamp(v: Float, lo: Float, hi: Float) =
@@ -225,5 +230,17 @@ class ZoomState {
     fun panSettle() {
         val c = clampPan(tx, ty)
         apply(zoom, c[0], c[1])
+    }
+
+    // ── double-tap ──
+
+    /** Zoom-in target for a double-tap at (px, py) in container coords —
+     *  the tapped layer point stays fixed (same anchor math as pinch),
+     *  pan-clamped like a settle. Caller animates then [apply]s. */
+    fun doubleTapTarget(px: Float, py: Float): FloatArray {
+        val t = ZoomK.DOUBLE_TAP
+        val k = t / zoom
+        val c = clampPan(px - k * (px - tx), py - k * (py - ty), t)
+        return floatArrayOf(t, c[0], c[1])
     }
 }
