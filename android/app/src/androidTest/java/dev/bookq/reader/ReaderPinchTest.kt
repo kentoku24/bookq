@@ -273,13 +273,22 @@ class ReaderPinchTest {
             for (dir in intArrayOf(1, -1)) {
                 val (x0, x1) =
                     if (dir > 0) edgeX0 to edgeX1 else edgeX1 to edgeX0
-                swipe(instr, decor, x0, x1, cy, steps = 14)
-                Thread.sleep(300)
-                swipe(instr, decor, x0, x1, cy, steps = 14)
-                turned = waitUntil(
-                    { counterText() != preEdge || (zoomScale() ?: 9f) <= 1f },
-                    5_000)
-                if (turned) break
+                // Pan room is viewport/spread dependent — a large tablet
+                // can need several drags just to reach the clamp before
+                // the next drag past EDGE_PX arms the turn. Keep dragging
+                // the same direction until the counter moves (bounded).
+                for (i in 0 until 5) {
+                    swipe(instr, decor, x0, x1, cy, steps = 14)
+                    Thread.sleep(300)
+                    turned = counterText() != preEdge ||
+                        (zoomScale() ?: 9f) <= 1f
+                    if (turned) break
+                }
+                if (turned || waitUntil(
+                        { counterText() != preEdge ||
+                            (zoomScale() ?: 9f) <= 1f }, 2_000)) {
+                    turned = true; break
+                }
             }
             assertTrue("edge-drag turn never moved the page " +
                 "(counter=$preEdge → ${counterText()}, zoom=${zoomScale()})",
