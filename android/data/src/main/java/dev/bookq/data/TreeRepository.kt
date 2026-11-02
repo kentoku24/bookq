@@ -61,12 +61,10 @@ class TreeRepository(
     val state = _state.asStateFlow()
 
     @Volatile private var loadGen = 0
-    @Volatile private var etag: String? = null
+    @Volatile private var fullRetry = 0
     private val loadMutex = Mutex()
     private var pollJob: Job? = null
     @Volatile private var foreground = true
-
-    /** Last applied node list — needed by the poller's re-emit path. */
 
     /** Restore the host snapshot synchronously so cold start paints
      *  instantly (SW NetworkFirst parity). Returns true when applied. */
@@ -93,12 +91,16 @@ class TreeRepository(
      */
     fun load(force: Boolean = false): Job {
         val gen = ++loadGen
+        if (!force) fullRetry = 0
         return scope.launch {
             loadMutex.withLock {
                 var shallowOk = false
                 _state.value = _state.value.copy(error = null)
-                // Stage 1: shallow first paint.
-                if (!force) {
+                // Stage 1: shallow first paint — skipped when a complete
+                // tree already backs the screen (restored snapshot or an
+                // earlier full load): swapping it for a shallow window
+                // would LOSE data when stage 2 then fails.
+                if (!force && !_state.value.hasSnapshot) {
                     try {
                         when (val res = api.tree(depth = 1)) {
                             is TreeResult.Nodes -> {
@@ -134,7 +136,9 @@ class TreeRepository(
                 } catch (e: Exception) {
                     if (gen != loadGen) return@withLock
                     if (shallowOk) {
-                        // Stay on the shallow grid — treeLoaded stays false.
+                        // Stay shallow — but web's _scheduleFullRetry:
+                        // a transient 202/5xx must not wedge the grid.
+                        scheduleFullRetry(gen)
                         return@withLock
                     }
                     if (_state.value.nodes.isNotEmpty()) {
@@ -152,8 +156,19 @@ class TreeRepository(
         }
     }
 
+    /** Full-tree retry while the shallow window stays up (app.js
+     *  `_scheduleFullRetry`). Bounded — pull-to-refresh always works. */
+    private fun scheduleFullRetry(gen: Int) {
+        if (fullRetry >= MAX_FULL_RETRIES) return
+        fullRetry++
+        scope.launch {
+            delay(FULL_RETRY_MS)
+            if (loadGen == gen) load(force = true)
+        }
+    }
+
     private fun applyFull(res: TreeResult.Nodes, gen: Int) {
-        etag = res.etag ?: etag
+        fullRetry = 0
         _state.value = State(
             nodes = res.nodes,
             generation = res.generation,
@@ -205,9 +220,11 @@ class TreeRepository(
         pollJob = null
     }
 
-    /** Pull-to-refresh: POST index/refresh, then reload unconditionally. */
-    fun refresh() {
-        scope.launch {
+    /** Pull-to-refresh: POST index/refresh, then reload unconditionally.
+     *  Returns the Job so the caller can clear its spinner in a finally —
+     *  completes on BOTH success and failure (error lands in state). */
+    fun refresh(): Job {
+        return scope.launch {
             try {
                 api.refreshIndex()
             } catch (e: Exception) {
@@ -215,7 +232,7 @@ class TreeRepository(
                     error = e.message ?: "再読み込みに失敗しました")
                 return@launch
             }
-            load(force = true)
+            load(force = true).join()
         }
     }
 
@@ -241,5 +258,7 @@ class TreeRepository(
 
     companion object {
         const val POLL_INTERVAL_MS = 15_000L
+        private const val FULL_RETRY_MS = 5_000L
+        private const val MAX_FULL_RETRIES = 8
     }
 }
