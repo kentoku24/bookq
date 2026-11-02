@@ -104,9 +104,15 @@ def test_01_offline_btn_visible_6_modes(page, server):
         expect(btn).to_be_visible(timeout=5000)
         cls = btn.get_attribute("class") or ""
         assert "offline-btn" in cls, f"{msg} class missing offline-btn: {cls}"
-        # check right-top via computed style (position absolute, top ~4px right ~4px)
-        pos = btn.evaluate("el => getComputedStyle(el).position")
-        assert pos == "absolute", f"{msg} position should be absolute got {pos}"
+        # check right-top via computed style (position absolute, top ~4px
+        # right ~4px) — poll it: an async re-render can detach the resolved
+        # node between to_be_visible and the style read (detached nodes
+        # compute to ''), so a one-shot evaluate races under load.
+        page.wait_for_function(
+            "() => { const b = document.querySelector('.offline-btn');"
+            " return !!b && getComputedStyle(b).position === 'absolute'; }",
+            timeout=5000,
+        )
         # check via evaluate getOfflineBtnState
         state = page.evaluate("() => typeof getOfflineBtnState==='function' ? getOfflineBtnState('simple_manga') : 'unknown'")
         assert state in ("idle", "downloading", "stopping", "complete", "deleting", "partial"), f"{msg} state {state}"
