@@ -107,7 +107,13 @@ class ServerScope(
 
     fun setForeground(resumed: Boolean) {
         tree.setForeground(resumed)
-        if (!resumed) progress.flush()
+        if (!resumed) {
+            progress.flush()        // trailing 2 s server push
+            // The 500 ms-debounced LOCAL write too — backgrounding can
+            // precede process death, and a network flush alone leaves
+            // the on-disk position stale.
+            progress.flushPersist()
+        }
     }
 
     fun close() {
