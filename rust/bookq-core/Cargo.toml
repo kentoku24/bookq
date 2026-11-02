@@ -8,6 +8,9 @@ license = "Proprietary"
 
 [dependencies]
 crc32fast = "1"
+# RARLAB unrar (bundled C source) — the same engine rarfile shells out to,
+# in-process instead of one 7z subprocess per page (#163).
+unrar = "0.5.8"
 # zlib-rs backend: miniz_oxide inflates ~2-3x slower than zlib C; zlib-rs is
 # pure Rust, faster than C zlib, and self-contained (no system zlib needed).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }

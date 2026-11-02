@@ -243,8 +243,14 @@ pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
 /// failed parse yields `None` just as Python propagates the open failure.
 pub(crate) fn archive_read_entry(archive: &Path, inner: &str) -> Option<Vec<u8>> {
     match bookq_core::open_archive(archive) {
-        Some(oa) => oa.read_zip_entry(inner),
-        None => bookq_core::zip_read_entry(archive, inner),
+        Some(oa) => oa.read_entry(archive, inner),
+        // Uncached one-shot fallback — the same "Python decides" escape
+        // the listing uses; a parse our port rejects may still decode
+        // under the real unrar engine.
+        None => match suffix_lower(archive).as_str() {
+            ".rar" | ".cbr" => bookq_core::rar_read_entry(archive, inner),
+            _ => bookq_core::zip_read_entry(archive, inner),
+        },
     }
 }
 
@@ -548,8 +554,8 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
-        if is_pdf_file(&archive) || is_rar_path(&archive) {
-            return Serve::Proxy; // pdf render / rar extraction → upstream tools
+        if is_pdf_file(&archive) {
+            return Serve::Proxy; // pdf render → upstream pypdfium2
         }
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
@@ -589,7 +595,7 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     serve_plain_file(&file_path, size, &etag, &last_modified, headers)
 }
 
-/// `_serve_archive_entry` for ZIP/CBZ/EPUB (pdf/rar proxy upstream).
+/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR (pdf proxies upstream).
 fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
     if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
         return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));

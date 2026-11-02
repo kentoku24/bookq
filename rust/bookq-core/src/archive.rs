@@ -2008,6 +2008,30 @@ pub fn rar_names(path: &Path) -> Option<Vec<(String, bool)>> {
     }
 }
 
+/// `_read_rar`'s extraction half, in-process: sequential RAR processing
+/// until the named member via rarlab unrar — the same engine rarfile
+/// shells out to, without one 7z subprocess per page. For solid archives
+/// entry *n* still decompresses 0..n (a format constraint rarfile+7z pays
+/// identically). Open/seek/read errors, encrypted members, and missing
+/// entries all yield `None` — Python maps every such failure to `None`
+/// → 404, and `ArchiveToolMissing` (501) cannot occur in-process.
+pub fn rar_read_entry(path: &Path, inner: &str) -> Option<Vec<u8>> {
+    let mut ar = unrar::Archive::new(path).open_for_processing().ok()?;
+    loop {
+        match ar.read_header() {
+            Ok(Some(header)) => {
+                let e = header.entry();
+                if e.filename.as_os_str().to_str() == Some(inner) && !e.is_directory() {
+                    let (data, _rest) = header.read().ok()?;
+                    return Some(data);
+                }
+                ar = header.skip().ok()?;
+            }
+            _ => return None,
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // Open-archive memo — port of app/archive.py's _open_archives LRU (#217)
 // ══════════════════════════════════════════════════════════════════════════
@@ -2053,9 +2077,9 @@ enum Parsed {
         /// .epub only — (raw image names, spine order) from `epub_raw`.
         epub: Option<(Vec<String>, Vec<String>)>,
     },
-    /// .rar/.cbr — parsed header names. Entry reads still proxy upstream
-    /// (compressed extraction needs external unrar); the memo saves the
-    /// O(E) header walk the listing was paying per request.
+    /// .rar/.cbr — parsed header names. Entry bytes go through
+    /// `rar_read_entry` (in-process unrar, sequential per read); the memo
+    /// still saves the O(E) header walk the listing was paying per request.
     Rar { names: Vec<(String, bool)> },
 }
 
@@ -2095,6 +2119,29 @@ impl OpenArchive {
             }
             _ => None,
         }
+    }
+
+    /// Format-dispatched entry bytes — `read_archive_entry`'s shape.
+    /// `Some(bytes)` only on a proven-identical read; anything else is
+    /// `None` and the caller produces the same 404 Python would.
+    pub fn read_entry(&self, path: &Path, inner: &str) -> Option<Vec<u8>> {
+        match &self.parsed {
+            Parsed::Zip { .. } => self.read_zip_entry(inner),
+            Parsed::Rar { .. } => self.read_rar_entry(path, inner),
+        }
+    }
+
+    /// RAR-family entry bytes via `rar_read_entry` — gated on the memoized
+    /// listing so a missing/directory member never pays the extraction
+    /// walk (Python's `inner not in rf.namelist() → None`).
+    pub fn read_rar_entry(&self, path: &Path, inner: &str) -> Option<Vec<u8>> {
+        let Parsed::Rar { names } = &self.parsed else {
+            return None;
+        };
+        if !names.iter().any(|(n, d)| n == inner && !*d) {
+            return None;
+        }
+        rar_read_entry(path, inner)
     }
 
     /// EPUB (raw names, spine order) — `epub_raw` shape; `None` for non-epub.
@@ -2306,6 +2353,73 @@ mod memo_tests {
         ))
     }
 
+    /// Minimal RAR5 *store* writer — port of tests/fixtures/rar5.py:
+    /// signature + main header + per-entry (file header, raw data) + end
+    /// header. Only what a RAR5 parser needs to list/extract stored files.
+    fn make_rar5_store(path: &Path, members: &[(&str, &[u8])]) {
+        fn vint(mut n: u64, out: &mut Vec<u8>) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n > 0 {
+                    out.push(b | 0x80);
+                } else {
+                    out.push(b);
+                    return;
+                }
+            }
+        }
+        fn header(body: &[u8]) -> Vec<u8> {
+            let mut size = Vec::new();
+            vint(body.len() as u64, &mut size);
+            let mut v = size.clone();
+            v.extend_from_slice(body);
+            let mut out = crc32fast::hash(&v).to_le_bytes().to_vec();
+            out.extend_from_slice(&v);
+            out
+        }
+        let mut out = b"Rar!\x1a\x07\x01\x00".to_vec();
+        let mut main = Vec::new();
+        vint(1, &mut main);
+        vint(0, &mut main);
+        vint(0, &mut main);
+        out.extend(header(&main));
+        for (name, data) in members {
+            let nb = name.as_bytes();
+            let mut body = Vec::new();
+            vint(2, &mut body); // file header
+            vint(0x0002, &mut body); // data area present
+            vint(data.len() as u64, &mut body);
+            vint(0x0004, &mut body); // CRC32 present
+            vint(data.len() as u64, &mut body); // unpacked size
+            vint(0x20, &mut body); // attributes
+            body.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            vint(0, &mut body); // compression: version 0, method store
+            vint(1, &mut body); // host OS: unix
+            vint(nb.len() as u64, &mut body);
+            body.extend_from_slice(nb);
+            out.extend(header(&body));
+            out.extend_from_slice(data);
+        }
+        let mut end = Vec::new();
+        vint(5, &mut end);
+        vint(0, &mut end);
+        vint(0, &mut end);
+        out.extend(header(&end));
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn tmp_rar(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bookq-arch-{tag}-{}-{}.rar",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     /// The LRU is process-global and cargo runs tests in parallel — stateful
     /// assertions serialize here so another test's opens can't evict the
     /// entry under test mid-assertion. Poison is ignored so one test's panic
@@ -2457,6 +2571,52 @@ mod memo_tests {
         }
         for h in handles {
             h.join().unwrap();
+        }
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn rar_store_entry_reads_and_missing_returns_none() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("store");
+        make_rar5_store(
+            &p,
+            &[
+                ("pages/001.png", b"first"),
+                ("pages/002.png", b"second"),
+                ("notes.txt", b"not-an-image"),
+            ],
+        );
+        let a = open_archive(&p).unwrap();
+        // Deep-member read: sequential processing reaches it in-process.
+        assert_eq!(a.read_entry(&p, "pages/002.png").unwrap(), b"second");
+        assert_eq!(a.read_entry(&p, "pages/001.png").unwrap(), b"first");
+        // Missing member → None (the memoized listing gate, like rarfile).
+        assert_eq!(a.read_entry(&p, "pages/999.png"), None);
+        // Uncached one-shot fallback also extracts.
+        assert_eq!(rar_read_entry(&p, "pages/001.png").unwrap(), b"first");
+        assert_eq!(rar_read_entry(&p, "pages/999.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn rar_listing_and_read_agree() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("agree");
+        make_rar5_store(&p, &[("x/1.png", b"aaa"), ("x/2.png", b"bbb")]);
+        let names = rar_names(&p).unwrap();
+        let files: Vec<String> = names
+            .into_iter()
+            .filter(|(_, d)| !*d)
+            .map(|(n, _)| n)
+            .collect();
+        for f in &files {
+            assert!(
+                rar_read_entry(&p, f).is_some(),
+                "listed member must extract: {f}"
+            );
         }
         std::fs::remove_file(&p).ok();
     }

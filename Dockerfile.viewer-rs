@@ -3,7 +3,8 @@
 # only rust/ is needed.
 
 FROM rust:1-slim AS rsbuilder
-RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev && rm -rf /var/lib/apt/lists/*
+# g++ compiles the bundled RARLAB unrar C++ (bookq-core `unrar` dep).
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY rust/ ./rust/
 # api/user-state-schema.sql is embedded via include_str! (#200)
@@ -11,7 +12,8 @@ COPY api/ ./api/
 RUN cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends zlib1g && rm -rf /var/lib/apt/lists/*
+# libstdc++6 carries the unrar C++ runtime the binary links against.
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 && rm -rf /var/lib/apt/lists/*
 COPY --from=rsbuilder /src/rust/target/release/viewer-rs /usr/local/bin/viewer-rs
 
 # Upstream the proxy falls through to; overridden by compose.

@@ -19,7 +19,8 @@ mod meta;
 mod scans;
 
 pub use archive::{
-    epub_raw, open_archive, rar_names, zip_names, zip_read_entry, OpenArchive, ZipEntry,
+    epub_raw, open_archive, rar_names, rar_read_entry, zip_names, zip_read_entry, OpenArchive,
+    ZipEntry,
 };
 pub use meta::{meta_walk, parse_metadata_batch, ComicRec};
 pub use scans::{
