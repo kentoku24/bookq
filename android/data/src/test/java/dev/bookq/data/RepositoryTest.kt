@@ -206,7 +206,11 @@ class RepositoryTest {
             clock = { 1000L }, saveDebounceMs = 0, pushDebounceMs = 1)
         repo.save("f/a", 3, 30)
         repo.save("f/a", 3, 30) // identical — second save is a no-op
-        withTimeout(5_000) { repo.flush().join() }
+        // Await the armed send — flush() can't join a send that already
+        // took `pending` (its sendNow returns early on inFlight), so a
+        // flush-first assert can run before the PUT lands.
+        withTimeout(5_000) { while (server.requestCount == 0) kotlinx.coroutines.delay(10) }
+        repo.flush().join() // ON_STOP flush must not duplicate the send
         assertEquals(1, repo.book.all().size)
         // Exactly one PUT — the deduped second save never re-queues.
         assertEquals(1, server.requestCount)
