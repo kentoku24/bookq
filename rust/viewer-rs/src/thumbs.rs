@@ -6,8 +6,10 @@
 //! falls through to the upstream Pillow pipeline, which renders into the
 //! same cache dir — the next identical request is a native hit.
 //!
-//! Never native: rendering/transcoding (Pillow), PDF pages (pypdfium2),
-//! RAR extraction (external tool) — those requests proxy whole.
+//! Never native: rendering/transcoding (Pillow) and PDF pages
+//! (pypdfium2) — those requests proxy whole. RAR members are read
+//! in-process via `bookq_core` (bundled unrar), so `/view` on a rar/cbr
+//! entry is native end to end.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,8 +20,8 @@ use axum::response::Response;
 use sha1::{Digest, Sha1};
 
 use crate::serve::{
-    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file, is_within, realpath,
-    resolve_archive, suffix_lower, Serve,
+    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file, is_rar_path,
+    is_within, realpath, resolve_archive, suffix_lower, Serve,
 };
 
 const CACHE_MAX_AGE: i64 = 86400;
@@ -143,7 +145,8 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
 
 /// `load_source_bytes` for the passthrough `/view` branch. Returns `Err`
 /// for the guard failures (400/403/404) and `Ok(None)` for "needs upstream
-/// tooling" (rar/pdf) so the caller proxies instead of reproducing 501s.
+/// tooling" (pdf pages — pypdfium2) so the caller proxies instead of
+/// reproducing 501s. RAR/CBR members read natively via `archive_read_entry`.
 fn load_source_bytes(
     downloads: &Path,
     path: &str,
@@ -160,7 +163,13 @@ fn load_source_bytes(
         let Some((mtime, size)) = stat_mtime_size(&archive) else {
             return Err(detail(StatusCode::NOT_FOUND, "File not found"));
         };
-        if is_pdf_file(&archive) || crate::serve::is_rar_path(&archive) {
+        // PDF pages stay upstream (pypdfium2); rar/cbr entries read
+        // natively via `archive_read_entry` → bundled unrar — except
+        // multipart sets, which 7z chains volumes for upstream.
+        if is_pdf_file(&archive) {
+            return Ok(None);
+        }
+        if is_rar_path(&archive) && bookq_core::rar_needs_upstream(&archive) {
             return Ok(None);
         }
         if !is_image_entry(&inner) {

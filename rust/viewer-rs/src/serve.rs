@@ -6,8 +6,8 @@
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
 //!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
-//!   - RAR/CBR entry *reads* (compressed extraction needs external unrar;
-//!     listing via `rar_names` is native)
+//!   - RAR/CBR members of *multipart* sets (the bundled unrar can't chain
+//!     volumes; single-volume entries extract in-process)
 //!   - multi-range requests (hypercorn emits multipart/byteranges with a
 //!     random boundary — byte parity is impossible; single ranges are native)
 //!
@@ -236,15 +236,40 @@ pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
     }
 }
 
+/// unrar allocates the decompress window per extraction (RAR5 dict sizes
+/// run 32MB–4GB); spawn_blocking's ≤512 threads could otherwise stack
+/// enough concurrent windows to OOM the gateway. Cap concurrent
+/// in-process rar extraction at the CPU count — zip reads stay unbounded.
+static RAR_EXTRACT: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| {
+        tokio::sync::Semaphore::new(
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+    });
+
 /// `read_archive_entry` read path (#217 port): the memoized open archive
 /// answers repeat page reads without re-parsing the central directory.
 /// `None` covers every non-proven read exactly like `zip_read_entry` —
 /// unstat'able paths fall through to the uncached one-shot open, and a
 /// failed parse yields `None` just as Python propagates the open failure.
 pub(crate) fn archive_read_entry(archive: &Path, inner: &str) -> Option<Vec<u8>> {
+    let _permit = if is_rar_path(archive) {
+        Some(RAR_EXTRACT.blocking_acquire().ok()?)
+    } else {
+        None
+    };
     match bookq_core::open_archive(archive) {
-        Some(oa) => oa.read_zip_entry(inner),
-        None => bookq_core::zip_read_entry(archive, inner),
+        Some(oa) => oa.read_entry(archive, inner),
+        // Uncached one-shot fallback — `rar_read_entry` resolves the
+        // member by ordinal inside `rar_names`, so it reads only what the
+        // ported listing can name (None → 404 when the listing fails,
+        // matching Python's open-failure path).
+        None => {
+            if is_rar_path(archive) {
+                bookq_core::rar_read_entry(archive, inner)
+            } else {
+                bookq_core::zip_read_entry(archive, inner)
+            }
+        }
     }
 }
 
@@ -542,14 +567,15 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 // ── /image/{path} ─────────────────────────────────────────────────────────────
 
 /// `serve_image` — archive-entry reads and plain-file serving.
-/// RAR/CBR entry reads proxy upstream (compressed extraction needs unrar).
+/// RAR/CBR entries extract in-process via bundled unrar; only PDF pages
+/// (pypdfium2) and multi-range requests still proxy upstream.
 pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if let Some((archive, inner)) = resolve_archive(downloads, path) {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
-        if is_pdf_file(&archive) || is_rar_path(&archive) {
-            return Serve::Proxy; // pdf render / rar extraction → upstream tools
+        if is_pdf_file(&archive) {
+            return Serve::Proxy; // pdf render → upstream pypdfium2
         }
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
@@ -589,7 +615,7 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     serve_plain_file(&file_path, size, &etag, &last_modified, headers)
 }
 
-/// `_serve_archive_entry` for ZIP/CBZ/EPUB (pdf/rar proxy upstream).
+/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR (pdf proxies upstream).
 fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
     if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
         return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
@@ -612,6 +638,10 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
     let etag = format!("\"{}-{}-{}\"", fmt_mtime(mtime), stat.len(), &digest[..16]);
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
+    }
+    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
+        // Multipart set — the bundled unrar can't chain volumes; 7z can.
+        return Serve::Proxy;
     }
     let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
