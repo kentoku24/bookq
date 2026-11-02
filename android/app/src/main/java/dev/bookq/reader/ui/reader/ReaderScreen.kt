@@ -224,6 +224,9 @@ private fun ReaderBody(
     var menu by remember { mutableStateOf(false) }
     val volumeKeys by graph.settings.volumeKeys.collectAsStateWithLifecycle()
     val focusRequester = remember { FocusRequester() }
+    // pointerInput captures values at launch — keep the live chrome flag
+    // so the center zone toggles instead of only hiding once.
+    val currentChrome by androidx.compose.runtime.rememberUpdatedState(chrome)
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     // iOS `turn`: spread-granularity, cross-chapter; rapid taps coalesce
@@ -281,7 +284,8 @@ private fun ReaderBody(
 
     // Commit on settle — navigation.js: the deferred finalize runs only
     // after the track settles; a newer settle invalidates the older.
-    LaunchedEffect(work, pager) {
+    // `original` keys the URL scheme captured by pageUrl below.
+    LaunchedEffect(work, pager, original) {
         snapshotFlow { pager.settledPage }.collect { s ->
             val idx = work.spreads.getOrNull(s)?.first() ?: return@collect
             onCurrent(idx)
@@ -326,7 +330,7 @@ private fun ReaderBody(
                 detectTapGestures { off ->
                     when (val a = zoneAction(off.x / size.width, tapForwardLeft)) {
                         is ZoneAction.Turn -> turn(a.delta)
-                        ZoneAction.ToggleChrome -> onChrome(!chrome)
+                        ZoneAction.ToggleChrome -> onChrome(!currentChrome)
                     }
                 }
             },
