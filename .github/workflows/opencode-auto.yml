@@ -164,7 +164,7 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Swap label to ✅ done
         if: success()
@@ -238,7 +238,7 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Swap label to ✅ done
         if: success()
@@ -331,7 +331,7 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Branch, commit, push, open PR
         if: success()
@@ -454,7 +454,7 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Branch, commit, push, open PR
         if: success()

@@ -525,7 +525,19 @@ def test_neighbor_image_load_does_not_move_current_spread(landscape_page):
     page.wait_for_function(
         "() => [...document.querySelectorAll('#img-track img')].every(i => i.complete)"
     )
-    page.wait_for_timeout(300)
+    # Neighbour loads may trigger a deferred anchor correction (recordAR →
+    # updateStripPositions → applyTrackTransform), which under CI load can
+    # land after a fixed settle — poll for convergence to the pre-load
+    # position instead of sampling once at an arbitrary moment.
+    page.wait_for_function(
+        f"""() => {{
+            const sc = [...document.querySelectorAll('#img-track .spread-container')]
+                .find(s => [...s.querySelectorAll('img')]
+                    .some(im => im.style.getPropertyValue('--i') === '0'));
+            return sc && Math.abs(sc.getBoundingClientRect().left - ({early})) < {TOL};
+        }}""",
+        timeout=5000,
+    )
     late = spread_with(geom(page), 0)["left"]
     assert abs(early - late) < TOL, f"current spread shifted {late - early:.1f}px on neighbour load"
 
