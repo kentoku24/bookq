@@ -4,13 +4,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.ui.platform.testTag
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -73,7 +76,25 @@ private fun BootErrorScreen(graph: AppGraph, message: String) {
 @Composable
 private fun ReadyNavHost(graph: AppGraph) {
     val nav = rememberNavController()
-    NavHost(navController = nav, startDestination = Routes.Browse()) {
+    val online by graph.online.online.collectAsStateWithLifecycle()
+    Column(Modifier.fillMaxSize()) {
+        if (!online) {
+            // Amber offline banner — web status-dot parity: only shown
+            // while the default network is unvalidated/absent.
+            Surface(
+                color = androidx.compose.ui.graphics.Color(0xFFC9A24F),
+                modifier = Modifier.fillMaxWidth().testTag("offlineBanner"),
+            ) {
+                Text(
+                    stringResource(R.string.offline_banner),
+                    color = androidx.compose.ui.graphics.Color(0xFF1A1A1A),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+            }
+        }
+    NavHost(navController = nav, startDestination = Routes.Browse(),
+        modifier = Modifier.weight(1f)) {
         composable<Routes.Browse> { entry ->
             val route = entry.toRoute<Routes.Browse>()
             BrowseScreen(
@@ -100,5 +121,6 @@ private fun ReadyNavHost(graph: AppGraph) {
         composable<Routes.Settings> {
             SettingsScreen(graph, onBack = { nav.popBackStack() })
         }
+    }
     }
 }
