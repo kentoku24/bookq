@@ -67,21 +67,30 @@ class AppModel<T : VersionProbe>(
     /**
      * Probe the server. 401 → login required; 200 → ready; anything else →
      * BootError (with an offline-snapshot escape hatch for M2).
+     * [bootGen] invalidates in-flight probes — a late 401 racing
+     * `didLogin()` must not push a Ready session back to Login.
      */
+    private var bootGen = 0
+
     fun boot() {
         val probe = api ?: run {
             _phase.value = AppPhase.Onboarding
             return
         }
+        val gen = ++bootGen
         _phase.value = AppPhase.Booting
         scope.launch {
             try {
-                _serverVersion.value = probe.version()
+                val v = probe.version()
+                if (gen != bootGen) return@launch
+                _serverVersion.value = v
                 _scopeValue.value = currentScope()
                 _phase.value = AppPhase.Ready
             } catch (e: ApiException.Unauthorized) {
+                if (gen != bootGen) return@launch
                 _phase.value = AppPhase.Login
             } catch (e: Exception) {
+                if (gen != bootGen) return@launch
                 _phase.value = if (hasOfflineSnapshot()) {
                     AppPhase.Ready
                 } else {
@@ -92,9 +101,11 @@ class AppModel<T : VersionProbe>(
     }
 
     /** Server URL was saved → drop old-scope state, rebuild, probe. */
-    fun serverChanged() {
+    suspend fun serverChanged() {
+        bootGen++
         auth.logout()
         _serverVersion.value = null
+        _scopeValue.value = null
         configureApi()
         boot()
     }
@@ -110,12 +121,27 @@ class AppModel<T : VersionProbe>(
     }
 
     fun didLogin() {
+        // Invalidate a boot still in flight (e.g. the token-less probe
+        // racing a browser round-trip after process death).
+        val gen = ++bootGen
         _scopeValue.value = currentScope()
         _phase.value = AppPhase.Ready
+        // /api/v1/version doubles as the boot auth probe, so it 401'd
+        // pre-login — quietly refetch for the settings version row.
+        val probe = api ?: return
+        scope.launch {
+            try {
+                val v = probe.version()
+                if (gen == bootGen) _serverVersion.value = v
+            } catch (_: Exception) { /* version row is advisory */ }
+        }
     }
 
-    fun logout() {
+    suspend fun logout() {
+        bootGen++
         auth.logout()
+        _serverVersion.value = null
+        _scopeValue.value = null
         _phase.value = AppPhase.Login
     }
 
