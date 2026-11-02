@@ -138,8 +138,10 @@ fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
                 title = stringResource(R.string.settings_logout),
                 titleColor = MaterialTheme.colorScheme.error,
                 onClick = {
-                    graph.model.logout()
-                    onBack()
+                    scope.launch {
+                        graph.model.logout()
+                        onBack()
+                    }
                 },
             )
             HorizontalDivider()
@@ -163,6 +165,7 @@ fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
     if (serverDialog) {
         var draft by remember { mutableStateOf(serverUrl) }
         val invalid = stringResource(R.string.onboarding_error_invalid)
+        val errHttp = stringResource(R.string.onboarding_error_http)
         var error by remember { mutableStateOf<String?>(null) }
         AlertDialog(
             onDismissRequest = { serverDialog = false },
@@ -188,7 +191,11 @@ fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
                 TextButton(onClick = {
                     val normalized = ServerUrls.normalize(draft)
                     if (normalized == null) {
-                        error = invalid
+                        error = if (draft.trim().startsWith("http://")) {
+                            errHttp
+                        } else {
+                            invalid
+                        }
                     } else {
                         serverDialog = false
                         scope.launch { graph.model.setServerAndBoot(normalized) }
