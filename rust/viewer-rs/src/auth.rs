@@ -7,9 +7,10 @@
 //! (fail-closed, never fail-open).
 //!
 //! Auth order matches `user_from_connection`: the signed session cookie
-//! wins over Bearer. We cannot verify the cookie natively, so any request
-//! carrying a `session` cookie delegates upstream — including Bearer
-//! requests, where Python would prefer the cookie identity anyway.
+//! wins over Bearer. The cookie is verified natively via
+//! `unsign_session` (itsdangerous.TimestampSigner, HMAC-SHA1 over a
+//! django-concat derived key) — an invalid, expired, or userless cookie
+//! falls through to Bearer exactly as Python's empty-session does.
 //! Everything we cannot positively identify delegates upstream so the
 //! Python side produces its own byte-exact 401.
 
@@ -43,20 +44,6 @@ fn now_secs_f64() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
-}
-
-/// True when a `Cookie` header carries a `session` entry — starlette's
-/// SessionMiddleware default cookie name (`app/main.py` doesn't override).
-fn has_session_cookie(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .any(|c| {
-            c.split(';')
-                .map(|kv| kv.trim())
-                .any(|kv| kv.starts_with("session="))
-        })
 }
 
 fn b64url(data: &str) -> Option<Vec<u8>> {
@@ -169,8 +156,9 @@ pub fn validate_bearer(token: &str, secret: &str, allowlist: &HashSet<String>) -
 }
 
 /// Resolve the caller for a native handler. `test_mode` returns the mock
-/// user; a `session` cookie delegates (Python prefers it over Bearer);
-/// `Bearer` validates locally; anything else delegates upstream.
+/// user; a verifiable `session` cookie identifies the caller natively
+/// (Python prefers it over Bearer); `Bearer` validates locally; anything
+/// else delegates upstream.
 pub fn resolve(
     headers: &HeaderMap,
     test_mode: bool,
@@ -182,8 +170,27 @@ pub fn resolve(
             email: TEST_USER_EMAIL.to_string(),
         });
     }
-    if has_session_cookie(headers) {
-        return Caller::Delegate;
+    // Session cookie wins over Bearer, matching `user_from_connection`.
+    // A verifiable cookie identifies the caller natively; an invalid,
+    // expired, or userless cookie falls through to Bearer — Python's
+    // SessionMiddleware sees an empty session there and does the same.
+    if !secret.is_empty() {
+        if let Some(raw) = session_cookie_value(headers) {
+            if let Some(payload) = unsign_session(secret, &raw, SESSION_MAX_AGE, now_secs_i64()) {
+                if let Ok(session) = serde_json::from_slice::<Value>(&payload) {
+                    if let Some(email) = session
+                        .get("user")
+                        .and_then(|u| u.get("email"))
+                        .and_then(|e| e.as_str())
+                        .filter(|e| !e.is_empty())
+                    {
+                        return Caller::User(Identity {
+                            email: email.to_lowercase(),
+                        });
+                    }
+                }
+            }
+        }
     }
     let auth = headers
         .get(header::AUTHORIZATION)
@@ -446,6 +453,123 @@ mod tests {
                 SECRET,
             );
             assert!(validate_bearer(&t, SECRET, &allowlist()).is_some(), "{alg}");
+        }
+    }
+
+    // ── resolve(): session-cookie callers ────────────────────────────────
+
+    /// Mint an itsdangerous.TimestampSigner cookie value — mirrors
+    /// `unsign_session`'s derivation: SHA1(salt + b"signer" + secret) is
+    /// the HMAC-SHA1 key, signed over `value_b64 + "." + ts_b64`.
+    fn sign_session(secret: &str, payload: &[u8], ts: u64) -> String {
+        use sha1::{Digest, Sha1};
+        let value_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let ts_bytes = ts.to_be_bytes();
+        let start = ts_bytes.iter().position(|&b| b != 0).unwrap_or(7);
+        let ts_b64 = URL_SAFE_NO_PAD.encode(&ts_bytes[start..]);
+        let mut kd = Sha1::new();
+        kd.update(b"itsdangerous.Signer");
+        kd.update(b"signer");
+        kd.update(secret.as_bytes());
+        let key = kd.finalize();
+        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(value_b64.as_bytes());
+        mac.update(b".");
+        mac.update(ts_b64.as_bytes());
+        let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        format!("{value_b64}.{ts_b64}.{sig}")
+    }
+
+    fn headers_with(cookie: Option<&str>, auth: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(c) = cookie {
+            h.insert(header::COOKIE, header::HeaderValue::from_str(c).unwrap());
+        }
+        if let Some(a) = auth {
+            h.insert(header::AUTHORIZATION, header::HeaderValue::from_str(a).unwrap());
+        }
+        h
+    }
+
+    fn now_ts() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    const USER_JSON: &str =
+        "{\"user\":{\"email\":\"A@Example.com\",\"name\":\"Alice\",\"picture\":\"p\"}}";
+
+    #[test]
+    fn session_cookie_identifies_caller() {
+        let cookie = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
+        let h = headers_with(Some(&format!("session={cookie}")), None);
+        match resolve(&h, false, SECRET, &allowlist()) {
+            Caller::User(u) => assert_eq!(u.email, "a@example.com"), // lowercased
+            Caller::Delegate => panic!("valid session delegated"),
+        }
+    }
+
+    #[test]
+    fn session_wins_over_bearer() {
+        // Bearer identifies a different allowlisted user — the cookie wins,
+        // matching user_from_connection's session-first order.
+        let cookie = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
+        let h = headers_with(
+            Some(&format!("session={cookie}")),
+            Some(&format!("Bearer {}", fresh(3600))),
+        );
+        match resolve(&h, false, SECRET, &allowlist()) {
+            Caller::User(u) => assert_eq!(u.email, "a@example.com"),
+            Caller::Delegate => panic!("valid session delegated"),
+        }
+    }
+
+    #[test]
+    fn invalid_session_falls_through_to_bearer() {
+        // Tampered signature → Python sees session={} → Bearer applies.
+        // A different allowlisted Bearer email proves the Bearer path ran.
+        let list: HashSet<String> =
+            ["a@example.com".into(), "b@example.com".into()].into_iter().collect();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let bearer = mint(
+            &format!("{{\"sub\":\"b@example.com\",\"exp\":{}}}", now + 3600),
+            "HS256",
+            SECRET,
+        );
+        let cookie = sign_session("wrong-secret", USER_JSON.as_bytes(), now_ts());
+        let h = headers_with(
+            Some(&format!("session={cookie}")),
+            Some(&format!("Bearer {bearer}")),
+        );
+        match resolve(&h, false, SECRET, &list) {
+            Caller::User(u) => assert_eq!(u.email, "b@example.com"),
+            Caller::Delegate => panic!("bearer after bad session delegated"),
+        }
+    }
+
+    #[test]
+    fn userless_or_expired_session_delegates() {
+        // Signed but no `user` — a logged-out cookie.
+        let cookie = sign_session(SECRET, b"{\"other\":1}", now_ts());
+        let h = headers_with(Some(&format!("session={cookie}")), None);
+        assert!(matches!(resolve(&h, false, SECRET, &allowlist()), Caller::Delegate));
+        // Signed but older than SESSION_MAX_AGE.
+        let old = sign_session(SECRET, USER_JSON.as_bytes(), now_ts() - (86400 * 8) as u64);
+        let h = headers_with(Some(&format!("session={old}")), None);
+        assert!(matches!(resolve(&h, false, SECRET, &allowlist()), Caller::Delegate));
+    }
+
+    #[test]
+    fn resolve_test_mode_returns_mock() {
+        let h = headers_with(None, None);
+        match resolve(&h, true, "", &allowlist()) {
+            Caller::User(u) => assert_eq!(u.email, TEST_USER_EMAIL),
+            Caller::Delegate => panic!("test mode delegated"),
         }
     }
 }
