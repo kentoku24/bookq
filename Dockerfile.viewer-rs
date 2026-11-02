@@ -2,7 +2,10 @@
 # Two-stage: cargo build → slim runtime. The context is the repo root;
 # only rust/ is needed.
 
-FROM rust:1-slim AS rsbuilder
+# Pinned to bookworm: the runtime stage is bookworm-slim, and unrar's
+# bundled C++ compiled under a newer builder (trixie g++14) would emit
+# GLIBCXX/CXXABI symbol versions bookworm's libstdc++6 can't satisfy.
+FROM rust:1-slim-bookworm AS rsbuilder
 # g++ compiles the bundled RARLAB unrar C++ (bookq-core `unrar` dep).
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src

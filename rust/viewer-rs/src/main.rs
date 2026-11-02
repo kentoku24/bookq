@@ -439,8 +439,8 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
-/// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
-/// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
+/// for plain files and ZIP/CBZ/EPUB/RAR/CBR entries.
+/// PDF pages and multi-range requests proxy upstream.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;

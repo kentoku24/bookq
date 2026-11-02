@@ -2008,28 +2008,58 @@ pub fn rar_names(path: &Path) -> Option<Vec<(String, bool)>> {
     }
 }
 
-/// `_read_rar`'s extraction half, in-process: sequential RAR processing
-/// until the named member via rarlab unrar — the same engine rarfile
-/// shells out to, without one 7z subprocess per page. For solid archives
-/// entry *n* still decompresses 0..n (a format constraint rarfile+7z pays
-/// identically). Open/seek/read errors, encrypted members, and missing
-/// entries all yield `None` — Python maps every such failure to `None`
-/// → 404, and `ArchiveToolMissing` (501) cannot occur in-process.
+/// `_read_rar`'s extraction half, in-process: the member is selected by
+/// ORDINAL in the ported listing, not by name — the dll's own name decode
+/// (ACTW_OEM under the C locale for RAR3, plus RAR5 sanitizing) produces
+/// different strings than `decode_rar3_fallback`, so name comparison
+/// 404s every non-ASCII member. rarfile's `_info_map` overwrite gives
+/// LAST-duplicate-wins, hence `rposition`.
 pub fn rar_read_entry(path: &Path, inner: &str) -> Option<Vec<u8>> {
+    let names = rar_names(path)?;
+    let ord = names.iter().rposition(|(n, d)| n == inner && !*d)?;
+    rar_read_ordinal(path, ord, inner)
+}
+
+/// Sequential RAR processing until file-header index `ord`, via rarlab
+/// unrar — the same engine rarfile shells out to, without one 7z
+/// subprocess per page. For solid archives entry *n* still decompresses
+/// 0..n (a format constraint rarfile+7z pays identically). `inner` is
+/// passed only for the ASCII misalignment guard below. Open/seek/read
+/// errors, encrypted members, and short bodies (RAR5 -oi file-reference
+/// entries read back empty in test mode) all yield `None` → 404; the
+/// `ArchiveToolMissing` (501) case cannot occur in-process.
+fn rar_read_ordinal(path: &Path, ord: usize, inner: &str) -> Option<Vec<u8>> {
     let mut ar = unrar::Archive::new(path).open_for_processing().ok()?;
-    loop {
-        match ar.read_header() {
-            Ok(Some(header)) => {
-                let e = header.entry();
-                if e.filename.as_os_str().to_str() == Some(inner) && !e.is_directory() {
-                    let (data, _rest) = header.read().ok()?;
-                    return Some(data);
-                }
-                ar = header.skip().ok()?;
+    let mut idx = 0usize;
+    while let Some(header) = ar.read_header().ok()? {
+        if idx == ord {
+            let e = header.entry();
+            // Misalignment guard: unrar never mangles ASCII names, so a
+            // mismatch means the two header walks diverged (version-marked
+            // entries are the known cause) — refuse rather than serve the
+            // wrong page. Non-ASCII names can't be checked this way.
+            if inner.is_ascii() && e.filename.as_os_str().to_str() != Some(inner) {
+                return None;
             }
-            _ => return None,
+            if e.is_directory() || e.is_encrypted() {
+                return None;
+            }
+            let want = e.unpacked_size;
+            let (data, _rest) = header.read().ok()?;
+            // A short body (file-reference entry, truncated extraction)
+            // must never go out as a 200 — a poisoned CacheFirst entry in
+            // the service worker would survive otherwise.
+            return if data.len() as u64 == want { Some(data) } else { None };
         }
+        idx += 1;
+        // A corrupt member earlier in a SOLID archive makes the dll's
+        // test-mode RAR_SKIP fail (CRC is verified); the typestate API
+        // consumes the handle, so the walk cannot resume — later members
+        // of a broken solid stream are undecodable anyway, so the 404
+        // here matches what 7z would return.
+        ar = header.skip().ok()?;
     }
+    None
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2127,21 +2157,15 @@ impl OpenArchive {
     pub fn read_entry(&self, path: &Path, inner: &str) -> Option<Vec<u8>> {
         match &self.parsed {
             Parsed::Zip { .. } => self.read_zip_entry(inner),
-            Parsed::Rar { .. } => self.read_rar_entry(path, inner),
+            // RAR: ordinal in the memoized listing (last duplicate wins,
+            // matching rarfile's _info_map) — the dll's name decode can't
+            // be compared to ours, and a missing/directory member never
+            // pays the extraction walk (Python's `not in namelist → None`).
+            Parsed::Rar { names } => {
+                let ord = names.iter().rposition(|(n, d)| n == inner && !*d)?;
+                rar_read_ordinal(path, ord, inner)
+            }
         }
-    }
-
-    /// RAR-family entry bytes via `rar_read_entry` — gated on the memoized
-    /// listing so a missing/directory member never pays the extraction
-    /// walk (Python's `inner not in rf.namelist() → None`).
-    pub fn read_rar_entry(&self, path: &Path, inner: &str) -> Option<Vec<u8>> {
-        let Parsed::Rar { names } = &self.parsed else {
-            return None;
-        };
-        if !names.iter().any(|(n, d)| n == inner && !*d) {
-            return None;
-        }
-        rar_read_entry(path, inner)
     }
 
     /// EPUB (raw names, spine order) — `epub_raw` shape; `None` for non-epub.
@@ -2409,6 +2433,99 @@ mod memo_tests {
         std::fs::write(path, out).unwrap();
     }
 
+    /// `make_rar5_store` plus an is_dir flag (file_flags |= RAR5_FF_ISDIR).
+    /// Directory entries must appear in BOTH listings for the ordinal
+    /// contract to hold — this is what the alignment test asserts.
+    fn make_rar5_store_ext(path: &Path, members: &[(&str, &[u8], bool)]) {
+        fn vint(mut n: u64, out: &mut Vec<u8>) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n > 0 {
+                    out.push(b | 0x80);
+                } else {
+                    out.push(b);
+                    return;
+                }
+            }
+        }
+        fn header(body: &[u8]) -> Vec<u8> {
+            let mut size = Vec::new();
+            vint(body.len() as u64, &mut size);
+            let mut v = size.clone();
+            v.extend_from_slice(body);
+            let mut out = crc32fast::hash(&v).to_le_bytes().to_vec();
+            out.extend_from_slice(&v);
+            out
+        }
+        let mut out = b"Rar!\x1a\x07\x01\x00".to_vec();
+        let mut main = Vec::new();
+        vint(1, &mut main);
+        vint(0, &mut main);
+        vint(0, &mut main);
+        out.extend(header(&main));
+        for (name, data, is_dir) in members {
+            let nb = name.as_bytes();
+            let mut body = Vec::new();
+            vint(2, &mut body);
+            vint(0x0002, &mut body);
+            vint(data.len() as u64, &mut body);
+            vint(0x0004 | (*is_dir as u64), &mut body); // CRC32 | ISDIR
+            vint(data.len() as u64, &mut body);
+            vint(0x20, &mut body);
+            body.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            vint(0, &mut body);
+            vint(1, &mut body);
+            vint(nb.len() as u64, &mut body);
+            body.extend_from_slice(nb);
+            out.extend(header(&body));
+            out.extend_from_slice(data);
+        }
+        let mut end = Vec::new();
+        vint(5, &mut end);
+        vint(0, &mut end);
+        vint(0, &mut end);
+        out.extend(header(&end));
+        std::fs::write(path, out).unwrap();
+    }
+
+    /// Minimal RAR3 *store* writer — signature + main + per-entry (file
+    /// header, raw data) + endarc. Names are raw bytes so cp932/UTF-8
+    /// encodings can be built explicitly; `flags` lets callers set
+    /// LHD_DIRECTORY (0x00e0) etc. HEAD_CRC = crc32 over header[2..].
+    fn make_rar3_store(path: &Path, members: &[(Vec<u8>, &[u8], u16)]) {
+        fn hdr(btype: u8, flags: u16, body: &[u8]) -> Vec<u8> {
+            let mut h = Vec::with_capacity(body.len() + 7);
+            h.push(btype);
+            h.extend_from_slice(&flags.to_le_bytes());
+            h.extend_from_slice(&(body.len() as u16 + 7).to_le_bytes());
+            h.extend_from_slice(body);
+            let crc = (crc32fast::hash(&h) & 0xFFFF) as u16;
+            let mut out = crc.to_le_bytes().to_vec();
+            out.extend_from_slice(&h);
+            out
+        }
+        let mut out = b"Rar!\x1a\x07\x00".to_vec();
+        out.extend(hdr(0x73, 0, &[0; 6])); // MAIN
+        for (name, data, flags) in members {
+            let mut b = Vec::new();
+            b.extend_from_slice(&(data.len() as u32).to_le_bytes()); // pack
+            b.extend_from_slice(&(data.len() as u32).to_le_bytes()); // unp
+            b.push(3);                                              // unix
+            b.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes()); // ftime
+            b.push(20);                              // unp_ver 2.0
+            b.push(0x30);                            // method: store
+            b.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            b.extend_from_slice(&0u32.to_le_bytes()); // attr
+            b.extend_from_slice(name);
+            out.extend(hdr(0x74, *flags | 0x8000, &b)); // LONG_BLOCK
+            out.extend_from_slice(data);
+        }
+        out.extend(hdr(0x7b, 0, &[])); // ENDARC
+        std::fs::write(path, out).unwrap();
+    }
+
     fn tmp_rar(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "bookq-arch-{tag}-{}-{}.rar",
@@ -2600,6 +2717,83 @@ mod memo_tests {
         std::fs::remove_file(&p).ok();
     }
 
+    /// Ordinal, not name, selection — the case that broke name-matching:
+    /// a RAR3 UTF-8 name without LHD_UNICODE decodes correctly in the
+    /// ported listing ("café.png") but the dll's C-locale OEM decode
+    /// mangles it, so `to_str() == inner` never held → 404 on every page.
+    #[test]
+    fn rar3_nonascii_name_reads_by_ordinal() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("r3utf8");
+        make_rar3_store(&p, &[
+            ("café.png".as_bytes().to_vec(), b"cafe-bytes", 0),
+            (b"plain.png".to_vec(), b"plain-bytes", 0),
+        ]);
+        let a = open_archive(&p).unwrap();
+        assert_eq!(a.rar_names().unwrap()[0].0, "café.png");
+        assert_eq!(a.read_entry(&p, "café.png").unwrap(), b"cafe-bytes");
+        assert_eq!(a.read_entry(&p, "plain.png").unwrap(), b"plain-bytes");
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// rarfile's `_info_map` overwrites on duplicate names → LAST wins.
+    /// (Name matching returned the first.) Same for the one-shot path.
+    #[test]
+    fn rar5_dup_names_last_wins() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("dup");
+        make_rar5_store(
+            &p,
+            &[("a.png", b"old"), ("b.png", b"middle"), ("a.png", b"new")],
+        );
+        let a = open_archive(&p).unwrap();
+        assert_eq!(a.read_entry(&p, "a.png").unwrap(), b"new");
+        assert_eq!(a.read_entry(&p, "b.png").unwrap(), b"middle");
+        assert_eq!(rar_read_entry(&p, "a.png").unwrap(), b"new");
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Directory entries must appear in BOTH header walks or ordinals
+    /// shift — asserts unrar yields dir headers like the ported walker.
+    #[test]
+    fn rar5_dir_entries_keep_ordinal_aligned() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("dirmix");
+        make_rar5_store_ext(
+            &p,
+            &[
+                ("sub/", b"", true),
+                ("sub/001.png", b"img1", false),
+                ("top.png", b"img2", false),
+            ],
+        );
+        let a = open_archive(&p).unwrap();
+        let names = a.rar_names().unwrap();
+        assert_eq!(names.len(), 3);
+        assert!(names[0].1); // dir
+        assert_eq!(a.read_entry(&p, "sub/001.png").unwrap(), b"img1");
+        assert_eq!(a.read_entry(&p, "top.png").unwrap(), b"img2");
+        // A directory name itself must never extract.
+        assert_eq!(a.read_entry(&p, "sub/"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Encrypted-member and misalignment guards refuse rather than serve
+    /// wrong bytes (the last-dup ASCII check catches a shifted walk).
+    #[test]
+    fn rar_missing_name_is_none() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("miss");
+        make_rar5_store(&p, &[("x.png", b"x")]);
+        let a = open_archive(&p).unwrap();
+        assert_eq!(a.read_entry(&p, "nope.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
     #[test]
     fn rar_listing_and_read_agree() {
         let _g = serial();
@@ -2618,6 +2812,49 @@ mod memo_tests {
                 "listed member must extract: {f}"
             );
         }
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// The name-decode divergence this build exists for: the ported
+    /// listing decodes a LHD_UNICODE UTF-8 name correctly, while the
+    /// bundled unrar under the C locale mangles ≥0x80 bytes to
+    /// U+FFFE/U+E0xx — so only the ORDINAL can match member to header.
+    /// Also covers plain (no LHD_UNICODE) UTF-8 names and rarfile's
+    /// last-duplicate-wins `read()` semantics.
+    #[test]
+    fn rar3_nonascii_names_read_by_ordinal() {
+        let _g = serial();
+        clear_open_archive_cache();
+        let p = tmp_rar("r3nonascii");
+        // 0x0200 = LHD_UNICODE; no NUL separator → unrar does NOT decode
+        // it as the unicode-encoded form, so its filename diverges.
+        make_rar3_store(
+            &p,
+            &[
+                ("表紙.png".as_bytes().to_vec(), &b"cover"[..], 0x0200),
+                ("第2話/001.png".as_bytes().to_vec(), &b"page1"[..], 0),
+                ("dup.png".as_bytes().to_vec(), &b"first"[..], 0x0200),
+                ("dup.png".as_bytes().to_vec(), &b"second"[..], 0x0200),
+            ],
+        );
+        let names = rar_names(&p).unwrap();
+        let files: Vec<String> = names
+            .into_iter()
+            .filter(|(_, d)| !*d)
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            files,
+            vec!["表紙.png", "第2話/001.png", "dup.png", "dup.png"]
+        );
+        assert_eq!(rar_read_entry(&p, "表紙.png").unwrap(), b"cover");
+        assert_eq!(rar_read_entry(&p, "第2話/001.png").unwrap(), b"page1");
+        // rarfile `_info_map` overwrite semantics: the LAST duplicate wins.
+        assert_eq!(rar_read_entry(&p, "dup.png").unwrap(), b"second");
+        // Memoized path agrees.
+        let a = open_archive(&p).unwrap();
+        assert_eq!(a.read_entry(&p, "表紙.png").unwrap(), b"cover");
+        assert_eq!(a.read_entry(&p, "dup.png").unwrap(), b"second");
         std::fs::remove_file(&p).ok();
     }
 }

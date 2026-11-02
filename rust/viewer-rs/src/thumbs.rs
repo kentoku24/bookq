@@ -160,7 +160,9 @@ fn load_source_bytes(
         let Some((mtime, size)) = stat_mtime_size(&archive) else {
             return Err(detail(StatusCode::NOT_FOUND, "File not found"));
         };
-        if is_pdf_file(&archive) || crate::serve::is_rar_path(&archive) {
+        // PDF pages stay upstream (pypdfium2); rar/cbr entries read
+        // natively via `archive_read_entry` → bundled unrar.
+        if is_pdf_file(&archive) {
             return Ok(None);
         }
         if !is_image_entry(&inner) {
