@@ -42,6 +42,9 @@ final class AppModel: ObservableObject {
     /// External-display projection (USB-C → monitor). Singleton shared
     /// with the scene delegate, which cannot receive environment objects.
     let external = ExternalDisplayStore.shared
+    /// `updateOnlineStatus` — health-probe driven connectivity pill.
+    private(set) lazy var online = OnlineStatusStore(
+        apiProvider: { [weak self] in self?.api })
     /// Dual-reader sync (reader_sync server-ws equivalent).
     private(set) lazy var pair = PairStore(
         url: { [weak self] in self?.api?.readerSyncURL },
