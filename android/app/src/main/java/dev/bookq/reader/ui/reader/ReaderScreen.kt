@@ -194,7 +194,7 @@ fun ReaderScreen(
                     chrome = chrome,
                     viewW = viewW,
                     viewH = viewH,
-                    onChrome = { chrome = it },
+                    onToggleChrome = { chrome = !chrome },
                     onCurrent = { currentIdx = it },
                     onBack = { goBack(nav, w.clickedPath) },
                 )
@@ -232,7 +232,7 @@ private fun ReaderBody(
     chrome: Boolean,
     viewW: Float,
     viewH: Float,
-    onChrome: (Boolean) -> Unit,
+    onToggleChrome: () -> Unit,
     onCurrent: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -245,9 +245,6 @@ private fun ReaderBody(
     var menu by remember { mutableStateOf(false) }
     val volumeKeys by graph.settings.volumeKeys.collectAsStateWithLifecycle()
     val focusRequester = remember { FocusRequester() }
-    // pointerInput captures values at launch — keep the live chrome flag
-    // so the center zone toggles instead of only hiding once.
-    val currentChrome by androidx.compose.runtime.rememberUpdatedState(chrome)
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     // iOS `turn`: spread-granularity, cross-chapter; rapid taps coalesce
@@ -491,14 +488,14 @@ private fun ReaderBody(
                                 abs(off.y - lastCenterTapY) <
                                     ZoomK.DOUBLE_TAP_PX -> {
                                 lastCenterTapAt = 0L
-                                onChrome(!currentChrome)
+                                onToggleChrome()
                                 val t = zs.doubleTapTarget(off.x, off.y)
                                 animateZoomTo(t[0], t[1], t[2])
                             }
                             else -> {
                                 lastCenterTapAt = now
                                 lastCenterTapX = off.x; lastCenterTapY = off.y
-                                onChrome(!currentChrome)
+                                onToggleChrome()
                             }
                         }
                     }
