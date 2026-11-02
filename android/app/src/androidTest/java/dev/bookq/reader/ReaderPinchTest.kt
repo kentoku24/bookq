@@ -220,9 +220,11 @@ class ReaderPinchTest {
 
         // ── 2. zoomed swipe → the layer pans: scale stays >1 and tx
         //     moves (any pager turn would reset the layer to 1x/0).
-        //     -200px stays inside the pan room at every scale used
-        //     here, so it can't arm the edge-turn rubber band. ──
-        swipe(instr, decor, cx, cx - 200f, cy)
+        //     Size-relative (cx*0.6): a fixed -200px goes off-screen on
+        //     the CI emulator's small display; this stays in-bounds and
+        //     inside the pan room, so it can't arm the edge-turn band. ──
+        val swipeDx = minOf(200f, cx * 0.6f)
+        swipe(instr, decor, cx, cx - swipeDx, cy)
         assertTrue(
             "zoomed swipe did not pan — the drag left the zoom layer",
             waitUntil({
@@ -253,7 +255,7 @@ class ReaderPinchTest {
         // The slide-to-target animation still writes tx each frame —
         // let it finish or the pan below is overwritten mid-gesture.
         Thread.sleep(400)
-        swipe(instr, decor, cx, cx - 200f, cy)
+        swipe(instr, decor, cx, cx - swipeDx, cy)
         assertTrue("double-tap zoom did not pan",
             waitUntil({
                 (zoomScale() ?: 0f) > 1.05f && abs(panX() ?: 0f) > 30f
@@ -265,14 +267,17 @@ class ReaderPinchTest {
         assertTrue("reset tap failed",
             waitUntil({ (zoomScale() ?: 9f) <= 1f }, 3_000))
 
-        // ── 4. pinch-IN — start span capped on-screen; crosses the
-        //     <=0.5 FIRE band at the ~0.28x end span. Retry once — this
-        //     ROM intermittently drops pointer events, and a pinch that
-        //     never arms is recoverable (fresh gesture re-seeds). ──
+        // ── 4. pinch-IN — start span capped on-screen; the end span is
+        //     ratio-relative (0.25x — always crosses the <=0.5 FIRE
+        //     band). A fixed-px end span can exceed startHalf on small
+        //     displays: the "pinch-in" becomes a pinch-out AND the
+        //     fingers travel under ARM_PX, so it never even arms.
+        //     Retry once — this ROM intermittently drops pointer events. ──
+        val pinchInStart = minOf(450f, cx * 0.83f)
         for (attempt in 0..1) {
             pinch(instr, decor, cx, cy,
-                startHalf = minOf(450f, cx * 0.83f),
-                endHalf = 140f, steps = 14)
+                startHalf = pinchInStart,
+                endHalf = pinchInStart * 0.25f, steps = 14)
             if (waitForTag("overviewGrid", 6_000)) break
         }
 
