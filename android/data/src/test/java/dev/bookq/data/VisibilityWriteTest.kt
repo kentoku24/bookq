@@ -64,10 +64,10 @@ class VisibilityWriteTest {
         catch (e: VisibilityRepository.SaveException) {
             assertEquals(VisibilityRepository.SaveError.CONFLICT, e.error)
         }
-        withTimeout(5_000) { while (server.requestCount < 2) kotlinx.coroutines.delay(10) }
-        // 409 → error+owner, convergence GET applied the authoritative owner.
+        // requestCount only marks the GET's arrival — the snapshot is
+        // applied on the repo dispatcher, so wait on the outcome.
+        withTimeout(5_000) { while (repo.vis.owner != "u2") kotlinx.coroutines.delay(10) }
         assertEquals(VisibilityRepository.LastError.OWNER, repo.lastError)
-        assertEquals("u2", repo.vis.owner)
         assertTrue(repo.vis.isHidden("x"))
     }
 
@@ -103,7 +103,7 @@ class VisibilityWriteTest {
         repo.vis.applySnapshot("u1", 5, emptyList())
         repo.setHidden("a", true)
         assertFalse(repo.vis.isHidden("stale")) // stale PUT payload dropped
-        withTimeout(5_000) { while (server.requestCount < 2) kotlinx.coroutines.delay(10) }
+        withTimeout(5_000) { while (repo.vis.revision < 6) kotlinx.coroutines.delay(10) }
         assertTrue(repo.vis.isHidden("fresh"))
         assertEquals(6, repo.vis.revision)
     }
