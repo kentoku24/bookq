@@ -423,9 +423,10 @@ class ReaderPinchTest {
         }
         if (!pinchedOut) {
             d.executeShellCommand("screencap -p /sdcard/m4-nopinchout.png")
+            val dbg = d.executeShellCommand("logcat -d -t 300 -s ZoomDbg:D")
             error("overview pinch-out did not exit — " +
                 "gridOpen=${nodes().any { tagOf(it) == "overviewGrid" }} " +
-                "counter=${counterText()} " +
+                "counter=${counterText()} dbg=$dbg " +
                 "tags=${nodes().mapNotNull { tagOf(it) }.take(20)}")
         }
         if (midBadge != null) {
