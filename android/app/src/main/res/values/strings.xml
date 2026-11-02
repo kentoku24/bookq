@@ -30,7 +30,13 @@
     <string name="browse_hidden_denied">非表示フォルダです</string>
 
     <string name="reader_root_title">ライブラリ直下</string>
-    <string name="reader_stub_pages">%1$d ページ — p.%2$d から</string>
+    <string name="reader_counter">%1$d / %2$d</string>
+    <string name="reader_empty">ページがありません</string>
+    <string name="reader_spread_toggle">見開き表示</string>
+    <string name="reader_spread_shift">見開きずらし</string>
+    <string name="reader_tap_left_forward">タップ方向：左で進む</string>
+    <string name="reader_tap_right_forward">タップ方向：右で進む</string>
+    <string name="back">戻る</string>
 
     <string name="settings_title">設定</string>
     <string name="settings_server">サーバー</string>
