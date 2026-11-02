@@ -90,7 +90,8 @@ services:
       # が稀な呼出のため許容)。未実測の search/facets/positions/visibility/
       # thumb 系と、native 不可の rar/pdf read は proxy のまま。
       - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-image,images,tree}
-      # visibility owner HMAC — viewer と同じ値が必須。
+      # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC —
+      # viewer と同じ値が必須。ずれるとブラウザ利用が全て proxy に落ちる。
       - SECRET_KEY=${SECRET_KEY}
       - BOOKQ_GIT_SHA=${GIT_SHA:-}
       - ALLOWED_EMAILS=${ALLOWED_EMAILS}
