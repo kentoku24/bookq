@@ -101,7 +101,6 @@ fun OverviewOverlay(
     onCellCenter: (Float, Float) -> Unit = { _, _ -> },
 ) {
     BackHandler { onClose() }
-    val padPx = with(LocalDensity.current) { PAD.toPx() }
     val navBottom = WindowInsets.navigationBars.asPaddingValues()
         .calculateBottomPadding()
 
@@ -286,13 +285,16 @@ private fun OverviewGrid(
                     awaitFirstDown(requireUnconsumed = false,
                         pass = PointerEventPass.Initial)
                     var acc = 1f
-                    var multi = false
                     var mid = Offset.Zero
+                    // Fire as soon as the ratio crosses (web exits live,
+                    // not on release) — a cell's clickable can claim the
+                    // stream mid-gesture, and a release-time check would
+                    // then never reach the threshold.
+                    var fired = false
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
                         val pressed = ev.changes.filter { it.pressed }
                         if (pressed.size >= 2) {
-                            multi = true
                             val a = pressed[0]
                             val b = pressed[1]
                             val cur = (a.position - b.position).getDistance()
@@ -301,10 +303,11 @@ private fun OverviewGrid(
                             if (prev > 0f) acc *= cur / prev
                             mid = (a.position + b.position) / 2f
                             a.consume(); b.consume()
+                            if (acc > PINCH_OUT) { fired = true; break }
                         }
                         if (ev.changes.none { it.pressed }) break
                     }
-                    if (multi && acc > PINCH_OUT) {
+                    if (fired) {
                         // elementFromPoint → the grid cell under lastMid.
                         // The fillMaxSize Box and the grid share bounds,
                         // and item.offset already INCLUDES contentPadding —
