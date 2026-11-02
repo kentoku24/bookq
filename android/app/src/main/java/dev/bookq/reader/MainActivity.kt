@@ -8,7 +8,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -55,7 +58,12 @@ class MainActivity : ComponentActivity() {
                 .collectAsStateWithLifecycle()
             val perfHud by graph.settings.perfHud.collectAsStateWithLifecycle()
             BookqTheme(dynamicColor = dynamicColor) {
-                Surface(modifier = Modifier.fillMaxSize()) {
+                // Expose testTags to UiAutomator as resource-ids
+                // (connectedDebugAndroidTest locators use By.res).
+                @OptIn(ExperimentalComposeUiApi::class)
+                Surface(modifier = Modifier.fillMaxSize().semantics {
+                    testTagsAsResourceId = true
+                }) {
                     Box {
                         Root(graph)
                         if (BuildConfig.DEBUG && perfHud) {

@@ -103,9 +103,12 @@ class ReaderPinchTest {
 
         // ── 0. reach the reader: resume card (device, seeded progress)
         //    or drill the first tile until a leaf opens (CI emulator) ──
-        val resume = By.textContains("続きから")
-        if (d.wait(Until.hasObject(resume), 20_000)) {
-            d.findObject(resume).click()
+        val resumeTag = By.res("resumePill")
+        val resumeText = By.textContains("続きから")
+        if (d.wait(Until.hasObject(resumeTag), 20_000)) {
+            d.findObject(resumeTag).click()
+        } else if (d.wait(Until.hasObject(resumeText), 3_000)) {
+            d.findObject(resumeText).click()
         } else {
             // CI path: no saved progress — drill the first tile until a
             // leaf opens the reader (bounded depth).
