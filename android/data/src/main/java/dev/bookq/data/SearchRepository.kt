@@ -2,6 +2,8 @@ package dev.bookq.data
 
 import dev.bookq.core.api.ComicMetadata
 import dev.bookq.core.api.Facets
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -52,8 +54,10 @@ class SearchRepository(
     private val _facets = MutableStateFlow<Facets?>(null)
     val facets = _facets.asStateFlow()
 
-    private var searchGen = 0
-    private var facetGen = 0
+    // Generations are bumped from two coroutines (debounce + filtersJob)
+    // — atomic, or a lost increment could let a stale response apply.
+    private val searchGen = AtomicInteger(0)
+    private val facetGen = AtomicInteger(0)
 
     init {
         // Input debounce — `searchTimer = setTimeout(doSearch, 300)`.
@@ -79,7 +83,7 @@ class SearchRepository(
     /** `doSearch` — generation-guarded; empty query exits search mode. */
     private suspend fun doSearch(rawQ: String) {
         val q = rawQ.trim()
-        val gen = ++searchGen
+        val gen = searchGen.incrementAndGet()
         if (q.isEmpty()) {
             _active.value = false
             _results.value = emptyList()
@@ -95,25 +99,29 @@ class SearchRepository(
                 includeHidden = showAll(),
             ) ?: return // still building after all retries — keep prior state
             // Post-decode staleness check (web re-checks after res.json()).
-            if (gen != searchGen) return
+            if (gen != searchGen.get()) return
             _results.value = res.results
             _active.value = true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // keep prior state — web logs and leaves results untouched
         } finally {
-            if (gen == searchGen) _searching.value = false
+            if (gen == searchGen.get()) _searching.value = false
         }
     }
 
     /** `loadFacets` — options for the filter sheet. `path` scopes to a
      *  subtree ("" = whole library, web's search-mode scope). */
     fun loadFacets(path: String = "") {
-        val gen = ++facetGen
+        val gen = facetGen.incrementAndGet()
         scope.launch {
             try {
                 val f = api.facets(path, showAll()) ?: return@launch
-                if (gen != facetGen) return@launch
+                if (gen != facetGen.get()) return@launch
                 _facets.value = f
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) { /* keep prior options */ }
         }
     }
@@ -144,7 +152,7 @@ class SearchRepository(
 
     /** Result-tap / hidden-redirect path — clears input + exits mode. */
     fun clear() {
-        searchGen++
+        searchGen.incrementAndGet()
         _query.value = ""
         _active.value = false
         _results.value = emptyList()

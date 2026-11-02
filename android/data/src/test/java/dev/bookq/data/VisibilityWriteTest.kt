@@ -12,6 +12,7 @@ import mockwebserver3.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -67,7 +68,9 @@ class VisibilityWriteTest {
         // requestCount only marks the GET's arrival — the snapshot is
         // applied on the repo dispatcher, so wait on the outcome.
         withTimeout(5_000) { while (repo.vis.owner != "u2") kotlinx.coroutines.delay(10) }
-        assertEquals(VisibilityRepository.LastError.OWNER, repo.lastError)
+        // The convergence GET succeeded — web `_resolveGet` clears
+        // `_lastError` on a successful apply, so the status row is clean.
+        assertNull(repo.lastError)
         assertTrue(repo.vis.isHidden("x"))
     }
 
