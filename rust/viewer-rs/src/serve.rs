@@ -6,8 +6,8 @@
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
 //!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
-//!   - RAR/CBR entry *reads* (compressed extraction needs external unrar;
-//!     listing via `rar_names` is native)
+//!   - RAR/CBR members of *multipart* sets (the bundled unrar can't chain
+//!     volumes; single-volume entries extract in-process)
 //!   - multi-range requests (hypercorn emits multipart/byteranges with a
 //!     random boundary — byte parity is impossible; single ranges are native)
 //!
@@ -638,6 +638,10 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
     let etag = format!("\"{}-{}-{}\"", fmt_mtime(mtime), stat.len(), &digest[..16]);
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
+    }
+    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
+        // Multipart set — the bundled unrar can't chain volumes; 7z can.
+        return Serve::Proxy;
     }
     let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
