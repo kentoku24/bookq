@@ -412,9 +412,12 @@ class ReaderPinchTest {
         }
         var pinchedOut = false
         for (attempt in 0..1) {
+            // Size-relative halves: a fixed 150 start is WIDER than
+            // cx*0.85 on the CI emulator's 320-wide display — the
+            // "pinch-out" then shrinks (acc<1) and never fires.
             pinch(instr, decor, cx, cy,
-                startHalf = 150f,
-                endHalf = minOf(cx * 0.85f, cx - 30f), steps = 12)
+                startHalf = minOf(150f, cx * 0.3f),
+                endHalf = cx * 0.85f, steps = 12)
             pinchedOut = waitUntil({
                 nodes().none { tagOf(it) == "overviewGrid" } &&
                     anyText(readerCounter)
