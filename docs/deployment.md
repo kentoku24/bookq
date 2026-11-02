@@ -240,6 +240,26 @@ docker compose ps -q tailscale | xargs docker exec tailscale serve status
 
 `.env` の `BOOKQ_RS_NATIVE` に native 化する endpoint 名をカンマ区切りで追加し、`docker compose --profile rs up -d viewer-rs` で再作成する。空 = 全 proxy（traffic-shape のみ検証する段階）。1 endpoint ずつ増やし、各段階で公開 URL + 実画面を確認する。native 側が契約外を返した場合は該当 endpoint だけリストから外して戻せる。
 
+既定値は検証済みの全 native 面を列挙 (#320): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
+
+#### フルネイティブモード (#320): py の index/tree を持たない運用
+
+`BOOKQ_RS_NATIVE` が全 index 消費者をカバーする状態で、viewer 側に
+`BOOKQ_DISABLE_INDEX=1` を `.env` へ設定すると、py が起動時 warmup・
+`_background_fill`・`_warm_covers`・TTL refresh をすべて skip し、
+`metadata_index_cache` を一切構築しない。tree+index は実データ
+(152k images) で ~150-250MB のヒープ最大ブロックなので、常駐メモリが
+import 基盤 (~120MB) まで下がる。
+
+- index 必要 endpoint (`/api/folders`・`/api/v1/tree` 全量、`/api/v1/search`・
+  `/api/v1/facets`・`/api/v1/index/refresh`・`/ws/reader-sync`・visibility PUT)
+  への着弾は **503 fail-fast** — 誤設定時に lazy build でヒープが静かに
+  復活するのを防ぐ。shallow (`depth=1`)・`/api/images`・`/image`・`/thumb`・
+  `/view`・health など index 非依存の経路は従来どおり動く。
+- 設定は必ず **`BOOKQ_RS_NATIVE` (全 index 消費者) と対で**行うこと。
+  片方だけだと py に native 未処理の index 要求が届き 503 になる。
+- rollback: `BOOKQ_DISABLE_INDEX` を空に戻して viewer 再作成。コード差し戻し不要。
+
 #### rollback
 
 完全切り戻しは設定のみで完結する（コード・イメージの変更は不要）:
