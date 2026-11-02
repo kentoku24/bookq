@@ -1,10 +1,15 @@
 package dev.bookq.data
 
 import dev.bookq.core.api.TokenPair
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -20,6 +25,7 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class AuthManagerTest {
 
     private val server = MockWebServer()
@@ -181,9 +187,15 @@ class AuthManagerTest {
             BookqHttp.plainClient(), { server.url("/") })
         auth.testSeed(TokenPair(jwt(), "r1"))
         server.enqueue(MockResponse.Builder().code(401).body("{}").build())
-        val collectJob = async { auth.sessionExpired.first() }
+        // replay-0 flow — subscribe BEFORE the refresh emits or the
+        // event is dropped (the unconfined collector resumes inline on
+        // the emitting IO thread during tryEmit).
+        var fired = false
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            auth.sessionExpired.collect { fired = true }
+        }
         assertNull(auth.refreshAccessToken())
-        collectJob.await()
+        assertTrue(fired)
         assertNull(auth.token)
         assertNull(store.load())
     }
@@ -195,9 +207,12 @@ class AuthManagerTest {
             BookqHttp.plainClient(), { server.url("/") })
         auth.testSeed(TokenPair(jwt(), "r1"))
         server.enqueue(MockResponse.Builder().code(400).body("{}").build())
-        val collectJob = async { auth.sessionExpired.first() }
+        var fired = false
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            auth.sessionExpired.collect { fired = true }
+        }
         assertNull(auth.refreshAccessToken())
-        collectJob.await()
+        assertTrue(fired)
         assertNull(store.load())
     }
 
@@ -211,15 +226,18 @@ class AuthManagerTest {
         val auth = AuthManager(store, InMemoryPendingLoginStore(),
             BookqHttp.plainClient(), { deadUrl })
         auth.testSeed(TokenPair(jwt(), "r1"))
-        val collectJob = async {
-            kotlinx.coroutines.withTimeoutOrNull(300) {
-                auth.sessionExpired.first()
-            }
+        var fired = false
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            auth.sessionExpired.collect { fired = true }
         }
         assertNull(auth.refreshAccessToken())
-        assertNull(collectJob.await())            // timed out → no event
+        // Real-time grace — a stray emit on the IO thread would land on
+        // the unconfined collector. (Virtual time can't prove absence.)
+        withContext(Dispatchers.Default) { delay(300) }
+        assertFalse(fired)
         assertEquals(jwt(), auth.token)           // session kept
     }
 
     private fun assertTrue(b: Boolean) = org.junit.Assert.assertTrue(b)
+    private fun assertFalse(b: Boolean) = org.junit.Assert.assertFalse(b)
 }
