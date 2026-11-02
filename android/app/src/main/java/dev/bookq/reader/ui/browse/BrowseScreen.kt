@@ -400,7 +400,9 @@ private fun BrowseBody(
                                     scope.search.clear()
                                     filter = ""
                                     searchOpen = false
-                                }) { Icon(Icons.Default.Close, null) }
+                                }, modifier = Modifier.testTag("searchClose")) {
+                                    Icon(Icons.Default.Close, null)
+                                }
                             },
                         )
                     } else if (filterActive) {
@@ -423,7 +425,8 @@ private fun BrowseBody(
                 },
                 actions = {
                     if (!searchOpen && !filterActive) {
-                        IconButton(onClick = { searchOpen = true }) {
+                        IconButton(onClick = { searchOpen = true },
+                            modifier = Modifier.testTag("searchBtn")) {
                             Icon(Icons.Default.Search,
                                 stringResource(R.string.browse_search))
                         }
@@ -437,7 +440,8 @@ private fun BrowseBody(
                         }
                     }
                     Box {
-                        IconButton(onClick = { menuOpen = true }) {
+                        IconButton(onClick = { menuOpen = true },
+                            modifier = Modifier.testTag("layoutMenuBtn")) {
                             Icon(Icons.Default.List,
                                 stringResource(R.string.settings_browse_layout))
                         }
@@ -540,6 +544,12 @@ private fun BrowseBody(
                         coverW = coverW,
                         onTap = ::openResult,
                         modifier = Modifier.fillMaxSize(),
+                        badge = { meta, node ->
+                            if (node != null) {
+                                val it = LevelModel.Item.Folder(meta.folderPath, node)
+                                OfflineBadgeFor(it, scope) { f -> startDownloadFlow(f) }
+                            }
+                        },
                     )
                     searching && searchOpen -> CenterBox {
                         CircularProgressIndicator()

@@ -60,8 +60,10 @@ fun SearchResultCard(
     coverW: Int,
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
+    badge: @Composable () -> Unit = {},
 ) {
     Card(onClick = onTap, modifier = modifier.testTag("searchResult:${meta.folderPath}")) {
+        androidx.compose.foundation.layout.Box {
         Column {
             val cover = node?.let { LevelModel.coverOf(it) }
             val model = when (cover) {
@@ -98,6 +100,9 @@ fun SearchResultCard(
                     color = MaterialTheme.colorScheme.outline)
             }
         }
+        androidx.compose.foundation.layout.Box(
+            Modifier.align(Alignment.TopEnd).padding(6.dp)) { badge() }
+        }
     }
 }
 
@@ -110,6 +115,7 @@ fun SearchResultGrid(
     coverW: Int,
     onTap: (ComicMetadata) -> Unit,
     modifier: Modifier = Modifier,
+    badge: @Composable (ComicMetadata, TreeNode?) -> Unit = { _, _ -> },
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 160.dp),
@@ -124,6 +130,7 @@ fun SearchResultGrid(
                 scope = scope,
                 coverW = coverW,
                 onTap = { onTap(meta) },
+                badge = { badge(meta, BrowseRules.nodeAt(meta.folderPath, nodes)) },
             )
         }
     }
