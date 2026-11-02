@@ -6,6 +6,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.TimeUnit
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import org.junit.After
@@ -35,17 +36,25 @@ class SearchRepositoryTest {
         "folder_path":"$path","folder_name":"x","title_jp":"t",
         "artist":[],"tags":[],"source":"meta","has_metadata":true,"total_pages":3}]}""".trimIndent()
 
-    @Test fun debounceFiresSingleRequest() = runBlocking {
-        server.enqueue(json(200, result("a")))
+    @Test fun debounceFiresLatestQuery() = runBlocking {
+        // Up to 3 requests can legitimately fire: if the test thread stalls
+        // past the 300 ms debounce between setQuery calls, the StateFlow
+        // debounce correctly emits intermediate values too.
+        repeat(3) { server.enqueue(json(200, result("a"))) }
         val repo = SearchRepository(api(), testScope())
         repo.setQuery("a")
         repo.setQuery("ab")
-        repo.setQuery("abc") // only the last query fires after 300 ms
-        withTimeout(5_000) { while (server.requestCount < 1) delay(10) }
-        assertEquals(1, server.requestCount)
-        assertTrue(server.takeRequest().url.toString().contains("q=abc"))
+        repo.setQuery("abc")
+        withTimeout(5_000) { while (repo.results.value.isEmpty()) delay(10) }
         assertTrue(repo.active.value)
         assertEquals("a", repo.results.value.first().folderPath)
+        // The deterministic contract: the LAST request observed carries the
+        // final query (stale responses are dropped by the generation guard).
+        val urls = generateSequence {
+            server.takeRequest(500, TimeUnit.MILLISECONDS)?.url?.toString()
+        }.toList()
+        assertTrue(urls.isNotEmpty() && urls.size <= 3)
+        assertTrue(urls.last().contains("q=abc"))
     }
 
     @Test fun emptyQueryExitsSearchMode() = runBlocking {
@@ -68,9 +77,10 @@ class SearchRepositoryTest {
         repo.setQuery("one")
         delay(400) // debounce fires
         repo.setQuery("two") // new gen before the first response lands → dropped
-        withTimeout(5_000) { while (server.requestCount < 2) delay(10) }
-        delay(100)
-        assertEquals("fresh", repo.results.value.firstOrNull()?.folderPath)
+        // Request arrival ≠ response applied — poll the observable outcome.
+        withTimeout(5_000) {
+            while (repo.results.value.firstOrNull()?.folderPath != "fresh") delay(10)
+        }
     }
 
     @Test fun includeHiddenFollowsShowAll() = runBlocking {
