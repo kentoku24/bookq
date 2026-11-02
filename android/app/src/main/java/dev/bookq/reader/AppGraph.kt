@@ -132,9 +132,20 @@ class AppGraph(app: Application) {
      * attempt must not surface as a login error.
      */
     fun completeLogin(callbackUri: String) {
+        // Scope identity at exchange start — a logout or server/account
+        // switch lands on scopeValue synchronously, so comparing after
+        // the exchange catches a stale login even if the StateFlow
+        // emission hasn't been collected yet.
+        val before = model.scopeValue.value
         scope.launch {
             try {
                 auth.completeLogin(callbackUri)
+                if (model.scopeValue.value != before) {
+                    // The persisted pair belongs to a dead session —
+                    // wipe it rather than reviving that login.
+                    auth.logout()
+                    return@launch
+                }
                 model.didLogin()
             } catch (e: AuthManager.AuthError) {
                 _loginError.value = e.message

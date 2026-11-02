@@ -141,10 +141,16 @@ class TreeRepository(
                         scheduleFullRetry(gen)
                         return@withLock
                     }
-                    if (_state.value.nodes.isNotEmpty()) {
-                        // Stale tree still on screen — mark loaded and show it.
+                    if (_state.value.nodes.isNotEmpty() &&
+                        _state.value.hasSnapshot) {
+                        // Stale FULL tree still on screen — mark loaded
+                        // and show it. A depth-1-only list is NOT
+                        // complete: keep the retry loop alive instead
+                        // of freezing the shallow window as "loaded".
                         _state.value = _state.value.copy(
                             shallow = false, treeLoaded = true)
+                    } else if (_state.value.nodes.isNotEmpty()) {
+                        scheduleFullRetry(gen)
                     } else if (restoreSnapshot()) {
                         // snapshot path already emitted
                     } else {

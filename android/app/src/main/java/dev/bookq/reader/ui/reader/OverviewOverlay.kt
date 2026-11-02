@@ -171,12 +171,11 @@ fun OverviewOverlay(
         val info2 = gridState.layoutInfo
         val cell2 = info2.visibleItemsInfo.firstOrNull { it.index == curItem }
             ?: return@LaunchedEffect
-        // item.offset sits inside beforeContentPadding; padStart on the
-        // cross axis. Root coords = grid root + padding + offset + half.
+        // LazyGridItemInfo.offset already includes the contentPadding —
+        // root coords are grid root + offset + half (no extra padding).
         onCellCenter(
-            gridRoot.value.x + padPx + cell2.offset.x + cell2.size.width / 2f,
-            gridRoot.value.y + info2.beforeContentPadding +
-                cell2.offset.y + cell2.size.height / 2f,
+            gridRoot.value.x + cell2.offset.x + cell2.size.width / 2f,
+            gridRoot.value.y + cell2.offset.y + cell2.size.height / 2f,
         )
     }
 
@@ -275,7 +274,6 @@ private fun OverviewGrid(
     onExit: () -> Unit,
     onGridRoot: (Offset) -> Unit,
 ) {
-    val padPx = with(LocalDensity.current) { PAD.toPx() }
     Box(
         Modifier
             .fillMaxSize()
@@ -308,20 +306,18 @@ private fun OverviewGrid(
                     }
                     if (multi && acc > PINCH_OUT) {
                         // elementFromPoint → the grid cell under lastMid.
-                        // item.offset lives INSIDE the content padding —
-                        // mid is Box-local, so shift it into item space:
-                        // beforeContentPadding on the main axis, the
-                        // horizontal content padding on the cross axis.
+                        // The fillMaxSize Box and the grid share bounds,
+                        // and item.offset already INCLUDES contentPadding —
+                        // compare mid directly (subtracting again shifts
+                        // the hit point up-left onto the wrong cell).
                         val info = gridState.layoutInfo
-                        val hx = mid.x - padPx
-                        val hy = mid.y - info.beforeContentPadding
                         val hit = info.visibleItemsInfo
                             .firstOrNull { item ->
                                 (item.key as? String)?.startsWith("g") == true &&
-                                    hx >= item.offset.x &&
-                                    hx < item.offset.x + item.size.width &&
-                                    hy >= item.offset.y &&
-                                    hy < item.offset.y + item.size.height
+                                    mid.x >= item.offset.x &&
+                                    mid.x < item.offset.x + item.size.width &&
+                                    mid.y >= item.offset.y &&
+                                    mid.y < item.offset.y + item.size.height
                             }
                         val g = (hit?.key as? String)
                             ?.removePrefix("g")?.toIntOrNull()

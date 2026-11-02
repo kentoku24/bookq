@@ -404,7 +404,12 @@ private fun ReaderBody(
 
     fun exitOverview(globalIdx: Int) {
         overviewOpen = false
-        compose.launch { pager.scrollToPage(work.spreadOf(globalIdx)) }
+        // Mark the jump as programmatic — a cross-chapter scrollToPage
+        // lands outside the departing chapter's range, and without this
+        // the settle-clamp would bounce it back to the old chapter edge.
+        val target = work.spreadOf(globalIdx)
+        pendingSpread = target
+        compose.launch { pager.scrollToPage(target) }
     }
 
     // measureBox — the centered spread's resting rect, refreshed per
@@ -433,10 +438,11 @@ private fun ReaderBody(
         // Web parity: merely OPENING a book never writes progress —
         // the first save lands on the first real page turn.
         var saveArmed = false
-        // Prefetch bookkeeping: cancel the previous window's requests
-        // and never refetch indices already requested (or being shown —
-        // PageCell's own fetch covers the settled spread).
-        val inflight = mutableListOf<coil3.request.Disposable>()
+        // Prefetch bookkeeping: requests slide with the window — an
+        // in-window request is never re-issued, and an out-of-window
+        // dispose drops its index from `fetched` so a re-covered page
+        // actually refetches instead of staying marked-done forever.
+        val inflight = mutableMapOf<Int, coil3.request.Disposable>()
         val fetched = mutableSetOf<Int>()
         snapshotFlow { pager.settledPage }.collect { s ->
             val idx = work.spreads.getOrNull(s)?.first() ?: return@collect
@@ -475,15 +481,24 @@ private fun ReaderBody(
             // spread.js ensureWindow: prefetch global idx −3 … +8,
             // non-spacer only, disk-cache warm at display size (an
             // ORIGINAL-size prefetch would evade the visible pages).
-            inflight.forEach { it.dispose() }
-            inflight.clear()
             val current = work.spreads.getOrNull(s)?.toSet() ?: emptySet()
             val lo = (idx - 3).coerceAtLeast(0)
             val hi = (idx + 8).coerceAtMost(work.images.size - 1)
-            for (i in lo..hi) {
-                if (work.images[i].isSpacer || i in current) continue
+            val window = (lo..hi).filterTo(mutableSetOf()) {
+                !work.images[it].isSpacer && it !in current
+            }
+            val it = inflight.iterator()
+            while (it.hasNext()) {
+                val e = it.next()
+                if (e.key !in window) {
+                    e.value.dispose()
+                    fetched -= e.key // re-fetchable when the window returns
+                    it.remove()
+                }
+            }
+            for (i in window) {
                 if (!fetched.add(i)) continue
-                inflight += sc.imageLoader.enqueue(
+                inflight[i] = sc.imageLoader.enqueue(
                     ImageRequest.Builder(context)
                         .data(pageData(i))
                         .size(viewW.roundToInt(), viewH.roundToInt())
