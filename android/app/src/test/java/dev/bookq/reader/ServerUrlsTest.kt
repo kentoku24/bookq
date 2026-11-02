@@ -33,6 +33,14 @@ class ServerUrlsTest {
             ServerUrls.normalize("http://10.0.2.2:8080"))
     }
 
+    /** A "127."-prefixed DNS name is not an IP literal; other loopback
+     *  forms the NSC does not whitelist stay rejected too. */
+    @Test fun fakeAndUnsupportedLoopbackRejected() {
+        assertNull(ServerUrls.normalize("http://127.attacker.example"))
+        assertNull(ServerUrls.normalize("http://127.0.0.2:8080"))
+        assertNull(ServerUrls.normalize("http://[::1]:8080"))
+    }
+
     @Test fun pathPrefixKept() {
         assertEquals("https://host/sub", ServerUrls.normalize("https://host/sub/"))
     }

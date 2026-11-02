@@ -56,6 +56,7 @@ fun LoginScreen(graph: AppGraph) {
 
     val loginError by graph.loginError.collectAsStateWithLifecycle()
     val cancelMsg = stringResource(R.string.login_cancelled)
+    val noBrowserMsg = stringResource(R.string.login_no_browser)
 
     // Auth Tab result → exchange the returned callback URI.
     val launcher = rememberLauncherForActivityResult(
@@ -64,7 +65,7 @@ fun LoginScreen(graph: AppGraph) {
         busy = false
         when {
             result.resultCode == AuthTabIntent.RESULT_OK && result.resultUri != null ->
-                scope.launch { graph.completeLogin(result.resultUri.toString()) }
+                graph.completeLogin(result.resultUri.toString())
             result.resultCode == AuthTabIntent.RESULT_CANCELED ->
                 scope.launch {
                     // Auth-Tab-unsupported browsers degrade to a plain tab:
@@ -97,6 +98,7 @@ fun LoginScreen(graph: AppGraph) {
 
     fun launchLogin() {
         val base = ServerUrls.parse(graph.settings.serverUrl.value) ?: return
+        val act = activity ?: return
         busy = true
         scope.launch {
             val pending = try {
@@ -111,9 +113,16 @@ fun LoginScreen(graph: AppGraph) {
                     .launch(launcher, uri, "bookq")
             } catch (e: Exception) {
                 // No auth-tab-capable handler — plain Custom Tab; the
-                // bookq://auth intent-filter catches the redirect.
-                CustomTabsIntent.Builder().build().launchUrl(
-                    activity ?: run { busy = false; return@launch }, uri)
+                // bookq://auth intent-filter catches the redirect. This
+                // throws too when no browser exists at all (kiosk /
+                // enterprise devices) — an uncaught throw in this scope
+                // would crash the app.
+                try {
+                    CustomTabsIntent.Builder().build().launchUrl(act, uri)
+                } catch (e2: Exception) {
+                    busy = false
+                    snackbar.showSnackbar(noBrowserMsg)
+                }
             }
         }
     }

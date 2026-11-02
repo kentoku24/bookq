@@ -22,7 +22,12 @@ object BookqHttp {
         val builder = (base?.newBuilder() ?: OkHttpClient.Builder())
             .cookieJar(CookieJar.NO_COOKIES)
             .cache(null)
-            .callTimeout(20, TimeUnit.SECONDS)
+            // No callTimeout: this client also carries Coil image fetches
+            // — an original-size page or a big tree response on a slow
+            // tailnet link would be killed mid-body. Hangs are detected
+            // by inactivity instead: 10s to connect, 60s between bytes.
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .addInterceptor(AuthInterceptor(baseUrl, tokenProvider))
         if (refresher != null) {
             builder.authenticator(

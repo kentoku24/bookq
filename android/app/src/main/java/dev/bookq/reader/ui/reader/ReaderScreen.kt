@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -141,6 +142,9 @@ fun ReaderScreen(
 
     var work by remember { mutableStateOf<ReaderWork?>(null) }
     var currentIdx by rememberSaveable { mutableIntStateOf(0) }
+    // Survives recreation: after the pager takes over once, rotations
+    // must re-anchor on currentIdx — not the nav-arg start page.
+    var tookAnchor by rememberSaveable { mutableStateOf(false) }
     var chrome by remember { mutableStateOf(true) }
 
     val sc = scope ?: return Box(Modifier.fillMaxSize()
@@ -190,12 +194,16 @@ fun ReaderScreen(
                     }
                 }
                 val w = work ?: l.work
+                // Anchor for the CURRENT work: the nav-arg page only until
+                // the pager settles once; afterwards (incl. post-rotation,
+                // where work==null on the first frame) the live index wins.
+                val anchor = if (tookAnchor) currentIdx else l.startIdx
                 ReaderBody(
                     graph = graph,
                     sc = sc,
                     controller = controller,
                     work = w,
-                    anchorIdx = if (work == null) l.startIdx else currentIdx,
+                    anchorIdx = anchor,
                     landscapeSpread = landscapeSpread,
                     spreadOffset = spreadOffset,
                     original = original,
@@ -204,8 +212,17 @@ fun ReaderScreen(
                     viewW = viewW,
                     viewH = viewH,
                     onToggleChrome = { chrome = !chrome },
-                    onCurrent = { currentIdx = it },
-                    onBack = { goBack(nav, w.clickedPath) },
+                    onCurrent = {
+                        currentIdx = it
+                        tookAnchor = true
+                    },
+                    // restoreBrowse parity: the browse anchor is the
+                    // chapter being READ, not the chapter first tapped.
+                    onBack = {
+                        val info = w.chapterInfo(currentIdx)
+                        goBack(nav, w.chapters.getOrNull(info.chapterIdx)
+                            ?.fullPath ?: w.clickedPath)
+                    },
                 )
             }
         }
@@ -263,10 +280,18 @@ private fun ReaderBody(
     var lastNavAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
     var navJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
-    fun turn(delta: Int) {
+    fun turn(delta: Int, crossChapter: Boolean = true) {
         if (pager.pageCount == 0) return
         val base = pendingSpread ?: pager.settledPage
-        val target = (base + delta).coerceIn(0, pager.pageCount - 1)
+        var target = base + delta
+        if (!crossChapter) {
+            // navTurn(±1, false): keys stop at the chapter boundary
+            // (only taps cross chapters in the web viewer).
+            val gi = work.spreads.getOrNull(base)?.first() ?: return
+            val r = work.chapterSpreadRange(gi)
+            target = target.coerceIn(r.first, r.last)
+        }
+        target = target.coerceIn(0, pager.pageCount - 1)
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastNavAt > 250) {
             lastNavAt = now
@@ -314,10 +339,16 @@ private fun ReaderBody(
     var overviewOpen by remember { mutableStateOf(false) }
     var suppressTapUntil by remember { mutableLongStateOf(0L) }
     // pointerInput captures values at launch — keep live flags.
-    val zoomedNow by rememberUpdatedState(zoomF > 1f)
+    // derivedStateOf: the 1x boundary is the only recompose trigger —
+    // a raw zoomF read would recompose ReaderBody every gesture frame.
+    val zoomedNow by remember { derivedStateOf { zoomF > 1f } }
     // One cancellable animation job shared with the gesture layer —
     // reset and bounce can never race.
     val zoomAnim = remember { MutableRef<Job?>(null) }
+    // Drift target for the shrink band: the overview reports its current
+    // cell's measured center (web curCenter → Zoom.driftTarget). Before
+    // the first measurement the viewport upper third stands in.
+    val driftRef = remember { MutableRef<Pair<Float, Float>?>(null) }
 
     fun applyZoom(s: Float, x: Float, y: Float) {
         zoomF = s; txF = x; tyF = y
@@ -397,25 +428,67 @@ private fun ReaderBody(
     // after the track settles; a newer settle invalidates the older.
     // `original` keys the URL scheme captured by pageUrl below.
     LaunchedEffect(work, pager, original) {
+        val anchorSpread = work.spreadOf(anchorIdx)
+        var lastSettled = -1
+        // Web parity: merely OPENING a book never writes progress —
+        // the first save lands on the first real page turn.
+        var saveArmed = false
+        // Prefetch bookkeeping: cancel the previous window's requests
+        // and never refetch indices already requested (or being shown —
+        // PageCell's own fetch covers the settled spread).
+        val inflight = mutableListOf<coil3.request.Disposable>()
+        val fetched = mutableSetOf<Int>()
         snapshotFlow { pager.settledPage }.collect { s ->
             val idx = work.spreads.getOrNull(s)?.first() ?: return@collect
+            // A raw swipe (no programmatic turn pending) landing outside
+            // the departing chapter's range bounces back — web's
+            // commitSwipeTurn clamps to getChapterSpreadRange.
+            val prev = lastSettled
+            lastSettled = s
+            if (pendingSpread == null && prev >= 0 && prev != s) {
+                val fromIdx = work.spreads.getOrNull(prev)?.first()
+                if (fromIdx != null) {
+                    val r = work.chapterSpreadRange(fromIdx)
+                    if (s !in r) {
+                        lastSettled = if (s <= r.first) r.first else r.last
+                        pager.scrollToPage(lastSettled)
+                        return@collect
+                    }
+                }
+            }
             onCurrent(idx)
             pendingSpread = null
-            // A page settle resets the layer (web snapTo → Zoom.reset).
-            if (zoomF != 1f || txF != 0f || tyF != 0f) {
-                zs.reset(); applyZoom(1f, 0f, 0f)
+            // A page settle resets the layer (web snapTo → Zoom.reset)
+            // — INCLUDING any running zoom animation, or a double-tap
+            // slide would land its 2.5x on the NEW page.
+            if (zoomF != 1f || txF != 0f || tyF != 0f ||
+                zoomAnim.value?.isActive == true) {
+                resetZoom(animated = false)
+            }
+            if (!saveArmed) {
+                if (s == anchorSpread) return@collect
+                saveArmed = true
             }
             val info = work.chapterInfo(idx)
             val ch = work.chapters.getOrNull(info.chapterIdx) ?: return@collect
             sc.progress.save(ch.fullPath, info.localIdx, ch.images.size)
             // spread.js ensureWindow: prefetch global idx −3 … +8,
-            // non-spacer only — keeps the disk cache warm.
+            // non-spacer only, disk-cache warm at display size (an
+            // ORIGINAL-size prefetch would evade the visible pages).
+            inflight.forEach { it.dispose() }
+            inflight.clear()
+            val current = work.spreads.getOrNull(s)?.toSet() ?: emptySet()
             val lo = (idx - 3).coerceAtLeast(0)
             val hi = (idx + 8).coerceAtMost(work.images.size - 1)
             for (i in lo..hi) {
-                if (work.images[i].isSpacer) continue
-                sc.imageLoader.enqueue(
-                    ImageRequest.Builder(context).data(pageData(i)).build())
+                if (work.images[i].isSpacer || i in current) continue
+                if (!fetched.add(i)) continue
+                inflight += sc.imageLoader.enqueue(
+                    ImageRequest.Builder(context)
+                        .data(pageData(i))
+                        .size(viewW.roundToInt(), viewH.roundToInt())
+                        .memoryCachePolicy(coil3.request.CachePolicy.DISABLED)
+                        .build())
             }
         }
     }
@@ -434,25 +507,30 @@ private fun ReaderBody(
             .onKeyEvent { e ->
                 val down = e.type == KeyEventType.KeyDown
                 if (overviewOpen) {
-                    // The grid owns keys — G/Esc exit, everything else is
-                    // swallowed so the reader below can't move.
+                    // The grid owns only its exit keys — web's overview
+                    // keydown handles just Escape/G. Volume keys in
+                    // particular MUST fall through to the OS or the
+                    // overlay mutes the device.
                     return@onKeyEvent when (e.key) {
                         Key.G, Key.Escape -> {
                             if (down) exitOverview(curGlobalIdx()); true
                         }
-                        else -> true
+                        else -> false
                     }
                 }
                 when (e.key) {
-                    // iOS key convention (platform-native): → = forward,
-                    // ← = back. Home/End jump to chapter bounds.
-                    Key.DirectionRight -> { if (down) turn(1); true }
-                    Key.DirectionLeft -> { if (down) turn(-1); true }
+                    // Web keyboard parity (RTL): ← = next, → = prev —
+                    // CLAUDE.md calls this out as a trip-wire convention.
+                    // Keys never cross chapters (navTurn(±1, false)).
+                    Key.DirectionLeft -> { if (down) turn(1, crossChapter = false); true }
+                    Key.DirectionRight -> { if (down) turn(-1, crossChapter = false); true }
                     Key.MoveHome -> { if (down) chapterEdge(false); true }
                     Key.MoveEnd -> { if (down) chapterEdge(true); true }
                     Key.G -> { if (down) openOverview(); true }
-                    Key.VolumeUp -> if (volumeKeys) { if (down) turn(-1); true } else false
-                    Key.VolumeDown -> if (volumeKeys) { if (down) turn(1); true } else false
+                    Key.VolumeUp -> if (volumeKeys) {
+                        if (down) turn(-1, crossChapter = false); true } else false
+                    Key.VolumeDown -> if (volumeKeys) {
+                        if (down) turn(1, crossChapter = false); true } else false
                     else -> false
                 }
             }
@@ -464,7 +542,8 @@ private fun ReaderBody(
                 },
                 apply = ::applyZoom,
                 onOverviewFire = ::openOverview,
-                onEdgeTurn = ::turn,
+                // Edge-turn during zoom follows tap semantics (cross ok).
+                onEdgeTurn = { d -> turn(d) },
                 onHaptic = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                 },
@@ -472,7 +551,10 @@ private fun ReaderBody(
                     suppressTapUntil =
                         android.os.SystemClock.uptimeMillis() + 400
                 },
-                driftTarget = { (viewW / 2f) to (viewH / 3f) },
+                // The overview shares its measured cell center (web
+                // curCenter); before any open the upper-third default
+                // approximates it.
+                driftTarget = { driftRef.value ?: ((viewW / 2f) to (viewH / 3f)) },
                 scope = compose,
                 animSlot = zoomAnim,
             )
@@ -674,6 +756,9 @@ private fun ReaderBody(
                 imageLoader = sc.imageLoader,
                 onJump = ::exitOverview,
                 onClose = { exitOverview(curGlobalIdx()) },
+                // web curCenter → Zoom.driftTarget: the next pinch-in
+                // shrinks toward where this cell actually sat.
+                onCellCenter = { x, y -> driftRef.value = x to y },
             )
         }
     }
@@ -717,6 +802,7 @@ private fun SpreadCell(
                         spreadIdx in work.chapterStartSpreads,
                     chapterName = work.chapterInfo(idx).name,
                     onAR = { a -> controller.recordAR(idx, a) },
+                    onLoaded = { controller.clearError(idx) },
                     onError = { onError(idx) },
                 )
             }
@@ -734,6 +820,7 @@ private fun PageCell(
     isChapterStart: Boolean,
     chapterName: String,
     onAR: (Float) -> Unit,
+    onLoaded: () -> Unit,
     onError: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -750,6 +837,7 @@ private fun PageCell(
             onSuccess = { state ->
                 val s = state.painter.intrinsicSize
                 if (s.width > 0f && s.height > 0f) onAR(s.width / s.height)
+                onLoaded()
             },
             onError = { onError() },
             loading = {},
