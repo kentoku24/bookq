@@ -51,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -74,6 +75,7 @@ import dev.bookq.reader.R
 import dev.bookq.reader.ServerScope
 import dev.bookq.reader.browse.BrowseController
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** Saved-state key the reader writes its chapter anchor into. */
@@ -150,12 +152,13 @@ private fun BrowseBody(
         onOpenReader(p, page)
     }
 
+    val deniedMsg = stringResource(R.string.browse_hidden_denied)
     fun handle(action: BrowseController.Action) {
         when (action) {
             is BrowseController.Action.Navigate -> onNavigate(action.path)
             is BrowseController.Action.Open -> openTarget(action.path)
             BrowseController.Action.Denied ->
-                coroutineScope.launch { snackbar.showSnackbar("非表示フォルダです") }
+                coroutineScope.launch { snackbar.showSnackbar(deniedMsg) }
             BrowseController.Action.Queued -> Unit
             null -> Unit
         }
@@ -172,19 +175,31 @@ private fun BrowseBody(
     }
 
     // Viewer→browse return anchor + scroll decision (one-shot per entry).
+    // Two contract details:
+    //  - childPaths is the FILTERED list actually rendered — indexOf must
+    //    agree with the Lazy* index space or the anchor scrolls wrong.
+    //  - the decision waits for a populated frame: cold start composes
+    //    before the tree arrives, and deciding on an empty list would
+    //    pin the scroll to TOP.
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
+    val renderedItems by rememberUpdatedState(items)
     LaunchedEffect(Unit) {
         val anchor = entry.savedStateHandle.get<String>(RETURN_ANCHOR_KEY)
         if (anchor != null) {
             entry.savedStateHandle.remove<String>(RETURN_ANCHOR_KEY)
             controller.decider.noteViewerReturn(path, anchor)
         }
+        val rendered = snapshotFlow {
+            Triple(renderedItems, visVersion, tree.treeLoaded)
+        }.first { (l, _, loaded) ->
+            l.isNotEmpty() || (loaded && vis.blockedGrid() == null)
+        }.first
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||
             gridState.firstVisibleItemIndex > 0 ||
             gridState.firstVisibleItemScrollOffset > 0
-        val childPaths = allItems.map { it.path }
+        val childPaths = rendered.map { it.path }
         val decision = controller.decider.decide(
             level = path.ifEmpty { null },
             cause = if (anchor != null || restored) {
@@ -197,11 +212,13 @@ private fun BrowseBody(
             progressFolders = book.folders() + setOf(""),
         )
         val index = decision.anchor?.let { a -> childPaths.indexOf(a) } ?: -1
+        // Scroll only the state backing the ACTIVE layout — scrollToItem
+        // on a Lazy* state whose container isn't composed suspends until
+        // first layout, which for the inactive one can wedge the effect.
         suspend fun scrollTo(i: Int) {
-            if (i >= 0) {
-                listState.scrollToItem(i)
-                gridState.scrollToItem(i)
-            }
+            if (i < 0) return
+            if (layout == BrowseLayout.LIST) listState.scrollToItem(i)
+            else gridState.scrollToItem(i)
         }
         when (decision.via) {
             ScrollDecider.Via.VIEWER, ScrollDecider.Via.PROGRESS ->
@@ -216,9 +233,6 @@ private fun BrowseBody(
         controller.drain(tree.nodes, tree, vis)?.let(::handle)
     }
 
-    // New tree data ends the pull-to-refresh spinner.
-    LaunchedEffect(tree.generation, tree.shallow) { refreshing = false }
-
     val density = LocalDensity.current.density
     val coverW = coverWidth(density)
     val context = LocalContext.current
@@ -226,6 +240,8 @@ private fun BrowseBody(
     // Visible-first cover prefetch — fires only once the scroll settles
     // (web: idle-scheduled, ≤50, never mid-gesture). Coil dedupes memory-
     // cached hits; `enqueued` survives the entry for the session.
+    // `items` is read through rememberUpdatedState: a settle event must
+    // prefetch the CURRENT list, not the empty one from first compose.
     val enqueued = remember { mutableSetOf<String>() }
     LaunchedEffect(gridState, listState, layout) {
         snapshotFlow {
@@ -243,16 +259,19 @@ private fun BrowseBody(
             settled to first
         }.collect { (settled, first) ->
             if (!settled || first < 0) return@collect
+            // CARD renders covers at card width (400); others use coverW.
+            val w = if (layout == BrowseLayout.CARD) 400 else coverW
             var sent = 0
-            for (i in first until minOf(first + 50, items.size)) {
+            val current = renderedItems
+            for (i in first until minOf(first + 50, current.size)) {
                 if (sent >= 50) break
-                val item = items[i]
+                val item = current[i]
                 val url = when (val c = LevelModel.coverOf(item.node)) {
                     is LevelModel.Cover.Single ->
-                        scope.api.thumbUrl(item.path, c.name, coverW).toString()
+                        scope.api.thumbUrl(item.path, c.name, w).toString()
                     is LevelModel.Cover.Sprite ->
                         scope.api.thumbSpriteUrl(
-                            item.path, c.names, c.spec.rows, coverW).toString()
+                            item.path, c.names, c.spec.rows, w).toString()
                     LevelModel.Cover.None -> null
                 } ?: continue
                 if (enqueued.add(url)) {
@@ -347,7 +366,10 @@ private fun BrowseBody(
             isRefreshing = refreshing,
             onRefresh = {
                 refreshing = true
-                scope.tree.refresh()
+                // Job-based completion — clears on success AND failure
+                // (a generation-based trigger can stale forever when the
+                // 202 window outlives the request).
+                scope.tree.refresh().invokeOnCompletion { refreshing = false }
             },
             modifier = Modifier.fillMaxSize().padding(padding),
         ) {

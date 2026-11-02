@@ -9,6 +9,7 @@ import dev.bookq.core.auth.Pkce
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -85,8 +86,17 @@ class AuthManager(
     private val _sessionExpired = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val sessionExpired: SharedFlow<Unit> = _sessionExpired.asSharedFlow()
 
+    /**
+     * IO hop for keystore/file work. `scope.coroutineContext` itself
+     * would reparent the block to the scope's supervisor (caller
+     * cancellation could no longer reach it); dropping the Job keeps
+     * the caller's structured concurrency while only borrowing the
+     * dispatcher (IO in prod, the test scheduler under runTest).
+     */
+    private val ioContext = scope.coroutineContext.minusKey(Job)
+
     /** Restore the persisted pair at launch. */
-    suspend fun restore() = withContext(scope.coroutineContext) {
+    suspend fun restore() = withContext(ioContext) {
         val pair = store.load() ?: return@withContext
         token = pair.accessToken
         refreshToken = pair.refreshToken
@@ -108,7 +118,7 @@ class AuthManager(
             .addQueryParameter("code_challenge_method", "S256")
             .addQueryParameter("state", state)
             .build()
-        withContext(scope.coroutineContext) {
+        withContext(ioContext) {
             pendingStore.save(PendingLogin(base.toString(), state, verifier))
         }
         return LoginRequest(url.toString(), state, verifier)
@@ -133,7 +143,8 @@ class AuthManager(
         val params = parseQuery(uri.rawQuery)
         val code = params["code"]?.takeIf { it.isNotEmpty() }
             ?: throw AuthError.NoCode
-        val pending = pendingStore.load() ?: throw AuthError.NoPendingLogin
+        val pending = withContext(ioContext) { pendingStore.load() }
+            ?: throw AuthError.NoPendingLogin
         // CSRF guard: the echoed state must match the one we sent.
         val state = params["state"]
         if (state != pending.state) throw AuthError.StateMismatch
@@ -144,7 +155,7 @@ class AuthManager(
             "code_verifier" to pending.verifier,
         ))
         applyPair(TokenPair(resp))
-        withContext(scope.coroutineContext) { pendingStore.clear() }
+        withContext(ioContext) { pendingStore.clear() }
         return _user.value ?: throw AuthError.NoToken
     }
 
@@ -194,7 +205,7 @@ class AuthManager(
     }
 
     private suspend fun applyPair(pair: TokenPair) {
-        withContext(scope.coroutineContext) { store.save(pair) }
+        withContext(ioContext) { store.save(pair) }
         token = pair.accessToken
         refreshToken = pair.refreshToken
         _user.value = JwtClaims.userFromAccessToken(pair.accessToken)
@@ -222,12 +233,16 @@ class AuthManager(
         }
     }
 
-    fun logout() {
-        store.clear()
-        pendingStore.clear()
+    suspend fun logout() {
+        // Volatile state drops first so the very next request stops
+        // carrying the old bearer; the file clears ride IO.
         token = null
         refreshToken = null
         _user.value = null
+        withContext(ioContext) {
+            store.clear()
+            pendingStore.clear()
+        }
     }
 
     /** Test hook — inject a pair as if login/refresh had returned it. */
