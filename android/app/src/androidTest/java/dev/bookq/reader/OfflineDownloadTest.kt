@@ -177,8 +177,12 @@ class OfflineDownloadTest {
             badge(expected).performClick()                 // delete
             assertTrue("delete did not settle to IDLE",
                 waitState(expected, "IDLE", 20_000))
+            // Other leaves may legitimately still be cached (a stopped
+            // partial is persistent state) — only this leaf must be gone.
+            // encFolder = URLEncoder form-encoding (space → '+').
+            val leafDir = java.net.URLEncoder.encode(expected, "UTF-8")
             assertTrue("offline files remain after delete",
-                offlineFiles().isEmpty())
+                offlineFiles().none { it.contains("/$leafDir/") })
         } finally {
             scenario.close()
         }
