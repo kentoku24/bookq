@@ -1,5 +1,6 @@
 package dev.bookq.data
 
+import java.util.concurrent.TimeUnit
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
@@ -21,6 +22,7 @@ object BookqHttp {
         val builder = (base?.newBuilder() ?: OkHttpClient.Builder())
             .cookieJar(CookieJar.NO_COOKIES)
             .cache(null)
+            .callTimeout(20, TimeUnit.SECONDS)
             .addInterceptor(AuthInterceptor(baseUrl, tokenProvider))
         if (refresher != null) {
             builder.authenticator(
