@@ -21,10 +21,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.toRoute
 import dev.bookq.reader.AppGraph
 import dev.bookq.reader.AppPhase
 import dev.bookq.reader.R
 import dev.bookq.reader.nav.Routes
+import dev.bookq.reader.ui.browse.BrowseScreen
 
 /** Phase router: onboarding → booting → login / library. */
 @Composable
@@ -70,9 +72,29 @@ private fun BootErrorScreen(graph: AppGraph, message: String) {
 @Composable
 private fun ReadyNavHost(graph: AppGraph) {
     val nav = rememberNavController()
-    NavHost(navController = nav, startDestination = Routes.Home) {
-        composable<Routes.Home> {
-            HomeScreen(graph, onSettings = { nav.navigate(Routes.Settings) })
+    NavHost(navController = nav, startDestination = Routes.Browse()) {
+        composable<Routes.Browse> { entry ->
+            val route = entry.toRoute<Routes.Browse>()
+            BrowseScreen(
+                graph = graph,
+                entry = entry,
+                path = route.path,
+                onNavigate = { nav.navigate(Routes.Browse(it)) },
+                onOpenReader = { folder, page ->
+                    nav.navigate(Routes.Reader(folder, page))
+                },
+                onSettings = { nav.navigate(Routes.Settings) },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable<Routes.Reader> { entry ->
+            val route = entry.toRoute<Routes.Reader>()
+            ReaderStubScreen(
+                graph = graph,
+                nav = nav,
+                folder = route.folder,
+                page = route.page,
+            )
         }
         composable<Routes.Settings> {
             SettingsScreen(graph, onBack = { nav.popBackStack() })

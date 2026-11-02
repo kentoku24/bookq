@@ -24,6 +24,14 @@
     <string name="home_error">読み込みに失敗しました</string>
     <string name="home_reload">再読み込み</string>
 
+    <string name="browse_search">絞り込み</string>
+    <string name="browse_filter_hint">この階層を絞り込み</string>
+    <string name="browse_empty">フォルダがありません</string>
+    <string name="browse_hidden_denied">非表示フォルダです</string>
+
+    <string name="reader_root_title">ライブラリ直下</string>
+    <string name="reader_stub_pages">%1$d ページ — p.%2$d から</string>
+
     <string name="settings_title">設定</string>
     <string name="settings_server">サーバー</string>
     <string name="settings_change">変更</string>

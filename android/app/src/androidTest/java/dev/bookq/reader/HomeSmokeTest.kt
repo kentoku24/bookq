@@ -6,16 +6,18 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
-import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.assertIsDisplayed
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * M1 smoke: launch MainActivity with `--es serverURL` (instrumentation arg
+ * Smoke: launch MainActivity with `--es serverURL` (instrumentation arg
  * `bookqServerUrl`, default the emulator host bridge), boot in TEST_MODE,
- * and assert a top-level folder name from the synthetic tree appears.
+ * and assert a top-level folder tile from the synthetic tree appears.
+ * Tiles are tagged `tile:<fullPath>` — the display text splits leaf/parent
+ * so the tag is the stable assertion.
  */
 @RunWith(AndroidJUnit4::class)
 class HomeSmokeTest {
@@ -36,11 +38,11 @@ class HomeSmokeTest {
         ActivityScenario.launch<MainActivity>(intent).use {
             composeRule.waitUntil(timeoutMillis = 30_000) {
                 runCatching {
-                    composeRule.onNodeWithText(expected).assertExists()
+                    composeRule.onNodeWithTag("tile:$expected").assertExists()
                     true
                 }.getOrDefault(false)
             }
-            composeRule.onNodeWithText(expected).assertIsDisplayed()
+            composeRule.onNodeWithTag("tile:$expected").assertIsDisplayed()
         }
     }
 }

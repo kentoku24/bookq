@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl
 
@@ -36,7 +37,47 @@ class AppGraph(app: Application) {
         auth = auth,
         apiFactory = ::buildApi,
         scope = scope,
+        snapshotProbe = { base -> ServerScope.hasTreeSnapshot(app, base.host) },
     )
+
+    /**
+     * Active per-(host, account) service bundle — rebuilt whenever
+     * [AppModel.scopeValue] changes (server URL or login identity).
+     * Collected by the UI via [serverScope].
+     */
+    private val _serverScope = MutableStateFlow<ServerScope?>(null)
+    val serverScope = _serverScope.asStateFlow()
+
+    init {
+        scope.launch {
+            model.scopeValue.collect { sc ->
+                val old = _serverScope.value
+                if (sc == null || sc.host.isEmpty()) {
+                    _serverScope.value = null
+                    old?.close()
+                    return@collect
+                }
+                val api = model.api ?: return@collect
+                if (old != null && old.api === api) return@collect
+                old?.close()
+                _serverScope.value = ServerScope(
+                    context = app,
+                    api = api,
+                    host = sc.host,
+                    email = sc.email,
+                    mediaClient = buildMediaClient(api.baseUrl),
+                    parent = scope,
+                ).also { it.start() }
+            }
+        }
+    }
+
+    private fun buildMediaClient(base: HttpUrl): okhttp3.OkHttpClient =
+        BookqHttp.apiClient(
+            baseUrl = base,
+            tokenProvider = { auth.token },
+            refresher = { runBlocking { auth.refreshAccessToken() } },
+        )
 
     /** Latest login failure surfaced to the UI (Snackbar). */
     private val _loginError = MutableStateFlow<String?>(null)
@@ -46,14 +87,8 @@ class AppGraph(app: Application) {
         _loginError.value = null
     }
 
-    private fun buildApi(base: HttpUrl): BookqApi {
-        val client = BookqHttp.apiClient(
-            baseUrl = base,
-            tokenProvider = { auth.token },
-            refresher = { runBlocking { auth.refreshAccessToken() } },
-        )
-        return BookqApi(base, client)
-    }
+    private fun buildApi(base: HttpUrl): BookqApi =
+        BookqApi(base, buildMediaClient(base))
 
     /** Unauthenticated health probe for onboarding. */
     suspend fun healthCheck(url: String): Boolean {
