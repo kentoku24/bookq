@@ -74,6 +74,8 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -103,6 +105,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /** spread.js `GAP_INNER`. */
 private const val GAP_INNER_PX = 5f
+
+/** Instrumentation hooks — the connected test reads zoom state
+ *  directly from semantics instead of inferring it from page counters
+ *  (the OS input pipeline is unreliable on some ROMs). */
+val ReaderZoomScale = SemanticsPropertyKey<Float>("ReaderZoomScale")
+val ReaderZoomPanX = SemanticsPropertyKey<Float>("ReaderZoomPanX")
 /** Max wait for the full tree before assembling from what exists — the
  *  shallow window can race a reader-open tap (web gates on tree-ready). */
 private const val TREE_WAIT_MS = 8_000L
@@ -417,6 +425,10 @@ private fun ReaderBody(
             .fillMaxSize()
             .focusRequester(focusRequester)
             .focusable()
+            .semantics {
+                this[ReaderZoomScale] = zoomF
+                this[ReaderZoomPanX] = txF
+            }
             .onKeyEvent { e ->
                 val down = e.type == KeyEventType.KeyDown
                 if (overviewOpen) {

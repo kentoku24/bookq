@@ -44,6 +44,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import coil3.ImageLoader
@@ -175,6 +176,7 @@ fun OverviewOverlay(
         Modifier
             .fillMaxSize()
             .background(Color(0xF20D0D0D))
+            .testTag("overviewGrid")
             // Eat taps so nothing leaks to the reader's tap zones below.
             .pointerInput(Unit) { detectTapGestures { } },
     ) {
