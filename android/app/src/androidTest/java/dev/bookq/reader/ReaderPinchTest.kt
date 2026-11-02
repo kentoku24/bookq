@@ -381,14 +381,24 @@ class ReaderPinchTest {
                     t.isNotEmpty() && t.all { c -> c.isDigit() }
                 }
         }
-        pinch(instr, decor, cx, cy,
-            startHalf = 150f,
-            endHalf = minOf(cx * 0.85f, cx - 30f), steps = 12)
-        assertTrue("overview pinch-out did not exit to the reader",
-            waitUntil({
+        var pinchedOut = false
+        for (attempt in 0..1) {
+            pinch(instr, decor, cx, cy,
+                startHalf = 150f,
+                endHalf = minOf(cx * 0.85f, cx - 30f), steps = 12)
+            pinchedOut = waitUntil({
                 nodes().none { tagOf(it) == "overviewGrid" } &&
                     anyText(readerCounter)
-            }, 8_000))
+            }, 6_000)
+            if (pinchedOut) break
+        }
+        if (!pinchedOut) {
+            d.executeShellCommand("screencap -p /sdcard/m4-nopinchout.png")
+            error("overview pinch-out did not exit — " +
+                "gridOpen=${nodes().any { tagOf(it) == "overviewGrid" }} " +
+                "counter=${counterText()} " +
+                "tags=${nodes().mapNotNull { tagOf(it) }.take(20)}")
+        }
         if (midBadge != null) {
             assertTrue(
                 "pinch-out landed on a different cell " +
