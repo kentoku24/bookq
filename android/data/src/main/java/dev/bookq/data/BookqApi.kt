@@ -104,11 +104,14 @@ class BookqApi(
     /**
      * GET /api/v1/tree. Retries through 202 rebuild responses using
      * `Retry-After` (default 2s, max 20 attempts). 304 → [TreeResult.NotModified].
+     * `depth` requests the shallow children-only envelope (`kind` "children");
+     * shallow responses must never be persisted (v1-semantics §1).
      */
-    suspend fun tree(since: Int? = null, etag: String? = null): TreeResult {
+    suspend fun tree(since: Int? = null, etag: String? = null, depth: Int? = null): TreeResult {
         repeat(20) {
             val ub = baseUrl.newBuilder().addPathSegments("api/v1/tree")
             if (since != null) ub.addQueryParameter("since", since.toString())
+            if (depth != null) ub.addQueryParameter("depth", depth.toString())
             val rb = Request.Builder().url(ub.build()).get()
             if (etag != null) rb.header("If-None-Match", etag)
             val resp = send(rb.build())
