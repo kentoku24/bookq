@@ -3,6 +3,9 @@ package dev.bookq.reader.ui.reader
 import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -40,10 +43,13 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -52,6 +58,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -61,6 +70,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
@@ -75,12 +85,16 @@ import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import dev.bookq.core.browse.BrowseRules
 import dev.bookq.core.reader.ReaderWork
+import dev.bookq.core.reader.ZoomBox
+import dev.bookq.core.reader.ZoomK
+import dev.bookq.core.reader.ZoomState
 import dev.bookq.core.reader.zoneAction
 import dev.bookq.core.reader.ZoneAction
 import dev.bookq.reader.AppGraph
 import dev.bookq.reader.R
 import dev.bookq.reader.reader.ReaderController
 import dev.bookq.reader.ui.browse.RETURN_ANCHOR_KEY
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -284,6 +298,70 @@ private fun ReaderBody(
         if (pager.currentPage != target) pager.scrollToPage(target)
     }
 
+    // ── M4: pinch-zoom + overview (viewer/zoom.js + overview.js) ──
+    val haptic = LocalHapticFeedback.current
+    val zs = remember { ZoomState() }
+    var zoomF by remember { mutableFloatStateOf(1f) }
+    var txF by remember { mutableFloatStateOf(0f) }
+    var tyF by remember { mutableFloatStateOf(0f) }
+    var overviewOpen by remember { mutableStateOf(false) }
+    var suppressTapUntil by remember { mutableLongStateOf(0L) }
+    // pointerInput captures values at launch — keep live flags.
+    val zoomedNow by rememberUpdatedState(zoomF > 1f)
+    // One cancellable animation job shared with the gesture layer —
+    // reset and bounce can never race.
+    val zoomAnim = remember { MutableRef<Job?>(null) }
+
+    fun applyZoom(s: Float, x: Float, y: Float) {
+        zoomF = s; txF = x; tyF = y
+    }
+
+    fun resetZoom(animated: Boolean) {
+        if (!animated || (zoomF == 1f && txF == 0f && tyF == 0f)) {
+            zoomAnim.value?.cancel()
+            zs.reset(); applyZoom(1f, 0f, 0f); return
+        }
+        // Snap-back — cubic-bezier(0.25, 0.1, 0.25, 1) over SLIDE_MS.
+        val s0 = zoomF; val x0 = txF; val y0 = tyF
+        zoomAnim.value?.cancel()
+        zoomAnim.value = compose.launch {
+            Animatable(0f).animateTo(
+                1f,
+                tween(ZoomK.SLIDE_MS,
+                    easing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)),
+            ) {
+                applyZoom(s0 + (1f - s0) * value,
+                    x0 * (1 - value), y0 * (1 - value))
+            }
+            zs.reset(); applyZoom(1f, 0f, 0f)
+        }
+    }
+
+    fun curGlobalIdx() =
+        work.spreads.getOrNull(pager.settledPage)?.first() ?: anchorIdx
+
+    fun openOverview() {
+        // web show(): the layer resets and the grid takes the screen.
+        resetZoom(animated = false)
+        overviewOpen = true
+    }
+
+    fun exitOverview(globalIdx: Int) {
+        overviewOpen = false
+        compose.launch { pager.scrollToPage(work.spreadOf(globalIdx)) }
+    }
+
+    // measureBox — the centered spread's resting rect, refreshed per
+    // settled page / measured aspect ratios / viewport size.
+    val arMap by controller.pageAR.collectAsStateWithLifecycle()
+    LaunchedEffect(work, pager.settledPage, arMap, viewW, viewH) {
+        val pages = work.spreads.getOrNull(pager.settledPage) ?: emptyList()
+        val (fw, fh) = ReaderWork.spreadFit(
+            pages.map { arMap[it] ?: controller.lastAR },
+            GAP_INNER_PX, viewW, viewH)
+        zs.box = ZoomBox.centered(fw, fh, viewW, viewH)
+    }
+
     fun pageUrl(globalIdx: Int): String {
         val p = work.images[globalIdx]
         return sc.api.pageUrl(p.folder, p.name, original).toString()
@@ -297,6 +375,10 @@ private fun ReaderBody(
             val idx = work.spreads.getOrNull(s)?.first() ?: return@collect
             onCurrent(idx)
             pendingSpread = null
+            // A page settle resets the layer (web snapTo → Zoom.reset).
+            if (zoomF != 1f || txF != 0f || tyF != 0f) {
+                zs.reset(); applyZoom(1f, 0f, 0f)
+            }
             val info = work.chapterInfo(idx)
             val ch = work.chapters.getOrNull(info.chapterIdx) ?: return@collect
             sc.progress.save(ch.fullPath, info.localIdx, ch.images.size)
@@ -321,6 +403,16 @@ private fun ReaderBody(
             .focusable()
             .onKeyEvent { e ->
                 val down = e.type == KeyEventType.KeyDown
+                if (overviewOpen) {
+                    // The grid owns keys — G/Esc exit, everything else is
+                    // swallowed so the reader below can't move.
+                    return@onKeyEvent when (e.key) {
+                        Key.G, Key.Escape -> {
+                            if (down) exitOverview(curGlobalIdx()); true
+                        }
+                        else -> true
+                    }
+                }
                 when (e.key) {
                     // iOS key convention (platform-native): → = forward,
                     // ← = back. Home/End jump to chapter bounds.
@@ -328,16 +420,44 @@ private fun ReaderBody(
                     Key.DirectionLeft -> { if (down) turn(-1); true }
                     Key.MoveHome -> { if (down) chapterEdge(false); true }
                     Key.MoveEnd -> { if (down) chapterEdge(true); true }
+                    Key.G -> { if (down) openOverview(); true }
                     Key.VolumeUp -> if (volumeKeys) { if (down) turn(-1); true } else false
                     Key.VolumeDown -> if (volumeKeys) { if (down) turn(1); true } else false
                     else -> false
                 }
             }
+            .zoomGestures(
+                zs = zs,
+                enabled = { !overviewOpen },
+                canTurn = { d ->
+                    pager.settledPage + d in 0 until pager.pageCount
+                },
+                apply = ::applyZoom,
+                onOverviewFire = ::openOverview,
+                onEdgeTurn = ::turn,
+                onHaptic = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                },
+                onSuppressTap = {
+                    suppressTapUntil =
+                        android.os.SystemClock.uptimeMillis() + 400
+                },
+                driftTarget = { (viewW / 2f) to (viewH / 3f) },
+                scope = compose,
+                animSlot = zoomAnim,
+            )
             .pointerInput(tapForwardLeft, work) {
                 detectTapGestures { off ->
+                    // A decided pan leaves a trailing tap — the web's
+                    // suppressClickFor(400).
+                    if (android.os.SystemClock.uptimeMillis() < suppressTapUntil)
+                        return@detectTapGestures
                     when (val a = zoneAction(off.x / size.width, tapForwardLeft)) {
-                        is ZoneAction.Turn -> turn(a.delta)
-                        ZoneAction.ToggleChrome -> onChrome(!currentChrome)
+                        is ZoneAction.Turn -> if (!zoomedNow) turn(a.delta)
+                        // Zoomed center tap drops back to 1x (plan).
+                        ZoneAction.ToggleChrome ->
+                            if (zoomedNow) resetZoom(animated = true)
+                            else onChrome(!currentChrome)
                     }
                 }
             },
@@ -348,7 +468,19 @@ private fun ReaderBody(
             HorizontalPager(
                 state = pager,
                 beyondViewportPageCount = 1,
-                modifier = Modifier.fillMaxSize(),
+                // Zoomed → the zoom layer owns one-finger drags.
+                userScrollEnabled = !zoomedNow,
+                modifier = Modifier
+                    .fillMaxSize()
+                    // translate(tx,ty) scale(zoom) around the top-left —
+                    // the web #zoom-layer transform, layer-local.
+                    .graphicsLayer {
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        scaleX = zoomF
+                        scaleY = zoomF
+                        translationX = txF
+                        translationY = tyF
+                    },
             ) { spreadIdx ->
                 SpreadCell(
                     work = work,
@@ -403,6 +535,7 @@ private fun ReaderBody(
                             tapForwardLeft = tapForwardLeft,
                             original = original,
                             onDismiss = { menu = false },
+                            onOverview = ::openOverview,
                             onToggleSpread = { controller.toggleLandscapeSpread() },
                             onToggleOffset = { controller.toggleSpreadOffset() },
                             onToggleTap = { controller.toggleTapForward() },
@@ -474,6 +607,19 @@ private fun ReaderBody(
                     )
                 }
             }
+        }
+
+        // ── M4 overview grid — drawn on top of the reader, consumes its
+        // own gestures/keys; reader chrome sits inert underneath. ──
+        if (overviewOpen) {
+            OverviewOverlay(
+                work = work,
+                currentIdx = curGlobalIdx(),
+                api = sc.api,
+                imageLoader = sc.imageLoader,
+                onJump = ::exitOverview,
+                onClose = { exitOverview(curGlobalIdx()) },
+            )
         }
     }
 }
@@ -582,12 +728,18 @@ private fun ReaderMenu(
     tapForwardLeft: Boolean,
     original: Boolean,
     onDismiss: () -> Unit,
+    onOverview: () -> Unit,
     onToggleSpread: () -> Unit,
     onToggleOffset: () -> Unit,
     onToggleTap: () -> Unit,
     onToggleOriginal: () -> Unit,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        // Web's overview button (g/#btn-overview) — the page grid.
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.reader_overview)) },
+            onClick = { onDismiss(); onOverview() },
+        )
         if (landscape) {
             DropdownMenuItem(
                 text = {

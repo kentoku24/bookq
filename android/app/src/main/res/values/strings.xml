@@ -32,6 +32,7 @@
     <string name="reader_root_title">ライブラリ直下</string>
     <string name="reader_counter">%1$d / %2$d</string>
     <string name="reader_empty">ページがありません</string>
+    <string name="reader_overview">ページ一覧</string>
     <string name="reader_spread_toggle">見開き表示</string>
     <string name="reader_spread_shift">見開きずらし</string>
     <string name="reader_tap_left_forward">タップ方向：左で進む</string>
