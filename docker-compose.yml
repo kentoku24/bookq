@@ -84,7 +84,12 @@ services:
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
-      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-}
+      # 既定は live 実測で py を上回った読み取り系のみ: image(/image は
+      # 1.4ms vs py 2.8ms・16並列で ~2x) / images(v1 listing は mtime cache
+      # で ~10x) / tree(?since poll は ~2x 高速。全量 tree 送出のみ ~2x 遅い
+      # が稀な呼出のため許容)。未実測の search/facets/positions/visibility/
+      # thumb 系と、native 不可の rar/pdf read は proxy のまま。
+      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-image,images,tree}
       # visibility owner HMAC — viewer と同じ値が必須。
       - SECRET_KEY=${SECRET_KEY}
       - BOOKQ_GIT_SHA=${GIT_SHA:-}
