@@ -62,6 +62,13 @@ class ServerScope(
         cache = VisibilityRepository.FileCacheIO(stateDir, host, email.orEmpty()),
     )
 
+    /** Global metadata search + facet state — `search/facets.js` port. */
+    val search = dev.bookq.data.SearchRepository(
+        api = api,
+        scope = ioScope,
+        showAll = { visibility.vis.showAll },
+    )
+
     val progress = ProgressRepository(
         api = api,
         scope = ioScope,

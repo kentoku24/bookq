@@ -76,4 +76,20 @@
     <string name="settings_offline_empty">保存済みの作品はありません</string>
     <string name="settings_offline_clear">すべて削除</string>
     <string name="settings_offline_clear_confirm">保存済みのすべての作品を削除しますか？</string>
+    <string name="browse_search_hint">ライブラリを検索</string>
+    <string name="browse_filters">フィルタ</string>
+    <string name="facet_artists">作者</string>
+    <string name="facet_tags">タグ</string>
+    <string name="facet_reset">リセット</string>
+    <string name="facet_apply">適用</string>
+    <string name="vis_badge_hidden">非表示</string>
+    <string name="vis_badge_under">上位が非表示</string>
+    <string name="vis_badge_above">配下に非表示</string>
+    <string name="vis_show">再表示</string>
+    <string name="vis_hide">非表示にする</string>
+    <string name="vis_hide_mode_on">すべて表示（非表示管理）</string>
+    <string name="vis_hide_mode_off">すべて表示を終了</string>
+    <string name="vis_save_failed">非表示設定の保存に失敗しました</string>
+    <string name="vis_save_conflict">別アカウントで更新されました</string>
+    <string name="vis_save_offline">オフラインのため変更できません</string>
 </resources>

@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -147,6 +148,22 @@ private fun BrowseBody(
     var menuOpen by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
 
+    // ── search/facets + show-all (M6) ──
+    val searchQuery by scope.search.query.collectAsStateWithLifecycle()
+    val searchActive by scope.search.active.collectAsStateWithLifecycle()
+    val searchResults by scope.search.results.collectAsStateWithLifecycle()
+    val searching by scope.search.searching.collectAsStateWithLifecycle()
+    val selArtists by scope.search.artists.collectAsStateWithLifecycle()
+    val selTags by scope.search.tags.collectAsStateWithLifecycle()
+    val facets by scope.search.facets.collectAsStateWithLifecycle()
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var facetOpen by remember { mutableStateOf(false) }
+
+    // Editable roots = current top-level tree paths (web setTopLevelPaths).
+    LaunchedEffect(tree.nodes) {
+        vis.setTopLevelPaths(BrowseRules.foldersAt("", tree.nodes).map { it.first })
+    }
+
     // ── offline downloads (M5) ──
     val originalImages by graph.settings.originalImages.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -215,7 +232,15 @@ private fun BrowseBody(
     val allItems = remember(tree.nodes, visVersion, path) {
         LevelModel.items(path, tree.nodes, vis)
     }
-    val items = remember(allItems, filter) { LevelModel.filterItems(allItems, filter) }
+    val items = remember(allItems, filter, selArtists, selTags) {
+        LevelModel.filterItems(allItems, filter).let { base ->
+            if (!dev.bookq.core.search.FacetRules.filtersActive(
+                    selArtists.toList(), selTags.toList())) base
+            else base.filter { it.node.subtreeFacets != null &&
+                dev.bookq.core.search.FacetRules.nodeMatches(
+                    it.node, selArtists.toList(), selTags.toList()) }
+        }
+    }
     val blocked = remember(visVersion) { vis.blockedGrid() }
 
     fun openTarget(p: String) {
@@ -232,6 +257,15 @@ private fun BrowseBody(
             BrowseController.Action.Queued -> Unit
             null -> Unit
         }
+    }
+
+    // Search-result tap → same tap path as a folder tile (nav/open).
+    fun openResult(meta: dev.bookq.core.api.ComicMetadata) {
+        scope.search.clear()
+        searchOpen = false
+        val node = BrowseRules.nodeAt(meta.folderPath, tree.nodes)
+        handle(controller.tap(meta.folderPath,
+            node?.let { BrowseRules.drillsDown(it) } ?: false, tree, vis))
     }
 
     fun tap(item: LevelModel.Item) {
@@ -354,7 +388,22 @@ private fun BrowseBody(
                     }
                 },
                 title = {
-                    if (filterActive) {
+                    if (searchOpen) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { scope.search.setQuery(it) },
+                            modifier = Modifier.fillMaxWidth().testTag("searchField"),
+                            singleLine = true,
+                            placeholder = { Text(stringResource(R.string.browse_search_hint)) },
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    scope.search.clear()
+                                    filter = ""
+                                    searchOpen = false
+                                }) { Icon(Icons.Default.Close, null) }
+                            },
+                        )
+                    } else if (filterActive) {
                         OutlinedTextField(
                             value = filter,
                             onValueChange = { filter = it },
@@ -373,10 +422,18 @@ private fun BrowseBody(
                     }
                 },
                 actions = {
-                    if (!filterActive) {
-                        IconButton(onClick = { filterActive = true }) {
+                    if (!searchOpen && !filterActive) {
+                        IconButton(onClick = { searchOpen = true }) {
                             Icon(Icons.Default.Search,
                                 stringResource(R.string.browse_search))
+                        }
+                        // Facet sheet — web `#filter-btn`; badge dot when armed.
+                        IconButton(onClick = {
+                            scope.search.loadFacets(if (searchActive) "" else path)
+                            facetOpen = true
+                        }, modifier = Modifier.testTag("facetBtn")) {
+                            Icon(Icons.Default.FilterList,
+                                stringResource(R.string.browse_filters))
                         }
                     }
                     Box {
@@ -388,6 +445,26 @@ private fun BrowseBody(
                             expanded = menuOpen,
                             onDismissRequest = { menuOpen = false },
                         ) {
+                            // Show-all entry — iOS menu parity (web edge-swipe).
+                            DropdownMenuItem(
+                                text = { Text(stringResource(
+                                    if (vis.showAll) R.string.vis_hide_mode_off
+                                    else R.string.vis_hide_mode_on)) },
+                                onClick = {
+                                    scope.visibility.setShowAll(!vis.showAll)
+                                    menuOpen = false
+                                },
+                                modifier = Modifier.testTag("showAllMenuItem"),
+                            )
+                            // In-level name filter (iOS `.searchable` parity).
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.browse_filter_hint)) },
+                                onClick = {
+                                    filterActive = true
+                                    menuOpen = false
+                                },
+                            )
+                            HorizontalDivider()
                             BrowseLayout.entries.forEach { mode ->
                                 DropdownMenuItem(
                                     text = {
@@ -424,8 +501,17 @@ private fun BrowseBody(
             modifier = Modifier.fillMaxSize().padding(padding),
         ) {
             Column(Modifier.fillMaxSize()) {
+                // Armed filter chips + visibility status row.
+                FilterChipRow(selArtists, selTags) { k, v ->
+                    scope.search.removeFilter(k, v)
+                }
+                scope.visibility.statusText()?.let { s ->
+                    Text(s, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(horizontal = 16.dp))
+                }
                 // 続きから resume pill — root level only (web parity).
-                if (path.isEmpty()) {
+                if (path.isEmpty() && !searchActive) {
                     val resume = remember(progressVersion, visVersion) {
                         book.resumeCandidate { vis.isVisible(it) }
                     }
@@ -446,6 +532,18 @@ private fun BrowseBody(
                     }
                 }
                 when {
+                    // Global search results replace the level grid.
+                    searchActive -> SearchResultGrid(
+                        results = searchResults,
+                        nodes = tree.nodes,
+                        scope = scope,
+                        coverW = coverW,
+                        onTap = ::openResult,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    searching && searchOpen -> CenterBox {
+                        CircularProgressIndicator()
+                    }
                     blocked == VisibilityState.BlockedGrid.Loading &&
                         allItems.isEmpty() -> CenterBox {
                         CircularProgressIndicator()
@@ -479,17 +577,67 @@ private fun BrowseBody(
                         BrowseLayout.LIST -> BrowseList(
                             items, listState, book, scope, coverW, ::tap,
                             badge = { OfflineBadgeFor(it, scope) { f -> startDownloadFlow(f) } },
+                            overlay = { VisOverlayFor(it, vis, scope, snackbar) },
                         )
                         else -> BrowseGrid(
                             items, gridState, book, scope, coverW,
                             card = layout == BrowseLayout.CARD, onTap = ::tap,
                             badge = { OfflineBadgeFor(it, scope) { f -> startDownloadFlow(f) } },
+                            overlay = { VisOverlayFor(it, vis, scope, snackbar) },
                         )
                     }
                 }
             }
         }
     }
+
+    if (facetOpen) {
+        FacetSheet(
+            facets = facets,
+            artists = selArtists,
+            tags = selTags,
+            onToggleArtist = { scope.search.toggleArtist(it); scope.search.filtersChanged() },
+            onToggleTag = { scope.search.toggleTag(it); scope.search.filtersChanged() },
+            onReset = { scope.search.resetFilters() },
+            onDismiss = { facetOpen = false },
+        )
+    }
+}
+
+/** Show-all tile overlay — badges + eye toggle, gated on showAll. */
+@Composable
+private fun VisOverlayFor(
+    item: LevelModel.Item,
+    vis: VisibilityState,
+    scope: ServerScope,
+    snackbar: SnackbarHostState,
+) {
+    if (!vis.showAll) return
+    val pres = vis.presentation(item.path)
+    if (pres.badge == null && !pres.toggle) return
+    val cs = rememberCoroutineScope()
+    val busy = scope.visibility.saving
+    val invalidMsg = stringResource(R.string.vis_save_failed)
+    val conflictMsg = stringResource(R.string.vis_save_conflict)
+    val offlineMsg = stringResource(R.string.vis_save_offline)
+    VisibilityOverlay(
+        pres = pres, path = item.path, busy = busy,
+        onToggle = {
+            cs.launch {
+                try {
+                    scope.visibility.setHidden(item.path, !pres.hidden)
+                } catch (e: dev.bookq.data.VisibilityRepository.SaveException) {
+                    snackbar.showSnackbar(when (e.error) {
+                        dev.bookq.data.VisibilityRepository.SaveError.CONFLICT ->
+                            conflictMsg
+                        dev.bookq.data.VisibilityRepository.SaveError.OFFLINE ->
+                            offlineMsg
+                        else -> invalidMsg
+                    })
+                }
+            }
+        },
+    )
 }
 
 @Composable
@@ -514,6 +662,7 @@ private fun BrowseGrid(
     card: Boolean,
     onTap: (LevelModel.Item) -> Unit,
     badge: @Composable (LevelModel.Item) -> Unit,
+    overlay: @Composable (LevelModel.Item) -> Unit = {},
 ) {
     val minWidth = if (card) 240.dp else 140.dp
     LazyVerticalGrid(
@@ -538,7 +687,11 @@ private fun BrowseGrid(
                         coverW = if (card) 400 else coverW,
                         modifier = Modifier.fillMaxSize(),
                     )
-                    Box(Modifier.align(Alignment.TopEnd).padding(6.dp)) { badge(item) }
+                    Column(Modifier.align(Alignment.TopEnd).padding(6.dp),
+                        horizontalAlignment = Alignment.End) {
+                        badge(item)
+                        overlay(item)
+                    }
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(8.dp),
@@ -581,6 +734,7 @@ private fun BrowseList(
     coverW: Int,
     onTap: (LevelModel.Item) -> Unit,
     badge: @Composable (LevelModel.Item) -> Unit,
+    overlay: @Composable (LevelModel.Item) -> Unit = {},
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         itemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
@@ -606,6 +760,7 @@ private fun BrowseList(
                         }
                     }
                     badge(item)
+                    overlay(item)
                     Spacer(Modifier.width(12.dp))
                     Box(Modifier.size(48.dp)) {
                         CoverImage(
