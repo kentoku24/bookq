@@ -23,10 +23,10 @@ final class OnlineStatusStore: ObservableObject {
     func start() {
         guard loop == nil else { return }
         loop = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.check()
+            while let self, !Task.isCancelled {
+                await self.check()
                 try? await Task.sleep(
-                    nanoseconds: UInt64((self?.interval ?? 30) * 1_000_000_000))
+                    nanoseconds: UInt64(self.interval * 1_000_000_000))
             }
         }
     }
@@ -45,6 +45,8 @@ final class OnlineStatusStore: ObservableObject {
                 try await api.health(onlineCheck: true)
             }
             online = true
+        } catch is CancellationError {
+            return   // torn down mid-probe — leave the state untouched
         } catch {
             online = false
         }

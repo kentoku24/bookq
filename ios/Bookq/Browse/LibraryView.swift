@@ -76,9 +76,12 @@ struct LibraryView: View {
             }
         }
         .task {
+            // Non-blocking — fire the first probe before load() so a dead
+            // server flips the badge to offline instead of waiting out
+            // the (potentially long) tree load first.
+            model.online.start()
             await model.library?.load()
             model.library?.startPolling()
-            model.online.start()
         }
         .overlay {
             // Error overlay only when there is nothing to show — a failed

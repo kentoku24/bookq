@@ -100,8 +100,9 @@ final class BookqAPI: Sendable {
 
     /// GET /api/v1/health — unauthenticated liveness.
     /// `onlineCheck` adds web parity markers (`?online_check=1` +
-    /// `X-Online-Check: 1`) so the server counts it as a connectivity
-    /// probe, not a page view.
+    /// `X-Online-Check: 1`): the web Service Worker (sw.js) detects
+    /// them and bypasses its NetworkFirst cache so the probe really
+    /// hits the network — native has no SW but keeps the wire shape.
     func health(onlineCheck: Bool = false) async throws {
         var query: [URLQueryItem] = []
         var headers: [String: String] = [:]
@@ -111,7 +112,10 @@ final class BookqAPI: Sendable {
         }
         let (_, resp) = try await send(makeRequest(
             path: "api/v1/health", query: query, headers: headers))
-        guard resp.statusCode == 200 else { throw APIError.status(resp.statusCode) }
+        // web parity: fetch `r.ok` is the whole 2xx band.
+        guard (200..<300).contains(resp.statusCode) else {
+            throw APIError.status(resp.statusCode)
+        }
     }
 
     /// GET /api/v1/version — also the boot auth probe: 401 = login needed.

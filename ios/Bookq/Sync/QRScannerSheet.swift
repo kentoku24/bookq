@@ -1,5 +1,6 @@
 import AVFoundation
 import SwiftUI
+import UIKit
 import Vision
 import VisionKit
 
