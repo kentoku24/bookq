@@ -48,6 +48,12 @@ struct FolderLevelView: View {
         case .none:
             grid(folders: folders, selfTiles: selfTiles)
                 .overlay(alignment: .bottom) { statusRow }
+                .overlay(alignment: .bottomLeading) {
+                    // #offline-status — persistent connectivity pill on
+                    // every browse level (web sidebar-header parity).
+                    OnlineStatusBadge()
+                        .padding(.leading, 12).padding(.bottom, 14)
+                }
         }
     }
 

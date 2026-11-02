@@ -99,8 +99,18 @@ final class BookqAPI: Sendable {
     // MARK: - Endpoints
 
     /// GET /api/v1/health — unauthenticated liveness.
-    func health() async throws {
-        let (_, resp) = try await send(makeRequest(path: "api/v1/health"))
+    /// `onlineCheck` adds web parity markers (`?online_check=1` +
+    /// `X-Online-Check: 1`) so the server counts it as a connectivity
+    /// probe, not a page view.
+    func health(onlineCheck: Bool = false) async throws {
+        var query: [URLQueryItem] = []
+        var headers: [String: String] = [:]
+        if onlineCheck {
+            query.append(URLQueryItem(name: "online_check", value: "1"))
+            headers["X-Online-Check"] = "1"
+        }
+        let (_, resp) = try await send(makeRequest(
+            path: "api/v1/health", query: query, headers: headers))
         guard resp.statusCode == 200 else { throw APIError.status(resp.statusCode) }
     }
 

@@ -78,6 +78,7 @@ struct LibraryView: View {
         .task {
             await model.library?.load()
             model.library?.startPolling()
+            model.online.start()
         }
         .overlay {
             // Error overlay only when there is nothing to show — a failed

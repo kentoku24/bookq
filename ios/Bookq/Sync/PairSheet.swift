@@ -11,6 +11,7 @@ struct PairSheet: View {
     @State private var joinCode = ""
     @State private var busy = false
     @State private var localError: String?
+    @State private var showScanner = false
 
     var body: some View {
         NavigationStack {
@@ -40,6 +41,25 @@ struct PairSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+        .sheet(isPresented: $showScanner) {
+            QRScannerSheet { payload in
+                showScanner = false
+                guard let code = PairJoinCode.extract(payload) else {
+                    localError = "ペアリング用QRコードではありません"
+                    return
+                }
+                // The QR's origin must be this server — a code minted by
+                // another bookq host cannot JOIN here (web gets this for
+                // free by navigating the link's own origin).
+                if let h = URL(string: payload)?.host,
+                   let mine = model.config.baseURL?.host, h != mine {
+                    localError = "別のサーバーのコードです"
+                    return
+                }
+                joinCode = code
+                run { try await pair.join(code: code) }
+            }
+        }
     }
 
     // MARK: - Sections
@@ -82,6 +102,14 @@ struct PairSheet: View {
                     Label("参加する", systemImage: "person.2")
                 }
                 .disabled(joinCode.count != 6 || busy)
+                // web pairUI.js スキャン相当 — リーダーの QR をカメラで
+                // 読み取って即 JOIN。
+                Button {
+                    showScanner = true
+                } label: {
+                    Label("QRコードで参加", systemImage: "qrcode.viewfinder")
+                }
+                .disabled(busy)
             }
         }
     }

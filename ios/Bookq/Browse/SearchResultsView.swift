@@ -61,6 +61,10 @@ struct SearchResultsView: View {
                 }
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            OnlineStatusBadge()
+                .padding(.leading, 12).padding(.bottom, 20)
+        }
         .overlay(alignment: .bottom) {
             if let saveError {
                 Text(saveError)
