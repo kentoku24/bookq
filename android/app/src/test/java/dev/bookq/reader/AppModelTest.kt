@@ -7,6 +7,7 @@ import dev.bookq.data.BookqHttp
 import dev.bookq.data.InMemoryPendingLoginStore
 import dev.bookq.data.InMemoryTokenStore
 import dev.bookq.data.VersionProbe
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -157,6 +158,38 @@ class AppModelTest {
         auth.refreshAccessToken()
         s.advanceUntilIdle()
         assertEquals(AppPhase.Login, m.phase.value)
+    }
+
+    /** A 401 landing late from an in-flight boot must not push a
+     *  just-logged-in session back to Login (browser round-trip after
+     *  process death). */
+    @Test fun staleBootProbeCannotOverwriteReady() = runTest {
+        val s = TestScope(testScheduler)
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val probe = FakeProbe {
+            calls++
+            if (calls == 1) {
+                gate.await()
+                throw ApiException.Unauthorized(401)
+            }
+            okVersion
+        }
+        val settings = FakeSettings("https://bookq.x.ts.net")
+        val auth = auth(s)
+        auth.testSeed(dev.bookq.core.api.TokenPair("a", "r"))
+        val m = AppModel(settings, auth, { probe }, s)
+        m.start()
+        s.advanceUntilIdle()
+        // Login completes while the token-less boot probe is parked.
+        m.didLogin()
+        s.advanceUntilIdle()
+        assertEquals(AppPhase.Ready, m.phase.value)
+        gate.complete(Unit)
+        s.advanceUntilIdle()
+        assertEquals(AppPhase.Ready, m.phase.value)
+        // The post-login quiet refetch populated the version row.
+        assertEquals(okVersion, m.serverVersion.value)
     }
 
     @Test fun bootErrorRetry() = runTest {

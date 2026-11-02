@@ -9,6 +9,11 @@ on:
       - "android/**"
       - "api/**"
       - ".github/workflows/android.yml"
+      # The ui job boots the repo's FastAPI server and asserts on
+      # /api/v1/* — server or dependency changes can break the client.
+      - "app/**"
+      - "requirements*.txt"
+      - "rust/viewer-rs/**"
   workflow_dispatch:
 
 permissions:
