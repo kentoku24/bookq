@@ -214,13 +214,6 @@ struct LibraryView: View {
                     Label("リスト", systemImage: "list.bullet").tag(AppConfig.LayoutMode.list)
                     Label("カード", systemImage: "rectangle.stack").tag(AppConfig.LayoutMode.card)
                 }
-                // 全表示 entry — always reachable (the web's equivalent is a
-                // hidden swipe on the root icon, always armed too). Eye
-                // toggles and badges only appear while this mode is on.
-                Toggle("隠しルートを表示",
-                       isOn: Binding(
-                        get: { visibility.showAll },
-                        set: { visibility.showAll = $0 }))
                 Divider()
                 Button { Task { await model.library?.refresh() } } label: {
                     Label("再読み込み", systemImage: "arrow.clockwise")
