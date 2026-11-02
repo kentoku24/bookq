@@ -58,4 +58,22 @@
     <string name="settings_unknown">不明</string>
     <string name="settings_user">ユーザー</string>
     <string name="settings_email">メール</string>
+
+    <string name="offline_badge">オフライン保存</string>
+    <string name="offline_dl_channel">オフライン保存</string>
+    <string name="offline_dl_title">オフライン保存</string>
+    <string name="offline_dl_listing">一覧を取得中…</string>
+    <string name="offline_dl_stop">停止</string>
+    <string name="offline_continue">続きをダウンロード（残り %1$d ページ）</string>
+    <string name="offline_delete_pages">削除（%1$d ページ分の保存データ）</string>
+    <string name="offline_banner">オフライン — 保存済みの作品のみ利用できます</string>
+    <string name="offline_quota_title">保存容量が不足しています</string>
+    <string name="offline_quota_body">最も古い作品『%1$s』（約 %2$s）を削除して続行しますか？</string>
+    <string name="offline_quota_ok">削除して続行</string>
+    <string name="offline_quota_fail">容量を確保できませんでした</string>
+    <string name="settings_offline">オフライン保存</string>
+    <string name="settings_offline_summary">%1$d 作品・%2$s</string>
+    <string name="settings_offline_empty">保存済みの作品はありません</string>
+    <string name="settings_offline_clear">すべて削除</string>
+    <string name="settings_offline_clear_confirm">保存済みのすべての作品を削除しますか？</string>
 </resources>
