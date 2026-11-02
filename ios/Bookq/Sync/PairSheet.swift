@@ -51,8 +51,8 @@ struct PairSheet: View {
                 // The QR's origin must be this server — a code minted by
                 // another bookq host cannot JOIN here (web gets this for
                 // free by navigating the link's own origin).
-                if let h = URL(string: payload)?.host,
-                   let mine = model.config.baseURL?.host, h != mine {
+                if !PairJoinCode.sameServer(payload: payload,
+                                            baseURL: model.config.baseURL) {
                     localError = "別のサーバーのコードです"
                     return
                 }
