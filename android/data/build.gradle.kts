@@ -32,6 +32,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     implementation(libs.okhttp.coroutines)
+    implementation(libs.stream.webrtc.android)
     implementation(libs.androidx.core.ktx)
     testImplementation(libs.junit)
     testImplementation(libs.mockwebserver)
