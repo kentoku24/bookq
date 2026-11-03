@@ -21,9 +21,12 @@ sim 検証は **`./scripts/sim-teardown.sh` の実行 + 合格で完了** とす
 1. `--dev-env` 指定時: `./dev.sh down <name>` (user-state volume は保持。`--full` は使わない)
 2. booted sim を shutdown (`--udid` 指定時はその1台のみ)
 3. xcodebuild テスト Clone デバイス (名前が `Clone *`) を delete
-4. `idb_companion` 停止 — 次回 `idb` 使用時に自動再接続するので止めてよい
-5. 残留 `simctl diagnose` と孤児化 `spindump` (ppid==1) を kill
-6. CPU 監査: simruntime / CoreSimulatorService / testmanagerd / liveactivitiesd /
+4. `~/Library/Developer/XCTestDevices/` の残留データを削除 —
+   `xcodebuild test` が作るテストデバイス data (sim/実機共通) で、
+   実行ごとに残り十数GBにまで膨らむ。実行中テストがあれば skip
+5. `idb_companion` 停止 — 次回 `idb` 使用時に自動再接続するので止めてよい
+6. 残留 `simctl diagnose` と孤児化 `spindump` (ppid==1) を kill
+7. CPU 監査: simruntime / CoreSimulatorService / testmanagerd / liveactivitiesd /
    spindump で %CPU>20 の残留があれば非0終了
 
 ## スクリプトが殺さないもの (報告のみ)

@@ -5,9 +5,10 @@ set -euo pipefail
 #   1. --dev-env 指定の dev 環境を down (user-state volume は保持)
 #   2. booted sim を shutdown (--udid 指定時はその1台のみ)
 #   3. xcodebuild テスト Clone デバイスを delete (--keep-clones で保持)
-#   4. idb_companion 停止 (次回使用時に自動再接続)
-#   5. 残留 simctl diagnose / 孤児 spindump を kill
-#   6. sim 関連プロセスの CPU 残留を監査 — 残っていれば非0終了
+#   4. ~/Library/Developer/XCTestDevices の残留データを削除
+#   5. idb_companion 停止 (次回使用時に自動再接続)
+#   6. 残留 simctl diagnose / 孤児 spindump を kill
+#   7. sim 関連プロセスの CPU 残留を監査 — 残っていれば非0終了
 # 他セッション所有の xcodebuild / dev 環境は kill せず報告のみ。
 
 DEV_ENV=""
@@ -78,6 +79,19 @@ for devs in d.get("devices",{}).values():
     xcrun simctl delete "$u" && echo "  deleted Clone $u"
   done
   [ -z "$clone_udids" ] && echo "  (Clone なし)"
+fi
+
+echo "== XCTestDevices 残留削除"
+# xcodebuild test が作るテストデバイス data (~/Library/Developer/XCTestDevices/<uuid>) —
+# 毎回生成され数GB〜十数GBに膨らむ。実行中テストの所有物を消すとテストが壊れるので
+# live_xcodebuild 中は skip (Clone 削除と同じガード)。
+XCTD="$HOME/Library/Developer/XCTestDevices"
+if [ -n "$live_xcodebuild" ]; then
+  echo "  skip: xcodebuild test 実行中 pid $live_xcodebuild"
+elif [ -d "$XCTD" ]; then
+  mb=$(( $(du -sk "$XCTD" 2>/dev/null | cut -f1 || echo 0) / 1024 ))
+  rm -rf "$XCTD"/*/ 2>/dev/null || true
+  echo "  pruned: ${mb} MB"
 fi
 
 if [ "$KEEP_IDB" = 0 ]; then
