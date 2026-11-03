@@ -62,20 +62,6 @@ android {
                 "false",
             )
         }
-        // Release-shaped, debug-signed variant for Macrobenchmark and
-        // Baseline Profile verification (issue #302). R8/minify match
-        // release; the serverURL intent extra stays enabled so the
-        // benchmark can point at a TEST_MODE dev environment.
-        create("benchmark") {
-            initWith(getByName("release"))
-            signingConfig = signingConfigs.getByName("debug")
-            matchingFallbacks += listOf("release")
-            buildConfigField(
-                "boolean",
-                "ALLOW_SERVER_URL_EXTRA",
-                "true",
-            )
-        }
         debug {
             applicationIdSuffix = ".debug"
             buildConfigField(

@@ -18,16 +18,6 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    // Tests run against the :app `benchmark` build type (release-shaped,
-    // debug-signed — matchingFallbacks resolves it for this module).
-    buildTypes {
-        create("benchmark") {
-            isDebuggable = true
-            signingConfig = getByName("debug").signingConfig
-            matchingFallbacks += listOf("release")
-        }
-    }
-
     targetProjectPath = ":app"
 }
 
