@@ -56,8 +56,12 @@ fi
 echo "gate device: ${ANDROID_SERIAL:-$("$ADB" devices | awk '/device$/{print $1}')}"
 
 # Microphone-less, no dialog: clear any stale app state so the launch
-# sequence is deterministic (TEST_MODE needs no login).
+# sequence is deterministic (TEST_MODE needs no login). The debug
+# package is force-stopped too — a stale .debug reader window once held
+# a11y/input focus while the benchmark app rendered underneath, making
+# injected taps die silently on CP08-J1.
 "$ADB" shell am force-stop dev.bookq.reader >/dev/null 2>&1 || true
+"$ADB" shell am force-stop dev.bookq.reader.debug >/dev/null 2>&1 || true
 
 if [[ "$GENERATE" == "1" ]]; then
     echo "== generating baseline profile on device =="
