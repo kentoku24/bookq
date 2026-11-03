@@ -22,6 +22,12 @@ import org.junit.runner.RunWith
  * - tapTurn: `bookq.pageTurn` sections, median < 60 ms
  * - swipeTurn / overviewFling: janky < 1 %, p99 frame < 16 ms
  * - readerOpen: `bookq.readerOpen` sections, < 400 ms cached
+ *
+ * Only the fling tests carry FrameTimingMetric: emulators expose no
+ * SurfaceFlinger frame timeline, so FrameTimingMetric aborts with
+ * "no expect/actual slices" there. Section metrics work on both,
+ * keeping tapTurn/readerOpen verifiable on the emulator while the
+ * frame gates stay physical-device-only.
  */
 @RunWith(AndroidJUnit4::class)
 class ReaderBenchmark {
@@ -32,10 +38,7 @@ class ReaderBenchmark {
     @Test
     fun tapTurn() = benchmarkRule.measureRepeated(
         packageName = PACKAGE_NAME,
-        metrics = listOf(
-            TraceSectionMetric("bookq.pageTurn"),
-            FrameTimingMetric(),
-        ),
+        metrics = listOf(TraceSectionMetric("bookq.pageTurn")),
         compilationMode = compilationMode(),
         startupMode = StartupMode.HOT,
         iterations = 10,
