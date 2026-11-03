@@ -133,6 +133,7 @@ fun Modifier.zoomGestures(
         }
 
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        dev.bookq.reader.PerfTunables.mark("zg.down at=${down.position} enabled=${enabled()}")
         // killTransition — a new gesture kills any settle/zoom animation
         // and snaps the layer to the model's truth (web onStart).
         animSlot.value?.cancel()

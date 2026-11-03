@@ -301,6 +301,7 @@ private fun ReaderBody(
         target = target.coerceIn(0, pager.pageCount - 1)
         // Macrobenchmark gate: tap release → target spread's first draw
         // ends the section (PerfTrace.onSpreadDrawn in SpreadCell).
+        PerfTunables.mark("turn base=$base target=$target count=${pager.pageCount}")
         if (target != base) PerfTrace.pageTurn(target)
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastNavAt > 250) {
@@ -638,6 +639,7 @@ private fun ReaderBody(
                 var lastCenterTapX = 0f
                 var lastCenterTapY = 0f
                 detectTapGestures { off ->
+                    PerfTunables.mark("tap x=${off.x} w=${size.width}")
                     // A decided pan leaves a trailing tap — the web's
                     // suppressClickFor(400).
                     val now = android.os.SystemClock.uptimeMillis()
