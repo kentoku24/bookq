@@ -16,7 +16,7 @@ unrar = "0.5.8"
 # zlib-rs backend: miniz_oxide inflates ~2-3x slower than zlib C; zlib-rs is
 # pure Rust, faster than C zlib, and self-contained (no system zlib needed).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-lopdf = "0.38"
+lopdf = "0.42"
 roxmltree = "0.20"
 sha2 = "0.10"
 toml = "0.8"
