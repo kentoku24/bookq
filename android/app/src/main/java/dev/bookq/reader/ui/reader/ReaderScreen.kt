@@ -3,6 +3,9 @@ package dev.bookq.reader.ui.reader
 import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -38,12 +41,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -52,6 +59,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -61,9 +71,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -75,19 +88,30 @@ import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import dev.bookq.core.browse.BrowseRules
 import dev.bookq.core.reader.ReaderWork
+import dev.bookq.core.reader.ZoomBox
+import dev.bookq.core.reader.ZoomK
+import dev.bookq.core.reader.ZoomState
 import dev.bookq.core.reader.zoneAction
 import dev.bookq.core.reader.ZoneAction
 import dev.bookq.reader.AppGraph
 import dev.bookq.reader.R
 import dev.bookq.reader.reader.ReaderController
 import dev.bookq.reader.ui.browse.RETURN_ANCHOR_KEY
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** spread.js `GAP_INNER`. */
 private const val GAP_INNER_PX = 5f
+
+/** Instrumentation hooks — the connected test reads zoom state
+ *  directly from semantics instead of inferring it from page counters
+ *  (the OS input pipeline is unreliable on some ROMs). */
+val ReaderZoomScale = SemanticsPropertyKey<Float>("ReaderZoomScale")
+val ReaderZoomPanX = SemanticsPropertyKey<Float>("ReaderZoomPanX")
 /** Max wait for the full tree before assembling from what exists — the
  *  shallow window can race a reader-open tap (web gates on tree-ready). */
 private const val TREE_WAIT_MS = 8_000L
@@ -186,7 +210,7 @@ fun ReaderScreen(
                     chrome = chrome,
                     viewW = viewW,
                     viewH = viewH,
-                    onChrome = { chrome = it },
+                    onToggleChrome = { chrome = !chrome },
                     onCurrent = {
                         currentIdx = it
                         tookAnchor = true
@@ -233,7 +257,7 @@ private fun ReaderBody(
     chrome: Boolean,
     viewW: Float,
     viewH: Float,
-    onChrome: (Boolean) -> Unit,
+    onToggleChrome: () -> Unit,
     onCurrent: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -246,9 +270,6 @@ private fun ReaderBody(
     var menu by remember { mutableStateOf(false) }
     val volumeKeys by graph.settings.volumeKeys.collectAsStateWithLifecycle()
     val focusRequester = remember { FocusRequester() }
-    // pointerInput captures values at launch — keep the live chrome flag
-    // so the center zone toggles instead of only hiding once.
-    val currentChrome by androidx.compose.runtime.rememberUpdatedState(chrome)
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     // iOS `turn`: spread-granularity, cross-chapter; rapid taps coalesce
@@ -308,6 +329,94 @@ private fun ReaderBody(
         if (pager.currentPage != target) pager.scrollToPage(target)
     }
 
+    // ── M4: pinch-zoom + overview (viewer/zoom.js + overview.js) ──
+    val haptic = LocalHapticFeedback.current
+    val zs = remember { ZoomState() }
+    var zoomF by remember { mutableFloatStateOf(1f) }
+    var txF by remember { mutableFloatStateOf(0f) }
+    var tyF by remember { mutableFloatStateOf(0f) }
+    var overviewOpen by remember { mutableStateOf(false) }
+    var suppressTapUntil by remember { mutableLongStateOf(0L) }
+    // pointerInput captures values at launch — keep live flags.
+    // derivedStateOf: the 1x boundary is the only recompose trigger —
+    // a raw zoomF read would recompose ReaderBody every gesture frame.
+    val zoomedNow by remember { derivedStateOf { zoomF > 1f } }
+    // One cancellable animation job shared with the gesture layer —
+    // reset and bounce can never race.
+    val zoomAnim = remember { MutableRef<Job?>(null) }
+    // Drift target for the shrink band: the overview reports its current
+    // cell's measured center (web curCenter → Zoom.driftTarget). Before
+    // the first measurement the viewport upper third stands in.
+    val driftRef = remember { MutableRef<Pair<Float, Float>?>(null) }
+
+    fun applyZoom(s: Float, x: Float, y: Float) {
+        zoomF = s; txF = x; tyF = y
+    }
+
+    fun resetZoom(animated: Boolean) {
+        if (!animated || (zoomF == 1f && txF == 0f && tyF == 0f)) {
+            zoomAnim.value?.cancel()
+            zs.reset(); applyZoom(1f, 0f, 0f); return
+        }
+        // Snap-back — cubic-bezier(0.25, 0.1, 0.25, 1) over SLIDE_MS.
+        val s0 = zoomF; val x0 = txF; val y0 = tyF
+        zoomAnim.value?.cancel()
+        zoomAnim.value = compose.launch {
+            Animatable(0f).animateTo(
+                1f,
+                tween(ZoomK.SLIDE_MS,
+                    easing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)),
+            ) {
+                applyZoom(s0 + (1f - s0) * value,
+                    x0 * (1 - value), y0 * (1 - value))
+            }
+            zs.reset(); applyZoom(1f, 0f, 0f)
+        }
+    }
+
+    // Double-tap zoom-in — same cubic slide as resetZoom, to an
+    // arbitrary target (s, x, y) from the model.
+    fun animateZoomTo(s: Float, x: Float, y: Float) {
+        val s0 = zoomF; val x0 = txF; val y0 = tyF
+        zoomAnim.value?.cancel()
+        zoomAnim.value = compose.launch {
+            Animatable(0f).animateTo(
+                1f,
+                tween(ZoomK.SLIDE_MS,
+                    easing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)),
+            ) {
+                applyZoom(s0 + (s - s0) * value,
+                    x0 + (x - x0) * value, y0 + (y - y0) * value)
+            }
+            zs.apply(s, x, y); applyZoom(s, x, y)
+        }
+    }
+
+    fun curGlobalIdx() =
+        work.spreads.getOrNull(pager.settledPage)?.first() ?: anchorIdx
+
+    fun openOverview() {
+        // web show(): the layer resets and the grid takes the screen.
+        resetZoom(animated = false)
+        overviewOpen = true
+    }
+
+    fun exitOverview(globalIdx: Int) {
+        overviewOpen = false
+        compose.launch { pager.scrollToPage(work.spreadOf(globalIdx)) }
+    }
+
+    // measureBox — the centered spread's resting rect, refreshed per
+    // settled page / measured aspect ratios / viewport size.
+    val arMap by controller.pageAR.collectAsStateWithLifecycle()
+    LaunchedEffect(work, pager.settledPage, arMap, viewW, viewH) {
+        val pages = work.spreads.getOrNull(pager.settledPage) ?: emptyList()
+        val (fw, fh) = ReaderWork.spreadFit(
+            pages.map { arMap[it] ?: controller.lastAR },
+            GAP_INNER_PX, viewW, viewH)
+        zs.box = ZoomBox.centered(fw, fh, viewW, viewH)
+    }
+
     fun pageUrl(globalIdx: Int): String {
         val p = work.images[globalIdx]
         return sc.api.pageUrl(p.folder, p.name, original).toString()
@@ -347,6 +456,13 @@ private fun ReaderBody(
             }
             onCurrent(idx)
             pendingSpread = null
+            // A page settle resets the layer (web snapTo → Zoom.reset)
+            // — INCLUDING any running zoom animation, or a double-tap
+            // slide would land its 2.5x on the NEW page.
+            if (zoomF != 1f || txF != 0f || tyF != 0f ||
+                zoomAnim.value?.isActive == true) {
+                resetZoom(animated = false)
+            }
             if (!saveArmed) {
                 if (s == anchorSpread) return@collect
                 saveArmed = true
@@ -382,8 +498,24 @@ private fun ReaderBody(
             .fillMaxSize()
             .focusRequester(focusRequester)
             .focusable()
+            .semantics {
+                this[ReaderZoomScale] = zoomF
+                this[ReaderZoomPanX] = txF
+            }
             .onKeyEvent { e ->
                 val down = e.type == KeyEventType.KeyDown
+                if (overviewOpen) {
+                    // The grid owns only its exit keys — web's overview
+                    // keydown handles just Escape/G. Volume keys in
+                    // particular MUST fall through to the OS or the
+                    // overlay mutes the device.
+                    return@onKeyEvent when (e.key) {
+                        Key.G, Key.Escape -> {
+                            if (down) exitOverview(curGlobalIdx()); true
+                        }
+                        else -> false
+                    }
+                }
                 when (e.key) {
                     // Web keyboard parity (RTL): ← = next, → = prev —
                     // CLAUDE.md calls this out as a trip-wire convention.
@@ -392,6 +524,7 @@ private fun ReaderBody(
                     Key.DirectionRight -> { if (down) turn(-1, crossChapter = false); true }
                     Key.MoveHome -> { if (down) chapterEdge(false); true }
                     Key.MoveEnd -> { if (down) chapterEdge(true); true }
+                    Key.G -> { if (down) openOverview(); true }
                     Key.VolumeUp -> if (volumeKeys) {
                         if (down) turn(-1, crossChapter = false); true } else false
                     Key.VolumeDown -> if (volumeKeys) {
@@ -399,11 +532,66 @@ private fun ReaderBody(
                     else -> false
                 }
             }
+            .zoomGestures(
+                zs = zs,
+                enabled = { !overviewOpen },
+                canTurn = { d ->
+                    pager.settledPage + d in 0 until pager.pageCount
+                },
+                apply = ::applyZoom,
+                onOverviewFire = ::openOverview,
+                // Edge-turn during zoom follows tap semantics (cross ok).
+                onEdgeTurn = { d -> turn(d) },
+                onHaptic = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                },
+                onSuppressTap = {
+                    suppressTapUntil =
+                        android.os.SystemClock.uptimeMillis() + 400
+                },
+                // The overview shares its measured cell center (web
+                // curCenter); before any open the upper-third default
+                // approximates it.
+                driftTarget = { driftRef.value ?: ((viewW / 2f) to (viewH / 3f)) },
+                scope = compose,
+                animSlot = zoomAnim,
+            )
             .pointerInput(tapForwardLeft, work) {
+                var lastCenterTapAt = 0L
+                var lastCenterTapX = 0f
+                var lastCenterTapY = 0f
                 detectTapGestures { off ->
+                    // A decided pan leaves a trailing tap — the web's
+                    // suppressClickFor(400).
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now < suppressTapUntil)
+                        return@detectTapGestures
                     when (val a = zoneAction(off.x / size.width, tapForwardLeft)) {
-                        is ZoneAction.Turn -> turn(a.delta)
-                        ZoneAction.ToggleChrome -> onChrome(!currentChrome)
+                        is ZoneAction.Turn -> if (!zoomedNow) turn(a.delta)
+                        // Zoomed center tap drops back to 1x (plan).
+                        ZoneAction.ToggleChrome -> when {
+                            zoomedNow -> resetZoom(animated = true)
+                            // Double-tap (Android convention — issue spec):
+                            // the first tap toggled chrome instantly, so
+                            // re-toggling restores it, then zoom in at
+                            // the tapped point. Edge double-taps stay
+                            // rapid turns — no added tap latency.
+                            now - lastCenterTapAt < ZoomK.DOUBLE_TAP_MS &&
+                                abs(off.x - lastCenterTapX) <
+                                    ZoomK.DOUBLE_TAP_PX &&
+                                abs(off.y - lastCenterTapY) <
+                                    ZoomK.DOUBLE_TAP_PX -> {
+                                lastCenterTapAt = 0L
+                                onToggleChrome()
+                                val t = zs.doubleTapTarget(off.x, off.y)
+                                animateZoomTo(t[0], t[1], t[2])
+                            }
+                            else -> {
+                                lastCenterTapAt = now
+                                lastCenterTapX = off.x; lastCenterTapY = off.y
+                                onToggleChrome()
+                            }
+                        }
                     }
                 }
             },
@@ -414,7 +602,19 @@ private fun ReaderBody(
             HorizontalPager(
                 state = pager,
                 beyondViewportPageCount = 1,
-                modifier = Modifier.fillMaxSize(),
+                // Zoomed → the zoom layer owns one-finger drags.
+                userScrollEnabled = !zoomedNow,
+                modifier = Modifier
+                    .fillMaxSize()
+                    // translate(tx,ty) scale(zoom) around the top-left —
+                    // the web #zoom-layer transform, layer-local.
+                    .graphicsLayer {
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        scaleX = zoomF
+                        scaleY = zoomF
+                        translationX = txF
+                        translationY = tyF
+                    },
             ) { spreadIdx ->
                 SpreadCell(
                     work = work,
@@ -469,6 +669,7 @@ private fun ReaderBody(
                             tapForwardLeft = tapForwardLeft,
                             original = original,
                             onDismiss = { menu = false },
+                            onOverview = ::openOverview,
                             onToggleSpread = { controller.toggleLandscapeSpread() },
                             onToggleOffset = { controller.toggleSpreadOffset() },
                             onToggleTap = { controller.toggleTapForward() },
@@ -540,6 +741,22 @@ private fun ReaderBody(
                     )
                 }
             }
+        }
+
+        // ── M4 overview grid — drawn on top of the reader, consumes its
+        // own gestures/keys; reader chrome sits inert underneath. ──
+        if (overviewOpen) {
+            OverviewOverlay(
+                work = work,
+                currentIdx = curGlobalIdx(),
+                api = sc.api,
+                imageLoader = sc.imageLoader,
+                onJump = ::exitOverview,
+                onClose = { exitOverview(curGlobalIdx()) },
+                // web curCenter → Zoom.driftTarget: the next pinch-in
+                // shrinks toward where this cell actually sat.
+                onCellCenter = { x, y -> driftRef.value = x to y },
+            )
         }
     }
 }
@@ -651,12 +868,18 @@ private fun ReaderMenu(
     tapForwardLeft: Boolean,
     original: Boolean,
     onDismiss: () -> Unit,
+    onOverview: () -> Unit,
     onToggleSpread: () -> Unit,
     onToggleOffset: () -> Unit,
     onToggleTap: () -> Unit,
     onToggleOriginal: () -> Unit,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        // Web's overview button (g/#btn-overview) — the page grid.
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.reader_overview)) },
+            onClick = { onDismiss(); onOverview() },
+        )
         if (landscape) {
             DropdownMenuItem(
                 text = {
