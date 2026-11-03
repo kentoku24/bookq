@@ -99,18 +99,24 @@ echo "== running macrobenchmark gates (compilation=$COMPILATION) =="
 OUT_DIR="baselineprofile/build/outputs/connected_android_test_additional_output"
 RESULTS_DIR="baselineprofile/build/perf-gate-results"
 rm -rf "$RESULTS_DIR" && mkdir -p "$RESULTS_DIR"
+FAILED_CLASSES=()
 for cls in $BENCH_CLASSES; do
     echo "--- $cls ---"
     STAMP=$(mktemp)
-    ./gradlew :baselineprofile:connectedBenchmarkReleaseAndroidTest \
+    if ! ./gradlew :baselineprofile:connectedBenchmarkReleaseAndroidTest \
         "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
         "-Pandroid.testInstrumentationRunnerArguments.class=$BENCH_PKG.$cls" \
         "-Pandroid.testInstrumentationRunnerArguments.compilation=$COMPILATION" \
-        --console=plain -q || true   # threshold evaluation below decides
+        --console=plain -q; then
+        # A failed class produces no trustworthy data — record it so
+        # the final verdict can't pass on another class's JSON alone.
+        FAILED_CLASSES+=("$cls")
+    fi
     find "$OUT_DIR" -name "*benchmarkData.json" -newer "$STAMP" \
         -exec cp {} "$RESULTS_DIR/$cls.json" \; 2>/dev/null || true
     rm -f "$STAMP"
 done
+export GATE_FAILED_CLASSES="${FAILED_CLASSES[*]:-}"
 
 echo "== results =="
 # bash 3.2 (stock macOS) has no mapfile — collect the JSON list the
@@ -121,7 +127,7 @@ while IFS= read -r f; do JSON+=("$f"); done \
 [[ ${#JSON[@]} -gt 0 ]] || { echo "no benchmarkData.json produced" >&2; exit 2; }
 
 python3 - "${JSON[@]}" <<'PY'
-import json, sys
+import json, os, sys
 
 # Per-test gates (issue #302 §5, recalibrated 2026-11-03 on CP08-J1).
 # Issue #292's aspirational "fling p99 <16ms / janky <1%" assumed a
@@ -176,6 +182,15 @@ for path in sys.argv[1:]:
         merged = dict(b.get("metrics") or {})
         merged.update(b.get("sampledMetrics") or {})
         seen[name] = merged
+
+# A class whose task failed produced no trustworthy data — its gates
+# were never measured, which is a FAIL, not an invisible skip.
+for cls in (os.environ.get("GATE_FAILED_CLASSES") or "").split():
+    fails.append(f"{cls}: benchmark class failed — gates unevaluated")
+# Every declared (test, metric) gate must have real data to check.
+for (t, mkey) in sorted(GATES):
+    if t not in seen or mkey not in (seen.get(t) or {}):
+        fails.append(f"{t}/{mkey}: missing — no data to evaluate")
 
 for test, metrics in sorted(seen.items()):
     print(f"\n{test}")
