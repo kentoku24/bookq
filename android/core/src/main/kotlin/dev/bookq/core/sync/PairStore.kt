@@ -555,6 +555,23 @@ class PairStore(
         waiter.await()
     }
 
+    /** Tracked request that rides the data plane — web `_dataSend`+
+     *  `_track` parity (READY/APPLIED): the dc hop is follower-only and
+     *  the ACK still arrives on ws where the waiter resolves. */
+    private suspend fun sendDataRequest(
+        type: String, payload: JsonObject,
+        workEpoch: Int? = null, baseRevision: Int? = null,
+    ) {
+        val req = lock.withLock {
+            envelope(type, payload,
+                workEpoch = workEpoch, baseRevision = baseRevision)
+        }
+        val waiter = CompletableDeferred<JsonObject>()
+        lock.withLock { pending[req.requestId] = waiter }
+        dataSendReq(req)
+        waiter.await()
+    }
+
     private fun onAckLocked(f: JsonObject) {
         val rid = (f["requestId"] as? JsonPrimitive)?.content ?: return
         val cont = pending.remove(rid) ?: return
@@ -849,7 +866,7 @@ class PairStore(
         readyFor = key
         scope.launch {
             runCatching {
-                sendRequest("READY", buildJsonObject {
+                sendDataRequest("READY", buildJsonObject {
                     put("manifestVersion", mv) }, workEpoch = e)
             }
         }
