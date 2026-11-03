@@ -1,0 +1,573 @@
+package dev.bookq.reader.ui.browse
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavBackStackEntry
+import coil3.request.ImageRequest
+import dev.bookq.core.browse.BrowseRules
+import dev.bookq.core.browse.LevelModel
+import dev.bookq.core.browse.ScrollDecider
+import dev.bookq.core.progress.ProgressBook
+import dev.bookq.core.visibility.VisibilityState
+import dev.bookq.reader.AppGraph
+import dev.bookq.reader.BrowseLayout
+import dev.bookq.reader.R
+import dev.bookq.reader.ServerScope
+import dev.bookq.reader.browse.BrowseController
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+/** Saved-state key the reader writes its chapter anchor into. */
+const val RETURN_ANCHOR_KEY = "bookq.returnAnchor"
+
+/**
+ * One browse level (folder grid/list/cards) — `renderBrowse` port.
+ * Each level is a Navigation destination, so per-entry `rememberSaveable`
+ * restores scroll for free; [BrowseController] keeps the cross-entry
+ * decision table and the shallow-window nav queue.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun BrowseScreen(
+    graph: AppGraph,
+    entry: NavBackStackEntry,
+    path: String,
+    onNavigate: (String) -> Unit,
+    onOpenReader: (String, Int) -> Unit,
+    onSettings: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val scopeState by graph.serverScope.collectAsStateWithLifecycle()
+    val scope = scopeState ?: run {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+    val controller = remember(scope) { BrowseController() }
+    BrowseBody(
+        scope, controller, entry, path,
+        onNavigate, onOpenReader, onSettings, onBack, graph,
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BrowseBody(
+    scope: ServerScope,
+    controller: BrowseController,
+    entry: NavBackStackEntry,
+    path: String,
+    onNavigate: (String) -> Unit,
+    onOpenReader: (String, Int) -> Unit,
+    onSettings: () -> Unit,
+    onBack: () -> Unit,
+    graph: AppGraph,
+) {
+    val tree by scope.tree.state.collectAsStateWithLifecycle()
+    val visVersion by scope.visibility.version.collectAsStateWithLifecycle()
+    val progressVersion by scope.progress.version.collectAsStateWithLifecycle()
+    val layout by graph.settings.browseLayout.collectAsStateWithLifecycle()
+    val vis = scope.visibility.vis
+    val book = scope.progress.book
+    val coroutineScope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+
+    var filter by rememberSaveable { mutableStateOf("") }
+    var filterActive by rememberSaveable { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var refreshing by remember { mutableStateOf(false) }
+
+    // Item derivation — visibility version + progress version are the
+    // recompute triggers (their mutations bump the ticks).
+    val allItems = remember(tree.nodes, visVersion, path) {
+        LevelModel.items(path, tree.nodes, vis)
+    }
+    val items = remember(allItems, filter) { LevelModel.filterItems(allItems, filter) }
+    val blocked = remember(visVersion) { vis.blockedGrid() }
+
+    fun openTarget(p: String) {
+        val page = book[p]?.page ?: 0
+        onOpenReader(p, page)
+    }
+
+    val deniedMsg = stringResource(R.string.browse_hidden_denied)
+    fun handle(action: BrowseController.Action) {
+        when (action) {
+            is BrowseController.Action.Navigate -> onNavigate(action.path)
+            is BrowseController.Action.Open -> openTarget(action.path)
+            BrowseController.Action.Denied ->
+                coroutineScope.launch { snackbar.showSnackbar(deniedMsg) }
+            BrowseController.Action.Queued -> Unit
+            null -> Unit
+        }
+    }
+
+    fun tap(item: LevelModel.Item) {
+        when (item) {
+            is LevelModel.Item.ReadSelf ->
+                handle(controller.tapSelf(item.path, tree, vis))
+            is LevelModel.Item.Folder ->
+                handle(controller.tap(item.path,
+                    BrowseRules.drillsDown(item.node), tree, vis))
+        }
+    }
+
+    // Viewer→browse return anchor + scroll decision (one-shot per entry).
+    // Two contract details:
+    //  - childPaths is the FILTERED list actually rendered — indexOf must
+    //    agree with the Lazy* index space or the anchor scrolls wrong.
+    //  - the decision waits for a populated frame: cold start composes
+    //    before the tree arrives, and deciding on an empty list would
+    //    pin the scroll to TOP.
+    val listState = rememberLazyListState()
+    val gridState = rememberLazyGridState()
+    val renderedItems by rememberUpdatedState(items)
+    LaunchedEffect(Unit) {
+        val anchor = entry.savedStateHandle.get<String>(RETURN_ANCHOR_KEY)
+        if (anchor != null) {
+            entry.savedStateHandle.remove<String>(RETURN_ANCHOR_KEY)
+            controller.decider.noteViewerReturn(path, anchor)
+        }
+        val rendered = snapshotFlow {
+            Triple(renderedItems, visVersion, tree.treeLoaded)
+        }.first { (l, _, loaded) ->
+            l.isNotEmpty() || (loaded && vis.blockedGrid() == null)
+        }.first
+        val restored = listState.firstVisibleItemIndex > 0 ||
+            listState.firstVisibleItemScrollOffset > 0 ||
+            gridState.firstVisibleItemIndex > 0 ||
+            gridState.firstVisibleItemScrollOffset > 0
+        val childPaths = rendered.map { it.path }
+        val decision = controller.decider.decide(
+            level = path.ifEmpty { null },
+            cause = if (anchor != null || restored) {
+                ScrollDecider.Cause.RESTORE
+            } else {
+                ScrollDecider.Cause.OPEN
+            },
+            hasSaved = restored,
+            childPaths = childPaths,
+            progressFolders = book.folders() + setOf(""),
+        )
+        val index = decision.anchor?.let { a -> childPaths.indexOf(a) } ?: -1
+        // Scroll only the state backing the ACTIVE layout — scrollToItem
+        // on a Lazy* state whose container isn't composed suspends until
+        // first layout, which for the inactive one can wedge the effect.
+        suspend fun scrollTo(i: Int) {
+            if (i < 0) return
+            if (layout == BrowseLayout.LIST) listState.scrollToItem(i)
+            else gridState.scrollToItem(i)
+        }
+        when (decision.via) {
+            ScrollDecider.Via.VIEWER, ScrollDecider.Via.PROGRESS ->
+                if (index >= 0) scrollTo(index)
+            ScrollDecider.Via.TOP -> if (!restored) scrollTo(0)
+            ScrollDecider.Via.SAVED -> Unit // framework already restored
+        }
+    }
+
+    // Drain the shallow/PENDING navigation queue once the tree is usable.
+    LaunchedEffect(tree.treeLoaded, visVersion) {
+        controller.drain(tree.nodes, tree, vis)?.let(::handle)
+    }
+
+    val density = LocalDensity.current.density
+    val coverW = coverWidth(density)
+    val context = LocalContext.current
+
+    // Visible-first cover prefetch — fires only once the scroll settles
+    // (web: idle-scheduled, ≤50, never mid-gesture). Coil dedupes memory-
+    // cached hits; `enqueued` survives the entry for the session.
+    // `items` is read through rememberUpdatedState: a settle event must
+    // prefetch the CURRENT list, not the empty one from first compose.
+    val enqueued = remember { mutableSetOf<String>() }
+    LaunchedEffect(gridState, listState, layout) {
+        snapshotFlow {
+            val settled: Boolean
+            val first: Int
+            if (layout == BrowseLayout.LIST) {
+                settled = !listState.isScrollInProgress
+                first = listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull()?.index ?: -1
+            } else {
+                settled = !gridState.isScrollInProgress
+                first = gridState.layoutInfo.visibleItemsInfo
+                    .firstOrNull()?.index ?: -1
+            }
+            settled to first
+        }.collect { (settled, first) ->
+            if (!settled || first < 0) return@collect
+            // CARD renders covers at card width (400); others use coverW.
+            val w = if (layout == BrowseLayout.CARD) 400 else coverW
+            var sent = 0
+            val current = renderedItems
+            for (i in first until minOf(first + 50, current.size)) {
+                if (sent >= 50) break
+                val item = current[i]
+                val url = when (val c = LevelModel.coverOf(item.node)) {
+                    is LevelModel.Cover.Single ->
+                        scope.api.thumbUrl(item.path, c.name, w).toString()
+                    is LevelModel.Cover.Sprite ->
+                        scope.api.thumbSpriteUrl(
+                            item.path, c.names, c.spec.rows, w).toString()
+                    LevelModel.Cover.None -> null
+                } ?: continue
+                if (enqueued.add(url)) {
+                    scope.imageLoader.enqueue(
+                        ImageRequest.Builder(context).data(url).build())
+                    sent++
+                }
+            }
+        }
+    }
+
+    val title = if (path.isEmpty()) {
+        stringResource(R.string.home_title)
+    } else {
+        BrowseRules.splitDisplayName(path.substringAfterLast('/')).first
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    if (path.isNotEmpty()) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                        }
+                    }
+                },
+                title = {
+                    if (filterActive) {
+                        OutlinedTextField(
+                            value = filter,
+                            onValueChange = { filter = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            placeholder = { Text(stringResource(R.string.browse_filter_hint)) },
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    filter = ""
+                                    filterActive = false
+                                }) { Icon(Icons.Default.Close, null) }
+                            },
+                        )
+                    } else {
+                        Text(title, maxLines = 1)
+                    }
+                },
+                actions = {
+                    if (!filterActive) {
+                        IconButton(onClick = { filterActive = true }) {
+                            Icon(Icons.Default.Search,
+                                stringResource(R.string.browse_search))
+                        }
+                    }
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(Icons.Default.List,
+                                stringResource(R.string.settings_browse_layout))
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
+                            BrowseLayout.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(when (mode) {
+                                            BrowseLayout.TILE -> stringResource(R.string.settings_layout_tile)
+                                            BrowseLayout.LIST -> stringResource(R.string.settings_layout_list)
+                                            BrowseLayout.CARD -> stringResource(R.string.settings_layout_card)
+                                        })
+                                    },
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            graph.settings.setBrowseLayout(mode)
+                                        }
+                                        menuOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    IconButton(onClick = onSettings) {
+                        Icon(Icons.Default.Settings,
+                            stringResource(R.string.settings_title))
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = {
+                refreshing = true
+                // Job-based completion — clears on success AND failure
+                // (a generation-based trigger can stale forever when the
+                // 202 window outlives the request).
+                scope.tree.refresh().invokeOnCompletion { refreshing = false }
+            },
+            modifier = Modifier.fillMaxSize().padding(padding),
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // 続きから resume pill — root level only (web parity).
+                if (path.isEmpty()) {
+                    val resume = remember(progressVersion, visVersion) {
+                        book.resumeCandidate { vis.isVisible(it) }
+                    }
+                    if (resume != null && blocked == null) {
+                        ElevatedCard(
+                            onClick = { openTarget(resume.folder) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .testTag("resumePill"),
+                        ) {
+                            Text(
+                                ProgressBook.resumeLabel(resume),
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(12.dp),
+                            )
+                        }
+                    }
+                }
+                when {
+                    blocked == VisibilityState.BlockedGrid.Loading &&
+                        allItems.isEmpty() -> CenterBox {
+                        CircularProgressIndicator()
+                    }
+                    blocked == VisibilityState.BlockedGrid.Error &&
+                        allItems.isEmpty() -> CenterBox {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(stringResource(R.string.home_error),
+                                color = MaterialTheme.colorScheme.error)
+                            TextButton(onClick = { scope.visibility.refresh() }) {
+                                Text(stringResource(R.string.home_reload))
+                            }
+                        }
+                    }
+                    tree.error != null && allItems.isEmpty() -> CenterBox {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(tree.error!!, color = MaterialTheme.colorScheme.error)
+                            TextButton(onClick = { scope.tree.load(force = true) }) {
+                                Text(stringResource(R.string.home_reload))
+                            }
+                        }
+                    }
+                    items.isEmpty() && tree.treeLoaded -> CenterBox {
+                        Text(stringResource(R.string.browse_empty),
+                            color = MaterialTheme.colorScheme.outline)
+                    }
+                    items.isEmpty() && !tree.treeLoaded -> CenterBox {
+                        CircularProgressIndicator()
+                    }
+                    else -> when (layout) {
+                        BrowseLayout.LIST -> BrowseList(items, listState, book, scope, coverW, ::tap)
+                        else -> BrowseGrid(
+                            items, gridState, book, scope, coverW,
+                            card = layout == BrowseLayout.CARD, onTap = ::tap,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CenterBox(content: @Composable () -> Unit) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
+}
+
+private fun LevelModel.Item.progressPct(book: ProgressBook): Int? {
+    val p = book[path] ?: return null
+    return BrowseRules.progressPct(p.page, p.total)
+}
+
+/** Tile grid — `renderTiles` (2:3 covers) / `renderCards` (16:9) share
+ *  one LazyVerticalGrid with different aspect ratios + min widths. */
+@Composable
+private fun BrowseGrid(
+    items: List<LevelModel.Item>,
+    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
+    book: ProgressBook,
+    scope: ServerScope,
+    coverW: Int,
+    card: Boolean,
+    onTap: (LevelModel.Item) -> Unit,
+) {
+    val minWidth = if (card) 240.dp else 140.dp
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minWidth),
+        state = gridState,
+        contentPadding = PaddingValues(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        gridItemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
+            ElevatedCard(
+                onClick = { onTap(item) },
+                modifier = Modifier.testTag("tile:${item.path}"),
+            ) {
+                Box(Modifier.fillMaxWidth().aspectRatio(if (card) 16f / 9f else 2f / 3f)) {
+                    CoverImage(
+                        cover = LevelModel.coverOf(item.node),
+                        folder = item.path,
+                        api = scope.api,
+                        imageLoader = scope.imageLoader,
+                        coverW = if (card) 400 else coverW,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        val (leaf, parent) = when (item) {
+                            is LevelModel.Item.ReadSelf ->
+                                BrowseRules.READ_SELF_LABEL to null
+                            is LevelModel.Item.Folder ->
+                                BrowseRules.splitDisplayName(item.node.name)
+                        }
+                        Text(leaf, style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1)
+                        if (parent != null) {
+                            Text(parent, style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline, maxLines = 1)
+                        }
+                        item.progressPct(book)?.let { pct ->
+                            Spacer(Modifier.height(4.dp))
+                            LinearProgressIndicator(
+                                progress = { pct / 100f },
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** List mode — `renderList`: icon + name + inline progress + end thumb. */
+@Composable
+private fun BrowseList(
+    items: List<LevelModel.Item>,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    book: ProgressBook,
+    scope: ServerScope,
+    coverW: Int,
+    onTap: (LevelModel.Item) -> Unit,
+) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+        itemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
+            Surface(onClick = { onTap(item) }, modifier = Modifier.testTag("tile:${item.path}")) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        val (leaf, _) = when (item) {
+                            is LevelModel.Item.ReadSelf ->
+                                BrowseRules.READ_SELF_LABEL to null
+                            is LevelModel.Item.Folder ->
+                                BrowseRules.splitDisplayName(item.node.name)
+                        }
+                        Text(leaf, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
+                        item.progressPct(book)?.let { pct ->
+                            Spacer(Modifier.height(4.dp))
+                            LinearProgressIndicator(
+                                progress = { pct / 100f },
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.size(48.dp)) {
+                        CoverImage(
+                            cover = LevelModel.coverOf(item.node),
+                            folder = item.path,
+                            api = scope.api,
+                            imageLoader = scope.imageLoader,
+                            coverW = coverW,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
+            }
+            HorizontalDivider()
+        }
+    }
+}
+
+private fun itemKey(item: LevelModel.Item): String =
+    when (item) {
+        is LevelModel.Item.ReadSelf -> "self:${item.path}"
+        is LevelModel.Item.Folder -> "dir:${item.path}"
+    }

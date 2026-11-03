@@ -27,6 +27,9 @@ class AppModel<T : VersionProbe>(
     val auth: AuthManager,
     private val apiFactory: (HttpUrl) -> T,
     private val scope: CoroutineScope,
+    /** M2: does a host-scoped tree snapshot exist for a failed boot's
+     *  offline fallback? Provided by AppGraph (file-backed). */
+    private val snapshotProbe: (HttpUrl) -> Boolean = { false },
 ) {
     var api: T? = null
         private set
@@ -40,8 +43,9 @@ class AppModel<T : VersionProbe>(
     private val _serverVersion = MutableStateFlow<VersionResponse?>(null)
     val serverVersion = _serverVersion.asStateFlow()
 
-    /** M2 seam — offline tree snapshot fallback for failed boots. */
-    fun hasOfflineSnapshot(): Boolean = false
+    /** Offline tree snapshot fallback for failed boots. */
+    fun hasOfflineSnapshot(): Boolean =
+        settings.baseUrl()?.let(snapshotProbe) == true
 
     fun start() {
         // Definitive session death (refresh rejected by the server) —
@@ -91,10 +95,12 @@ class AppModel<T : VersionProbe>(
                 _phase.value = AppPhase.Login
             } catch (e: Exception) {
                 if (gen != bootGen) return@launch
-                _phase.value = if (hasOfflineSnapshot()) {
-                    AppPhase.Ready
+                if (hasOfflineSnapshot()) {
+                    // Offline fallback still needs a scope or browse spins forever.
+                    _scopeValue.value = currentScope()
+                    _phase.value = AppPhase.Ready
                 } else {
-                    AppPhase.BootError(e.message ?: "接続できませんでした")
+                    _phase.value = AppPhase.BootError(e.message ?: "接続できませんでした")
                 }
             }
         }

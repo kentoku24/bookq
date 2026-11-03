@@ -14,7 +14,9 @@ import dev.bookq.core.api.TreeNode
 import dev.bookq.core.api.TreeResponse
 import dev.bookq.core.api.VersionResponse
 import dev.bookq.core.api.VisibilitySnapshot
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl
@@ -70,18 +72,20 @@ class BookqApi(
     private fun get(url: HttpUrl): Request =
         Request.Builder().url(url).get().build()
 
-    /** Decode JSON or map a non-2xx status to [ApiException]. */
-    private inline fun <reified T> Response.decode(): T {
-        use {
+    /** Decode JSON or map a non-2xx status to [ApiException]. The body
+     *  read hops to IO — callers may resume on the main dispatcher. */
+    private suspend inline fun <reified T> Response.decode(): T {
+        val text = use {
             when {
                 code == 401 || code == 403 -> throw ApiException.Unauthorized(code)
                 code !in 200..299 -> throw ApiException.Status(code)
             }
-            return try {
-                json.decodeFromString<T>(body.string())
-            } catch (e: Exception) {
-                throw ApiException.Decode(e)
-            }
+            withContext(Dispatchers.IO) { body.string() }
+        }
+        return try {
+            json.decodeFromString<T>(text)
+        } catch (e: Exception) {
+            throw ApiException.Decode(e)
         }
     }
 
@@ -104,11 +108,14 @@ class BookqApi(
     /**
      * GET /api/v1/tree. Retries through 202 rebuild responses using
      * `Retry-After` (default 2s, max 20 attempts). 304 → [TreeResult.NotModified].
+     * `depth` requests the shallow children-only envelope (`kind` "children");
+     * shallow responses must never be persisted (v1-semantics §1).
      */
-    suspend fun tree(since: Int? = null, etag: String? = null): TreeResult {
+    suspend fun tree(since: Int? = null, etag: String? = null, depth: Int? = null): TreeResult {
         repeat(20) { attempt ->
             val ub = baseUrl.newBuilder().addPathSegments("api/v1/tree")
             if (since != null) ub.addQueryParameter("since", since.toString())
+            if (depth != null) ub.addQueryParameter("depth", depth.toString())
             val rb = Request.Builder().url(ub.build()).get()
             if (etag != null) rb.header("If-None-Match", etag)
             val resp = send(rb.build())
@@ -174,7 +181,8 @@ class BookqApi(
                 it.code !in 200..299 -> throw ApiException.Status(it.code)
             }
             return try {
-                json.decodeFromString<PositionStatus>(it.body.string())
+                json.decodeFromString<PositionStatus>(
+                    withContext(Dispatchers.IO) { it.body.string() })
             } catch (e: Exception) {
                 null // ok/stale is informational — any 2xx counts as accepted
             }
