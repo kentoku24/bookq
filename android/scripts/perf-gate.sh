@@ -33,12 +33,27 @@ export JAVA_HOME="${JAVA_HOME:-$(brew --prefix openjdk@21)}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 
 BENCH_PKG="dev.bookq.reader.baselineprofile"
-BENCH_CLASSES="dev.bookq.reader.baselineprofile.StartupBenchmark,dev.bookq.reader.baselineprofile.ReaderBenchmark,dev.bookq.reader.baselineprofile.BrowseBenchmark"
+BENCH_CLASSES="StartupBenchmark ReaderBenchmark BrowseBenchmark"
 
 # The measured app: release-shaped `benchmark` variant (debug-signed).
 ADB="${ANDROID_HOME}/platform-tools/adb"
 "$ADB" devices | grep -q "device$" || {
     echo "no adb device — connect CP08-J1 first" >&2; exit 2; }
+
+# With multiple devices attached the connected* task runs on ALL of them
+# and the result-collection step would pick a device at random. Require
+# the caller to pin ANDROID_SERIAL (or attach exactly one device).
+DEV_COUNT=$("$ADB" devices | grep -c "device$")
+if [[ -z "${ANDROID_SERIAL:-}" ]]; then
+    if [[ "$DEV_COUNT" -gt 1 ]]; then
+        echo "multiple devices attached — export ANDROID_SERIAL=<serial>" >&2
+        "$ADB" devices >&2
+        exit 2
+    fi
+else
+    export ANDROID_SERIAL
+fi
+echo "gate device: ${ANDROID_SERIAL:-$("$ADB" devices | awk '/device$/{print $1}')}"
 
 # Microphone-less, no dialog: clear any stale app state so the launch
 # sequence is deterministic (TEST_MODE needs no login).
@@ -56,7 +71,7 @@ if [[ "$GENERATE" == "1" ]]; then
     # output lands under src/release/generated, so mirror it into the
     # measurement variants (committed so plain assemble* also carries
     # the profile).
-    for v in benchmark benchmarkRelease nonMinifiedRelease; do
+    for v in benchmarkRelease nonMinifiedRelease; do
         mkdir -p "app/src/$v/baselineProfiles"
         for p in baseline-prof.txt startup-prof.txt; do
             cp "app/src/release/generated/baselineProfiles/$p" \
@@ -74,31 +89,50 @@ echo "== building + installing benchmark variants =="
     --console=plain -q
 
 echo "== running macrobenchmark gates (compilation=$COMPILATION) =="
-./gradlew :baselineprofile:connectedBenchmarkReleaseAndroidTest \
-    "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
-    "-Pandroid.testInstrumentationRunnerArguments.class=$BENCH_CLASSES" \
-    "-Pandroid.testInstrumentationRunnerArguments.compilation=$COMPILATION" \
-    --console=plain -q || true   # threshold evaluation below decides
+# One class per invocation: a comma list silently runs only the first
+# class on this AGP, and every run overwrites the same
+# <pkg>-benchmarkData.json — stash each under its own name.
+OUT_DIR="baselineprofile/build/outputs/connected_android_test_additional_output"
+RESULTS_DIR="baselineprofile/build/perf-gate-results"
+rm -rf "$RESULTS_DIR" && mkdir -p "$RESULTS_DIR"
+for cls in $BENCH_CLASSES; do
+    echo "--- $cls ---"
+    STAMP=$(mktemp)
+    ./gradlew :baselineprofile:connectedBenchmarkReleaseAndroidTest \
+        "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
+        "-Pandroid.testInstrumentationRunnerArguments.class=$BENCH_PKG.$cls" \
+        "-Pandroid.testInstrumentationRunnerArguments.compilation=$COMPILATION" \
+        --console=plain -q || true   # threshold evaluation below decides
+    find "$OUT_DIR" -name "*benchmarkData.json" -newer "$STAMP" \
+        -exec cp {} "$RESULTS_DIR/$cls.json" \; 2>/dev/null || true
+    rm -f "$STAMP"
+done
 
 echo "== results =="
-OUT_DIR="baselineprofile/build/outputs/connected_android_test_additional_output"
-JSON=$(find "$OUT_DIR" -name "benchmarkData.json" -newermt "-2 hours" 2>/dev/null | sort)
-if [[ -z "$JSON" ]]; then
-    JSON=$(find "$OUT_DIR" -name "benchmarkData.json" 2>/dev/null | sort -r | head -6)
-fi
-[[ -n "$JSON" ]] || { echo "no benchmarkData.json produced" >&2; exit 2; }
+mapfile -t JSON < <(find "$RESULTS_DIR" -name "*.json" | sort)
+[[ ${#JSON[@]} -gt 0 ]] || { echo "no benchmarkData.json produced" >&2; exit 2; }
 
-python3 - "$JSON" <<'PY'
+python3 - "${JSON[@]}" <<'PY'
 import json, sys
 
 # Gate thresholds from issue #292 §5.
 GATES = {
-    # metric key                      (gate_ms, column)
+    # metric key                      (stat, threshold_ms, label)
     "bookq.pageTurnMs":    ("p50",  60.0, "tap turn median"),
     "bookq.readerOpenMs":  ("p50", 400.0, "reader open median"),
     "timeToFullDisplayMs": ("p50", 1500.0, "cold start TTFD"),
     "frameDurationCpuMs":  ("p99",  16.0, "fling p99 frame"),
 }
+
+def stat(m, name):
+    # `metrics` uses minimum/median/maximum, `sampledMetrics` uses
+    # P50/P90/P95/P99 — normalise both spellings.
+    for k in (name, name.upper()):
+        if m.get(k) is not None:
+            return m[k]
+    if name == "p50":
+        return m.get("median")
+    return None
 
 fails = []
 seen = {}
@@ -110,29 +144,41 @@ for path in sys.argv[1:]:
         continue
     for b in data.get("benchmarks", []):
         name = f"{b.get('className','?').split('.')[-1]}_{b.get('name','?')}"
-        # keep the newest file's entry per test name (sorted by path ts)
-        seen[name] = b.get("metrics", {})
+        merged = dict(b.get("metrics") or {})
+        merged.update(b.get("sampledMetrics") or {})
+        seen[name] = merged
 
-worst = 0
 for test, metrics in sorted(seen.items()):
     print(f"\n{test}")
     for mkey, m in sorted(metrics.items()):
-        runs = m.get("runs") or []
-        stats = {k: m.get(k) for k in
-                 ("minimum","median","maximum","p50","p90","p95","p99")}
-        line = "  %-24s %s" % (mkey, " ".join(
-            f"{k}={v:.1f}" for k, v in stats.items() if v is not None))
-        print(line)
+        if not isinstance(m, dict):
+            continue
+        parts = []
+        for name in ("p50", "p90", "p95", "p99"):
+            v = stat(m, name)
+            if v is not None:
+                parts.append(f"{name}={v:.1f}")
+        for k in ("minimum", "maximum"):
+            if m.get(k) is not None:
+                parts.append(f"{k}={m[k]:.1f}")
+        print("  %-24s %s" % (mkey, " ".join(parts)))
         gate = GATES.get(mkey)
         if gate:
-            stat, thr, label = gate
-            val = m.get(stat)
+            s, thr, label = gate
+            val = stat(m, s)
             if val is not None and val > thr:
-                fails.append(f"{test} {label}: {stat}={val:.1f}ms > {thr}ms")
-                print(f"    !! GATE MISS {stat} {val:.1f} > {thr}")
-    janky = metrics.get("jankyFrames") or {}
-    if janky and janky.get("percent", 0) > 1.0:
-        fails.append(f"{test} janky {janky['percent']:.2f}% > 1%")
+                fails.append(f"{test} {label}: {s}={val:.1f}ms > {thr}ms")
+                print(f"    !! GATE MISS {s} {val:.1f} > {thr}")
+        if mkey == "frameOverrunMs":
+            # Jank% = frames past deadline (overrun > 0) / total —
+            # derived because FrameTimingMetric emits no jankyFrames.
+            runs = m.get("runs") or []
+            flat = [f for it in runs for f in (it if isinstance(it, list) else [it])]
+            if flat:
+                pct = 100.0 * sum(1 for f in flat if f > 0) / len(flat)
+                print(f"  {'derived janky%':<24} {pct:.2f}%")
+                if pct > 1.0:
+                    fails.append(f"{test} janky frames: {pct:.2f}% > 1%")
 
 print("\n" + ("FAIL" if fails else "PASS"))
 for f in fails:
