@@ -52,9 +52,17 @@ jobs:
 
   # Mirrors the verification tail of opencode-auto.yml
   # (implement / research / implement-direct / research-direct).
+  # Sharded across N runners via pytest-split (#331): each leg runs the same
+  # setup, then 1/N of the suite balanced by committed .test_durations.
+  # The --splits value and matrix.shard list must be kept in sync.
   uv-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      # A red leg must not cancel the rest — shard results are independent.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     # chromium-only gate (mirrors opencode-auto.yml)
     steps:
       - uses: actions/checkout@v7
@@ -78,5 +86,19 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
+      - name: Run bookq test gate (shard ${{ matrix.shard }}/3)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2 --splits 3 --group ${{ matrix.shard }}
+
+  # Single stable check name over the uv-gate matrix legs (#331) — matrix
+  # fan-out would otherwise produce only per-shard check names.
+  gate-done:
+    needs: uv-gate
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate shard results
+        env:
+          RESULT: ${{ needs.uv-gate.result }}
+        run: |
+          echo "uv-gate result: $RESULT"
+          [ "$RESULT" = "success" ] || exit 1
