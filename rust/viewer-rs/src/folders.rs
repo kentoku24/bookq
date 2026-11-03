@@ -167,8 +167,56 @@ async fn background_index_refresh(st: &IndexState, downloads: &Path) {
             && sig.as_deref() != prev_sig.as_deref();
         data.generation = if changed { prev_gen + 1 } else { prev_gen };
         data.signature = sig;
+        snapshot_save(&data);
         *c = Some(Arc::new(data));
     }
+}
+
+// ── index snapshot (fast repeat boot) ────────────────────────────────────────
+
+/// Persisted CacheData under BOOKQ_STATE_DIR. On boot it is installed as a
+/// *stale* cache and the ordinary signature-gated refresh verifies it in the
+/// background: unchanged → re-stamp (seconds, done); changed (the user
+/// reorganised archives while we were down) → full rebuild + prev+1 swap.
+/// Self-healing with a brief stale window — semantically a TTL expiry.
+fn snapshot_path() -> PathBuf {
+    PathBuf::from(std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()))
+        .join("index-snapshot.json")
+}
+const SNAPSHOT_VERSION: i64 = 1;
+
+fn snapshot_save(c: &CacheData) {
+    let payload = serde_json::json!({
+        "version": SNAPSHOT_VERSION,
+        "generation": c.generation,
+        "signature": c.signature,
+        "tree": c.tree,
+        "comics": c.comics,
+    });
+    let Ok(bytes) = serde_json::to_vec(&payload) else { return };
+    let path = snapshot_path();
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn snapshot_load() -> Option<CacheData> {
+    let bytes = std::fs::read(snapshot_path()).ok()?;
+    let v: Value = serde_json::from_slice(&bytes).ok()?;
+    if v.get("version").and_then(|x| x.as_i64()) != Some(SNAPSHOT_VERSION) {
+        return None;
+    }
+    Some(CacheData {
+        tree: serde_json::from_value(v.get("tree")?.clone()).ok()?,
+        comics: serde_json::from_value(v.get("comics")?.clone()).ok()?,
+        // Stale timestamp → the caller routes through the refresh path,
+        // which re-walks the signature and rebuilds only on a real change.
+        timestamp_micros: AtomicU64::new(0),
+        generation: v.get("generation")?.as_i64()?,
+        signature: v.get("signature").and_then(|x| x.as_str()).map(String::from),
+        body_cache: Mutex::new(HashMap::new()),
+    })
 }
 
 /// `refresh_index` — unconditional synchronous rebuild (NOT signature
@@ -200,6 +248,13 @@ pub async fn force_rebuild(st: &Arc<IndexState>, downloads: &Path) -> Option<usi
 
 /// `_scan_and_rebuild` — full tree + metadata + attaches in one walk.
 fn build_cache(downloads: &Path) -> Option<CacheData> {
+    // The signature walk is independent of the scan/metadata walk — run it
+    // on its own thread so the two full-tree traversals overlap instead of
+    // serialising back to back (each is a complete stat-walk of the volume).
+    let signature_walk = {
+        let d = downloads.to_path_buf();
+        std::thread::spawn(move || bookq_core::tree_signature(&d))
+    };
     let mut t = tree::scan_tree(downloads)?;
     // `rebuild_from_tree` (NOT `_walk`): tree-driven parse — archive
     // nodes' internal dirs produce phantom minimal records, and real
@@ -211,7 +266,7 @@ fn build_cache(downloads: &Path) -> Option<CacheData> {
     let subtree = tree::subtree_facets(&comics);
     tree::attach_subtree_facets(&mut t, &subtree, "");
     let generation = 1 + tree::archive_node_count(&t);
-    let signature = bookq_core::tree_signature(downloads);
+    let signature = signature_walk.join().ok().flatten();
     Some(CacheData {
         tree: t,
         comics,
@@ -258,6 +313,25 @@ pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) ->
         }
     };
     if let Role::Builder(n) = role {
+        // Repeat-boot fast path: install a persisted snapshot as stale, then
+        // let the signature-gated refresh verify it — unchanged re-stamps in
+        // ~seconds, a reorganised library triggers the full rebuild+swap.
+        let snap = tokio::task::spawn_blocking(snapshot_load).await.ok().flatten();
+        if let Some(data) = snap {
+            {
+                let mut c = st.cache.lock().await;
+                if c.is_none() {
+                    *c = Some(Arc::new(data));
+                }
+            }
+            *st.building.lock().await = None;
+            n.notify_waiters();
+            st.schedule_refresh(&downloads);
+            return match st.current().await {
+                Some(c) => Ensure::Stale(c),
+                None => Ensure::Building,
+            };
+        }
         return build_and_serve(st, downloads.clone(), n).await;
     }
     let Role::Follower(follower) = role else {
@@ -287,6 +361,7 @@ async fn build_and_serve(st: &Arc<IndexState>, downloads: PathBuf, done: Arc<Not
         let cur_fresh = matches!(&*c, Some(d) if d.fresh());
         if !cur_fresh {
             if let Some(d) = built {
+                snapshot_save(&d);
                 *c = Some(Arc::new(d));
             }
         }

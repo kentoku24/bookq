@@ -1,9 +1,11 @@
 """Regression tests for #113: viewer runs single-worker hypercorn; WEB_CONCURRENCY is dead.
 
-hypercorn never reads the WEB_CONCURRENCY env var (gunicorn convention), and the
-Dockerfile ENTRYPOINT/CMD passes no --workers flag, so the viewer is effectively
-single-process. These tests pin the compose files to that reality: no dead env,
-healthcheck + restart intact.
+hypercorn never reads the WEB_CONCURRENCY env var (gunicorn convention). The
+Dockerfile CMD passes --workers 0, which serves inside the entrypoint process
+itself instead of under a multiprocessing spawn supervisor — same single-worker
+concurrency, minus the ~40MB supervisor + resource_tracker overhead. These
+tests pin the compose files and Dockerfile to that reality: no dead env,
+healthcheck + restart + init intact.
 """
 
 import re
@@ -23,20 +25,34 @@ def test_dev_compose_has_no_web_concurrency():
     assert "WEB_CONCURRENCY" not in DEV_COMPOSE
 
 
-def test_dockerfile_passes_no_workers_flag():
-    # Todo4 never touches the Dockerfile in either branch; the viewer entrypoint
-    # stays on hypercorn's single-worker default.
-    assert "--workers" not in DOCKERFILE
+def test_dockerfile_runs_hypercorn_in_process():
+    # --workers 0 keeps the same single-worker concurrency while dropping the
+    # multiprocessing spawn supervisor (~30MB) and resource_tracker (~12MB)
+    # that hypercorn's default workers=1 model parks next to the real worker.
+    assert re.search(r'"--workers",\s*"0"', DOCKERFILE)
 
 
 def test_prod_compose_keeps_healthcheck_and_restart():
     assert "healthcheck:" in PROD_COMPOSE
     assert "restart: unless-stopped" in PROD_COMPOSE
+    assert "init: true" in PROD_COMPOSE
 
 
 def test_dev_compose_keeps_healthcheck_and_restart():
     assert "healthcheck:" in DEV_COMPOSE
     assert "restart: unless-stopped" in DEV_COMPOSE
+    assert "init: true" in DEV_COMPOSE
+
+
+def test_viewer_healthcheck_does_not_spawn_python():
+    # The healthcheck fires every 2s for the container's lifetime; spawning a
+    # python interpreter each time costs ~10-15MB transient plus fork/exec
+    # churn. The bash /dev/tcp probe (same shape as viewer-rs) answers the
+    # same /api/health 200 contract without a second interpreter.
+    for compose in (PROD_COMPOSE, DEV_COMPOSE):
+        assert "urllib.request" not in compose
+        assert "/dev/tcp" in compose
+        assert "/api/health" in compose
 
 
 # ── #223: RAR content serving needs the reference decoder ─────────────

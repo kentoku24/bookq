@@ -349,13 +349,81 @@ fn walk_dir(
 /// `folders` are RELATIVE paths under `base`; outer None → Python does
 /// the whole batch (Poison anywhere).
 pub fn parse_metadata_batch(base: &Path, folders: &[String]) -> Option<Vec<Option<ComicRec>>> {
-    let mut out = Vec::with_capacity(folders.len());
-    for rel in folders {
-        match parse_one(&base.join(rel), base) {
-            Folder::Rec(r) => out.push(Some(r)),
-            Folder::Skip => out.push(None),
-            Folder::Poison => return None,
+    // Per-folder `metadata.toml` reads are independent and I/O-bound — chunk
+    // the list across worker threads; results are concatenated in input
+    // order so output is identical to the sequential pass. A Poison anywhere
+    // still collapses the whole batch to None (same as sequential — the only
+    // difference is we don't early-exit).
+    if folders.is_empty() {
+        return Some(Vec::new());
+    }
+    const WORKERS: usize = 8;
+    let n = folders.len();
+    let workers = WORKERS.min(n).max(1);
+    let chunk = n.div_ceil(workers);
+    let parts = std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for c in folders.chunks(chunk) {
+            handles.push(s.spawn(move || -> Option<Vec<Option<ComicRec>>> {
+                let mut out = Vec::with_capacity(c.len());
+                for rel in c {
+                    match parse_one(&base.join(rel), base) {
+                        Folder::Rec(r) => out.push(Some(r)),
+                        Folder::Skip => out.push(None),
+                        Folder::Poison => return None,
+                    }
+                }
+                Some(out)
+            }));
         }
+        handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
+    });
+    let mut out = Vec::with_capacity(n);
+    for part in parts {
+        out.extend(part.ok()??);
     }
     Some(out)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_base(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "bookq-meta-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn parse_metadata_batch_empty_input() {
+        let base = tmp_base("empty");
+        fs::create_dir_all(&base).unwrap();
+        assert_eq!(parse_metadata_batch(&base, &[]), Some(vec![]));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_metadata_batch_preserves_input_order() {
+        let base = tmp_base("order");
+        // 20 folders > WORKERS(8): exercises the multi-chunk path. No
+        // metadata.toml → parse_one yields Rec(minimal) → Some(rec) with
+        // rec.0 == the relative path passed in.
+        let mut folders: Vec<String> = (0..20).map(|i| format!("f{i:02}")).collect();
+        for f in &folders {
+            fs::create_dir_all(base.join(f)).unwrap();
+        }
+        folders.reverse(); // deterministic non-sorted input order
+        let out = parse_metadata_batch(&base, &folders).unwrap();
+        assert_eq!(out.len(), folders.len());
+        for (i, rel) in folders.iter().enumerate() {
+            assert_eq!(out[i].as_ref().unwrap().0, *rel);
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
 }
