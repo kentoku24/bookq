@@ -42,6 +42,14 @@ fun launchIntent(url: String): Intent =
  *  the active accessibility window, leaving findObject() blind even
  *  though the grid is on screen (same failure mode ReaderPinchTest
  *  documents). A fresh launch re-binds the a11y focus. */
+// Every selector is package-scoped: By.res() alone scans ALL a11y
+// windows, and a stale `dev.bookq.reader.debug` window left in the
+// reader would otherwise shadow `readerPager`/`tile:*` queries —
+// hasObject() then reports a reader that the measured app never
+// opened (readerOpenCount=0 with a passing test).
+private fun sel(res: String) = By.res(res).pkg(PACKAGE_NAME)
+private fun selP(pattern: Pattern) = By.res(pattern).pkg(PACKAGE_NAME)
+
 fun MacrobenchmarkScope.launchToBrowse(url: String) {
     repeat(2) { attempt ->
         pressHome()
@@ -50,7 +58,7 @@ fun MacrobenchmarkScope.launchToBrowse(url: String) {
         // into the reader — back out, then keep waiting for the grid.
         val deadline = android.os.SystemClock.uptimeMillis() + 30_000
         while (android.os.SystemClock.uptimeMillis() < deadline) {
-            if (device.hasObject(By.res("browseGrid"))) {
+            if (device.hasObject(sel("browseGrid"))) {
                 device.waitForIdle(1_500)
                 return
             }
@@ -68,23 +76,27 @@ fun MacrobenchmarkScope.launchToBrowse(url: String) {
  *  leaf opens — same strategy as ReaderPinchTest. */
 fun MacrobenchmarkScope.reachReader() {
     if (inReader()) return
-    device.wait(Until.findObject(By.res("resumePill")), 8_000)
+    device.wait(Until.findObject(sel("resumePill")), 8_000)
         ?.click()
     if (waitForReader(20_000)) return
     repeat(8) {
         if (waitForReader(3_000)) return
-        device.findObjects(By.res(TILE))
+        device.findObjects(selP(TILE))
             .firstOrNull()?.click() ?: return
         device.waitForIdle(1_500)
     }
     if (!waitForReader(30_000)) error("reader counter never appeared")
 }
 
+// NOTE: Until.hasObject is a Boolean condition — wait() returns
+// Boolean.FALSE (not null) on timeout, so compare `== true`: the
+// `!= null` shape passed unconditionally and once made readerOpen
+// skip its whole drill (zero bookq.readerOpen slices, green test).
 fun MacrobenchmarkScope.waitForReader(ms: Long): Boolean =
-    device.wait(Until.hasObject(By.res("readerPager")), ms) != null
+    device.wait(Until.hasObject(sel("readerPager")), ms) == true
 
 fun MacrobenchmarkScope.inReader(): Boolean =
-    device.hasObject(By.res("readerPager"))
+    device.hasObject(sel("readerPager"))
 
 fun UiDevice.tapForward() = click(
     displayWidth * 15 / 100, displayHeight / 2)
@@ -110,7 +122,7 @@ fun UiDevice.flingBack() {
 
 fun MacrobenchmarkScope.openOverview() {
     device.pressKeyCode(KeyEvent.KEYCODE_G)
-    device.wait(Until.findObject(By.res("overviewGrid")), 10_000)
+    device.wait(Until.findObject(sel("overviewGrid")), 10_000)
         ?: error("overview grid never opened")
 }
 
@@ -119,7 +131,7 @@ fun UiDevice.flingObject(res: String, direction: Direction, times: Int) {
     // that goes stale the moment the list scrolls/mutates — a cached
     // handle throws StaleObjectException on the second fling.
     repeat(times) {
-        val target = wait(Until.findObject(By.res(res)), 15_000)
+        val target = wait(Until.findObject(sel(res)), 15_000)
             ?: error("$res never appeared for fling")
         target.setGestureMarginPercentage(0.15f)
         target.fling(direction)

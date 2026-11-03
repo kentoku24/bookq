@@ -34,13 +34,16 @@ class BrowseBenchmark {
             // Resume lands wherever the task left off — back out of the
             // reader, then drill one level so the grid is populated.
             if (inReader()) device.pressBack()
-            device.wait(
-                Until.hasObject(By.res("browseGrid")), 30_000)
-                ?: error("browse grid never appeared")
+            if (device.wait(Until.hasObject(
+                    By.res("browseGrid").pkg(PACKAGE_NAME)),
+                    30_000) != true) {
+                error("browse grid never appeared")
+            }
             // Root can be a single folder — one free drill inside setup
             // so the measured level has a large tile list.
             device.findObjects(By.res(java.util.regex.Pattern
-                .compile("tile:.*"))).firstOrNull()?.click()
+                .compile("tile:.*")).pkg(PACKAGE_NAME))
+                .firstOrNull()?.click()
             device.waitForIdle(1_200)
         },
     ) {

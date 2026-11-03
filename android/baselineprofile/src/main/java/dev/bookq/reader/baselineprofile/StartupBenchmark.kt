@@ -33,8 +33,11 @@ class StartupBenchmark {
         setupBlock = { pressHome() },
     ) {
         startActivityAndWait(launchIntent(serverUrl()))
-        device.wait(Until.hasObject(By.res("browseGrid")), 30_000)
-            ?: error("browse grid never appeared")
+        if (device.wait(Until.hasObject(
+                By.res("browseGrid").pkg(PACKAGE_NAME)),
+                30_000) != true) {
+            error("browse grid never appeared")
+        }
     }
 }
 

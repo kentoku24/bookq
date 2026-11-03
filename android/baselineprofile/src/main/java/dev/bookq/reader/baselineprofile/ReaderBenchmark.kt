@@ -108,9 +108,11 @@ class ReaderBenchmark {
             // Resume may land inside the reader — back out to browse.
             if (inReader()) {
                 device.pressBack()
-                device.wait(
-                    Until.hasObject(By.res("browseGrid")), 15_000)
-                    ?: error("browse grid never appeared after back")
+                if (device.wait(Until.hasObject(
+                        By.res("browseGrid").pkg(PACKAGE_NAME)),
+                        15_000) != true) {
+                    error("browse grid never appeared after back")
+                }
             }
             device.waitForIdle(800)
         },
@@ -119,21 +121,30 @@ class ReaderBenchmark {
         // auto-resume may land inside it) — back out so every iteration
         // navigates fresh and emits the section. Section metrics only
         // time the slice, so the back-out clicks cost nothing here.
+        System.out.println("bench.readerOpen start inReader=${inReader()}")
         if (inReader()) {
             device.pressBack()
-            device.wait(
-                Until.hasObject(By.res("browseGrid")), 10_000)
-                ?: error("browse grid never appeared after back")
+            if (device.wait(Until.hasObject(
+                    By.res("browseGrid").pkg(PACKAGE_NAME)),
+                    10_000) != true) {
+                error("browse grid never appeared after back")
+            }
         }
         // Drill the first tile until the reader shows — folder tiles
         // navigate without emitting the section.
         repeat(6) {
-            if (waitForReader(5_000)) return@repeat
-            device.findObjects(By.res(PATTERN_TILE))
-                .firstOrNull()?.click() ?: return@repeat
+            if (waitForReader(2_000)) return@repeat
+            val first = device.findObjects(
+                By.res(PATTERN_TILE).pkg(PACKAGE_NAME))
+                .firstOrNull() ?: return@repeat
+            System.out.println("bench.drill res=${first.resourceName} pkg=${first.applicationPackage}")
+            first.click()
             device.waitForIdle(1_200)
         }
         if (!waitForReader(15_000)) error("reader never opened")
+        // Diag: did the section actually start? Zero marks mean the
+        // reader was reached without onOpenReader (nav restore).
+        System.out.println("bench.readerOpen inReader=${inReader()}")
     }
 }
 

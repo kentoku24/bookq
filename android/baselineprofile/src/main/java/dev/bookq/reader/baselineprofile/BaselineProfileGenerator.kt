@@ -34,7 +34,8 @@ class BaselineProfileGenerator {
         pressHome()
         startActivityAndWait(launchIntent(url))
         device.wait(androidx.test.uiautomator.Until.hasObject(
-            androidx.test.uiautomator.By.res("browseGrid")), 30_000)
+            androidx.test.uiautomator.By.res("browseGrid")
+                .pkg(PACKAGE_NAME)), 30_000)
     }
 
     @Test
