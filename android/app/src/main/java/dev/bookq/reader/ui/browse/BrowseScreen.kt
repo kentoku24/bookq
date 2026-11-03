@@ -495,13 +495,14 @@ private fun BrowseBody(
     // a remote apply put us in, do not send it back (a clamped local
     // value would drag the peer). Cleared on the next real send.
     val appliedHoldTop = remember { doubleArrayOf(Double.NaN) }
-    val lastLocalScrollMs = remember { longArrayOf(Long.MIN_VALUE) }
+    val lastLocalScrollMs = remember { longArrayOf(-1L) }
 
     fun localBusy(): Boolean {
         val busy = if (layout == BrowseLayout.LIST)
             listState.isScrollInProgress else gridState.isScrollInProgress
-        return busy ||
-            System.currentTimeMillis() - lastLocalScrollMs[0] < 400
+        val last = lastLocalScrollMs[0]
+        return busy || (last >= 0 &&
+            System.currentTimeMillis() - last < 400)
     }
 
     /** pitch + columns of the ACTIVE container (for remoteTop→index). */
