@@ -72,6 +72,9 @@ jobs:
         if: failure()
         with:
           name: schemathesis-diagnostics
+          # upload-artifact >=4.4 skips hidden entries by default — the
+          # .schemathesis crash cache is the point of this artifact.
+          include-hidden-files: true
           path: |
             /tmp/bookq-server.log
             schemathesis-report/
