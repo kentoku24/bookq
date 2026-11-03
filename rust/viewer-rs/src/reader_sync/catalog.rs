@@ -66,25 +66,18 @@ const CONTENT_KEYS: &[&str] = &[
 
 // ── tree predicates ────────────────────────────────────────────────────────
 
-fn has_only_images(node: &Value) -> bool {
-    match node.get("children").and_then(|c| c.as_array()) {
-        Some(ch) => {
-            !ch.is_empty()
-                && ch
-                    .iter()
-                    .all(|c| c.get("type").and_then(|v| v.as_str()) == Some("image"))
-        }
-        None => false,
-    }
+fn has_only_images(node: &tree::FolderNode) -> bool {
+    !node.children.is_empty()
+        && node
+            .children
+            .iter()
+            .all(|c| matches!(c, tree::Node::Image { .. }))
 }
 
-fn has_images(node: &Value) -> bool {
-    match node.get("children").and_then(|c| c.as_array()) {
-        Some(ch) => ch
-            .iter()
-            .any(|c| c.get("type").and_then(|v| v.as_str()) == Some("image")),
-        None => false,
-    }
+fn has_images(node: &tree::FolderNode) -> bool {
+    node.children
+        .iter()
+        .any(|c| matches!(c, tree::Node::Image { .. }))
 }
 
 fn compose(parent: &str, name: &str) -> String {
@@ -106,22 +99,18 @@ fn norm_path(path: &str) -> String {
 /// `(siblings_list, parent_path)` whose list holds `target` — structural
 /// parent lookup mirroring `findParentOf` (names are never split on "/").
 fn find_container<'a>(
-    nodes: &'a [Value],
+    nodes: &'a [tree::Node],
     target: &str,
     path: &str,
-) -> Option<(&'a [Value], String)> {
+) -> Option<(&'a [tree::Node], String)> {
     for node in nodes {
-        let name = match node.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        let full = compose(path, name);
+        let full = compose(path, node.name());
         if full == target {
             return Some((nodes, path.to_string()));
         }
-        if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+        if let tree::Node::Folder(f) = node {
             if target.starts_with(&format!("{full}/")) {
-                if let Some(hit) = find_container(children, target, &full) {
+                if let Some(hit) = find_container(&f.children, target, &full) {
                     return Some(hit);
                 }
             }
@@ -132,7 +121,7 @@ fn find_container<'a>(
 
 /// Port of `getSiblingLeafFolders`: ordered chapter-folder full paths
 /// when the sibling run applies, else None (single chapter).
-fn sibling_leaf_folders(tree: &[Value], folder: &str) -> Option<Vec<String>> {
+fn sibling_leaf_folders(tree: &[tree::Node], folder: &str) -> Option<Vec<String>> {
     if folder.matches('/').count() < SIBLING_MIN_DEPTH {
         return None;
     }
@@ -142,13 +131,9 @@ fn sibling_leaf_folders(tree: &[Value], folder: &str) -> Option<Vec<String>> {
     }
     let leaves: Vec<String> = siblings
         .iter()
-        .filter(|n| n.get("type").and_then(|v| v.as_str()) == Some("folder") && has_only_images(n))
-        .map(|n| {
-            compose(
-                &parent_path,
-                n.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-            )
-        })
+        .filter_map(|n| n.as_folder())
+        .filter(|f| has_only_images(f))
+        .map(|f| compose(&parent_path, &f.name))
         .collect();
     if leaves.len() <= 1 {
         return None;
@@ -264,30 +249,28 @@ fn list_folder_images(downloads: &Path, folder: &str) -> Result<Vec<String>, Lis
 /// tree leaf children, then mixed-folder direct images, then enumeration.
 fn chapter_pages(
     downloads: &Path,
-    tree: &[Value],
+    tree: &[tree::Node],
     folder: &str,
 ) -> Result<Vec<String>, ManifestError> {
     let node = if folder.is_empty() {
         None
     } else {
-        tree::find_tree_node(tree, folder, "")
+        tree::find_tree_node(tree, folder, "").and_then(|n| n.as_folder())
     };
-    if let Some(n) = node {
-        if has_only_images(n) {
-            return Ok(n["children"]
-                .as_array()
-                .unwrap()
+    if let Some(f) = node {
+        if has_only_images(f) {
+            return Ok(f
+                .children
                 .iter()
-                .filter_map(|c| c.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                .map(|c| c.name().to_string())
                 .collect());
         }
-        if has_images(n) {
-            return Ok(n["children"]
-                .as_array()
-                .unwrap()
+        if has_images(f) {
+            return Ok(f
+                .children
                 .iter()
-                .filter(|c| c.get("type").and_then(|v| v.as_str()) == Some("image"))
-                .filter_map(|c| c.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                .filter(|c| matches!(c, tree::Node::Image { .. }))
+                .map(|c| c.name().to_string())
                 .collect());
         }
     }
@@ -316,7 +299,7 @@ fn chapter_pages(
 /// Resolve `folder` into the shared manifest (content fields + digest).
 pub fn build_manifest_core(
     downloads: &Path,
-    tree: &[Value],
+    tree: &[tree::Node],
     folder: &str,
     offset: i64,
 ) -> Result<Value, ManifestError> {
@@ -329,9 +312,9 @@ pub fn build_manifest_core(
     let node = if folder.is_empty() {
         None
     } else {
-        tree::find_tree_node(tree, folder, "")
+        tree::find_tree_node(tree, folder, "").and_then(|n| n.as_folder())
     };
-    let is_mixed = node.is_some_and(|n| has_images(n) && !has_only_images(n));
+    let is_mixed = node.is_some_and(|f| has_images(f) && !has_only_images(f));
     let siblings = sibling_leaf_folders(tree, folder);
 
     let (chapter_folders, in_tree_names) = match &siblings {
@@ -345,11 +328,7 @@ pub fn build_manifest_core(
         let names = chapter_pages(downloads, tree, cf)?;
         let cnode = tree::find_tree_node(tree, cf, "");
         let cname = if in_tree_names && cnode.is_some() {
-            cnode
-                .and_then(|n| n.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
+            cnode.map(|n| n.name().to_string()).unwrap_or_default()
         } else {
             cf.rsplit('/').next().unwrap_or("").to_string()
         };

@@ -24,6 +24,7 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "
 # encoder, exr, tiff, qoi, moxcms, rayon). Min = locked version, which is
 # what we build/test (ImageDecoder::orientation landed in 0.25.5).
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"
 tokio = { version = "1", features = ["full"] }

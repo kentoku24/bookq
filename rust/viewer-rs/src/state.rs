@@ -584,9 +584,10 @@ pub async fn put_folder_visibility(
             let Some(data) = data else {
                 return vis_detail(StatusCode::SERVICE_UNAVAILABLE, "library tree unavailable");
             };
-            let member = data.tree.iter().any(|n| {
-                n["type"] == "folder" && n["name"].as_str() == Some(root)
-            });
+            let member = data
+                .tree
+                .iter()
+                .any(|n| matches!(n, crate::tree::Node::Folder(f) if &*f.name == root));
             if !member {
                 return vis_detail(StatusCode::NOT_FOUND, "no such top-level folder or archive");
             }
