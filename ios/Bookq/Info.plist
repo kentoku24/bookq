@@ -15,5 +15,7 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>ペアリング用のQRコードを読み取るためにカメラを使用します。</string>
 </dict>
 </plist>

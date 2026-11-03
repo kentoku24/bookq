@@ -15,6 +15,9 @@ struct ReaderChapter: Equatable {
     var name: String
     var fullPath: String
     var images: [PageRef]    // real (non-spacer) pages
+    /// Archive-backed virtual folder (rar/zip/cbz/…) — `name` is the
+    /// archive filename, not a chapter title worth labelling.
+    var isArchive: Bool = false
 }
 
 enum ReaderPageMode: String, Equatable {
@@ -113,7 +116,8 @@ struct ReaderWork: Equatable {
                     .filter(\.isImage)
                     .map { PageRef(name: $0.name, folder: sib.path) }
                 list.append(ReaderChapter(name: sib.node.name,
-                                          fullPath: sib.path, images: imgs))
+                                          fullPath: sib.path, images: imgs,
+                                          isArchive: sib.node.archive == true))
             }
             return (list, true)
         }

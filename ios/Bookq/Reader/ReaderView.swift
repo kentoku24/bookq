@@ -190,17 +190,20 @@ struct ReaderView: View {
     }
 
     /// Chapter title pill shown on chapter-start spreads (chapterLabels).
+    /// Archive chapters name the raw file (rar/zip/…) — no label for those.
     private func chapterLabel(_ work: ReaderWork, spread s: Int) -> some View {
         Group {
             if work.isCrossChapter,
                let first = work.spreads[safe: s]?.first {
                 let info = work.chapterInfo(at: first)
-                Text(info.name)
-                    .font(.caption).foregroundStyle(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(.black.opacity(0.55), in: Capsule())
-                    .padding(.trailing, 12)
-                    .transition(.opacity)
+                if work.chapters[safe: info.chapterIdx]?.isArchive != true {
+                    Text(info.name)
+                        .font(.caption).foregroundStyle(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(.trailing, 12)
+                        .transition(.opacity)
+                }
             }
         }
     }

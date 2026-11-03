@@ -51,4 +51,10 @@ RUN mkdir -p /app/downloads
 EXPOSE 8080
 
 ENTRYPOINT ["hypercorn", "app.main:app"]
-CMD ["--bind", "0.0.0.0:8080"]
+# --workers 0 serves in the entrypoint process itself: hypercorn's default
+# spawn model parks a ~30MB supervisor plus a ~12MB multiprocessing
+# resource_tracker next to the ~1 real worker. Same single-worker
+# concurrency (compose's restart policy already covers process exits), and
+# the worker installs its own SIGINT/SIGTERM handlers, so docker stop
+# stays graceful. init: true in compose reaps orphaned extractor children.
+CMD ["--bind", "0.0.0.0:8080", "--workers", "0"]
