@@ -200,12 +200,6 @@ struct ReaderView: View {
                 Spacer()
                 VStack(spacing: 2) {
                     Text(counterText).font(.subheadline).monospacedDigit()
-                    if let work, work.isCrossChapter {
-                        Text(work.chapterInfo(at: currentIdx).name)
-                            .font(.caption2).foregroundStyle(.white.opacity(0.8))
-                            .lineLimit(1)
-                            .frame(maxWidth: 150)
-                    }
                     // External-display bring-up diagnostic (temporary):
                     // mode/bounds when connected, else availability state.
                     if let s = ext.externalScreen {
