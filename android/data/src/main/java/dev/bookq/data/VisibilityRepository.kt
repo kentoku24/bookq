@@ -168,6 +168,10 @@ class VisibilityRepository(
                                         vis.setStatus(
                                             VisibilityState.Status.READY,
                                             readOnly = false)
+                                        // The GET succeeded — clear before
+                                        // apply so the new owner is never
+                                        // observable with a stale error.
+                                        lastError = null
                                         vis.applySnapshot(
                                             owner, j.revision, j.hiddenRoots,
                                             force = owner != vis.owner,
@@ -175,7 +179,6 @@ class VisibilityRepository(
                                         )
                                         writeCache(vis.snapshot())
                                         convergenceSent = false
-                                        lastError = null
                                     }
                                 }
                                 Outcome.AuthFail -> {
