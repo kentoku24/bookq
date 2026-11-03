@@ -6,8 +6,8 @@
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
 //!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
-//!   - RAR/CBR entry *reads* (compressed extraction needs external unrar;
-//!     listing via `rar_names` is native)
+//!   - RAR/CBR members of *multipart* sets (the bundled unrar can't chain
+//!     volumes; single-volume entries extract in-process)
 //!   - multi-range requests (hypercorn emits multipart/byteranges with a
 //!     random boundary — byte parity is impossible; single ranges are native)
 //!
@@ -16,11 +16,12 @@
 //! not ported yet, so outside test mode everything proxies upstream.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     io,
     io::Write,
     path::{Component, Path, PathBuf},
+    sync::{LazyLock, Mutex},
 };
 
 use axum::{
@@ -120,9 +121,13 @@ pub(crate) fn realpath(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `_is_within`: target inside base after resolving both.
+/// `base` must already be canonical — `AppState` canonicalizes `downloads`
+/// once at startup. Only `target` pays a per-call realpath (required for
+/// symlink-escape safety); canonicalizing `base` per request was a
+/// stat-walk on every hot-path call.
 pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
-    match (realpath(base), realpath(target)) {
-        (Ok(b), Ok(t)) => t.starts_with(&b),
+    match realpath(target) {
+        Ok(t) => t.starts_with(base),
         _ => false,
     }
 }
@@ -231,15 +236,40 @@ pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
     }
 }
 
+/// unrar allocates the decompress window per extraction (RAR5 dict sizes
+/// run 32MB–4GB); spawn_blocking's ≤512 threads could otherwise stack
+/// enough concurrent windows to OOM the gateway. Cap concurrent
+/// in-process rar extraction at the CPU count — zip reads stay unbounded.
+static RAR_EXTRACT: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| {
+        tokio::sync::Semaphore::new(
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+    });
+
 /// `read_archive_entry` read path (#217 port): the memoized open archive
 /// answers repeat page reads without re-parsing the central directory.
 /// `None` covers every non-proven read exactly like `zip_read_entry` —
 /// unstat'able paths fall through to the uncached one-shot open, and a
 /// failed parse yields `None` just as Python propagates the open failure.
 pub(crate) fn archive_read_entry(archive: &Path, inner: &str) -> Option<Vec<u8>> {
+    let _permit = if is_rar_path(archive) {
+        Some(RAR_EXTRACT.blocking_acquire().ok()?)
+    } else {
+        None
+    };
     match bookq_core::open_archive(archive) {
-        Some(oa) => oa.read_zip_entry(inner),
-        None => bookq_core::zip_read_entry(archive, inner),
+        Some(oa) => oa.read_entry(archive, inner),
+        // Uncached one-shot fallback — `rar_read_entry` resolves the
+        // member by ordinal inside `rar_names`, so it reads only what the
+        // ported listing can name (None → 404 when the listing fails,
+        // matching Python's open-failure path).
+        None => {
+            if is_rar_path(archive) {
+                bookq_core::rar_read_entry(archive, inner)
+            } else {
+                bookq_core::zip_read_entry(archive, inner)
+            }
+        }
     }
 }
 
@@ -382,7 +412,7 @@ fn detail(status: StatusCode, msg: &str) -> Response {
     r
 }
 
-fn not_modified() -> Response {
+pub(crate) fn not_modified() -> Response {
     response(StatusCode::NOT_MODIFIED, Body::empty())
 }
 
@@ -468,7 +498,58 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
             &format!("Folder not found: {folder}"),
         ));
     }
-    Serve::Done(json_list(folder, bookq_core::list_images(&resolved).unwrap_or_default()))
+    Serve::Done(json_list(folder, dir_images_cached(&resolved)))
+}
+
+/// Directory image-listing memo keyed on dir mtime — a readdir of a large
+/// folder on a slow volume costs tens of ms, while a single metadata call
+/// costs ~µs. Dir mtime changes on add/remove/rename (file-content edits
+/// do not affect the name list, so they need no invalidation).
+static DIR_IMAGES_MEMO: LazyLock<Mutex<DirImagesMemo>> = LazyLock::new(|| {
+    Mutex::new(DirImagesMemo {
+        map: HashMap::new(),
+        lru: VecDeque::new(),
+    })
+});
+const DIR_IMAGES_MEMO_CAP: usize = 128;
+
+struct DirImagesMemo {
+    map: HashMap<PathBuf, (u128, Vec<String>)>,
+    lru: VecDeque<PathBuf>,
+}
+
+fn dir_mtime_key(dir: &Path) -> Option<u128> {
+    dir.metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+}
+
+fn dir_images_cached(dir: &Path) -> Vec<String> {
+    let mt = dir_mtime_key(dir);
+    if let Some(mt) = mt {
+        if let Ok(g) = DIR_IMAGES_MEMO.lock() {
+            if let Some((k, names)) = g.map.get(dir) {
+                if *k == mt {
+                    return names.clone();
+                }
+            }
+        }
+    }
+    let names = bookq_core::list_images(dir).unwrap_or_default();
+    if let Some(mt) = mt {
+        if let Ok(mut g) = DIR_IMAGES_MEMO.lock() {
+            g.map.insert(dir.to_path_buf(), (mt, names.clone()));
+            g.lru.push_back(dir.to_path_buf());
+            while g.map.len() > DIR_IMAGES_MEMO_CAP {
+                if let Some(old) = g.lru.pop_front() {
+                    g.map.remove(&old);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Compact JSON list matching Starlette's `json.dumps(..., separators=(",",":"))`.
@@ -486,14 +567,15 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 // ── /image/{path} ─────────────────────────────────────────────────────────────
 
 /// `serve_image` — archive-entry reads and plain-file serving.
-/// RAR/CBR entry reads proxy upstream (compressed extraction needs unrar).
+/// RAR/CBR entries extract in-process via bundled unrar; only PDF pages
+/// (pypdfium2) and multi-range requests still proxy upstream.
 pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if let Some((archive, inner)) = resolve_archive(downloads, path) {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
-        if is_pdf_file(&archive) || is_rar_path(&archive) {
-            return Serve::Proxy; // pdf render / rar extraction → upstream tools
+        if is_pdf_file(&archive) {
+            return Serve::Proxy; // pdf render → upstream pypdfium2
         }
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
@@ -533,7 +615,7 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     serve_plain_file(&file_path, size, &etag, &last_modified, headers)
 }
 
-/// `_serve_archive_entry` for ZIP/CBZ/EPUB (pdf/rar proxy upstream).
+/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR (pdf proxies upstream).
 fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
     if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
         return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
@@ -556,6 +638,10 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
     let etag = format!("\"{}-{}-{}\"", fmt_mtime(mtime), stat.len(), &digest[..16]);
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
+    }
+    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
+        // Multipart set — the bundled unrar can't chain volumes; 7z can.
+        return Serve::Proxy;
     }
     let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
@@ -649,11 +735,14 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
     set_header(&mut r, header::CONTENT_TYPE, guess_type(&path.to_string_lossy()));
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
     match plan_range(headers, size) {
-        RangePlan::Full => match std::fs::File::open(path) {
-            Ok(f) => {
+        RangePlan::Full => match std::fs::read(path) {
+            // Whole-buffer read: ReaderStream's 8KB chunks pay a per-chunk
+            // wake through the spawn_blocking → Body stream bridge — ~1ms
+            // per chunk vs hypercorn's sendfile — so a single memcpy is
+            // cheaper at typical page sizes (100KB–a few MB).
+            Ok(bytes) => {
                 set_header(&mut r, header::CONTENT_LENGTH, &size.to_string());
-                let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(f));
-                *r.body_mut() = Body::from_stream(stream);
+                *r.body_mut() = Body::from(bytes);
                 Serve::Done(r)
             }
             Err(_) => Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),

@@ -35,19 +35,28 @@ struct FolderLevelView: View {
 
         // `blockedGridHtml` — never paint an unfiltered list while the
         // visibility judgment is unknown (loading/error without snapshot).
-        switch visibility.blockedState {
-        case .loading:
-            VStack { Spacer(); ProgressView("読込中…"); Spacer() }
-        case .error:
-            VStack(spacing: 10) {
-                Spacer()
-                Text("取得失敗").foregroundStyle(.red).font(.caption)
-                Button("再試行") { visibility.retry() }
-                Spacer()
+        Group {
+            switch visibility.blockedState {
+            case .loading:
+                VStack { Spacer(); ProgressView("読込中…"); Spacer() }
+            case .error:
+                VStack(spacing: 10) {
+                    Spacer()
+                    Text("取得失敗").foregroundStyle(.red).font(.caption)
+                    Button("再試行") { visibility.retry() }
+                    Spacer()
+                }
+            case .none:
+                grid(folders: folders, selfTiles: selfTiles)
+                    .overlay(alignment: .bottom) { statusRow }
             }
-        case .none:
-            grid(folders: folders, selfTiles: selfTiles)
-                .overlay(alignment: .bottom) { statusRow }
+        }
+        .overlay(alignment: .bottomLeading) {
+            // #offline-status — persistent connectivity pill on every
+            // browse level including loading/error (web sidebar-header
+            // parity — it never leaves the header).
+            OnlineStatusBadge()
+                .padding(.leading, 12).padding(.bottom, 14)
         }
     }
 
