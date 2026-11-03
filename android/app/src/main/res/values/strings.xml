@@ -38,6 +38,7 @@
     <string name="reader_spread_shift">見開きずらし</string>
     <string name="reader_tap_left_forward">タップ方向：左で進む</string>
     <string name="reader_tap_right_forward">タップ方向：右で進む</string>
+    <string name="reader_ext_display">外部ディスプレイに出力</string>
     <string name="back">戻る</string>
 
     <string name="settings_title">設定</string>
