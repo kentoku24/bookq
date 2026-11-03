@@ -4,6 +4,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -369,6 +371,68 @@ class PairDcTest {
         assertTrue(pcs[0].closed)
         assertEquals(2, pcs.size)
         assertEquals("offer", kindOf(signalsOf(sent).last()))
+    }
+
+    @Test fun dcDropRespinsSignaling() = runTest {
+        val fake = FakeTransport(); val creds = MemCreds()
+        val pcs = mutableListOf<FakePc>()
+        val store = newStore(this, fake, creds)
+        store.rtcFactory = { FakePc().also { pcs.add(it) } }
+        bindLeader(fake, store)
+        fake.emit(wire(state(rev = 1)))
+        waitForSent(fake, 2)                 // CREATE + offer
+        pcs[0].channels[0].fireOpen()
+        waitForSent(fake, 3)                 // TRANSPORT_STATE{up}
+        pcs[0].channels[0].close()           // mid-session dc drop
+        val sent = waitForSent(fake, 5)
+        assertEquals("down", (sent[3]["payload"] as JsonObject)["state"]
+            ?.jsonPrimitive?.content)
+        assertTrue(pcs[0].closed)            // old peer closed
+        assertEquals(2, pcs.size)            // fresh pc → fresh offer
+        assertEquals("offer", kindOf(sent[4]))
+    }
+
+    @Test fun followerEscalatesWhenLeaderNeverOffers() = runTest {
+        val fake = FakeTransport(); val creds = MemCreds()
+        val pcs = mutableListOf<FakePc>()
+        val store = newStore(this, fake, creds)
+        store.rtcFactory = { FakePc().also { pcs.add(it) } }
+        bindFollower(fake, store)
+        fake.emit(wire(state(rev = 1)))
+        delay(300)
+        assertEquals(1, pcs.size)            // waiting sig, no offer
+        assertTrue(signalsOf(decoded(fake.sent())).isEmpty())
+        advanceTimeBy(4_200)
+        runCurrent()
+        val sent = waitForSent(fake, 2)      // JOIN + escalated offer
+        assertEquals(2, pcs.size)            // fresh pc offered
+        assertEquals(1, pcs[1].channels.size)
+        assertEquals("offer", kindOf(signalsOf(sent).last()))
+    }
+
+    @Test fun escalatedFollowerYieldsToLeaderOffer() = runTest {
+        val fake = FakeTransport(); val creds = MemCreds()
+        val pcs = mutableListOf<FakePc>()
+        val store = newStore(this, fake, creds)
+        store.rtcFactory = { FakePc().also { pcs.add(it) } }
+        bindFollower(fake, store)
+        fake.emit(wire(state(rev = 1)))
+        advanceTimeBy(4_200)
+        runCurrent()
+        waitForSent(fake, 2)                 // escalated offer on pcs[1]
+        assertEquals(2, pcs.size)
+        // leader's own re-offer crosses ours → glare: yield and answer
+        fake.emit(wire(buildJsonObject {
+            put("v", 1); put("type", "SIGNAL"); put("sessionId", "s1")
+            put("from", "leader"); put("kind", "offer")
+            put("data", buildJsonObject {
+                put("type", "offer"); put("sdp", "leader-sdp") })
+        }))
+        val sent = waitForSent(fake, 3)
+        assertTrue(pcs[1].closed)            // stale escalated pc dropped
+        assertEquals(3, pcs.size)            // fresh waiting sig answered
+        assertEquals("answer", kindOf(signalsOf(sent).last()))
+        assertEquals("leader-sdp", pcs[2].remoteSdp?.sdp)
     }
 
     // MARK: - UI_SYNC

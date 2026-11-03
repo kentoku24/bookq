@@ -213,6 +213,8 @@ class PairStore(
     private var pc: RtcPeerConnection? = null
     private var dcChannel: RtcDataChannel? = null
     private var dcUp = false
+    private var dcEscalated = false
+    private var dcWatchJob: kotlinx.coroutines.Job? = null
     private var plane = "server-ws"             // server-confirmed plane
     private var lastRx = Long.MIN_VALUE
     private var attemptingResume = false
@@ -411,7 +413,9 @@ class PairStore(
             ch.onOpen = null; ch.onMessage = null; ch.onClose = null
             runCatching { ch.close() }
         }
-        dcChannel = null; dcUp = false; plane = "server-ws"
+        dcChannel = null; dcUp = false; dcEscalated = false
+        dcWatchJob?.cancel(); dcWatchJob = null
+        plane = "server-ws"
         _effPlane.value = "server-ws"
         val t = transport; transport = null
         if (t != null) scope.launch { t.close() }
@@ -444,9 +448,20 @@ class PairStore(
                 put("v", 1); put("type", "PONG")
                 put("seq", f["seq"] ?: JsonNull) })
             "PONG" -> Unit
-            "SIGNAL" -> sig?.applySignal(
-                (f["kind"] as? JsonPrimitive)?.content ?: "",
-                f["data"])
+            "SIGNAL" -> {
+                val kind = (f["kind"] as? JsonPrimitive)?.content ?: ""
+                if (kind == "offer") {
+                    dcWatchJob?.cancel(); dcWatchJob = null
+                    if (dcEscalated) {
+                        // glare — the leader also re-offered: yield to
+                        // its offer on a fresh waiting sig.
+                        sig?.close(); sig = null; pc = null
+                        dcEscalated = false
+                        maybeStartDcLocked()
+                    }
+                }
+                sig?.applySignal(kind, f["data"])
+            }
             "UI_SYNC" -> UiSync.parse(f)?.let { _uiSync.tryEmit(it) }
             "TRANSPORT_STATE" -> setPlaneLocked(
                 (f["dataPlane"] as? JsonPrimitive)?.content,
@@ -1031,15 +1046,16 @@ class PairStore(
     /** Web `_paired()` — the session carries both members. */
     private fun pairedEnoughLocked(): Boolean = _presence.value.size >= 2
 
-    private fun maybeStartDcLocked() {
+    private fun maybeStartDcLocked(escalated: Boolean = false) {
         val factory = rtcFactory ?: return
         if (_member.value == null || sig != null ||
             !pairedEnoughLocked()) return
         val conn = runCatching { factory() }.getOrNull() ?: return
         pc = conn
+        val initiator = role == PairRole.leader || escalated
         val peer = SignalingPeer(
             pc = conn, scope = scope,
-            initiator = role == PairRole.leader,
+            initiator = initiator,
             send = { kind, data ->
                 scope.launch {
                     lock.withLock {
@@ -1053,9 +1069,26 @@ class PairStore(
                     lock.withLock { attachDataChannelLocked(ch) }
                 }
             })
-        sig = peer
+        sig = peer; dcEscalated = escalated
         runCatching { peer.start() }.onFailure {
-            sig = null; pc = null
+            sig = null; pc = null; dcEscalated = false; return
+        }
+        // Stale-wait watchdog: the web reference never re-offers once
+        // its sig peer exists, so a follower that (re)joined after the
+        // leader's session spun up waits forever. If no offer lands in
+        // time, escalate — offer as initiator; the stale leader's
+        // existing pc answers and the channel re-forms on both ends.
+        if (!initiator) {
+            dcWatchJob = scope.launch {
+                delay(DC_OFFER_WATCH_MS)
+                lock.withLock {
+                    if (sig === peer && dcChannel == null &&
+                        _member.value != null && pairedEnoughLocked()) {
+                        sig = null; pc = null; dcEscalated = false
+                        maybeStartDcLocked(escalated = true)
+                    }
+                }
+            }
         }
     }
 
@@ -1066,6 +1099,8 @@ class PairStore(
         scope.launch {
             lock.withLock {
                 sig?.close(); sig = null; pc = null
+                dcEscalated = false
+                dcWatchJob?.cancel(); dcWatchJob = null
                 maybeStartDcLocked()
             }
         }
@@ -1079,6 +1114,7 @@ class PairStore(
                 runCatching { prev.close() }
             }
         }
+        dcWatchJob?.cancel(); dcWatchJob = null
         dcChannel = ch; dcUp = false
         ch.onOpen = {
             scope.launch { lock.withLock { markDcUpLocked() } }
@@ -1094,7 +1130,7 @@ class PairStore(
 
     private fun markDcUpLocked() {
         if (dcChannel == null || dcUp) return
-        dcUp = true
+        dcUp = true; dcEscalated = false
         ctlSendReq(envelope("TRANSPORT_STATE",
             buildJsonObject { put("state", "up") }))
         emitPlaneLocked()
@@ -1128,6 +1164,12 @@ class PairStore(
             ctlSendReq(envelope("TRANSPORT_STATE",
                 buildJsonObject { put("state", "down") }))
         }
+        // Mid-session drop → re-negotiate while the pair lives on ws:
+        // the leader re-offers; a follower waits briefly, then escalates
+        // to an offer itself to kick a stale leader (web exposes this
+        // only as the manual restartDataChannel API).
+        sig?.close(); sig = null; pc = null; dcEscalated = false
+        maybeStartDcLocked()
     }
 
     private fun setPlaneLocked(p: String?, rev: Int?) {
@@ -1186,5 +1228,13 @@ class PairStore(
                 _status.value = UiStatus.Idle
             }
         }
+    }
+
+    private companion object {
+        /* How long a non-initiator sig waits for an offer before the
+         * follower escalates to initiating — the web leader never
+         * re-offers while its (possibly stale) sig peer exists, so
+         * without this a rejoining follower could wait forever. */
+        const val DC_OFFER_WATCH_MS = 4_000L
     }
 }
