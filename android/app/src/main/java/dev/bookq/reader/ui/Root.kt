@@ -27,6 +27,7 @@ import dev.bookq.reader.AppPhase
 import dev.bookq.reader.R
 import dev.bookq.reader.nav.Routes
 import dev.bookq.reader.ui.browse.BrowseScreen
+import dev.bookq.reader.ui.reader.ReaderScreen
 
 /** Phase router: onboarding → booting → login / library. */
 @Composable
@@ -89,7 +90,7 @@ private fun ReadyNavHost(graph: AppGraph) {
         }
         composable<Routes.Reader> { entry ->
             val route = entry.toRoute<Routes.Reader>()
-            ReaderStubScreen(
+            ReaderScreen(
                 graph = graph,
                 nav = nav,
                 folder = route.folder,
