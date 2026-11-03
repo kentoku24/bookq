@@ -380,6 +380,7 @@ private fun BrowseBody(
             withTimeoutOrNull(1_500) { withFrameNanos {} }
         }
         act?.reportFullyDrawn()
+        PerfTunables.fullyDrawnReported = true
         PerfTunables.mark("fullyDrawn")
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||

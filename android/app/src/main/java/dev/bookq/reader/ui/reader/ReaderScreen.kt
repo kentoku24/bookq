@@ -680,8 +680,12 @@ private fun ReaderBody(
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
             HorizontalPager(
                 state = pager,
+                // A/B on CP08-J1 (swipeTurn CPU p99 / overrun p50):
+                //   0→15.8/2.3  1→14.2/2.1  2→12.1/1.7 — deeper
+                //   pre-composition wins: the swipe animates already-
+                //   built layers instead of composing mid-gesture.
                 beyondViewportPageCount =
-                    PerfTunables.beyondViewportPageCount ?: 1,
+                    PerfTunables.beyondViewportPageCount ?: 2,
                 // Zoomed → the zoom layer owns one-finger drags.
                 userScrollEnabled = !zoomedNow,
                 modifier = Modifier
@@ -877,6 +881,7 @@ private fun SpreadCell(
     val pages = work.spreads.getOrNull(spreadIdx) ?: return
     val ars by controller.pageAR.collectAsStateWithLifecycle()
     val density = LocalDensity.current
+    val act = LocalContext.current as? android.app.Activity
     val (fitW, fitH) = remember(pages, ars, viewW, viewH) {
         ReaderWork.spreadFit(pages.map { ars[it] ?: controller.lastAR },
             GAP_INNER_PX, viewW, viewH)
@@ -885,10 +890,19 @@ private fun SpreadCell(
         Modifier
             .fillMaxSize()
             // Perf gate: the target spread's first drawn frame ends
-            // bookq.pageTurn (and any open bookq.readerOpen).
+            // bookq.pageTurn (and any open bookq.readerOpen). A start
+            // that lands in the reader (task-resume nav restore) never
+            // composes BrowseScreen, so the first spread draw is also
+            // the TTFD marker — reportFullyDrawn is one-shot per
+            // process via PerfTunables.fullyDrawnReported.
             .drawWithContent {
                 drawContent()
                 PerfTrace.onSpreadDrawn(spreadIdx)
+                if (!PerfTunables.fullyDrawnReported) {
+                    PerfTunables.fullyDrawnReported = true
+                    act?.reportFullyDrawn()
+                    PerfTunables.mark("fullyDrawn.reader")
+                }
             },
         contentAlignment = Alignment.Center,
     ) {

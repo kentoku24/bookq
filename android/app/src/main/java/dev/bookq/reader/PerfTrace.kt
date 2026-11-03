@@ -81,6 +81,12 @@ object PerfTunables {
     /** Process-uptime anchor for cold-start phase logging (ms). */
     @Volatile var bootT0: Long = 0L
 
+    /** Set once reportFullyDrawn fires — BrowseScreen reports on first
+     *  grid draw; a start that lands in the reader (task-resume nav
+     *  restore) reports on first spread draw instead, so TTFD has a
+     *  marker on either surface. */
+    @Volatile var fullyDrawnReported: Boolean = false
+
     /** `PerfBoot` logcat marker: `bookq.boot <tag> t=<ms-since-onCreate>`.
      *  Measurement builds only — never logs in release, and no-ops on
      *  JVM unit tests where android.util.Log is unmocked. */

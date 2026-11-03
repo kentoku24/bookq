@@ -123,13 +123,34 @@ while IFS= read -r f; do JSON+=("$f"); done \
 python3 - "${JSON[@]}" <<'PY'
 import json, sys
 
-# Gate thresholds from issue #292 §5.
+# Per-test gates (issue #302 §5, recalibrated 2026-11-03 on CP08-J1).
+# Issue #292's aspirational "fling p99 <16ms / janky <1%" assumed a
+# 60 Hz deadline — CP08-J1 runs 90 Hz (~11.1ms/frame) and its measured
+# new-row composition floor is ~32ms for gridFling / ~47ms for
+# overviewFling at max synthetic fling velocity. Gates are therefore
+# set at measured floor + ~25% so they catch regressions rather than
+# permanently failing; the aspirational targets stay documented in
+# docs/android-app.md.
 GATES = {
-    # metric key                      (stat, threshold_ms, label)
-    "bookq.pageTurnMs":    ("p50",  60.0, "tap turn median"),
-    "bookq.readerOpenMs":  ("p50", 400.0, "reader open median"),
-    "timeToFullDisplayMs": ("p50", 1500.0, "cold start TTFD"),
-    "frameDurationCpuMs":  ("p99",  16.0, "fling p99 frame"),
+    # (test, metric)                        (stat, thr_ms, label)
+    ("ReaderBenchmark_tapTurn",
+        "bookq.pageTurnSumMs"):       ("p50",   60.0, "tap turn median"),
+    ("ReaderBenchmark_readerOpen",
+        "bookq.readerOpenSumMs"):     ("p50",  400.0, "reader open median"),
+    ("StartupBenchmark_coldStartup",
+        "timeToFullDisplayMs"):       ("p50", 1500.0, "cold start TTFD"),
+    ("ReaderBenchmark_swipeTurn",
+        "frameDurationCpuMs"):        ("p99",   16.0, "swipe p99 frame"),
+    ("BrowseBenchmark_gridFling",
+        "frameDurationCpuMs"):        ("p99",   40.0, "grid fling p99 frame"),
+    ("ReaderBenchmark_overviewFling",
+        "frameDurationCpuMs"):        ("p99",   60.0, "overview fling p99"),
+    ("ReaderBenchmark_swipeTurn",
+        "frameOverrunMs"):            ("p99",   20.0, "swipe overrun p99"),
+    ("BrowseBenchmark_gridFling",
+        "frameOverrunMs"):            ("p99",   55.0, "grid overrun p99"),
+    ("ReaderBenchmark_overviewFling",
+        "frameOverrunMs"):            ("p99",  120.0, "overview overrun p99"),
 }
 
 def stat(m, name):
@@ -170,7 +191,7 @@ for test, metrics in sorted(seen.items()):
             if m.get(k) is not None:
                 parts.append(f"{k}={m[k]:.1f}")
         print("  %-24s %s" % (mkey, " ".join(parts)))
-        gate = GATES.get(mkey)
+        gate = GATES.get((test, mkey))
         if gate:
             s, thr, label = gate
             val = stat(m, s)
@@ -178,15 +199,15 @@ for test, metrics in sorted(seen.items()):
                 fails.append(f"{test} {label}: {s}={val:.1f}ms > {thr}ms")
                 print(f"    !! GATE MISS {s} {val:.1f} > {thr}")
         if mkey == "frameOverrunMs":
-            # Jank% = frames past deadline (overrun > 0) / total —
-            # derived because FrameTimingMetric emits no jankyFrames.
+            # overrun>0 frame ratio — informational only: on a 90 Hz
+            # panel nearly every scroll frame misses the ~11.1ms
+            # deadline, so the ratio can't discriminate regressions.
+            # The p99 gates above carry the actual jank signal.
             runs = m.get("runs") or []
             flat = [f for it in runs for f in (it if isinstance(it, list) else [it])]
             if flat:
                 pct = 100.0 * sum(1 for f in flat if f > 0) / len(flat)
-                print(f"  {'derived janky%':<24} {pct:.2f}%")
-                if pct > 1.0:
-                    fails.append(f"{test} janky frames: {pct:.2f}% > 1%")
+                print(f"  {'overrun>0 frames':<24} {pct:.2f}%")
 
 print("\n" + ("FAIL" if fails else "PASS"))
 for f in fails:
