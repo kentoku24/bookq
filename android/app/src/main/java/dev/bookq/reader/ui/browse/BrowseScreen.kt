@@ -63,7 +63,17 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.core.content.ContextCompat
 import coil3.request.ImageRequest
+import dev.bookq.core.offline.OfflineRules
+import dev.bookq.data.offline.WorkRecord
+import dev.bookq.reader.offline.OfflineManager
+import dev.bookq.reader.ui.offline.OfflineBadge
 import dev.bookq.core.browse.BrowseRules
 import dev.bookq.core.browse.LevelModel
 import dev.bookq.core.browse.ScrollDecider
@@ -138,6 +148,69 @@ private fun BrowseBody(
     var filterActive by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
+
+    // ── offline downloads (M5) ──
+    val originalImages by graph.settings.originalImages.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val quotaFailMsg = stringResource(R.string.offline_quota_fail)
+    var quotaPrompt by remember { mutableStateOf<Pair<String, WorkRecord>?>(null) }
+    // POST_NOTIFICATIONS on first download (API 33+); denial never blocks.
+    var pendingDownload by remember { mutableStateOf<String?>(null) }
+    val notifPerm = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { pendingDownload?.let { f ->
+        coroutineScope.launch { startDownload(scope, f, originalImages, onQuota = { quotaPrompt = f to it }) }
+    }; pendingDownload = null }
+
+    fun startDownloadFlow(folder: String) {
+        pendingDownload = folder
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED) {
+            notifPerm.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            coroutineScope.launch {
+                startDownload(scope, folder, originalImages,
+                    onQuota = { quotaPrompt = folder to it })
+            }
+            pendingDownload = null
+        }
+    }
+
+    LaunchedEffect(scope) {
+        scope.offline.quotaEvents.collect { folder ->
+            scope.offline.evictablePreview()?.let { quotaPrompt = folder to it }
+        }
+    }
+
+    if (quotaPrompt != null) {
+        val (folder, victim) = quotaPrompt!!
+        AlertDialog(
+            onDismissRequest = { quotaPrompt = null },
+            title = { Text(stringResource(R.string.offline_quota_title)) },
+            text = {
+                Text(stringResource(R.string.offline_quota_body,
+                    victim.folder, OfflineRules.fmt(victim.bytes)))
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    quotaPrompt = null
+                    coroutineScope.launch {
+                        when (scope.offline.evictAndRetry(folder, originalImages)) {
+                            is OfflineManager.RequestResult.Rejected ->
+                                snackbar.showSnackbar(quotaFailMsg)
+                            else -> Unit
+                        }
+                    }
+                }) { Text(stringResource(R.string.offline_quota_ok)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { quotaPrompt = null }) {
+                    Text(stringResource(R.string.settings_cancel))
+                }
+            },
+        )
+    }
 
     // Item derivation — visibility version + progress version are the
     // recompute triggers (their mutations bump the ticks).
@@ -235,7 +308,6 @@ private fun BrowseBody(
 
     val density = LocalDensity.current.density
     val coverW = coverWidth(density)
-    val context = LocalContext.current
 
     // Visible-first cover prefetch — fires only once the scroll settles
     // (web: idle-scheduled, ≤50, never mid-gesture). Coil dedupes memory-
@@ -426,10 +498,14 @@ private fun BrowseBody(
                         CircularProgressIndicator()
                     }
                     else -> when (layout) {
-                        BrowseLayout.LIST -> BrowseList(items, listState, book, scope, coverW, ::tap)
+                        BrowseLayout.LIST -> BrowseList(
+                            items, listState, book, scope, coverW, ::tap,
+                            badge = { OfflineBadgeFor(it, scope) { f -> startDownloadFlow(f) } },
+                        )
                         else -> BrowseGrid(
                             items, gridState, book, scope, coverW,
                             card = layout == BrowseLayout.CARD, onTap = ::tap,
+                            badge = { OfflineBadgeFor(it, scope) { f -> startDownloadFlow(f) } },
                         )
                     }
                 }
@@ -459,6 +535,7 @@ private fun BrowseGrid(
     coverW: Int,
     card: Boolean,
     onTap: (LevelModel.Item) -> Unit,
+    badge: @Composable (LevelModel.Item) -> Unit,
 ) {
     val minWidth = if (card) 240.dp else 140.dp
     LazyVerticalGrid(
@@ -483,6 +560,7 @@ private fun BrowseGrid(
                         coverW = if (card) 400 else coverW,
                         modifier = Modifier.fillMaxSize(),
                     )
+                    Box(Modifier.align(Alignment.TopEnd).padding(6.dp)) { badge(item) }
                 }
                 Row(
                     Modifier.fillMaxWidth().padding(8.dp),
@@ -524,6 +602,7 @@ private fun BrowseList(
     scope: ServerScope,
     coverW: Int,
     onTap: (LevelModel.Item) -> Unit,
+    badge: @Composable (LevelModel.Item) -> Unit,
 ) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         itemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
@@ -548,6 +627,7 @@ private fun BrowseList(
                             )
                         }
                     }
+                    badge(item)
                     Spacer(Modifier.width(12.dp))
                     Box(Modifier.size(48.dp)) {
                         CoverImage(
@@ -571,3 +651,59 @@ private fun itemKey(item: LevelModel.Item): String =
         is LevelModel.Item.ReadSelf -> "self:${item.path}"
         is LevelModel.Item.Folder -> "dir:${item.path}"
     }
+
+/** Per-tile badge host — collects the manager's flows so badge/pct/menu
+ *  recompose on record/transient changes. */
+@Composable
+private fun OfflineBadgeFor(
+    item: LevelModel.Item,
+    scope: ServerScope,
+    onStart: (String) -> Unit,
+) {
+    val records by scope.offline.records.collectAsStateWithLifecycle()
+    val trans by scope.offline.transient.collectAsStateWithLifecycle()
+    val cs = rememberCoroutineScope()
+    val offline = scope.offline
+    val t = trans[item.path] ?: OfflineManager.Transient()
+    val state = OfflineRules.btnState(
+        folder = item.path,
+        leaves = offline.leavesOf(item.path),
+        recordOf = { f -> records[f]?.let { OfflineRules.LeafState(it.pageCount, it.cachedCount) } },
+        confirmArmed = t.confirmUntil > System.currentTimeMillis(),
+        deleting = t.deleting, stopping = t.stopping,
+        downloading = t.downloading, listing = t.listing,
+    )
+    val pct = if (t.downloading && t.progressTotal > 0) {
+        t.progressDone.toFloat() / t.progressTotal
+    } else {
+        OfflineRules.partialProgress(offline.leavesOf(item.path)) { f ->
+            records[f]?.let { OfflineRules.LeafState(it.pageCount, it.cachedCount) }
+        }.pct
+    }
+    OfflineBadge(
+        state = state,
+        pct = pct,
+        partial = offline.partialProgress(item.path),
+        tag = "offline:${item.path}",
+        onIdle = { onStart(item.path) },
+        onStop = { offline.stop(item.path) },
+        onConfirmDelete = {
+            if (offline.onBadgeTap(item.path, item.node)
+                    is OfflineManager.TapResult.Delete) {
+                cs.launch { offline.delete(item.path) }
+            }
+        },
+        onContinue = { onStart(item.path) },
+        onPartialDelete = { cs.launch { offline.delete(item.path) } },
+    )
+}
+
+private suspend fun startDownload(
+    scope: ServerScope,
+    folder: String,
+    original: Boolean,
+    onQuota: (WorkRecord) -> Unit,
+) {
+    val r = scope.offline.requestDownload(folder, original)
+    if (r is OfflineManager.RequestResult.NeedsEviction) onQuota(r.victim)
+}

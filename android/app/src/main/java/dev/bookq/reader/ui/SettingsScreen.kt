@@ -93,6 +93,53 @@ fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
             ) { scope.launch { settings.setOriginalImages(it) } }
             HorizontalDivider()
 
+            // オフライン保存 (M5)
+            val scopeState by graph.serverScope.collectAsStateWithLifecycle()
+            val offline = scopeState?.offline
+            if (offline != null) {
+                val records by offline.records.collectAsStateWithLifecycle()
+                val (works, bytes) = records.let { offline.stats() }
+                var clearConfirm by remember { mutableStateOf(false) }
+                SectionHeader(stringResource(R.string.settings_offline))
+                SettingRow(
+                    title = stringResource(R.string.settings_offline),
+                    subtitle = if (works > 0) {
+                        stringResource(R.string.settings_offline_summary,
+                            works, dev.bookq.core.offline.OfflineRules.fmt(bytes))
+                    } else {
+                        stringResource(R.string.settings_offline_empty)
+                    },
+                    onClick = {},
+                )
+                if (works > 0) {
+                    TextButton(
+                        onClick = { clearConfirm = true },
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    ) {
+                        Text(stringResource(R.string.settings_offline_clear),
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                if (clearConfirm) {
+                    AlertDialog(
+                        onDismissRequest = { clearConfirm = false },
+                        text = { Text(stringResource(R.string.settings_offline_clear_confirm)) },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                clearConfirm = false
+                                scope.launch { offline.clearAll() }
+                            }) { Text(stringResource(R.string.settings_offline_clear)) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { clearConfirm = false }) {
+                                Text(stringResource(R.string.settings_cancel))
+                            }
+                        },
+                    )
+                }
+                HorizontalDivider()
+            }
+
             // 表示
             SectionHeader(stringResource(R.string.settings_browse_layout))
             SingleChoiceSegmentedButtonRow(

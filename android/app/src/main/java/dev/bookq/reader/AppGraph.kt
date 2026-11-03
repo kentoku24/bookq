@@ -29,6 +29,9 @@ class AppGraph(app: Application) {
 
     val settings: AppSettings = AppConfig(app, scope)
 
+    /** Connectivity watch → the amber offline banner (web ●online parity). */
+    val online = dev.bookq.data.offline.OnlineStatus(app).also { it.start() }
+
     val auth = AuthManager(
         store = KeystoreTokenStore(app),
         pendingStore = FilePendingLoginStore(app),

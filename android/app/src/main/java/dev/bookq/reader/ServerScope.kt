@@ -36,6 +36,12 @@ class ServerScope(
 ) {
     private val stateDir = File(context.filesDir, "state")
 
+    private val scopeKey = ScopedFiles.key(host, email)
+
+    /** Authed client for raw page fetches (the download worker uses it —
+     *  Coil got its own reference at build time). */
+    val mediaClient: OkHttpClient = mediaClient
+
     /** Repo jobs die with the scope — not on screen teardown. IO-bound:
      *  inherits the parent's job but runs on Dispatchers.IO so
      *  decode/Retry-After sleeps never touch the main thread. */
@@ -61,6 +67,19 @@ class ServerScope(
         scope = ioScope,
         store = ProgressRepository.FileStoreIO(
             stateDir, ScopedFiles.key(host, email)),
+    )
+
+    /** Offline downloads — JSON records + page files under
+     *  `filesDir/offline/<scope>/`, badge state machine, WorkManager
+     *  orchestration, local-first read path. */
+    val offline = dev.bookq.reader.offline.OfflineManager(
+        context = context,
+        scope = ioScope,
+        api = api,
+        store = dev.bookq.data.offline.OfflineStore(
+            filesDir = context.filesDir, scopeKey = scopeKey),
+        scopeKey = scopeKey,
+        roots = { tree.state.value.nodes },
     )
 
     /** Coil with the authed client — `/thumb/` needs the same Bearer. */

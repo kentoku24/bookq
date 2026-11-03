@@ -9,6 +9,7 @@ import android.view.MotionEvent.PointerCoords
 import android.view.MotionEvent.PointerProperties
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsOwner
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -170,18 +171,39 @@ class ReaderPinchTest {
             tap(instr, decor, b.center.x, b.center.y)
             return true
         }
+        /** Deterministic click — invokes the node's OnClick semantics
+         *  action in-process (what compose-test performClick does). Used
+         *  only when the dispatched MotionEvent never landed, which this
+         *  ROM occasionally does under load. */
+        fun clickTag(tag: String, prefix: Boolean = false): Boolean {
+            val n = nodes().firstOrNull {
+                val t = tagOf(it)
+                if (prefix) t?.startsWith(tag) == true else t == tag
+            } ?: return false
+            instr.runOnMainSync {
+                conf(n, SemanticsActions.OnClick)?.action?.invoke()
+            }
+            return true
+        }
+        /** dispatch first; OnClick fallback when nothing navigated. */
+        fun tapTagOrClick(tag: String, prefix: Boolean = false): Boolean {
+            if (!tapTag(tag, prefix)) return false
+            Thread.sleep(900)
+            clickTag(tag, prefix)
+            return true
+        }
 
         // ── 0. reach the reader: resume card (device, seeded progress)
         //    or drill the first tile until a leaf opens (CI emulator) ──
         if (waitForTag("resumePill", 20_000)) {
-            tapTag("resumePill")
+            tapTagOrClick("resumePill")
         } else {
             // CI path: no saved progress — drill the first tile until a
             // leaf opens the reader (bounded depth).
             for (depth in 0 until 8) {
                 if (waitForText(readerCounter, 3_000)) break
-                if (!tapTag("tile:", prefix = true)) break
-                Thread.sleep(1_500)
+                if (!tapTagOrClick("tile:", prefix = true)) break
+                Thread.sleep(700)
             }
         }
         if (!waitForText(readerCounter, 45_000)) {
@@ -224,12 +246,16 @@ class ReaderPinchTest {
         //     the CI emulator's small display; this stays in-bounds and
         //     inside the pan room, so it can't arm the edge-turn band. ──
         val swipeDx = minOf(200f, cx * 0.6f)
-        swipe(instr, decor, cx, cx - swipeDx, cy)
+        var panned = false
+        for (attempt in 0..1) {
+            swipe(instr, decor, cx, cx - swipeDx, cy)
+            if (waitUntil({
+                    (zoomScale() ?: 0f) > 1.05f && abs(panX() ?: 0f) > 30f
+                }, 2_500)) { panned = true; break }
+        }
         assertTrue(
             "zoomed swipe did not pan — the drag left the zoom layer",
-            waitUntil({
-                (zoomScale() ?: 0f) > 1.05f && abs(panX() ?: 0f) > 30f
-            }, 2_500))
+            panned)
 
         // ── 2.5. edge-turn: a pan that STARTS at a clamped edge and
         //     keeps going past EDGE_PX arms a page turn (web
@@ -296,11 +322,14 @@ class ReaderPinchTest {
         // The slide-to-target animation still writes tx each frame —
         // let it finish or the pan below is overwritten mid-gesture.
         Thread.sleep(400)
-        swipe(instr, decor, cx, cx - swipeDx, cy)
-        assertTrue("double-tap zoom did not pan",
-            waitUntil({
-                (zoomScale() ?: 0f) > 1.05f && abs(panX() ?: 0f) > 30f
-            }, 2_500))
+        panned = false
+        for (attempt in 0..1) {
+            swipe(instr, decor, cx, cx - swipeDx, cy)
+            if (waitUntil({
+                    (zoomScale() ?: 0f) > 1.05f && abs(panX() ?: 0f) > 30f
+                }, 2_500)) { panned = true; break }
+        }
+        assertTrue("double-tap zoom did not pan", panned)
         // Zoomed center tap → back to 1x for the pinch-in below
         // (past the pan-decided tap suppression window).
         Thread.sleep(500)

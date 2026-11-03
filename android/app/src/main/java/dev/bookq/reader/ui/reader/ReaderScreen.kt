@@ -165,7 +165,8 @@ fun ReaderScreen(
                 sc.tree.state.first { it.treeLoaded }
             }
             controller.open(folder, page, sc.tree.state.value.nodes,
-                { f -> sc.api.images(f) }, viewW, viewH)
+                { f -> sc.offline.imageLister(f) }, viewW, viewH)
+            sc.offline.touchRead(folder)
         }
 
         when (val l = load) {
@@ -417,9 +418,10 @@ private fun ReaderBody(
         zs.box = ZoomBox.centered(fw, fh, viewW, viewH)
     }
 
-    fun pageUrl(globalIdx: Int): String {
+    /** Local-first: the downloaded file when present, else /view|/image. */
+    fun pageData(globalIdx: Int): Any {
         val p = work.images[globalIdx]
-        return sc.api.pageUrl(p.folder, p.name, original).toString()
+        return sc.offline.pageData(p.folder, p.name, original)
     }
 
     // Commit on settle — navigation.js: the deferred finalize runs only
@@ -483,7 +485,7 @@ private fun ReaderBody(
                 if (!fetched.add(i)) continue
                 inflight += sc.imageLoader.enqueue(
                     ImageRequest.Builder(context)
-                        .data(pageUrl(i))
+                        .data(pageData(i))
                         .size(viewW.roundToInt(), viewH.roundToInt())
                         .memoryCachePolicy(coil3.request.CachePolicy.DISABLED)
                         .build())
@@ -622,7 +624,7 @@ private fun ReaderBody(
                     controller = controller,
                     viewW = viewW,
                     viewH = viewH,
-                    urlOf = ::pageUrl,
+                    urlOf = ::pageData,
                     imageLoader = sc.imageLoader,
                     onError = { controller.recordError(it) },
                 )
@@ -750,6 +752,7 @@ private fun ReaderBody(
                 work = work,
                 currentIdx = curGlobalIdx(),
                 api = sc.api,
+                offline = sc.offline,
                 imageLoader = sc.imageLoader,
                 onJump = ::exitOverview,
                 onClose = { exitOverview(curGlobalIdx()) },
@@ -770,7 +773,7 @@ private fun SpreadCell(
     controller: ReaderController,
     viewW: Float,
     viewH: Float,
-    urlOf: (Int) -> String,
+    urlOf: (Int) -> Any,
     imageLoader: coil3.ImageLoader,
     onError: (Int) -> Unit,
 ) {
@@ -791,7 +794,7 @@ private fun SpreadCell(
                 val h = with(density) { fitH.toDp() }
                 PageCell(
                     globalIdx = idx,
-                    url = urlOf(idx),
+                    data = urlOf(idx),
                     width = w,
                     height = h,
                     imageLoader = imageLoader,
@@ -810,7 +813,7 @@ private fun SpreadCell(
 @Composable
 private fun PageCell(
     globalIdx: Int,
-    url: String,
+    data: Any,
     width: androidx.compose.ui.unit.Dp,
     height: androidx.compose.ui.unit.Dp,
     imageLoader: coil3.ImageLoader,
@@ -821,7 +824,7 @@ private fun PageCell(
     onError: () -> Unit,
 ) {
     val context = LocalContext.current
-    val request = remember(url) { ImageRequest.Builder(context).data(url).build() }
+    val request = remember(data) { ImageRequest.Builder(context).data(data).build() }
     Box(
         Modifier.width(width).height(height).background(Color(0xFF161616)),
         contentAlignment = Alignment.Center,

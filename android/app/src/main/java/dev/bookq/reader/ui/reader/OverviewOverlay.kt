@@ -99,6 +99,7 @@ fun OverviewOverlay(
     work: ReaderWork,
     currentIdx: Int,
     api: BookqApi,
+    offline: dev.bookq.reader.offline.OfflineManager,
     imageLoader: ImageLoader,
     onJump: (Int) -> Unit,
     onClose: () -> Unit,
@@ -246,6 +247,7 @@ fun OverviewOverlay(
                 flat = flat,
                 curKey = curKey,
                 api = api,
+                offline = offline,
                 imageLoader = imageLoader,
                 gridState = gridState,
                 attachImage = if (huge) {
@@ -267,6 +269,7 @@ private fun OverviewGrid(
     flat: List<Pair<Boolean, Int>>,
     curKey: Int,
     api: BookqApi,
+    offline: dev.bookq.reader.offline.OfflineManager,
     imageLoader: ImageLoader,
     gridState: LazyGridState,
     attachImage: ((Int) -> Boolean)?,
@@ -375,6 +378,7 @@ private fun OverviewGrid(
                         isCur = start + l == curKey,
                         attachImage = attachImage?.invoke(start + l) ?: true,
                         api = api,
+                        offline = offline,
                         imageLoader = imageLoader,
                         onJump = onJump,
                     )
@@ -391,6 +395,7 @@ private fun OverviewCell(
     isCur: Boolean,
     attachImage: Boolean,
     api: BookqApi,
+    offline: dev.bookq.reader.offline.OfflineManager,
     imageLoader: ImageLoader,
     onJump: (Int) -> Unit,
 ) {
@@ -398,7 +403,7 @@ private fun OverviewCell(
     val im = work.images[g]
     val request = remember(im) {
         ImageRequest.Builder(context)
-            .data(api.thumbUrl(im.folder, im.name, THUMB_W).toString())
+            .data(offline.thumbData(im.folder, im.name, THUMB_W))
             .build()
     }
     val info = work.chapterInfo(g)

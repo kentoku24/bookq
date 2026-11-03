@@ -15,8 +15,9 @@ object ScopedFiles {
     fun key(host: String, email: String?): String =
         if (email.isNullOrEmpty()) host else "$host|$email"
 
-    /** Safe file name for a scope key — readable prefix + 8-hex sha1 tail. */
-    fun fileName(prefix: String, scopeKey: String): String {
+    /** Scope-key as a safe single path segment — readable prefix + 8-hex
+     *  sha1 tail, same scheme as [fileName] minus the extension. */
+    fun segment(scopeKey: String): String {
         val readable = scopeKey
             .map { if (it.isLetterOrDigit() || it == '-' || it == '_' || it == '.') it else '_' }
             .joinToString("")
@@ -25,8 +26,12 @@ object ScopedFiles {
             .digest(scopeKey.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
             .take(8)
-        return "$prefix-$readable-$digest.json"
+        return "$readable-$digest"
     }
+
+    /** Safe file name for a scope key — readable prefix + 8-hex sha1 tail. */
+    fun fileName(prefix: String, scopeKey: String): String =
+        "$prefix-${segment(scopeKey)}.json"
 
     /** Write `text` to `file` atomically (tmp + rename) — works on JVM and
      *  Android without pulling in androidx AtomicFile. */
