@@ -710,6 +710,10 @@ private fun ReaderBody(
                     urlOf = ::pageData,
                     imageLoader = sc.imageLoader,
                     onError = { controller.recordError(it) },
+                    isSettled = {
+                        !pager.isScrollInProgress &&
+                            pager.settledPage == spreadIdx
+                    },
                 )
             }
         }
@@ -877,6 +881,10 @@ private fun SpreadCell(
     urlOf: (Int) -> Any,
     imageLoader: coil3.ImageLoader,
     onError: (Int) -> Unit,
+    /** True only when this spread is the pager's settled current page —
+     *  evaluated inside the draw pass so its state reads subscribe the
+     *  draw node (settle → redraw → PerfTrace closes the section). */
+    isSettled: () -> Boolean,
 ) {
     val pages = work.spreads.getOrNull(spreadIdx) ?: return
     val ars by controller.pageAR.collectAsStateWithLifecycle()
@@ -897,7 +905,7 @@ private fun SpreadCell(
             // process via PerfTunables.fullyDrawnReported.
             .drawWithContent {
                 drawContent()
-                PerfTrace.onSpreadDrawn(spreadIdx)
+                PerfTrace.onSpreadDrawn(spreadIdx, isSettled())
                 if (!PerfTunables.fullyDrawnReported) {
                     PerfTunables.fullyDrawnReported = true
                     act?.reportFullyDrawn()

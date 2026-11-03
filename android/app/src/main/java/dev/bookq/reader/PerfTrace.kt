@@ -39,9 +39,13 @@ object PerfTrace {
         readerOpenOpen = true
     }
 
-    /** Spread cell's first draw: closes the open reader-open section on
-     *  any spread, and the page-turn section only on its target. */
-    fun onSpreadDrawn(spreadIdx: Int) {
+    /** Spread cell's draw: closes the open reader-open / page-turn
+     *  section only when the drawn spread is the SETTLED page. A
+     *  beyondViewport-precomposed cell can draw while still off-screen
+     *  mid-gesture — closing there would end the section before the
+     *  spread is visible, understating the measured turn. */
+    fun onSpreadDrawn(spreadIdx: Int, settled: Boolean) {
+        if (!settled) return
         if (pageTurnOpen && spreadIdx == pageTurnTarget) {
             Trace.endSection()
             pageTurnOpen = false
