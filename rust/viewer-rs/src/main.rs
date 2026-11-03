@@ -48,9 +48,9 @@ struct Upstream {
 /// test mode, `BOOKQ_RS_NATIVE` is a comma-separated list of endpoint ids
 /// (`positions`, `visibility`, `image`, `tree`, …); `all`/`1`/`true`/`*`
 /// enables the full native surface. Anything not enabled, plus any
-/// request we cannot positively identify (session cookie, missing/bad
-/// Bearer), falls through to upstream — production rollout is per
-/// endpoint via config only.
+/// request we cannot positively identify (no verifiable session cookie,
+/// missing/bad Bearer), falls through to upstream — production rollout
+/// is per endpoint via config only.
 pub(crate) struct Native {
     pub(crate) test_mode: bool,
     all: bool,
@@ -100,8 +100,11 @@ pub(crate) struct AppState {
     pub(crate) positions: std::sync::Arc<state::Positions>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
-    /// `SECRET_KEY` — needed for the visibility owner HMAC.
+    /// `SECRET_KEY` — Bearer JWT verify + visibility owner HMAC.
     pub(crate) secret_key: String,
+    /// Session-cookie signing key derived once from `secret_key` (`None`
+    /// on empty — the fail-closed guard shared by HTTP and WS auth).
+    pub(crate) session_key: Option<auth::SessionKey>,
     /// M7: shared thumb-cache root (`BOOKQ_THUMB_CACHE_DIR`).
     pub(crate) thumb_cache: PathBuf,
     /// `BOOKQ_GIT_SHA` / `BOOKQ_BUILD_DATE` — `/api/v1/version` fields.
@@ -191,19 +194,55 @@ async fn proxy(st: &Upstream, mut req: Request<Body>) -> Response {
     forward(req, st).await
 }
 
-/// Resolve the caller for a native route: unidentified requests (session
-/// cookie present, no/invalid Bearer) always proxy upstream, which applies
-/// its own cookie → Bearer → 401 chain.
+/// Resolve the caller for a native route: unidentified requests (no
+/// verifiable session cookie, no/invalid Bearer) always proxy upstream,
+/// which applies its own cookie → Bearer → 401 chain.
 fn caller_or_proxy(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
     match auth::resolve(
         headers,
         st.native.test_mode,
         &st.secret_key,
+        st.session_key.as_ref(),
         &st.allowed_emails,
     ) {
         auth::Caller::User(u) => Some(u),
         auth::Caller::Delegate => None,
     }
+}
+
+/// `Vary` already lists `Cookie` (case-insensitive, comma-separated).
+fn vary_lists_cookie(h: &axum::http::HeaderMap) -> bool {
+    h.get_all(header::VARY).iter().any(|v| {
+        v.to_str()
+            .unwrap_or("")
+            .split(',')
+            .any(|p| p.trim().eq_ignore_ascii_case("cookie"))
+    })
+}
+
+/// `Vary: Cookie` parity with starlette's SessionMiddleware: it appends
+/// the header to every response when the request's session cookie loaded
+/// (valid signature, any payload). Now that cookie-authenticated
+/// requests are served natively, a shared HTTP cache must still key on
+/// the cookie or one user's cached page could answer another's — this
+/// matters most once per-user surfaces (positions, visibility, search)
+/// are enabled. Proxied responses carry upstream's own Vary, which
+/// `vary_lists_cookie` dedupes.
+async fn vary_session_cookie(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let signed = !matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Absent
+    );
+    let mut res = next.run(req).await;
+    if signed && !vary_lists_cookie(res.headers()) {
+        res.headers_mut()
+            .append(header::VARY, HeaderValue::from_static("Cookie"));
+    }
+    res
 }
 
 /// `/api/v1/reading-positions` — M4: per-folder LWW + tombstones, fully
@@ -439,8 +478,8 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
-/// for plain files and ZIP/CBZ/EPUB entries (M7 completes the surface).
-/// PDF pages, RAR/CBR entries and multi-range requests proxy upstream.
+/// for plain files and ZIP/CBZ/EPUB/RAR/CBR entries.
+/// PDF pages and multi-range requests proxy upstream.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
@@ -472,7 +511,8 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/thumb/{*path}` — v1 contract path. Native answers validation, the
-/// 304 fast path and shared-cache hits; misses proxy to Pillow upstream.
+/// 304 fast path and shared-cache hits; misses render in-process (image
+/// crate) with upstream fallback for sources/decodes it can't reach.
 async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("thumb") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
@@ -504,7 +544,8 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/view/{*path}` — passthrough formats serve natively; normalized
-/// formats answer shared-cache hits; everything else proxies.
+/// formats answer shared-cache hits and render misses in-process;
+/// undecodable/unreachable sources still proxy.
 async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
@@ -580,6 +621,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
         req.headers(),
         st.native.test_mode,
         &st.secret_key,
+        st.session_key.as_ref(),
         &st.allowed_emails,
     ) else {
         return StatusCode::FORBIDDEN.into_response();
@@ -766,6 +808,9 @@ async fn main() {
         .parse()
         .expect("BOOKQ_UPSTREAM must be http://host[:port]");
     let downloads = PathBuf::from(std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/app/downloads".into()));
+    // Canonicalize once — `is_within` treats this as the canonical base so
+    // per-request checks canonicalize only the target path.
+    let downloads = std::fs::canonicalize(&downloads).unwrap_or(downloads);
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
     let native = Native::from_env();
     let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
@@ -795,6 +840,7 @@ async fn main() {
         index: index.clone(),
         positions: std::sync::Arc::new(state::Positions::default()),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
+        session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
         thumb_cache: PathBuf::from(
@@ -844,6 +890,10 @@ async fn main() {
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await
         }))
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            vary_session_cookie,
+        ))
         .with_state(st);
 
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");

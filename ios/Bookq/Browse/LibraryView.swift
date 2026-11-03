@@ -13,11 +13,19 @@ struct LibraryView: View {
     /// Epoch the user manually dismissed — the paired reader auto-opens on
     /// each new work commit but never yanks back mid-browse within one.
     @State private var pairSuppressedEpoch: Int?
+    /// Rightward travel of the nav-bar "bookq" title while the showAll drag
+    /// is armed (web `_bindEntryGesture` translateX parity).
+    @State private var bookqDragX: CGFloat = 0
+    /// Transient bottom pill — the showAll toggle feedback toast.
+    @State private var visNotice: String?
+    /// Content width for the drag's right-edge (90%) activation threshold.
+    @State private var swipeWidth: CGFloat = 0
 
     var body: some View {
         NavigationStack(path: $model.navPath) {
             levelStack
                 .navigationTitle("bookq")
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar { toolbar }
                 .navigationDestination(for: BrowseRoute.self) { route in
                     switch route {
@@ -50,6 +58,16 @@ struct LibraryView: View {
             PairSheet()
         }
         .searchable(text: $search.query, prompt: "作品を検索")
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+            swipeWidth = $0
+        }
+        .onChange(of: visNotice) { _, v in
+            guard v != nil else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                visNotice = nil
+            }
+        }
         .onChange(of: visibility.showAll) { _, _ in
             // include_hidden affects both search and facet sets server-side
             Task {
@@ -58,6 +76,10 @@ struct LibraryView: View {
             }
         }
         .task {
+            // Non-blocking — fire the first probe before load() so a dead
+            // server flips the badge to offline instead of waiting out
+            // the (potentially long) tree load first.
+            model.online.start()
             await model.library?.load()
             model.library?.startPolling()
         }
@@ -73,9 +95,9 @@ struct LibraryView: View {
                 ProgressView("読み込み中…")
             }
         }
-        // DL完了/失敗 toast (web #toast equivalent)
+        // DL完了/失敗 toast + showAll トグル toast (web #toast equivalent)
         .overlay(alignment: .bottom) {
-            if let toast = offline.toast {
+            if let toast = offline.toast ?? visNotice {
                 Text(toast)
                     .font(.subheadline)
                     .padding(.horizontal, 16).padding(.vertical, 9)
@@ -167,6 +189,24 @@ struct LibraryView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        // "bookq" title in the buttons' row — the hidden showAll entry
+        // gesture lives here (web `#browse-root-icon` parity): drag it to
+        // the right edge (≥90% width) and release to toggle 全表示モード.
+        ToolbarItem(placement: .principal) {
+            Text("bookq")
+                .font(.headline)
+                // web parity: body.fv-showall shifts the root icon to a
+                // red hue — the only visible trace of the hidden mode.
+                .foregroundStyle(visibility.showAll ? Color.red : Color.primary)
+                .onGeometryChange(for: CGFloat.self) {
+                    $0.frame(in: .global).minX
+                } action: {
+                    bookqMinX = $0
+                }
+                .offset(x: max(0, bookqDragX))
+                .contentShape(Rectangle())
+                .gesture(bookqSwipe)
+        }
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("表示", selection: layoutBinding) {
@@ -174,13 +214,6 @@ struct LibraryView: View {
                     Label("リスト", systemImage: "list.bullet").tag(AppConfig.LayoutMode.list)
                     Label("カード", systemImage: "rectangle.stack").tag(AppConfig.LayoutMode.card)
                 }
-                // 全表示 entry — always reachable (the web's equivalent is a
-                // hidden swipe on the root icon, always armed too). Eye
-                // toggles and badges only appear while this mode is on.
-                Toggle("隠しルートを表示",
-                       isOn: Binding(
-                        get: { visibility.showAll },
-                        set: { visibility.showAll = $0 }))
                 Divider()
                 Button { Task { await model.library?.refresh() } } label: {
                     Label("再読み込み", systemImage: "arrow.clockwise")
@@ -206,6 +239,33 @@ struct LibraryView: View {
             }
             .accessibilityLabel("ペアリング")
         }
+    }
+
+    /// Global x of the title's left edge — the drag's `location` is local
+    /// to the text, so edge detection needs this offset.
+    @State private var bookqMinX: CGFloat = 0
+
+    /// showAll ギミックのドラッグ — web `_bindEntryGesture` parity:
+    /// rightward-only arm (dx>12 かつ dx>1.2|dy|; 縦スクロールや左フリック
+    /// は渡す)、アーム中はタイトルが指に追従、右端(幅90%)での解放で発火。
+    private var bookqSwipe: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { v in
+                let dx = v.translation.width, dy = v.translation.height
+                if bookqDragX == 0,
+                   !(dx > 12 && dx > abs(dy) * 1.2) { return }
+                bookqDragX = max(0, dx)
+            }
+            .onEnded { v in
+                defer { bookqDragX = 0 }
+                let globalX = bookqMinX + v.location.x
+                guard swipeWidth > 0,
+                      globalX >= swipeWidth * 0.9 else { return }
+                visibility.showAll.toggle()
+                visNotice = visibility.showAll
+                    ? "全表示モード（再読み込みで解除）"
+                    : "通常モードに戻しました"
+            }
     }
 
     private var offlineLabel: String {

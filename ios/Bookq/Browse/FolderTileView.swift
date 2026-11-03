@@ -13,7 +13,7 @@ struct FolderTileView: View {
     var leaves: [String] = []
     /// Search-result metadata — badge row under the title (artist≤2,tag≤4).
     var meta: ComicMetadata? = nil
-    /// Visibility presentation (showAll only): badge text + dim + whether
+    /// Visibility presentation (showAll only): badge text + whether
     /// the caller renders the eye toggle.
     var vis: VisibilityStore.Presentation? = nil
 
@@ -27,7 +27,8 @@ struct FolderTileView: View {
             case .card: rowBody(thumbSize: 72)
             }
         }
-        .opacity(vis?.dimmed == true ? 0.45 : 1)
+        // Web parity: hidden tiles are NOT dimmed — `is-hidden` has no
+        // visual rule; the badge alone marks them.
         .overlay(alignment: .topLeading) { visBadge }
     }
 
