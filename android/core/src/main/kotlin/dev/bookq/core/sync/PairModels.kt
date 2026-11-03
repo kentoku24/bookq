@@ -248,3 +248,19 @@ data class PairProjection(
     val chapterName: String,
     val chapterFolder: String,
 )
+
+/** QR / deep-link join payload parser — the web QR carries
+ *  `<origin>/#/join/<code>` (pairUI.js); a bare 6-digit code is accepted
+ *  too so the scanner and the manual field share one validation. */
+object PairJoinCode {
+    private val URL_CODE = Regex("""#/join/(\d{6})(?:\D|$)""")
+    private val BARE_CODE = Regex("""^(\d{6})$""")
+
+    /** Extract the 6-digit join code from scanned text, or null. */
+    fun parse(text: String): String? {
+        val t = text.trim()
+        URL_CODE.find(t)?.let { return it.groupValues[1] }
+        BARE_CODE.matchEntire(t)?.let { return it.groupValues[1] }
+        return null
+    }
+}

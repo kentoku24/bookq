@@ -64,6 +64,18 @@ android {
         buildConfig = true
     }
 
+    // WebRTC native libs are shipped per-ABI: split so CP08-J1 (arm64)
+    // and the CI emulator (x86_64) each get a right-sized APK; the
+    // universal APK stays for convenience installs.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
@@ -105,6 +117,10 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.zxing.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
