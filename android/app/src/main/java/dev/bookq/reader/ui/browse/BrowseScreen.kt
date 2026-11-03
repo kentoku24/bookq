@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridPrefetchStrategy
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -31,6 +32,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -44,6 +46,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -56,6 +60,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -66,6 +71,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,6 +89,7 @@ import dev.bookq.core.progress.ProgressBook
 import dev.bookq.core.visibility.VisibilityState
 import dev.bookq.reader.AppGraph
 import dev.bookq.reader.BrowseLayout
+import dev.bookq.reader.PerfTunables
 import dev.bookq.reader.R
 import dev.bookq.reader.ServerScope
 import dev.bookq.reader.browse.BrowseController
@@ -91,6 +98,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Saved-state key the reader writes its chapter anchor into. */
 const val RETURN_ANCHOR_KEY = "bookq.returnAnchor"
@@ -128,7 +136,7 @@ fun BrowseScreen(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun BrowseBody(
     scope: ServerScope,
@@ -339,7 +347,11 @@ private fun BrowseBody(
     //    before the tree arrives, and deciding on an empty list would
     //    pin the scroll to TOP.
     val listState = rememberLazyListState()
-    val gridState = rememberLazyGridState()
+    // Prefetch off-screen tiles during scroll slack — at the panel's
+    // 90 Hz the 11 ms frame budget leaves no room for mid-fling
+    // subcomposition (issue #302).
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = LazyGridPrefetchStrategy(nestedPrefetchItemCount = 6))
     val renderedItems by rememberUpdatedState(items)
     LaunchedEffect(Unit) {
         val anchor = entry.savedStateHandle.get<String>(RETURN_ANCHOR_KEY)
@@ -352,6 +364,24 @@ private fun BrowseBody(
         }.first { (l, _, loaded) ->
             l.isNotEmpty() || (loaded && vis.blockedGrid() == null)
         }.first
+        // Startup gate: cold start → library displayed (timeToFullDisplay).
+        // The marker must land INSIDE a Choreographer doFrame — early
+        // (before the items' frame ends) crashes StartupTimingQuery, and
+        // late (after the app goes idle) leaves no doFrame ending after
+        // it. withFrameNanos resumes during the next frame's callback;
+        // if the pipeline already went idle, a manual invalidate
+        // schedules one more doFrame so the marker still gets bounded.
+        val act = context as? ComponentActivity
+        if (withTimeoutOrNull(1_500) { withFrameNanos {}; true } == null) {
+            // Pipeline already idle — schedule a doFrame so the marker
+            // still lands inside one (metric needs a slice ending
+            // after reportFullyDrawn).
+            act?.window?.decorView?.postInvalidate()
+            withTimeoutOrNull(1_500) { withFrameNanos {} }
+        }
+        act?.reportFullyDrawn()
+        PerfTunables.fullyDrawnReported = true
+        PerfTunables.mark("fullyDrawn")
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||
             gridState.firstVisibleItemIndex > 0 ||
@@ -626,7 +656,8 @@ private fun BrowseBody(
                 navigationIcon = {
                     if (path.isNotEmpty()) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack,
+                                stringResource(R.string.back))
                         }
                     }
                 },
@@ -644,7 +675,8 @@ private fun BrowseBody(
                                     filter = ""
                                     searchOpen = false
                                 }, modifier = Modifier.testTag("searchClose")) {
-                                    Icon(Icons.Default.Close, null)
+                                    Icon(Icons.Default.Close,
+                                        stringResource(R.string.browse_search_close))
                                 }
                             },
                         )
@@ -659,7 +691,8 @@ private fun BrowseBody(
                                 IconButton(onClick = {
                                     filter = ""
                                     filterActive = false
-                                }) { Icon(Icons.Default.Close, null) }
+                                }) { Icon(Icons.Default.Close,
+                                    stringResource(R.string.browse_filter_close)) }
                             },
                         )
                     } else {
@@ -1003,11 +1036,17 @@ private fun BrowseGrid(
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxSize(),
+        // UiAutomator locator for the Macrobenchmark grid-fling gate.
+        modifier = Modifier.fillMaxSize().testTag("browseGrid"),
     ) {
         gridItemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
-            ElevatedCard(
+            // Flat tile (not ElevatedCard): per-tile shadow layers +
+            // tonal providers were measurable per new row during flings
+            // — web's tiles are flat anyway (#302).
+            Surface(
                 onClick = { onTap(item) },
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 1.dp,
                 modifier = Modifier.testTag("tile:${item.path}"),
             ) {
                 Box(Modifier.fillMaxWidth().aspectRatio(if (card) 16f / 9f else 2f / 3f)) {
@@ -1018,6 +1057,9 @@ private fun BrowseGrid(
                         imageLoader = scope.imageLoader,
                         coverW = if (card) 400 else coverW,
                         modifier = Modifier.fillMaxSize(),
+                        // Deferred attach while flinging — decode/upload
+                        // bursts were the gridFling frame tail (#302).
+                        attach = !gridState.isScrollInProgress,
                     )
                     Column(Modifier.align(Alignment.TopEnd).padding(6.dp),
                         horizontalAlignment = Alignment.End) {
@@ -1036,12 +1078,32 @@ private fun BrowseGrid(
                             is LevelModel.Item.Folder ->
                                 BrowseRules.splitDisplayName(item.node.name)
                         }
-                        Text(leaf, style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1)
-                        if (parent != null) {
-                            Text(parent, style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline, maxLines = 1)
-                        }
+                        // ONE Text: leaf + parent in a single layout pass —
+                        // each Text costs a StaticLayout (CJK shaping is the
+                        // dominant gridFling frame cost on the trace).
+                        Text(
+                            text = buildAnnotatedString {
+                                append(leaf)
+                                if (parent != null) {
+                                    append('\n')
+                                    withStyle(
+                                        androidx.compose.ui.text.SpanStyle(
+                                            color = MaterialTheme.colorScheme
+                                                .outline,
+                                            fontSize = MaterialTheme.typography
+                                                .labelSmall.fontSize,
+                                        ),
+                                    ) { append(parent) }
+                                }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            // leaf never wraps — it ellipsizes on line 1
+                            // exactly like the two-Text layout did.
+                            softWrap = false,
+                            overflow = androidx.compose.ui.text.style
+                                .TextOverflow.Ellipsis,
+                            maxLines = 2,
+                        )
                         item.progressPct(book)?.let { pct ->
                             Spacer(Modifier.height(4.dp))
                             LinearProgressIndicator(
@@ -1102,6 +1164,7 @@ private fun BrowseList(
                             imageLoader = scope.imageLoader,
                             coverW = coverW,
                             modifier = Modifier.fillMaxSize(),
+                            attach = !listState.isScrollInProgress,
                         )
                     }
                 }

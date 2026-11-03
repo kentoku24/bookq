@@ -67,7 +67,7 @@ fun SettingsScreen(graph: AppGraph, onBack: () -> Unit) {
                     IconButton(onClick = onBack) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = null,
+                            contentDescription = stringResource(R.string.back),
                         )
                     }
                 },

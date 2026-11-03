@@ -12,4 +12,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "bookq-android"
-include(":core", ":data", ":app")
+include(":core", ":data", ":app", ":baselineprofile")

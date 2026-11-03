@@ -58,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -76,6 +77,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.semantics
@@ -86,7 +88,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
-import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import dev.bookq.core.browse.BrowseRules
 import dev.bookq.core.reader.ExtDisplay
@@ -97,6 +99,8 @@ import dev.bookq.core.reader.ZoomState
 import dev.bookq.core.reader.zoneAction
 import dev.bookq.core.reader.ZoneAction
 import dev.bookq.reader.AppGraph
+import dev.bookq.reader.PerfTrace
+import dev.bookq.reader.PerfTunables
 import dev.bookq.reader.R
 import dev.bookq.reader.reader.ReaderController
 import dev.bookq.reader.ui.browse.RETURN_ANCHOR_KEY
@@ -295,6 +299,10 @@ private fun ReaderBody(
             target = target.coerceIn(r.first, r.last)
         }
         target = target.coerceIn(0, pager.pageCount - 1)
+        // Macrobenchmark gate: tap release → target spread's first draw
+        // ends the section (PerfTrace.onSpreadDrawn in SpreadCell).
+        PerfTunables.mark("turn base=$base target=$target count=${pager.pageCount}")
+        if (target != base) PerfTrace.pageTurn(target)
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastNavAt > 250) {
             lastNavAt = now
@@ -303,6 +311,7 @@ private fun ReaderBody(
             navJob = compose.launch {
                 pager.scrollToPage(target)
                 pendingSpread = null
+                PerfTrace.closePageTurnAfterFrame()
             }
         } else {
             pendingSpread = target
@@ -313,6 +322,7 @@ private fun ReaderBody(
                     lastNavAt = android.os.SystemClock.uptimeMillis()
                     pager.scrollToPage(t)
                     pendingSpread = null
+                    PerfTrace.closePageTurnAfterFrame()
                 }
             }
         }
@@ -629,6 +639,7 @@ private fun ReaderBody(
                 var lastCenterTapX = 0f
                 var lastCenterTapY = 0f
                 detectTapGestures { off ->
+                    PerfTunables.mark("tap x=${off.x} w=${size.width}")
                     // A decided pan leaves a trailing tap — the web's
                     // suppressClickFor(400).
                     val now = android.os.SystemClock.uptimeMillis()
@@ -669,11 +680,17 @@ private fun ReaderBody(
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
             HorizontalPager(
                 state = pager,
-                beyondViewportPageCount = 1,
+                // A/B on CP08-J1 (swipeTurn CPU p99 / overrun p50):
+                //   0→15.8/2.3  1→14.2/2.1  2→12.1/1.7 — deeper
+                //   pre-composition wins: the swipe animates already-
+                //   built layers instead of composing mid-gesture.
+                beyondViewportPageCount =
+                    PerfTunables.beyondViewportPageCount ?: 2,
                 // Zoomed → the zoom layer owns one-finger drags.
                 userScrollEnabled = !zoomedNow,
                 modifier = Modifier
                     .fillMaxSize()
+                    .testTag("readerPager")
                     // translate(tx,ty) scale(zoom) around the top-left —
                     // the web #zoom-layer transform, layer-local.
                     .graphicsLayer {
@@ -693,6 +710,10 @@ private fun ReaderBody(
                     urlOf = ::pageData,
                     imageLoader = sc.imageLoader,
                     onError = { controller.recordError(it) },
+                    isSettled = {
+                        !pager.isScrollInProgress &&
+                            pager.settledPage == spreadIdx
+                    },
                 )
             }
         }
@@ -742,7 +763,9 @@ private fun ReaderBody(
                     }
                     Box {
                         IconButton(onClick = { menu = true }) {
-                            Icon(Icons.Filled.MoreVert, null, tint = Color.White)
+                            Icon(Icons.Filled.MoreVert,
+                                stringResource(R.string.reader_menu),
+                                tint = Color.White)
                         }
                         ReaderMenu(
                             expanded = menu,
@@ -858,15 +881,39 @@ private fun SpreadCell(
     urlOf: (Int) -> Any,
     imageLoader: coil3.ImageLoader,
     onError: (Int) -> Unit,
+    /** True only when this spread is the pager's settled current page —
+     *  evaluated inside the draw pass so its state reads subscribe the
+     *  draw node (settle → redraw → PerfTrace closes the section). */
+    isSettled: () -> Boolean,
 ) {
     val pages = work.spreads.getOrNull(spreadIdx) ?: return
     val ars by controller.pageAR.collectAsStateWithLifecycle()
     val density = LocalDensity.current
+    val act = androidx.activity.compose.LocalActivity.current
     val (fitW, fitH) = remember(pages, ars, viewW, viewH) {
         ReaderWork.spreadFit(pages.map { ars[it] ?: controller.lastAR },
             GAP_INNER_PX, viewW, viewH)
     }
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            // Perf gate: the target spread's first drawn frame ends
+            // bookq.pageTurn (and any open bookq.readerOpen). A start
+            // that lands in the reader (task-resume nav restore) never
+            // composes BrowseScreen, so the first spread draw is also
+            // the TTFD marker — reportFullyDrawn is one-shot per
+            // process via PerfTunables.fullyDrawnReported.
+            .drawWithContent {
+                drawContent()
+                PerfTrace.onSpreadDrawn(spreadIdx, isSettled())
+                if (!PerfTunables.fullyDrawnReported) {
+                    PerfTunables.fullyDrawnReported = true
+                    act?.reportFullyDrawn()
+                    PerfTunables.mark("fullyDrawn.reader")
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         // The pager's RTL LayoutDirection is inherited: the Row lays its
         // first child at the right edge — web's `row-reverse` for free.
         Row {
@@ -913,24 +960,30 @@ internal fun PageCell(
         Modifier.width(width).height(height).background(Color(0xFF161616)),
         contentAlignment = Alignment.Center,
     ) {
-        SubcomposeAsyncImage(
+        // AsyncImage (not Subcompose): per-cell subcomposition is the
+        // dominant fling frame cost at the panel's 11 ms budget (#302).
+        var failed by remember { mutableStateOf(false) }
+        AsyncImage(
             model = request,
             imageLoader = imageLoader,
             contentDescription = null,
             contentScale = ContentScale.Fit,
-            onSuccess = { state ->
-                val s = state.painter.intrinsicSize
-                if (s.width > 0f && s.height > 0f) onAR(s.width / s.height)
-                onLoaded()
-            },
-            onError = { onError() },
-            loading = {},
-            error = {
-                // Web's ⚠ marker on a failed page cell.
-                Text("⚠", color = Color(0xFFB0B0B0),
-                    style = MaterialTheme.typography.headlineMedium)
+            onState = { state ->
+                failed = state is
+                    coil3.compose.AsyncImagePainter.State.Error
+                if (state is coil3.compose.AsyncImagePainter.State.Success) {
+                    val s = state.painter.intrinsicSize
+                    if (s.width > 0f && s.height > 0f) onAR(s.width / s.height)
+                    onLoaded()
+                }
+                if (failed) onError()
             },
         )
+        if (failed) {
+            // Web's ⚠ marker on a failed page cell.
+            Text("⚠", color = Color(0xFFB0B0B0),
+                style = MaterialTheme.typography.headlineMedium)
+        }
         if (isChapterStart && chapterName.isNotEmpty()) {
             // `spread.js` paints the chapter title on boundary spreads.
             Text(

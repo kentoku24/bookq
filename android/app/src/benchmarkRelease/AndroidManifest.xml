@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Macrobenchmark (CompilationMode + perfetto) needs
+             shell-level profiling rights on API 29+. Measurement
+             variants only — never in the shipping manifest (#342). -->
+        <profileable android:shell="true" />
+    </application>
+</manifest>

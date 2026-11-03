@@ -43,9 +43,12 @@ class AppModel<T : VersionProbe>(
     private val _serverVersion = MutableStateFlow<VersionResponse?>(null)
     val serverVersion = _serverVersion.asStateFlow()
 
-    /** Offline tree snapshot fallback for failed boots. */
+    /** Offline tree snapshot fallback for failed boots. A saved
+     *  library is user data — only surface it to a restored session,
+     *  or a logged-out launch would paint another user's folders. */
     fun hasOfflineSnapshot(): Boolean =
-        settings.baseUrl()?.let(snapshotProbe) == true
+        auth.user.value != null &&
+            settings.baseUrl()?.let(snapshotProbe) == true
 
     fun start() {
         // Definitive session death (refresh rejected by the server) —
@@ -57,7 +60,9 @@ class AppModel<T : VersionProbe>(
         }
         scope.launch {
             auth.restore()
+            PerfTunables.mark("auth.restored")
             settings.awaitLoaded()
+            PerfTunables.mark("settings.loaded")
             configureApi()
             if (api != null) boot() else _phase.value = AppPhase.Onboarding
         }
@@ -82,7 +87,16 @@ class AppModel<T : VersionProbe>(
             return
         }
         val gen = ++bootGen
-        _phase.value = AppPhase.Booting
+        PerfTunables.mark("boot snap=${hasOfflineSnapshot()}")
+        // Snapshot-first (SW NetworkFirst parity): a host-scoped tree
+        // snapshot paints the library instantly; the version probe then
+        // revalidates in the background — 401 still flips to Login.
+        if (hasOfflineSnapshot()) {
+            _scopeValue.value = currentScope()
+            _phase.value = AppPhase.Ready
+        } else {
+            _phase.value = AppPhase.Booting
+        }
         scope.launch {
             try {
                 val v = probe.version()
@@ -117,6 +131,13 @@ class AppModel<T : VersionProbe>(
     }
 
     suspend fun setServerAndBoot(url: String) {
+        // Same URL → re-probe only. A teardown would kill the live
+        // ServerScope and log the user out for nothing (also the
+        // benchmark `--es serverURL` path re-saving its persisted URL).
+        if (ServerUrls.parse(url) == settings.baseUrl()) {
+            boot()
+            return
+        }
         settings.setServerUrl(url)
         serverChanged()
     }

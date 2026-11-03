@@ -1,9 +1,12 @@
+import com.android.build.api.variant.BuildConfigField
+
 plugins {
     alias(libs.plugins.android.application)
     // Kotlin is built into AGP 9 — only the serialization/compose compiler
     // plugins are applied on top.
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 // Release signing comes from ~/.gradle/gradle.properties (or -P flags):
@@ -53,9 +56,19 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            buildConfigField(
+                "boolean",
+                "ALLOW_SERVER_URL_EXTRA",
+                "false",
+            )
         }
         debug {
             applicationIdSuffix = ".debug"
+            buildConfigField(
+                "boolean",
+                "ALLOW_SERVER_URL_EXTRA",
+                "true",
+            )
         }
     }
 
@@ -89,6 +102,49 @@ java {
     }
 }
 
+// The baselineprofile plugin's `nonMinified*`/`benchmark*` variants
+// initWith their base type, so they inherit release's
+// ALLOW_SERVER_URL_EXTRA=false and the measured app would sit on the
+// onboarding screen forever. Measurement variants need the extra.
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        val bt = variant.buildType ?: ""
+        if (bt.startsWith("nonMinified") || bt.startsWith("benchmark")) {
+            variant.buildConfigFields?.put(
+                "ALLOW_SERVER_URL_EXTRA",
+                BuildConfigField(
+                    "boolean",
+                    "true",
+                    "serverURL intent extra for measurement variants",
+                ),
+            )
+        }
+    }
+}
+
+// The generated profile lands under src/release/generated — point the
+// measurement variants' baselineProfiles source at it so they need no
+// checked-in copies. (`named()` can't see plugin-generated variants,
+// so wire it inside onVariants.)
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        if (variant.buildType?.startsWith("nonMinified") == true ||
+            variant.buildType?.startsWith("benchmark") == true) {
+            variant.sources.baselineProfiles?.addStaticSourceDirectory(
+                "src/release/generated/baselineProfiles")
+        }
+    }
+}
+
+// M10 audit surface: `./gradlew :app:compileReleaseKotlin` emits the
+// stability/metrics reports for the Compose-stability review.
+composeCompiler {
+    reportsDestination = layout.buildDirectory.dir("compose_reports")
+    metricsDestination = layout.buildDirectory.dir("compose_metrics")
+    stabilityConfigurationFiles.add(
+        layout.projectDirectory.file("../compose-stability.conf"))
+}
+
 dependencies {
     implementation(project(":core"))
     implementation(project(":data"))
@@ -116,6 +172,8 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
     implementation(libs.androidx.lifecycle.process)
+    implementation(libs.androidx.profileinstaller)
+    baselineProfile(project(":baselineprofile"))
     implementation(libs.zxing.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
