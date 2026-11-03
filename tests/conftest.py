@@ -20,6 +20,13 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+# app.auth reads BOOKQ_TEST_MODE once at import time (_TEST_MODE), and any
+# test module doing `from app.routes import ...` pulls app.auth in. Setting
+# the default here — before collection imports whichever module comes first
+# alphabetically — keeps in-process TestClients deterministic regardless of
+# test order (#326). Tests needing real auth patch auth._TEST_MODE=False.
+os.environ.setdefault("BOOKQ_TEST_MODE", "true")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(Path(__file__).parent))
