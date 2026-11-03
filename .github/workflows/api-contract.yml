@@ -62,7 +62,7 @@ jobs:
       # the server log holds the traceback behind any 5xx.
       - name: Schemathesis contract test
         run: |
-          uv run --with schemathesis schemathesis run api/openapi.v1.yaml \
+          uv run --with "schemathesis>=4.33,<5" schemathesis run api/openapi.v1.yaml \
             --url http://127.0.0.1:8080 \
             --exclude-checks ignored_auth,allow_header_conformance \
             --report junit,ndjson --report-dir schemathesis-report
@@ -71,7 +71,9 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: schemathesis-diagnostics
+          # run_attempt disambiguates job retries — v4 artifact names are
+          # immutable within a run.
+          name: schemathesis-diagnostics-${{ github.run_attempt }}
           # upload-artifact >=4.4 skips hidden entries by default — the
           # .schemathesis crash cache is the point of this artifact.
           include-hidden-files: true
