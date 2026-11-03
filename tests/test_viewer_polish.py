@@ -3,6 +3,7 @@ import io
 import re
 import time
 
+import pytest
 from PIL import Image
 from playwright.sync_api import expect
 
@@ -75,7 +76,7 @@ def _assert_no_neighbour_peek_and_dark_margins(page):
             clean_streak = 0
             last = f"bright margin: {bright}"
         page.wait_for_timeout(150)
-    assert False, f"spread margins never settled: {last}"
+    pytest.fail(f"spread margins never settled: {last}")
 
 
 def test_solo_cover_partner_side_is_dark_not_neighbour_page(landscape_page, server):
