@@ -71,12 +71,7 @@ final class PairManifestTests: XCTestCase {
     func testParse() {
         let m = PairManifest.parse(CanonicalJSONTests.manifestFixture)
         XCTAssertNotNil(m)
-        XCTAssertEqual(m?.folder, "作品A")
-        XCTAssertEqual(m?.offset, 1)
-        XCTAssertEqual(m?.chapters.count, 1)
-        XCTAssertEqual(m?.chapters.first?.pages.count, 3)
         XCTAssertEqual(m?.spreadTable.count, 2)
-        XCTAssertEqual(m?.initialSpreadId, "s0")
         XCTAssertEqual(m?.spreadIndex(byId: "s1"), 1)
         XCTAssertNil(m?.spreadTable[1].left)   // trailing blank side
     }

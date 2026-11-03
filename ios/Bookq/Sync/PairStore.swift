@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Dual-reader sync client — Swift port of viewer/pairClient.js +
 /// pairController.js (server-ws plane only; the webrtc-dc upgrade is
-/// deliberately absent, so `dataPlane` stays "server-ws").
+/// deliberately absent).
 ///
 /// Lifecycle: idle → connecting → waiting(leader)/pending(follower) →
 /// paired (phase from STATE drives the reader) → ended. RESUME rebinds a
@@ -570,13 +570,12 @@ final class PairStore: ObservableObject {
 
         let snap = PairSnapshot(
             sessionId: f["sessionId"] as? String,
-            revision: rev, workEpoch: epoch,
+            workEpoch: epoch,
             manifestVersion: seenMv,
             phase: PairPhase(rawValue: f["phase"] as? String ?? "") ?? .waiting,
             spreadId: f["spreadId"] as? String,
             offset: f["offset"] as? Int ?? 0,
-            leaderSide: PairSide(rawValue: f["leaderSide"] as? String ?? "") ?? .left,
-            dataPlane: f["dataPlane"] as? String ?? "server-ws")
+            leaderSide: PairSide(rawValue: f["leaderSide"] as? String ?? "") ?? .left)
         lastState = snap
 
         // Status follows the committed phase.
@@ -619,10 +618,9 @@ final class PairStore: ObservableObject {
         let spread = manifest.spreadTable[si]
         let proj = PairModel.project(spread: spread, role: role,
                                      leaderSide: s.leaderSide)
-        let anchor = spread.right
         projection = PairProjection(
             spreadIndex: si, spreadTotal: manifest.spreadTable.count,
-            side: proj.side, ref: proj.ref, anchor: anchor,
+            ref: proj.ref,
             chapterFolder: spread.chapterFolder)
     }
 
