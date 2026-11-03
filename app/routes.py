@@ -137,10 +137,11 @@ def _require_int_literal(v):
 
     FastAPI's default int coercion accepts ``since=0.0`` / ``depth=1.0``,
     which the spec's ``type: integer`` forbids — schemathesis flags the
-    acceptance as ST201 (#326). Values already non-str (direct unit calls,
-    ``None``) pass through untouched.
+    acceptance as ST201 (#326). ``[0-9]`` rather than ``\\d`` — the latter
+    matches Unicode digits (``１２``) which ``int()`` also parses. Values
+    already non-str (direct unit calls, ``None``) pass through untouched.
     """
-    if isinstance(v, str) and re.fullmatch(r"-?\d+", v) is None:
+    if isinstance(v, str) and re.fullmatch(r"-?[0-9]+", v) is None:
         raise ValueError("expected an integer literal")
     return v
 

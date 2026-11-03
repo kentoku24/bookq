@@ -119,6 +119,7 @@ def test_non_literal_int_params_return_422(client):
     which schemathesis flags as ST201 (#326)."""
     for params in (
         {"since": "0.0"}, {"since": "1.5"}, {"since": "1e2"}, {"since": "abc"},
+        {"since": "１２"},  # Unicode digits: \d matches and int() parses them
         {"depth": "1.0"}, {"depth": "x"},
     ):
         assert client.get("/api/folders", params=params).status_code == 422, params
