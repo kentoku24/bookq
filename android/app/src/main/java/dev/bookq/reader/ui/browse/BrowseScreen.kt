@@ -110,6 +110,7 @@ fun BrowseScreen(
     onSettings: () -> Unit,
     onBack: () -> Unit,
     onTop: () -> Unit,
+    onOpenPair: () -> Unit,
 ) {
     val scopeState by graph.serverScope.collectAsStateWithLifecycle()
     val scope = scopeState ?: run {
@@ -121,7 +122,7 @@ fun BrowseScreen(
     val controller = remember(scope) { BrowseController() }
     BrowseBody(
         scope, controller, entry, path,
-        onNavigate, onOpenReader, onSettings, onBack, onTop, graph,
+        onNavigate, onOpenReader, onSettings, onBack, onTop, onOpenPair, graph,
     )
 }
 
@@ -137,6 +138,7 @@ private fun BrowseBody(
     onSettings: () -> Unit,
     onBack: () -> Unit,
     onTop: () -> Unit,
+    onOpenPair: () -> Unit,
     graph: AppGraph,
 ) {
     val tree by scope.tree.state.collectAsStateWithLifecycle()
@@ -162,6 +164,7 @@ private fun BrowseBody(
     val selTags by scope.search.tags.collectAsStateWithLifecycle()
     val facets by scope.search.facets.collectAsStateWithLifecycle()
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var pairSheet by remember { mutableStateOf(false) }
     var facetOpen by remember { mutableStateOf(false) }
 
     // Back while searching closes the search before unwinding the level —
@@ -253,6 +256,14 @@ private fun BrowseBody(
         )
     }
 
+    if (pairSheet) {
+        dev.bookq.reader.ui.pair.PairSheet(
+            pair = scope.pair,
+            wsBaseUrl = scope.api.baseUrl.toString().removeSuffix("/"),
+            onDismiss = { pairSheet = false },
+        )
+    }
+
     // Item derivation — visibility version + progress version are the
     // recompute triggers (their mutations bump the ticks).
     val allItems = remember(tree.nodes, visVersion, path) {
@@ -271,7 +282,18 @@ private fun BrowseBody(
 
     fun openTarget(p: String) {
         val page = book[p]?.page ?: 0
-        onOpenReader(p, page)
+        // Paired leader picking a work → OPEN_WORK on the wire instead of
+        // a local reader (web: leader tap while paired). `pickWork` fails
+        // closed for followers/visibility veto → local open.
+        val pair = scope.pair
+        if (pair.role == dev.bookq.core.sync.PairRole.leader &&
+            pair.paired) {
+            coroutineScope.launch {
+                if (!pair.pickWork(p)) onOpenReader(p, page)
+            }
+        } else {
+            onOpenReader(p, page)
+        }
     }
 
     val deniedMsg = stringResource(R.string.browse_hidden_denied)
@@ -499,6 +521,15 @@ private fun BrowseBody(
                             expanded = menuOpen,
                             onDismissRequest = { menuOpen = false },
                         ) {
+                            // Dual-reader pairing entry.
+                            DropdownMenuItem(
+                                text = { Text("ペアリング") },
+                                onClick = {
+                                    pairSheet = true
+                                    menuOpen = false
+                                },
+                                modifier = Modifier.testTag("pairMenuItem"),
+                            )
                             // Show-all entry — iOS menu parity (web edge-swipe).
                             DropdownMenuItem(
                                 text = { Text(stringResource(
@@ -597,6 +628,36 @@ private fun BrowseBody(
                                 modifier = Modifier.padding(12.dp),
                             )
                         }
+                    }
+                }
+                // 同期中 banner — a bound session stays reachable from
+                // browse (web sidebar parity); tap re-enters the paired
+                // reader.
+                val pairState by scope.pair.status.collectAsStateWithLifecycle()
+                val pairSnap by scope.pair.lastState.collectAsStateWithLifecycle()
+                if (scope.pair.bound && pairSnap != null) {
+                    Surface(
+                        onClick = onOpenPair,
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .testTag("pairBanner"),
+                    ) {
+                        Text(
+                            "同期中" + (pairSnap?.phase?.let {
+                                " — " + when (it) {
+                                    dev.bookq.core.sync.PairPhase.waiting -> "待機中"
+                                    dev.bookq.core.sync.PairPhase.selecting -> "作品選択中"
+                                    dev.bookq.core.sync.PairPhase.loading -> "読み込み中"
+                                    dev.bookq.core.sync.PairPhase.reading -> "同期読書中"
+                                    dev.bookq.core.sync.PairPhase.paused -> "一時停止"
+                                    dev.bookq.core.sync.PairPhase.ended -> "終了"
+                                }
+                            } ?: ""),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(12.dp),
+                        )
                     }
                 }
                 // `_visibleResults` — render-time isVisible on top of the

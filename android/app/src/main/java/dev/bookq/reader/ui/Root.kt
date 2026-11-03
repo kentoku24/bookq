@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -77,6 +78,29 @@ private fun BootErrorScreen(graph: AppGraph, message: String) {
 private fun ReadyNavHost(graph: AppGraph) {
     val nav = rememberNavController()
     val online by graph.online.online.collectAsStateWithLifecycle()
+    val scope by graph.serverScope.collectAsStateWithLifecycle()
+
+    // Web parity: a committed OPEN_WORK swaps the whole surface into the
+    // paired reader — auto-enter on the transition into loading/reading.
+    // Keyed on the PHASE transition (not "is reading") so closing back to
+    // browse doesn't immediately reopen; a NEW openWork commits another
+    // transition and re-enters.
+    androidx.compose.runtime.LaunchedEffect(scope?.pair) {
+        val p = scope?.pair ?: return@LaunchedEffect
+        var prev: dev.bookq.core.sync.PairPhase? = null
+        p.lastState.collect { s ->
+            val ph = s?.phase
+            val entered = ph != prev &&
+                (ph == dev.bookq.core.sync.PairPhase.loading ||
+                 ph == dev.bookq.core.sync.PairPhase.reading)
+            prev = ph
+            if (entered && nav.currentDestination
+                    ?.hasRoute<Routes.Pair>() != true) {
+                nav.navigate(Routes.Pair)
+            }
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
         if (!online) {
             // Amber offline banner — web status-dot parity: only shown
@@ -114,6 +138,7 @@ private fun ReadyNavHost(graph: AppGraph) {
                         popUpTo(0) { inclusive = true }
                     }
                 },
+                onOpenPair = { nav.navigate(Routes.Pair) },
             )
         }
         composable<Routes.Reader> { entry ->
@@ -127,6 +152,20 @@ private fun ReadyNavHost(graph: AppGraph) {
         }
         composable<Routes.Settings> {
             SettingsScreen(graph, onBack = { nav.popBackStack() })
+        }
+        composable<Routes.Pair> {
+            val sc by graph.serverScope.collectAsStateWithLifecycle()
+            sc?.let { scope ->
+                dev.bookq.reader.ui.pair.PairedReaderScreen(
+                    pair = scope.pair,
+                    pageUrlFor = { f, n ->
+                        scope.api.pageUrl(f, n,
+                            original = false).toString()
+                    },
+                    imageLoader = scope.imageLoader,
+                    onClose = { nav.popBackStack() },
+                )
+            }
         }
     }
     }

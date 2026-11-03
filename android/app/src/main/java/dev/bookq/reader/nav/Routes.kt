@@ -17,4 +17,8 @@ object Routes {
 
     @Serializable
     data object Settings
+
+    /** Dual-reader paired view — renders this device's own spread side. */
+    @Serializable
+    data object Pair
 }
