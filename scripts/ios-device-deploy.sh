@@ -1,0 +1,99 @@
+#!/bin/bash
+set -euo pipefail
+# Usage: ./scripts/ios-device-deploy.sh [--release] [--no-launch] [--udid <udid>]
+# 実機 (paired iPhone/iPad) へ Bookq.app を build → install → launch するヘルパー。
+#   1. devicectl JSON から physical + paired + booted のデバイスを自動選択
+#      (--udid / DEVICE_UDID で明示も可。複数台なら一覧を出して中断)
+#   2. xcodebuild で対象デバイス向けに build (DEVELOPMENT_TEAM は pbxproj 記載済み)
+#   3. -showBuildSettings で .app の実パスを特定 (DerivedData の hash 非依存)
+#   4. devicectl install + launch
+# Personal Team プロビジョニングは 7 日で期限切れ。初回のみ端末側で
+# 設定 → 一般 → VPNとデバイス管理 で開発元の信頼が必要。
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$REPO_ROOT/ios"
+
+CONFIG=Debug
+LAUNCH=1
+UDID="${DEVICE_UDID:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --release)   CONFIG=Release; shift ;;
+    --no-launch) LAUNCH=0; shift ;;
+    --udid)      UDID=$2; shift 2 ;;
+    -h|--help)
+      echo "Usage: $0 [--release] [--no-launch] [--udid <udid>]" >&2
+      echo "  --release    Release 構成で build (default: Debug)" >&2
+      echo "  --no-launch  install まで (起動しない)" >&2
+      echo "  --udid <u>   対象デバイスを明示 (DEVICE_UDID でも可)" >&2
+      exit 0 ;;
+    *) echo "Usage: $0 [--release] [--no-launch] [--udid <udid>]" >&2; exit 2 ;;
+  esac
+done
+
+# == 1. デバイス選択 ==
+if [ -z "$UDID" ]; then
+  JSON=/tmp/bookq-devices.$$.json
+  trap 'rm -f "$JSON"' EXIT
+  xcrun devicectl list devices --json-output "$JSON" >/dev/null
+  # physical = deviceProperties.provider が CoreSimulator でない
+  # (sim は com.apple.CoreSimulator.SimulatorCoreDevicePlugin を持つ)。
+  # paired + booted で devicectl がオンデマンド tunnel を張れる状態。
+  CANDS=()
+  while IFS= read -r line; do
+    CANDS+=("$line")
+  done < <(python3 - "$JSON" <<'PY'
+import json, sys
+for dev in json.load(open(sys.argv[1]))["result"]["devices"]:
+    dp = dev.get("deviceProperties", {})
+    cp = dev.get("connectionProperties", {})
+    if "CoreSimulator" in (dp.get("provider") or ""):
+        continue
+    if cp.get("pairingState") != "paired" or dp.get("bootState") != "booted":
+        continue
+    print(f"{dev['identifier']}\t{dp.get('name', '?')}")
+PY
+)
+  if [ ${#CANDS[@]} -eq 0 ]; then
+    echo "error: 利用可能な実機がありません — 接続/ペアリング/デベロッパモード/ロック解除を確認" >&2
+    exit 1
+  elif [ ${#CANDS[@]} -gt 1 ]; then
+    echo "error: 実機が複数あります — --udid で指定してください:" >&2
+    printf '  %s\n' "${CANDS[@]}" >&2
+    exit 1
+  fi
+  UDID=${CANDS[0]%%$'\t'*}
+  echo "== device: ${CANDS[0]#*$'\t'} ($UDID)"
+fi
+
+# == 2. build ==
+echo "== build ($CONFIG → id=$UDID)"
+xcodebuild -project Bookq.xcodeproj -scheme Bookq \
+  -destination "id=$UDID" -configuration "$CONFIG" \
+  -allowProvisioningUpdates build | tail -3
+
+# == 3. .app 特定 (showBuildSettings で確実に — DerivedData hash を grep しない) ==
+BUILD_DIR=$(xcodebuild -project Bookq.xcodeproj -scheme Bookq \
+  -destination "id=$UDID" -configuration "$CONFIG" -showBuildSettings \
+  | awk -F' = ' '/^ +TARGET_BUILD_DIR/ {print $2; exit}')
+PRODUCT=$(xcodebuild -project Bookq.xcodeproj -scheme Bookq \
+  -destination "id=$UDID" -configuration "$CONFIG" -showBuildSettings \
+  | awk -F' = ' '/^ +FULL_PRODUCT_NAME/ {print $2; exit}')
+APP="$BUILD_DIR/$PRODUCT"
+[ -d "$APP" ] || { echo "error: $APP が見つかりません" >&2; exit 1; }
+
+# == 4. install ==
+echo "== install → $UDID"
+xcrun devicectl device install app --device "$UDID" "$APP"
+
+# == 5. launch ==
+if [ "$LAUNCH" = 1 ]; then
+  echo "== launch dev.bookq.reader"
+  # ロック中は process launch が error 10002 (Locked) で失敗する。
+  # install は済んでいるので原因を案内して終了コードだけ立てる。
+  if ! xcrun devicectl device process launch --device "$UDID" dev.bookq.reader; then
+    echo "warn: install は成功しましたが起動できません (端末のロック解除、または初回は 設定 → 一般 → VPNとデバイス管理 で開発元を信頼 → 再実行 or アイコンをタップ)" >&2
+    exit 1
+  fi
+fi
+echo "✅ deploy 完了 ($CONFIG → $UDID)"
