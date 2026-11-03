@@ -40,30 +40,32 @@ run_tests() {
     "-Pandroid.testInstrumentationRunnerArguments.bookqExpectedFolder=$EXPECTED_FOLDER"
 }
 
-echo "== emulator->server connectivity gate: $PROBE_URL"
-ready=""
-for i in $(seq 1 "$PROBE_ATTEMPTS"); do
-  if probe; then
-    echo "emulator reached server after $i probe(s)"
-    ready=1
-    break
-  fi
-  sleep "$PROBE_SLEEP"
-done
-
-if [ -z "$ready" ]; then
+wait_for_server() {
+  for i in $(seq 1 "$PROBE_ATTEMPTS"); do
+    if probe; then
+      echo "emulator reached server after $i probe(s)"
+      return 0
+    fi
+    sleep "$PROBE_SLEEP"
+  done
   echo "ERROR: emulator cannot reach $PROBE_URL after $PROBE_ATTEMPTS probes"
   adb devices
   adb shell getprop sys.boot_completed || true
-  exit 1
-fi
+  return 1
+}
+
+echo "== emulator->server connectivity gate: $PROBE_URL"
+wait_for_server || exit 1
 
 echo "== connected tests (attempt 1)"
 if run_tests; then
   exit 0
 fi
 
-echo "== attempt 1 failed; re-probing $PROBE_URL before retry"
-probe && echo "server still reachable" || echo "server UNREACHABLE from emulator"
+# Retry only makes sense once connectivity is back — if the NAT bridge
+# dropped mid-run it may take tens of seconds to recover; a retry fired
+# while still unreachable would waste the attempt.
+echo "== attempt 1 failed; re-gating on $PROBE_URL before retry"
+wait_for_server || exit 1
 echo "== connected tests (attempt 2)"
 run_tests
