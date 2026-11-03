@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import dev.bookq.reader.PerfTrace
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -127,6 +128,8 @@ private fun ReadyNavHost(graph: AppGraph) {
                 path = route.path,
                 onNavigate = { nav.navigate(Routes.Browse(it)) },
                 onOpenReader = { folder, page ->
+                    // Perf gate: reader cold-open → first spread draw.
+                    PerfTrace.readerOpen()
                     nav.navigate(Routes.Reader(folder, page))
                 },
                 onSettings = { nav.navigate(Routes.Settings) },

@@ -58,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -97,6 +98,7 @@ import dev.bookq.core.reader.ZoomState
 import dev.bookq.core.reader.zoneAction
 import dev.bookq.core.reader.ZoneAction
 import dev.bookq.reader.AppGraph
+import dev.bookq.reader.PerfTrace
 import dev.bookq.reader.R
 import dev.bookq.reader.reader.ReaderController
 import dev.bookq.reader.ui.browse.RETURN_ANCHOR_KEY
@@ -295,6 +297,9 @@ private fun ReaderBody(
             target = target.coerceIn(r.first, r.last)
         }
         target = target.coerceIn(0, pager.pageCount - 1)
+        // Macrobenchmark gate: tap release → target spread's first draw
+        // ends the section (PerfTrace.onSpreadDrawn in SpreadCell).
+        if (target != base) PerfTrace.pageTurn(target)
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastNavAt > 250) {
             lastNavAt = now
@@ -742,7 +747,9 @@ private fun ReaderBody(
                     }
                     Box {
                         IconButton(onClick = { menu = true }) {
-                            Icon(Icons.Filled.MoreVert, null, tint = Color.White)
+                            Icon(Icons.Filled.MoreVert,
+                                stringResource(R.string.reader_menu),
+                                tint = Color.White)
                         }
                         ReaderMenu(
                             expanded = menu,
@@ -866,7 +873,17 @@ private fun SpreadCell(
         ReaderWork.spreadFit(pages.map { ars[it] ?: controller.lastAR },
             GAP_INNER_PX, viewW, viewH)
     }
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            // Perf gate: the target spread's first drawn frame ends
+            // bookq.pageTurn (and any open bookq.readerOpen).
+            .drawWithContent {
+                drawContent()
+                PerfTrace.onSpreadDrawn(spreadIdx)
+            },
+        contentAlignment = Alignment.Center,
+    ) {
         // The pager's RTL LayoutDirection is inherited: the Row lays its
         // first child at the right edge — web's `row-reverse` for free.
         Row {

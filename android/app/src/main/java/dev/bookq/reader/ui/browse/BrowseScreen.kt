@@ -86,6 +86,7 @@ import dev.bookq.reader.BrowseLayout
 import dev.bookq.reader.R
 import dev.bookq.reader.ServerScope
 import dev.bookq.reader.browse.BrowseController
+import android.app.Activity
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -352,6 +353,8 @@ private fun BrowseBody(
         }.first { (l, _, loaded) ->
             l.isNotEmpty() || (loaded && vis.blockedGrid() == null)
         }.first
+        // Startup gate: cold start → library displayed (timeToFullDisplay).
+        (context as? Activity)?.reportFullyDrawn()
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||
             gridState.firstVisibleItemIndex > 0 ||
@@ -626,7 +629,8 @@ private fun BrowseBody(
                 navigationIcon = {
                     if (path.isNotEmpty()) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null)
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack,
+                                stringResource(R.string.back))
                         }
                     }
                 },
@@ -644,7 +648,8 @@ private fun BrowseBody(
                                     filter = ""
                                     searchOpen = false
                                 }, modifier = Modifier.testTag("searchClose")) {
-                                    Icon(Icons.Default.Close, null)
+                                    Icon(Icons.Default.Close,
+                                        stringResource(R.string.browse_search_close))
                                 }
                             },
                         )
@@ -659,7 +664,8 @@ private fun BrowseBody(
                                 IconButton(onClick = {
                                     filter = ""
                                     filterActive = false
-                                }) { Icon(Icons.Default.Close, null) }
+                                }) { Icon(Icons.Default.Close,
+                                    stringResource(R.string.browse_filter_close)) }
                             },
                         )
                     } else {
@@ -1003,7 +1009,8 @@ private fun BrowseGrid(
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier.fillMaxSize(),
+        // UiAutomator locator for the Macrobenchmark grid-fling gate.
+        modifier = Modifier.fillMaxSize().testTag("browseGrid"),
     ) {
         gridItemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
             ElevatedCard(

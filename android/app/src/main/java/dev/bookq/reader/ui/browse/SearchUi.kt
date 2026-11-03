@@ -34,6 +34,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -153,6 +155,7 @@ fun FilterChipRow(
             .padding(horizontal = 16.dp, vertical = 4.dp),
     ) {
         items(artists.toList()) { a ->
+            val removeDesc = stringResource(R.string.search_chip_remove, a)
             AssistChip(
                 onClick = { onRemove(SearchRepository.Kind.ARTIST, a) },
                 label = { Text(a) },
@@ -160,10 +163,13 @@ fun FilterChipRow(
                     Icon(Icons.Default.Close, null,
                         Modifier.padding(start = 2.dp).width(16.dp))
                 },
-                modifier = Modifier.testTag("filterChip:artist:$a"),
+                modifier = Modifier
+                    .testTag("filterChip:artist:$a")
+                    .semantics { contentDescription = removeDesc },
             )
         }
         items(tags.toList()) { t ->
+            val removeDesc = stringResource(R.string.search_chip_remove, t)
             AssistChip(
                 onClick = { onRemove(SearchRepository.Kind.TAG, t) },
                 label = { Text(t) },
@@ -171,7 +177,9 @@ fun FilterChipRow(
                     Icon(Icons.Default.Close, null,
                         Modifier.padding(start = 2.dp).width(16.dp))
                 },
-                modifier = Modifier.testTag("filterChip:tag:$t"),
+                modifier = Modifier
+                    .testTag("filterChip:tag:$t")
+                    .semantics { contentDescription = removeDesc },
             )
         }
     }

@@ -80,6 +80,10 @@
     <string name="settings_offline_clear_confirm">保存済みのすべての作品を削除しますか？</string>
     <string name="browse_search_hint">ライブラリを検索</string>
     <string name="browse_filters">フィルタ</string>
+    <string name="browse_search_close">検索を閉じる</string>
+    <string name="browse_filter_close">絞り込みを解除</string>
+    <string name="reader_menu">リーダーメニュー</string>
+    <string name="search_chip_remove">%1$s を除外</string>
     <string name="facet_artists">作者</string>
     <string name="facet_tags">タグ</string>
     <string name="facet_reset">リセット</string>
