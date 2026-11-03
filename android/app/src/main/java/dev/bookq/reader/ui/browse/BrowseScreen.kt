@@ -56,6 +56,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -66,6 +67,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -87,12 +89,12 @@ import dev.bookq.reader.PerfTunables
 import dev.bookq.reader.R
 import dev.bookq.reader.ServerScope
 import dev.bookq.reader.browse.BrowseController
-import android.app.Activity
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Saved-state key the reader writes its chapter anchor into. */
 const val RETURN_ANCHOR_KEY = "bookq.returnAnchor"
@@ -355,8 +357,22 @@ private fun BrowseBody(
             l.isNotEmpty() || (loaded && vis.blockedGrid() == null)
         }.first
         // Startup gate: cold start → library displayed (timeToFullDisplay).
+        // The marker must land INSIDE a Choreographer doFrame — early
+        // (before the items' frame ends) crashes StartupTimingQuery, and
+        // late (after the app goes idle) leaves no doFrame ending after
+        // it. withFrameNanos resumes during the next frame's callback;
+        // if the pipeline already went idle, a manual invalidate
+        // schedules one more doFrame so the marker still gets bounded.
+        val act = context as? ComponentActivity
+        if (withTimeoutOrNull(1_500) { withFrameNanos {}; true } == null) {
+            // Pipeline already idle — schedule a doFrame so the marker
+            // still lands inside one (metric needs a slice ending
+            // after reportFullyDrawn).
+            act?.window?.decorView?.postInvalidate()
+            withTimeoutOrNull(1_500) { withFrameNanos {} }
+        }
+        act?.reportFullyDrawn()
         PerfTunables.mark("fullyDrawn")
-        (context as? Activity)?.reportFullyDrawn()
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||
             gridState.firstVisibleItemIndex > 0 ||
