@@ -128,7 +128,8 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
 
 ### 計測結果（CP08-J1 / release + Baseline Profile）
 
-計測 2026-11-03、CompilationMode.Partial(Require)、n=10/テスト。
+計測 2026-11-03、CompilationMode.Partial(Require)、n=10/テスト、
+`perf-gate.sh` 一括実行の最終結果（全ゲート PASS）。
 フレーム系は CPU 時間 (`frameDurationCpuMs`) とパイプライン超過
 (`frameOverrunMs`、UI+RT+GPU 計 vs フレーム締切) を併記。CP08-J1 は
 90 Hz パネルのためフレーム締切は ~11.1ms（60Hz 前提の 16ms ゲートは
@@ -137,23 +138,23 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
 | ゲート | 閾値 | 実測 | web 基準 (#60) |
 |--------|------|------|----------------|
 | タップ送り median | < 60ms | **0.4ms** (SumMs p50) | 88–138ms |
-| リーダー起動 (cache) | < 400ms | **2.6ms** (SumMs p50) | — |
-| スワイプ送り CPU p99 / overrun p99 | < 16ms / — | **12.1ms** / 14.4ms | 171–205ms |
-| タイルグリッド fling CPU p99 / overrun p99 | 40ms / 55ms | **32.3ms** / 46.5ms | — |
-| 概要 fling (600p) CPU p99 / overrun p99 | 60ms / 120ms | **47.1ms** / 103.4ms | — |
-| コールド起動 TTFD | < 1.5s | **925.5ms** (TTID ~514ms) | — |
+| リーダー起動 (cache) | < 400ms | **2.7ms** (SumMs p50) | — |
+| スワイプ送り CPU p99 / overrun p99 | < 16ms / < 20ms | **13.8ms** / 16.9ms | 171–205ms |
+| タイルグリッド fling CPU p99 / overrun p99 | < 40ms / < 55ms | **32.3ms** / 45.6ms | — |
+| 概要 fling (600p) CPU p99 / overrun p99 | < 60ms / < 120ms | **46.0ms** / 103.5ms | — |
+| コールド起動 TTFD / TTID | < 1.5s | **827.4ms** / 488.1ms | — |
 
 ゲートしきい値の再校正について: #292 §5 の「fling p99 <16ms・
 janky <1%」は 60Hz 前提の目標値。実測では CP08-J1 (90Hz・Mali-G57)
-でグリッド fling の新規行合成フロアが ~32ms、概要グリッドが ~47ms
+でグリッド fling の新規行合成フロアが ~32ms、概要グリッドが ~46ms
 で、3 回の最適化反復（Text 1 本化・ElevatedCard→Surface・スクロール中
 画像アタッチ遅延）でも p99 は不動だった — 高速合成 fling での新規行
-compose が支配コスト。実 UX は P50 11.3ms（グリッド）/ 7.0ms（概要）
+compose が支配コスト。実 UX は P50 10.0ms（グリッド）/ 6.4ms（概要）
 と軽快で、テールは settle 時の遅延画像アタッチ一括反映による
 バーストフレーム。ゲートは回帰検出用に実測フロア+~25% に設定し、
-理想値は上表の閾値列ではなく本節の記録として残す。janky% 派生値
-（overrun>0 比率）は 90Hz 締切では fling 中ほぼ全フレーム超過と
-なるため採用せず、overrun p99 を代替指標とする。
+理想値は上表の閾値列ではなく本節の記録として残す。overrun>0
+フレーム比率は 90Hz 締切では fling 中ほぼ全フレーム超過となるため
+採用せず（情報表示のみ）、overrun p99 を代替指標とする。
 
 ### リーダー描画方式（A/B 決着）
 
