@@ -33,11 +33,21 @@ class StartupBenchmark {
         setupBlock = { pressHome() },
     ) {
         startActivityAndWait(launchIntent(serverUrl()))
-        if (device.wait(Until.hasObject(
-                By.res("browseGrid").pkg(PACKAGE_NAME)),
-                30_000) != true) {
-            error("browse grid never appeared")
+        // Cold start can auto-resume straight into the reader (saved
+        // progress on the device) — TTFD already fired on whichever
+        // surface drew first. Only WAIT here: a pressBack during the
+        // measured window adds navigation frames and can orphan the
+        // reportFullyDrawn frame's RT slice ("No RT frame slice
+        // associated with UI thread frame").
+        val deadline = android.os.SystemClock.uptimeMillis() + 30_000
+        var surfaced = false
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            if (device.hasObject(
+                    By.res("browseGrid").pkg(PACKAGE_NAME)) ||
+                inReader()) { surfaced = true; break }
+            android.os.SystemClock.sleep(300)
         }
+        if (!surfaced) error("no app surface appeared within 30s")
     }
 }
 

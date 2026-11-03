@@ -113,7 +113,11 @@ for cls in $BENCH_CLASSES; do
 done
 
 echo "== results =="
-mapfile -t JSON < <(find "$RESULTS_DIR" -name "*.json" | sort)
+# bash 3.2 (stock macOS) has no mapfile — collect the JSON list the
+# portable way. Sorted so the table order is stable.
+JSON=()
+while IFS= read -r f; do JSON+=("$f"); done \
+    < <(find "$RESULTS_DIR" -name "*.json" | sort)
 [[ ${#JSON[@]} -gt 0 ]] || { echo "no benchmarkData.json produced" >&2; exit 2; }
 
 python3 - "${JSON[@]}" <<'PY'
