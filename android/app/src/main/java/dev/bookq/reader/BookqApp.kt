@@ -11,6 +11,7 @@ class BookqApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        PerfTunables.bootT0 = android.os.SystemClock.uptimeMillis()
         graph = AppGraph(this)
         graph.model.start()
         // App-level foreground edge → the scope's since-poll + pending

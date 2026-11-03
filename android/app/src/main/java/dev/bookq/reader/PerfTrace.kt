@@ -60,4 +60,18 @@ object PerfTunables {
     /** HorizontalPager composition window override for the reader A/B
      *  sweep (`--ei bvp N`). null → the code default. */
     @Volatile var beyondViewportPageCount: Int? = null
+
+    /** Process-uptime anchor for cold-start phase logging (ms). */
+    @Volatile var bootT0: Long = 0L
+
+    /** `PerfBoot` logcat marker: `bookq.boot <tag> t=<ms-since-onCreate>`.
+     *  Measurement builds only — never logs in release, and no-ops on
+     *  JVM unit tests where android.util.Log is unmocked. */
+    fun mark(tag: String) {
+        if (!BuildConfig.ALLOW_SERVER_URL_EXTRA) return
+        runCatching {
+            android.util.Log.i("PerfBoot",
+                "$tag t=${android.os.SystemClock.uptimeMillis() - bootT0}")
+        }
+    }
 }

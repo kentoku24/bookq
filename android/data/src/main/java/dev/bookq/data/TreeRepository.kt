@@ -37,6 +37,10 @@ class TreeRepository(
     private val scope: CoroutineScope,
     private val pollIntervalMs: Long = POLL_INTERVAL_MS,
     private val snapshot: SnapshotIO = FileSnapshotIO(snapshotDir, api.baseUrl.host),
+    /** Top-level-only sibling of [snapshot] — kilobytes, decodes
+     *  instantly, so cold start can paint the root grid while the
+     *  multi-MB full snapshot is still parsing. */
+    private val shallow: SnapshotIO? = null,
 ) {
 
     data class State(
@@ -55,7 +59,14 @@ class TreeRepository(
         fun read(): String?
         fun write(text: String)
         fun exists(): Boolean
+        /** Backing file name — lets a boot-time prewarm prove the decoded
+         *  candidate really came from this repo's file (never apply a
+         *  different host's snapshot). Null for in-memory stores. */
+        val backingName: String? get() = null
     }
+
+    /** A snapshot decoded ahead of scope construction (boot prewarm). */
+    class PrewarmedSnapshot(val name: String, val snap: TreeSnapshot)
 
     private val _state = MutableStateFlow(State())
     val state = _state.asStateFlow()
@@ -66,13 +77,40 @@ class TreeRepository(
     private var pollJob: Job? = null
     @Volatile private var foreground = true
 
-    /** Restore the host snapshot synchronously so cold start paints
-     *  instantly (SW NetworkFirst parity). Returns true when applied. */
-    fun restoreSnapshot(): Boolean {
-        val text = snapshot.read() ?: return false
+    /** Instant-paint phase — restore the top-level snapshot (KBs) so
+     *  the grid can draw while the full restore is still decoding.
+     *  Mirrors the network `depth=1` stage: `shallow=true` until the
+     *  full tree arrives. Returns true when applied. */
+    fun restoreShallow(): Boolean {
+        val io = shallow ?: return false
+        val text = io.read() ?: return false
         val snap = runCatching {
             BookqJson.decodeFromString<TreeSnapshot>(text)
         }.getOrNull() ?: return false
+        _state.value = State(
+            nodes = snap.nodes,
+            generation = snap.generation,
+            shallow = true,
+            treeLoaded = false,
+            hasSnapshot = true,
+        )
+        return true
+    }
+
+    /** Restore the host snapshot synchronously so cold start paints
+     *  instantly (SW NetworkFirst parity). A [prewarmed] candidate is
+     *  used only when it came from this repo's backing file — the boot
+     *  prewarm races settings load, before the scope's host is known.
+     *  Returns true when applied. */
+    fun restoreSnapshot(prewarmed: PrewarmedSnapshot? = null): Boolean {
+        val snap = if (prewarmed != null && prewarmed.name == snapshot.backingName) {
+            prewarmed.snap
+        } else {
+            val text = snapshot.read() ?: return false
+            runCatching {
+                BookqJson.decodeFromString<TreeSnapshot>(text)
+            }.getOrNull() ?: return false
+        }
         _state.value = State(
             nodes = snap.nodes,
             generation = snap.generation,
@@ -187,6 +225,12 @@ class TreeRepository(
             runCatching {
                 snapshot.write(BookqJson.encodeToString(
                     TreeSnapshot(res.nodes, res.generation)))
+                // Sibling shallow snapshot — `depth=1` semantics, the
+                // next cold start's instant paint.
+                shallow?.write(BookqJson.encodeToString(
+                    TreeSnapshot(
+                        res.nodes.map { it.copy(children = null) },
+                        res.generation)))
             }
         }
     }
@@ -247,8 +291,9 @@ class TreeRepository(
 
     /** File-backed snapshot under `<dir>/tree-<host>.json` (iOS parity:
      *  keyed per server host so switching servers can't leak a tree). */
-    class FileSnapshotIO(dir: File, host: String) : SnapshotIO {
-        private val file = File(dir, ScopedFiles.fileName("tree", host))
+    class FileSnapshotIO(dir: File, host: String, prefix: String = "tree") : SnapshotIO {
+        private val file = File(dir, ScopedFiles.fileName(prefix, host))
+        override val backingName: String get() = file.name
         override fun read(): String? = ScopedFiles.readOrNull(file)
         override fun write(text: String) = ScopedFiles.writeAtomic(file, text)
         override fun exists(): Boolean = file.isFile

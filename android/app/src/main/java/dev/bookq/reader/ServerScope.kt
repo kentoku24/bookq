@@ -35,6 +35,10 @@ class ServerScope(
     /** Live bearer for the reader-sync WS upgrade — auth.token. */
     tokenProvider: () -> String?,
     parent: CoroutineScope,
+    /** Snapshot decoded during settings load (cold-start overlap) —
+     *  applied only when it came from this scope's own backing file. */
+    private val treePrewarm:
+        kotlinx.coroutines.Deferred<TreeRepository.PrewarmedSnapshot?>? = null,
 ) {
     private val stateDir = File(context.filesDir, "state")
 
@@ -60,6 +64,7 @@ class ServerScope(
         snapshotDir = stateDir,
         scope = ioScope,
         snapshot = TreeRepository.FileSnapshotIO(stateDir, host),
+        shallow = TreeRepository.FileSnapshotIO(stateDir, host, "shallow"),
     )
 
     val visibility = VisibilityRepository(
@@ -139,9 +144,18 @@ class ServerScope(
         }
         .build()
 
+    /** Instant-paint phase — apply the tiny shallow snapshot BEFORE the
+     *  scope publishes, so the grid draws at first frame; [start] then
+     *  swaps in the full tree off the critical path. */
+    fun warmShallow() {
+        val ok = tree.restoreShallow()
+        PerfTunables.mark("scope.shallow ok=$ok")
+    }
+
     /** Boot the scope — snapshot paint, two-stage tree, visibility, progress. */
-    fun start() {
-        tree.restoreSnapshot()
+    suspend fun start() {
+        val snap = tree.restoreSnapshot(treePrewarm?.await())
+        PerfTunables.mark("scope.start snapshot=$snap")
         tree.load()
         tree.startPolling()
         visibility.refresh()

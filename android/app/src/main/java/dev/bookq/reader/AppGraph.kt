@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -56,6 +57,25 @@ class AppGraph(app: Application) {
         snapshotProbe = { base -> ServerScope.hasTreeSnapshot(app, base.host) },
     )
 
+    /** Read+decode the newest tree snapshot while settings still load —
+     *  moves the multi-MB JSON parse off the cold-start critical path.
+     *  ServerScope applies it only when the backing file matches its
+     *  host (a stale other-host candidate is just wasted warmth). */
+    private val treePrewarm =
+        scope.async(Dispatchers.IO) {
+            val dir = java.io.File(app.filesDir, "state")
+            val file = dir.listFiles { f ->
+                f.isFile && f.name.startsWith("tree-") && f.name.endsWith(".json")
+            }?.maxByOrNull { it.lastModified() } ?: return@async null
+            val text = dev.bookq.data.ScopedFiles.readOrNull(file)
+                ?: return@async null
+            val snap = runCatching {
+                dev.bookq.core.api.BookqJson.decodeFromString<
+                    dev.bookq.data.TreeRepository.TreeSnapshot>(text)
+            }.getOrNull() ?: return@async null
+            dev.bookq.data.TreeRepository.PrewarmedSnapshot(file.name, snap)
+        }
+
     /**
      * Active per-(host, account) service bundle — rebuilt whenever
      * [AppModel.scopeValue] changes (server URL or login identity).
@@ -86,6 +106,7 @@ class AppGraph(app: Application) {
                 // restoreSnapshot read+decode multi-MB files — a main-
                 // thread cold start would jank (StrictMode DiskRead).
                 val created = withContext(Dispatchers.IO) {
+                    PerfTunables.mark("scope.build.begin")
                     ServerScope(
                         context = app,
                         api = api,
@@ -94,10 +115,16 @@ class AppGraph(app: Application) {
                         mediaClient = buildMediaClient(api.baseUrl),
                         tokenProvider = { auth.token },
                         parent = scope,
-                    ).also { it.start() }
+                        treePrewarm = treePrewarm,
+                    ).also { it.warmShallow() }
                 }
                 serverScopeKey = sc
                 _serverScope.value = created
+                PerfTunables.mark("scope.emitted")
+                // Full snapshot restore + network kickoff continue off
+                // the publish path — the grid already has the shallow
+                // snapshot to paint. Dies with the scope on close().
+                created.ioScope.launch { created.start() }
             }
         }
     }

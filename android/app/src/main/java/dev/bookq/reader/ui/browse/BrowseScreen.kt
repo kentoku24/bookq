@@ -83,6 +83,7 @@ import dev.bookq.core.progress.ProgressBook
 import dev.bookq.core.visibility.VisibilityState
 import dev.bookq.reader.AppGraph
 import dev.bookq.reader.BrowseLayout
+import dev.bookq.reader.PerfTunables
 import dev.bookq.reader.R
 import dev.bookq.reader.ServerScope
 import dev.bookq.reader.browse.BrowseController
@@ -354,6 +355,7 @@ private fun BrowseBody(
             l.isNotEmpty() || (loaded && vis.blockedGrid() == null)
         }.first
         // Startup gate: cold start → library displayed (timeToFullDisplay).
+        PerfTunables.mark("fullyDrawn")
         (context as? Activity)?.reportFullyDrawn()
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||
