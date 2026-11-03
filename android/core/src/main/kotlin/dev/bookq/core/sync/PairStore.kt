@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -100,6 +101,20 @@ class PairStore(
     val code: StateFlow<String?> = _code
     data class JoinRequest(val memberId: String, val name: String)
 
+    /** MATCH outcome — bound straight through or the server saw several
+     *  eligible waiting sessions and handed back opaque pick tokens. */
+    sealed interface MatchResult {
+        data object Paired : MatchResult
+        data class Ambiguous(
+            val candidates: List<MatchCandidate>) : MatchResult
+    }
+
+    data class MatchCandidate(
+        val id: String,          // opaque match_token — pass to match(pick)
+        val leaderName: String,
+        val ageSec: Int,
+    )
+
     private val _joinRequest = MutableStateFlow<JoinRequest?>(null)
     val joinRequest: StateFlow<JoinRequest?> = _joinRequest
     private val _lastState = MutableStateFlow<PairSnapshot?>(null)
@@ -148,7 +163,8 @@ class PairStore(
     private var transport: PairTransport? = null
     private var eventJob: Job? = null
     private var linkGen = 0
-    private val pending = LinkedHashMap<String, CompletableDeferred<Unit>>()
+    private val pending =
+        LinkedHashMap<String, CompletableDeferred<JsonObject>>()
     private var ridSeq = 0
 
     // protocol mirrors (pairClient.js _seen/_applied/_readyFor/_deferredState)
@@ -181,7 +197,7 @@ class PairStore(
     private var entryPayload: JsonObject = JsonObject(emptyMap())
     private var bootstrapTried = false
     private var suspended = false
-    private var entryCont: CompletableDeferred<Unit>? = null
+    private var entryCont: CompletableDeferred<JsonObject>? = null
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -204,10 +220,25 @@ class PairStore(
             memberOverride = null)
     }
 
-    /** `pick` = matched memberId hint (web "この端末と同期" entry point). */
-    suspend fun match(pick: String? = null) {
+    /** `pick` = matched session's opaque token (ambiguous ACK picker). */
+    suspend fun match(pick: String? = null): MatchResult {
         val p = buildJsonObject { pick?.let { put("pick", it) } }
-        entry(Entry.MATCH, "MATCH", p, memberOverride = null)
+        val data = entry(Entry.MATCH, "MATCH", p, memberOverride = null)
+        if ((data["ambiguous"] as? JsonPrimitive)?.booleanOrNull == true) {
+            val cs = (data["candidates"] as? JsonArray).orEmpty()
+                .mapNotNull { c ->
+                    val o = c as? JsonObject ?: return@mapNotNull null
+                    MatchCandidate(
+                        id = (o["id"] as? JsonPrimitive)?.content
+                            ?: return@mapNotNull null,
+                        leaderName = (o["leaderName"] as? JsonPrimitive)
+                            ?.content.orEmpty(),
+                        ageSec = (o["ageSec"] as? JsonPrimitive)?.intOrNull
+                            ?: 0)
+                }
+            return MatchResult.Ambiguous(cs)
+        }
+        return MatchResult.Paired
     }
 
     suspend fun resume() {
@@ -224,7 +255,7 @@ class PairStore(
     private suspend fun entry(
         mode: Entry, type: String, payload: JsonObject,
         memberOverride: PairMember?,
-    ) {
+    ): JsonObject {
         // Leave politely first, then reset (web _leaveBound +
         // _teardownLink). The resume window must survive teardown —
         // it clears offlineSince/retryCount which reconnect owns.
@@ -248,10 +279,10 @@ class PairStore(
             _status.value = UiStatus.Connecting
         }
         openSocket()
-        val waiter = CompletableDeferred<Unit>()
+        val waiter = CompletableDeferred<JsonObject>()
         lock.withLock { entryCont = waiter }
         armEntryTimeout()
-        waiter.await()
+        return waiter.await()
     }
 
     private fun armEntryTimeout() {
@@ -457,7 +488,7 @@ class PairStore(
             envelope(type, payload,
                 workEpoch = workEpoch, baseRevision = baseRevision)
         }
-        val waiter = CompletableDeferred<Unit>()
+        val waiter = CompletableDeferred<JsonObject>()
         lock.withLock { pending[req.requestId] = waiter }
         scope.launch {
             try {
@@ -477,7 +508,12 @@ class PairStore(
         val cont = pending.remove(rid) ?: return
         val data = (f["data"] as? JsonObject) ?: JsonObject(emptyMap())
         bindFromAckLocked(data, (f["request"] as? JsonPrimitive)?.content)
-        cont.complete(Unit)
+        // MATCH ambiguous: nothing bound — web `_teardownLink`s the
+        // connection; the picker issues a fresh match(pick).
+        if ((data["ambiguous"] as? JsonPrimitive)?.booleanOrNull == true) {
+            teardownLocked()
+        }
+        cont.complete(data)
     }
 
     private fun onRejectLocked(f: JsonObject) {

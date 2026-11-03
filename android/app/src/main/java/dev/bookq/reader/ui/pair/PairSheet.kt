@@ -64,6 +64,8 @@ fun PairSheet(
     var joinCode by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var matchCandidates by remember {
+        mutableStateOf<List<PairStore.MatchCandidate>?>(null) }
 
     fun run(op: suspend () -> Unit) {
         busy = true; localError = null
@@ -91,6 +93,31 @@ fun PairSheet(
                 Spacer(Modifier.height(8.dp))
             }
 
+            // Ambiguous MATCH — the server saw several eligible waiting
+            // sessions; pick one by its opaque token (web picker parity).
+            matchCandidates?.let { cands ->
+                Text("接続先を選択",
+                    style = MaterialTheme.typography.titleSmall)
+                cands.forEach { c ->
+                    OutlinedButton(
+                        onClick = {
+                            matchCandidates = null
+                            run { pair.match(c.id) }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                            .testTag("matchCandidate:${c.id}")) {
+                        Text("${c.leaderName.ifEmpty { c.id.take(8) }}" +
+                            " — ${c.ageSec}秒前")
+                    }
+                }
+                TextButton(onClick = { matchCandidates = null }) {
+                    Text("戻る")
+                }
+                Spacer(Modifier.height(8.dp))
+                return@Column
+            }
+
             when (val st = status) {
                 PairStore.UiStatus.Idle -> Column {
                     Text("新しいセッション",
@@ -103,7 +130,15 @@ fun PairSheet(
                             Text("コードを発行する")
                         }
                         FilledTonalButton(
-                            onClick = { run { pair.match() } },
+                            onClick = {
+                                run {
+                                    when (val r = pair.match()) {
+                                        is PairStore.MatchResult.Ambiguous ->
+                                            matchCandidates = r.candidates
+                                        else -> Unit
+                                    }
+                                }
+                            },
                             enabled = !busy,
                             modifier = Modifier.testTag("pairMatch")) {
                             Text("自動で接続")
