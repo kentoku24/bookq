@@ -881,7 +881,7 @@ private fun SpreadCell(
     val pages = work.spreads.getOrNull(spreadIdx) ?: return
     val ars by controller.pageAR.collectAsStateWithLifecycle()
     val density = LocalDensity.current
-    val act = LocalContext.current as? android.app.Activity
+    val act = androidx.activity.compose.LocalActivity.current
     val (fitW, fitH) = remember(pages, ars, viewW, viewH) {
         ReaderWork.spreadFit(pages.map { ars[it] ?: controller.lastAR },
             GAP_INNER_PX, viewW, viewH)
