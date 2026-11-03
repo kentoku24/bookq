@@ -179,15 +179,22 @@ class TreeRepository(
                         scheduleFullRetry(gen)
                         return@withLock
                     }
-                    if (_state.value.nodes.isNotEmpty() &&
-                        _state.value.hasSnapshot) {
+                    val st = _state.value
+                    if (st.nodes.isNotEmpty() && st.hasSnapshot &&
+                        !st.shallow) {
                         // Stale FULL tree still on screen — mark loaded
                         // and show it. A depth-1-only list is NOT
                         // complete: keep the retry loop alive instead
                         // of freezing the shallow window as "loaded".
-                        _state.value = _state.value.copy(
+                        _state.value = st.copy(
                             shallow = false, treeLoaded = true)
-                    } else if (_state.value.nodes.isNotEmpty()) {
+                    } else if (st.shallow && restoreSnapshot()) {
+                        // Shallow snapshot on screen + full fetch down:
+                        // children=null tiles can never drill. The file
+                        // snapshot is a COMPLETE stale tree — swap to
+                        // it, then keep retrying for a fresh pull.
+                        scheduleFullRetry(gen)
+                    } else if (st.nodes.isNotEmpty()) {
                         scheduleFullRetry(gen)
                     } else if (restoreSnapshot()) {
                         // snapshot path already emitted
