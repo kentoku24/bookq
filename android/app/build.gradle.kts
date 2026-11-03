@@ -4,6 +4,7 @@ plugins {
     // plugins are applied on top.
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 // Release signing comes from ~/.gradle/gradle.properties (or -P flags):
@@ -53,9 +54,33 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            buildConfigField(
+                "boolean",
+                "ALLOW_SERVER_URL_EXTRA",
+                "false",
+            )
+        }
+        // Release-shaped, debug-signed variant for Macrobenchmark and
+        // Baseline Profile verification (issue #302). R8/minify match
+        // release; the serverURL intent extra stays enabled so the
+        // benchmark can point at a TEST_MODE dev environment.
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            buildConfigField(
+                "boolean",
+                "ALLOW_SERVER_URL_EXTRA",
+                "true",
+            )
         }
         debug {
             applicationIdSuffix = ".debug"
+            buildConfigField(
+                "boolean",
+                "ALLOW_SERVER_URL_EXTRA",
+                "true",
+            )
         }
     }
 
@@ -89,6 +114,15 @@ java {
     }
 }
 
+// M10 audit surface: `./gradlew :app:compileReleaseKotlin` emits the
+// stability/metrics reports for the Compose-stability review.
+composeCompiler {
+    reportsDestination = layout.buildDirectory.dir("compose_reports")
+    metricsDestination = layout.buildDirectory.dir("compose_metrics")
+    stabilityConfigurationFiles.add(
+        layout.projectDirectory.file("../compose-stability.conf"))
+}
+
 dependencies {
     implementation(project(":core"))
     implementation(project(":data"))
@@ -116,6 +150,8 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
     implementation(libs.androidx.lifecycle.process)
+    implementation(libs.androidx.profileinstaller)
+    baselineProfile(project(":baselineprofile"))
     implementation(libs.zxing.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)

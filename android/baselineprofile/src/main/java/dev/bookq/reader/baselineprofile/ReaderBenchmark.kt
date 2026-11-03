@@ -1,0 +1,127 @@
+@file:OptIn(androidx.benchmark.macro.ExperimentalMetricApi::class)
+
+package dev.bookq.reader.baselineprofile
+
+import androidx.benchmark.macro.FrameTimingMetric
+import androidx.benchmark.macro.StartupMode
+import androidx.benchmark.macro.TraceSectionMetric
+import androidx.benchmark.macro.junit4.MacrobenchmarkRule
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Direction
+import androidx.test.uiautomator.Until
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Reader gates (issue #302 §5), all measured WARM: the process stays
+ * resident between iterations (StartupMode.HOT only pressHomes), so
+ * Coil's memory/disk caches reflect a real reading session.
+ *
+ * - tapTurn: `bookq.pageTurn` sections, median < 60 ms
+ * - swipeTurn / overviewFling: janky < 1 %, p99 frame < 16 ms
+ * - readerOpen: `bookq.readerOpen` sections, < 400 ms cached
+ */
+@RunWith(AndroidJUnit4::class)
+class ReaderBenchmark {
+
+    @get:Rule
+    val benchmarkRule = MacrobenchmarkRule()
+
+    @Test
+    fun tapTurn() = benchmarkRule.measureRepeated(
+        packageName = PACKAGE_NAME,
+        metrics = listOf(
+            TraceSectionMetric("bookq.pageTurn"),
+            FrameTimingMetric(),
+        ),
+        compilationMode = compilationMode(),
+        startupMode = StartupMode.HOT,
+        iterations = 10,
+        setupBlock = {
+            val url = serverUrl()
+            pressHome()
+            startActivityAndWait(launchIntent(url))
+            reachReader()
+            device.waitForIdle(1_000)
+        },
+    ) {
+        device.tapForward()
+        device.waitForIdle(400)
+    }
+
+    @Test
+    fun swipeTurn() = benchmarkRule.measureRepeated(
+        packageName = PACKAGE_NAME,
+        metrics = listOf(FrameTimingMetric()),
+        compilationMode = compilationMode(),
+        startupMode = StartupMode.HOT,
+        iterations = 10,
+        setupBlock = {
+            val url = serverUrl()
+            pressHome()
+            startActivityAndWait(launchIntent(url))
+            reachReader()
+            device.waitForIdle(1_000)
+        },
+    ) {
+        device.flingForward()
+    }
+
+    @Test
+    fun overviewFling() = benchmarkRule.measureRepeated(
+        packageName = PACKAGE_NAME,
+        metrics = listOf(FrameTimingMetric()),
+        compilationMode = compilationMode(),
+        startupMode = StartupMode.HOT,
+        iterations = 10,
+        setupBlock = {
+            val url = serverUrl()
+            pressHome()
+            startActivityAndWait(launchIntent(url))
+            reachReader()
+            openOverview()
+            device.waitForIdle(800)
+        },
+    ) {
+        device.flingObject("overviewGrid", Direction.DOWN, 3)
+    }
+
+    @Test
+    fun readerOpen() = benchmarkRule.measureRepeated(
+        packageName = PACKAGE_NAME,
+        metrics = listOf(TraceSectionMetric("bookq.readerOpen")),
+        compilationMode = compilationMode(),
+        startupMode = StartupMode.HOT,
+        iterations = 10,
+        setupBlock = {
+            val url = serverUrl()
+            pressHome()
+            startActivityAndWait(launchIntent(url))
+            // Resume may land inside the reader — back out to browse.
+            if (inReader()) {
+                device.pressBack()
+                device.wait(
+                    Until.hasObject(By.res("browseGrid")), 15_000)
+                    ?: error("browse grid never appeared after back")
+            }
+            device.wait(
+                Until.hasObject(By.res("browseGrid")), 30_000)
+                ?: error("browse grid never appeared")
+            device.waitForIdle(800)
+        },
+    ) {
+        // Drill the first tile until the reader counter shows —
+        // folder tiles navigate without emitting the section.
+        repeat(6) {
+            if (waitForReader(5_000)) return@repeat
+            device.findObjects(By.res(PATTERN_TILE))
+                .firstOrNull()?.click() ?: return@repeat
+            device.waitForIdle(1_200)
+        }
+        if (!waitForReader(15_000)) error("reader never opened")
+    }
+}
+
+private val PATTERN_TILE = java.util.regex.Pattern.compile("tile:.*")

@@ -22,6 +22,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Bookq">
 
+        <!-- Macrobenchmark (CompilationMode + perfetto) needs shell-level
+             profiling rights on API 29+. -->
+        <profileable android:shell="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

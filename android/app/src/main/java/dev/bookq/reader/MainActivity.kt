@@ -28,7 +28,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyDebugServerUrl(intent: android.content.Intent?) {
-        if (!BuildConfig.DEBUG) return
+        // Debug + benchmark builds only — the release build never lets an
+        // intent extra redirect the client to an arbitrary server.
+        if (!BuildConfig.ALLOW_SERVER_URL_EXTRA) return
         val graph = (application as BookqApp).graph
         intent?.getStringExtra("serverURL")?.let { url ->
             lifecycleScope.launch {
