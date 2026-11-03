@@ -12,6 +12,14 @@ uv run --with playwright playwright install chromium
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
 ```
 
+## CI でのシャード実行
+
+workflow-smoke の uv-gate は pytest-split で3ランナーに分割 (`--splits 3 --group N`)。分割はコミット済み `.test_durations` (テストID → 実行秒数) の実行時間バランスに基づく。テスト構成が大きく変わって分割が偏ってきたら、ローカルでフル実行して再生成・コミットする:
+
+```bash
+BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --store-durations
+```
+
 ## カバー範囲
 
 | 領域 | 内容 |
