@@ -32,6 +32,8 @@ class ServerScope(
     email: String?,
     /** Media client (Bearer + refresh) shared by the API and Coil. */
     mediaClient: OkHttpClient,
+    /** Live bearer for the reader-sync WS upgrade — auth.token. */
+    tokenProvider: () -> String?,
     parent: CoroutineScope,
 ) {
     private val stateDir = File(context.filesDir, "state")
@@ -89,6 +91,40 @@ class ServerScope(
         roots = { tree.state.value.nodes },
     )
 
+    /** Dual-reader sync — server-ws PairStore (iOS PairStore port).
+     *  Bound at boot via bootResume() when persisted creds exist; the
+     *  reconnect machine owns RESUME within the server's 300 s window. */
+    val pair = dev.bookq.core.sync.PairStore(
+        scope = ioScope,
+        urlProvider = { api.readerSyncUrl() },
+        tokenProvider = tokenProvider,
+        transportFactory = { dev.bookq.data.PairSocket(mediaClient) },
+        creds = dev.bookq.data.PairCredStore(stateDir, host, email.orEmpty()),
+    ).apply {
+        // Leader work-pick: saved position (clamped) or the first page —
+        // same resolution the web's OPEN_WORK bootstrap uses.
+        openWorkResolver = { folder ->
+            val imgs = runCatching { api.images(folder) }.getOrNull()
+                ?: emptyList()
+            val want = progress.book[folder]?.page ?: 0
+            imgs.getOrNull(want.coerceIn(0, (imgs.size - 1).coerceAtLeast(0)))
+                ?.let { dev.bookq.core.sync.PairPageRef(folder, it) }
+        }
+        // Fresh-pair bootstrap: share the resume candidate (newest read).
+        bootstrapWork = {
+            val pos = progress.book.resumeCandidate { visibility.vis.isVisible(it) }
+            pos?.let { p ->
+                val imgs = runCatching { api.images(p.folder) }.getOrNull()
+                    ?: emptyList()
+                imgs.getOrNull(
+                    p.page.coerceIn(0, (imgs.size - 1).coerceAtLeast(0)))
+                    ?.let { dev.bookq.core.sync.PairPageRef(p.folder, it) to p.folder }
+            }
+        }
+        // Hidden-root veto — web `_visBlocksFolder` parity.
+        visibilityBlocks = { folder -> !visibility.vis.isVisible(folder) }
+    }
+
     /** Coil with the authed client — `/thumb/` needs the same Bearer. */
     val imageLoader = ImageLoader.Builder(context)
         .components {
@@ -103,10 +139,13 @@ class ServerScope(
         tree.startPolling()
         visibility.refresh()
         ioScope.launch { progress.pull() }
+        pair.bootResume()
     }
 
     fun setForeground(resumed: Boolean) {
         tree.setForeground(resumed)
+        // scenePhase parity — SET_ACTIVITY suspended while backgrounded.
+        pair.onForeground(resumed)
         if (!resumed) {
             progress.flush()        // trailing 2 s server push
             // The 500 ms-debounced LOCAL write too — backgrounding can

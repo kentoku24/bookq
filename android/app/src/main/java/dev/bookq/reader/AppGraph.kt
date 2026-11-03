@@ -86,6 +86,7 @@ class AppGraph(app: Application) {
                         host = sc.host,
                         email = sc.email,
                         mediaClient = buildMediaClient(api.baseUrl),
+                        tokenProvider = { auth.token },
                         parent = scope,
                     ).also { it.start() }
                 }

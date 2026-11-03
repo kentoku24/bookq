@@ -114,6 +114,7 @@ private fun ReadyNavHost(graph: AppGraph) {
                         popUpTo(0) { inclusive = true }
                     }
                 },
+                onOpenPair = { nav.navigate(Routes.Pair) },
             )
         }
         composable<Routes.Reader> { entry ->
@@ -127,6 +128,20 @@ private fun ReadyNavHost(graph: AppGraph) {
         }
         composable<Routes.Settings> {
             SettingsScreen(graph, onBack = { nav.popBackStack() })
+        }
+        composable<Routes.Pair> {
+            val sc by graph.serverScope.collectAsStateWithLifecycle()
+            sc?.let { scope ->
+                dev.bookq.reader.ui.pair.PairedReaderScreen(
+                    pair = scope.pair,
+                    pageUrlFor = { f, n ->
+                        scope.api.pageUrl(f, n,
+                            original = false).toString()
+                    },
+                    imageLoader = scope.imageLoader,
+                    onClose = { nav.popBackStack() },
+                )
+            }
         }
     }
     }
