@@ -206,6 +206,56 @@ class VisibilityState {
         return if (!path.isNullOrEmpty() && hiddenRootFor(path) != null) Guard.HIDDEN else Guard.ALLOW
     }
 
+    // ── showAll presentation (web `presentation`/`uiPresentation`) ──
+
+    enum class BadgeKind { SELF, DESCENDANT, ANCESTOR }
+
+    /**
+     * `uiPresentation` — badge + eye-toggle decision for one tile.
+     * Only meaningful in showAll mode (callers gate on it): normal mode
+     * filters hidden roots outright and marks nothing.
+     *
+     * @param editable null → auto via [isTopLevel]; ancestor matches are
+     *   NEVER editable (they aren't real tree nodes — PUTting them 404s).
+     */
+    data class Presentation(
+        val badge: BadgeKind?,
+        /** Covered by the hidden set — the eye offers 再表示. */
+        val hidden: Boolean,
+        /** Eye toggle allowed (editable root & not an ancestor match). */
+        val toggle: Boolean,
+    )
+
+    fun presentation(path: String, editable: Boolean? = null): Presentation {
+        val m = hiddenMatch(path)
+        val badge = when (m?.kind) {
+            MatchKind.SELF -> BadgeKind.SELF
+            MatchKind.DESCENDANT -> BadgeKind.DESCENDANT
+            MatchKind.ANCESTOR -> BadgeKind.ANCESTOR
+            null -> null
+        }
+        val hidden = m?.kind == MatchKind.SELF || m?.kind == MatchKind.DESCENDANT
+        var edit = editable ?: isTopLevel(path)
+        if (m?.kind == MatchKind.ANCESTOR) edit = false
+        return Presentation(badge = badge, hidden = hidden,
+            toggle = edit && path.isNotEmpty())
+    }
+
+    /**
+     * Client-side copy of the backend root rule (`_validRootPath`):
+     * non-empty, ≤2048, no NUL/backslash, no empty/"." /".." /
+     * dot-leading segments. Multi-segment roots (flattened names) are
+     * valid — membership in the top-level set is the server's check.
+     */
+    fun validRootPath(root: String?): String? {
+        if (root.isNullOrEmpty() || root.length > 2048) return null
+        if (root.contains('\\') || root.contains('\u0000')) return null
+        for (s in root.split('/')) {
+            if (s.isEmpty() || s == "." || s == ".." || s.startsWith(".")) return null
+        }
+        return root
+    }
+
     /** Grid-wide gate while NO snapshot exists — renderers must never
      *  paint an unfiltered list in loading/error. Any snapshot (cached or
      *  live) renders normally. */

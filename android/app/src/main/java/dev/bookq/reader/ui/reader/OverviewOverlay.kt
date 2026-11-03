@@ -314,7 +314,14 @@ private fun OverviewGrid(
                             a.consume(); b.consume()
                             if (acc > PINCH_OUT) { fired = true; break }
                         }
-                        if (ev.changes.none { it.pressed }) break
+                        if (ev.changes.none { it.pressed }) {
+                            // Release-time fallback — on a starved emulator
+                            // the stream can end before the mid-gesture
+                            // check sees the crossing (web also checks at
+                            // pointerup).
+                            if (acc > PINCH_OUT) fired = true
+                            break
+                        }
                     }
                     olog { "gesture end sawMulti=$sawMulti acc=$acc fired=$fired mid=$mid" }
                     if (fired) {

@@ -188,8 +188,12 @@ def test_resume_button_skips_hidden_newest(vpage, vis_env):
 # ── loading / error judgment gates ──────────────────────────────────────
 
 
-def _wait_held(held, timeout=10.0):
-    """Poll until the route handler captured at least one request."""
+def _wait_held(held, timeout=30.0):
+    """Poll until the route handler captured at least one request.
+
+    30s: the visibility GET is issued inside init() after the first
+    loadFolders paint — under CI runner load that chain has crossed 10s.
+    """
     deadline = time.time() + timeout
     while not held and time.time() < deadline:
         time.sleep(0.05)

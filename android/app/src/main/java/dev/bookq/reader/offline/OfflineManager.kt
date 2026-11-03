@@ -23,7 +23,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Per-scope offline orchestrator — owns the badge state machine, unique
@@ -273,15 +275,16 @@ class OfflineManager(
     /** Coil `data`: the on-disk file when present, else the `/view/` (or
      *  `/image/`) URL — reader + overview get offline pages for free. */
     fun pageData(folder: String, name: String, original: Boolean): Any {
-        val f = store.pageFile(folder, name)
-        return if (f.isFile && f.length() > 0) f else api.pageUrl(folder, name, original).toString()
+        val f = store.pageFileOrNull(folder, name)
+        return if (f != null && f.isFile && f.length() > 0) f
+            else api.pageUrl(folder, name, original).toString()
     }
 
     /** Overview thumbnails: the downloaded page file when present, else
      *  the small `/thumb/` URL (cheaper over the network). */
     fun thumbData(folder: String, name: String, w: Int): Any {
-        val f = store.pageFile(folder, name)
-        return if (f.isFile && f.length() > 0) f
+        val f = store.pageFileOrNull(folder, name)
+        return if (f != null && f.isFile && f.length() > 0) f
             else api.thumbUrl(folder, name, w).toString()
     }
 
@@ -312,6 +315,15 @@ class OfflineManager(
     fun evictablePreview(): WorkRecord? = store.oldest()
 
     suspend fun clearAll() {
+        // Kill every in-flight download under this scope FIRST — a worker
+        // still writing would resurrect the just-deleted records/pages.
+        val tag = DownloadWorker.tag(scopeKey)
+        wm.cancelAllWorkByTag(tag)
+        withTimeoutOrNull(15_000) {
+            wm.getWorkInfosByTagFlow(tag).first { infos ->
+                infos.all { it.state.isFinished }
+            }
+        }
         store.clear()
         _transient.value = emptyMap()
     }

@@ -93,7 +93,9 @@ class DownloadWorker(
                 store.get(leaf)?.let { bytes = it.bytes }
                 for (name in names) {
                     if (isStopped) return stopped(store, leaves)
-                    val out = store.pageFile(leaf, name)
+                    // A hostile listing name (`../`, absolute) must not
+                    // write outside the work dir — skip it, never throw.
+                    val out = store.pageFileOrNull(leaf, name) ?: continue
                     if (out.isFile && out.length() > 0) { donePages++; continue }
                     if (isLowOnSpace()) return noSpace(store, leaves)
                     try {
@@ -177,22 +179,29 @@ class DownloadWorker(
 
     private fun foreground(done: Int, total: Int): ForegroundInfo {
         val notif = notif(done, total)
+        // Distinct id per work — concurrent downloads get their own
+        // notification (and their own stop button identity).
+        val id = NOTIF_ID + (workName().hashCode() and 0x3FFFFFFF)
         return if (Build.VERSION.SDK_INT >= 29) {
-            ForegroundInfo(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            ForegroundInfo(id, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
-            ForegroundInfo(NOTIF_ID, notif)
+            ForegroundInfo(id, notif)
         }
     }
 
     private fun notif(done: Int, total: Int): Notification {
+        // PendingIntent identity ignores Intent extras — requestCode must
+        // carry the unique work name or FLAG_UPDATE_CURRENT lets the
+        // newest notification's stop button overwrite every older one.
+        val reqCode = workName().hashCode()
         val stop = Intent(applicationContext, DownloadStopReceiver::class.java)
             .putExtra(DownloadStopReceiver.EXTRA_WORK_NAME, workName())
         val stopPi = PendingIntent.getBroadcast(
-            applicationContext, 0, stop,
+            applicationContext, reqCode, stop,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val openPi = applicationContext.packageManager
             .getLaunchIntentForPackage(applicationContext.packageName)
-            ?.let { PendingIntent.getActivity(applicationContext, 0, it,
+            ?.let { PendingIntent.getActivity(applicationContext, reqCode, it,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE) }
         return NotificationCompat.Builder(applicationContext, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)

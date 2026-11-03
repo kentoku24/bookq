@@ -133,4 +133,50 @@ class VisibilityRulesTest {
         assertTrue(s.isTopLevel("root/2"))
         assertFalse(s.isTopLevel("root1/child"))
     }
+
+    // ── presentation (M6 — showAll tile marks) ──
+
+    @Test fun presentationKindsAndEditable() {
+        val s = ready(listOf("secret", "wrap/inner"))
+        s.setTopLevelPaths(listOf("secret", "open", "wrap"))
+        // self-hidden top-level: badge + toggle + hidden
+        s.presentation("secret").let {
+            assertEquals(VisibilityState.BadgeKind.SELF, it.badge)
+            assertTrue(it.hidden); assertTrue(it.toggle)
+        }
+        // descendant of a hidden root: badge + hidden, toggle still
+        // governed by top-level membership (not a top-level → no toggle)
+        s.presentation("secret/ch1").let {
+            assertEquals(VisibilityState.BadgeKind.DESCENDANT, it.badge)
+            assertTrue(it.hidden); assertFalse(it.toggle)
+        }
+        // ancestor of a hidden key: badge, NEVER editable — PUT would 404
+        s.presentation("wrap").let {
+            assertEquals(VisibilityState.BadgeKind.ANCESTOR, it.badge)
+            assertFalse(it.hidden); assertFalse(it.toggle)
+        }
+        // clean top-level: no badge, not hidden, toggle on
+        s.presentation("open").let {
+            assertNull(it.badge); assertFalse(it.hidden); assertTrue(it.toggle)
+        }
+        // explicit editable=false wins over top-level membership
+        assertFalse(s.presentation("open", editable = false).toggle)
+    }
+
+    // ── validRootPath (M6 — write-path client rule) ──
+
+    @Test fun validRootPath() {
+        val s = state()
+        assertEquals("a", s.validRootPath("a"))
+        assertEquals("wrap/work", s.validRootPath("wrap/work")) // flattened ok
+        assertNull(s.validRootPath(null))
+        assertNull(s.validRootPath(""))
+        assertNull(s.validRootPath("a//b"))      // empty segment
+        assertNull(s.validRootPath("a/./b"))
+        assertNull(s.validRootPath("a/../b"))
+        assertNull(s.validRootPath(".hidden"))
+        assertNull(s.validRootPath("a/.b"))
+        assertNull(s.validRootPath("a\\b"))
+        assertNull(s.validRootPath("x".repeat(2049)))
+    }
 }

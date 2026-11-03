@@ -85,12 +85,31 @@ class OfflineStore(
 
     fun workDir(folder: String): File = File(workRoot, OfflineRules.encFolder(folder))
 
-    fun pageFile(folder: String, name: String): File = File(workDir(folder), name)
+    /**
+     * Resolve a server-provided page name inside the work dir — nested
+     * archive members (`epub/OEBPS/a.jpg`) are legal, but `../`, absolute
+     * paths, or any segment escaping the work dir resolves to null.
+     * Canonical comparison also defeats symlink tricks.
+     */
+    fun pageFileOrNull(folder: String, name: String): File? {
+        val dir = workDir(folder).canonicalFile
+        val f = File(dir, name).canonicalFile
+        return if (f != dir && f.toPath().startsWith(dir.toPath())) f else null
+    }
+
+    /** Write-path variant — an escaping name is a hard error, never a
+     *  silent write outside the work sandbox. */
+    fun pageFile(folder: String, name: String): File =
+        pageFileOrNull(folder, name)
+            ?: throw IllegalArgumentException("page name escapes work dir")
 
     /** Recorded names that physically exist — the offline reader fallback. */
     fun cachedNames(folder: String): List<String> {
         val rec = get(folder) ?: return emptyList()
-        return rec.names.filter { pageFile(folder, it).isFile && pageFile(folder, it).length() > 0 }
+        return rec.names.filter {
+            val f = pageFileOrNull(folder, it)
+            f != null && f.isFile && f.length() > 0
+        }
     }
 
     /** Refresh a record's `cachedCount`/`bytes` from what is on disk —
@@ -101,7 +120,7 @@ class OfflineStore(
         var count = 0
         var bytes = 0L
         for (name in rec.names) {
-            val f = pageFile(folder, name)
+            val f = pageFileOrNull(folder, name) ?: continue
             if (f.isFile && f.length() > 0) { count++; bytes += f.length() }
         }
         update(folder) { it.copy(cachedCount = count, bytes = bytes) }

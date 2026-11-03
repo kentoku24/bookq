@@ -22,8 +22,10 @@ class BrowseController {
 
     val decider = ScrollDecider()
 
-    /** What a tap wants to do once the tree is usable. */
-    data class PendingAction(val path: String, val open: Boolean)
+    /** What a tap wants to do once the tree is usable. `open` null =
+     *  undecided — the node was unknown at tap time, so [drain] decides
+     *  open-vs-navigate on the full tree instead of freezing a guess. */
+    data class PendingAction(val path: String, val open: Boolean?)
 
     /** Outcome of evaluating a tap. */
     sealed interface Action {
@@ -39,22 +41,25 @@ class BrowseController {
     val pending = _pending.asStateFlow()
 
     /**
-     * Evaluate a folder-tile tap. `open` requests reader-open regardless
-     * of children (read-self/read-child tiles); otherwise
-     * `hasOnlyImages` decides drill vs open.
+     * Evaluate a folder-tile tap. `drillsDown` null = the node was not
+     * resolvable at tap time (search hit outside the shallow window or a
+     * flattened-chain mid-path) — the open/navigate decision defers to
+     * [drain] rather than guessing open on a folder that may drill down.
      */
     fun tap(
         path: String,
-        drillsDown: Boolean,
+        drillsDown: Boolean?,
         tree: TreeRepository.State,
         vis: VisibilityState,
     ): Action {
         val guard = vis.guardPath(path)
-        if (!tree.treeLoaded || guard == VisibilityState.Guard.PENDING) {
-            _pending.value = PendingAction(path, open = !drillsDown)
+        if (guard == VisibilityState.Guard.HIDDEN) return Action.Denied
+        if (!tree.treeLoaded || guard == VisibilityState.Guard.PENDING ||
+            drillsDown == null) {
+            _pending.value = PendingAction(
+                path, open = drillsDown?.let { !it })
             return Action.Queued
         }
-        if (guard == VisibilityState.Guard.HIDDEN) return Action.Denied
         return if (!drillsDown) Action.Open(path, 0) else Action.Navigate(path)
     }
 
@@ -85,7 +90,7 @@ class BrowseController {
         if (vis.guardPath(p.path) == VisibilityState.Guard.HIDDEN) return Action.Denied
         val node = if (p.path.isEmpty()) null else BrowseRules.nodeAt(p.path, roots)
         return when {
-            p.open -> Action.Open(p.path, 0)
+            p.open == true -> Action.Open(p.path, 0)
             node == null -> null // vanished between shallow and full
             BrowseRules.hasOnlyImages(node) -> Action.Open(p.path, 0)
             else -> Action.Navigate(p.path)

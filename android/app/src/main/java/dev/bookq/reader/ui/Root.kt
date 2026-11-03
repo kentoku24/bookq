@@ -107,6 +107,13 @@ private fun ReadyNavHost(graph: AppGraph) {
                 },
                 onSettings = { nav.navigate(Routes.Settings) },
                 onBack = { nav.popBackStack() },
+                // Leaving show-all inside a hidden root bounces here —
+                // the whole browse stack is hidden content, so reset it.
+                onTop = {
+                    nav.navigate(Routes.Browse("")) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
             )
         }
         composable<Routes.Reader> { entry ->
