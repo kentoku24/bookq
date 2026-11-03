@@ -51,6 +51,23 @@ object PerfTrace {
             readerOpenOpen = false
         }
     }
+
+    /** Fallback close for pre-composed targets: with
+     *  `beyondViewportPageCount` the adjacent spread is already composed
+     *  and a snap only translates its layer — `drawWithContent` never
+     *  re-fires, so [onSpreadDrawn] can't close the section. Called
+     *  after `scrollToPage` returns: one frame boundary, then close
+     *  whatever is still open. No-op when the draw hook already ran. */
+    suspend fun closePageTurnAfterFrame() {
+        if (!pageTurnOpen) return
+        kotlinx.coroutines.withTimeoutOrNull(1_000) {
+            androidx.compose.runtime.withFrameNanos {}
+        }
+        if (pageTurnOpen) {
+            Trace.endSection()
+            pageTurnOpen = false
+        }
+    }
 }
 
 /** Measurement-only tunables set from intent extras in builds that

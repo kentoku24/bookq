@@ -310,6 +310,7 @@ private fun ReaderBody(
             navJob = compose.launch {
                 pager.scrollToPage(target)
                 pendingSpread = null
+                PerfTrace.closePageTurnAfterFrame()
             }
         } else {
             pendingSpread = target
@@ -320,6 +321,7 @@ private fun ReaderBody(
                     lastNavAt = android.os.SystemClock.uptimeMillis()
                     pager.scrollToPage(t)
                     pendingSpread = null
+                    PerfTrace.closePageTurnAfterFrame()
                 }
             }
         }
