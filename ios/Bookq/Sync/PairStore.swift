@@ -620,13 +620,10 @@ final class PairStore: ObservableObject {
         let proj = PairModel.project(spread: spread, role: role,
                                      leaderSide: s.leaderSide)
         let anchor = spread.right
-        let chName = manifest.chapters
-            .first(where: { $0.folder == spread.chapterFolder })?.name
-            ?? spread.chapterFolder
         projection = PairProjection(
             spreadIndex: si, spreadTotal: manifest.spreadTable.count,
             side: proj.side, ref: proj.ref, anchor: anchor,
-            chapterName: chName, chapterFolder: spread.chapterFolder)
+            chapterFolder: spread.chapterFolder)
     }
 
     private func sendApplied(requestId: String, rev: Int, epoch: Int) {

@@ -177,6 +177,5 @@ struct PairProjection: Equatable {
     var side: PairSide
     var ref: PairPageRef?      // nil → blank side
     var anchor: PairPageRef    // first real page of the spread
-    var chapterName: String
     var chapterFolder: String
 }
