@@ -1,15 +1,30 @@
 # Dependabot auto-merge — merges dependabot PRs once CI is green.
 #
+# CI 完了の再評価は workflow_run で受け取る。check_suite/check_run は
+# GitHub Actions が作成したチェックでは発火しない (再帰抑制) ので、旧設定では
+# PR open 時の単発評価しかなく CI 完了を待てなかった。workflow_run は
+# default branch コンテキストで read/write トークンを持ち、Dependabot 起因
+# run の read-only 制約 (push/pull_request 系イベント限定) の対象外。
+#
+# チェック対象外パスの PR (例: tailscale/ のみ) は CI が走らず workflow_run
+# が来ないため、schedule の定期スキャンが拾う。MERGE_READY_STATE=clean は
+# 「チェック全緑 or チェック無し」を意味し、赤CIでは決してマージしない。
+#
 # `gh pr merge --auto` は使わない: branch protection がない本リポジトリでは
-# CI を待たず即時マージしてしまうため。代わりにこのアクションがチェック完了を
-# 待ってマージする。MERGE_READY_STATE=clean のみ許可 = 赤CIでは決してマージしない。
+# CI を待たず即時マージしてしまうため。
 name: dependabot-auto-merge
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-  check_suite:
+  # branches で dependabot/* を head に持つ run のみ — ai/* PR の CI 完了では
+  # 起動しない。pull_request_target を付けないのは意図的: open 直後は
+  # チェック未登録で mergeable_state が一瞬 clean を返し得るため。
+  workflow_run:
+    workflows: [workflow-smoke, api-contract, api-spec-lint, rust, android]
     types: [completed]
+    branches: ["dependabot/**"]
+  # 取りこぼし救済 + CI 対象外パス (ゼロチェック PR) の自動マージ。
+  schedule:
+    - cron: "17 * * * *"
 
 permissions:
   contents: write
@@ -17,7 +32,10 @@ permissions:
 
 jobs:
   automerge:
-    if: github.actor == 'dependabot[bot]'
+    # 失敗 run では評価しない (赤チェックが残っている限り clean にもならない)。
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -29,3 +47,5 @@ jobs:
           MERGE_METHOD: squash
           MERGE_DELETE_BRANCH: "true"
           MERGE_READY_STATE: clean
+          # CI 完了直後は mergeable_state の再計算に数十秒かかることがある。
+          MERGE_RETRIES: "12"
