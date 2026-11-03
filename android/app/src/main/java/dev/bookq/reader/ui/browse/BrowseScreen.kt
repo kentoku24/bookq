@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridPrefetchStrategy
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -31,6 +32,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -132,7 +134,7 @@ fun BrowseScreen(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun BrowseBody(
     scope: ServerScope,
@@ -343,7 +345,11 @@ private fun BrowseBody(
     //    before the tree arrives, and deciding on an empty list would
     //    pin the scroll to TOP.
     val listState = rememberLazyListState()
-    val gridState = rememberLazyGridState()
+    // Prefetch off-screen tiles during scroll slack — at the panel's
+    // 90 Hz the 11 ms frame budget leaves no room for mid-fling
+    // subcomposition (issue #302).
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = LazyGridPrefetchStrategy(nestedPrefetchItemCount = 6))
     val renderedItems by rememberUpdatedState(items)
     LaunchedEffect(Unit) {
         val anchor = entry.savedStateHandle.get<String>(RETURN_ANCHOR_KEY)

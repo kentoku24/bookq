@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridPrefetchStrategy
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -39,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -58,8 +60,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import coil3.ImageLoader
-import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.bitmapConfig
 import dev.bookq.core.reader.OverviewRules
 import dev.bookq.core.reader.ReaderWork
 import dev.bookq.data.BookqApi
@@ -94,6 +97,7 @@ private const val HUGE = 600
  * exit at the cell under the fingers. LazyVerticalGrid supplies the
  * ±window virtualization natively; the IMG_WINDOW band is prefetched.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun OverviewOverlay(
     work: ReaderWork,
@@ -136,7 +140,10 @@ fun OverviewOverlay(
             .let { if (it < 0) reals.lastIndex else it }
     }
 
-    val gridState = rememberLazyGridState()
+    // Prefetch off-screen cells during scroll slack — page thumbs
+    // otherwise subcompose mid-fling (90 Hz budget is 11 ms).
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = LazyGridPrefetchStrategy(nestedPrefetchItemCount = 6))
     LaunchedEffect(huge) {
         if (!huge) return@LaunchedEffect
         snapshotFlow {
@@ -409,8 +416,10 @@ private fun OverviewCell(
     val context = LocalContext.current
     val im = work.images[g]
     val request = remember(im) {
+        // RGB_565 like the browse tiles — halves the upload per cell.
         ImageRequest.Builder(context)
             .data(offline.thumbData(im.folder, im.name, THUMB_W))
+            .bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
             .build()
     }
     val info = work.chapterInfo(g)
@@ -428,15 +437,19 @@ private fun OverviewCell(
         contentAlignment = Alignment.Center,
     ) {
         if (attachImage) {
-            SubcomposeAsyncImage(
+            // AsyncImage (not Subcompose): a subcomposition per cell is
+            // the dominant overviewFling frame cost. Error state is a
+            // lightweight overlay below.
+            var failed by remember { mutableStateOf(false) }
+            AsyncImage(
                 model = request,
                 imageLoader = imageLoader,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
-                loading = {},
-                error = { Text("⚠", color = Color(0xFF808080)) },
+                onState = { failed = it is coil3.compose.AsyncImagePainter.State.Error },
             )
+            if (failed) Text("⚠", color = Color(0xFF808080))
         }
         // web `.pg` badge — chapter-local page number.
         Text(

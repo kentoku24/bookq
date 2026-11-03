@@ -88,7 +88,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
-import coil3.compose.SubcomposeAsyncImage
+import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import dev.bookq.core.browse.BrowseRules
 import dev.bookq.core.reader.ExtDisplay
@@ -936,24 +936,30 @@ internal fun PageCell(
         Modifier.width(width).height(height).background(Color(0xFF161616)),
         contentAlignment = Alignment.Center,
     ) {
-        SubcomposeAsyncImage(
+        // AsyncImage (not Subcompose): per-cell subcomposition is the
+        // dominant fling frame cost at the panel's 11 ms budget (#302).
+        var failed by remember { mutableStateOf(false) }
+        AsyncImage(
             model = request,
             imageLoader = imageLoader,
             contentDescription = null,
             contentScale = ContentScale.Fit,
-            onSuccess = { state ->
-                val s = state.painter.intrinsicSize
-                if (s.width > 0f && s.height > 0f) onAR(s.width / s.height)
-                onLoaded()
-            },
-            onError = { onError() },
-            loading = {},
-            error = {
-                // Web's ⚠ marker on a failed page cell.
-                Text("⚠", color = Color(0xFFB0B0B0),
-                    style = MaterialTheme.typography.headlineMedium)
+            onState = { state ->
+                failed = state is
+                    coil3.compose.AsyncImagePainter.State.Error
+                if (state is coil3.compose.AsyncImagePainter.State.Success) {
+                    val s = state.painter.intrinsicSize
+                    if (s.width > 0f && s.height > 0f) onAR(s.width / s.height)
+                    onLoaded()
+                }
+                if (failed) onError()
             },
         )
+        if (failed) {
+            // Web's ⚠ marker on a failed page cell.
+            Text("⚠", color = Color(0xFFB0B0B0),
+                style = MaterialTheme.typography.headlineMedium)
+        }
         if (isChapterStart && chapterName.isNotEmpty()) {
             // `spread.js` paints the chapter title on boundary spreads.
             Text(

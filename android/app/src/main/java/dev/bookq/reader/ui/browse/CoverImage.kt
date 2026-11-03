@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import coil3.ImageLoader
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import coil3.request.bitmapConfig
 import dev.bookq.core.browse.LevelModel
 import dev.bookq.data.BookqApi
 
@@ -46,7 +47,11 @@ fun CoverImage(
     }
     val context = LocalContext.current
     val request = remember(url) {
-        ImageRequest.Builder(context).data(url).build()
+        // RGB_565: halves decode + GPU-upload bytes on Mali-G57 —
+        // banding is invisible at grid-thumb sizes (#302).
+        ImageRequest.Builder(context).data(url)
+            .bitmapConfig(android.graphics.Bitmap.Config.RGB_565)
+            .build()
     }
     AsyncImage(
         model = request,
