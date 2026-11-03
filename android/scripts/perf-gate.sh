@@ -52,14 +52,29 @@ if [[ "$GENERATE" == "1" ]]; then
         "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
         "-Pandroid.testInstrumentationRunnerArguments.class=dev.bookq.reader.baselineprofile.BaselineProfileGenerator" \
         --console=plain
+    # The plugin only merges src/<variant>/baselineProfiles — generated
+    # output lands under src/release/generated, so mirror it into the
+    # measurement variants (committed so plain assemble* also carries
+    # the profile).
+    for v in benchmark benchmarkRelease nonMinifiedRelease; do
+        mkdir -p "app/src/$v/baselineProfiles"
+        for p in baseline-prof.txt startup-prof.txt; do
+            cp "app/src/release/generated/baselineProfiles/$p" \
+               "app/src/$v/baselineProfiles/" 2>/dev/null || true
+        done
+    done
 fi
 
 echo "== building + installing benchmark variants =="
-./gradlew :app:installBenchmark :baselineprofile:installBenchmarkBenchmark \
+# `benchmarkRelease` is the plugin-generated measurement variant —
+# release shape (R8) + benchmark instrumented + debug-signed. It is
+# what the connected*Release test runs measure.
+./gradlew :app:installBenchmarkRelease \
+    :baselineprofile:installBenchmarkRelease \
     --console=plain -q
 
 echo "== running macrobenchmark gates (compilation=$COMPILATION) =="
-./gradlew :baselineprofile:connectedBenchmarkBenchmarkAndroidTest \
+./gradlew :baselineprofile:connectedBenchmarkReleaseAndroidTest \
     "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
     "-Pandroid.testInstrumentationRunnerArguments.class=$BENCH_CLASSES" \
     "-Pandroid.testInstrumentationRunnerArguments.compilation=$COMPILATION" \

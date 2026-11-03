@@ -116,13 +116,14 @@ java {
     }
 }
 
-// The baselineprofile plugin's `nonMinified*` variants initWith their
-// base type, so nonMinifiedRelease inherits release's
-// ALLOW_SERVER_URL_EXTRA=false and the profile generator would sit on
-// the onboarding screen forever. Measurement variants need the extra.
+// The baselineprofile plugin's `nonMinified*`/`benchmark*` variants
+// initWith their base type, so they inherit release's
+// ALLOW_SERVER_URL_EXTRA=false and the measured app would sit on the
+// onboarding screen forever. Measurement variants need the extra.
 androidComponents {
     onVariants(selector().all()) { variant ->
-        if (variant.buildType?.startsWith("nonMinified") == true) {
+        val bt = variant.buildType ?: ""
+        if (bt.startsWith("nonMinified") || bt.startsWith("benchmark")) {
             variant.buildConfigFields?.put(
                 "ALLOW_SERVER_URL_EXTRA",
                 BuildConfigField(
@@ -131,6 +132,20 @@ androidComponents {
                     "serverURL intent extra for measurement variants",
                 ),
             )
+        }
+    }
+}
+
+// The generated profile lands under src/release/generated — point the
+// measurement variants' baselineProfiles source at it so they need no
+// checked-in copies. (`named()` can't see plugin-generated variants,
+// so wire it inside onVariants.)
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        if (variant.buildType?.startsWith("nonMinified") == true ||
+            variant.buildType?.startsWith("benchmark") == true) {
+            variant.sources.baselineProfiles?.addStaticSourceDirectory(
+                "src/release/generated/baselineProfiles")
         }
     }
 }
