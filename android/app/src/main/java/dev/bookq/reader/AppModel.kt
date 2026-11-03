@@ -43,9 +43,12 @@ class AppModel<T : VersionProbe>(
     private val _serverVersion = MutableStateFlow<VersionResponse?>(null)
     val serverVersion = _serverVersion.asStateFlow()
 
-    /** Offline tree snapshot fallback for failed boots. */
+    /** Offline tree snapshot fallback for failed boots. A saved
+     *  library is user data — only surface it to a restored session,
+     *  or a logged-out launch would paint another user's folders. */
     fun hasOfflineSnapshot(): Boolean =
-        settings.baseUrl()?.let(snapshotProbe) == true
+        auth.user.value != null &&
+            settings.baseUrl()?.let(snapshotProbe) == true
 
     fun start() {
         // Definitive session death (refresh rejected by the server) —
