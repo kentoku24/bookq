@@ -120,7 +120,10 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       # Emulator reaches the host uvicorn via 10.0.2.2 (cleartext allowed
-      # for that host in the debug network security config).
+      # for that host in the debug network security config). The script
+      # gates on emulator->server reachability first and retries once in the
+      # same booted session — the whole class used to fail when the NAT
+      # bridge or adb was wedged (#326).
       - name: Emulator UI test
         uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
@@ -129,10 +132,7 @@ jobs:
           target: google_apis
           disable-animations: true
           working-directory: android
-          script: >-
-            ./gradlew :app:connectedDebugAndroidTest
-            -Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=http://10.0.2.2:8080
-            -Pandroid.testInstrumentationRunnerArguments.bookqExpectedFolder=Other
+          script: bash "$GITHUB_WORKSPACE/.github/scripts/android-ui-test.sh"
 
       - name: Upload connected test report
         uses: actions/upload-artifact@v4
