@@ -112,8 +112,18 @@ class ReaderBenchmark {
             device.waitForIdle(800)
         },
     ) {
-        // Drill the first tile until the reader counter shows —
-        // folder tiles navigate without emitting the section.
+        // The reader may still be open from the previous iteration (or
+        // auto-resume may land inside it) — back out so every iteration
+        // navigates fresh and emits the section. Section metrics only
+        // time the slice, so the back-out clicks cost nothing here.
+        if (inReader()) {
+            device.pressBack()
+            device.wait(
+                Until.hasObject(By.res("browseGrid")), 10_000)
+                ?: error("browse grid never appeared after back")
+        }
+        // Drill the first tile until the reader shows — folder tiles
+        // navigate without emitting the section.
         repeat(6) {
             if (waitForReader(5_000)) return@repeat
             device.findObjects(By.res(PATTERN_TILE))
