@@ -13,10 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::Response,
 };
+use serde::Serialize;
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 use tokio::sync::{Mutex, Notify};
@@ -27,6 +28,11 @@ use bookq_core::ComicRec;
 const INDEX_CACHE_TTL_SECS: f64 = 300.0;
 const INDEX_BUILD_AWAIT_SECS: f64 = 0.8;
 const FOLDERS_CACHE_CONTROL: &str = "private, max-age=60";
+/// #322: `folders_body_cache` byte budget per generation. A full-tree body
+/// is ~14MB at real scale — per-(path,depth) lazy bodies would otherwise
+/// accumulate unboundedly. On overflow the whole map is cleared (amortized;
+/// entries re-mint on demand) so the cap is hard.
+const BODY_CACHE_CAP: usize = 64 * 1024 * 1024;
 
 pub struct IndexState {
     /// `metadata_index_cache` — check-and-swap only, never held over a build.
@@ -38,10 +44,17 @@ pub struct IndexState {
 }
 
 pub struct CacheData {
-    pub tree: Vec<Value>,
+    /// #322: typed node tree (was `Vec<Value>` — a DOM that cost ~200-300B
+    /// per leaf and was deep-cloned per serialization).
+    pub tree: Vec<tree::Node>,
     /// `index.comics` — `rebuild_from_tree`'s ComicMetadata rows; M6
     /// search/facets read them straight off the cache like the Python index.
     pub comics: Vec<ComicRec>,
+    /// #322: `subtree_facets` side map — path → sorted facet sets. Emitted
+    /// into the JSON at serialize time (contract identical to the old
+    /// `node["subtree_facets"] = facets.clone()` embed, minus the
+    /// depth-multiplied string duplication).
+    pub facets: tree::FacetMap,
     /// `timestamp` — epoch seconds (float precision as f64 micros); re-stamped
     /// in place by the signature gate on an unchanged tree.
     timestamp_micros: AtomicU64,
@@ -53,8 +66,11 @@ pub struct CacheData {
     /// `folders_body_cache` — (key_ns, path, depth) → (body, etag). Lives
     /// per-swap; an in-place timestamp re-stamp keeps the tree identical so
     /// hits stay semantically correct. `key_ns` mirrors Python's namespace
-    /// ("v1" payloads vs the "v1-since" stale-poll envelope).
-    body_cache: Mutex<HashMap<(String, String, Option<i64>), (Vec<u8>, String)>>,
+    /// ("v1" payloads vs the "v1-since" stale-poll envelope). `Bytes` makes
+    /// every hit a refcount clone instead of a multi-MB memcpy.
+    body_cache: Mutex<HashMap<(String, String, Option<i64>), (Bytes, String)>>,
+    /// Byte total currently held by `body_cache` (for `BODY_CACHE_CAP`).
+    body_bytes: AtomicU64,
 }
 
 impl CacheData {
@@ -186,14 +202,32 @@ fn snapshot_path() -> PathBuf {
 const SNAPSHOT_VERSION: i64 = 1;
 
 fn snapshot_save(c: &CacheData) {
-    let payload = serde_json::json!({
-        "version": SNAPSHOT_VERSION,
-        "generation": c.generation,
-        "signature": c.signature,
-        "tree": c.tree,
-        "comics": c.comics,
-    });
-    let Ok(bytes) = serde_json::to_vec(&payload) else { return };
+    // #322: borrowed serialization — `json!` here used to deep-clone the
+    // whole tree + comics on every refresh.
+    struct Snap<'a> {
+        c: &'a CacheData,
+    }
+    impl Serialize for Snap<'_> {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut m = s.serialize_map(Some(5))?;
+            m.serialize_entry("version", &SNAPSHOT_VERSION)?;
+            m.serialize_entry("generation", &self.c.generation)?;
+            m.serialize_entry("signature", &self.c.signature)?;
+            m.serialize_entry(
+                "tree",
+                &tree::TreeSer {
+                    nodes: &self.c.tree,
+                    facets: &self.c.facets,
+                    parent: "",
+                    shallow: false,
+                },
+            )?;
+            m.serialize_entry("comics", &self.c.comics)?;
+            m.end()
+        }
+    }
+    let Ok(bytes) = serde_json::to_vec(&Snap { c }) else { return };
     let path = snapshot_path();
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, &bytes).is_ok() {
@@ -202,20 +236,39 @@ fn snapshot_save(c: &CacheData) {
 }
 
 fn snapshot_load() -> Option<CacheData> {
+    #[derive(serde::Deserialize)]
+    struct Snap {
+        version: i64,
+        generation: i64,
+        signature: Option<String>,
+        tree: Vec<tree::NodeDe>,
+        comics: Vec<ComicRec>,
+    }
     let bytes = std::fs::read(snapshot_path()).ok()?;
-    let v: Value = serde_json::from_slice(&bytes).ok()?;
-    if v.get("version").and_then(|x| x.as_i64()) != Some(SNAPSHOT_VERSION) {
+    // #322: one-shot parse into typed nodes (was envelope-Value + per-field
+    // from_value — a second full-tree clone at boot).
+    let v: Snap = serde_json::from_slice(&bytes).ok()?;
+    if v.version != SNAPSHOT_VERSION {
         return None;
     }
+    let mut interner = tree::Interner::default();
+    let tree: Vec<tree::Node> = v
+        .tree
+        .into_iter()
+        .map(|n| n.into_node(&mut interner))
+        .collect();
+    let facets = tree::subtree_facets(&v.comics, &mut interner);
     Some(CacheData {
-        tree: serde_json::from_value(v.get("tree")?.clone()).ok()?,
-        comics: serde_json::from_value(v.get("comics")?.clone()).ok()?,
+        tree,
+        comics: v.comics,
+        facets,
         // Stale timestamp → the caller routes through the refresh path,
         // which re-walks the signature and rebuilds only on a real change.
         timestamp_micros: AtomicU64::new(0),
-        generation: v.get("generation")?.as_i64()?,
-        signature: v.get("signature").and_then(|x| x.as_str()).map(String::from),
+        generation: v.generation,
+        signature: v.signature,
         body_cache: Mutex::new(HashMap::new()),
+        body_bytes: AtomicU64::new(0),
     })
 }
 
@@ -255,25 +308,29 @@ fn build_cache(downloads: &Path) -> Option<CacheData> {
         let d = downloads.to_path_buf();
         std::thread::spawn(move || bookq_core::tree_signature(&d))
     };
-    let mut t = tree::scan_tree(downloads)?;
+    let mut interner = tree::Interner::default();
+    let mut t = tree::scan_tree(downloads, &mut interner)?;
     // `rebuild_from_tree` (NOT `_walk`): tree-driven parse — archive
     // nodes' internal dirs produce phantom minimal records, and real
     // dirs absent from the tree are never indexed.
     let comics = tree::rebuild_index_from_tree(&t, downloads);
     let lookup: HashMap<String, ComicRec> =
         comics.iter().map(|c| (c.0.clone(), c.clone())).collect();
-    tree::attach_metadata(&mut t, &lookup, "");
-    let subtree = tree::subtree_facets(&comics);
-    tree::attach_subtree_facets(&mut t, &subtree, "");
+    tree::attach_metadata(&mut t, &lookup, "", &mut interner);
+    // #322: facets stay in a side map — serialized into the response by
+    // path lookup instead of being cloned into every ancestor folder node.
+    let facets = tree::subtree_facets(&comics, &mut interner);
     let generation = 1 + tree::archive_node_count(&t);
     let signature = signature_walk.join().ok().flatten();
     Some(CacheData {
         tree: t,
         comics,
+        facets,
         timestamp_micros: AtomicU64::new((now_secs() * 1e6) as u64),
         generation,
         signature,
         body_cache: Mutex::new(HashMap::new()),
+        body_bytes: AtomicU64::new(0),
     })
 }
 
@@ -391,7 +448,7 @@ fn detail_response(status: StatusCode, detail: &str) -> Response {
     res
 }
 
-fn json_body_response(body: Vec<u8>, etag: Option<&str>) -> Response {
+fn json_body_response(body: Bytes, etag: Option<&str>) -> Response {
     let mut res = Response::builder()
         .status(StatusCode::OK)
         .body(Body::from(body))
@@ -432,9 +489,10 @@ fn not_modified(cache_control: &'static str, etag: Option<&str>) -> Response {
 /// `{kind, nodes, generation}` — `key_ns` is part of the digest so the v0
 /// and v1 shapes can never collide, and so the "v1-since" stale-poll
 /// envelope never aliases the bare full-tree body cached under "v1".
-async fn folders_response(
+/// #322: payload is a borrowed `Serialize` view — no DOM clone per request.
+async fn folders_response<T: Serialize + ?Sized>(
     data: &Arc<CacheData>,
-    payload: &Value,
+    payload: &T,
     path: &str,
     depth: Option<i64>,
     headers: &HeaderMap,
@@ -455,11 +513,19 @@ async fn folders_response(
                 format!("{key_ns}:{path}:{}:{body_str}", depth_repr(depth)).as_bytes(),
             );
             let etag = format!("\"{}-g{}\"", &hex24(&digest), data.generation);
-            let body = body_str.into_bytes();
-            data.body_cache
-                .lock()
-                .await
-                .insert(key, (body.clone(), etag.clone()));
+            let body = Bytes::from(body_str.into_bytes());
+            {
+                let mut bc = data.body_cache.lock().await;
+                let len = body.len() as u64;
+                if data.body_bytes.load(Ordering::Relaxed) + len > BODY_CACHE_CAP as u64 {
+                    bc.clear();
+                    data.body_bytes.store(0, Ordering::Relaxed);
+                }
+                if let Some((old, _)) = bc.insert(key, (body.clone(), etag.clone())) {
+                    data.body_bytes.fetch_sub(old.len() as u64, Ordering::Relaxed);
+                }
+                data.body_bytes.fetch_add(len, Ordering::Relaxed);
+            }
             (body, etag)
         }
     };
@@ -521,7 +587,7 @@ fn live_fs_response(
     {
         return not_modified(FOLDERS_CACHE_CONTROL, Some(&etag));
     }
-    json_body_response(body_str.into_bytes(), Some(&etag))
+    json_body_response(body_str.into_bytes().into(), Some(&etag))
 }
 
 // ── handler ─────────────────────────────────────────────────────────────────
@@ -601,16 +667,32 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
             // stale body can't be served under new coordinates. The newly
             // attached ETag/Cache-Control is safe for the fill-poller —
             // it only reads body.generation and treats 304 as unchanged.
-            let payload = serde_json::json!({
-                "kind": "tree", "nodes": data.tree, "generation": gen_int
-            });
+            // #322: borrowed envelope — the tree is NOT cloned into a Value
+            // before serializing (the old `json!` deep-copied ~230k nodes).
+            let payload = tree::EnvSer {
+                kind: "tree",
+                nodes: &tree::TreeSer {
+                    nodes: &data.tree,
+                    facets: &data.facets,
+                    parent: "",
+                    shallow: false,
+                },
+                generation: gen_int,
+            };
             return Serve::Done(
                 folders_response(&data, &payload, "", None, &headers, "v1-since").await,
             );
         }
-        let payload = serde_json::json!({
-            "kind": "tree", "nodes": data.tree, "generation": gen_int
-        });
+        let payload = tree::EnvSer {
+            kind: "tree",
+            nodes: &tree::TreeSer {
+                nodes: &data.tree,
+                facets: &data.facets,
+                parent: "",
+                shallow: false,
+            },
+            generation: gen_int,
+        };
         return Serve::Done(folders_response(&data, &payload, "", None, &headers, "v1").await);
     }
 
@@ -630,13 +712,11 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     }
     match st.index.current().await {
         Some(data) if data.fresh() => {
-            let children: &[Value] = if norm.is_empty() {
+            let children: &[tree::Node] = if norm.is_empty() {
                 &data.tree
             } else {
                 match tree::find_tree_node(&data.tree, &norm, "") {
-                    Some(n) if n["type"] == "folder" => {
-                        n["children"].as_array().map(|v| v.as_slice()).unwrap_or(&[])
-                    }
+                    Some(tree::Node::Folder(f)) => &f.children,
                     _ => {
                         return Serve::Done(detail_response(
                             StatusCode::NOT_FOUND,
@@ -645,10 +725,18 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                     }
                 }
             };
-            let shallow = tree::shallow_from_tree(children);
-            let payload = serde_json::json!({
-                "kind": "children", "nodes": shallow, "generation": data.generation
-            });
+            // `shallow_from_tree`: folder children only, `children: []`,
+            // every other field (thumb/metadata/subtree_facets) intact.
+            let payload = tree::EnvSer {
+                kind: "children",
+                nodes: &tree::TreeSer {
+                    nodes: children,
+                    facets: &data.facets,
+                    parent: &norm,
+                    shallow: true,
+                },
+                generation: data.generation,
+            };
             Serve::Done(folders_response(&data, &payload, &norm, Some(depth), &headers, "v1").await)
         }
         // Cold/stale → live-FS one-level listing (never waits on the scan).
@@ -696,14 +784,16 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
 
-    fn test_data(tree: Vec<Value>, generation: i64) -> Arc<CacheData> {
+    fn test_data(tree: Vec<tree::Node>, generation: i64) -> Arc<CacheData> {
         Arc::new(CacheData {
             tree,
             comics: Vec::new(),
+            facets: HashMap::new(),
             timestamp_micros: AtomicU64::new((now_secs() * 1e6) as u64),
             generation,
             signature: None,
             body_cache: Mutex::new(HashMap::new()),
+            body_bytes: AtomicU64::new(0),
         })
     }
 
@@ -711,14 +801,27 @@ mod tests {
         res.into_body().collect().await.unwrap().to_bytes().to_vec()
     }
 
+    fn test_folder(name: &str) -> tree::Node {
+        tree::Node::Folder(Box::new(tree::FolderNode {
+            name: name.into(),
+            children: vec![],
+            thumb: None,
+            thumbs: vec![],
+            archive: false,
+            pdf: false,
+            has_metadata: false,
+            metadata: None,
+        }))
+    }
+
     /// #221 port: the ?since stale-poll envelope rides the body cache —
     /// one serialization per generation, ETag/304/Cache-Control attached,
     /// namespaced so it can never alias the bare full-tree body.
     #[tokio::test]
     async fn since_payload_is_cached_with_conditional_headers() {
-        let data = test_data(vec![serde_json::json!({"name": "a", "type": "folder"})], 7);
+        let data = test_data(vec![test_folder("a")], 7);
         let payload = serde_json::json!({
-            "kind": "tree", "nodes": data.tree, "generation": data.generation
+            "kind": "tree", "nodes": [{"name":"a","type":"folder","children":[]}], "generation": data.generation
         });
         let empty = HeaderMap::new();
 

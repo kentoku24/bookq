@@ -547,10 +547,13 @@ impl Registry {
             Some(c) => c,
             None => {
                 let downloads = self.downloads.clone();
-                let tree = cache.tree.clone();
+                // #322: move the Arc'd cache into the task — cloning
+                // `cache.tree` used to deep-copy the whole node DOM per
+                // manifest build.
+                let cache_c = cache.clone();
                 let folder_c = folder.clone();
                 let built = tokio::task::spawn_blocking(move || {
-                    catalog::build_manifest_core(&downloads, &tree, &folder_c, offset_i64)
+                    catalog::build_manifest_core(&downloads, &cache_c.tree, &folder_c, offset_i64)
                 })
                 .await;
                 let built = match built {
