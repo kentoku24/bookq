@@ -37,7 +37,9 @@ jobs:
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # schedule スキャンは非 clean な dependabot PR 1件あたり最大
+    # MERGE_RETRIES*5s (=60s) 消費するため滞留分の頭数を見て 15 にする。
+    timeout-minutes: 15
     steps:
       - uses: pascalgn/automerge-action@v0.16.4
         env:
