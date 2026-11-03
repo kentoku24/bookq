@@ -46,6 +46,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -1037,8 +1039,13 @@ private fun BrowseGrid(
         modifier = Modifier.fillMaxSize().testTag("browseGrid"),
     ) {
         gridItemsIndexed(items, key = { _, it -> itemKey(it) }) { _, item ->
-            ElevatedCard(
+            // Flat tile (not ElevatedCard): per-tile shadow layers +
+            // tonal providers were measurable per new row during flings
+            // — web's tiles are flat anyway (#302).
+            Surface(
                 onClick = { onTap(item) },
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 1.dp,
                 modifier = Modifier.testTag("tile:${item.path}"),
             ) {
                 Box(Modifier.fillMaxWidth().aspectRatio(if (card) 16f / 9f else 2f / 3f)) {
@@ -1049,6 +1056,9 @@ private fun BrowseGrid(
                         imageLoader = scope.imageLoader,
                         coverW = if (card) 400 else coverW,
                         modifier = Modifier.fillMaxSize(),
+                        // Deferred attach while flinging — decode/upload
+                        // bursts were the gridFling frame tail (#302).
+                        attach = !gridState.isScrollInProgress,
                     )
                     Column(Modifier.align(Alignment.TopEnd).padding(6.dp),
                         horizontalAlignment = Alignment.End) {
@@ -1067,12 +1077,32 @@ private fun BrowseGrid(
                             is LevelModel.Item.Folder ->
                                 BrowseRules.splitDisplayName(item.node.name)
                         }
-                        Text(leaf, style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1)
-                        if (parent != null) {
-                            Text(parent, style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline, maxLines = 1)
-                        }
+                        // ONE Text: leaf + parent in a single layout pass —
+                        // each Text costs a StaticLayout (CJK shaping is the
+                        // dominant gridFling frame cost on the trace).
+                        Text(
+                            text = buildAnnotatedString {
+                                append(leaf)
+                                if (parent != null) {
+                                    append('\n')
+                                    withStyle(
+                                        androidx.compose.ui.text.SpanStyle(
+                                            color = MaterialTheme.colorScheme
+                                                .outline,
+                                            fontSize = MaterialTheme.typography
+                                                .labelSmall.fontSize,
+                                        ),
+                                    ) { append(parent) }
+                                }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            // leaf never wraps — it ellipsizes on line 1
+                            // exactly like the two-Text layout did.
+                            softWrap = false,
+                            overflow = androidx.compose.ui.text.style
+                                .TextOverflow.Ellipsis,
+                            maxLines = 2,
+                        )
                         item.progressPct(book)?.let { pct ->
                             Spacer(Modifier.height(4.dp))
                             LinearProgressIndicator(
@@ -1133,6 +1163,7 @@ private fun BrowseList(
                             imageLoader = scope.imageLoader,
                             coverW = coverW,
                             modifier = Modifier.fillMaxSize(),
+                            attach = !listState.isScrollInProgress,
                         )
                     }
                 }

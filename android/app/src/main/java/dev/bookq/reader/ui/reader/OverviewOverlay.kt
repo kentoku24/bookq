@@ -391,6 +391,7 @@ private fun OverviewGrid(
                         g = start + l,
                         isCur = start + l == curKey,
                         attachImage = attachImage?.invoke(start + l) ?: true,
+                        scrolling = gridState.isScrollInProgress,
                         api = api,
                         offline = offline,
                         imageLoader = imageLoader,
@@ -408,6 +409,7 @@ private fun OverviewCell(
     g: Int,
     isCur: Boolean,
     attachImage: Boolean,
+    scrolling: Boolean,
     api: BookqApi,
     offline: dev.bookq.reader.offline.OfflineManager,
     imageLoader: ImageLoader,
@@ -436,7 +438,12 @@ private fun OverviewCell(
             .clickable { onJump(g) },
         contentAlignment = Alignment.Center,
     ) {
-        if (attachImage) {
+        // Deferred attach while the grid scrolls: image delivery inside
+        // a fling frame is the overviewFling tail (#302). Cells that
+        // already painted keep their image; the rest warm the cache via
+        // a plain enqueue and draw on settle.
+        var painted by remember(request) { mutableStateOf(false) }
+        if (attachImage && (painted || !scrolling)) {
             // AsyncImage (not Subcompose): a subcomposition per cell is
             // the dominant overviewFling frame cost. Error state is a
             // lightweight overlay below.
@@ -447,9 +454,18 @@ private fun OverviewCell(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
-                onState = { failed = it is coil3.compose.AsyncImagePainter.State.Error },
+                onState = { s ->
+                    if (s is coil3.compose.AsyncImagePainter.State.Success) {
+                        painted = true
+                    }
+                    failed = s is coil3.compose.AsyncImagePainter.State.Error
+                },
             )
             if (failed) Text("⚠", color = Color(0xFF808080))
+        } else if (attachImage) {
+            androidx.compose.runtime.LaunchedEffect(request) {
+                imageLoader.enqueue(request)
+            }
         }
         // web `.pg` badge — chapter-local page number.
         Text(
