@@ -13,10 +13,12 @@ import re
 import time
 from email import utils
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from pydantic import BeforeValidator
 from starlette.concurrency import run_in_threadpool
 
 from app import auth as auth_module
@@ -128,6 +130,22 @@ async def _rebuild_into_cache(app) -> None:
 # /thumb/ and /api/thumb-sprite).
 _FILL_IDLE_SECONDS = 10.0
 _FILL_STEP_SECONDS = 0.2
+
+
+def _require_int_literal(v):
+    """Reject non-integer-literal query values ahead of pydantic's lax coercion.
+
+    FastAPI's default int coercion accepts ``since=0.0`` / ``depth=1.0``,
+    which the spec's ``type: integer`` forbids — schemathesis flags the
+    acceptance as ST201 (#326). Values already non-str (direct unit calls,
+    ``None``) pass through untouched.
+    """
+    if isinstance(v, str) and re.fullmatch(r"-?\d+", v) is None:
+        raise ValueError("expected an integer literal")
+    return v
+
+
+_QueryInt = Annotated[int, BeforeValidator(_require_int_literal)]
 
 
 def _is_within(base: Path, target: Path) -> bool:
@@ -1045,8 +1063,8 @@ async def api_folders(
     request: Request,
     response: Response = None,  # type: ignore[assignment] — injected per request; None on direct unit calls
     path: str = Query("", description="Subtree path relative to downloads dir (empty = root)"),
-    depth: int | None = Query(None, description="1 = direct child folders only; omitted = full tree"),
-    since: int | None = Query(None, description="Tree generation last seen; match = 304, stale = tree+generation"),
+    depth: _QueryInt | None = Query(None, description="1 = direct child folders only; omitted = full tree"),
+    since: _QueryInt | None = Query(None, description="Tree generation last seen; match = 304, stale = tree+generation"),
     _user: dict = Depends(require_auth),
 ):
     """List folders as a recursive tree with metadata. Requires authentication.

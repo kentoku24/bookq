@@ -19,6 +19,7 @@ from app.routes import (
     _POSITION_MAX_FOLDERS,
     _POSITION_MAX_USERS,
     _POSITION_TS_FUTURE_SLACK_MS,
+    _QueryInt,
     _facets_impl,
     _folder_tree,
     _latest_position,
@@ -118,8 +119,8 @@ async def v1_version(request: Request, _user: dict = Depends(require_auth)):
 async def v1_tree(
     request: Request,
     path: str = Query("", description="Subtree path relative to downloads dir (empty = root)"),
-    depth: int | None = Query(None, description="1 = direct child folders only; omitted = full tree"),
-    since: int | None = Query(None, description="Tree generation last seen; match = 304"),
+    depth: _QueryInt | None = Query(None, description="1 = direct child folders only; omitted = full tree"),
+    since: _QueryInt | None = Query(None, description="Tree generation last seen; match = 304"),
     _user: dict = Depends(require_auth),
 ):
     """Folder tree as ``{kind: tree|children, nodes, generation}``."""
