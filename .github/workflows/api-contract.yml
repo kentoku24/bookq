@@ -47,14 +47,33 @@ jobs:
         run: |
           BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
             uv run --with-requirements requirements-dev.txt \
-            uvicorn app.main:app --host 127.0.0.1 --port 8080 &
+            uvicorn app.main:app --host 127.0.0.1 --port 8080 \
+            > /tmp/bookq-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/health && exit 0 || sleep 1
           done
           echo "server did not become healthy" && exit 1
 
+      # Seed stays random — the fuzz value of this job is that each run
+      # explores different inputs (#326). Reproducibility comes from the
+      # artifacts instead: the crash cache under .schemathesis/ replays a
+      # failing case via `st replay`, the printed `Seed:` enables a full
+      # `st run --seed N` rerun, the ndjson report carries every case, and
+      # the server log holds the traceback behind any 5xx.
       - name: Schemathesis contract test
         run: |
           uv run --with schemathesis schemathesis run api/openapi.v1.yaml \
             --url http://127.0.0.1:8080 \
-            --exclude-checks ignored_auth,allow_header_conformance
+            --exclude-checks ignored_auth,allow_header_conformance \
+            --report junit,ndjson --report-dir schemathesis-report
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: schemathesis-diagnostics
+          path: |
+            /tmp/bookq-server.log
+            schemathesis-report/
+            .schemathesis/
+          if-no-files-found: ignore
