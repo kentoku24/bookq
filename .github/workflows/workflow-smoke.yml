@@ -54,7 +54,7 @@ jobs:
   # (implement / research / implement-direct / research-direct).
   # Sharded across N runners via pytest-split (#331): each leg runs the same
   # setup, then 1/N of the suite balanced by committed .test_durations.
-  # The --splits value and matrix.shard list must be kept in sync.
+  # --splits uses strategy.job-total so it tracks matrix.shard automatically.
   uv-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -86,8 +86,8 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (shard ${{ matrix.shard }}/3)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2 --splits 3 --group ${{ matrix.shard }}
+      - name: Run bookq test gate (shard ${{ matrix.shard }}/${{ strategy.job-total }})
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2 --splits ${{ strategy.job-total }} --group ${{ matrix.shard }}
 
   # Single stable check name over the uv-gate matrix legs (#331) — matrix
   # fan-out would otherwise produce only per-shard check names.
