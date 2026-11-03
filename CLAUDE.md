@@ -150,6 +150,22 @@ Server-side behavior currently has no unit tests; everything is asserted through
 
 Performance budgets live in `tests/test_perf_budget.py` (deterministic: request counts, gzip ratio, long tasks — run with the rest of `tests/`). Millisecond KPIs are measured manually against the real-library dev host with `scripts/perf/measure.py`; targets and procedure are in `docs/performance.md`. `/api`, `/static`, `/sw.js` are gzipped by `app/compression.py`; `/image` and `/thumb` are never compressed or resized.
 
+## Android (`android/`)
+
+Kotlin + Compose (M3) native client — `:core` (pure Kotlin: openapi models, `ImagePath` = JS encodeURIComponent parity, PKCE/JWT), `:data` (OkHttp `BookqApi` for all v1 endpoints with 202/304/Retry-After, Keystore AES-GCM `TokenStore`, `AuthManager` RFC 8252 PKCE), `:app` (Compose UI, `AppModel` phase machine, `AppGraph` hand DI). minSdk 35, compileSdk `release(37){minorApiLevel=2}`. See `docs/android-app.md`.
+
+```bash
+cd android
+JAVA_HOME=$(brew --prefix openjdk@21) ANDROID_HOME=$HOME/Library/Android/sdk \
+  ./gradlew :core:test :data:testDebugUnitTest :app:testDebugUnitTest \
+            :app:lintDebug :app:assembleDebug
+```
+
+Device verify on CP08-J1: `./gradlew :app:installDebug` then
+`adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`
+(Tailscale app required on the device). Emulator/UI tests:
+`./gradlew :app:connectedDebugAndroidTest` (instrumentation arg `bookqServerUrl`, default `http://10.0.2.2:8080`). Dependency versions pinned in `gradle/libs.versions.toml` (stable, ≥7 days old).
+
 ## Docs
 
 `docs/core-features.md` is a detailed spec but is **stale for the server**: it describes the pre-FastAPI `viewer.py` single-file stdlib server (commit `32b55fb`) with no authentication. Its UI, `scan_tree`, and swipe/momentum sections still match the current code and are the best reference for those. `docs/superpowers/` holds the design spec and plan for the OAuth migration.

@@ -24,3 +24,11 @@ dev_fixture/
 
 # Rust build artifacts (docker -v mounts can create this locally)
 rust/target/
+
+# Android ネイティブクライアント (`android/`)
+android/**/build/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+*.jks
+*.keystore

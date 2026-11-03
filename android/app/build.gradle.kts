@@ -1,0 +1,113 @@
+plugins {
+    alias(libs.plugins.android.application)
+    // Kotlin is built into AGP 9 — only the serialization/compose compiler
+    // plugins are applied on top.
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.kotlin.compose)
+}
+
+// Release signing comes from ~/.gradle/gradle.properties (or -P flags):
+// BOOKQ_KEYSTORE_PATH / BOOKQ_KEYSTORE_PASSWORD / BOOKQ_KEY_ALIAS /
+// BOOKQ_KEY_PASSWORD. Absent → the release APK stays unsigned (sideload
+// debug or sign later); the build must not fail.
+val releaseKeystorePath = providers.gradleProperty("BOOKQ_KEYSTORE_PATH").orNull
+val releaseKeystorePassword = providers.gradleProperty("BOOKQ_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.gradleProperty("BOOKQ_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.gradleProperty("BOOKQ_KEY_PASSWORD").orNull
+val hasReleaseSigning = !releaseKeystorePath.isNullOrBlank()
+
+android {
+    namespace = "dev.bookq.reader"
+    // Installed platform is android-37.2 — target API 37 at minor level 2.
+    compileSdk { version = release(37) { minorApiLevel = 2 } }
+
+    defaultConfig {
+        applicationId = "dev.bookq.reader"
+        minSdk { version = release(35) }
+        targetSdk { version = release(37) }
+        versionCode = 1
+        versionName = "1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                // hasReleaseSigning guarantees the path is non-null.
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                this.keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+        debug {
+            applicationIdSuffix = ".debug"
+        }
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        }
+    }
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
+dependencies {
+    implementation(project(":core"))
+    implementation(project(":data"))
+
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.core)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.browser)
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.tracing.ktx)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.splashscreen)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
+
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.androidx.test.core)
+
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+}
