@@ -645,8 +645,16 @@ private fun BrowseBody(
                             .testTag("pairBanner"),
                     ) {
                         Text(
-                            "同期中" + (pairSnap?.phase?.let { " — " + it.name }
-                                ?: ""),
+                            "同期中" + (pairSnap?.phase?.let {
+                                " — " + when (it) {
+                                    dev.bookq.core.sync.PairPhase.waiting -> "待機中"
+                                    dev.bookq.core.sync.PairPhase.selecting -> "作品選択中"
+                                    dev.bookq.core.sync.PairPhase.loading -> "読み込み中"
+                                    dev.bookq.core.sync.PairPhase.reading -> "同期読書中"
+                                    dev.bookq.core.sync.PairPhase.paused -> "一時停止"
+                                    dev.bookq.core.sync.PairPhase.ended -> "終了"
+                                }
+                            } ?: ""),
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(12.dp),
                         )
