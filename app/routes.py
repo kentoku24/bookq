@@ -48,6 +48,38 @@ class _IndexBuilding(Exception):
     """The metadata index cache is missing and its cold build is still running."""
 
 
+def _index_disabled() -> bool:
+    """True when the metadata index must not be built or held (rs-native mode).
+
+    ``BOOKQ_DISABLE_INDEX`` opts the Python viewer into "no index" mode for
+    the viewer-rs full rollout (#320): once every tree/index consumer is
+    served natively upstream, the Python worker must stop building and
+    holding the tree+index (the largest heap block — ~150-250MB on a
+    ~150k-image library). Read at call time so tests can flip it via
+    monkeypatch.setenv.
+
+    Index-needing handlers fail fast with 503 via ``_IndexDisabled`` — a
+    lazy build would silently regrow the heap on misconfiguration.
+    Endpoints that serve without the index (shallow /api/folders live-FS
+    fallback, /api/images, /image, /thumb, /view, /api/v1/health) keep
+    working, so a disabled viewer still functions as the plain-file
+    fallback backend behind viewer-rs.
+    """
+    return os.getenv("BOOKQ_DISABLE_INDEX", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+class _IndexDisabled(HTTPException):
+    """Raised by the ``_ensure_*`` path under ``BOOKQ_DISABLE_INDEX`` → 503."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=503,
+            detail="metadata index disabled (BOOKQ_DISABLE_INDEX)",
+        )
+
+
 # How long a request may wait on an in-flight cold build before answering
 # 202. Small libraries finish inside the budget and keep the synchronous
 # 200 contract; a large-library cold build never parks a request.
@@ -382,6 +414,8 @@ async def _ensure_tree_and_index(request: Request, wait: bool = False) -> tuple[
     the old block-until-built semantics for callers that cannot answer
     202 (the reader-sync WS path has no retry channel to offer).
     """
+    if _index_disabled():
+        raise _IndexDisabled()
     cache_data = getattr(request.app.state, "metadata_index_cache", None)
     if cache_data is not None and "tree" in cache_data:
         if (time.time() - cache_data["timestamp"]) <= INDEX_CACHE_TTL:
@@ -461,7 +495,14 @@ async def warmup_metadata_index(app_state) -> tuple[int, int, float]:
 
     Raises on failure — the caller logs WARNING and continues startup.
     Returns (folders, images, elapsed_ms).
+
+    Under ``BOOKQ_DISABLE_INDEX`` (#320) the warmup is a no-op: rs-native
+    mode must not build the tree at all, not even once (a one-shot build
+    would still leave it in the cache for its lifetime).
     """
+    if _index_disabled():
+        logger.info("index disabled (BOOKQ_DISABLE_INDEX): warmup skipped pid=%s", os.getpid())
+        return 0, 0, 0.0
     started = time.perf_counter()
     tree, index, folders, images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(
         app_state.settings.downloads_path, list_archives=False
@@ -1286,6 +1327,8 @@ async def refresh_index(request: Request, _user: dict = Depends(require_auth)):
     folders ETag/body cache keys off the timestamp generation and rolls
     over automatically).
     """
+    if _index_disabled():
+        raise _IndexDisabled()
     async with _index_lock:
         downloads_path = request.app.state.settings.downloads_path
         tree, index, _folders, _images, _archives, _epubs, _rars, _pdfs = await _scan_and_rebuild(downloads_path)

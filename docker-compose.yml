@@ -35,6 +35,11 @@ services:
       - BOOKQ_CACHE_DIR=/var/cache/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       - BOOKQ_STATE_DIR=/var/lib/bookq
+      # #320 rs フルネイティブモード: 空=従来どおり index/tree を構築・保持。
+      # 全 index 消費者が native (BOOKQ_RS_NATIVE 全件 or `all`) のとき 1 に
+      # すると、warmup/fill/cover-warm を止めて tree+index (~150-250MB) を
+      # 持たなくなる。index 必要 endpoint への着弾は 503 fail-fast。
+      - BOOKQ_DISABLE_INDEX=${BOOKQ_DISABLE_INDEX:-}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - SECRET_KEY=${SECRET_KEY}
@@ -84,12 +89,13 @@ services:
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
-      # 既定は live 実測で py を上回った読み取り系のみ: image(/image は
-      # 1.4ms vs py 2.8ms・16並列で ~2x) / images(v1 listing は mtime cache
-      # で ~10x) / tree(?since poll は ~2x 高速。全量 tree 送出のみ ~2x 遅い
-      # が稀な呼出のため許容)。未実測の search/facets/positions/visibility/
-      # thumb 系と、native 不可の rar/pdf read は proxy のまま。
-      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-image,images,tree}
+      # 既定は検証済みの全 native 面 (#320): gateway-contract CI が
+      # BOOKQ_RS_NATIVE=all で全件を叩いて等価性を確認済み。py へ残るのは
+      # OAuth/template/static + native 対象外の v0 系のみ。
+      # `all` ではなく列挙に留める — 将来追加される native route が
+      # 未検証のまま自動有効化されるのを防ぐため。新規 native route は
+      # この既定リストへの追加で有効化する。
+      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync}
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC —
       # viewer と同じ値が必須。ずれるとブラウザ利用が全て proxy に落ちる。
       - SECRET_KEY=${SECRET_KEY}
