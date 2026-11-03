@@ -25,8 +25,14 @@ PROBE_SLEEP="${PROBE_SLEEP:-2}"
 
 HOSTPORT="${SERVER_URL#*://}"
 HOSTPORT="${HOSTPORT%%/*}"
-HOST="${HOSTPORT%%:*}"
-PORT="${HOSTPORT##*:}"
+if [[ "$HOSTPORT" == *:* ]]; then
+  HOST="${HOSTPORT%%:*}"
+  PORT="${HOSTPORT##*:}"
+else
+  # `##*:` on a port-less host yields the host itself → nc host host.
+  HOST="$HOSTPORT"
+  case "$SERVER_URL" in https://*) PORT=443 ;; *) PORT=80 ;; esac
+fi
 
 # API-35 images ship /system/bin/curl; toybox nc is the fallback probe.
 probe() {
