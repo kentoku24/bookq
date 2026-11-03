@@ -41,8 +41,7 @@ class ReaderBenchmark {
         iterations = 10,
         setupBlock = {
             val url = serverUrl()
-            pressHome()
-            startActivityAndWait(launchIntent(url))
+            launchToBrowse(url)
             reachReader()
             device.waitForIdle(1_000)
         },
@@ -60,8 +59,7 @@ class ReaderBenchmark {
         iterations = 10,
         setupBlock = {
             val url = serverUrl()
-            pressHome()
-            startActivityAndWait(launchIntent(url))
+            launchToBrowse(url)
             reachReader()
             device.waitForIdle(1_000)
         },
@@ -78,8 +76,7 @@ class ReaderBenchmark {
         iterations = 10,
         setupBlock = {
             val url = serverUrl()
-            pressHome()
-            startActivityAndWait(launchIntent(url))
+            launchToBrowse(url)
             reachReader()
             openOverview()
             device.waitForIdle(800)
@@ -97,8 +94,7 @@ class ReaderBenchmark {
         iterations = 10,
         setupBlock = {
             val url = serverUrl()
-            pressHome()
-            startActivityAndWait(launchIntent(url))
+            launchToBrowse(url)
             // Resume may land inside the reader — back out to browse.
             if (inReader()) {
                 device.pressBack()
@@ -106,9 +102,6 @@ class ReaderBenchmark {
                     Until.hasObject(By.res("browseGrid")), 15_000)
                     ?: error("browse grid never appeared after back")
             }
-            device.wait(
-                Until.hasObject(By.res("browseGrid")), 30_000)
-                ?: error("browse grid never appeared")
             device.waitForIdle(800)
         },
     ) {

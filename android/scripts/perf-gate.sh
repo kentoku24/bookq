@@ -46,8 +46,11 @@ ADB="${ANDROID_HOME}/platform-tools/adb"
 
 if [[ "$GENERATE" == "1" ]]; then
     echo "== generating baseline profile on device =="
+    # Restrict to the generator class — the benchmark classes fail fast
+    # here because Partial(Require) has no installed profile yet.
     ./gradlew :app:generateReleaseBaselineProfile \
         "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
+        "-Pandroid.testInstrumentationRunnerArguments.class=dev.bookq.reader.baselineprofile.BaselineProfileGenerator" \
         --console=plain
 fi
 

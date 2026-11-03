@@ -77,6 +77,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.semantics
@@ -99,6 +100,7 @@ import dev.bookq.core.reader.zoneAction
 import dev.bookq.core.reader.ZoneAction
 import dev.bookq.reader.AppGraph
 import dev.bookq.reader.PerfTrace
+import dev.bookq.reader.PerfTunables
 import dev.bookq.reader.R
 import dev.bookq.reader.reader.ReaderController
 import dev.bookq.reader.ui.browse.RETURN_ANCHOR_KEY
@@ -674,11 +676,13 @@ private fun ReaderBody(
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
             HorizontalPager(
                 state = pager,
-                beyondViewportPageCount = 1,
+                beyondViewportPageCount =
+                    PerfTunables.beyondViewportPageCount ?: 1,
                 // Zoomed → the zoom layer owns one-finger drags.
                 userScrollEnabled = !zoomedNow,
                 modifier = Modifier
                     .fillMaxSize()
+                    .testTag("readerPager")
                     // translate(tx,ty) scale(zoom) around the top-left —
                     // the web #zoom-layer transform, layer-local.
                     .graphicsLayer {

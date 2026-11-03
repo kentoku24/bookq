@@ -14,9 +14,6 @@ import java.util.regex.Pattern
 // debug carries .debug) — the gates measure what users get.
 const val PACKAGE_NAME = "dev.bookq.reader"
 
-/** `N / M` counter text — the reader's reliable "open" signal (same
- *  locator ReaderPinchTest uses: it is chrome, not a tile). */
-private val READER_COUNTER = Pattern.compile("\\d+ / \\d+")
 private val TILE = Pattern.compile("tile:.*")
 
 /** TEST_MODE dev environment URL passed by perf-gate.sh
@@ -25,6 +22,11 @@ fun serverUrl(): String = InstrumentationRegistry.getArguments()
     .getString("bookqServerUrl")
     ?: error("-e bookqServerUrl <url> is required for the gate run")
 
+/** A/B sweep: `-e bvp N` overrides the reader pager's
+ *  beyondViewportPageCount (PerfTunables; debug/benchmark only). */
+fun bvp(): Int? = InstrumentationRegistry.getArguments()
+    .getString("bvp")?.toIntOrNull()
+
 fun launchIntent(url: String): Intent =
     Intent(Intent.ACTION_MAIN).apply {
         addCategory(Intent.CATEGORY_LAUNCHER)
@@ -32,20 +34,40 @@ fun launchIntent(url: String): Intent =
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
             Intent.FLAG_ACTIVITY_CLEAR_TASK)
         putExtra("serverURL", url)
+        bvp()?.let { putExtra("bvp", it) }
     }
 
-/** Cold launch into TEST_MODE browse; waits for the grid. */
+/** Cold launch into TEST_MODE browse; waits for the grid.
+ *  Retries the launch once: CP08-J1's stale Tailscale window can keep
+ *  the active accessibility window, leaving findObject() blind even
+ *  though the grid is on screen (same failure mode ReaderPinchTest
+ *  documents). A fresh launch re-binds the a11y focus. */
 fun MacrobenchmarkScope.launchToBrowse(url: String) {
-    startActivityAndWait(launchIntent(url))
-    device.wait(Until.findObject(By.res("browseGrid")), 30_000)
-        ?: error("browse grid never appeared")
-    device.waitForIdle(1_500)
+    repeat(2) { attempt ->
+        pressHome()
+        startActivityAndWait(launchIntent(url))
+        // Poll both targets: saved progress can resume the task straight
+        // into the reader — back out, then keep waiting for the grid.
+        val deadline = android.os.SystemClock.uptimeMillis() + 30_000
+        while (android.os.SystemClock.uptimeMillis() < deadline) {
+            if (device.hasObject(By.res("browseGrid"))) {
+                device.waitForIdle(1_500)
+                return
+            }
+            if (inReader()) device.pressBack()
+            android.os.SystemClock.sleep(400)
+        }
+        if (attempt == 1) error("browse grid never appeared")
+        device.pressHome()
+        device.waitForIdle(1_000)
+    }
 }
 
 /** Deterministic reader entry: the seeded resume pill when present
  *  (CP08-J1 keeps saved progress), else drill the first tile until a
  *  leaf opens — same strategy as ReaderPinchTest. */
 fun MacrobenchmarkScope.reachReader() {
+    if (inReader()) return
     device.wait(Until.findObject(By.res("resumePill")), 8_000)
         ?.click()
     if (waitForReader(20_000)) return
@@ -59,10 +81,10 @@ fun MacrobenchmarkScope.reachReader() {
 }
 
 fun MacrobenchmarkScope.waitForReader(ms: Long): Boolean =
-    device.wait(Until.hasObject(By.text(READER_COUNTER)), ms) != null
+    device.wait(Until.hasObject(By.res("readerPager")), ms) != null
 
 fun MacrobenchmarkScope.inReader(): Boolean =
-    device.hasObject(By.text(READER_COUNTER))
+    device.hasObject(By.res("readerPager"))
 
 fun UiDevice.tapForward() = click(
     displayWidth * 15 / 100, displayHeight / 2)
@@ -85,12 +107,13 @@ fun MacrobenchmarkScope.openOverview() {
 }
 
 fun UiDevice.flingObject(res: String, direction: Direction, times: Int) {
-    // wait→object: UiObject2 re-queries on each action, so a fling fired
-    // on the waited handle survives recomposition between iterations.
-    val target = wait(Until.findObject(By.res(res)), 15_000)
-        ?: error("$res never appeared for fling")
-    target.setGestureMarginPercentage(0.15f)
+    // Re-query per fling: UiObject2 holds a resolved AccessibilityNode
+    // that goes stale the moment the list scrolls/mutates — a cached
+    // handle throws StaleObjectException on the second fling.
     repeat(times) {
+        val target = wait(Until.findObject(By.res(res)), 15_000)
+            ?: error("$res never appeared for fling")
+        target.setGestureMarginPercentage(0.15f)
         target.fling(direction)
         waitForIdle(800)
     }

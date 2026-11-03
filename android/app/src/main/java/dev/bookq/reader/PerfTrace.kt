@@ -52,3 +52,12 @@ object PerfTrace {
         }
     }
 }
+
+/** Measurement-only tunables set from intent extras in builds that
+ *  allow `serverURL` (debug/benchmark — never release; #302 A/B). */
+object PerfTunables {
+
+    /** HorizontalPager composition window override for the reader A/B
+     *  sweep (`--ei bvp N`). null → the code default. */
+    @Volatile var beyondViewportPageCount: Int? = null
+}

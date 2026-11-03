@@ -30,8 +30,7 @@ class BrowseBenchmark {
         iterations = 10,
         setupBlock = {
             val url = serverUrl()
-            pressHome()
-            startActivityAndWait(launchIntent(url))
+            launchToBrowse(url)
             // Resume lands wherever the task left off — back out of the
             // reader, then drill one level so the grid is populated.
             if (inReader()) device.pressBack()

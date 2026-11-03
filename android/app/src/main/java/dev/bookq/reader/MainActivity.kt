@@ -31,6 +31,9 @@ class MainActivity : ComponentActivity() {
         // Debug + benchmark builds only — the release build never lets an
         // intent extra redirect the client to an arbitrary server.
         if (!BuildConfig.ALLOW_SERVER_URL_EXTRA) return
+        intent?.getIntExtra("bvp", -1)
+            ?.takeIf { it >= 0 }
+            ?.let { PerfTunables.beyondViewportPageCount = it }
         val graph = (application as BookqApp).graph
         intent?.getStringExtra("serverURL")?.let { url ->
             lifecycleScope.launch {

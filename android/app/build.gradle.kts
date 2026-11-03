@@ -1,3 +1,5 @@
+import com.android.build.api.variant.BuildConfigField
+
 plugins {
     alias(libs.plugins.android.application)
     // Kotlin is built into AGP 9 — only the serialization/compose compiler
@@ -111,6 +113,25 @@ android {
 java {
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
+// The baselineprofile plugin's `nonMinified*` variants initWith their
+// base type, so nonMinifiedRelease inherits release's
+// ALLOW_SERVER_URL_EXTRA=false and the profile generator would sit on
+// the onboarding screen forever. Measurement variants need the extra.
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        if (variant.buildType?.startsWith("nonMinified") == true) {
+            variant.buildConfigFields?.put(
+                "ALLOW_SERVER_URL_EXTRA",
+                BuildConfigField(
+                    "boolean",
+                    "true",
+                    "serverURL intent extra for measurement variants",
+                ),
+            )
+        }
     }
 }
 

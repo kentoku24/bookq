@@ -62,7 +62,53 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
 |------|------|
 | `core/` | 純 Kotlin JVM。`api/`（openapi 準拠モデル、`ImagePath`=encodeURIComponent 互換）、`auth/`（PKCE、JWT claims） |
 | `data/` | `BookqApi`（全 v1 endpoint、202/304/Retry-After）、`AuthInterceptor`（same-origin Bearer）/`TokenAuthenticator`（401→refresh→1回 retry）、`TokenStore`（Keystore AES-GCM）、`AuthManager` |
-| `app/` | Compose UI。`AppModel`（onboarding→booting→login→ready）、`AppGraph`（手書き DI）、Onboarding/Login/Home(M1 仮)/Settings、`BookqTrace`（`bookq.*` sections）、debug FPS HUD |
+| `app/` | Compose UI。`AppModel`（onboarding→booting→login→ready）、`AppGraph`（手書き DI）、Onboarding/Login/Home/Settings、`PerfTrace`（`bookq.*` sections）、debug FPS HUD |
+| `baselineprofile/` | `com.android.test` モジュール。Baseline/Startup Profile 生成 + Macrobenchmark ゲート群 |
+
+## 性能計測（Macrobenchmark + Baseline Profile）
+
+- `:app` は `benchmark` ビルドタイプ（release 形状・debug 署名）と
+  `nonMinifiedRelease`/`benchmarkRelease`（baselineprofile プラグイン生成）
+  を持つ。`profileinstaller` が同梱され、release には
+  `src/release/generated/baselineProfiles/` のプロファイルが入る。
+- Baseline Profile 生成（実機必須、API 31+、CP08-J1 は非 root で可）:
+
+  ```bash
+  ./gradlew :app:generateReleaseBaselineProfile \
+    -Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=<dev-url> \
+    -Pandroid.testInstrumentationRunnerArguments.class=dev.bookq.reader.baselineprofile.BaselineProfileGenerator
+  ```
+
+- §5 ゲート一括実行: `android/scripts/perf-gate.sh <dev-url> [--generate]`
+  — benchmark variant をインストール → 全 Macrobenchmark を実行 →
+  `benchmarkData.json` を閾値（タップ median <60ms、fling janky <1%・
+  p99 <16ms、コールド TTFD <1.5s、readerOpen <400ms、各 n≥10）と比較し
+  非ゼロ終了。
+- 計測点: `bookq.pageTurn`（`turn()` → 対象スプレッド初描画）、
+  `bookq.readerOpen`（reader 遷移 → 初 spread）、
+  `reportFullyDrawn()`（初回グリッド表示）— いずれも `PerfTrace`。
+
+### 計測結果（CP08-J1 / release + Baseline Profile）
+
+| ゲート | 閾値 | 実測 | web 基準 (#60) |
+|--------|------|------|----------------|
+| タップ送り median | < 60ms | TBD | 88–138ms |
+| スワイプ送り janky / p99 | < 1% / < 16ms | TBD | 171–205ms |
+| タイルグリッド fling janky / p99 | < 1% / < 16ms | TBD | — |
+| 概要 fling (600p) janky / p99 | < 1% / < 16ms | TBD | — |
+| コールド起動 TTFD | < 1.5s | TBD | — |
+| リーダー起動 (cache) | < 400ms | TBD | — |
+
+### リーダー描画方式（A/B 決着）
+
+TBD — `beyondViewportPageCount` スイープ結果をここに記録。
+
+### Compose 安定性監査
+
+`compose-stability.conf` で `:core` のイミュータブルモデルを安定化
+（unstable params 24 → 14、残りはサービス/フレームワーク型で強スキップ
+が処理）。compiler reports は `app/build/compose_reports/`、
+`:app:compileReleaseKotlin` で再生成。
 
 バージョンは `gradle/libs.versions.toml` に固定（公開 7 日以上の stable。
 floating 指定禁止）。R8 full mode + shrinkResources。release 署名は
@@ -75,8 +121,14 @@ BOOKQ_KEY_PASSWORD` を読み、未設定なら unsigned のままビルドは�
 `ui`（reactivecircus/android-emulator-runner API 35 x86_64 + KVM。
 TEST_MODE uvicorn を job 内で起動し `10.0.2.2:8080` 経由で接続）。
 
-## 既知の制限（M1 時点）
+## 既知の制限
 
-- Home は仮画面（トップレベル名の一覧のみ）。Browse/Reader は M2 以降。
-- offline snapshot fallback は seam のみ（`hasOfflineSnapshot()=false`）。
-- 音量キー送り・ブラウズレイアウト切替は設定値の永続化のみ（機能は後続 M）。
+- `serverURL` intent extra は debug/benchmark ビルドのみ受理（
+  `BuildConfig.ALLOW_SERVER_URL_EXTRA`）。release は任意サーバへの
+  リダイレクトを拒否する。
+- 実機計測は CP08-J1 (API 35) で行う。Tailscale の残存ウィンドウが
+  a11y アクティブ窓を握り続けることがあり、uiautomator の
+  `findObject` が見える画面でも null を返し得る — ベンチマーク側は
+  リトライで吸収するが、単発失敗時は端末の開いている窓を確認。
+- Macrobenchmark / Baseline Profile 生成は CI 対象外（実機必須のため）。
+  `:app:connectedDebugAndroidTest` の UI テストは引き続き CI で走る。
