@@ -40,6 +40,10 @@ class ServerScope(
 
     private val scopeKey = ScopedFiles.key(host, email)
 
+    /** PeerConnectionFactory — lazily created on first pair use (the
+     *  native webrtc lib never loads for solo readers). */
+    private val pairRtc = lazy { dev.bookq.data.PairRtc(context) }
+
     /** Authed client for raw page fetches (the download worker uses it —
      *  Coil got its own reference at build time). */
     val mediaClient: OkHttpClient = mediaClient
@@ -101,6 +105,9 @@ class ServerScope(
         transportFactory = { dev.bookq.data.PairSocket(mediaClient) },
         creds = dev.bookq.data.PairCredStore(stateDir, host, email.orEmpty()),
     ).apply {
+        // webrtc-dc upgrade — the factory spins up the native stack on
+        // the first paired STATE, not at scope boot (#300).
+        rtcFactory = { pairRtc.value.peerConnection() }
         // Leader work-pick: saved position (clamped) or the first page —
         // same resolution the web's OPEN_WORK bootstrap uses.
         openWorkResolver = { folder ->
@@ -157,6 +164,7 @@ class ServerScope(
 
     fun close() {
         tree.stopPolling()
+        if (pairRtc.isInitialized()) pairRtc.value.dispose()
         ioScope.cancel()
     }
 

@@ -129,6 +129,15 @@ class PairStore(
     val errorText: StateFlow<String?> = _errorText
     private val _endReason = MutableStateFlow<String?>(null)
     val endReason: StateFlow<String?> = _endReason
+    private val _effPlane = MutableStateFlow("server-ws")
+    /** Effective send plane ("server-ws"|"webrtc-dc") — web 'transport'
+     *  event parity: flips only on an actual send-path change. */
+    val effPlane: StateFlow<String> = _effPlane
+    private val _uiSync =
+        kotlinx.coroutines.flow.MutableSharedFlow<UiSync.Frame>(
+            extraBufferCapacity = 32)
+    /** Inbound UI_SYNC relays (browse scroll mirror). */
+    val uiSync: kotlinx.coroutines.flow.SharedFlow<UiSync.Frame> = _uiSync
 
     val paired: Boolean
         get() = _status.value == UiStatus.Paired &&
@@ -158,6 +167,13 @@ class PairStore(
     var visibilityBlocks: ((String) -> Boolean)? = null
     /** Leader bootstrap: which work to share when paired with no manifest. */
     var bootstrapWork: (suspend () -> Pair<PairPageRef, String>?)? = null
+    /** WebRTC pc factory — opt into the webrtc-dc upgrade (web
+     *  `enableWebRTC`): signaling starts on the next paired STATE. */
+    var rtcFactory: (() -> RtcPeerConnection)? = null
+        set(v) {
+            field = v
+            scope.launch { lock.withLock { maybeStartDcLocked() } }
+        }
 
     private val lock = Mutex()
     private var transport: PairTransport? = null
@@ -191,6 +207,15 @@ class PairStore(
     private var retryCount = 0
     private var retryJob: Job? = null
     private var livenessJob: Job? = null
+
+    // webrtc-dc upgrade (pairClient.js §1517+)
+    private var sig: SignalingPeer? = null
+    private var pc: RtcPeerConnection? = null
+    private var dcChannel: RtcDataChannel? = null
+    private var dcUp = false
+    private var dcEscalated = false
+    private var dcWatchJob: kotlinx.coroutines.Job? = null
+    private var plane = "server-ws"             // server-confirmed plane
     private var lastRx = Long.MIN_VALUE
     private var attemptingResume = false
     private var entryType: String? = null
@@ -383,6 +408,15 @@ class PairStore(
         eventJob?.cancel(); eventJob = null
         livenessJob?.cancel(); livenessJob = null
         retryJob?.cancel(); retryJob = null
+        sig?.close(); sig = null; pc = null
+        dcChannel?.let { ch ->
+            ch.onOpen = null; ch.onMessage = null; ch.onClose = null
+            runCatching { ch.close() }
+        }
+        dcChannel = null; dcUp = false; dcEscalated = false
+        dcWatchJob?.cancel(); dcWatchJob = null
+        plane = "server-ws"
+        _effPlane.value = "server-ws"
         val t = transport; transport = null
         if (t != null) scope.launch { t.close() }
         for ((_, c) in pending) c.completeExceptionally(PairException.Disconnected())
@@ -410,10 +444,28 @@ class PairStore(
         }
         when ((f["type"] as? JsonPrimitive)?.content) {
             "HELLO" -> onHelloLocked()
-            "PING" -> sendRaw(buildJsonObject {
+            "PING" -> ctlSendRaw(buildJsonObject {
                 put("v", 1); put("type", "PONG")
                 put("seq", f["seq"] ?: JsonNull) })
             "PONG" -> Unit
+            "SIGNAL" -> {
+                val kind = (f["kind"] as? JsonPrimitive)?.content ?: ""
+                if (kind == "offer") {
+                    dcWatchJob?.cancel(); dcWatchJob = null
+                    if (dcEscalated) {
+                        // glare — the leader also re-offered: yield to
+                        // its offer on a fresh waiting sig.
+                        sig?.close(); sig = null; pc = null
+                        dcEscalated = false
+                        maybeStartDcLocked()
+                    }
+                }
+                sig?.applySignal(kind, f["data"])
+            }
+            "UI_SYNC" -> UiSync.parse(f)?.let { _uiSync.tryEmit(it) }
+            "TRANSPORT_STATE" -> setPlaneLocked(
+                (f["dataPlane"] as? JsonPrimitive)?.content,
+                (f["revision"] as? JsonPrimitive)?.intOrNull)
             "ACK" -> onAckLocked(f)
             "REJECT" -> onRejectLocked(f)
             "JOIN_REQUEST" -> {
@@ -438,7 +490,7 @@ class PairStore(
             "ERROR" ->
                 _errorText.value =
                     (f["code"] as? JsonPrimitive)?.content ?: "error"
-            else -> Unit    // SIGNAL / UI_SYNC / TRANSPORT_STATE unused
+            else -> Unit
         }
     }
 
@@ -449,7 +501,7 @@ class PairStore(
             sessionId = _member.value?.sessionId)
         pending[req.requestId] = cont
         entryCont = null
-        sendReq(req)
+        ctlSendReq(req)
     }
 
     // MARK: - Requests
@@ -500,6 +552,23 @@ class PairStore(
                 }
             }
         }
+        waiter.await()
+    }
+
+    /** Tracked request that rides the data plane — web `_dataSend`+
+     *  `_track` parity (READY/APPLIED): the dc hop is follower-only and
+     *  the ACK still arrives on ws where the waiter resolves. */
+    private suspend fun sendDataRequest(
+        type: String, payload: JsonObject,
+        workEpoch: Int? = null, baseRevision: Int? = null,
+    ) {
+        val req = lock.withLock {
+            envelope(type, payload,
+                workEpoch = workEpoch, baseRevision = baseRevision)
+        }
+        val waiter = CompletableDeferred<JsonObject>()
+        lock.withLock { pending[req.requestId] = waiter }
+        dataSendReq(req)
         waiter.await()
     }
 
@@ -656,6 +725,9 @@ class PairStore(
             dataPlane = (f["dataPlane"] as? JsonPrimitive)?.content
                 ?: "server-ws")
         _lastState.value = snap
+        // Server-confirmed plane + dc upgrade hook (web _onState order).
+        setPlaneLocked(snap.dataPlane, rev)
+        maybeStartDcLocked()
 
         // Status follows the committed phase.
         if (_member.value != null) {
@@ -678,7 +750,7 @@ class PairStore(
         applied = epoch to rev
         applyStateLocked(snap)
         appliedPending.remove(rev)?.let { rid ->
-            sendReq(envelope("APPLIED", buildJsonObject {
+            dataSendReq(envelope("APPLIED", buildJsonObject {
                 put("requestId", rid) }, workEpoch = epoch, baseRevision = rev))
         }
         maybeBootstrapLocked(snap)
@@ -794,7 +866,7 @@ class PairStore(
         readyFor = key
         scope.launch {
             runCatching {
-                sendRequest("READY", buildJsonObject {
+                sendDataRequest("READY", buildJsonObject {
                     put("manifestVersion", mv) }, workEpoch = e)
             }
         }
@@ -945,19 +1017,207 @@ class PairStore(
         return openWork(folder = folder, page = page)
     }
 
-    /** Fire-and-forget data send (web _dataSend on server-ws == _ctlSend). */
+    /** Fire-and-forget data send — rides the dc when the follower holds
+     *  the webrtc-dc plane (web _dataSend), else the ws control channel. */
     private fun send(type: String, payload: JsonObject) {
-        sendReq(envelope(type, payload))
+        dataSendReq(envelope(type, payload))
     }
 
-    private fun sendReq(req: OutRequest) {
+    /** Control send — always the ws link (web _ctlSend). SIGNAL,
+     *  TRANSPORT_STATE and UI_SYNC never ride the dc: relayed dc frames
+     *  would take a payload.origin stamp they must not carry. */
+    private fun ctlSendReq(req: OutRequest) {
         val t = transport ?: return
         scope.launch { runCatching { t.send(req.text) } }
     }
 
-    private fun sendRaw(frame: JsonObject) {
+    private fun ctlSendRaw(frame: JsonObject) {
         val t = transport ?: return
         scope.launch { runCatching { t.send(frame.toString()) } }
+    }
+
+    /** Sequenced-op send (web _dataSend): the dc belongs to the follower
+     *  only — the leader is the sequencer and always writes ws. A failed
+     *  dc write marks the channel down and retries on ws so a mid-switch
+     *  frame is never lost. */
+    private fun dataSendReq(req: OutRequest) {
+        val dc = if (plane == "webrtc-dc" && role == PairRole.follower &&
+            dcUp) dcChannel else null
+        val t = transport
+        if (dc != null) {
+            scope.launch {
+                if (runCatching { dc.send(req.text); true }
+                        .getOrDefault(false)) return@launch
+                lock.withLock {
+                    if (dcChannel === dc) { dcUp = false; emitPlaneLocked() }
+                }
+                t?.let { runCatching { it.send(req.text) } }
+            }
+        } else if (t != null) {
+            scope.launch { runCatching { t.send(req.text) } }
+        }
+    }
+
+    // MARK: - Data-channel upgrade (pairClient.js §1517+)
+
+    /** Web `_paired()` — the session carries both members. */
+    private fun pairedEnoughLocked(): Boolean = _presence.value.size >= 2
+
+    private fun maybeStartDcLocked(escalated: Boolean = false) {
+        val factory = rtcFactory ?: return
+        if (_member.value == null || sig != null ||
+            !pairedEnoughLocked()) return
+        val conn = runCatching { factory() }.getOrNull() ?: return
+        pc = conn
+        val initiator = role == PairRole.leader || escalated
+        val peer = SignalingPeer(
+            pc = conn, scope = scope,
+            initiator = initiator,
+            send = { kind, data ->
+                scope.launch {
+                    lock.withLock {
+                        ctlSendReq(envelope("SIGNAL", buildJsonObject {
+                            put("kind", kind); put("data", data) }))
+                    }
+                }
+            },
+            onChannel = { ch ->
+                scope.launch {
+                    lock.withLock { attachDataChannelLocked(ch) }
+                }
+            })
+        sig = peer; dcEscalated = escalated
+        runCatching { peer.start() }.onFailure {
+            sig = null; pc = null; dcEscalated = false; return
+        }
+        // Stale-wait watchdog: the web reference never re-offers once
+        // its sig peer exists, so a follower that (re)joined after the
+        // leader's session spun up waits forever. If no offer lands in
+        // time, escalate — offer as initiator; the stale leader's
+        // existing pc answers and the channel re-forms on both ends.
+        if (!initiator) {
+            dcWatchJob = scope.launch {
+                delay(DC_OFFER_WATCH_MS)
+                lock.withLock {
+                    if (sig === peer && dcChannel == null &&
+                        _member.value != null && pairedEnoughLocked()) {
+                        sig = null; pc = null; dcEscalated = false
+                        maybeStartDcLocked(escalated = true)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Re-run signaling after a mid-session dc drop: the pair/session
+     *  state is untouched — frames keep flowing on server-ws until the
+     *  server confirms the plane flip again (web restartDataChannel). */
+    fun restartDataChannel() {
+        scope.launch {
+            lock.withLock {
+                sig?.close(); sig = null; pc = null
+                dcEscalated = false
+                dcWatchJob?.cancel(); dcWatchJob = null
+                maybeStartDcLocked()
+            }
+        }
+    }
+
+    private fun attachDataChannelLocked(ch: RtcDataChannel) {
+        dcChannel?.let { prev ->
+            if (prev !== ch) {
+                prev.onOpen = null; prev.onMessage = null
+                prev.onClose = null
+                runCatching { prev.close() }
+            }
+        }
+        dcWatchJob?.cancel(); dcWatchJob = null
+        dcChannel = ch; dcUp = false
+        ch.onOpen = {
+            scope.launch { lock.withLock { markDcUpLocked() } }
+        }
+        ch.onMessage = { text ->
+            scope.launch { lock.withLock { onDcFrameLocked(text) } }
+        }
+        ch.onClose = {
+            scope.launch { lock.withLock { onDcDownLocked() } }
+        }
+        if (ch.open) markDcUpLocked()
+    }
+
+    private fun markDcUpLocked() {
+        if (dcChannel == null || dcUp) return
+        dcUp = true; dcEscalated = false
+        ctlSendReq(envelope("TRANSPORT_STATE",
+            buildJsonObject { put("state", "up") }))
+        emitPlaneLocked()
+    }
+
+    private fun onDcFrameLocked(text: String) {
+        val f = runCatching {
+            json.parseToJsonElement(text) as? JsonObject
+        }.getOrNull() ?: return
+        // leader-sequenced plane (§3.4): follower-ordered requests
+        // arriving on the dc are relayed verbatim + payload.origin
+        // through the leader's control channel.
+        if (role == PairRole.leader && plane == "webrtc-dc" &&
+            f["requestId"] is JsonPrimitive && f["type"] is JsonPrimitive &&
+            f["payload"] is JsonObject) {
+            val p = (f["payload"] as JsonObject).toMutableMap()
+            p["origin"] = JsonPrimitive("follower")
+            val fwd = f.toMutableMap(); fwd["payload"] = JsonObject(p)
+            ctlSendRaw(JsonObject(fwd))
+            return
+        }
+        dispatchLocked(f)
+    }
+
+    private fun onDcDownLocked() {
+        val had = dcChannel != null || dcUp
+        dcChannel = null; dcUp = false
+        if (!had) return
+        emitPlaneLocked()
+        if (_member.value != null && transport != null) {
+            ctlSendReq(envelope("TRANSPORT_STATE",
+                buildJsonObject { put("state", "down") }))
+        }
+        // Mid-session drop → re-negotiate while the pair lives on ws:
+        // the leader re-offers; a follower waits briefly, then escalates
+        // to an offer itself to kick a stale leader (web exposes this
+        // only as the manual restartDataChannel API).
+        sig?.close(); sig = null; pc = null; dcEscalated = false
+        maybeStartDcLocked()
+    }
+
+    private fun setPlaneLocked(p: String?, rev: Int?) {
+        plane = if (p == "webrtc-dc") "webrtc-dc" else "server-ws"
+        emitPlaneLocked(rev)
+    }
+
+    private fun emitPlaneLocked(rev: Int? = null) {
+        val e = if (plane == "webrtc-dc" && dcUp) "webrtc-dc"
+            else "server-ws"
+        if (e != _effPlane.value) _effPlane.value = e
+    }
+
+    /** Ephemeral mirrored-UI relay — fire-and-forget on the control
+     *  channel (web sendUiSync): never tracked, never sequenced, and a
+     *  dropped frame just converges on the next send. */
+    fun sendUiSync(
+        path: String?, top: Double, viewH: Double,
+        scrollH: Double?, mode: String?,
+    ): Boolean {
+        if (_member.value == null || _presence.value.size < 2) return false
+        val p = UiSync.payload(path, top, viewH, scrollH, mode)
+            ?: return false
+        scope.launch {
+            lock.withLock {
+                if (_member.value != null) {
+                    ctlSendReq(envelope("UI_SYNC", p))
+                }
+            }
+        }
+        return true
     }
 
     // MARK: - Teardown
@@ -985,5 +1245,13 @@ class PairStore(
                 _status.value = UiStatus.Idle
             }
         }
+    }
+
+    private companion object {
+        /* How long a non-initiator sig waits for an offer before the
+         * follower escalates to initiating — the web leader never
+         * re-offers while its (possibly stale) sig peer exists, so
+         * without this a rejoining follower could wait forever. */
+        const val DC_OFFER_WATCH_MS = 4_000L
     }
 }

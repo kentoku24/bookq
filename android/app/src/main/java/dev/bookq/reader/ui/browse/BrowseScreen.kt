@@ -87,6 +87,8 @@ import dev.bookq.reader.R
 import dev.bookq.reader.ServerScope
 import dev.bookq.reader.browse.BrowseController
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -436,6 +438,177 @@ private fun BrowseBody(
                         ImageRequest.Builder(context).data(url).build())
                     sent++
                 }
+            }
+        }
+    }
+
+    // ── UI_SYNC — browse scroll mirror (web browse/pairSync.js, #300) ──
+    // Armed while paired in phase=selecting: sends the local scroll
+    // metrics at a bounded cadence and maps the peer's normalized
+    // progress onto this grid's estimated scroll range.
+    val pair = scope.pair
+    val pairPresence by pair.presence.collectAsStateWithLifecycle()
+    val pairState by pair.lastState.collectAsStateWithLifecycle()
+    val syncOn = pair.bound && pairPresence.size >= 2 &&
+        pairState?.phase == dev.bookq.core.sync.PairPhase.selecting &&
+        !searchActive && !searchOpen
+
+    /** Estimated px metrics of the ACTIVE Lazy* container — grid rows
+     *  and list rows share the (index,offset)→top projection; columns
+     *  and pitch come from the visible items (Adaptive grids vary). */
+    fun activeMetrics(): dev.bookq.core.sync.UiSync.Metrics? {
+        if (layout == BrowseLayout.LIST) {
+            val info = listState.layoutInfo
+            val vis = info.visibleItemsInfo
+            if (vis.isEmpty()) return null
+            val ys = vis.map { it.offset }.distinct().sorted()
+            val pitch = if (ys.size > 1) (ys[1] - ys[0]).toFloat()
+                else vis.map { it.size }.average().toFloat()
+            return dev.bookq.core.sync.UiSync.estimateGridMetrics(
+                firstIndex = listState.firstVisibleItemIndex,
+                firstOffsetPx = listState.firstVisibleItemScrollOffset,
+                columns = 1, cellPx = pitch,
+                totalItems = info.totalItemsCount,
+                viewportPx = info.viewportSize.height)
+        }
+        val info = gridState.layoutInfo
+        val vis = info.visibleItemsInfo
+        if (vis.isEmpty()) return null
+        val rowY = vis.first().offset.y
+        val cols = vis.count { it.offset.y == rowY }.coerceAtLeast(1)
+        val ys = vis.map { it.offset.y }.distinct().sorted()
+        val pitch = if (ys.size > 1) (ys[1] - ys[0]).toFloat()
+            else vis.map { it.size.height }.average().toFloat()
+        return dev.bookq.core.sync.UiSync.estimateGridMetrics(
+            firstIndex = gridState.firstVisibleItemIndex,
+            firstOffsetPx = gridState.firstVisibleItemScrollOffset,
+            columns = cols, cellPx = pitch,
+            totalItems = info.totalItemsCount,
+            viewportPx = info.viewportSize.height)
+    }
+
+    var uiSyncUnlocked by remember { mutableStateOf(false) }
+    var pendingUiSync by remember {
+        mutableStateOf<dev.bookq.core.sync.UiSync.Frame?>(null) }
+    var pendingUiSyncAt = remember { longArrayOf(0L) }
+    // echo suppression — web _appliedHold: while parked at the position
+    // a remote apply put us in, do not send it back (a clamped local
+    // value would drag the peer). Cleared on the next real send.
+    val appliedHoldTop = remember { doubleArrayOf(Double.NaN) }
+    val lastLocalScrollMs = remember { longArrayOf(-1L) }
+
+    fun localBusy(): Boolean {
+        val busy = if (layout == BrowseLayout.LIST)
+            listState.isScrollInProgress else gridState.isScrollInProgress
+        val last = lastLocalScrollMs[0]
+        return busy || (last >= 0 &&
+            System.currentTimeMillis() - last < 400)
+    }
+
+    /** pitch + columns of the ACTIVE container (for remoteTop→index). */
+    fun activeShape(): Pair<Int, Float> {
+        if (layout == BrowseLayout.LIST) {
+            val vis = listState.layoutInfo.visibleItemsInfo
+            val ys = vis.map { it.offset }.distinct().sorted()
+            return 1 to (if (ys.size > 1) (ys[1] - ys[0]).toFloat()
+                else vis.map { it.size }.average().toFloat())
+        }
+        val vis = gridState.layoutInfo.visibleItemsInfo
+        val rowY = vis.firstOrNull()?.offset?.y ?: return 1 to 0f
+        val cols = vis.count { it.offset.y == rowY }.coerceAtLeast(1)
+        val ys = vis.map { it.offset.y }.distinct().sorted()
+        return cols to (if (ys.size > 1) (ys[1] - ys[0]).toFloat()
+            else vis.map { it.size.height }.average().toFloat())
+    }
+
+    suspend fun applyRemoteScroll(f: dev.bookq.core.sync.UiSync.Frame) {
+        val m = activeMetrics() ?: return
+        val t = dev.bookq.core.sync.UiSync.remoteTop(
+            localViewH = m.viewH, localScrollH = m.scrollH,
+            top = f.top, viewH = f.viewH, scrollH = f.scrollH,
+            follower = pair.role == dev.bookq.core.sync.PairRole.follower)
+        val (cols, cellPx) = activeShape()
+        if (cellPx <= 0f) return
+        val (idx, off) = dev.bookq.core.sync.UiSync.targetIndexOffset(
+            t, cols, cellPx, renderedItems.size)
+        if (layout == BrowseLayout.LIST) listState.scrollToItem(idx, off)
+        else gridState.scrollToItem(idx, off)
+        appliedHoldTop[0] = t
+    }
+
+    // Receive → navigate or scroll.
+    LaunchedEffect(syncOn) {
+        if (!syncOn) return@LaunchedEffect
+        pair.uiSync.collect { f ->
+            val wantPath = f.path ?: ""
+            if (wantPath != path ||
+                (f.mode != null && f.mode != layout.name.lowercase())) {
+                pendingUiSync = f
+                pendingUiSyncAt[0] = System.currentTimeMillis()
+                f.mode?.let { m ->
+                    runCatching {
+                        graph.settings.setBrowseLayout(
+                            BrowseLayout.valueOf(m.uppercase()))
+                    }
+                }
+                if (wantPath != path) onNavigate(wantPath)
+            } else if (!localBusy()) {
+                applyRemoteScroll(f)
+                uiSyncUnlocked = true
+            }
+        }
+    }
+    // Post-nav pending apply — the frame stashed while the destination
+    // composed; dropped when it ages out (web pendingMsg TTL ~2s).
+    LaunchedEffect(path, layout, syncOn, renderedItems) {
+        val f = pendingUiSync ?: return@LaunchedEffect
+        if (!syncOn || f.path != (path.ifEmpty { null }) ||
+            (f.mode != null && f.mode != layout.name.lowercase()) ||
+            renderedItems.isEmpty() ||
+            System.currentTimeMillis() - pendingUiSyncAt[0] > 2000) {
+            if (System.currentTimeMillis() - pendingUiSyncAt[0] > 2000)
+                pendingUiSync = null
+            return@LaunchedEffect
+        }
+        pendingUiSync = null
+        applyRemoteScroll(f)
+        uiSyncUnlocked = true
+    }
+    // leader unlocks on arm; follower unlocks on first remote apply —
+    // a follower sending stale position would drag the leader.
+    LaunchedEffect(syncOn) {
+        uiSyncUnlocked = pair.role == dev.bookq.core.sync.PairRole.leader
+        if (!syncOn) return@LaunchedEffect
+        var lastSentMs = 0L
+        var lastSig = ""
+        snapshotFlow {
+            val m = activeMetrics()
+            val busy = if (layout == BrowseLayout.LIST)
+                listState.isScrollInProgress
+            else gridState.isScrollInProgress
+            m?.let { Triple(it, busy, System.currentTimeMillis()) }
+        }.collectLatest { sm ->
+            val (m, busy, now) = sm ?: return@collectLatest
+            if (busy) lastLocalScrollMs[0] = now
+            val sig = "${path}|${m.top.toLong()}|${m.viewH.toLong()}|" +
+                "${m.scrollH.toLong()}|${layout.name}"
+            val held = kotlin.math.abs(m.top - appliedHoldTop[0]) <= 1.0
+            if (!uiSyncUnlocked || held || sig == lastSig) return@collectLatest
+            if (now - lastSentMs < 60) {
+                // trailing send — a newer emission replaces this one
+                delay(300)
+                val m2 = activeMetrics() ?: return@collectLatest
+                if (pair.sendUiSync(path.ifEmpty { null }, m2.top,
+                        m2.viewH, m2.scrollH,
+                        layout.name.lowercase())) {
+                    lastSentMs = System.currentTimeMillis()
+                    lastSig = "${path}|${m2.top.toLong()}|" +
+                        "${m2.viewH.toLong()}|${m2.scrollH.toLong()}|" +
+                        layout.name
+                }
+            } else if (pair.sendUiSync(path.ifEmpty { null }, m.top,
+                    m.viewH, m.scrollH, layout.name.lowercase())) {
+                lastSentMs = now; lastSig = sig
             }
         }
     }

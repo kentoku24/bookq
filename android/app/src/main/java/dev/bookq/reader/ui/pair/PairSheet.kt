@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import dev.bookq.core.sync.PairPhase
 import dev.bookq.core.sync.PairRole
 import dev.bookq.core.sync.PairStore
@@ -59,13 +60,24 @@ fun PairSheet(
     val peer = pair.peer
     val phase by pair.lastState.collectAsState()
     val error by pair.errorText.collectAsState()
+    val plane by pair.effPlane.collectAsState()
     val scope = rememberCoroutineScope()
 
     var joinCode by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var scanning by remember { mutableStateOf(false) }
+    var camDenied by remember { mutableStateOf(false) }
     var matchCandidates by remember {
         mutableStateOf<List<PairStore.MatchCandidate>?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val camPermission = androidx.activity.compose
+        .rememberLauncherForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts
+                .RequestPermission()) { granted ->
+            scanning = granted
+            camDenied = !granted
+        }
 
     fun run(op: suspend () -> Unit) {
         busy = true; localError = null
@@ -167,6 +179,48 @@ fun PairSheet(
                             Text("参加する")
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    // QR scan (#300): CAMERA is requested only when the
+                    // user asks to scan; denial falls back to the
+                    // six-digit entry above.
+                    if (scanning) {
+                        QrScanView(
+                            onCode = { code ->
+                                scanning = false
+                                joinCode = code
+                                run { pair.join(code) }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                                .height(220.dp)
+                                .testTag("pairQrScan"))
+                        TextButton(onClick = { scanning = false },
+                            modifier = Modifier.testTag("pairQrStop")) {
+                            Text("スキャンをやめる")
+                        }
+                    } else {
+                        TextButton(
+                            onClick = {
+                                val granted = ContextCompat
+                                    .checkSelfPermission(context,
+                                        android.Manifest.permission.CAMERA) ==
+                                    android.content.pm.PackageManager
+                                        .PERMISSION_GRANTED
+                                if (granted) scanning = true
+                                else camPermission.launch(
+                                    android.Manifest.permission.CAMERA)
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.testTag("pairQrOpen")) {
+                            Text("QRコードで参加")
+                        }
+                        if (camDenied) {
+                            Text("カメラを利用できません — " +
+                                "6桁のコードを入力してください",
+                                color = MaterialTheme.colorScheme
+                                    .onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
                 PairStore.UiStatus.Connecting -> Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -243,6 +297,13 @@ fun PairSheet(
                                 PairPhase.ended -> "終了"
                             })
                         }
+                    }
+                    Row(Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("経路")
+                        Text(if (plane == "webrtc-dc") "端末間直接"
+                            else "サーバー経由",
+                            modifier = Modifier.testTag("pairTransport"))
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
