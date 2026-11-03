@@ -68,7 +68,6 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(w.images.count, 7)
         XCTAssertEqual(w.images.filter(\.isSpacer).count, 0)
         XCTAssertEqual(w.spreads, [[0, 1], [2, 3], [4, 5], [6]])
-        XCTAssertEqual(w.chapterStartSpreads, [2])
     }
 
     func testCrossChapterSpacerPadsOddBoundary() {
@@ -83,7 +82,6 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(w.spreads, [[0, 1], [2], [4, 5], [6, 7]])
         XCTAssertEqual(w.realCount, 7)
         XCTAssertEqual(w.realIndex(at: 4), 3)
-        XCTAssertEqual(w.chapterStartSpreads, [2])
     }
 
     func testCrossChapterOffset1Chapter0GetsLeadingSpacer() {
@@ -100,7 +98,6 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(w.boundaries, [1, 5])
         // groups: [0]=spacer dropped, (1,2), (3,4)→4 spacer→[3], (5,6)
         XCTAssertEqual(w.spreads, [[1, 2], [3], [5, 6]])
-        XCTAssertEqual(w.chapterStartSpreads, [2])
     }
 
     func testChapterInfoLocalIndex() {
@@ -164,26 +161,6 @@ final class ReaderModelTests: XCTestCase {
         let (list, cross) = ReaderWork.chapters(for: "w/01", in: tree)
         XCTAssertFalse(cross)
         XCTAssertEqual(list[0].images.count, 1)   // direct images only
-    }
-
-    // MARK: - chapter labels (test_chapter_labels: windowed labels that
-    // follow page turns → chapterStartSpreads flag each boundary spread)
-
-    func testChapterStartFlaggedOnEveryBoundary() {
-        // 3 chapters (4p,4p,2p), spread mode — every chapter-start spread
-        // except chapter0's gets the label flag (labels "follow" turns).
-        let w = ReaderWork.assemble(clickedPath: "w/01",
-                                    chapters: [chapter("01", "w/01", 4),
-                                               chapter("02", "w/02", 4),
-                                               chapter("03", "w/03", 2)],
-                                    pageMode: .spread, spreadOffset: 0)
-        // spreads: [0,1][2,3][4,5][6,7][8,9] — chapter starts at globals 4,8
-        XCTAssertEqual(w.boundaries, [0, 4, 8])
-        XCTAssertTrue(w.chapterStartSpreads.contains(w.spreadOf(4)))
-        XCTAssertTrue(w.chapterStartSpreads.contains(w.spreadOf(8)))
-        XCTAssertFalse(w.chapterStartSpreads.contains(w.spreadOf(0)))
-        // Non-boundary spreads carry no label.
-        XCTAssertFalse(w.chapterStartSpreads.contains(w.spreadOf(2)))
     }
 
     // MARK: - tap zones (test_viewer_tapmode: L/R modes + center chrome)

@@ -21,12 +21,6 @@ struct PairPageRef: Codable, Equatable, Hashable {
     var name: String
 }
 
-struct PairChapter: Equatable {
-    var name: String
-    var folder: String
-    var pages: [PairPageRef]
-}
-
 struct PairSpread: Equatable {
     var id: String            // "c<chapterIdx>:s<spreadIdx>"
     var chapterFolder: String
@@ -34,26 +28,14 @@ struct PairSpread: Equatable {
     var left: PairPageRef?
 }
 
-/// Committed work manifest (catalog.resolve_work). `digest` covers only
-/// the content keys — see CanonicalJSON.manifestDigest.
+/// Committed work manifest (catalog.resolve_work). Only the spread table
+/// is consumed — the remaining digest-covered keys are shape-checked on
+/// parse (see CanonicalJSON.manifestDigest) but not stored.
 struct PairManifest: Equatable {
-    var folder: String
-    var offset: Int
-    var chapters: [PairChapter]
-    var pageRefs: [PairPageRef]
     var spreadTable: [PairSpread]
-    var digest: String
-    var initialSpreadId: String?
 
     func spreadIndex(byId id: String) -> Int? {
         spreadTable.firstIndex { $0.id == id }
-    }
-
-    /// `spreadIndexForPage` — first spread containing the ref on either side.
-    func spreadIndex(forPage ref: PairPageRef) -> Int? {
-        spreadTable.firstIndex {
-            $0.right == ref || $0.left == ref
-        }
     }
 
     private static func ref(_ v: Any?) -> PairPageRef? {
@@ -65,23 +47,14 @@ struct PairManifest: Equatable {
 
     /// Parse the digest-verified manifest object (JSONSerialization dict).
     static func parse(_ obj: [String: Any]) -> PairManifest? {
-        guard let folder = obj["folder"] as? String,
-              let offset = obj["offset"] as? Int,
-              let digest = obj["digest"] as? String,
-              let chapterDicts = obj["chapters"] as? [[String: Any]],
-              let refDicts = obj["pageRefs"] as? [[String: Any]],
+        guard obj["folder"] is String,
+              obj["offset"] is Int,
+              obj["digest"] is String,
+              obj["chapters"] is [[String: Any]],
+              obj["pageRefs"] is [[String: Any]],
               let spreadDicts = obj["spreadTable"] as? [[String: Any]]
         else { return nil }
 
-        var chapters: [PairChapter] = []
-        for c in chapterDicts {
-            guard let name = c["name"] as? String,
-                  let cf = c["folder"] as? String,
-                  let pageDicts = c["pages"] as? [[String: Any]] else { return nil }
-            chapters.append(PairChapter(
-                name: name, folder: cf,
-                pages: pageDicts.compactMap(ref)))
-        }
         var table: [PairSpread] = []
         for s in spreadDicts {
             guard let id = s["id"] as? String,
@@ -90,11 +63,7 @@ struct PairManifest: Equatable {
             table.append(PairSpread(id: id, chapterFolder: cf,
                                     right: right, left: ref(s["left"])))
         }
-        let initial = (obj["initial"] as? [String: Any])?["spreadId"] as? String
-        return PairManifest(
-            folder: folder, offset: offset, chapters: chapters,
-            pageRefs: refDicts.compactMap(ref), spreadTable: table,
-            digest: digest, initialSpreadId: initial)
+        return PairManifest(spreadTable: table)
     }
 }
 
@@ -159,14 +128,12 @@ struct PairPresenceEntry: Equatable {
 /// REJECT (`reject + latest snapshot`, §3.4).
 struct PairSnapshot: Equatable {
     var sessionId: String?
-    var revision: Int
     var workEpoch: Int
     var manifestVersion: Int
     var phase: PairPhase
     var spreadId: String?
     var offset: Int
     var leaderSide: PairSide
-    var dataPlane: String     // "server-ws" | "webrtc-dc"
 }
 
 /// This device's current projection into the shared spread table —
@@ -174,9 +141,6 @@ struct PairSnapshot: Equatable {
 struct PairProjection: Equatable {
     var spreadIndex: Int
     var spreadTotal: Int
-    var side: PairSide
     var ref: PairPageRef?      // nil → blank side
-    var anchor: PairPageRef    // first real page of the spread
-    var chapterName: String
     var chapterFolder: String
 }

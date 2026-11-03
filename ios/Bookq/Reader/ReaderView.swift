@@ -97,7 +97,6 @@ struct ReaderView: View {
     }
 
     private func pager(work: ReaderWork, in size: CGSize) -> some View {
-        let spreadIdx = work.spreadOf(currentIdx)
         return TabView(selection: spreadBinding(work)) {
             ForEach(Array(work.spreads.enumerated()), id: \.offset) { s, pages in
                 spreadCell(work: work, spread: s, pages: pages, in: size)
@@ -128,7 +127,6 @@ struct ReaderView: View {
         }
         .onKeyPress(.home) { snapTo(chapterEdge(0, in: work), in: work); return .handled }
         .onKeyPress(.end) { snapTo(chapterEdge(-1, in: work), in: work); return .handled }
-        .overlay(alignment: .trailing) { chapterLabel(work, spread: spreadIdx) }
         .sheet(isPresented: $showOverview) {
             if let api = model.api {
                 OverviewView(work: work, api: api, currentIdx: $currentIdx) {
@@ -189,25 +187,6 @@ struct ReaderView: View {
         }
     }
 
-    /// Chapter title pill shown on chapter-start spreads (chapterLabels).
-    /// Archive chapters name the raw file (rar/zip/…) — no label for those.
-    private func chapterLabel(_ work: ReaderWork, spread s: Int) -> some View {
-        Group {
-            if work.isCrossChapter,
-               let first = work.spreads[safe: s]?.first {
-                let info = work.chapterInfo(at: first)
-                if work.chapters[safe: info.chapterIdx]?.isArchive != true {
-                    Text(info.name)
-                        .font(.caption).foregroundStyle(.white)
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .padding(.trailing, 12)
-                        .transition(.opacity)
-                }
-            }
-        }
-    }
-
     // MARK: - Chrome
 
     private var chrome: some View {
@@ -221,12 +200,6 @@ struct ReaderView: View {
                 Spacer()
                 VStack(spacing: 2) {
                     Text(counterText).font(.subheadline).monospacedDigit()
-                    if let work, work.isCrossChapter {
-                        Text(work.chapterInfo(at: currentIdx).name)
-                            .font(.caption2).foregroundStyle(.white.opacity(0.8))
-                            .lineLimit(1)
-                            .frame(maxWidth: 150)
-                    }
                     // External-display bring-up diagnostic (temporary):
                     // mode/bounds when connected, else availability state.
                     if let s = ext.externalScreen {

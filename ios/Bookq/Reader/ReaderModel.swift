@@ -15,9 +15,6 @@ struct ReaderChapter: Equatable {
     var name: String
     var fullPath: String
     var images: [PageRef]    // real (non-spacer) pages
-    /// Archive-backed virtual folder (rar/zip/cbz/…) — `name` is the
-    /// archive filename, not a chapter title worth labelling.
-    var isArchive: Bool = false
 }
 
 enum ReaderPageMode: String, Equatable {
@@ -47,7 +44,6 @@ struct ReaderWork: Equatable {
     var realCount: Int
     var spreads: [[Int]]              // per-spread page indices (non-spacer only)
     var idxToSpread: [Int]            // global idx → spread index (-1 spacer)
-    var chapterStartSpreads: Set<Int> // spreads flagged chapterStart (gap labels)
     var pageMode: ReaderPageMode
 
     var isCrossChapter: Bool { chapters.count > 1 }
@@ -116,8 +112,7 @@ struct ReaderWork: Equatable {
                     .filter(\.isImage)
                     .map { PageRef(name: $0.name, folder: sib.path) }
                 list.append(ReaderChapter(name: sib.node.name,
-                                          fullPath: sib.path, images: imgs,
-                                          isArchive: sib.node.archive == true))
+                                          fullPath: sib.path, images: imgs))
             }
             return (list, true)
         }
@@ -178,7 +173,7 @@ struct ReaderWork: Equatable {
             clickedPath: clickedPath, images: images, chapters: chapters,
             boundaries: boundaries, globalToReal: g2r,
             realCount: images.count - spacerCount,
-            spreads: [], idxToSpread: [], chapterStartSpreads: [],
+            spreads: [], idxToSpread: [],
             pageMode: pageMode)
         return work.rebuildSpreads(offset: spreadOffset)
     }
@@ -201,23 +196,16 @@ struct ReaderWork: Equatable {
         }
         var spreads: [[Int]] = []
         var i2s = [Int](repeating: -1, count: n)
-        var starts = Set<Int>()
         for g in groups {
             let pages = g.filter { !images[$0].isSpacer }
             if pages.isEmpty { continue }
             let s = spreads.count
             for p in pages { i2s[p] = s }
-            // chapterStart: boundaries.indexOf(pages[0]) > 0
-            if boundaries.count > 1,
-               let bi = boundaries.firstIndex(of: pages[0]), bi > 0 {
-                starts.insert(s)
-            }
             spreads.append(pages)
         }
         var w = self
         w.spreads = spreads
         w.idxToSpread = i2s
-        w.chapterStartSpreads = starts
         return w
     }
 
