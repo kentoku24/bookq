@@ -46,7 +46,11 @@ class ReaderBenchmark {
             device.waitForIdle(1_000)
         },
     ) {
-        device.tapForward()
+        // Alternate direction: single-direction taps strand the reader
+        // on an edge spread where turn() is a no-op and the section
+        // metric collects zero slices.
+        if (tapDir > 0) device.tapForward() else device.tapBack()
+        tapDir = -tapDir
         device.waitForIdle(400)
     }
 
@@ -64,7 +68,8 @@ class ReaderBenchmark {
             device.waitForIdle(1_000)
         },
     ) {
-        device.flingForward()
+        if (swipeDir > 0) device.flingForward() else device.flingBack()
+        swipeDir = -swipeDir
     }
 
     @Test
@@ -82,7 +87,9 @@ class ReaderBenchmark {
             device.waitForIdle(800)
         },
     ) {
-        device.flingObject("overviewGrid", Direction.DOWN, 3)
+        val dir = if (flingDir > 0) Direction.DOWN else Direction.UP
+        flingDir = -flingDir
+        device.flingObject("overviewGrid", dir, 3)
     }
 
     @Test
@@ -118,3 +125,10 @@ class ReaderBenchmark {
 }
 
 private val PATTERN_TILE = java.util.regex.Pattern.compile("tile:.*")
+
+// Alternate tap/fling direction per iteration — single-direction turns
+// strand the reader on an edge spread where turn() is a no-op and the
+// section/frame metrics degenerate.
+private var tapDir = 1
+private var swipeDir = 1
+private var flingDir = 1

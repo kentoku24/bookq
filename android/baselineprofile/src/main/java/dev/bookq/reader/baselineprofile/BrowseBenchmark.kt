@@ -44,6 +44,12 @@ class BrowseBenchmark {
             device.waitForIdle(1_200)
         },
     ) {
-        device.flingObject("browseGrid", Direction.DOWN, 3)
+        // Alternate direction — repeated DOWN flings hit the end of the
+        // grid, where scrolling emits almost no frames to measure.
+        val dir = if (gridDir > 0) Direction.DOWN else Direction.UP
+        gridDir = -gridDir
+        device.flingObject("browseGrid", dir, 3)
     }
 }
+
+private var gridDir = 1

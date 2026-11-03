@@ -100,6 +100,14 @@ fun UiDevice.flingForward() {
     waitForIdle(600)
 }
 
+/** Reverse fling for the alternating sweep (left→right). */
+fun UiDevice.flingBack() {
+    swipe(
+        displayWidth * 15 / 100, displayHeight / 2,
+        displayWidth * 80 / 100, displayHeight / 2, 24)
+    waitForIdle(600)
+}
+
 fun MacrobenchmarkScope.openOverview() {
     device.pressKeyCode(KeyEvent.KEYCODE_G)
     device.wait(Until.findObject(By.res("overviewGrid")), 10_000)
