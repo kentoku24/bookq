@@ -113,6 +113,26 @@ def test_depth_below_one_returns_400(client):
     assert client.get("/api/folders", params={"path": "", "depth": -2}).status_code == 400
 
 
+def test_non_literal_int_params_return_422(client):
+    """`type: integer` in the spec means the wire value must be an integer
+    literal — pydantic's lax coercion used to accept `since=0.0`/`depth=1.0`,
+    which schemathesis flags as ST201 (#326)."""
+    for params in (
+        {"since": "0.0"}, {"since": "1.5"}, {"since": "1e2"}, {"since": "abc"},
+        {"since": "１２"},  # Unicode digits: \d matches and int() parses them
+        {"depth": "1.0"}, {"depth": "x"},
+    ):
+        assert client.get("/api/folders", params=params).status_code == 422, params
+        assert client.get("/api/v1/tree", params=params).status_code == 422, params
+    # Integer literals stay accepted — a non-matching `since` still serves
+    # the tree, and negatives are schema-valid integers.
+    assert client.get("/api/folders", params={"since": "0"}).status_code == 200
+    assert client.get("/api/folders", params={"since": "-3"}).status_code == 200
+    assert client.get("/api/folders", params={"depth": "1"}).status_code == 200
+    assert client.get("/api/v1/tree", params={"since": "0"}).status_code == 200
+    assert client.get("/api/v1/tree", params={"depth": "1"}).status_code == 200
+
+
 # --- Todo 6: HTTP cache (ETag + Cache-Control: private, max-age=60) ---
 
 
