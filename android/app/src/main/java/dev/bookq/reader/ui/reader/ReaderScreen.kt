@@ -28,6 +28,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Tv
+import androidx.compose.material.icons.filled.TvOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -87,6 +89,7 @@ import androidx.navigation.NavController
 import coil3.compose.SubcomposeAsyncImage
 import coil3.request.ImageRequest
 import dev.bookq.core.browse.BrowseRules
+import dev.bookq.core.reader.ExtDisplay
 import dev.bookq.core.reader.ReaderWork
 import dev.bookq.core.reader.ZoomBox
 import dev.bookq.core.reader.ZoomK
@@ -429,6 +432,54 @@ private fun ReaderBody(
         return sc.offline.pageData(p.folder, p.name, original)
     }
 
+    // ── M9: external-display projection (issue #301) ──
+    // The panel re-derives pageMode from ITS OWN viewport; the device
+    // keeps the interactive reader as the control surface. Gates:
+    // reader active && !paired && tv-toggle on && display attached.
+    val extCtl = graph.extDisplays
+    val extAttached by extCtl.displays.collectAsStateWithLifecycle()
+    val extEnabled by extCtl.userEnabled.collectAsStateWithLifecycle()
+    val pairMember by sc.pair.member.collectAsStateWithLifecycle()
+    val projecting = ExtDisplay.target(
+        readerActive = true,
+        paired = pairMember != null,
+        userEnabled = extEnabled,
+        displays = extAttached,
+    )
+    // The content lambda captures these States, so a remode / offset
+    // flip / original toggle reaches the panel without rebuilding the
+    // Presentation window.
+    val extWork by rememberUpdatedState(work)
+    val extAnchor by rememberUpdatedState(anchorIdx)
+    val extLandscapeSpread by rememberUpdatedState(landscapeSpread)
+    val extOffset by rememberUpdatedState(spreadOffset)
+    val extPageData = rememberUpdatedState<(Int) -> Any> { i -> pageData(i) }
+    DisposableEffect(projecting?.id) {
+        val ref = projecting
+        val disp = ref?.let { extCtl.displayFor(it.id) }
+        val activity = context as? Activity
+        if (disp == null || activity == null) {
+            onDispose { }
+        } else {
+            val pres = dev.bookq.reader.ext.ReaderPresentation(
+                activity, disp) {
+                val idx = extWork.spreads.getOrNull(pager.settledPage)
+                    ?.first() ?: extAnchor
+                ExternalReaderScreen(
+                    work = extWork,
+                    currentIdx = idx,
+                    controller = controller,
+                    landscapeSpread = extLandscapeSpread,
+                    spreadOffset = extOffset,
+                    pageData = { extPageData.value(it) },
+                    imageLoader = sc.imageLoader,
+                )
+            }
+            pres.show()
+            onDispose { pres.dismiss() }
+        }
+    }
+
     // Commit on settle — navigation.js: the deferred finalize runs only
     // after the track settles; a newer settle invalidates the older.
     // `original` keys the URL scheme captured by pageUrl below.
@@ -673,6 +724,22 @@ private fun ReaderBody(
                         maxLines = 1,
                         modifier = Modifier.weight(1f),
                     )
+                    // M9 tv toggle — visible only while a presentation
+                    // display is attached; accent tint while projecting.
+                    if (extAttached.isNotEmpty()) {
+                        IconButton(onClick = {
+                            extCtl.setUserEnabled(!extEnabled)
+                        }) {
+                            Icon(
+                                if (extEnabled) Icons.Filled.Tv
+                                else Icons.Filled.TvOff,
+                                contentDescription = stringResource(
+                                    R.string.reader_ext_display),
+                                tint = if (projecting != null) Color(0xFF7FD4FF)
+                                       else Color.White,
+                            )
+                        }
+                    }
                     Box {
                         IconButton(onClick = { menu = true }) {
                             Icon(Icons.Filled.MoreVert, null, tint = Color.White)
@@ -825,8 +892,10 @@ private fun SpreadCell(
     }
 }
 
+/** Shared with [ExternalReaderScreen] — the external surface renders
+ *  the same cell the device pager does. */
 @Composable
-private fun PageCell(
+internal fun PageCell(
     globalIdx: Int,
     data: Any,
     width: androidx.compose.ui.unit.Dp,

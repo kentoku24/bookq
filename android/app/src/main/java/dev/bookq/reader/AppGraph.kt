@@ -32,6 +32,12 @@ class AppGraph(app: Application) {
     /** Connectivity watch → the amber offline banner (web ●online parity). */
     val online = dev.bookq.data.offline.OnlineStatus(app).also { it.start() }
 
+    /** Presentation-capable displays + the tv toggle (issue #301) —
+     *  app-scoped like iOS `ExternalDisplayStore.shared`: attach is
+     *  independent of which server is mounted. */
+    val extDisplays = dev.bookq.reader.ext.ExternalDisplayController(app)
+        .also { it.start() }
+
     val auth = AuthManager(
         store = KeystoreTokenStore(app),
         pendingStore = FilePendingLoginStore(app),
