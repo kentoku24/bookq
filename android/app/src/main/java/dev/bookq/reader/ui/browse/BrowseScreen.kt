@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,6 +34,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -53,6 +55,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -63,8 +66,15 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -695,6 +705,10 @@ private fun BrowseBody(
                                     stringResource(R.string.browse_filter_close)) }
                             },
                         )
+                    } else if (path.isEmpty()) {
+                        // 全表示エントリジェスチャー — iOS `bookqSwipe`
+                        // parity (root title only, web `#browse-root-icon`).
+                        ShowAllTitle(title, vis, scope, snackbar)
                     } else {
                         Text(title, maxLines = 1)
                     }
@@ -882,9 +896,17 @@ private fun BrowseBody(
                         onTap = ::openResult,
                         modifier = Modifier.fillMaxSize(),
                         badge = { meta, node ->
-                            if (node != null) {
-                                val it = LevelModel.Item.Folder(meta.folderPath, node)
-                                OfflineBadgeFor(it, scope) { f -> startDownloadFlow(f) }
+                            Column(horizontalAlignment = Alignment.End) {
+                                if (node != null) {
+                                    val it = LevelModel.Item.Folder(
+                                        meta.folderPath, node)
+                                    OfflineBadgeFor(it, scope) { f ->
+                                        startDownloadFlow(f) }
+                                }
+                                // Search-result eye — iOS SearchResultsView
+                                // shared-toggle parity.
+                                VisOverlayFor(meta.folderPath, null,
+                                    vis, scope, snackbar)
                             }
                         },
                     )
@@ -951,10 +973,94 @@ private fun BrowseBody(
     }
 }
 
+/**
+ * Hidden show-all entry — iOS `bookqSwipe` (LibraryView) / web
+ * `_bindEntryGesture` parity: drag the root "bookq" title rightward and
+ * release at the screen's right edge (≥90% width) to toggle 全表示モード.
+ * `detectHorizontalDragGestures` supplies the rightward-only arm —
+ * vertical moves lose the touch-slop race and never reach us (web
+ * disarm equivalent). The title tracks the finger via offset and stays
+ * red while the mode is on (web `body.fv-showall` root-icon hue) — the
+ * only visible trace the mode exists.
+ */
+@Composable
+private fun ShowAllTitle(
+    title: String,
+    vis: VisibilityState,
+    scope: ServerScope,
+    snackbar: SnackbarHostState,
+) {
+    var dragX by remember { mutableFloatStateOf(0f) }
+    var titleMinX by remember { mutableFloatStateOf(0f) }
+    var lastGlobalX by remember { mutableFloatStateOf(0f) }
+    val containerW = LocalWindowInfo.current.containerSize.width.toFloat()
+    val cs = rememberCoroutineScope()
+    val onMsg = stringResource(R.string.vis_showall_toast_on)
+    val offMsg = stringResource(R.string.vis_showall_toast_off)
+    Text(
+        title,
+        maxLines = 1,
+        color = if (vis.showAll) MaterialTheme.colorScheme.error
+            else Color.Unspecified,
+        modifier = Modifier
+            .testTag("showAllTitle")
+            .onGloballyPositioned { titleMinX = it.boundsInWindow().left }
+            .offset { IntOffset(dragX.roundToInt(), 0) }
+            .pointerInput(scope) {
+                detectHorizontalDragGestures(
+                    onDragStart = { start ->
+                        lastGlobalX = titleMinX + start.x
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        // offset-shifted minX + local position = the
+                        // finger's true window X (iOS bookqMinX + location).
+                        dragX = (dragX + dragAmount).coerceAtLeast(0f)
+                        lastGlobalX = titleMinX + change.position.x
+                    },
+                    onDragEnd = {
+                        if (containerW > 0 &&
+                            lastGlobalX >= containerW * SHOWALL_EDGE) {
+                            scope.visibility.setShowAll(!vis.showAll)
+                            cs.launch {
+                                snackbar.showSnackbar(
+                                    if (vis.showAll) onMsg else offMsg)
+                            }
+                        }
+                        dragX = 0f
+                    },
+                    onDragCancel = { dragX = 0f },
+                )
+            },
+    )
+}
+
+/** Right-edge release threshold — web `_edge` / iOS swipeWidth parity. */
+private const val SHOWALL_EDGE = 0.9f
+
 /** Show-all tile overlay — badges + eye toggle, gated on showAll. */
 @Composable
 private fun VisOverlayFor(
     item: LevelModel.Item,
+    vis: VisibilityState,
+    scope: ServerScope,
+    snackbar: SnackbarHostState,
+) {
+    // ReadSelf tiles never own the eye toggle (web render.js: read-child
+    // passes editable=false) — only the Folder tile may write.
+    VisOverlayFor(
+        path = item.path,
+        editable = if (item is LevelModel.Item.ReadSelf) false else null,
+        vis = vis, scope = scope, snackbar = snackbar,
+    )
+}
+
+/** Path-level variant shared with the search results — iOS shares one
+ *  `VisibilityEyeButton` across FolderLevelView and SearchResultsView. */
+@Composable
+private fun VisOverlayFor(
+    path: String,
+    editable: Boolean?,
     vis: VisibilityState,
     scope: ServerScope,
     snackbar: SnackbarHostState,
@@ -964,10 +1070,7 @@ private fun VisOverlayFor(
     // changes.
     scope.visibility.version.collectAsStateWithLifecycle().value
     if (!vis.showAll) return
-    // ReadSelf tiles never own the eye toggle (web render.js: read-child
-    // passes editable=false) — only the Folder tile may write.
-    val pres = vis.presentation(item.path,
-        editable = if (item is LevelModel.Item.ReadSelf) false else null)
+    val pres = vis.presentation(path, editable = editable)
     if (pres.badge == null && !pres.toggle) return
     val cs = rememberCoroutineScope()
     val busy = scope.visibility.saving
@@ -975,19 +1078,19 @@ private fun VisOverlayFor(
     val conflictMsg = stringResource(R.string.vis_save_conflict)
     val offlineMsg = stringResource(R.string.vis_save_offline)
     VisibilityOverlay(
-        pres = pres, path = item.path, busy = busy,
+        pres = pres, path = path, busy = busy,
         onToggle = {
             cs.launch {
                 // Web `setHidden` parity: unhide only on a SELF match and
                 // send the SERVER-stored key — `set_hidden` deletes by
                 // exact-match, so the NFC/lowercase display path would
                 // 0-row the unhide of a differently-cased stored root.
-                val match = vis.hiddenMatch(item.path)
+                val match = vis.hiddenMatch(path)
                 val (target, hidden) =
                     if (match?.kind == VisibilityState.MatchKind.SELF) {
                         match.key to false
                     } else {
-                        item.path to true
+                        path to true
                     }
                 try {
                     scope.visibility.setHidden(target, hidden)
