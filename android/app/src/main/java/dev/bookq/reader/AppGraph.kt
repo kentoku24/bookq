@@ -106,7 +106,7 @@ class AppGraph(app: Application) {
                 // restoreSnapshot read+decode multi-MB files — a main-
                 // thread cold start would jank (StrictMode DiskRead).
                 val created = withContext(Dispatchers.IO) {
-                    PerfTunables.mark("scope.build.begin")
+                    PerfTunables.mark { "scope.build.begin" }
                     ServerScope(
                         context = app,
                         api = api,
@@ -120,7 +120,7 @@ class AppGraph(app: Application) {
                 }
                 serverScopeKey = sc
                 _serverScope.value = created
-                PerfTunables.mark("scope.emitted")
+                PerfTunables.mark { "scope.emitted" }
                 // Full snapshot restore + network kickoff continue off
                 // the publish path — the grid already has the shallow
                 // snapshot to paint. Dies with the scope on close().
