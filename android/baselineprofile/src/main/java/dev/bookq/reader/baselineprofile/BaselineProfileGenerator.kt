@@ -30,12 +30,10 @@ class BaselineProfileGenerator {
         packageName = PACKAGE_NAME,
         includeInStartupProfile = true,
     ) {
-        val url = serverUrl()
-        pressHome()
-        startActivityAndWait(launchIntent(url))
-        device.wait(androidx.test.uiautomator.Until.hasObject(
-            androidx.test.uiautomator.By.res("browseGrid")
-                .pkg(PACKAGE_NAME)), 30_000)
+        // launchToBrowse guarantees the browse surface — a bare
+        // wait-for-grid lets a reader-landing (saved progress) or bad
+        // URL silently collect a browse-less startup profile.
+        launchToBrowse(serverUrl())
     }
 
     @Test
