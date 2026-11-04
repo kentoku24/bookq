@@ -121,7 +121,6 @@ class ReaderBenchmark {
         // auto-resume may land inside it) — back out so every iteration
         // navigates fresh and emits the section. Section metrics only
         // time the slice, so the back-out clicks cost nothing here.
-        System.out.println("bench.readerOpen start inReader=${inReader()}")
         if (inReader()) {
             device.pressBack()
             if (device.wait(Until.hasObject(
@@ -137,14 +136,10 @@ class ReaderBenchmark {
             val first = device.findObjects(
                 By.res(PATTERN_TILE).pkg(PACKAGE_NAME))
                 .firstOrNull() ?: return@repeat
-            System.out.println("bench.drill res=${first.resourceName} pkg=${first.applicationPackage}")
             first.click()
             device.waitForIdle(1_200)
         }
         if (!waitForReader(15_000)) error("reader never opened")
-        // Diag: did the section actually start? Zero marks mean the
-        // reader was reached without onOpenReader (nav restore).
-        System.out.println("bench.readerOpen inReader=${inReader()}")
     }
 }
 

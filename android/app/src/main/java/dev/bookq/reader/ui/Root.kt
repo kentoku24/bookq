@@ -130,7 +130,7 @@ private fun ReadyNavHost(graph: AppGraph) {
                 onNavigate = { nav.navigate(Routes.Browse(it)) },
                 onOpenReader = { folder, page ->
                     // Perf gate: reader cold-open → first spread draw.
-                    PerfTunables.mark("readerOpen folder=$folder page=$page")
+                    PerfTunables.mark { "readerOpen folder=$folder page=$page" }
                     PerfTrace.readerOpen()
                     nav.navigate(Routes.Reader(folder, page))
                 },

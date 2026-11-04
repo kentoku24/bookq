@@ -93,12 +93,16 @@ object PerfTunables {
 
     /** `PerfBoot` logcat marker: `bookq.boot <tag> t=<ms-since-onCreate>`.
      *  Measurement builds only — never logs in release, and no-ops on
-     *  JVM unit tests where android.util.Log is unmocked. */
-    fun mark(tag: String) {
+     *  JVM unit tests where android.util.Log is unmocked. The tag is a
+     *  lazy `inline` lambda: ALLOW_SERVER_URL_EXTRA is a compile-time
+     *  `false` in release, so R8 folds the whole call away and hot
+     *  paths (per-tap/per-pointer marks) never even allocate the
+     *  string. */
+    inline fun mark(tag: () -> String) {
         if (!BuildConfig.ALLOW_SERVER_URL_EXTRA) return
         runCatching {
             android.util.Log.i("PerfBoot",
-                "$tag t=${android.os.SystemClock.uptimeMillis() - bootT0}")
+                "${tag()} t=${android.os.SystemClock.uptimeMillis() - bootT0}")
         }
     }
 }
