@@ -24,7 +24,7 @@ import org.junit.runner.RunWith
  * the same gesture exits. The menu item remains an alternative entry.
  *
  * Works against any TEST_MODE tree via `bookqExpectedFolder`
- * (default the CI fixture's top segment).
+ * (default `Series`, a plain top-level folder).
  */
 @RunWith(AndroidJUnit4::class)
 class ShowAllGestureTest {
@@ -50,17 +50,18 @@ class ShowAllGestureTest {
     fun titleEdgeSwipeTogglesShowAll() {
         val args = InstrumentationRegistry.getArguments()
         val url = args.getString("bookqServerUrl") ?: "http://10.0.2.2:8080"
-        val top = (args.getString("bookqExpectedFolder") ?: "Series")
-            .substringBefore('/')
+        // Root-level tile path — must resolve to a real top-level folder
+        // (single-child chains may flatten, so keep it arg-driven).
+        val tile = args.getString("bookqExpectedFolder") ?: "Series"
         val intent = Intent(
             ApplicationProvider.getApplicationContext(),
             MainActivity::class.java,
         ).putExtra("serverURL", url)
 
         ActivityScenario.launch<MainActivity>(intent).use {
-            check(waitTag("tile:$top")) { "browse grid never rendered" }
+            check(waitTag("tile:$tile")) { "browse grid never rendered" }
             check(waitTag("showAllTitle")) { "root title missing" }
-            composeRule.onNodeWithTag("tile:$top").assertIsDisplayed()
+            composeRule.onNodeWithTag("tile:$tile").assertIsDisplayed()
 
             val title = composeRule.onNodeWithTag("showAllTitle")
             val bounds = title.fetchSemanticsNode().boundsInWindow
@@ -74,7 +75,7 @@ class ShowAllGestureTest {
                     Offset(endLocalX, bounds.height / 2f),
                     durationMillis = 400)
             }
-            check(waitTag("visToggle:$top")) {
+            check(waitTag("visToggle:$tile")) {
                 "edge swipe did not enter show-all" }
 
             // Same gesture exits — release at the edge again.
@@ -83,7 +84,7 @@ class ShowAllGestureTest {
                     Offset(endLocalX, bounds.height / 2f),
                     durationMillis = 400)
             }
-            check(goneTag("visToggle:$top")) {
+            check(goneTag("visToggle:$tile")) {
                 "second edge swipe did not exit show-all" }
         }
     }
