@@ -98,4 +98,6 @@
     <string name="vis_save_failed">非表示設定の保存に失敗しました</string>
     <string name="vis_save_conflict">別アカウントで更新されました</string>
     <string name="vis_save_offline">オフラインのため変更できません</string>
+    <string name="vis_showall_toast_on">全表示モード（再読み込みで解除）</string>
+    <string name="vis_showall_toast_off">通常モードに戻しました</string>
 </resources>
