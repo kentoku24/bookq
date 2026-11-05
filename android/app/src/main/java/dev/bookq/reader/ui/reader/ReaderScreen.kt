@@ -78,12 +78,12 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -725,8 +725,11 @@ private fun ReaderBody(
                 // uncovers/covers stays parked under the viewport center.
                 // Z is keyed on settledPage so the draw order flips once
                 // per turn (a per-frame composition read would recompose
-                // every page every frame); position/alpha are read in the
+                // every page every frame); position/scrim are read in the
                 // draw pass instead — no recomposition during a drag.
+                // The covered page stays opaque: a black scrim rect, not
+                // alpha, or the pages parked beneath it would ghost
+                // through the revealed strip.
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -736,8 +739,15 @@ private fun ReaderBody(
                                 pager.currentPageOffsetFraction
                             translationX =
                                 stackTurnTranslateX(off) * size.width
-                            alpha = stackTurnAlpha(
-                                off, pager.currentPageOffsetFraction)
+                        }
+                        .drawWithContent {
+                            drawContent()
+                            val off = spreadIdx - pager.currentPage -
+                                pager.currentPageOffsetFraction
+                            val scrim = stackTurnScrim(off)
+                            if (scrim > 0f) {
+                                drawRect(Color.Black.copy(alpha = scrim))
+                            }
                         },
                 ) {
                     SpreadCell(
@@ -924,14 +934,14 @@ internal fun stackTurnTranslateX(off: Float): Float = off.coerceAtLeast(0f)
  * nearest-next sits topmost. */
 internal fun stackTurnZ(off: Float): Float = -off
 
-/** Depth scrim for the covered page: dimmed by how much of it is still
- * under the moving page. frac<0 (reverse): covered fraction grows with
- * |frac|; frac>0 (forward): coverage shrinks as the page is uncovered. */
-internal fun stackTurnAlpha(off: Float, frac: Float): Float {
-    if (off <= 0f) return 1f
-    val covered = if (frac >= 0f) 1f - frac else -frac
-    return 1f - STACK_SCRIM * covered.coerceIn(0f, 1f)
-}
+/** Depth scrim opacity for the covered page — the black overlay drawn
+ * on top of it. For the page under the mover `off` IS the covered
+ * fraction (forward: off=1−frac, reverse: off=−frac); deeper parked
+ * pages are fully covered → max scrim. Drawn opaque-under, so no
+ * see-through blending — a page alpha would let deeper parked pages
+ * ghost through the revealed strip. */
+internal fun stackTurnScrim(off: Float): Float =
+    STACK_SCRIM * off.coerceIn(0f, 1f)
 
 /** One pager page = one spread (1 or 2 cells, RTL order: pages[0]
  *  renders rightmost — the web's `row-reverse`). */

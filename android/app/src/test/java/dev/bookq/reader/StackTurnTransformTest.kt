@@ -1,6 +1,6 @@
 package dev.bookq.reader
 
-import dev.bookq.reader.ui.reader.stackTurnAlpha
+import dev.bookq.reader.ui.reader.stackTurnScrim
 import dev.bookq.reader.ui.reader.stackTurnTranslateX
 import dev.bookq.reader.ui.reader.stackTurnZ
 import org.junit.Assert.assertEquals
@@ -12,6 +12,9 @@ import org.junit.Test
  * forward-axis distance from the scroll position; in the RTL pager
  * +off sits left of center (next side), −off right (prev side). Only
  * off<0 pages travel — parked pages hold the viewport center.
+ *
+ * The covered page stays opaque under a black scrim rect; `off` doubles
+ * as the covered fraction, so deeper parked pages saturate at max scrim.
  */
 class StackTurnTransformTest {
 
@@ -54,31 +57,23 @@ class StackTurnTransformTest {
 
     // ── covered-page scrim ───────────────────────────────────────
 
-    @Test fun `moving pages are never dimmed`() {
-        assertEquals(1f, stackTurnAlpha(-0.4f, 0.4f), 1e-6f)
-        assertEquals(1f, stackTurnAlpha(-1.4f, -0.4f), 1e-6f)
+    @Test fun `moving pages get no scrim`() {
+        assertEquals(0f, stackTurnScrim(-0.4f), 1e-6f)
+        assertEquals(0f, stackTurnScrim(-1.4f), 1e-6f)
+        assertEquals(0f, stackTurnScrim(0f), 1e-6f)
     }
 
-    @Test fun `forward reveal brightens as uncovered`() {
-        // fraction 0→1: next page goes fully covered → fully revealed.
-        val early = stackTurnAlpha(0.9f, 0.1f)
-        val late = stackTurnAlpha(0.1f, 0.9f)
-        assertTrue(early < late)
-        assertEquals(1f, late, 0.36f)  // ~1 within scrim depth
-        assertTrue(early >= 0.65f)     // never darker than 1 - SCRIM
+    @Test fun `scrim shrinks as the page is uncovered`() {
+        // Forward: covered fraction = off; early turn the next page is
+        // still mostly covered → heavy scrim, late → light.
+        assertTrue(stackTurnScrim(0.9f) > stackTurnScrim(0.1f))
+        assertEquals(0.035f, stackTurnScrim(0.1f), 1e-6f)
+        assertEquals(0.315f, stackTurnScrim(0.9f), 1e-6f)
     }
 
-    @Test fun `reverse cover dims as covered`() {
-        // fraction 0→−1: current page goes uncovered → fully covered.
-        val early = stackTurnAlpha(0.1f, -0.1f)
-        val late = stackTurnAlpha(0.9f, -0.9f)
-        assertTrue(early > late)
-        assertTrue(late >= 0.65f)
-    }
-
-    @Test fun `fully covered page is maximally dimmed`() {
-        // frac=0: parked pages sit fully under the opaque current slot —
-        // dim is max but invisible either way.
-        assertEquals(0.65f, stackTurnAlpha(1f, 0f), 1e-6f)
+    @Test fun `fully covered page gets max scrim`() {
+        // Deep parked pages (off>1) sit fully under the page above.
+        assertEquals(0.35f, stackTurnScrim(1f), 1e-6f)
+        assertEquals(0.35f, stackTurnScrim(2f), 1e-6f)
     }
 }
