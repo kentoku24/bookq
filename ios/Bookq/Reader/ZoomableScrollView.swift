@@ -8,6 +8,9 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
     var onZoomChange: ((Bool) -> Void)? = nil
     /// Fired when a pinch-IN (scale < ~0.75) ends near 1x — overview trigger.
     var onPinchOut: (() -> Void)? = nil
+    /// Fired on pinch-gesture state transitions (true = pinch in flight).
+    /// Lets the outer pager suspend page drags while a second finger is down.
+    var onPinchState: ((Bool) -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
     func makeUIView(context: Context) -> UIScrollView {
@@ -48,6 +51,7 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
         context.coordinator.host.rootView = content()
         context.coordinator.onZoomChange = onZoomChange
         context.coordinator.onPinchOut = onPinchOut
+        context.coordinator.onPinchState = onPinchState
     }
 
     func makeCoordinator() -> Coordinator {
@@ -59,11 +63,18 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
         weak var scrollView: UIScrollView?
         var onZoomChange: ((Bool) -> Void)?
         var onPinchOut: (() -> Void)?
+        var onPinchState: ((Bool) -> Void)?
         private var zoomed = false
+        private var pinchActive = false
 
         init(host: UIHostingController<Content>) { self.host = host }
 
         @objc func onPinch(_ gr: UIPinchGestureRecognizer) {
+            let active = gr.state == .began || gr.state == .changed
+            if active != pinchActive {
+                pinchActive = active
+                onPinchState?(active)
+            }
             guard gr.state == .ended || gr.state == .cancelled,
                   let sv = scrollView else { return }
             // Deliberate pinch-in that lands at ~1x → open the page grid.
