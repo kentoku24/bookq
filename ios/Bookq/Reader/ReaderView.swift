@@ -43,6 +43,20 @@ struct ReaderView: View {
     @State private var dragBase: CGFloat?
     /// A pinch gesture is in flight on some page — page drags suspend.
     @State private var pinchActive = false
+    /// True while a programmatic `pos` spring is in flight — the state
+    /// value snaps to `posTarget` instantly but the on-screen slide takes
+    /// ~0.4s, so hit-testing/drag-lock wait for the timer to clear.
+    @State private var posAnimating = false
+    /// `pos` range covered by the current programmatic animation —
+    /// `pagerSpreadIndices` renders every spread in it so multi-spread
+    /// jumps (overview/slider) and rapid-tap bursts still have every
+    /// layer they pass through (the visual `pos` lags the snapped state).
+    @State private var posAnimRange: ClosedRange<CGFloat>?
+    @State private var animTask: Task<Void, Never>?
+    /// Finger translation at the moment a drag locked its direction —
+    /// deltas are measured from here so a late lock (post-animation)
+    /// doesn't jump by the pre-lock travel.
+    @State private var dragTransBase: CGFloat = 0
 
     private var pageMode: ReaderPageMode {
         ReaderWork.pageMode(for: viewportSize, landscapeSpread: landscapeSpread)
@@ -118,9 +132,9 @@ struct ReaderView: View {
         return ZStack {
             ForEach(pagerSpreadIndices(work: work), id: \.self) { s in
                 spreadCell(work: work, spread: s, pages: work.spreads[s], in: size)
-                    .opacity(opacityFor(s, count: work.spreads.count))
-                    .offset(x: offsetFor(s, count: work.spreads.count, size: size))
-                    .zIndex(zIndexFor(s, count: work.spreads.count))
+                    .modifier(PagerLayerFx(pos: pos, index: s,
+                                           width: size.width,
+                                           count: work.spreads.count))
                     .allowsHitTesting(pagerSettled && s == posTarget)
             }
         }
@@ -178,49 +192,22 @@ struct ReaderView: View {
     /// True when the pager is at rest on `posTarget` — hit-testing (zoom,
     /// scroll) is suspended while `pos` is mid-turn or being dragged.
     private var pagerSettled: Bool {
-        dragBase == nil && pos == CGFloat(posTarget)
+        dragBase == nil && !posAnimating && pos == CGFloat(posTarget)
     }
 
-    /// Spread indices the pager renders: the two spreads adjacent to
-    /// `pos` plus one neighbour on each side kept at opacity 0 (image/AR
-    /// warm-up, matching the old TabView neighbourhood).
+    /// Spread indices the pager renders: every spread between `pos` and
+    /// where the current animation started (`posAnimRange`), plus one
+    /// neighbour on each side kept at opacity 0 (image/AR warm-up,
+    /// matching the old TabView neighbourhood). Covering the whole
+    /// travelled range matters for multi-spread overview/slider jumps.
     private func pagerSpreadIndices(work: ReaderWork) -> [Int] {
         let n = work.spreads.count
+        let range = posAnimRange ?? (pos...pos)
+        let lo = Int(floor(min(pos, range.lowerBound))) - 1
+        let hi = Int(ceil(max(pos, range.upperBound))) + 1
         var set = Set<Int>()
-        for s in [Int(floor(pos)) - 1, Int(floor(pos)),
-                  Int(ceil(pos)), Int(ceil(pos)) + 1] {
-            if s >= 0 && s < n { set.insert(s) }
-        }
+        for s in lo...hi where s >= 0 && s < n { set.insert(s) }
         return set.sorted()
-    }
-
-    /// Only layers participating in the current view are opaque — hidden
-    /// neighbours must never peek out from behind a narrower spread.
-    /// Edge overshoot (pos < 0 or > count-1) shows only the edge spread.
-    private func opacityFor(_ s: Int, count: Int) -> Double {
-        if pos < 0 { return s == 0 ? 1 : 0 }
-        if pos > CGFloat(count - 1) { return s == count - 1 ? 1 : 0 }
-        return (s == Int(floor(pos)) || s == Int(ceil(pos))) ? 1 : 0
-    }
-
-    /// Visual offset: the floor spread slides right by the fractional
-    /// part of `pos`; everything else sits at 0 beneath it. Past either
-    /// work edge the boundary spread rubber-bands instead.
-    private func offsetFor(_ s: Int, count: Int, size: CGSize) -> CGFloat {
-        let w = size.width
-        if pos < 0 { return s == 0 ? pos * w : 0 }
-        if pos > CGFloat(count - 1) {
-            return s == count - 1 ? (pos - CGFloat(count - 1)) * w : 0
-        }
-        return s == Int(floor(pos)) ? (pos - CGFloat(Int(floor(pos)))) * w : 0
-    }
-
-    /// `floor(pos)` is always the top layer while a turn is in flight —
-    /// forward it exits right, backward it is the incoming spread.
-    private func zIndexFor(_ s: Int, count: Int) -> Double {
-        if pos < 0 { return s == 0 ? 1 : 0 }
-        if pos > CGFloat(count - 1) { return s == count - 1 ? 1 : 0 }
-        return s == Int(floor(pos)) ? 1 : 0
     }
 
     /// Global index of the current chapter's first (0) or last (-1) real page.
@@ -435,16 +422,46 @@ struct ReaderView: View {
             return
         }
         if target != posTarget {
-            posTarget = target
             if animated {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
-                    pos = CGFloat(target)
-                }
+                animatePos(to: target)
             } else {
+                posTarget = target
                 pos = CGFloat(target)
             }
         }
         applyLanding(idx, in: work)
+    }
+
+    /// Animate `pos` to spread `target`. `pos` state snaps instantly —
+    /// the slide itself is interpolated by `PagerLayerFx.animatableData`,
+    /// which is why a plain `.offset(x: f(pos))` used to snap: the
+    /// departing spread's offset was 0 at both integer endpoints.
+    /// `posTarget` moves in the same transaction so `pagerSettled`/
+    /// hit-testing stay consistent. `posAnimating` covers the ~0.4s the
+    /// interpolated slide actually takes on screen.
+    private func animatePos(to target: Int) {
+        // Grow the rendered range to cover this jump — during a burst the
+        // earliest start stays the lower bound so lagging visuals keep
+        // their layers.
+        let p = pos
+        let t = CGFloat(target)
+        if let r = posAnimRange {
+            posAnimRange = min(r.lowerBound, p)...max(r.upperBound, t)
+        } else {
+            posAnimRange = min(p, t)...max(p, t)
+        }
+        posAnimating = true
+        animTask?.cancel()
+        animTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            posAnimating = false
+            posAnimRange = nil
+        }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+            posTarget = target
+            pos = CGFloat(target)
+        }
     }
 
     /// Side effects of arriving at `idx` — runs at turn START so the
@@ -471,12 +488,17 @@ struct ReaderView: View {
         if dragBase == nil {
             // Only take over once the gesture is decided-horizontal; a
             // mid-animation `pos` is a valid base (cancel returns to
-            // `posTarget`, the interrupted destination).
-            guard PageTurnMath.dragDirection(dx: dx, dy: dy) != nil else { return }
+            // `posTarget`, the interrupted destination). New drags can't
+            // lock while a programmatic slide is still on screen — the
+            // snapped `pos` would jump away from the interpolated visual.
+            guard !posAnimating,
+                  PageTurnMath.dragDirection(dx: dx, dy: dy) != nil else { return }
             dragBase = pos
+            dragTransBase = v.translation.width
         }
         guard let base = dragBase else { return }
-        let raw = base + PageTurnMath.dragDelta(dx: dx, viewWidth: size.width)
+        let raw = base + PageTurnMath.dragDelta(
+            dx: dx - dragTransBase, viewWidth: size.width)
         pos = PageTurnMath.edgeClamp(raw, count: work.spreads.count)
     }
 
@@ -490,14 +512,16 @@ struct ReaderView: View {
         let n = work.spreads.count
         guard n > 0 else { return }
         // The release translation can be ahead of the last onChanged —
-        // settle `pos` on it before deciding commit vs cancel.
+        // settle `pos` on it before deciding commit vs cancel. Both are
+        // measured from `dragTransBase` (the translation at lock time).
+        let relDx = v.translation.width - dragTransBase
         pos = PageTurnMath.edgeClamp(
-            base + PageTurnMath.dragDelta(dx: v.translation.width,
+            base + PageTurnMath.dragDelta(dx: relDx,
                                           viewWidth: size.width),
             count: n)
         let commit = !pinchActive ? PageTurnMath.commitDirection(
-            translation: v.translation.width,
-            predicted: v.predictedEndTranslation.width,
+            translation: relDx,
+            predicted: v.predictedEndTranslation.width - dragTransBase,
             viewWidth: size.width) : nil
         var target = posTarget
         if let dir = commit {
@@ -509,12 +533,9 @@ struct ReaderView: View {
             target = min(max(t, 0), n - 1)
         }
         if target != posTarget, let landing = work.spreads[safe: target]?.first {
-            posTarget = target
             applyLanding(landing, in: work)
         }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
-            pos = CGFloat(target)
-        }
+        animatePos(to: target)
     }
 
     /// Publish the current snapshot to the external-display projection.
@@ -560,6 +581,9 @@ struct ReaderView: View {
         pos = CGFloat(s)
         posTarget = s
         dragBase = nil
+        posAnimating = false
+        posAnimRange = nil
+        animTask?.cancel()
         publishExternal()
     }
 
@@ -651,6 +675,8 @@ struct ReaderView: View {
             let s = min(max(w.spreadOf(start), 0), max(w.spreads.count - 1, 0))
             pos = CGFloat(s)
             posTarget = s
+            posAnimating = false
+            posAnimRange = nil
             prefetch(around: start, in: w)
             publishExternal()
         } catch APIError.status(let s) where [404, 401, 403].contains(s) {
@@ -661,6 +687,71 @@ struct ReaderView: View {
         loading = false
     }
 }
+
+/// Per-layer pager effects driven by the *interpolated* `pos`.
+///
+/// A plain `.offset(x: f(pos))` cannot animate a turn: SwiftUI interpolates
+/// attribute deltas between transactions, and the departing spread's
+/// offset is 0 at both integer endpoints — nothing to animate, so taps
+/// snapped. Making `pos` the modifier's `animatableData` instead makes
+/// SwiftUI interpolate `pos` itself and re-evaluate offset/opacity/
+/// zIndex every frame, which is what produces the slide.
+///
+/// `floor(pos)` is the top layer: pos rising slides it right off-screen
+/// (forward — next spread revealed beneath), pos falling slides it in
+/// from the right over the current spread (backward). `ceil(pos)` waits
+/// static beneath at offset 0 in both cases.
+private struct PagerLayerFx: ViewModifier {
+    var pos: CGFloat
+    var index: Int
+    var width: CGFloat
+    var count: Int
+
+    var animatableData: CGFloat {
+        get { pos }
+        set { pos = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(opacity)
+            .offset(x: offset)
+            .zIndex(z)
+    }
+
+    /// Only the two spreads adjacent to `pos` are opaque — hidden
+    /// neighbours must never peek out from behind a narrower spread.
+    /// Edge overshoot (pos < 0 or > count-1) shows only the edge spread.
+    private var opacity: Double {
+        if pos < 0 { return index == 0 ? 1 : 0 }
+        if pos > CGFloat(count - 1) { return index == count - 1 ? 1 : 0 }
+        return index == Int(floor(pos)) || index == Int(ceil(pos)) ? 1 : 0
+    }
+
+    /// Spreads at or behind `floor(pos)` keep sliding right by
+    /// `(pos - index) * width` — spreads ahead of it (the revealed
+    /// `ceil` layer) stay at 0. Departed spreads trail off to +width and
+    /// farther, off-screen, which is what gives `.offset` real endpoint
+    /// deltas for the animation to interpolate.
+    private var offset: CGFloat {
+        if pos < 0 { return index == 0 ? pos * width : 0 }
+        if pos > CGFloat(count - 1) {
+            return index == count - 1 ? (pos - CGFloat(count - 1)) * width : 0
+        }
+        return index <= Int(floor(pos)) ? (pos - CGFloat(index)) * width : 0
+    }
+
+    private var z: Double {
+        if pos < 0 { return index == 0 ? 1 : 0 }
+        if pos > CGFloat(count - 1) { return index == count - 1 ? 1 : 0 }
+        return index == Int(floor(pos)) ? 1 : 0
+    }
+}
+
+// `Animatable` is nonisolated while `ViewModifier.body` is @MainActor —
+// declaring the conformance here keeps the `Animatable` side nonisolated
+// (Swift 6 rejects the combined `AnimatableModifier` inheritance clause).
+extension PagerLayerFx: @preconcurrency AnimatableModifier {}
 
 extension Array {
     subscript(safe index: Int) -> Element? {
