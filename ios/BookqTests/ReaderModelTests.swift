@@ -188,4 +188,74 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(zoneAction(frac: 0.30, tapForwardLeft: true), .toggleChrome)
         XCTAssertEqual(zoneAction(frac: 0.70, tapForwardLeft: true), .toggleChrome)
     }
+
+    // MARK: - page-turn drag math (custom ZStack pager)
+
+    func testDragDirectionWaitsForThreshold() {
+        XCTAssertNil(PageTurnMath.dragDirection(dx: 5, dy: 0))
+        XCTAssertNil(PageTurnMath.dragDirection(dx: -5, dy: 0))
+        XCTAssertNil(PageTurnMath.dragDirection(dx: PageTurnMath.decideDistance,
+                                                dy: 0))
+    }
+
+    func testDragDirectionRejectsVerticalDominant() {
+        // |dx| > decideDistance but |dy| larger → still undecided.
+        XCTAssertNil(PageTurnMath.dragDirection(dx: 20, dy: 30))
+        XCTAssertNil(PageTurnMath.dragDirection(dx: -20, dy: -40))
+    }
+
+    func testDragDirectionRightIsForward() {
+        // Manga/RTL: drag right = next spread (current slides right).
+        XCTAssertEqual(PageTurnMath.dragDirection(dx: 20, dy: 5), 1)
+        XCTAssertEqual(PageTurnMath.dragDirection(dx: -20, dy: 5), -1)
+    }
+
+    func testDragProgressLinearToViewport() {
+        XCTAssertEqual(PageTurnMath.dragProgress(dx: 100, viewWidth: 400), 0.25,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.dragProgress(dx: 400, viewWidth: 400), 1.0,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.dragProgress(dx: 0, viewWidth: 400), 0)
+    }
+
+    func testDragProgressDampsOvershoot() {
+        // Past one width the progress keeps growing but at 30% rate.
+        let p = PageTurnMath.dragProgress(dx: 800, viewWidth: 400)
+        XCTAssertEqual(p, 1 + (2 - 1) * PageTurnMath.overshootDamping,
+                       accuracy: 0.0001)
+        XCTAssertGreaterThan(p, 1)
+    }
+
+    func testDragProgressSignedDecaysOnReversal() {
+        // Locked-direction update: finger reversed past start → progress
+        // decays toward 0 rather than re-growing via abs().
+        XCTAssertEqual(PageTurnMath.dragProgressSigned(dx: -50,
+                                                       viewWidth: 400), 0)
+        XCTAssertEqual(PageTurnMath.dragProgressSigned(dx: 200,
+                                                       viewWidth: 400), 0.5,
+                       accuracy: 0.0001)
+    }
+
+    func testShouldCommitOnFlick() {
+        // Predicted end ≥ half the viewport commits even on short travel.
+        XCTAssertTrue(PageTurnMath.shouldCommit(translation: 10,
+                                                predicted: 200,
+                                                viewWidth: 400))
+    }
+
+    func testShouldCommitOnDistance() {
+        // Deliberate drag ≥ ~one third commits even without flick.
+        XCTAssertTrue(PageTurnMath.shouldCommit(translation: 140,
+                                                predicted: 100,
+                                                viewWidth: 400))
+        XCTAssertFalse(PageTurnMath.shouldCommit(translation: 100,
+                                                 predicted: 100,
+                                                 viewWidth: 400))
+    }
+
+    func testShouldCommitRejectsZeroWidth() {
+        XCTAssertFalse(PageTurnMath.shouldCommit(translation: 100,
+                                                 predicted: 500,
+                                                 viewWidth: 0))
+    }
 }

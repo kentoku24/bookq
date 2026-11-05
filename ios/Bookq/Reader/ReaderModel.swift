@@ -35,6 +35,70 @@ func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
     return .toggleChrome
 }
 
+/// One in-flight page turn for the custom ZStack pager. `progress` 0→1
+/// drives both layers: forward slides `from` right off-screen revealing
+/// `to` beneath; backward slides `to` in from the right edge covering
+/// `from`. `interactive` marks finger-driven turns — the release decides
+/// commit vs cancel; programmatic turns always run to completion.
+struct PageTurn {
+    var from: Int
+    var to: Int
+    var forward: Bool
+    var progress: CGFloat
+    var interactive: Bool
+}
+
+/// Pure drag/commit math for the pager — unit-tested, no UIKit deps.
+enum PageTurnMath {
+    /// Horizontal travel (pt) before a drag locks its direction.
+    static let decideDistance: CGFloat = 12
+    /// Damping applied to drags that point past the first/last spread.
+    static let edgeRubber: CGFloat = 0.35
+    /// Commit when the predicted end (flick) covers this fraction of the
+    /// viewport width, or the actual travel covers commitDistanceFrac.
+    static let commitPredictedFrac: CGFloat = 0.5
+    static let commitDistanceFrac: CGFloat = 0.33
+    /// Soft resistance past a full-width travel while dragging.
+    static let overshootDamping: CGFloat = 0.3
+
+    /// Direction verdict: nil until the drag is clearly horizontal
+    /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
+    /// -1 = backward (drag left) — the manga/RTL convention shared with
+    /// the web touch handler (`dragPx > 0 → next`).
+    static func dragDirection(dx: CGFloat, dy: CGFloat) -> Int? {
+        let ax = abs(dx), ay = abs(dy)
+        guard ax > decideDistance, ax > ay else { return nil }
+        return dx > 0 ? 1 : -1
+    }
+
+    /// Live drag → turn progress. Linear to one viewport width, then
+    /// damped so an over-drag keeps moving but slowly.
+    static func dragProgress(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
+        dragProgressSigned(dx: abs(dx), viewWidth: viewWidth)
+    }
+
+    /// Signed variant for the locked-direction update path: a negative
+    /// `dx` (finger reversed past the start) decays progress toward 0
+    /// instead of re-growing it via abs().
+    static func dragProgressSigned(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
+        guard viewWidth > 0 else { return 0 }
+        let p = dx / viewWidth
+        if p <= 0 { return 0 }
+        return p <= 1 ? p : 1 + (p - 1) * overshootDamping
+    }
+
+    /// Release decision in the locked direction's coordinate frame:
+    /// `translation`/`predicted` are already sign-normalized (positive =
+    /// toward the turn target). Commits on a flick (predicted end ≥ half
+    /// the viewport) or a deliberate drag (≥ ~one third).
+    static func shouldCommit(translation: CGFloat, predicted: CGFloat,
+                             viewWidth: CGFloat) -> Bool {
+        guard viewWidth > 0 else { return false }
+        return predicted >= viewWidth * commitPredictedFrac
+            || translation >= viewWidth * commitDistanceFrac
+    }
+}
+
 struct ReaderWork: Equatable {
     var clickedPath: String
     var images: [PageRef]             // global, including spacers
