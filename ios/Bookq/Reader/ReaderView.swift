@@ -32,6 +32,17 @@ struct ReaderView: View {
     /// tapForward equivalent — session-only like the web. true = left zone
     /// turns forward (web default), false = right zone turns forward.
     @State private var tapForwardLeft = true
+    /// In-flight page turn for the custom ZStack pager (replaces the old
+    /// TabView strip slide). nil = settled.
+    @State private var turnAnim: PageTurn?
+    /// Damped offset applied to the settled spread when a drag points past
+    /// the first/last spread (edge rubber-band).
+    @State private var rubberX: CGFloat = 0
+    /// A pinch gesture is in flight on some page — page drags suspend.
+    @State private var pinchActive = false
+    /// Monotonic token so a superseded turn animation can't clear its
+    /// successor's `turnAnim` from a stale completion.
+    @State private var turnSeq = 0
 
     private var pageMode: ReaderPageMode {
         ReaderWork.pageMode(for: viewportSize, landscapeSpread: landscapeSpread)
@@ -96,16 +107,27 @@ struct ReaderView: View {
         .padding()
     }
 
+    /// Custom pager — asymmetric page-stack turn (replaces the old TabView
+    /// strip slide): forward slides the current spread right off-screen
+    /// revealing the next spread static beneath; backward slides the
+    /// previous spread in from the right edge covering the current one.
+    /// `turnAnim` is the only transition state; `currentIdx` already points
+    /// at the destination once a turn commits (web parity: counter/slider
+    /// move at turn start, the strip catches up visually).
     private func pager(work: ReaderWork, in size: CGSize) -> some View {
-        return TabView(selection: spreadBinding(work)) {
-            ForEach(Array(work.spreads.enumerated()), id: \.offset) { s, pages in
-                spreadCell(work: work, spread: s, pages: pages, in: size)
-                    .tag(s)
+        let settled = work.spreadOf(currentIdx)
+        return ZStack {
+            ForEach(pagerSpreadIndices(work: work, settled: settled), id: \.self) { s in
+                spreadCell(work: work, spread: s, pages: work.spreads[s], in: size)
+                    .opacity(opacityFor(s, settled: settled))
+                    .offset(x: offsetFor(s, settled: settled, size: size))
+                    .zIndex(zIndexFor(s, settled: settled))
+                    .allowsHitTesting(turnAnim == nil && s == settled)
             }
         }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-        .environment(\.layoutDirection, .rightToLeft)
-        .id(work.pageMode)                       // rebuild on mode change
+        // NOTE: no RTL environment here — `.offset(x:)` mirrors under
+        // rightToLeft, which would invert the turn direction. RTL page
+        // order lives inside spreadCell instead.
         // Tap zones (web zoneActionAt): edge 30% zones follow tapForward
         // (default left = forward), center toggles chrome. SpatialTap is
         // single-tap; zoom pan/pinch live inside ZoomableScrollView.
@@ -116,24 +138,83 @@ struct ReaderView: View {
             case .toggleChrome: withAnimation { showChrome.toggle() }
             }
         })
-        // Web keyboard parity (iPad/hardware keyboard): →=next, ←=prev,
+        // Page-turn drag: right = next (current slides right, next revealed
+        // beneath), left = prev (previous slides in from the right on top).
+        // simultaneousGesture so it never blocks the tap zones; zoomed or
+        // pinching suspends it inside the handlers.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: PageTurnMath.decideDistance)
+                .onChanged { v in pagerDragChanged(v, work: work, size: size) }
+                .onEnded { v in pagerDragEnded(v, work: work, size: size) }
+        )
+        // Web keyboard parity (iPad/hardware keyboard, RTL): ←=next, →=prev,
         // Home/End = chapter edges, G = overview.
         .focusable()
         .focusEffectDisabled()
-        .onKeyPress(.rightArrow) { turn(1, in: work); return .handled }
-        .onKeyPress(.leftArrow) { turn(-1, in: work); return .handled }
+        .onKeyPress(.rightArrow) { turn(-1, in: work); return .handled }
+        .onKeyPress(.leftArrow) { turn(1, in: work); return .handled }
         .onKeyPress(keys: [.init("g"), .init("G")]) { _ in
             showOverview = true; return .handled
         }
-        .onKeyPress(.home) { snapTo(chapterEdge(0, in: work), in: work); return .handled }
+        .onKeyPress(.home) {
+            snapTo(chapterEdge(0, in: work), in: work, animated: false)
+            return .handled
+        }
         .onKeyPress(.end) { snapTo(chapterEdge(-1, in: work), in: work); return .handled }
         .sheet(isPresented: $showOverview) {
             if let api = model.api {
-                OverviewView(work: work, api: api, currentIdx: $currentIdx) {
-                    showOverview = false
-                }
+                OverviewView(
+                    work: work, api: api,
+                    currentIdx: Binding(
+                        get: { currentIdx },
+                        set: { snapTo($0, in: work) }),
+                    onDismiss: { showOverview = false }
+                )
             }
         }
+    }
+
+    // MARK: - Pager layers
+
+    /// Spread indices the pager renders. Idle keeps the settled spread plus
+    /// its two neighbours alive at opacity 0 (image/AR warm-up, matching the
+    /// old TabView neighbourhood); a turn keeps only `from`/`to`.
+    private func pagerSpreadIndices(work: ReaderWork, settled: Int) -> [Int] {
+        var set = Set<Int>([settled])
+        if let t = turnAnim {
+            set.insert(t.from); set.insert(t.to)
+        } else {
+            if settled > 0 { set.insert(settled - 1) }
+            if settled + 1 < work.spreads.count { set.insert(settled + 1) }
+        }
+        return set.filter { work.spreads.indices.contains($0) }.sorted()
+    }
+
+    /// Only layers participating in the current view are opaque — hidden
+    /// neighbours must never peek out from behind a narrower settled spread.
+    private func opacityFor(_ s: Int, settled: Int) -> Double {
+        if let t = turnAnim { return (s == t.from || s == t.to) ? 1 : 0 }
+        return s == settled ? 1 : 0
+    }
+
+    /// Visual offset. Forward: `from` travels 0→+width (next beneath is
+    /// static). Backward: `to` travels +width→0 on top (current beneath is
+    /// static). Idle: `rubberX` edge feedback on the settled spread.
+    private func offsetFor(_ s: Int, settled: Int, size: CGSize) -> CGFloat {
+        if let t = turnAnim {
+            if t.forward { return s == t.from ? t.progress * size.width : 0 }
+            return s == t.to ? (1 - t.progress) * size.width : 0
+        }
+        return s == settled ? rubberX : 0
+    }
+
+    /// Forward puts the outgoing spread on top; backward puts the incoming
+    /// spread on top — the asymmetry the turn animation is built on.
+    private func zIndexFor(_ s: Int, settled: Int) -> Double {
+        if let t = turnAnim {
+            return (t.forward ? s == t.from : s == t.to) ? 1 : 0
+        }
+        return s == settled ? 1 : 0
     }
 
     /// Global index of the current chapter's first (0) or last (-1) real page.
@@ -143,19 +224,10 @@ struct ReaderView: View {
         return work.resumeGlobalIndex(chapterIdx: info.chapterIdx, localIdx: local)
     }
 
-    /// Bind TabView selection (spread index) → currentIdx (global page idx).
-    private func spreadBinding(_ work: ReaderWork) -> Binding<Int> {
-        Binding(
-            get: { work.spreadOf(currentIdx) },
-            set: { s in
-                guard s < work.spreads.count, let first = work.spreads[s].first else { return }
-                if first != currentIdx { snapTo(first, in: work) }
-            }
-        )
-    }
-
     /// One spread cell: 1–2 pages fit into the viewport using measured ARs
     /// (`spreadMetrics` equivalent — pages share one height, width = ar*h).
+    /// RTL lives here (not on the pager ZStack) so manga page order stays
+    /// right-to-left without mirroring the pager's `.offset` turns.
     private func spreadCell(work: ReaderWork, spread s: Int,
                             pages: [Int], in size: CGSize) -> some View {
         let ars = pages.map { pageAR[$0] ?? 0.7 }
@@ -167,6 +239,7 @@ struct ReaderView: View {
                     .frame(width: ars[pos] * fit.height, height: fit.height)
             }
         }
+        .environment(\.layoutDirection, .rightToLeft)
         .frame(width: fit.width, height: fit.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -177,7 +250,8 @@ struct ReaderView: View {
                                      original: model.config.originalImages)
         return ZoomableScrollView(
             onZoomChange: { z in zoomed = z },
-            onPinchOut: { showOverview = true }
+            onPinchOut: { showOverview = true },
+            onPinchState: { active in pinchActive = active }
         ) {
             RemoteImageView(url: url, contentMode: .fit) { img in
                 let ar = img.size.width / max(img.size.height, 1)
@@ -362,13 +436,129 @@ struct ReaderView: View {
         }
     }
 
-    private func snapTo(_ idx: Int, in work: ReaderWork) {
+    private func snapTo(_ idx: Int, in work: ReaderWork, animated: Bool = true) {
         pendingIdx = nil
         guard idx >= 0 && idx < work.images.count else { return }
+        let target = work.spreadOf(idx)
+        let from = work.spreadOf(currentIdx)
+        if animated && target != from && work.spreads.indices.contains(target) {
+            beginTurn(from: from, to: target, landingIdx: idx, in: work)
+        } else {
+            settleTurnInstantly()
+            applyLanding(idx, in: work)
+        }
+    }
+
+    /// Side effects of arriving at `idx` — the old snapTo body minus the
+    /// animation concern. Runs at turn START for animated turns too, so the
+    /// counter/slider/external display move with the gesture (web parity).
+    private func applyLanding(_ idx: Int, in work: ReaderWork) {
         currentIdx = idx
         scheduleSave()
         prefetch(around: idx, in: work)
         publishExternal()
+    }
+
+    /// Start a programmatic (non-interactive) turn: `currentIdx` lands on
+    /// `landingIdx` immediately, `turnAnim` plays the slide, and the layer
+    /// swap completes when progress reaches 1.
+    private func beginTurn(from: Int, to: Int, landingIdx: Int, in work: ReaderWork) {
+        settleTurnInstantly()
+        turnAnim = PageTurn(from: from, to: to, forward: to > from,
+                            progress: 0, interactive: false)
+        applyLanding(landingIdx, in: work)
+        animateTurnProgress(to: 1)
+    }
+
+    /// Drop any in-flight turn without animating — the view settles on
+    /// `currentIdx`'s spread, which is already the committed destination
+    /// for programmatic turns (or the drag origin for interactive ones).
+    private func settleTurnInstantly() {
+        turnAnim = nil
+        rubberX = 0
+    }
+
+    /// Animate `turnAnim.progress` to `target` (1 = commit, 0 = cancel)
+    /// and clear the turn when it finishes. `seq` guards the completion
+    /// against a newer turn having replaced this one mid-flight.
+    private func animateTurnProgress(to target: CGFloat) {
+        guard turnAnim != nil else { return }
+        turnSeq += 1
+        let seq = turnSeq
+        withAnimation(
+            .timingCurve(0.25, 0.1, 0.25, 1.0, duration: 0.3),
+            completionCriteria: .logicallyComplete
+        ) {
+            turnAnim?.progress = target
+        } completion: {
+            if turnSeq == seq { turnAnim = nil }
+        }
+    }
+
+    // MARK: - Page-turn drag
+
+    /// Live drag → turn/rubber state. Direction locks on first decided
+    /// move; a programmatic turn in flight is settled first so a fresh
+    /// swipe always owns the screen.
+    private func pagerDragChanged(_ v: DragGesture.Value,
+                                  work: ReaderWork, size: CGSize) {
+        guard !zoomed, !pinchActive else { return }
+        if let t = turnAnim, !t.interactive { settleTurnInstantly() }
+        let dx = v.translation.width
+        let dy = v.translation.height
+        // A locked interactive turn owns the gesture until release —
+        // progress follows the finger in the turn's own direction frame,
+        // so reversing the drag decays it toward 0 (never re-decides).
+        if var t = turnAnim, t.interactive {
+            t.progress = PageTurnMath.dragProgressSigned(
+                dx: t.forward ? dx : -dx, viewWidth: size.width)
+            turnAnim = t
+            return
+        }
+        guard let dir = PageTurnMath.dragDirection(dx: dx, dy: dy) else { return }
+        let from = work.spreadOf(currentIdx)
+        let to = from + dir
+        guard to >= 0 && to < work.spreads.count else {
+            // Edge rubber-band: damped follow, never commits.
+            turnAnim = nil
+            rubberX = dx * PageTurnMath.edgeRubber
+            return
+        }
+        rubberX = 0
+        turnAnim = PageTurn(
+            from: from, to: to, forward: dir > 0,
+            progress: PageTurnMath.dragProgress(dx: dir > 0 ? dx : -dx,
+                                                viewWidth: size.width),
+            interactive: true)
+    }
+
+    /// Release: commit when the flick/distance thresholds say so, else
+    /// spring the turn back. Only interactive (drag-created) turns decide
+    /// here — programmatic ones are already animating to completion.
+    private func pagerDragEnded(_ v: DragGesture.Value,
+                                work: ReaderWork, size: CGSize) {
+        guard let t = turnAnim, t.interactive else {
+            if abs(rubberX) > 0.01 {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    rubberX = 0
+                }
+            }
+            return
+        }
+        // Sign-normalize into the locked direction's frame. A pinch that
+        // started mid-drag poisons the gesture — never commit it.
+        let sgn: CGFloat = t.forward ? 1 : -1
+        let commit = !pinchActive && PageTurnMath.shouldCommit(
+            translation: v.translation.width * sgn,
+            predicted: v.predictedEndTranslation.width * sgn,
+            viewWidth: size.width)
+        if commit, let landing = work.spreads[safe: t.to]?.first {
+            turnAnim?.interactive = false
+            applyLanding(landing, in: work)
+            animateTurnProgress(to: 1)
+        } else {
+            animateTurnProgress(to: 0)
+        }
     }
 
     /// Publish the current snapshot to the external-display projection.
@@ -408,6 +598,9 @@ struct ReaderView: View {
         }
         w = w.withMode(pageMode, offset: spreadOffset)
         work = w
+        // Spreads regrouped — any in-flight turn references stale indices.
+        // Web parity: orientation/mode changes snap without animation.
+        settleTurnInstantly()
         publishExternal()
     }
 
