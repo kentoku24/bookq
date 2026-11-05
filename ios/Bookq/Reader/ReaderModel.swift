@@ -35,20 +35,16 @@ func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
     return .toggleChrome
 }
 
-/// One in-flight page turn for the custom ZStack pager. `progress` 0→1
-/// drives both layers: forward slides `from` right off-screen revealing
-/// `to` beneath; backward slides `to` in from the right edge covering
-/// `from`. `interactive` marks finger-driven turns — the release decides
-/// commit vs cancel; programmatic turns always run to completion.
-struct PageTurn {
-    var from: Int
-    var to: Int
-    var forward: Bool
-    var progress: CGFloat
-    var interactive: Bool
-}
-
 /// Pure drag/commit math for the pager — unit-tested, no UIKit deps.
+///
+/// The pager is driven by a continuous spread position `pos` (CGFloat):
+/// integers are settled spreads, fractions are mid-turn. `floor(pos)` is
+/// always the top layer sliding right; `ceil(pos)` sits static beneath —
+/// forward (pos rising) slides the current spread off right revealing the
+/// next, backward (pos falling) slides the previous in from the right on
+/// top. One formula yields both directions, so finger reversals mid-drag
+/// need no direction lock: pos just follows the finger back through the
+/// origin.
 enum PageTurnMath {
     /// Horizontal travel (pt) before a drag locks its direction.
     static let decideDistance: CGFloat = 12
@@ -71,31 +67,41 @@ enum PageTurnMath {
         return dx > 0 ? 1 : -1
     }
 
-    /// Live drag → turn progress. Linear to one viewport width, then
-    /// damped so an over-drag keeps moving but slowly.
-    static func dragProgress(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
-        dragProgressSigned(dx: abs(dx), viewWidth: viewWidth)
-    }
-
-    /// Signed variant for the locked-direction update path: a negative
-    /// `dx` (finger reversed past the start) decays progress toward 0
-    /// instead of re-growing it via abs().
-    static func dragProgressSigned(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
+    /// Live drag → signed spread delta for `pos`. Odd-symmetric: positive
+    /// dx advances pos (forward), negative retreats it (backward); travel
+    /// past one viewport keeps moving at `overshootDamping` rate.
+    static func dragDelta(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
         guard viewWidth > 0 else { return 0 }
         let p = dx / viewWidth
-        if p <= 0 { return 0 }
-        return p <= 1 ? p : 1 + (p - 1) * overshootDamping
+        let a = abs(p)
+        let mag = a <= 1 ? a : 1 + (a - 1) * overshootDamping
+        return p < 0 ? -mag : mag
     }
 
-    /// Release decision in the locked direction's coordinate frame:
-    /// `translation`/`predicted` are already sign-normalized (positive =
-    /// toward the turn target). Commits on a flick (predicted end ≥ half
-    /// the viewport) or a deliberate drag (≥ ~one third).
-    static func shouldCommit(translation: CGFloat, predicted: CGFloat,
-                             viewWidth: CGFloat) -> Bool {
-        guard viewWidth > 0 else { return false }
-        return predicted >= viewWidth * commitPredictedFrac
-            || translation >= viewWidth * commitDistanceFrac
+    /// Edge rubber-band for `pos`: inside [0, count-1] passthrough; past
+    /// either end the overshoot is damped so the edge spread resists.
+    static func edgeClamp(_ p: CGFloat, count: Int) -> CGFloat {
+        let last = CGFloat(max(count - 1, 0))
+        if p < 0 { return p * edgeRubber }
+        if p > last { return last + (p - last) * edgeRubber }
+        return p
+    }
+
+    /// Release decision for a drag in continuous-pos space. Returns the
+    /// commit direction (+1 = forward/right, -1 = backward/left) or nil
+    /// to spring back. A flick (predicted end ≥ half the viewport) wins
+    /// over deliberate travel (≥ ~one third); direction comes from the
+    /// firing signal so a reversed flick commits the way it points.
+    static func commitDirection(translation: CGFloat, predicted: CGFloat,
+                                viewWidth: CGFloat) -> Int? {
+        guard viewWidth > 0 else { return nil }
+        if abs(predicted) >= viewWidth * commitPredictedFrac {
+            return predicted > 0 ? 1 : -1
+        }
+        if abs(translation) >= viewWidth * commitDistanceFrac {
+            return translation > 0 ? 1 : -1
+        }
+        return nil
     }
 }
 

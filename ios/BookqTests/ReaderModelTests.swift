@@ -210,52 +210,75 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(PageTurnMath.dragDirection(dx: -20, dy: 5), -1)
     }
 
-    func testDragProgressLinearToViewport() {
-        XCTAssertEqual(PageTurnMath.dragProgress(dx: 100, viewWidth: 400), 0.25,
+    func testDragDeltaLinearToViewport() {
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: 100, viewWidth: 400), 0.25,
                        accuracy: 0.0001)
-        XCTAssertEqual(PageTurnMath.dragProgress(dx: 400, viewWidth: 400), 1.0,
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: 400, viewWidth: 400), 1.0,
                        accuracy: 0.0001)
-        XCTAssertEqual(PageTurnMath.dragProgress(dx: 0, viewWidth: 400), 0)
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: 0, viewWidth: 400), 0)
     }
 
-    func testDragProgressDampsOvershoot() {
-        // Past one width the progress keeps growing but at 30% rate.
-        let p = PageTurnMath.dragProgress(dx: 800, viewWidth: 400)
-        XCTAssertEqual(p, 1 + (2 - 1) * PageTurnMath.overshootDamping,
+    func testDragDeltaSignedBothDirections() {
+        // Odd-symmetric: left drags retreat pos (backward turn).
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: -100, viewWidth: 400), -0.25,
                        accuracy: 0.0001)
-        XCTAssertGreaterThan(p, 1)
-    }
-
-    func testDragProgressSignedDecaysOnReversal() {
-        // Locked-direction update: finger reversed past start → progress
-        // decays toward 0 rather than re-growing via abs().
-        XCTAssertEqual(PageTurnMath.dragProgressSigned(dx: -50,
-                                                       viewWidth: 400), 0)
-        XCTAssertEqual(PageTurnMath.dragProgressSigned(dx: 200,
-                                                       viewWidth: 400), 0.5,
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: -400, viewWidth: 400), -1.0,
                        accuracy: 0.0001)
     }
 
-    func testShouldCommitOnFlick() {
+    func testDragDeltaDampsOvershoot() {
+        // Past one width the delta keeps growing but at 30% rate.
+        let d = PageTurnMath.dragDelta(dx: 800, viewWidth: 400)
+        XCTAssertEqual(d, 1 + (2 - 1) * PageTurnMath.overshootDamping,
+                       accuracy: 0.0001)
+        XCTAssertGreaterThan(d, 1)
+        // Symmetric on the backward side.
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: -800, viewWidth: 400), -d,
+                       accuracy: 0.0001)
+    }
+
+    func testEdgeClampInsidePassthrough() {
+        XCTAssertEqual(PageTurnMath.edgeClamp(2.5, count: 6), 2.5)
+        XCTAssertEqual(PageTurnMath.edgeClamp(0, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.edgeClamp(5, count: 6), 5)
+    }
+
+    func testEdgeClampDampsOvershoot() {
+        XCTAssertEqual(PageTurnMath.edgeClamp(-1, count: 6),
+                       -PageTurnMath.edgeRubber, accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.edgeClamp(6, count: 6),
+                       5 + PageTurnMath.edgeRubber, accuracy: 0.0001)
+        // Partial overshoot scales linearly.
+        XCTAssertEqual(PageTurnMath.edgeClamp(-0.5, count: 6),
+                       -0.5 * PageTurnMath.edgeRubber, accuracy: 0.0001)
+    }
+
+    func testCommitDirectionOnFlick() {
         // Predicted end ≥ half the viewport commits even on short travel.
-        XCTAssertTrue(PageTurnMath.shouldCommit(translation: 10,
-                                                predicted: 200,
-                                                viewWidth: 400))
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: 10,
+                                                    predicted: 200,
+                                                    viewWidth: 400), 1)
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: -10,
+                                                    predicted: -200,
+                                                    viewWidth: 400), -1)
     }
 
-    func testShouldCommitOnDistance() {
+    func testCommitDirectionOnDistance() {
         // Deliberate drag ≥ ~one third commits even without flick.
-        XCTAssertTrue(PageTurnMath.shouldCommit(translation: 140,
-                                                predicted: 100,
-                                                viewWidth: 400))
-        XCTAssertFalse(PageTurnMath.shouldCommit(translation: 100,
-                                                 predicted: 100,
-                                                 viewWidth: 400))
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: 140,
+                                                    predicted: 100,
+                                                    viewWidth: 400), 1)
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: -140,
+                                                    predicted: -100,
+                                                    viewWidth: 400), -1)
+        XCTAssertNil(PageTurnMath.commitDirection(translation: 100,
+                                                  predicted: 100,
+                                                  viewWidth: 400))
     }
 
-    func testShouldCommitRejectsZeroWidth() {
-        XCTAssertFalse(PageTurnMath.shouldCommit(translation: 100,
-                                                 predicted: 500,
-                                                 viewWidth: 0))
+    func testCommitDirectionRejectsZeroWidth() {
+        XCTAssertNil(PageTurnMath.commitDirection(translation: 100,
+                                                  predicted: 500,
+                                                  viewWidth: 0))
     }
 }
