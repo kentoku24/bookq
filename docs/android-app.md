@@ -107,9 +107,27 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
   `benchmarkData.json` を閾値（タップ median <60ms、fling janky <1%・
   p99 <16ms、コールド TTFD <1.5s、readerOpen <400ms、各 n≥10）と比較し
   非ゼロ終了。
-- 計測点: `bookq.pageTurn`（`turn()` → 対象スプレッド初描画）、
+- 計測点: `bookq.pageTurn`（`turn()` → 対象スプレッドの settle 描画
+  — スタック遷移では対象が既に下に常駐し描画済みのため
+  「settle コミット」相当の値になる）、
   `bookq.readerOpen`（reader 遷移 → 初 spread）、
   `reportFullyDrawn()`（初回グリッド表示）— いずれも `PerfTrace`。
+
+### ページ送り遷移（スタック式）
+
+RTL `HorizontalPager` の各スプレッドに offset 駆動の変換を掛け、
+標準スライド（2 ページ同時移動）ではなく物理めくり風の遷移に
+している（`ReaderScreen.kt` 冒頭部の `stackTurn*` 群）:
+
+- 順方向: 現ページのみ右へ退場、次ページは静止したまま下から露出
+- 逆方向: 前ページのみ右から上に進入、現ページは静止したまま下に残る
+- 被覆側は被覆量に応じて薄く暗くなる（深度 scrim）
+- スワイプ方向は RTL 慣例のまま（右スワイプ=順方向・指とページ同方向。
+  キー/タップは読み順セマンティクスで左右=順方向）
+- プログラム送り（タップ/キー/音量/概要選択）は ±8 スプレッド以内を
+  `animateScrollToPage`（250ms・web `commitSwipeTurn` と同じ
+  cubic-bezier(0.25,0.1,0.25,1)）で遷移し、超過分は即時スナップ。
+  章境界補正・リモード再アンカー・スライダースクラブは常に即時
 
 ### コールド起動パイプライン（snapshot-first）
 
