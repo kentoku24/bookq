@@ -131,11 +131,12 @@ struct ReaderView: View {
     private func pager(work: ReaderWork, in size: CGSize) -> some View {
         return ZStack {
             ForEach(pagerSpreadIndices(work: work), id: \.self) { s in
-                spreadCell(work: work, spread: s, pages: work.spreads[s], in: size)
-                    .modifier(PagerLayerFx(pos: pos, index: s,
-                                           width: size.width,
-                                           count: work.spreads.count))
-                    .allowsHitTesting(pagerSettled && s == posTarget)
+                PagerLayer(pos: pos, index: s, width: size.width,
+                           count: work.spreads.count) { live in
+                    spreadCell(work: work, spread: s, pages: work.spreads[s],
+                               live: live, in: size)
+                }
+                .allowsHitTesting(pagerSettled && s == posTarget)
             }
         }
         // NOTE: no RTL environment here — `.offset(x:)` mirrors under
@@ -221,20 +222,28 @@ struct ReaderView: View {
     /// (`spreadMetrics` equivalent — pages share one height, width = ar*h).
     /// RTL lives here (not on the pager ZStack) so manga page order stays
     /// right-to-left without mirroring the pager's `.offset` turns.
+    @ViewBuilder
     private func spreadCell(work: ReaderWork, spread s: Int,
-                            pages: [Int], in size: CGSize) -> some View {
-        let ars = pages.map { pageAR[$0] ?? 0.7 }
-        let gap: CGFloat = 5
-        let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
-        return HStack(spacing: gap) {
-            ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in
-                pageView(work: work, idx: idx)
-                    .frame(width: ars[pos] * fit.height, height: fit.height)
+                            pages: [Int], live: Bool,
+                            in size: CGSize) -> some View {
+        if live {
+            let ars = pages.map { pageAR[$0] ?? 0.7 }
+            let gap: CGFloat = 5
+            let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
+            HStack(spacing: gap) {
+                ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in
+                    pageView(work: work, idx: idx)
+                        .frame(width: ars[pos] * fit.height, height: fit.height)
+                }
             }
+            .environment(\.layoutDirection, .rightToLeft)
+            .frame(width: fit.width, height: fit.height)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            // Far corridor spreads are always opacity 0 — a plain colour
+            // keeps the slide math without mounting image views.
+            Color.black
         }
-        .environment(\.layoutDirection, .rightToLeft)
-        .frame(width: fit.width, height: fit.height)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func pageView(work: ReaderWork, idx: Int) -> some View {
@@ -688,32 +697,38 @@ struct ReaderView: View {
     }
 }
 
-/// Per-layer pager effects driven by the *interpolated* `pos`.
+/// One pager layer — an `Animatable` view (not a modifier) so `body`
+/// re-evaluates every interpolated frame and can pick live vs. cheap
+/// content by distance to `pos`.
 ///
-/// A plain `.offset(x: f(pos))` cannot animate a turn: SwiftUI interpolates
-/// attribute deltas between transactions, and the departing spread's
-/// offset is 0 at both integer endpoints — nothing to animate, so taps
-/// snapped. Making `pos` the modifier's `animatableData` instead makes
-/// SwiftUI interpolate `pos` itself and re-evaluate offset/opacity/
-/// zIndex every frame, which is what produces the slide.
+/// `pos` is the animatable data: SwiftUI interpolates it per frame and
+/// re-runs `body`, which is what produces the slide (a plain
+/// `.offset(x: f(pos))` cannot animate — the departing spread's offset
+/// is 0 at both integer endpoints, leaving nothing to interpolate).
 ///
 /// `floor(pos)` is the top layer: pos rising slides it right off-screen
 /// (forward — next spread revealed beneath), pos falling slides it in
 /// from the right over the current spread (backward). `ceil(pos)` waits
 /// static beneath at offset 0 in both cases.
-private struct PagerLayerFx: ViewModifier {
+private struct PagerLayer<Content: View>: View {
     var pos: CGFloat
     var index: Int
     var width: CGFloat
     var count: Int
+    /// |index - pos| beyond this renders the placeholder. The visible
+    /// pair (floor/ceil) is always < 1 away, so ~2 spreads of lead keep
+    /// image warm-up without mounting real cells for a whole burst
+    /// corridor (which can span a dozen spreads on rapid taps).
+    var liveDistance: CGFloat = 2
+    var content: (Bool) -> Content
 
     var animatableData: CGFloat {
         get { pos }
         set { pos = newValue }
     }
 
-    func body(content: Content) -> some View {
-        content
+    var body: some View {
+        content(abs(pos - CGFloat(index)) <= liveDistance)
             .opacity(opacity)
             .offset(x: offset)
             .zIndex(z)
@@ -748,10 +763,7 @@ private struct PagerLayerFx: ViewModifier {
     }
 }
 
-// `Animatable` is nonisolated while `ViewModifier.body` is @MainActor —
-// declaring the conformance here keeps the `Animatable` side nonisolated
-// (Swift 6 rejects the combined `AnimatableModifier` inheritance clause).
-extension PagerLayerFx: @preconcurrency AnimatableModifier {}
+extension PagerLayer: @preconcurrency Animatable {}
 
 extension Array {
     subscript(safe index: Int) -> Element? {
