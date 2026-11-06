@@ -2,8 +2,9 @@
 set -euo pipefail
 # Usage: ./scripts/ios-device-deploy.sh [--release] [--no-launch] [--udid <udid>] [--dev]
 # 実機 (paired iPhone/iPad) へ Bookq.app を build → install → launch するヘルパー。
-#   1. devicectl JSON から physical + paired + booted のデバイスを自動選択
-#      (--udid / DEVICE_UDID で明示も可。複数台なら一覧を出して中断)
+#   1. デバイス選択: --udid > DEVICE_UDID 環境変数 > .env の DEVICE_UDID
+#      > devicectl 自動検出 (paired+booted の実機が1台ならそれ)
+#      (.env は dev.sh と同じく worktree/メイン両方を見る)
 #   2. xcodebuild で対象デバイス向けに build (DEVELOPMENT_TEAM は pbxproj 記載済み)
 #   3. -showBuildSettings で .app の実パスを特定 (DerivedData の hash 非依存)
 #   4. devicectl install + launch
@@ -14,6 +15,28 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$REPO_ROOT/ios"
+
+# .env 解決 — dev.sh と同じ規約。worktree には .env が無いので
+# リポジトリルートとメインチェックアウトの両方を見る。
+main_checkout() {
+    local common
+    common="$(git -C "$REPO_ROOT" rev-parse --git-common-dir)"
+    case "$common" in
+        /*) ;;
+        *) common="$REPO_ROOT/$common" ;;
+    esac
+    ( cd "$common/.." && pwd )
+}
+dotenv_value() {
+    local key="$1" f v
+    for f in "$REPO_ROOT/.env" "$(main_checkout)/.env"; do
+        [ -f "$f" ] || continue
+        v="$(grep -E "^${key}=.+" "$f" 2>/dev/null | tail -1 | cut -d= -f2- \
+            | sed -e 's/\r$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")"
+        [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+    done
+    return 1
+}
 
 CONFIG=Debug
 LAUNCH=1
@@ -44,6 +67,10 @@ if [ -n "$DEV" ]; then
 fi
 
 # == 1. デバイス選択 ==
+# 優先順位: --udid > DEVICE_UDID 環境変数 > .env の DEVICE_UDID > 自動検出
+if [ -z "$UDID" ]; then
+  UDID="$(dotenv_value DEVICE_UDID || true)"
+fi
 if [ -z "$UDID" ]; then
   JSON=/tmp/bookq-devices.$$.json
   trap 'rm -f "$JSON"' EXIT
