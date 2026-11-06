@@ -502,7 +502,10 @@ struct ReaderView: View {
         let scaled = PageTurnMath.chaseSpreadsPerSecond
             * min(max(dist / 3, 1), 10)
         let speed = min(scaled, dist / 0.12)
-        pos += (diff > 0 ? 1 : -1) * speed * CGFloat(dt)
+        // Clamp the step to the remaining distance: a stalled main thread
+        // (dt up to 0.2s) would otherwise overshoot posTarget and bounce
+        // around it for several ticks before the dist<0.02 snap.
+        pos += (diff > 0 ? 1 : -1) * min(speed * CGFloat(dt), dist)
     }
 
     /// Side effects of arriving at `idx` — runs at turn START so the
