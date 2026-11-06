@@ -1,4 +1,6 @@
-# bookq — 本番。tailscale サイドカー経由の HTTPS だけが唯一の到達経路。
+# bookq — 本番。既定の到達経路は tailscale サイドカー経由の HTTPS。
+# 独自ドメイン公開時は opt-in の cloudflared (profile `public`) が
+# 第 2 の到達経路になる (#349、docs/deployment.md「独自ドメイン公開」)。
 #
 # 未検証コードの動作確認にこのファイルを使ってはいけない。
 # worktree で `docker compose up` を打つと、ホスト名 bookq を要求する
@@ -141,6 +143,24 @@ services:
     restart: unless-stopped
     depends_on:
       - viewer
+
+  # Cloudflare Tunnel (#349): 独自ドメイン公開用の opt-in ingress。
+  # profile `public` でのみ起動 — CLOUDFLARE_TUNNEL_TOKEN が .env にある
+  # とき rebuild.sh prd deploy が profile を有効化する。cloudflared が
+  # 外向きに Cloudflare edge へ接続を張るだけなので、受信ポート開放も
+  # グローバル IP も不要 (CGNAT でも動く)。公開 hostname → service
+  # (http://viewer:8080) の対応は Cloudflare ダッシュボード側で管理する。
+  cloudflared:
+    profiles: ["public"]
+    image: cloudflare/cloudflared:2026.10.4
+    container_name: bookq-prd-cloudflared
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    restart: unless-stopped
+    depends_on:
+      viewer:
+        condition: service_healthy
 
 volumes:
   tailscale-state:
