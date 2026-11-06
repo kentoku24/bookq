@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Usage: ./scripts/ios-device-deploy.sh [--release] [--no-launch] [--udid <udid>] [--dev]
+# Usage: ./scripts/ios-device-deploy.sh [--release] [--no-launch] [--udid <udid>] [--prd]
 # 実機 (paired iPhone/iPad) へ Bookq.app を build → install → launch するヘルパー。
 #   1. デバイス選択: --udid > DEVICE_UDID 環境変数 > .env の DEVICE_UDID
 #      > devicectl 自動検出 (paired+booted の実機が1台ならそれ)
@@ -8,8 +8,9 @@ set -euo pipefail
 #   2. xcodebuild で対象デバイス向けに build (DEVELOPMENT_TEAM は pbxproj 記載済み)
 #   3. -showBuildSettings で .app の実パスを特定 (DerivedData の hash 非依存)
 #   4. devicectl install + launch
-# --dev は別 bundle ID (dev.bookq.reader.dev / BookqDev.app) の開発用バリアントを
-# 入れる — 通常版とストレージ/Keychain/進捗が分離され同時インストール可。
+# 既定は開発用バリアント BookqDev (dev.bookq.reader.dev / BookqDev.app) —
+# 通常版とストレージ/Keychain/進捗が分離され同時インストール可。
+# --prd で通常版 (dev.bookq.reader / Bookq.app) をデプロイする。
 # Personal Team プロビジョニングは 7 日で期限切れ。初回のみ端末側で
 # 設定 → 一般 → VPNとデバイス管理 で開発元の信頼が必要。
 
@@ -40,31 +41,33 @@ dotenv_value() {
 
 CONFIG=Debug
 LAUNCH=1
-DEV=""
+PRD=""
 UDID="${DEVICE_UDID:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --release)   CONFIG=Release; shift ;;
     --no-launch) LAUNCH=0; shift ;;
-    --dev)       DEV=1; shift ;;
+    --prd)       PRD=1; shift ;;
+    --dev)       PRD=""; shift ;;   # 既定と同じ — 明示用に残す
     --udid)      UDID=$2; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--release] [--no-launch] [--udid <udid>] [--dev]" >&2
+      echo "Usage: $0 [--release] [--no-launch] [--udid <udid>] [--prd]" >&2
       echo "  --release    Release 構成で build (default: Debug)" >&2
       echo "  --no-launch  install まで (起動しない)" >&2
       echo "  --udid <u>   対象デバイスを明示 (DEVICE_UDID でも可)" >&2
-      echo "  --dev        BookqDev (dev.bookq.reader.dev) として install" >&2
+      echo "  --prd        Bookq (dev.bookq.reader) として install (default: BookqDev)" >&2
       exit 0 ;;
-    *) echo "Usage: $0 [--release] [--no-launch] [--udid <udid>] [--dev]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--release] [--no-launch] [--udid <udid>] [--prd]" >&2; exit 2 ;;
   esac
 done
 
-BUNDLE_ID=dev.bookq.reader
-OVERRIDES=()
-if [ -n "$DEV" ]; then
-  BUNDLE_ID=dev.bookq.reader.dev
-  OVERRIDES=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" PRODUCT_NAME=BookqDev)
+BUNDLE_ID=dev.bookq.reader.dev
+OVERRIDES=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" PRODUCT_NAME=BookqDev)
+if [ -n "$PRD" ]; then
+  BUNDLE_ID=dev.bookq.reader
+  OVERRIDES=()
 fi
+VARIANT=dev; [ -n "$PRD" ] && VARIANT=prd
 
 # == 1. デバイス選択 ==
 # 優先順位: --udid > DEVICE_UDID 環境変数 > .env の DEVICE_UDID > 自動検出
@@ -106,7 +109,7 @@ PY
 fi
 
 # == 2. build ==
-echo "== build ($CONFIG${DEV:+ --dev} → id=$UDID)"
+echo "== build ($CONFIG/$VARIANT → id=$UDID)"
 xcodebuild -project Bookq.xcodeproj -scheme Bookq \
   -destination "id=$UDID" -configuration "$CONFIG" \
   -allowProvisioningUpdates "${OVERRIDES[@]+"${OVERRIDES[@]}"}" build | tail -3
