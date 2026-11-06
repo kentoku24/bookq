@@ -1664,13 +1664,18 @@ async def serve_thumb(
 async def serve_view(
     path: str,
     request: Request,
+    w: str | None = Query(default=None),
     _user: dict = Depends(require_auth),
 ):
-    """Serve a reader page normalized for fast decode. Requires authentication."""
+    """Serve a reader page normalized for fast decode. Requires authentication.
+
+    ``?w=<px>`` requests a smaller rendition (clamped) for flip-through
+    fast tiers; absent keeps passthrough/2560-cap behaviour.
+    """
     from app.thumbs import handle_view
 
     request.app.state.last_request_at = time.time()
-    return await handle_view(request, path)
+    return await handle_view(request, path, w)
 
 
 @api_router.get("/api/thumb-sprite")

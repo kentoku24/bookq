@@ -469,6 +469,11 @@ async def handle_thumb(request: Request, path: str, w: str | int | None) -> Resp
 # decode (jpeg/png/gif) or natively scalable (svg) pass through byte-identical.
 VIEW_JPEG_QUALITY = 85
 VIEW_MAX_WIDTH = 2560
+# ``?w=`` bounds for /view — reader clients ask for a smaller fast-tier
+# size; anything outside clamps rather than 422s so odd clients degrade
+# gracefully. 240 keeps text barely legible; 4096 covers huge scans.
+VIEW_WIDTH_MIN = 240
+VIEW_WIDTH_MAX = 4096
 VIEW_PASSTHROUGH = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -488,8 +493,8 @@ def view_cache_namespace() -> Path:
     return cache_root() / "view"
 
 
-def make_view_bytes(data: bytes) -> bytes:
-    """Normalize any Pillow-decodable source to JPEG q85 (≤VIEW_MAX_WIDTH).
+def make_view_bytes(data: bytes, max_width: int = VIEW_MAX_WIDTH) -> bytes:
+    """Normalize any Pillow-decodable source to JPEG q85 (≤*max_width*).
 
     Alpha is flattened onto white (paper); like make_thumbnail, non-image
     bytes raise 404 to mirror the ``/image/*`` flow.
@@ -499,7 +504,7 @@ def make_view_bytes(data: bytes) -> bytes:
     try:
         im = Image.open(io.BytesIO(data))
         im = ImageOps.exif_transpose(im)
-        im.thumbnail((VIEW_MAX_WIDTH, VIEW_MAX_WIDTH * 4), Image.LANCZOS)
+        im.thumbnail((max_width, max_width * 4), Image.LANCZOS)
         if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
             rgba = im.convert("RGBA")
             bg = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -516,21 +521,42 @@ def make_view_bytes(data: bytes) -> bytes:
         raise HTTPException(status_code=404, detail="File not found")
 
 
-async def handle_view(request: Request, path: str) -> Response:
+def normalize_view_width(raw: str | int | None) -> int | None:
+    """``?w=`` for /view → clamped pixel width, or None when absent/invalid.
+
+    None keeps the historical behaviour (passthrough / 2560 cap); a valid
+    width forces the normalize branch so readers can fetch a small
+    fast-tier rendition of any source format.
+    """
+    try:
+        w = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return min(max(w, VIEW_WIDTH_MIN), VIEW_WIDTH_MAX)
+
+
+async def handle_view(request: Request, path: str,
+                      w: str | int | None = None) -> Response:
     """Serve ``GET /view/{path}`` — a reader page in a fast-decode format.
 
     Passthrough formats serve the original bytes straight through (a
-    re-encode would only lose quality and still cost the same decode). The
-    normalized branch mirrors ``handle_thumb``: stat-only fast path checks
-    the ``view/`` disk cache before any archive open or byte extraction, and
-    the same ``_not_modified``/304 conditional semantics apply.
+    re-encode would only lose quality and still cost the same decode).
+    ``?w=<px>`` opts into the normalized branch at that width — the
+    fast-tier rendition mobile readers use while flip-through is in
+    flight. The normalized branch mirrors ``handle_thumb``: stat-only
+    fast path checks the ``view/`` disk cache before any archive open or
+    byte extraction, and the same ``_not_modified``/304 conditional
+    semantics apply (width is part of etag + cache key).
     """
     from app.routes import _not_modified
 
     downloads_dir = request.app.state.settings.downloads_path
     suffix = Path(path).suffix.lower()
+    width = normalize_view_width(w)
 
-    if suffix in VIEW_PASSTHROUGH or suffix == ".svg":
+    # SVG scales natively in every client — never worth a re-encode, so
+    # it passes through even when ?w= asks for a size.
+    if suffix == ".svg" or (width is None and suffix in VIEW_PASSTHROUGH):
         data, mtime, size, key = await load_source_bytes(downloads_dir, path)
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
         etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
@@ -552,26 +578,31 @@ async def handle_view(request: Request, path: str) -> Response:
         return Response(content=data, media_type=media, headers=headers)
 
     mtime, size, key = _stat_source(downloads_dir, path)
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+    # Width is part of the cache identity: the same source serves the
+    # 2560 default rendition and any ?w= fast-tier size side by side.
+    cache_key = key if width is None else f"{key}|w{width}"
+    wtag = "full" if width is None else str(width)
+    digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()
+    etag = f'"{mtime:.0f}-{size:.0f}-view-{wtag}-{digest[:16]}"'
     if _not_modified(request, etag, mtime):
         return Response(status_code=304)
 
-    dest = view_cache_path_for(cache_root(), key)
+    dest = view_cache_path_for(cache_root(), cache_key)
     if dest.is_file():
         body = await run_in_threadpool(dest.read_bytes)
     else:
         data, mtime, size, key = await load_source_bytes(downloads_dir, path)
-        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
-        etag = f'"{mtime:.0f}-{size:.0f}-view-{digest[:16]}"'
+        cache_key = key if width is None else f"{key}|w{width}"
+        digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()
+        etag = f'"{mtime:.0f}-{size:.0f}-view-{wtag}-{digest[:16]}"'
         if _not_modified(request, etag, mtime):
             return Response(status_code=304)
-        dest = view_cache_path_for(cache_root(), key)
+        dest = view_cache_path_for(cache_root(), cache_key)
 
         def _get_or_make() -> bytes:
             if dest.is_file():
                 return dest.read_bytes()
-            body = make_view_bytes(data)
+            body = make_view_bytes(data, width or VIEW_MAX_WIDTH)
             _store_thumb(dest, body)
             return body
 

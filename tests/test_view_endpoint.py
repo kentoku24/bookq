@@ -129,3 +129,63 @@ def test_view_avif_normalized_to_jpeg(client, view_tree: Path):
     res = client.get("/view/plain/page.avif")
     assert res.status_code == 200
     assert res.headers["content-type"] == "image/jpeg"
+
+
+def test_view_w_downsizes_passthrough_source(client):
+    """?w= opts a jpeg source out of passthrough into the normalized
+    branch — this is the iOS flip-through fast tier."""
+    res = client.get("/view/plain/photo.jpg?w=240")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/jpeg"
+    with Image.open(io.BytesIO(res.content)) as im:
+        assert im.format == "JPEG"
+        assert im.size == (240, 180)
+
+
+def test_view_w_webp_normalized_at_width(client):
+    res = client.get("/view/plain/page.webp?w=400")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/jpeg"
+    with Image.open(io.BytesIO(res.content)) as im:
+        assert im.size[0] <= 400
+        assert im.size[1] > im.size[0]  # portrait aspect preserved
+
+
+def test_view_w_invalid_falls_back_to_default(client, view_tree: Path):
+    # Non-numeric w is ignored → jpeg stays passthrough byte-identical.
+    res = client.get("/view/plain/photo.jpg?w=abc")
+    assert res.status_code == 200
+    assert res.content == (view_tree / "plain" / "photo.jpg").read_bytes()
+
+
+def test_view_w_clamps_to_bounds(client):
+    # w=99999 clamps to VIEW_WIDTH_MAX — a 640px source can't grow, so
+    # the rendition equals the source dimensions (thumbnail never
+    # upscales) but is still re-encoded, not passthrough bytes.
+    res = client.get("/view/plain/photo.jpg?w=99999")
+    assert res.status_code == 200
+    with Image.open(io.BytesIO(res.content)) as im:
+        assert im.size == (640, 480)
+    # w below the floor clamps up to 240.
+    res2 = client.get("/view/plain/photo.jpg?w=1")
+    with Image.open(io.BytesIO(res2.content)) as im:
+        assert im.size == (240, 180)
+
+
+def test_view_w_separate_cache_and_etag(client, view_cache: Path):
+    full = client.get("/view/plain/page.webp")
+    small = client.get("/view/plain/page.webp?w=200")
+    assert full.headers["ETag"] != small.headers["ETag"]
+    # Two renditions coexist in the view/ namespace.
+    assert len(list((view_cache / "view").glob("*.jpg"))) >= 2
+    # Conditional request honours the width-specific etag.
+    res2 = client.get("/view/plain/page.webp?w=200",
+                      headers={"If-None-Match": small.headers["ETag"]})
+    assert res2.status_code == 304
+
+
+def test_view_w_archive_entry(client):
+    res = client.get("/view/work.zip/2.webp?w=300")
+    assert res.status_code == 200
+    with Image.open(io.BytesIO(res.content)) as im:
+        assert im.size[0] <= 300
