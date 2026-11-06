@@ -51,9 +51,10 @@ enum PageTurnMath {
     /// Damping applied to drags that point past the first/last spread.
     static let edgeRubber: CGFloat = 0.35
     /// Commit when the predicted end (flick) covers this fraction of the
-    /// viewport width, or the actual travel covers commitDistanceFrac.
+    /// viewport width, or deliberate travel covers the web touchend
+    /// threshold `min(10% width, 70pt)` (app.js — points ≈ CSS px).
     static let commitPredictedFrac: CGFloat = 0.5
-    static let commitDistanceFrac: CGFloat = 0.33
+    static let commitDistanceCap: CGFloat = 70
     /// Soft resistance past a full-width travel while dragging.
     static let overshootDamping: CGFloat = 0.3
     /// Base flip-through rate (spreads/sec) when `pos` chases
@@ -94,27 +95,31 @@ enum PageTurnMath {
         return p < 0 ? -mag : mag
     }
 
-    /// Edge rubber-band for `pos`: inside [0, count-1] passthrough; past
-    /// either end the overshoot is damped so the edge spread resists.
-    static func edgeClamp(_ p: CGFloat, count: Int) -> CGFloat {
-        let last = CGFloat(max(count - 1, 0))
-        if p < 0 { return p * edgeRubber }
-        if p > last { return last + (p - last) * edgeRubber }
+    /// Rubber-band for `pos` against [lo, hi] spread bounds — inside
+    /// passthrough, overshoot damped at edgeRubber. Callers pass the
+    /// current chapter's spread range (`chapterSpreadRange`), which for
+    /// a single-chapter work IS the book edge [0, count-1] — web damps
+    /// `dragPx *= 0.35` past the chapter edge the same way.
+    static func rangeClamp(_ p: CGFloat, lo: Int, hi: Int) -> CGFloat {
+        let l = CGFloat(lo), h = CGFloat(max(hi, lo))
+        if p < l { return l + (p - l) * edgeRubber }
+        if p > h { return h + (p - h) * edgeRubber }
         return p
     }
 
     /// Release decision for a drag in continuous-pos space. Returns the
     /// commit direction (+1 = forward/right, -1 = backward/left) or nil
     /// to spring back. A flick (predicted end ≥ half the viewport) wins
-    /// over deliberate travel (≥ ~one third); direction comes from the
-    /// firing signal so a reversed flick commits the way it points.
+    /// over deliberate travel (web touchend `min(10% width, 70px)`);
+    /// direction comes from the firing signal so a reversed flick
+    /// commits the way it points.
     static func commitDirection(translation: CGFloat, predicted: CGFloat,
                                 viewWidth: CGFloat) -> Int? {
         guard viewWidth > 0 else { return nil }
         if abs(predicted) >= viewWidth * commitPredictedFrac {
             return predicted > 0 ? 1 : -1
         }
-        if abs(translation) >= viewWidth * commitDistanceFrac {
+        if abs(translation) >= min(viewWidth * 0.10, commitDistanceCap) {
             return translation > 0 ? 1 : -1
         }
         return nil
@@ -331,6 +336,30 @@ struct ReaderWork: Equatable {
             w = size.width
         }
         return CGSize(width: w, height: h)
+    }
+
+    /// `getChapterSpreadRange` (app.js) — spread index range [lo, hi]
+    /// covering chapter `ci`'s real pages. Spreads never mix chapters
+    /// (spacer padding aligns boundaries), so the range is contiguous.
+    /// Swipes and keys clamp turns to it; taps and overview jumps cross.
+    func chapterSpreadRange(_ ci: Int) -> (lo: Int, hi: Int) {
+        guard !spreads.isEmpty else { return (0, 0) }
+        if boundaries.count <= 1 { return (0, spreads.count - 1) }
+        let c = min(max(ci, 0), boundaries.count - 1)
+        let start = boundaries[c]
+        let end = c + 1 < boundaries.count ? boundaries[c + 1] : images.count
+        var firstReal = -1, lastReal = -1
+        if start < images.count {
+            for i in start..<min(end, images.count) where !images[i].isSpacer {
+                if firstReal < 0 { firstReal = i }
+                lastReal = i
+            }
+        }
+        if firstReal < 0 {
+            let s = spreadOf(min(start, max(images.count - 1, 0)))
+            return (s, s)
+        }
+        return (spreadOf(firstReal), spreadOf(lastReal))
     }
 
     /// `spreadOf` — spread containing global index.

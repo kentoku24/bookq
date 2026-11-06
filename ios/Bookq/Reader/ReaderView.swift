@@ -168,8 +168,8 @@ struct ReaderView: View {
         // Home/End = chapter edges, G = overview.
         .focusable()
         .focusEffectDisabled()
-        .onKeyPress(.rightArrow) { turn(-1, in: work); return .handled }
-        .onKeyPress(.leftArrow) { turn(1, in: work); return .handled }
+        .onKeyPress(.rightArrow) { turn(-1, in: work, crossChapter: false); return .handled }
+        .onKeyPress(.leftArrow) { turn(1, in: work, crossChapter: false); return .handled }
         .onKeyPress(keys: [.init("g"), .init("G")]) { _ in
             showOverview = true; return .handled
         }
@@ -226,11 +226,28 @@ struct ReaderView: View {
         return work.spreads[s].contains { zoomedPages.contains($0) }
     }
 
-    /// Global index of the current chapter's first (0) or last (-1) real page.
+    /// Current page's chapter spread range — web
+    /// `getChapterSpreadRange(getCurrentChapterInfo(currentIdx))`.
+    /// Swipes and arrow keys clamp turns to it; taps cross chapters.
+    private func chapterSpreadBounds(in work: ReaderWork) -> (lo: Int, hi: Int) {
+        let ci = work.chapterInfo(at: currentIdx).chapterIdx
+        return work.chapterSpreadRange(ci)
+    }
+
+    /// Global index of the current chapter's first (0) or last (-1)
+    /// navigation target — web Home/End: `spreads[r.lo/hi].pages[0]`,
+    /// i.e. the first page of the edge spread, not the chapter's last
+    /// page itself.
     private func chapterEdge(_ which: Int, in work: ReaderWork) -> Int {
         let info = work.chapterInfo(at: currentIdx)
-        let local = which == 0 ? 0 : work.chapters[info.chapterIdx].images.count - 1
-        return work.resumeGlobalIndex(chapterIdx: info.chapterIdx, localIdx: local)
+        if which == 0 {
+            return work.resumeGlobalIndex(chapterIdx: info.chapterIdx, localIdx: 0)
+        }
+        let b = chapterSpreadBounds(in: work)
+        if let first = work.spreads[safe: b.hi]?.first { return first }
+        return work.resumeGlobalIndex(
+            chapterIdx: info.chapterIdx,
+            localIdx: work.chapters[info.chapterIdx].images.count - 1)
     }
 
     /// One spread cell: 1–2 pages fit into the viewport using measured ARs
@@ -444,15 +461,24 @@ struct ReaderView: View {
 
     // MARK: - Navigation
 
-    /// Tap-zone turn — web navTurn: spread granularity, cross-chapter.
-    /// Every tap lands immediately: `posTarget` steps one spread and the
-    /// `pos` chase follows it, so rapid taps each count as a turn (the
-    /// pager fast-forwards through spreads instead of queueing animations).
-    private func turn(_ dir: Int, in work: ReaderWork) {
-        guard let next = dir > 0
-            ? work.nextSpreadFirstPage(after: currentIdx)
-            : work.prevSpreadFirstPage(before: currentIdx) else { return }
-        snapTo(next, in: work)
+    /// Spread-granularity turn — web navTurn/goNext/goPrev. Taps pass
+    /// `crossChapter` (edge zones cross chapters freely); arrow keys
+    /// clamp to the current chapter's spread range and no-op at its
+    /// edge (`t == s` after clamping, same as web's early return).
+    /// Every accepted turn lands immediately: `posTarget` steps one
+    /// spread and the `pos` chase follows it, so rapid taps each count
+    /// as a turn (the pager fast-forwards instead of queueing).
+    private func turn(_ dir: Int, in work: ReaderWork, crossChapter: Bool = true) {
+        let s = work.spreadOf(currentIdx)
+        var t = dir > 0 ? s + 1 : s - 1
+        if !crossChapter {
+            let b = chapterSpreadBounds(in: work)
+            t = min(max(t, b.lo), b.hi)
+            if t == s { return }
+        }
+        guard work.spreads.indices.contains(t),
+              let first = work.spreads[t].first else { return }
+        snapTo(first, in: work)
     }
 
     /// Navigate to `idx` (any page — the spread it belongs to is the turn
@@ -564,9 +590,13 @@ struct ReaderView: View {
             dragTransBase = v.translation.width
         }
         guard let base = dragBase else { return }
+        // Chapter bounds are the drag's rubber-band edge — web damps
+        // `dragPx` past them (`currentIdx` vs chapter min/max page).
+        // For a single-chapter work the range IS the book edge.
+        let b = chapterSpreadBounds(in: work)
         let raw = base + PageTurnMath.dragDelta(
             dx: dx - dragTransBase, viewWidth: size.width)
-        pos = PageTurnMath.edgeClamp(raw, count: work.spreads.count)
+        pos = PageTurnMath.rangeClamp(raw, lo: b.lo, hi: b.hi)
     }
 
     /// Release: commit completes the turn in the flick/travel direction,
@@ -581,11 +611,14 @@ struct ReaderView: View {
         // The release translation can be ahead of the last onChanged —
         // settle `pos` on it before deciding commit vs cancel. Both are
         // measured from `dragTransBase` (the translation at lock time).
+        // Swipes never cross chapters (web commitSwipeTurn clamps the
+        // target spread to the chapter range).
+        let b = chapterSpreadBounds(in: work)
         let relDx = v.translation.width - dragTransBase
-        pos = PageTurnMath.edgeClamp(
+        pos = PageTurnMath.rangeClamp(
             base + PageTurnMath.dragDelta(dx: relDx,
                                           viewWidth: size.width),
-            count: n)
+            lo: b.lo, hi: b.hi)
         let commit = !pinchActive ? PageTurnMath.commitDirection(
             translation: relDx,
             predicted: v.predictedEndTranslation.width - dragTransBase,
@@ -597,7 +630,7 @@ struct ReaderView: View {
             // still counts as one more spread in the commit direction.
             var t = dir > 0 ? Int(pos.rounded(.up)) : Int(pos.rounded(.down))
             if CGFloat(t) == pos { t += dir }
-            target = min(max(t, 0), n - 1)
+            target = min(max(t, b.lo), b.hi)
         }
         if target != posTarget, let landing = work.spreads[safe: target]?.first {
             applyLanding(landing, in: work)

@@ -79,6 +79,11 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   1 つの式で両方向を表現するため、ドラッグ中の指の反転は向きの再判定
   なしに `pos` が原点を通って戻るだけで処理できる。`PageTurnMath`
   純粋関数がドラッグデルタ・端ラバーバンド・コミット方向判定を担当。
+  ドラッグと ←/→ キーの移動範囲は現在章の spread 範囲
+  （`chapterSpreadRange` = web `getChapterSpreadRange`）にクランプされ、
+  章端ではラバーバンド→バウンスバック。タップゾーンのみ章跨ぎ可
+  （web の crossChapter:true/false と同じ区分）。コミット閾値は
+  web touchend と同じ `min(10%幅, 70pt)` + flick 予測 50%。
   `currentIdx` はコミット開始時点で着地し、カウンタ/スライダー/外部
   ディスプレイはアニメーションと同時に動く（web の strip 追従と同じ）。
 - 連打は合流しない: タップ毎に `posTarget` が 1 spread 進み、`pos` が
@@ -96,8 +101,10 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   `OverviewView` を開く。章見出し・章ローカルページ番号・現ページ
   ハイライト・現ページへ 1/3 位置スクロール・タップジャンプ
   （ページャと同じアニメーションで遷移）。
-- キーボード（iPad/外付け）: ←=次 / →=前 / Home=即時で章頭・End=章末へ
-  アニメーション遷移 / G=複数ページ（web・Android と同じ RTL 規約）。
+- キーボード（iPad/外付け）: ←=次 / →=前（章内 clamp、端で no-op）/
+  Home=即時で章頭・End=章末 spread 先頭ページへアニメーション遷移
+  （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
+  （web・Android と同じ RTL 規約）。
 
 ## ブラウズ仕様（web parity）
 
