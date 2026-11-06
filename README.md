@@ -68,6 +68,21 @@ cp .env.example .env
 
 `https://<your-tailscale-hostname>` でアクセス可能。
 
+### 4. 一般公開（Tailscale Funnel, オプション）
+
+既定では tailnet 内からのみ到達できる。`.env` に `TS_FUNNEL=1` を設定すると tailscale funnel になり、**同じ `https://<your-tailscale-hostname>` が public internet からも開ける**（ドメイン購入・外部サービス不要、`BASE_URL` / OAuth redirect URI も変更不要）。
+
+1. tailnet policy file (admin console → ACL) の `nodeAttrs` に funnel 許可を追加:
+   ```json
+   "nodeAttrs": [{"target": ["*"], "attr": ["funnel"]}]
+   ```
+   ※ または `./prd.sh up` 後に `docker logs bookq-prd-tailscaleGateway` に出る `https://login.tailscale.com/f/funnel?node=...` リンクを踏んで当該ノードだけ許可する方法もある
+2. `.env` に `TS_FUNNEL=1` を追加
+3. `./prd.sh up` — デプロイ後の `verify_url` が公開経路で `/api/health` を叩くので疎通まで自動確認される
+4. tailnet 外の端末 (スマホ LTE 等) で `https://<your-tailscale-hostname>` を開き、ログイン・閲覧を確認
+
+公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は [docs/deployment.md](docs/deployment.md) 参照。
+
 ## API
 
 | エンドポイント | 認証 | 説明 |
