@@ -43,16 +43,13 @@ struct ReaderView: View {
     @State private var dragBase: CGFloat?
     /// A pinch gesture is in flight on some page — page drags suspend.
     @State private var pinchActive = false
-    /// True while a programmatic `pos` spring is in flight — the state
-    /// value snaps to `posTarget` instantly but the on-screen slide takes
-    /// ~0.4s, so hit-testing/drag-lock wait for the timer to clear.
+    /// True while `pos` is chasing `posTarget` — hit-testing/drag-lock
+    /// wait because the on-screen slide is still in flight.
     @State private var posAnimating = false
-    /// `pos` range covered by the current programmatic animation —
-    /// `pagerSpreadIndices` renders every spread in it so multi-spread
-    /// jumps (overview/slider) and rapid-tap bursts still have every
-    /// layer they pass through (the visual `pos` lags the snapped state).
-    @State private var posAnimRange: ClosedRange<CGFloat>?
-    @State private var animTask: Task<Void, Never>?
+    /// Drives `pos` toward `posTarget` at a steady flip rate (see
+    /// `animatePos`). `pos` stays the honest visual position — written
+    /// per tick — so the rendered corridor is simply pos...posTarget.
+    @State private var chaseTask: Task<Void, Never>?
     /// Finger translation at the moment a drag locked its direction —
     /// deltas are measured from here so a late lock (post-animation)
     /// doesn't jump by the pre-lock travel.
@@ -80,6 +77,7 @@ struct ReaderView: View {
         .statusBarHidden(!showChrome)
         .overlay(alignment: .top) { if showChrome { chrome } }
         .onDisappear {
+            chaseTask?.cancel()
             saveCurrentPosition()
             progress.sync?.flush()          // pagehide → flush pending PUT
             ext.endPresentation()           // external display → back to mirroring
@@ -196,16 +194,18 @@ struct ReaderView: View {
         dragBase == nil && !posAnimating && pos == CGFloat(posTarget)
     }
 
-    /// Spread indices the pager renders: every spread between `pos` and
-    /// where the current animation started (`posAnimRange`), plus one
-    /// neighbour on each side kept at opacity 0 (image/AR warm-up,
-    /// matching the old TabView neighbourhood). Covering the whole
-    /// travelled range matters for multi-spread overview/slider jumps.
+    /// Spread indices the pager renders: the corridor between `pos` and
+    /// `posTarget` while a chase is in flight (every spread the flip
+    /// will pass through), collapsing to `pos`±1 at rest. The ±1
+    /// neighbour padding keeps image/AR warm-up (matching the old
+    /// TabView neighbourhood).
     private func pagerSpreadIndices(work: ReaderWork) -> [Int] {
         let n = work.spreads.count
-        let range = posAnimRange ?? (pos...pos)
-        let lo = Int(floor(min(pos, range.lowerBound))) - 1
-        let hi = Int(ceil(max(pos, range.upperBound))) + 1
+        let range = posAnimating
+            ? (min(pos, CGFloat(posTarget))...max(pos, CGFloat(posTarget)))
+            : (pos...pos)
+        let lo = Int(floor(range.lowerBound)) - 1
+        let hi = Int(ceil(range.upperBound)) + 1
         var set = Set<Int>()
         for s in lo...hi where s >= 0 && s < n { set.insert(s) }
         return set.sorted()
@@ -434,6 +434,8 @@ struct ReaderView: View {
             if animated {
                 animatePos(to: target)
             } else {
+                chaseTask?.cancel()
+                posAnimating = false
                 posTarget = target
                 pos = CGFloat(target)
             }
@@ -441,36 +443,46 @@ struct ReaderView: View {
         applyLanding(idx, in: work)
     }
 
-    /// Animate `pos` to spread `target`. `pos` state snaps instantly —
-    /// the slide itself is interpolated by `PagerLayerFx.animatableData`,
-    /// which is why a plain `.offset(x: f(pos))` used to snap: the
-    /// departing spread's offset was 0 at both integer endpoints.
-    /// `posTarget` moves in the same transaction so `pagerSettled`/
-    /// hit-testing stay consistent. `posAnimating` covers the ~0.4s the
-    /// interpolated slide actually takes on screen.
+    /// Advance `pos` toward spread `target`. A spring cannot keep up
+    /// with rapid taps — its travel time grows with distance, so a
+    /// `posTarget` running ahead caps the flip rate near ~2 spreads/s.
+    /// Instead `pos` chases `posTarget` at a steady rate (scaled up for
+    /// long jumps), easing out near the target; every tap still counts
+    /// as its own turn because `posTarget` steps independently.
     private func animatePos(to target: Int) {
-        // Grow the rendered range to cover this jump — during a burst the
-        // earliest start stays the lower bound so lagging visuals keep
-        // their layers.
-        let p = pos
-        let t = CGFloat(target)
-        if let r = posAnimRange {
-            posAnimRange = min(r.lowerBound, p)...max(r.upperBound, t)
-        } else {
-            posAnimRange = min(p, t)...max(p, t)
-        }
+        posTarget = target
         posAnimating = true
-        animTask?.cancel()
-        animTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            guard !Task.isCancelled else { return }
-            posAnimating = false
-            posAnimRange = nil
+        chaseTask?.cancel()
+        chaseTask = Task { @MainActor in
+            var last = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000)
+                let now = Date()
+                // Cap dt so a hitch doesn't teleport `pos`.
+                stepPos(dt: min(now.timeIntervalSince(last), 0.05))
+                last = now
+                if pos == CGFloat(posTarget) {
+                    posAnimating = false
+                    return
+                }
+            }
         }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
-            posTarget = target
-            pos = CGFloat(target)
+    }
+
+    /// One chase tick. Speed scales with remaining distance (long
+    /// overview/slider jumps blur through quickly) and eases off inside
+    /// the last ~0.12 spread so single turns keep a soft landing.
+    private func stepPos(dt: TimeInterval) {
+        let diff = CGFloat(posTarget) - pos
+        let dist = abs(diff)
+        if dist < 0.02 {
+            pos = CGFloat(posTarget)
+            return
         }
+        let scaled = PageTurnMath.chaseSpreadsPerSecond
+            * min(max(dist / 3, 1), 10)
+        let speed = min(scaled, dist / 0.12)
+        pos += (diff > 0 ? 1 : -1) * speed * CGFloat(dt)
     }
 
     /// Side effects of arriving at `idx` — runs at turn START so the
@@ -591,8 +603,7 @@ struct ReaderView: View {
         posTarget = s
         dragBase = nil
         posAnimating = false
-        posAnimRange = nil
-        animTask?.cancel()
+        chaseTask?.cancel()
         publishExternal()
     }
 
@@ -685,7 +696,7 @@ struct ReaderView: View {
             pos = CGFloat(s)
             posTarget = s
             posAnimating = false
-            posAnimRange = nil
+            chaseTask?.cancel()
             prefetch(around: start, in: w)
             publishExternal()
         } catch APIError.status(let s) where [404, 401, 403].contains(s) {

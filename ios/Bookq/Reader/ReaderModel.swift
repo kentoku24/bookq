@@ -56,6 +56,10 @@ enum PageTurnMath {
     static let commitDistanceFrac: CGFloat = 0.33
     /// Soft resistance past a full-width travel while dragging.
     static let overshootDamping: CGFloat = 0.3
+    /// Base flip-through rate (spreads/sec) when `pos` chases
+    /// `posTarget` — chosen so ~10 taps/s keeps up while staying
+    /// readable; scaled up ×(dist/3) for long jumps, capped ×10.
+    static let chaseSpreadsPerSecond: CGFloat = 8
 
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
