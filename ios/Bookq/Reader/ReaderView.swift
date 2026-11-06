@@ -130,9 +130,10 @@ struct ReaderView: View {
         return ZStack {
             ForEach(pagerSpreadIndices(work: work), id: \.self) { s in
                 PagerLayer(pos: pos, index: s, width: size.width,
-                           count: work.spreads.count) { live in
+                           count: work.spreads.count,
+                           fullRes: pagerSettled) { tier in
                     spreadCell(work: work, spread: s, pages: work.spreads[s],
-                               live: live, in: size)
+                               tier: tier, in: size)
                 }
                 .allowsHitTesting(pagerSettled && s == posTarget)
             }
@@ -224,32 +225,38 @@ struct ReaderView: View {
     /// right-to-left without mirroring the pager's `.offset` turns.
     @ViewBuilder
     private func spreadCell(work: ReaderWork, spread s: Int,
-                            pages: [Int], live: Bool,
+                            pages: [Int], tier: PagerCellTier,
                             in size: CGSize) -> some View {
-        if live {
+        if tier == .placeholder {
+            // Far corridor spreads are always opacity 0 — a plain colour
+            // keeps the slide math without mounting image views.
+            Color.black
+        } else {
+            let fast = tier == .fast
             let ars = pages.map { pageAR[$0] ?? 0.7 }
             let gap: CGFloat = 5
             let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
             HStack(spacing: gap) {
                 ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in
-                    pageView(work: work, idx: idx)
+                    pageView(work: work, idx: idx, fast: fast)
                         .frame(width: ars[pos] * fit.height, height: fit.height)
                 }
             }
             .environment(\.layoutDirection, .rightToLeft)
             .frame(width: fit.width, height: fit.height)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            // Far corridor spreads are always opacity 0 — a plain colour
-            // keeps the slide math without mounting image views.
-            Color.black
         }
     }
 
-    private func pageView(work: ReaderWork, idx: Int) -> some View {
+    private func pageView(work: ReaderWork, idx: Int, fast: Bool) -> some View {
         let page = work.images[idx]
-        let url = model.api?.pageURL(folder: page.folder, name: page.name,
-                                     original: model.config.originalImages)
+        // Fast tier always uses the normalized /view rendition at reduced
+        // width — even under originalImages, since it is only the
+        // flip-through preview; the settled spread loads full quality.
+        let url = model.api?.pageURL(
+            folder: page.folder, name: page.name,
+            original: fast ? false : model.config.originalImages,
+            width: fast ? PageTurnMath.fastPageWidth : nil)
         return ZoomableScrollView(
             onZoomChange: { z in zoomed = z },
             onPinchOut: { showOverview = true },
@@ -708,6 +715,13 @@ struct ReaderView: View {
     }
 }
 
+/// What a corridor spread renders: nothing (far placeholder), the
+/// reduced-width fast rendition (in-flight turns), or full quality
+/// (settled reading, incl. zoom).
+private enum PagerCellTier: Equatable {
+    case placeholder, fast, full
+}
+
 /// One pager layer — an `Animatable` view (not a modifier) so `body`
 /// re-evaluates every interpolated frame and can pick live vs. cheap
 /// content by distance to `pos`.
@@ -727,11 +741,18 @@ private struct PagerLayer<Content: View>: View {
     var width: CGFloat
     var count: Int
     /// |index - pos| beyond this renders the placeholder. The visible
-    /// pair (floor/ceil) is always < 1 away, so ~2 spreads of lead keep
+    /// pair (floor/ceil) is always < 1 away, so ~3 spreads of lead keep
     /// image warm-up without mounting real cells for a whole burst
-    /// corridor (which can span a dozen spreads on rapid taps).
-    var liveDistance: CGFloat = 2
-    var content: (Bool) -> Content
+    /// corridor (which can span a dozen spreads on rapid taps). At the
+    /// 8 spreads/s chase rate that's ~375ms of fetch head start — enough
+    /// for a server's first ?w= rendition to generate before the spread
+    /// slides into view.
+    var liveDistance: CGFloat = 3
+    /// Settled pager → the visible neighbourhood upgrades to full-res
+    /// images; while a turn is in flight everything stays fast-tier so
+    /// decode/render cost never scales with flip speed.
+    var fullRes: Bool = false
+    var content: (PagerCellTier) -> Content
 
     var animatableData: CGFloat {
         get { pos }
@@ -739,10 +760,18 @@ private struct PagerLayer<Content: View>: View {
     }
 
     var body: some View {
-        content(abs(pos - CGFloat(index)) <= liveDistance)
+        content(tier)
             .opacity(opacity)
             .offset(x: offset)
             .zIndex(z)
+    }
+
+    private var tier: PagerCellTier {
+        let dist = abs(pos - CGFloat(index))
+        guard dist <= liveDistance else { return .placeholder }
+        // At rest pos is integral, so dist <= 1 covers the visible pair
+        // plus both warm-up neighbours — all upgrade together on settle.
+        return fullRes && dist <= 1 ? .full : .fast
     }
 
     /// Only the two spreads adjacent to `pos` are opaque — hidden

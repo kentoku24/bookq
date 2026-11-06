@@ -60,6 +60,11 @@ enum PageTurnMath {
     /// `posTarget` — chosen so ~10 taps/s keeps up while staying
     /// readable; scaled up ×(dist/3) for long jumps, capped ×10.
     static let chaseSpreadsPerSecond: CGFloat = 8
+    /// `/view/?w=` width for in-flight pages — ~1.3× an iPhone's 3×
+    /// viewport, so fast-tier bitmaps decode ~4× cheaper than the
+    /// 2560px default while flip-through stays sharp enough to read
+    /// motion. Settled spreads upgrade to the full rendition.
+    static let fastPageWidth = 1600
 
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),

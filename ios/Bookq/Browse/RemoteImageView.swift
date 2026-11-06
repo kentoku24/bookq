@@ -22,7 +22,11 @@ final class RemoteImageLoader: ObservableObject {
 
     init() {
         cache.countLimit = 400
-        cache.totalCostLimit = 128 * 1024 * 1024
+        // A decoded 2560px reader page costs ~150MB+ as RGBA — the old
+        // 128MB cap meant full-res pages could never stay cached and
+        // every revisit paid a refetch+redecode. 512MB holds a few
+        // spreads; NSCache still evicts under real memory pressure.
+        cache.totalCostLimit = 512 * 1024 * 1024
     }
 
     func image(for url: URL) -> UIImage? {
