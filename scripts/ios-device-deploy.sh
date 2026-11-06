@@ -1,12 +1,14 @@
 #!/bin/bash
 set -euo pipefail
-# Usage: ./scripts/ios-device-deploy.sh [--release] [--no-launch] [--udid <udid>]
+# Usage: ./scripts/ios-device-deploy.sh [--release] [--no-launch] [--udid <udid>] [--dev]
 # 実機 (paired iPhone/iPad) へ Bookq.app を build → install → launch するヘルパー。
 #   1. devicectl JSON から physical + paired + booted のデバイスを自動選択
 #      (--udid / DEVICE_UDID で明示も可。複数台なら一覧を出して中断)
 #   2. xcodebuild で対象デバイス向けに build (DEVELOPMENT_TEAM は pbxproj 記載済み)
 #   3. -showBuildSettings で .app の実パスを特定 (DerivedData の hash 非依存)
 #   4. devicectl install + launch
+# --dev は別 bundle ID (dev.bookq.reader.dev / BookqDev.app) の開発用バリアントを
+# 入れる — 通常版とストレージ/Keychain/進捗が分離され同時インストール可。
 # Personal Team プロビジョニングは 7 日で期限切れ。初回のみ端末側で
 # 設定 → 一般 → VPNとデバイス管理 で開発元の信頼が必要。
 
@@ -15,21 +17,31 @@ cd "$REPO_ROOT/ios"
 
 CONFIG=Debug
 LAUNCH=1
+DEV=""
 UDID="${DEVICE_UDID:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --release)   CONFIG=Release; shift ;;
     --no-launch) LAUNCH=0; shift ;;
+    --dev)       DEV=1; shift ;;
     --udid)      UDID=$2; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [--release] [--no-launch] [--udid <udid>]" >&2
+      echo "Usage: $0 [--release] [--no-launch] [--udid <udid>] [--dev]" >&2
       echo "  --release    Release 構成で build (default: Debug)" >&2
       echo "  --no-launch  install まで (起動しない)" >&2
       echo "  --udid <u>   対象デバイスを明示 (DEVICE_UDID でも可)" >&2
+      echo "  --dev        BookqDev (dev.bookq.reader.dev) として install" >&2
       exit 0 ;;
-    *) echo "Usage: $0 [--release] [--no-launch] [--udid <udid>]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--release] [--no-launch] [--udid <udid>] [--dev]" >&2; exit 2 ;;
   esac
 done
+
+BUNDLE_ID=dev.bookq.reader
+OVERRIDES=()
+if [ -n "$DEV" ]; then
+  BUNDLE_ID=dev.bookq.reader.dev
+  OVERRIDES=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" PRODUCT_NAME=BookqDev)
+fi
 
 # == 1. デバイス選択 ==
 if [ -z "$UDID" ]; then
@@ -67,17 +79,19 @@ PY
 fi
 
 # == 2. build ==
-echo "== build ($CONFIG → id=$UDID)"
+echo "== build ($CONFIG${DEV:+ --dev} → id=$UDID)"
 xcodebuild -project Bookq.xcodeproj -scheme Bookq \
   -destination "id=$UDID" -configuration "$CONFIG" \
-  -allowProvisioningUpdates build | tail -3
+  -allowProvisioningUpdates "${OVERRIDES[@]+"${OVERRIDES[@]}"}" build | tail -3
 
 # == 3. .app 特定 (showBuildSettings で確実に — DerivedData hash を grep しない) ==
 BUILD_DIR=$(xcodebuild -project Bookq.xcodeproj -scheme Bookq \
   -destination "id=$UDID" -configuration "$CONFIG" -showBuildSettings \
+  "${OVERRIDES[@]+"${OVERRIDES[@]}"}" \
   | awk -F' = ' '/^ +TARGET_BUILD_DIR/ {print $2; exit}')
 PRODUCT=$(xcodebuild -project Bookq.xcodeproj -scheme Bookq \
   -destination "id=$UDID" -configuration "$CONFIG" -showBuildSettings \
+  "${OVERRIDES[@]+"${OVERRIDES[@]}"}" \
   | awk -F' = ' '/^ +FULL_PRODUCT_NAME/ {print $2; exit}')
 APP="$BUILD_DIR/$PRODUCT"
 [ -d "$APP" ] || { echo "error: $APP が見つかりません" >&2; exit 1; }
@@ -88,10 +102,10 @@ xcrun devicectl device install app --device "$UDID" "$APP"
 
 # == 5. launch ==
 if [ "$LAUNCH" = 1 ]; then
-  echo "== launch dev.bookq.reader"
+  echo "== launch $BUNDLE_ID"
   # ロック中は process launch が error 10002 (Locked) で失敗する。
   # install は済んでいるので原因を案内して終了コードだけ立てる。
-  if ! xcrun devicectl device process launch --device "$UDID" dev.bookq.reader; then
+  if ! xcrun devicectl device process launch --device "$UDID" "$BUNDLE_ID"; then
     echo "warn: install は成功しましたが起動できません (端末のロック解除、または初回は 設定 → 一般 → VPNとデバイス管理 で開発元を信頼 → 再実行 or アイコンをタップ)" >&2
     exit 1
   fi
