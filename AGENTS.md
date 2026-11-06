@@ -86,7 +86,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 
 ### デプロイ / ネットワーク
 
-- viewer はホストポートを公開しない。唯一の到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer:8080)。`viewer` が `bookq_default` ネットワーク外だと 502 になる。
+- viewer はホストポートを公開しない。既定の到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer:8080)。独自ドメイン公開時は opt-in の cloudflared (profile `public`、`CLOUDFLARE_TUNNEL_TOKEN` 設定で `rebuild.sh prd deploy` が有効化) が第 2 の経路になる (#349)。`viewer` が `bookq_default` ネットワーク外だと 502 になる。
 - 開発環境は `./dev.sh up` で管理 (10スロットプール、project `bookq-dev-pool-XX` 形式。真実は docker label `com.bookq.name` / `com.bookq.pool_slot` のみ)。本番 `docker compose up` を worktree で直接叩かないこと。
 - ユーザー設定 (隠しルート等) は `user-state` volume の `/var/lib/bookq` に永続化される。キャッシュではないのでキャッシュ掃除経路で消さないこと。
 

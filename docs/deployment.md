@@ -175,10 +175,37 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 
 ### 唯一の到達経路
 
-viewer は**ホストにポートを公開していない**。`tailscale serve` が :443 で HTTPS を終端し、compose ネットワーク内の `http://viewer:8080` にプロキシする。つまり:
+viewer は**ホストにポートを公開していない**。既定では `tailscale serve` が :443 で HTTPS を終端し、compose ネットワーク内の `http://viewer:8080` にプロキシする。独自ドメイン公開を有効化した場合はこれに `cloudflared` 経由の第 2 の経路が加わる（下記「独自ドメイン公開」）。つまり:
 
 - ホストから `http://localhost:8080` は叩けない。ヘルスチェックはコンテナ内から行うしかない（`docker-compose.yml` の `healthcheck` がそれ）。
 - **viewer が compose ネットワークにいないと 502 になる。** 実際に一度これが起きている（下記）。
+
+### 独自ドメイン公開（Cloudflare Tunnel, #349）
+
+独自ドメインでの公開は opt-in の `cloudflared` コンテナ (compose profile `public`) で行う。cloudflared が外向きに Cloudflare edge へ接続を張る方式なので、**CGNAT・ポート開放不可の回線でも動く**（受信側にグローバル IP は不要）。TLS は Cloudflare edge が終端する。
+
+```
+ブラウザ → Cloudflare edge (TLS 終端) → トンネル → cloudflared → http://viewer:8080
+```
+
+`CLOUDFLARE_TUNNEL_TOKEN` が `.env`（またはシェル環境）にあると `rebuild.sh prd deploy` が自動で `--profile public` を付けて `docker compose up` する — つまり **token を置けば次の `prd.sh up` から cloudflared が起動する**。未設定なら従来どおり tailscale serve のみ。
+
+#### セットアップ手順
+
+1. Cloudflare にサイトを追加し、ドメインのネームサーバーを Cloudflare 指定の 2 台に変更（レジストラ側で操作）。**ドメインをメール等他用途で使っている場合は、既存の MX/TXT/A レコードを全て Cloudflare DNS に再現してから切り替えること** — NS 切替で既存レコードは全て無効になる。
+2. Zero Trust ダッシュボード → Networks → Tunnels → Create a tunnel → cloudflared。発行された token を `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定。
+3. 同じダッシュボードで Public Hostname を登録: `<host>.<domain>` → service `HTTP` `viewer:8080`（viewer-rs 運用時は `viewer-rs:8080`）。
+4. `.env` の `BASE_URL` を `https://<host>.<domain>` に変更。
+5. Google Cloud Console で `https://<host>.<domain>/auth/callback` を承認済み redirect URI に追加。**OAuth consent screen が "Testing" の場合は `ALLOWED_EMAILS` の各アドレスを Test users に登録必須**（未登録だと本人もログインできない）。
+6. `./prd.sh up` — cloudflared も起動し、`verify_url` が独自ドメイン経由の `/api/health` を叩くのでトンネル疎通まで確認できる。`docker logs bookq-prd-cloudflared` で `Registered tunnel connection` ×4 が見えれば接続確立。
+
+#### 運用上の注意
+
+- `BASE_URL` が ts.net 以外になると、`prd deploy` の tailnet 登録名整合チェック (`heal_fqdn_collision`) は自動でスキップされる（無関係なため）。
+- `*.ts.net` 側は引き続きコンテンツを返すが、OAuth ログインは `BASE_URL`（独自ドメイン）へ遷移する — cookie はドメイン別のため、実質独自ドメインが canonical になる。tailscale sidecar はそのまま残してよい。
+- `ALLOWED_EMAILS` は据え置き前提。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
+- Cloudflare 無料プランの TOS §2.8 は画像主体コンテンツの proxy 配信を制限する条項がある。個人利用なら実害はほぼない想定だが、転送量で問題化した場合の fallback は VPS リレー等の別方式。
+- token を消したい場合は `.env` から `CLOUDFLARE_TUNNEL_TOKEN` を削除して `./prd.sh up` — profile が外れて cloudflared は作られない（既存コンテナは `up` で `--remove-orphans` していないと残ることがあるので `docker rm -f bookq-prd-cloudflared` で掃除）。
 
 ### やってはいけないこと
 
