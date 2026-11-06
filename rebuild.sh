@@ -371,7 +371,15 @@ deploy_prd() {
     : "${PRD_TAILSCALE_IMAGE:?PRD_TAILSCALE_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     : "${PRD_EXPECT_SHA:?PRD_EXPECT_SHA が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     echo "🚀 本番コンテナを prebuilt image で起動します..."
-    docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build
+    # Cloudflare Tunnel (#349): CLOUDFLARE_TUNNEL_TOKEN があるときだけ
+    # profile `public` を有効化して cloudflared も起動する。無ければ
+    # 従来どおり tailscale serve のみが到達経路（後方互換）。
+    local profiles=()
+    if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-$(dotenv_value CLOUDFLARE_TUNNEL_TOKEN || true)}" ]; then
+        profiles=(--profile public)
+        info "CLOUDFLARE_TUNNEL_TOKEN 検出 — profile 'public' で cloudflared も起動します"
+    fi
+    docker compose "${profiles[@]}" -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build
 
     local cid
     cid="$(docker compose ps -q viewer)"
@@ -388,12 +396,21 @@ deploy_prd() {
 
     # tailnet 登録名が BASE_URL とずれている（= 同名ゴースト残存で -1 付与）と
     # BASE_URL は offline ノードを指すので、verify_url 前に自動復旧を試みる。
+    # BASE_URL が独自ドメイン (ts.net 以外) のときは tailnet 登録名とは無関係
+    # なので、このチェック自体をスキップする（#349）。
     local expected_fqdn sidecar
     expected_fqdn="$(printf '%s' "$base_url" | sed -E 's#^https?://##; s#/.*$##; s#:[0-9]+$##')"
-    sidecar="$(docker compose -f docker-compose.yml -f docker-compose.prd-image.yml ps -q tailscale 2>/dev/null || true)"
-    if [ -n "$sidecar" ]; then
-        heal_fqdn_collision "$sidecar" "$expected_fqdn" || true
-    fi
+    case "$expected_fqdn" in
+        *.ts.net)
+            sidecar="$(docker compose -f docker-compose.yml -f docker-compose.prd-image.yml ps -q tailscale 2>/dev/null || true)"
+            if [ -n "$sidecar" ]; then
+                heal_fqdn_collision "$sidecar" "$expected_fqdn" || true
+            fi
+            ;;
+        *)
+            info "BASE_URL ($expected_fqdn) は ts.net 以外 — tailnet 登録名の整合チェックをスキップします"
+            ;;
+    esac
 
     verify_url "$base_url"
     verify_prd_version "$PRD_EXPECT_SHA"
