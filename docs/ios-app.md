@@ -72,18 +72,39 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   リセット）を `spread.js` 通りに再現。RTL: 右端=最初のページ。タップゾーンは
   端30%=送り / 反対端30%=戻し / 中央=UI トグルで、`tapForward` 相当の
   方向切替ボタンあり（セッション限定・デフォルト左=次）。
-- 連打は 160ms 合流（最初のタップは即時、以後の連打は最終 spread へ一発遷移）
-  で TabView アニメーションの直列詰まりを回避。
+- ページ送りは TabView ではなく自前の ZStack ページャ。視覚状態は連続値
+  `pos`（spread 単位、小数=めくり途中）で、`floor(pos)` が上層として右へ
+  スライドし `ceil(pos)` が下に静止する — pos 上昇=現在 spread が右へ
+  出て次が現れ、pos 下降=前 spread が右からスライドインして覆う。
+  1 つの式で両方向を表現するため、ドラッグ中の指の反転は向きの再判定
+  なしに `pos` が原点を通って戻るだけで処理できる。`PageTurnMath`
+  純粋関数がドラッグデルタ・端ラバーバンド・コミット方向判定を担当。
+  ドラッグと ←/→ キーの移動範囲は現在章の spread 範囲
+  （`chapterSpreadRange` = web `getChapterSpreadRange`）にクランプされ、
+  章端ではラバーバンド→バウンスバック。タップゾーンのみ章跨ぎ可
+  （web の crossChapter:true/false と同じ区分）。コミット閾値は
+  web touchend と同じ `min(10%幅, 70pt)` + flick 予測 50%。
+  `currentIdx` はコミット開始時点で着地し、カウンタ/スライダー/外部
+  ディスプレイはアニメーションと同時に動く（web の strip 追従と同じ）。
+- 連打は合流しない: タップ毎に `posTarget` が 1 spread 進み、`pos` が
+  定速チェイスで追従する。10 taps/s 程度でも各タップが 1 ページ送りとして
+  計上され、ページは連続値を通って高速にめくれる（アニメーションの
+  キューイングは発生しない）。
 - 章結合: 兄弟 leaf を一続きで読み、各章境の前にスペーサーを挿入して
   spread ペア境界に揃える（app.js と同一式 `(startIdx-spreadOff+2)%2`）。
 - 進捗は常に「leaf パス + 章ローカル page」で保存・同期（`sync.js`
   と同じワイヤ {folder,page,total,ts}、2s デバウンス+バックオフ）。
 - ズームは UIScrollView ベース（pinch/pan のみ、double-tap 拡大なし）。
   1x 時は pan ジェスチャを無効化して外側ページングにスワイプを渡す。
+  ピンチ中は `onPinchState` でページドラッグを停止する。
 - 複数ページ（`overview.js` 相当）: 右上グリッドボタン or ピンチインで
   `OverviewView` を開く。章見出し・章ローカルページ番号・現ページ
-  ハイライト・現ページへ 1/3 位置スクロール・タップジャンプ。
-- キーボード（iPad/外付け）: →=次 / ←=前 / Home・End=章頭・章末 / G=複数ページ。
+  ハイライト・現ページへ 1/3 位置スクロール・タップジャンプ
+  （ページャと同じアニメーションで遷移）。
+- キーボード（iPad/外付け）: ←=次 / →=前（章内 clamp、端で no-op）/
+  Home=即時で章頭・End=章末 spread 先頭ページへアニメーション遷移
+  （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
+  （web・Android と同じ RTL 規約）。
 
 ## ブラウズ仕様（web parity）
 

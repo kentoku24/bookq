@@ -216,9 +216,17 @@ final class BookqAPI: Sendable {
     }
 
     /// Reader page URL — `/view/` (normalized) or `/image/` (original).
-    func pageURL(folder: String, name: String, original: Bool) -> URL {
+    /// `width` requests the `/view/?w=` fast-tier rendition (ignored for
+    /// `original`, which has no server-side resize).
+    func pageURL(folder: String, name: String, original: Bool,
+                 width: Int? = nil) -> URL {
         let rel = folder.isEmpty ? name : folder + "/" + name
-        return encodedURL("\(original ? "image" : "view")/" + ImageURL.encodePath(rel))
+        var query: [URLQueryItem] = []
+        if !original, let width {
+            query = [URLQueryItem(name: "w", value: String(width))]
+        }
+        return encodedURL("\(original ? "image" : "view")/" + ImageURL.encodePath(rel),
+                          query: query)
     }
 
     /// Absolute URL for an already-encoded API path + optional query.

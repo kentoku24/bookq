@@ -163,6 +163,48 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(list[0].images.count, 1)   // direct images only
     }
 
+    // MARK: - chapter spread range (getChapterSpreadRange)
+
+    func testChapterSpreadRangeSingleChapterIsFullBook() {
+        let w = ReaderWork.assemble(clickedPath: "a",
+                                    chapters: [chapter("a", "a", 5)],
+                                    pageMode: .spread, spreadOffset: 0)
+        // boundaries.count <= 1 → the whole book is the clamp range.
+        XCTAssertEqual(w.chapterSpreadRange(0).lo, 0)
+        XCTAssertEqual(w.chapterSpreadRange(0).hi, 2)
+    }
+
+    func testChapterSpreadRangeCrossChapter() {
+        // ch0: 3 imgs / ch1: 4 imgs, offset0 → 1 spacer before ch1.
+        // spreads [[0,1],[2],[4,5],[6,7]] — ch0 owns spreads 0-1,
+        // ch1 owns 2-3 (spreads never mix chapters).
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 3),
+                                               chapter("02", "w/02", 4)],
+                                    pageMode: .spread, spreadOffset: 0)
+        let r0 = w.chapterSpreadRange(0)
+        XCTAssertEqual(r0.lo, 0)
+        XCTAssertEqual(r0.hi, 1)
+        let r1 = w.chapterSpreadRange(1)
+        XCTAssertEqual(r1.lo, 2)
+        XCTAssertEqual(r1.hi, 3)
+    }
+
+    func testChapterSpreadRangeLeadingSpacerOffset1() {
+        // offset1 cross-chapter quirk: leading spacer + boundary spacer.
+        // spreads [[1,2],[3],[5,6]] — ch0 = 0-1, ch1 = 2 only.
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 3),
+                                               chapter("02", "w/02", 2)],
+                                    pageMode: .spread, spreadOffset: 1)
+        let r0 = w.chapterSpreadRange(0)
+        XCTAssertEqual(r0.lo, 0)
+        XCTAssertEqual(r0.hi, 1)
+        let r1 = w.chapterSpreadRange(1)
+        XCTAssertEqual(r1.lo, 2)
+        XCTAssertEqual(r1.hi, 2)
+    }
+
     // MARK: - tap zones (test_viewer_tapmode: L/R modes + center chrome)
 
     func testZoneActionLeftMode() {
@@ -187,5 +229,163 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(zoneAction(frac: 0.71, tapForwardLeft: true), .turn(-1))
         XCTAssertEqual(zoneAction(frac: 0.30, tapForwardLeft: true), .toggleChrome)
         XCTAssertEqual(zoneAction(frac: 0.70, tapForwardLeft: true), .toggleChrome)
+    }
+
+    // MARK: - page-turn drag math (custom ZStack pager)
+
+    func testDragDirectionWaitsForThreshold() {
+        XCTAssertNil(PageTurnMath.dragDirection(dx: 5, dy: 0))
+        XCTAssertNil(PageTurnMath.dragDirection(dx: -5, dy: 0))
+        XCTAssertNil(PageTurnMath.dragDirection(dx: PageTurnMath.decideDistance,
+                                                dy: 0))
+    }
+
+    func testDragDirectionRejectsVerticalDominant() {
+        // |dx| > decideDistance but |dy| larger → still undecided.
+        XCTAssertNil(PageTurnMath.dragDirection(dx: 20, dy: 30))
+        XCTAssertNil(PageTurnMath.dragDirection(dx: -20, dy: -40))
+    }
+
+    func testDragDirectionRightIsForward() {
+        // Manga/RTL: drag right = next spread (current slides right).
+        XCTAssertEqual(PageTurnMath.dragDirection(dx: 20, dy: 5), 1)
+        XCTAssertEqual(PageTurnMath.dragDirection(dx: -20, dy: 5), -1)
+    }
+
+    func testDragDeltaLinearToViewport() {
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: 100, viewWidth: 400), 0.25,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: 400, viewWidth: 400), 1.0,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: 0, viewWidth: 400), 0)
+    }
+
+    func testDragDeltaSignedBothDirections() {
+        // Odd-symmetric: left drags retreat pos (backward turn).
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: -100, viewWidth: 400), -0.25,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: -400, viewWidth: 400), -1.0,
+                       accuracy: 0.0001)
+    }
+
+    func testDragDeltaDampsOvershoot() {
+        // Past one width the delta keeps growing but at 30% rate.
+        let d = PageTurnMath.dragDelta(dx: 800, viewWidth: 400)
+        XCTAssertEqual(d, 1 + (2 - 1) * PageTurnMath.overshootDamping,
+                       accuracy: 0.0001)
+        XCTAssertGreaterThan(d, 1)
+        // Symmetric on the backward side.
+        XCTAssertEqual(PageTurnMath.dragDelta(dx: -800, viewWidth: 400), -d,
+                       accuracy: 0.0001)
+    }
+
+    func testRangeClampBookEdges() {
+        // Book bounds are just rangeClamp(0, count-1) — the single-
+        // chapter case of the chapter-range clamp.
+        XCTAssertEqual(PageTurnMath.rangeClamp(2.5, lo: 0, hi: 5), 2.5)
+        XCTAssertEqual(PageTurnMath.rangeClamp(-1, lo: 0, hi: 5),
+                       -PageTurnMath.edgeRubber, accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.rangeClamp(6, lo: 0, hi: 5),
+                       5 + PageTurnMath.edgeRubber, accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.rangeClamp(-0.5, lo: 0, hi: 5),
+                       -0.5 * PageTurnMath.edgeRubber, accuracy: 0.0001)
+    }
+
+    func testRangeClampArbitraryBounds() {
+        // Chapter-bound rubber band: inside [lo,hi] passthrough, overshoot
+        // damped toward the bound (web dragPx *= 0.35 at chapter edge).
+        XCTAssertEqual(PageTurnMath.rangeClamp(3.5, lo: 2, hi: 5), 3.5)
+        XCTAssertEqual(PageTurnMath.rangeClamp(1.0, lo: 2, hi: 5),
+                       2 - PageTurnMath.edgeRubber, accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.rangeClamp(6.0, lo: 2, hi: 5),
+                       5 + PageTurnMath.edgeRubber, accuracy: 0.0001)
+        // Inverted/empty ranges collapse to a point; overshoot still
+        // rubber-bands on both sides of it.
+        XCTAssertEqual(PageTurnMath.rangeClamp(3.0, lo: 4, hi: 2),
+                       4 - PageTurnMath.edgeRubber, accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.rangeClamp(5.0, lo: 4, hi: 2),
+                       4 + PageTurnMath.edgeRubber, accuracy: 0.0001)
+    }
+
+    func testCommitDirectionOnFlick() {
+        // Predicted end ≥ half the viewport commits even on short travel.
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: 10,
+                                                    predicted: 200,
+                                                    viewWidth: 400), 1)
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: -10,
+                                                    predicted: -200,
+                                                    viewWidth: 400), -1)
+    }
+
+    func testCommitDirectionOnDistance() {
+        // Deliberate drag past the web touchend threshold
+        // `min(10% width, 70)` commits even without a flick.
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: 140,
+                                                    predicted: 100,
+                                                    viewWidth: 400), 1)
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: -140,
+                                                    predicted: -100,
+                                                    viewWidth: 400), -1)
+        XCTAssertNil(PageTurnMath.commitDirection(translation: 30,
+                                                  predicted: 30,
+                                                  viewWidth: 400))
+    }
+
+    func testCommitDirectionThresholdMatchesWeb() {
+        // web touchend: min(innerWidth * 0.10, 70) — 10% below 700pt,
+        // capped at 70pt above it.
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: 40,
+                                                    predicted: 0,
+                                                    viewWidth: 400), 1)
+        XCTAssertNil(PageTurnMath.commitDirection(translation: 39,
+                                                  predicted: 0,
+                                                  viewWidth: 400))
+        XCTAssertEqual(PageTurnMath.commitDirection(translation: 70,
+                                                    predicted: 0,
+                                                    viewWidth: 800), 1)
+        XCTAssertNil(PageTurnMath.commitDirection(translation: 69,
+                                                  predicted: 0,
+                                                  viewWidth: 800))
+    }
+
+    func testCommitDirectionRejectsZeroWidth() {
+        XCTAssertNil(PageTurnMath.commitDirection(translation: 100,
+                                                  predicted: 500,
+                                                  viewWidth: 0))
+    }
+
+    // MARK: - depth scrim (coveredFraction)
+
+    func testCoveredFractionZeroAtRest() {
+        // Integer pos = settled spread — nothing is covered.
+        XCTAssertEqual(PageTurnMath.coveredFraction(0, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(2, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(5, count: 6), 0)
+    }
+
+    func testCoveredFractionForwardTurn() {
+        // pos = i+0.3 forward: the revealed next spread is still 70%
+        // covered → scrim fraction 0.7, brightening toward 0 at i+1.
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.3, count: 6), 0.7,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.9, count: 6), 0.1,
+                       accuracy: 0.0001)
+    }
+
+    func testCoveredFractionBackwardTurn() {
+        // pos = i-0.3 written as 2.7 (floor 2 sliding in on top):
+        // the current spread is 30% covered → fraction 0.3.
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.7, count: 6), 0.3,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.1, count: 6), 0.9,
+                       accuracy: 0.0001)
+    }
+
+    func testCoveredFractionEdgesAndOvershoot() {
+        // No covered page at the book edges or while rubber-banding past.
+        XCTAssertEqual(PageTurnMath.coveredFraction(-0.4, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(0.5, count: 1), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(5.5, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(6.2, count: 6), 0)
     }
 }

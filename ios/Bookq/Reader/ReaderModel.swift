@@ -35,6 +35,108 @@ func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
     return .toggleChrome
 }
 
+/// Pure drag/commit math for the pager — unit-tested, no UIKit deps.
+///
+/// The pager is driven by a continuous spread position `pos` (CGFloat):
+/// integers are settled spreads, fractions are mid-turn. `floor(pos)` is
+/// always the top layer sliding right; `ceil(pos)` sits static beneath —
+/// forward (pos rising) slides the current spread off right revealing the
+/// next, backward (pos falling) slides the previous in from the right on
+/// top. One formula yields both directions, so finger reversals mid-drag
+/// need no direction lock: pos just follows the finger back through the
+/// origin.
+enum PageTurnMath {
+    /// Horizontal travel (pt) before a drag locks its direction.
+    static let decideDistance: CGFloat = 12
+    /// Damping applied to drags that point past the first/last spread.
+    static let edgeRubber: CGFloat = 0.35
+    /// Commit when the predicted end (flick) covers this fraction of the
+    /// viewport width, or deliberate travel covers the web touchend
+    /// threshold `min(10% width, 70pt)` (app.js — points ≈ CSS px).
+    static let commitPredictedFrac: CGFloat = 0.5
+    static let commitDistanceCap: CGFloat = 70
+    /// Soft resistance past a full-width travel while dragging.
+    static let overshootDamping: CGFloat = 0.3
+    /// Base flip-through rate (spreads/sec) when `pos` chases
+    /// `posTarget` — must exceed a ~10 taps/s input burst or `pos`
+    /// falls behind permanently; the per-target ease (`dist/0.12`)
+    /// still lands single turns gently. Long jumps scale up ×(dist/3),
+    /// capped ×10.
+    static let chaseSpreadsPerSecond: CGFloat = 12
+    /// `/view/?w=` width for in-flight pages — ~1.3× an iPhone's 3×
+    /// viewport, so fast-tier bitmaps decode ~4× cheaper than the
+    /// 2560px default while flip-through stays sharp enough to read
+    /// motion. Settled spreads upgrade to the full rendition.
+    static let fastPageWidth = 1600
+    /// Peak black overlay on the covered (static) spread mid-turn —
+    /// the depth scrim that sells the page-lift metaphor (iBooks /
+    /// Android `STACK_SCRIM` parity). Fully covered → this opacity,
+    /// fully revealed → 0.
+    static let stackScrimMax: CGFloat = 0.35
+
+    /// Direction verdict: nil until the drag is clearly horizontal
+    /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
+    /// -1 = backward (drag left) — the manga/RTL convention shared with
+    /// the web touch handler (`dragPx > 0 → next`).
+    static func dragDirection(dx: CGFloat, dy: CGFloat) -> Int? {
+        let ax = abs(dx), ay = abs(dy)
+        guard ax > decideDistance, ax > ay else { return nil }
+        return dx > 0 ? 1 : -1
+    }
+
+    /// Live drag → signed spread delta for `pos`. Odd-symmetric: positive
+    /// dx advances pos (forward), negative retreats it (backward); travel
+    /// past one viewport keeps moving at `overshootDamping` rate.
+    static func dragDelta(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
+        guard viewWidth > 0 else { return 0 }
+        let p = dx / viewWidth
+        let a = abs(p)
+        let mag = a <= 1 ? a : 1 + (a - 1) * overshootDamping
+        return p < 0 ? -mag : mag
+    }
+
+    /// Rubber-band for `pos` against [lo, hi] spread bounds — inside
+    /// passthrough, overshoot damped at edgeRubber. Callers pass the
+    /// current chapter's spread range (`chapterSpreadRange`), which for
+    /// a single-chapter work IS the book edge [0, count-1] — web damps
+    /// `dragPx *= 0.35` past the chapter edge the same way.
+    static func rangeClamp(_ p: CGFloat, lo: Int, hi: Int) -> CGFloat {
+        let l = CGFloat(lo), h = CGFloat(max(hi, lo))
+        if p < l { return l + (p - l) * edgeRubber }
+        if p > h { return h + (p - h) * edgeRubber }
+        return p
+    }
+
+    /// Release decision for a drag in continuous-pos space. Returns the
+    /// commit direction (+1 = forward/right, -1 = backward/left) or nil
+    /// to spring back. A flick (predicted end ≥ half the viewport) wins
+    /// over deliberate travel (web touchend `min(10% width, 70px)`);
+    /// direction comes from the firing signal so a reversed flick
+    /// commits the way it points.
+    static func commitDirection(translation: CGFloat, predicted: CGFloat,
+                                viewWidth: CGFloat) -> Int? {
+        guard viewWidth > 0 else { return nil }
+        if abs(predicted) >= viewWidth * commitPredictedFrac {
+            return predicted > 0 ? 1 : -1
+        }
+        if abs(translation) >= min(viewWidth * 0.10, commitDistanceCap) {
+            return translation > 0 ? 1 : -1
+        }
+        return nil
+    }
+
+    /// Covered fraction of the static (`ceil`) spread during a turn —
+    /// `ceil(pos) - pos` inside the book. Forward (`pos = i+f`) dims the
+    /// revealed next spread by 1-f so it brightens as the mover slides
+    /// away; backward (`pos = i-f`) dims the current spread by f as the
+    /// previous one covers it. Integer `pos` yields 0 for free, and
+    /// edge overshoot is excluded so rubber-banding never dims.
+    static func coveredFraction(_ pos: CGFloat, count: Int) -> CGFloat {
+        guard pos > 0, pos < CGFloat(count - 1) else { return 0 }
+        return min(max(ceil(pos) - pos, 0), 1)
+    }
+}
+
 struct ReaderWork: Equatable {
     var clickedPath: String
     var images: [PageRef]             // global, including spacers
@@ -234,6 +336,30 @@ struct ReaderWork: Equatable {
             w = size.width
         }
         return CGSize(width: w, height: h)
+    }
+
+    /// `getChapterSpreadRange` (app.js) — spread index range [lo, hi]
+    /// covering chapter `ci`'s real pages. Spreads never mix chapters
+    /// (spacer padding aligns boundaries), so the range is contiguous.
+    /// Swipes and keys clamp turns to it; taps and overview jumps cross.
+    func chapterSpreadRange(_ ci: Int) -> (lo: Int, hi: Int) {
+        guard !spreads.isEmpty else { return (0, 0) }
+        if boundaries.count <= 1 { return (0, spreads.count - 1) }
+        let c = min(max(ci, 0), boundaries.count - 1)
+        let start = boundaries[c]
+        let end = c + 1 < boundaries.count ? boundaries[c + 1] : images.count
+        var firstReal = -1, lastReal = -1
+        if start < images.count {
+            for i in start..<min(end, images.count) where !images[i].isSpacer {
+                if firstReal < 0 { firstReal = i }
+                lastReal = i
+            }
+        }
+        if firstReal < 0 {
+            let s = spreadOf(min(start, max(images.count - 1, 0)))
+            return (s, s)
+        }
+        return (spreadOf(firstReal), spreadOf(lastReal))
     }
 
     /// `spreadOf` — spread containing global index.
