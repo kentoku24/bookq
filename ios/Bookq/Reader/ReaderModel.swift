@@ -67,6 +67,11 @@ enum PageTurnMath {
     /// 2560px default while flip-through stays sharp enough to read
     /// motion. Settled spreads upgrade to the full rendition.
     static let fastPageWidth = 1600
+    /// Peak black overlay on the covered (static) spread mid-turn —
+    /// the depth scrim that sells the page-lift metaphor (iBooks /
+    /// Android `STACK_SCRIM` parity). Fully covered → this opacity,
+    /// fully revealed → 0.
+    static let stackScrimMax: CGFloat = 0.35
 
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
@@ -113,6 +118,17 @@ enum PageTurnMath {
             return translation > 0 ? 1 : -1
         }
         return nil
+    }
+
+    /// Covered fraction of the static (`ceil`) spread during a turn —
+    /// `ceil(pos) - pos` inside the book. Forward (`pos = i+f`) dims the
+    /// revealed next spread by 1-f so it brightens as the mover slides
+    /// away; backward (`pos = i-f`) dims the current spread by f as the
+    /// previous one covers it. Integer `pos` yields 0 for free, and
+    /// edge overshoot is excluded so rubber-banding never dims.
+    static func coveredFraction(_ pos: CGFloat, count: Int) -> CGFloat {
+        guard pos > 0, pos < CGFloat(count - 1) else { return 0 }
+        return min(max(ceil(pos) - pos, 0), 1)
     }
 }
 

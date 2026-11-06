@@ -774,9 +774,21 @@ private struct PagerLayer<Content: View>: View {
 
     var body: some View {
         content(tier)
+            .overlay { Color.black.opacity(Double(scrim)) }
             .opacity(opacity)
             .offset(x: offset)
             .zIndex(z)
+    }
+
+    /// Depth scrim on the static (`ceil`) spread — the covered page
+    /// dims by `coveredFraction` and brightens as the mover uncovers
+    /// it (iBooks / Android `stackTurnScrim` parity). Only the ceil
+    /// layer is ever the covered one; the floor mover stays lit, and
+    /// at rest or edge overshoot the fraction is 0 so nothing dims.
+    private var scrim: CGFloat {
+        guard index == Int(ceil(pos)) else { return 0 }
+        return PageTurnMath.coveredFraction(pos, count: count)
+            * PageTurnMath.stackScrimMax
     }
 
     private var tier: PagerCellTier {

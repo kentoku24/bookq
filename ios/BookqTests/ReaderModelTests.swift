@@ -281,4 +281,39 @@ final class ReaderModelTests: XCTestCase {
                                                   predicted: 500,
                                                   viewWidth: 0))
     }
+
+    // MARK: - depth scrim (coveredFraction)
+
+    func testCoveredFractionZeroAtRest() {
+        // Integer pos = settled spread — nothing is covered.
+        XCTAssertEqual(PageTurnMath.coveredFraction(0, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(2, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(5, count: 6), 0)
+    }
+
+    func testCoveredFractionForwardTurn() {
+        // pos = i+0.3 forward: the revealed next spread is still 70%
+        // covered → scrim fraction 0.7, brightening toward 0 at i+1.
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.3, count: 6), 0.7,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.9, count: 6), 0.1,
+                       accuracy: 0.0001)
+    }
+
+    func testCoveredFractionBackwardTurn() {
+        // pos = i-0.3 written as 2.7 (floor 2 sliding in on top):
+        // the current spread is 30% covered → fraction 0.3.
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.7, count: 6), 0.3,
+                       accuracy: 0.0001)
+        XCTAssertEqual(PageTurnMath.coveredFraction(2.1, count: 6), 0.9,
+                       accuracy: 0.0001)
+    }
+
+    func testCoveredFractionEdgesAndOvershoot() {
+        // No covered page at the book edges or while rubber-banding past.
+        XCTAssertEqual(PageTurnMath.coveredFraction(-0.4, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(0.5, count: 1), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(5.5, count: 6), 0)
+        XCTAssertEqual(PageTurnMath.coveredFraction(6.2, count: 6), 0)
+    }
 }
