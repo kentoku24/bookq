@@ -135,7 +135,6 @@ struct ReaderView: View {
                     spreadCell(work: work, spread: s, pages: work.spreads[s],
                                tier: tier, in: size)
                 }
-                .allowsHitTesting(pagerSettled && s == posTarget)
             }
         }
         // NOTE: no RTL environment here — `.offset(x:)` mirrors under
@@ -245,6 +244,10 @@ struct ReaderView: View {
             .environment(\.layoutDirection, .rightToLeft)
             .frame(width: fit.width, height: fit.height)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Keeps the cell hittable while its ZoomableScrollView is
+            // suspended mid-turn — the pager's tap/drag gestures live on
+            // the parent ZStack and need a hittable descendant.
+            .contentShape(Rectangle())
         }
     }
 
@@ -268,6 +271,11 @@ struct ReaderView: View {
             }
             .background(Color.black)
         }
+        // Scroll/zoom suspend only while the pager is mid-turn — taps
+        // and the page-turn drag must stay live so rapid input keeps
+        // counting (gating the whole PagerLayer killed the parent
+        // gestures too, making turns ignore taps until settle).
+        .allowsHitTesting(pagerSettled)
     }
 
     // MARK: - Chrome
