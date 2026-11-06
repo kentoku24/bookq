@@ -82,15 +82,30 @@ fi
 SERVE_TARGET="${TS_SERVE_TARGET-http://viewer:8080}"
 
 if [ -n "$SERVE_TARGET" ]; then
-    echo "[tailscale] Setting up serve → $SERVE_TARGET"
-    tailscale --socket="$SOCKET" serve --https=443 off 2>/dev/null || true
-    tailscale --socket="$SOCKET" serve --bg "$SERVE_TARGET"
+    if [ "${TS_FUNNEL:-}" = "1" ]; then
+        # funnel は serve と同じ proxy を public internet にも開く (#353)。
+        # tailnet 側アクセスも継続する。前提として tailnet policy file の
+        # nodeAttrs に `funnel` 許可が必要 — 無いとコマンドが失敗する。
+        echo "[tailscale] Setting up funnel (public internet) → $SERVE_TARGET"
+        tailscale --socket="$SOCKET" funnel --https=443 off 2>/dev/null || true
+        tailscale --socket="$SOCKET" funnel --bg "$SERVE_TARGET"
+    else
+        echo "[tailscale] Setting up serve → $SERVE_TARGET"
+        # 過去に funnel を有効化していた場合に公開が残らないよう明示的に閉じる。
+        tailscale --socket="$SOCKET" funnel --https=443 off 2>/dev/null || true
+        tailscale --socket="$SOCKET" serve --https=443 off 2>/dev/null || true
+        tailscale --socket="$SOCKET" serve --bg "$SERVE_TARGET"
+    fi
 else
     echo "[tailscale] No TS_SERVE_TARGET — serve entries are managed externally"
 fi
 
 echo "[tailscale] Serve status:"
 tailscale --socket="$SOCKET" serve status || true
+if [ "${TS_FUNNEL:-}" = "1" ]; then
+    echo "[tailscale] Funnel status:"
+    tailscale --socket="$SOCKET" funnel status || true
+fi
 
 echo "[tailscale] Ready"
 wait

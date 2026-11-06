@@ -53,7 +53,7 @@ There is no linter or formatter configured.
 
 ### Two containers, one reachable path
 
-`docker-compose.yml` runs `viewer` (FastAPI on :8080) and a `tailscale` sidecar. **The viewer publishes no host port** — the only route in is `tailscale serve` terminating HTTPS on :443 and proxying to `viewer:8080` inside the compose network. Consequences worth knowing:
+`docker-compose.yml` runs `viewer` (FastAPI on :8080) and a `tailscale` sidecar. **The viewer publishes no host port** — the route in is `tailscale serve` terminating HTTPS on :443 and proxying to `viewer:8080` inside the compose network. `TS_FUNNEL=1` switches the sidecar to `tailscale funnel`, exposing the same endpoint to the public internet (no domain or extra infra needed; requires the `funnel` nodeAttr in the tailnet policy — #353). Consequences worth knowing:
 
 - Nothing on the host can reach the viewer directly, so liveness has to be checked from *inside* the container. That is what the `healthcheck` in `docker-compose.yml` is for; `rebuild.sh` (the shared deploy engine behind `prd.sh up` and `dev.sh up`) waits on it and then curls the public URL, which is the only check that catches "container is up but the proxy isn't serving it".
 - **If `viewer` is not on the `bookq_default` network, the site returns 502** — `tailscale serve` resolves the literal name `viewer` through compose DNS. This has happened for real: a hand-started container inherited the compose labels `project=bookq, service=viewer` while sitting on the default `bridge` network. Diagnose with `docker inspect $(docker compose ps -q viewer) --format '{{json .NetworkSettings.Networks}}'`.

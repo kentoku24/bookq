@@ -180,6 +180,19 @@ viewer は**ホストにポートを公開していない**。`tailscale serve` 
 - ホストから `http://localhost:8080` は叩けない。ヘルスチェックはコンテナ内から行うしかない（`docker-compose.yml` の `healthcheck` がそれ）。
 - **viewer が compose ネットワークにいないと 502 になる。** 実際に一度これが起きている（下記）。
 
+### 一般公開（Tailscale Funnel, #353）
+
+`TS_FUNNEL=1` を `.env` に設定すると、sidecar が `tailscale serve` ではなく `tailscale funnel` を張る。これにより **`https://bookq.<tailnet>.ts.net` が tailnet 外の public internet からも到達できる**（funnel は public :443 をノードへ中継し、TLS は従来どおり sidecar 内で終端。tailnet 内アクセスも継続）。
+
+- 前提: tailnet policy file (admin console → ACL) の `nodeAttrs` に funnel 許可が必要:
+  ```json
+  "nodeAttrs": [{"target": ["*"], "attr": ["funnel"]}]
+  ```
+- 設定後は `./prd.sh up` で有効化。`verify_url` が `BASE_URL/api/health` を叩くので、公開経路の疎通まで自動確認できる
+- `BASE_URL`・Google OAuth redirect URI は変更不要（ホスト名が変わらないため）
+- 停止は `TS_FUNNEL` を外して `./prd.sh up` — entrypoint が `funnel --https=443 off` を明示して公開を確実に閉じる
+- 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）。独自ドメインでの公開は #349 (Cloudflare Tunnel) が別経路として存在する
+
 ### やってはいけないこと
 
 **worktree で素の `docker compose up` を打たない。** compose はディレクトリ名からプロジェクト名を作るので、worktree では別プロジェクトが立ち上がる。そこには tailscale サイドカーも含まれ、ホスト名 `bookq` を要求して本番のノードと名前を争う（Tailscale が `bookq-1` にリネームするため、`BASE_URL` と証明書が食い違って本番が壊れる）。

@@ -132,6 +132,10 @@ services:
       # 未設定 → viewer 直結（従来どおり）。http://viewer-rs:8080 で gateway
       # 経由に切替。空文字 = serve を外部管理（entrypoint の escape hatch）。
       - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer:8080}
+      # 1 で serve を funnel (public internet 公開) に切替 (#353)。
+      # tailnet policy の nodeAttrs `funnel` 許可が前提。未設定 = tailnet 内
+      # のみ（従来どおり）。
+      - TS_FUNNEL=${TS_FUNNEL:-}
     volumes:
       - tailscale-state:/var/lib/tailscale
     restart: unless-stopped
