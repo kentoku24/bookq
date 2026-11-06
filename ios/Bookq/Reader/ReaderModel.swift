@@ -57,9 +57,11 @@ enum PageTurnMath {
     /// Soft resistance past a full-width travel while dragging.
     static let overshootDamping: CGFloat = 0.3
     /// Base flip-through rate (spreads/sec) when `pos` chases
-    /// `posTarget` — chosen so ~10 taps/s keeps up while staying
-    /// readable; scaled up ×(dist/3) for long jumps, capped ×10.
-    static let chaseSpreadsPerSecond: CGFloat = 8
+    /// `posTarget` — must exceed a ~10 taps/s input burst or `pos`
+    /// falls behind permanently; the per-target ease (`dist/0.12`)
+    /// still lands single turns gently. Long jumps scale up ×(dist/3),
+    /// capped ×10.
+    static let chaseSpreadsPerSecond: CGFloat = 12
     /// `/view/?w=` width for in-flight pages — ~1.3× an iPhone's 3×
     /// viewport, so fast-tier bitmaps decode ~4× cheaper than the
     /// 2560px default while flip-through stays sharp enough to read

@@ -465,8 +465,13 @@ struct ReaderView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 8_000_000)
                 let now = Date()
-                // Cap dt so a hitch doesn't teleport `pos`.
-                stepPos(dt: min(now.timeIntervalSince(last), 0.05))
+                // Cap dt so a hitch doesn't teleport `pos` — but the cap
+                // must stay well above worst-case tick jitter. At 0.05 a
+                // saturated main thread (ticks ~200ms apart) advanced pos
+                // by only 0.05s×speed per tick ≈ 2 spreads/s — the exact
+                // "2 pages per second" ceiling seen on device. 0.2s keeps
+                // the chase honest to real elapsed time under jitter.
+                stepPos(dt: min(now.timeIntervalSince(last), 0.2))
                 last = now
                 if pos == CGFloat(posTarget) {
                     posAnimating = false
