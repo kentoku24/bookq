@@ -21,7 +21,11 @@ struct ReaderView: View {
     @State private var showChrome = true
     @State private var spreadOffset = 0          // 0=default pairs, 1=cover solo
     @State private var landscapeSpread = true    // spread in landscape
-    @State private var zoomed = false
+    /// Pages currently zoomed, keyed by global page index. Tracked per
+    /// page — not a single flag — so a zoomed neighbour cell that stays
+    /// mounted doesn't poison the drag guard after a turn, while turning
+    /// back to it still correctly refuses page drags.
+    @State private var zoomedPages: Set<Int> = []
     @State private var pageAR: [Int: CGFloat] = [:]  // measured AR per page
     @State private var viewportSize: CGSize = .zero
     @State private var saveTask: Task<Void, Never>?
@@ -35,8 +39,9 @@ struct ReaderView: View {
     /// one formula produces both turn directions (see PageTurnMath).
     @State private var pos: CGFloat = 0
     /// Spread index `pos` is animating toward. Programmatic turns (tap,
-    /// keys, slider, overview) just move this target — the spring chases
-    /// it, so rapid taps each advance one spread instead of queueing.
+    /// keys, slider, overview) just move this target — `pos` chases it
+    /// at a steady rate, so rapid taps each advance one spread instead
+    /// of queueing.
     @State private var posTarget = 0
     /// Finger-driven drag: `pos` captured when the gesture locked its
     /// direction (nil = not dragging). Cancel returns `pos` to `posTarget`.
@@ -48,7 +53,7 @@ struct ReaderView: View {
     @State private var posAnimating = false
     /// Drives `pos` toward `posTarget` at a steady flip rate (see
     /// `animatePos`). `pos` stays the honest visual position — written
-    /// per tick — so the rendered corridor is simply pos...posTarget.
+    /// per tick — so the pager simply renders whatever `pos` shows.
     @State private var chaseTask: Task<Void, Never>?
     /// Finger translation at the moment a drag locked its direction —
     /// deltas are measured from here so a late lock (post-animation)
@@ -194,21 +199,31 @@ struct ReaderView: View {
         dragBase == nil && !posAnimating && pos == CGFloat(posTarget)
     }
 
-    /// Spread indices the pager renders: the corridor between `pos` and
-    /// `posTarget` while a chase is in flight (every spread the flip
-    /// will pass through), collapsing to `pos`±1 at rest. The ±1
-    /// neighbour padding keeps image/AR warm-up (matching the old
-    /// TabView neighbourhood).
+    /// Spread indices the pager renders: a window around `pos`. At rest
+    /// it collapses to `pos`±1 (the old TabView neighbourhood); while a
+    /// chase is in flight it widens to the live-cell radius so spreads
+    /// the flip will pass through already have their fast-tier fetch in
+    /// flight — without mounting a dead placeholder for every corridor
+    /// spread on long jumps.
     private func pagerSpreadIndices(work: ReaderWork) -> [Int] {
         let n = work.spreads.count
-        let range = posAnimating
-            ? (min(pos, CGFloat(posTarget))...max(pos, CGFloat(posTarget)))
-            : (pos...pos)
-        let lo = Int(floor(range.lowerBound)) - 1
-        let hi = Int(ceil(range.upperBound)) + 1
+        let pad = posAnimating ? Int(pagerLiveDistance) + 1 : 1
+        let lo = Int(floor(pos)) - pad
+        let hi = Int(ceil(pos)) + pad
         var set = Set<Int>()
         for s in lo...hi where s >= 0 && s < n { set.insert(s) }
         return set.sorted()
+    }
+
+    /// True when a page of the spread under `pos` is zoomed — the
+    /// ScrollView's pan/zoom owns the gesture then, so page drags must
+    /// stay out. `Int(pos)` truncates toward the visible top layer
+    /// (`floor` for non-negative pos, 0 under start-edge rubber-band).
+    private func spreadZoomed(in work: ReaderWork) -> Bool {
+        let n = work.spreads.count
+        guard n > 0 else { return false }
+        let s = min(max(Int(pos), 0), n - 1)
+        return work.spreads[s].contains { zoomedPages.contains($0) }
     }
 
     /// Global index of the current chapter's first (0) or last (-1) real page.
@@ -227,7 +242,7 @@ struct ReaderView: View {
                             pages: [Int], tier: PagerCellTier,
                             in size: CGSize) -> some View {
         if tier == .placeholder {
-            // Far corridor spreads are always opacity 0 — a plain colour
+            // Far window spreads are always opacity 0 — a plain colour
             // keeps the slide math without mounting image views.
             Color.black
         } else {
@@ -261,7 +276,9 @@ struct ReaderView: View {
             original: fast ? false : model.config.originalImages,
             width: fast ? PageTurnMath.fastPageWidth : nil)
         return ZoomableScrollView(
-            onZoomChange: { z in zoomed = z },
+            onZoomChange: { z in
+                if z { zoomedPages.insert(idx) } else { zoomedPages.remove(idx) }
+            },
             onPinchOut: { showOverview = true },
             onPinchState: { active in pinchActive = active }
         ) {
@@ -276,6 +293,9 @@ struct ReaderView: View {
         // counting (gating the whole PagerLayer killed the parent
         // gestures too, making turns ignore taps until settle).
         .allowsHitTesting(pagerSettled)
+        // A destroyed cell (placeholder swap / window slide) must not
+        // leave a stale zoom entry — its next mount starts at 1x.
+        .onDisappear { zoomedPages.remove(idx) }
     }
 
     // MARK: - Chrome
@@ -426,7 +446,7 @@ struct ReaderView: View {
 
     /// Tap-zone turn — web navTurn: spread granularity, cross-chapter.
     /// Every tap lands immediately: `posTarget` steps one spread and the
-    /// `pos` spring chases it, so rapid taps each count as a turn (the
+    /// `pos` chase follows it, so rapid taps each count as a turn (the
     /// pager fast-forwards through spreads instead of queueing animations).
     private func turn(_ dir: Int, in work: ReaderWork) {
         guard let next = dir > 0
@@ -440,6 +460,9 @@ struct ReaderView: View {
     /// spread unless `animated` is false (Home key, mode rebuilds).
     private func snapTo(_ idx: Int, in work: ReaderWork, animated: Bool = true) {
         guard idx >= 0 && idx < work.images.count else { return }
+        // Programmatic navigation owns `pos` now — drop any in-flight
+        // drag so chase ticks and finger deltas can't fight over it.
+        dragBase = nil
         let target = work.spreadOf(idx)
         guard work.spreads.indices.contains(target) else {
             applyLanding(idx, in: work)
@@ -526,7 +549,7 @@ struct ReaderView: View {
     /// walks `pos` back through the origin — no direction lock needed.
     private func pagerDragChanged(_ v: DragGesture.Value,
                                   work: ReaderWork, size: CGSize) {
-        guard !zoomed, !pinchActive else { return }
+        guard !pinchActive, !spreadZoomed(in: work) else { return }
         let dx = v.translation.width
         let dy = v.translation.height
         if dragBase == nil {
@@ -731,7 +754,12 @@ struct ReaderView: View {
     }
 }
 
-/// What a corridor spread renders: nothing (far placeholder), the
+/// How far (in spreads) a mounted pager cell stays "live" — closer cells
+/// render real pages, farther ones a placeholder. `pagerSpreadIndices`
+/// uses it to size the mounted window while a chase is in flight.
+private let pagerLiveDistance: CGFloat = 3
+
+/// What a pager spread renders: nothing (far placeholder), the
 /// reduced-width fast rendition (in-flight turns), or full quality
 /// (settled reading, incl. zoom).
 private enum PagerCellTier: Equatable {
@@ -760,10 +788,10 @@ private struct PagerLayer<Content: View>: View {
     /// pair (floor/ceil) is always < 1 away, so ~3 spreads of lead keep
     /// image warm-up without mounting real cells for a whole burst
     /// corridor (which can span a dozen spreads on rapid taps). At the
-    /// 8 spreads/s chase rate that's ~375ms of fetch head start — enough
-    /// for a server's first ?w= rendition to generate before the spread
-    /// slides into view.
-    var liveDistance: CGFloat = 3
+    /// 12 spreads/s base chase rate that's ~250-375ms of fetch head
+    /// start — enough for a server's first ?w= rendition to generate
+    /// before the spread slides into view.
+    var liveDistance: CGFloat = pagerLiveDistance
     /// Settled pager → the visible neighbourhood upgrades to full-res
     /// images; while a turn is in flight everything stays fast-tier so
     /// decode/render cost never scales with flip speed.
