@@ -429,7 +429,7 @@ fn archive_bytes_response(
         return not_modified();
     }
     let mut r = response(StatusCode::OK, Body::empty());
-    set_header(&mut r, header::CACHE_CONTROL, "public, max-age=3600");
+    set_header(&mut r, header::CACHE_CONTROL, "private, max-age=3600");
     set_header(&mut r, header::ETAG, etag);
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
@@ -729,7 +729,7 @@ fn plan_range(headers: &HeaderMap, size: u64) -> RangePlan {
 
 fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, headers: &HeaderMap) -> Serve {
     let mut r = response(StatusCode::OK, Body::empty());
-    set_header(&mut r, header::CACHE_CONTROL, "public, max-age=3600");
+    set_header(&mut r, header::CACHE_CONTROL, "private, max-age=3600");
     set_header(&mut r, header::ETAG, etag);
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
     set_header(&mut r, header::CONTENT_TYPE, guess_type(&path.to_string_lossy()));

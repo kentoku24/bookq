@@ -114,7 +114,7 @@ def test_view_etag_304_and_disk_cache(client, view_cache: Path):
     res = client.get("/view/plain/page.webp")
     assert res.status_code == 200
     assert res.headers.get("ETag")
-    assert res.headers.get("Cache-Control") == "public, max-age=86400"
+    assert res.headers.get("Cache-Control") == "private, max-age=86400"
     # Normalized output landed in the view/ namespace.
     assert list((view_cache / "view").glob("*.jpg"))
     res2 = client.get("/view/plain/page.webp", headers={"If-None-Match": res.headers["ETag"]})

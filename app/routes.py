@@ -1497,8 +1497,10 @@ def _archive_bytes_response(
     """Return bytes with ETag/Last-Modified, conditional 304, and Range 206 support."""
     if _not_modified(request, etag, mtime):
         return Response(status_code=304)
+    # `private`, not `public`: shared caches (CDN edge) must not store
+    # authenticated image bytes — they would re-serve them without auth.
     headers = {
-        "Cache-Control": "public, max-age=3600",
+        "Cache-Control": "private, max-age=3600",
         "ETag": etag,
         "Last-Modified": last_modified,
         "Accept-Ranges": "bytes",
@@ -1639,7 +1641,7 @@ async def serve_image(
         stat_result=stat,
         media_type=ctype or "application/octet-stream",
         headers={
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": "private, max-age=3600",
             "ETag": etag,
             "Last-Modified": last_modified,
         },

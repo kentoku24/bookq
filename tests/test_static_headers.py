@@ -28,12 +28,13 @@ def test_static_asset_conditional_304(server):
     assert r2.headers.get("cache-control") == "no-cache"
 
 
-def test_sw_js_keeps_no_cache_and_images_keep_public_max_age(server):
-    """既存の方針が崩れていないこと（回帰防止）。"""
+def test_sw_js_keeps_no_cache_and_images_keep_private_max_age(server):
+    """既存の方針が崩れていないこと（回帰防止）。認証付きメディアは private —
+    共有キャッシュ (CDN edge 等) に乗ると認証バイパスになるため。"""
     with httpx.Client(base_url=server, timeout=10) as c:
         sw = c.get("/sw.js")
         img = c.get("/image/simple_manga/1.png")
         thumb = c.get("/thumb/simple_manga/1.png?w=200")
     assert sw.headers.get("cache-control") == "no-cache"
-    assert img.headers.get("cache-control") == "public, max-age=3600"
-    assert thumb.headers.get("cache-control", "").startswith("public, max-age=86400")
+    assert img.headers.get("cache-control") == "private, max-age=3600"
+    assert thumb.headers.get("cache-control", "").startswith("private, max-age=86400")

@@ -25,6 +25,10 @@ ALLOWED_WIDTHS = (200, 400, 800)
 DEFAULT_WIDTH = 400
 JPEG_QUALITY = 70
 CACHE_MAX_AGE = 86400
+# Authenticated media must say `private`, never `public`: a shared cache
+# (CDN edge, corporate proxy) would store the bytes and re-serve them to
+# unauthenticated requests — an auth bypass. `private` keeps browser/SW
+# caching identical (#349 Cloudflare Tunnel public exposure).
 
 # Disk-cache eviction cap (issue #265): EACH of ``thumbs/<w>/`` and
 # ``sprites/<w>/`` keeps at most this many files. N=5000 matches the warmup
@@ -441,7 +445,7 @@ async def handle_thumb(request: Request, path: str, w: str | int | None) -> Resp
 
         body = await run_in_threadpool(_get_or_make)
     headers = {
-        "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+        "Cache-Control": f"private, max-age={CACHE_MAX_AGE}",
         "ETag": etag,
         "Last-Modified": utils.formatdate(mtime, usegmt=True),
         "X-Content-Type-Options": "nosniff",
@@ -563,7 +567,7 @@ async def handle_view(request: Request, path: str,
         if _not_modified(request, etag, mtime):
             return Response(status_code=304)
         headers = {
-            "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+            "Cache-Control": f"private, max-age={CACHE_MAX_AGE}",
             "ETag": etag,
             "Last-Modified": utils.formatdate(mtime, usegmt=True),
             "X-Content-Type-Options": "nosniff",
@@ -611,7 +615,7 @@ async def handle_view(request: Request, path: str,
         content=body,
         media_type="image/jpeg",
         headers={
-            "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+            "Cache-Control": f"private, max-age={CACHE_MAX_AGE}",
             "ETag": etag,
             "Last-Modified": utils.formatdate(mtime, usegmt=True),
             "X-Content-Type-Options": "nosniff",
@@ -959,7 +963,7 @@ async def handle_thumb_sprite(request: Request) -> Response:
             content=await run_in_threadpool(dest.read_bytes),
             media_type="image/jpeg",
             headers={
-                "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+                "Cache-Control": f"private, max-age={CACHE_MAX_AGE}",
                 "ETag": etag,
                 "Last-Modified": utils.formatdate(etag_mtime, usegmt=True),
                 "X-Content-Type-Options": "nosniff",
@@ -1018,7 +1022,7 @@ async def handle_thumb_sprite(request: Request) -> Response:
     except Exception:
         raise HTTPException(status_code=404, detail="File not found")
     headers = {
-        "Cache-Control": f"public, max-age={CACHE_MAX_AGE}",
+        "Cache-Control": f"private, max-age={CACHE_MAX_AGE}",
         "ETag": etag,
         "Last-Modified": utils.formatdate(etag_mtime, usegmt=True),
         "X-Content-Type-Options": "nosniff",

@@ -101,7 +101,7 @@ def test_thumb_etag_304_and_cache_control(client, thumb_cache: Path):
     res = client.get("/thumb/plain/big.png?w=200")
     assert res.status_code == 200
     assert res.headers.get("ETag")
-    assert res.headers.get("Cache-Control") == "public, max-age=86400"
+    assert res.headers.get("Cache-Control") == "private, max-age=86400"
     assert res.headers.get("Last-Modified")
     assert res.headers.get("X-Content-Type-Options") == "nosniff"
     # Only the SVG branch carries the sandbox CSP; a rasterized JPEG must not.
