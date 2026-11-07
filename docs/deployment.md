@@ -188,9 +188,11 @@ viewer は**ホストにポートを公開していない**。`tailscale serve` 
   ```json
   "nodeAttrs": [{"target": ["*"], "attr": ["funnel"]}]
   ```
-- 設定後は `./prd.sh up` で有効化。`verify_url` が `BASE_URL/api/health` を叩くので、公開経路の疎通まで自動確認できる
+- 設定後は `./prd.sh up` で有効化。`verify_url` は deploy ホスト (tailnet メンバー) から `BASE_URL/api/health` を叩くため **tailnet 経路**の疎通確認になる。公開経路そのものの確認は tailnet 外端末で行う
 - `BASE_URL`・Google OAuth redirect URI は変更不要（ホスト名が変わらないため）
 - 停止は `TS_FUNNEL` を外して `./prd.sh up` — entrypoint が `funnel --https=443 off` を明示して公開を確実に閉じる
+- funnel 未許可のままだと `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無くサイト全体 (tailnet 経路も) 停止するが、sidecar コンテナは healthcheck 無しで Up のまま — restart loop にはならず自動検知もされない (実測で承認待ち ~106 秒)。復旧は承認リンク (`login.tailscale.com/f/funnel?node=...`) を踏むか `TS_FUNNEL` を外して `prd.sh up`。`funnel` コマンド自体が非ゼロ終了した場合のみ restart loop になる
+- Tailscale Funnel は beta で調整不可の帯域上限あり (数値非公開)。画像連続取得で体感差が出る可能性がある。`*.ts.net` 証明書は CT log に記録されるため funnel 公開により tailnet 名は公開情報になる
 - 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）。独自ドメインでの公開は #349 (Cloudflare Tunnel) が別経路として存在する
 
 ### やってはいけないこと
