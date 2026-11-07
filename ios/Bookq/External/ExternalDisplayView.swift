@@ -51,17 +51,6 @@ struct ExternalDisplayRootView: View {
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .onDisappear { store.screenLost() }
-        // Diagnostics overlay (temporary, for device bring-up): shows what
-        // mode/bounds the panel actually reports. Inset enough to survive
-        // panel-level overscan clipping.
-        .overlay(alignment: .bottomLeading) {
-            if let screen = store.externalScreen {
-                Text(ExternalDisplayStore.describe(screen))
-                    .font(.system(size: 18, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .padding(40)
-            }
-        }
     }
 }
 
