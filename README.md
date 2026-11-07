@@ -81,9 +81,9 @@ cp .env.example .env
 3. `./prd.sh up` — デプロイ後の `verify_url` が公開経路で `/api/health` を叩くので疎通まで自動確認される
 4. tailnet 外の端末 (スマホ LTE 等) で `https://<your-tailscale-hostname>` を開き、ログイン・閲覧を確認
 
-公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は [docs/deployment.md](docs/deployment.md) 参照。
+公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は #349 (Cloudflare Tunnel) が別経路として存在する。詳細は [docs/deployment.md](docs/deployment.md) 参照。
 
-公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) をブラウザで開く (client → Funnel edge → sidecar → viewer、ソース参照つき)。
+公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
 
 ## API
 
