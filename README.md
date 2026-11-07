@@ -78,12 +78,16 @@ cp .env.example .env
    ```
    ※ または `./prd.sh up` 後に `docker logs bookq-prd-tailscaleGateway` に出る `https://login.tailscale.com/f/funnel?node=...` リンクを踏んで当該ノードだけ許可する方法もある
 2. `.env` に `TS_FUNNEL=1` を追加
-3. `./prd.sh up` — デプロイ後の `verify_url` が公開経路で `/api/health` を叩くので疎通まで自動確認される
-4. tailnet 外の端末 (スマホ LTE 等) で `https://<your-tailscale-hostname>` を開き、ログイン・閲覧を確認
+3. `./prd.sh up`
+   - `verify_url` は deploy ホスト (tailnet メンバー) からの到達確認で **tailnet 経路**。funnel 自体の失敗は sidecar の restart loop として検出される (公開だけの失敗にはならない)
+   - 初回有効化は `serve` 解除 → `funnel --bg` が nodeAttrs 承認を待つため、承認が遅れる間は :443 proxy が無く**数十秒サイト全体が停止しうる**
+4. tailnet 外の端末 (スマホ LTE 等) で `https://<your-tailscale-hostname>` を開き、ログイン・閲覧を確認 (公開経路そのものの確認はこの手順が担う)
 
 公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は #349 (Cloudflare Tunnel) が別経路として存在する。詳細は [docs/deployment.md](docs/deployment.md) 参照。
 
 公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
+
+注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開) — 画像の連続取得で体感差が出る可能性がある。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
 
 ## API
 
