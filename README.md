@@ -83,6 +83,8 @@ cp .env.example .env
 
 公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は [docs/deployment.md](docs/deployment.md) 参照。
 
+公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) をブラウザで開く (client → Funnel edge → sidecar → viewer、ソース参照つき)。
+
 ## API
 
 | エンドポイント | 認証 | 説明 |
