@@ -474,7 +474,7 @@ def test_serve_zip_entry_and_etag(client):
     assert res.status_code == 200
     assert res.content[:8] == b"\x89PNG\r\n\x1a\n"
     assert res.headers.get("ETag")
-    assert res.headers.get("Cache-Control", "").startswith("public")
+    assert res.headers.get("Cache-Control", "").startswith("private")
     assert res.headers.get("Accept-Ranges") == "bytes"
     assert res.headers.get("Last-Modified")
     res2 = client.get("/image/work.zip/2.png", headers={"If-None-Match": res.headers["ETag"]})

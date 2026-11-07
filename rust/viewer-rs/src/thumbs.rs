@@ -253,7 +253,7 @@ fn media_response(
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(media));
     h.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_str(&format!("public, max-age={CACHE_MAX_AGE}")).unwrap(),
+        HeaderValue::from_str(&format!("private, max-age={CACHE_MAX_AGE}")).unwrap(),
     );
     h.insert(header::ETAG, HeaderValue::from_str(etag).unwrap());
     h.insert(
