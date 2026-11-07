@@ -79,8 +79,8 @@ cp .env.example .env
    ※ または `./prd.sh up` 後に `docker logs bookq-prd-tailscaleGateway` に出る `https://login.tailscale.com/f/funnel?node=...` リンクを踏んで当該ノードだけ許可する方法もある
 2. `.env` に `TS_FUNNEL=1` を追加
 3. `./prd.sh up`
-   - `verify_url` は deploy ホスト (tailnet メンバー) からの到達確認で **tailnet 経路**。funnel 自体の失敗は sidecar の restart loop として検出される (公開だけの失敗にはならない)
-   - 初回有効化は `serve` 解除 → `funnel --bg` が nodeAttrs 承認を待つため、承認が遅れる間は :443 proxy が無く**数十秒サイト全体が停止しうる**
+   - `verify_url` は deploy ホスト (tailnet メンバー) からの到達確認で **tailnet 経路** — 公開経路そのものの確認は 4. が担う
+   - funnel 未許可のままでは `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無く**サイト全体 (tailnet 経路も) が数分程度停止しうる** — sidecar は healthcheck 無しで Up のまま・restart もされず自動検知されない。復旧は承認リンクを踏むか `TS_FUNNEL` を外して `prd.sh up`
 4. tailnet 外の端末 (スマホ LTE 等) で `https://<your-tailscale-hostname>` を開き、ログイン・閲覧を確認 (公開経路そのものの確認はこの手順が担う)
 
 公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は #349 (Cloudflare Tunnel) が別経路として存在する。詳細は [docs/deployment.md](docs/deployment.md) 参照。
