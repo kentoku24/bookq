@@ -68,26 +68,27 @@ cp .env.example .env
 
 `https://<your-tailscale-hostname>` でアクセス可能。
 
-### 4. 一般公開（Tailscale Funnel, オプション）
+### 4. 一般公開（Cloudflare Tunnel, オプション・推奨）
 
-既定では tailnet 内からのみ到達できる。`.env` に `TS_FUNNEL=1` を設定すると tailscale funnel になり、**同じ `https://<your-tailscale-hostname>` が public internet からも開ける**（ドメイン購入・外部サービス不要、`BASE_URL` / OAuth redirect URI も変更不要）。
+既定では tailnet 内からのみ到達できる。独自ドメインを Cloudflare に移管し tunnel を張ると、**`https://<host>.<your-domain>` が public internet から開ける**（CGNAT・受信ポート開放不要、帯域上限なし）。要: 独自ドメイン + Cloudflare Free アカウント。
 
-1. tailnet policy file (admin console → ACL) の `nodeAttrs` に funnel 許可を追加:
-   ```json
-   "nodeAttrs": [{"target": ["*"], "attr": ["funnel"]}]
-   ```
-   ※ または `./prd.sh up` 後に `docker logs bookq-prd-tailscaleGateway` に出る `https://login.tailscale.com/f/funnel?node=...` リンクを踏んで当該ノードだけ許可する方法もある
-2. `.env` に `TS_FUNNEL=1` を追加
-3. `./prd.sh up`
-   - `verify_url` は deploy ホスト (tailnet メンバー) からの到達確認で **tailnet 経路** — 公開経路そのものの確認は 4. が担う
-   - funnel 未許可のままでは `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無く**サイト全体 (tailnet 経路も) が数分程度停止しうる** — sidecar は healthcheck 無しで Up のまま・restart もされず自動検知されない。復旧は承認リンクを踏むか `TS_FUNNEL` を外して `prd.sh up`
-4. tailnet 外の端末 (スマホ LTE 等) で `https://<your-tailscale-hostname>` を開き、ログイン・閲覧を確認 (公開経路そのものの確認はこの手順が担う)
+1. Cloudflare にサイトを追加し、ドメインの NS を Cloudflare 指定に変更（レジストラ側で操作。既存 DNS 用途がある場合は先に全レコードを Cloudflare DNS へ再現）
+2. Zero Trust ダッシュボード → Networks → Tunnels → Create a tunnel → cloudflared。発行 token を `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定
+3. 同ダッシュボードで Public Hostname を登録: `<host>.<domain>` → service `HTTP` `viewer:8080`
+4. `.env` の `BASE_URL` を `https://<host>.<domain>` に変更
+5. Google Cloud Console で `https://<host>.<domain>/auth/callback` を承認済み redirect URI に追加（consent screen が Testing なら `ALLOWED_EMAILS` を Test users に登録必須）
+6. `./prd.sh up` — token があれば profile `public` で cloudflared も起動。`docker logs bookq-prd-cloudflared` に `Registered tunnel connection` が出れば接続確立
+7. tailnet 外の端末 (スマホ LTE 等) で `https://<host>.<domain>` を開き、Google ログイン → 閲覧を確認
 
-公開を閉じるには `TS_FUNNEL` を外して `./prd.sh up` (entrypoint が `funnel off` を明示する)。認可は引き続き OAuth + `ALLOWED_EMAILS`。独自ドメインでの公開は #349 (Cloudflare Tunnel) が別経路として存在する。詳細は [docs/deployment.md](docs/deployment.md) 参照。
+認可は引き続き OAuth + `ALLOWED_EMAILS`。詳細と運用注意 (Cloudflare edge キャッシュ対策・Bot Fight Mode・TOS §2.8) は [docs/deployment.md](docs/deployment.md)「独自ドメイン公開」を参照。
+
+### 4'. 一般公開（Tailscale Funnel, #353）— 非推奨
+
+`.env` に `TS_FUNNEL=1` を設定すると tailscale funnel になり同じ `https://<your-tailscale-hostname>` が public にも開けるが、**公式に変更不可の帯域上限があり (実測 ~数十KB/s/接続) 画像ビューア用途では使い物にならない**。公開には Cloudflare Tunnel を使うこと。手順・詳細は [docs/deployment.md](docs/deployment.md)「一般公開（Tailscale Funnel）」を参照。停止は `TS_FUNNEL` を外して `./prd.sh up`。
 
 公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
 
-注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開) — 画像の連続取得で体感差が出る可能性がある。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
+注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
 
 ## API
 
