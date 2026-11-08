@@ -630,12 +630,11 @@ pub async fn put_folder_visibility(
         }
     }
     let root2 = root.to_string();
-    let snap = tokio::task::spawn_blocking(move || {
-        store.set_hidden(GLOBAL_USER_KEY, &root2, hidden)
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok());
+    let snap =
+        tokio::task::spawn_blocking(move || store.set_hidden(GLOBAL_USER_KEY, &root2, hidden))
+            .await
+            .ok()
+            .and_then(|r| r.ok());
     match snap {
         Some(s) => vis_response(&owner, &s),
         None => vis_detail(StatusCode::SERVICE_UNAVAILABLE, "visibility store unavailable"),
