@@ -163,5 +163,7 @@ jobs:
         if: always()
         with:
           name: android-connected-test-report
-          path: android/app/build/reports/androidTests/
+          path: |
+            android/app/build/reports/androidTests/
+            android/build/outputs/android-ui-test-results.txt
           if-no-files-found: ignore
