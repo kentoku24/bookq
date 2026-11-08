@@ -73,7 +73,7 @@
 
   // ── OfflineStore / cache naming: shared with the harness via offline-core.js ──
   const OfflineStore = window.OfflineStore;
-  const { encodePath, escapeHtml, folderHasOnlyImages, folderHasImages, fmt: fmtBytes, dedupedBytes, rawBytes } = window.OfflineCore;
+  const { encodePath, escapeHtml, folderHasOnlyImages, folderHasImages, fmt: fmtBytes, dedupedBytes, rawBytes, wipeClientData } = window.OfflineCore;
   let offlineMap = {};
   let offlineRecordMap = new Map();
   let offlineParentPaths = new Set();
@@ -118,6 +118,22 @@
   window.refreshOfflineMap = refreshOfflineMap;
   window.offlineMap = offlineMap;
   try { window.offlineRecordMap = offlineRecordMap; window.offlineParentPaths = offlineParentPaths; } catch(e) { console.warn(e); }
+  // Logout erases client-held library data BEFORE the session is cleared
+  // server-side, so an offline tap still wipes the local copies — the
+  // /auth/logout interstitial then repeats the wipe and refreshes the '/'
+  // shell entry for the online path. The race keeps a hung IDB from
+  // blocking navigation; the server-side wipe is the backstop.
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const wiped = Promise.resolve()
+        .then(() => wipeClientData())
+        .catch(() => {});
+      Promise.race([wiped, new Promise(r => setTimeout(r, 3000))])
+        .then(() => { location.href = '/auth/logout'; });
+    });
+  }
   function updateProgress(folder,pct){
     try{
       const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(folder) : folder.replace(/["\\]/g,'\\$&');

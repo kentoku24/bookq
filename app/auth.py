@@ -9,7 +9,7 @@ Set BOOKQ_TEST_MODE=true to bypass auth in test environments.
 import os
 
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from joserfc import jwt
 from joserfc.errors import JoseError
@@ -208,8 +208,62 @@ async def auth_callback(request: Request):
     return RedirectResponse(url="/", status_code=303)
 
 
+# Logout interstitial: the session is already dead when this renders, so the
+# page's only job is erasing what the browser still holds — per-work image
+# caches, the API cache, IndexedDB records and the cached tree snapshot —
+# then refreshing the '/' entry inside the shell cache (it may hold the
+# authenticated viewer page with its visibility-snapshot embed) before
+# landing on the login page. offline-core.js is the single source for the
+# wipe; it is also what sw.js importScripts(), so it resolves offline too.
+_LOGOUT_HTML = """<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bookq — ログアウト</title>
+<meta http-equiv="refresh" content="8;url=/">
+</head>
+<body>
+<p>ログアウトしました。端末内のキャッシュを消去しています…</p>
+<p><a href="/">続行</a></p>
+<script src="/static/offline-core.js"></script>
+<script>
+(function () {
+  function done() { location.replace('/'); }
+  var jobs = [];
+  var core = window.OfflineCore;
+  if (core && core.wipeClientData) {
+    jobs.push(Promise.resolve().then(function () {
+      return core.wipeClientData();
+    }).catch(function () {}));
+  }
+  if (window.caches) {
+    jobs.push(fetch('/', {cache: 'no-store'}).then(function (res) {
+      if (!res || !res.ok) return null;
+      return caches.keys().then(function (names) {
+        return Promise.all(names.filter(function (n) {
+          return n.indexOf('bookq-shell-') === 0;
+        }).map(function (n) {
+          return caches.open(n).then(function (c) {
+            return c.put(new Request('/'), res.clone());
+          });
+        }));
+      });
+    }).catch(function () {}));
+  }
+  Promise.all(jobs).then(done, done);
+})();
+</script>
+</body>
+</html>
+"""
+
+
 @router.get("/logout")
 async def logout(request: Request):
-    """Clear session and redirect to home."""
+    """Clear session, wipe client-held library data, then land on `/`."""
     request.session.clear()
-    return RedirectResponse(url="/", status_code=303)
+    return HTMLResponse(
+        content=_LOGOUT_HTML,
+        headers={"Cache-Control": "no-store"},
+    )
