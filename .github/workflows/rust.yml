@@ -56,6 +56,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Exposes ACTIONS_RUNTIME_TOKEN/ACTIONS_*_URL to the shell — without
+      # them `type=gha` cache-from/to is skipped silently (#380).
+      - uses: crazy-max/ghaction-github-runtime@v4
+
       # type=gha layer cache: unchanged Cargo.lock/deps rebuild in seconds
       # instead of a full cold cargo build (#380).
       - name: docker build viewer-rs
@@ -97,6 +101,9 @@ jobs:
           EOF
 
       - uses: docker/setup-buildx-action@v3
+
+      # Same runtime env exposure as image-build — required for type=gha.
+      - uses: crazy-max/ghaction-github-runtime@v4
 
       # --load puts the images in the daemon for the compose-free `docker run`
       # below; per-image scopes keep the Python and Rust caches independent.
