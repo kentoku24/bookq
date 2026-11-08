@@ -5,6 +5,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PAIR_SYNC_JS = REPO_ROOT / "app" / "static" / "browse" / "pairSync.js"
+PAIR_CLIENT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairClient.js"
 
 _SC = "document.getElementById('sidebar-scroll')"
 
@@ -21,6 +22,7 @@ def pair_page(any_browser):
     context = any_browser.new_context(viewport={"width": 390, "height": 460})
     pg = context.new_page()
     pg.goto("about:blank")
+    pg.add_script_tag(path=str(PAIR_CLIENT_JS))
     pg.evaluate(SETUP_JS)
     pg.add_script_tag(path=str(PAIR_SYNC_JS))
     yield pg
@@ -128,7 +130,12 @@ SETUP_JS = r"""
     subscribe: function () { return function () {}; },
     onEvent: function (cb) { ctlEvents.push(cb); return function () {}; },
     sendUiSync: function (p) {
-      window.__uiSent.push(JSON.parse(JSON.stringify(p)));
+      // Run the REAL wire normalization (pairClient.js is loaded above) —
+      // a verbatim stub let pred-bearing tests stay green while the
+      // production whitelist silently dropped the key (#262).
+      var n = window.PairClient.normalizeUiSyncPayload(p);
+      if (n === null) return false;
+      window.__uiSent.push(JSON.parse(JSON.stringify(n)));
       return true;
     },
   };
