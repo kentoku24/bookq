@@ -507,8 +507,7 @@ impl PositionStore {
 // ── endpoint handlers ────────────────────────────────────────────────────────
 
 /// `_validate_folder_param` — non-empty, ≤2048 chars, no leading `/`, no NUL.
-/// (Python counts code points; `len()` here is bytes — multi-byte folders
-/// are bounded slightly tighter, matching the old Rust port's posture.)
+/// `chars().count()` counts code points like Python's `len(str)`.
 fn valid_folder_param(folder: &str) -> bool {
     !folder.is_empty()
         && folder.chars().count() <= 2048
