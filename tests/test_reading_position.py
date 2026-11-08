@@ -108,6 +108,11 @@ def test_put_validation(server):
         # json.loads accepts NaN/Infinity — int() would 500, must be 400
         {"folder": "f", "page": 0, "total": 1, "ts": float("nan")},
         {"folder": "f", "page": 0, "total": 1, "ts": float("inf")},
+        # ints beyond SQLite i64 must 400, not OverflowError -> 503
+        {"folder": "f", "page": 0, "total": 1 << 63},
+        {"folder": "f", "page": 1 << 63, "total": 5},
+        {"folder": "f", "page": 0, "total": 5, "ts": 1 << 63},
+        {"folder": "f", "page": 0.0, "total": float(1 << 63)},
     ):
         status, _ = _req(server, "PUT", "/api/reading-position", body)
         assert status == 400, body

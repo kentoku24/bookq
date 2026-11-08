@@ -1788,18 +1788,28 @@ def _validate_folder_param(folder) -> str:
     return folder
 
 
+# SQLite INTEGER / Rust i64 bound — viewer-rs's as_int rejects anything
+# outside i64, and an out-of-range Python int would OverflowError inside
+# sqlite3 and surface as a bogus 503 instead of a validation 400.
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
+
+
 def _as_int(v) -> int | None:
     """JSON Schema `integer` admits integral floats (2716.0) — coerce them.
 
-    bools and non-integral/non-finite values stay rejected.
+    bools, non-integral/non-finite values and ints outside the i64 range
+    the store can hold stay rejected.
     """
     if isinstance(v, bool):
         return None
     if isinstance(v, int):
-        return v
-    if isinstance(v, float) and math.isfinite(v) and v.is_integer():
-        return int(v)
-    return None
+        n = v
+    elif isinstance(v, float) and math.isfinite(v) and v.is_integer():
+        n = int(v)
+    else:
+        return None
+    return n if _INT64_MIN <= n <= _INT64_MAX else None
 
 
 def _validate_position_body_v1(body) -> dict:

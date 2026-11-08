@@ -414,6 +414,7 @@ paths:
                     type: array
                     items: {$ref: "#/components/schemas/ReadingPosition"}
         "403": {$ref: "#/components/responses/Forbidden"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
     put:
       tags: [state]
       operationId: putReadingPosition
@@ -451,6 +452,7 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "422": {$ref: "#/components/responses/ValidationError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
     delete:
       tags: [state]
       operationId: deleteReadingPosition
@@ -472,6 +474,7 @@ paths:
                   status: {type: string, enum: [ok]}
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
 
   /api/v1/folder-visibility:
     get:
@@ -792,6 +795,8 @@ paths:
                     oneOf:
                       - $ref: "#/components/schemas/ReadingPosition"
                       - type: "null"
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
     put:
       tags: [state]
       deprecated: true
@@ -822,6 +827,8 @@ paths:
                 properties:
                   status: {type: string, enum: [ok, stale]}
         "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
     delete:
       tags: [state]
       deprecated: true
@@ -840,6 +847,8 @@ paths:
                 type: object
                 properties:
                   status: {type: string}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
 
   /api/folder-visibility:
     get:
@@ -942,6 +951,11 @@ components:
               detail:
                 type: array
                 items: {type: object}
+    ServiceUnavailable:
+      description: user-state ストアの読み書き失敗（fail-closed。ディスク/DB 障害時）
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
 
   schemas:
     Error:
