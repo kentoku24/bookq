@@ -2605,6 +2605,11 @@
 
   function onStripImgError(idx, img){
     if (stripImgs[idx] !== img) return;
+    // H7 gate (same rule snapTo's onCurError applies): a decoded bitmap
+    // (naturalWidth > 0) means this error is a recycling/abort/synthetic
+    // artifact, not a fetch failure — pooled imgs are src-reset on
+    // release, so a genuine failure always arrives with nw === 0.
+    if (img.naturalWidth !== 0) return;
     // Same settle as a successful decode for the spinner's purposes —
     // the broken-image state must be visible, not an endless spinner.
     // Distinct from .pair-blank: this is a fetch failure, not an
