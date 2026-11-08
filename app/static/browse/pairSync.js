@@ -73,6 +73,14 @@
   var EST_MIN_MS = 30;
   var EST_MAX_MS = 200;
   var LOCAL_SETTLE_MS = 400;
+  /* 適応書き込みスロットル (#135) — メインスレッド逼迫で rAF dt が
+   * STARVE_DT_MS を超え続ける端末では scrollTop 書き込みを隔フレームに
+   * 間引く（積分は毎フレーム継続、軌跡は連続のまま）。starve は逼迫
+   * フレームで +2・良好フレームで -1、>=STARVE_ON の間だけ間引き —
+   * 一過性のジャンクではなく持続的な逼迫にだけ反応するヒステリシス。 */
+  var STARVE_DT_MS = 34;
+  var STARVE_ON = 2;
+  var STARVE_MAX = 6;
 
   var _armed = false;        // ミラー有効（live pair && phase==='selecting'）
   var _unlocked = false;     // 送信解禁 — leader は arm 即時、follower は初適用後
@@ -97,6 +105,19 @@
   var _lastLocalIntent = -1e9;
   var _sndHist = [];
   var _trace = null;
+  /* test-mode 診断 (#135) — 本番では計測しない（observer 未設置・カウンタ
+   * も _diag ガード）。実機計測は dev 環境 (BOOKQ_TEST_MODE) の
+   * __pairBrowseSync.stats から取る。 */
+  var _diag = (typeof window !== 'undefined' &&
+               window.__BOOKQ_TEST_MODE__ === 'true');
+  var _stats = {
+    ticks: 0, writes: 0, skips: 0,          // _followTick の回数・実書き込み・間引き
+    costSum: 0, costMax: 0,                 // tick 内 JS の処理コスト ms
+    gapOk: 0, gap60: 0, gap120: 0,          // rAF dt: <34ms / <120ms / >=120ms
+    lastRecv: -1, recvGapMax: 0, staleArrivals: 0,  // UI_SYNC 到着間隔
+    longtasks: [],                          // {t, dur} — 直近64件
+  };
+  var _ltObs = null;
 
   function _w() { return window; }
   function _pc() { return _w().PairController || null; }
@@ -188,6 +209,7 @@
       _userClosed = false;
       _suppressUntil = 0;
       _lastRemoteMsg = null;
+      _stats.lastRecv = -1;
       _resetFollow();
       _releaseInput();
       _lastLocalMove = -1e9;
@@ -219,7 +241,20 @@
   }
 
   function _onCtlEvent(e) {
-    if (e && e.type === 'ui-sync') _applyRemote(e.payload);
+    if (e && e.type === 'ui-sync') {
+      // 到着間隔の計測 (#135) — バースト着信 (recvGap/stale) が配送遅延の
+      // 直接証拠。stash 後の再適用は新着ではないのでここでのみ数える。
+      if (_diag) {
+        var rt = _perfNow();
+        if (_stats.lastRecv >= 0) {
+          var gap = rt - _stats.lastRecv;
+          if (gap > _stats.recvGapMax) _stats.recvGapMax = gap;
+          if (gap > STALE_MS) _stats.staleArrivals++;
+        }
+        _stats.lastRecv = rt;
+      }
+      _applyRemote(e.payload);
+    }
   }
 
   /* ── 送信 ── */
@@ -433,7 +468,7 @@
     return {sc: sc, hist: [],
       stream: {t0: t, top: top, vel: 0, dir: 0, pred: null},
       s1: top, pos: top, lastTick: t, tMax: -1e18, tMin: 1e18,
-      active: false};
+      starve: 0, wrNo: 0, active: false};
   }
   function _seedFollow(sc, ctx) {
     _follow = _newFollow(sc, sc.scrollTop, _perfNow());
@@ -585,6 +620,7 @@
     var f = _follow;
     if (!f || !f.active || !_followEligible(f)) { _resetFollow(); return; }
     var ts = (typeof t === 'number') ? t : _perfNow();
+    var c0 = _diag ? _perfNow() : 0;
     var dt = ts - f.lastTick;
     f.lastTick = ts;
     if (dt < 0) dt = 0;
@@ -592,15 +628,40 @@
     var T = _targetAt(f, ts);
     _integrate(f, T, dt);
     var x = f.pos;
-    var w = _writeFollow(x);
-    if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T});
+    /* 書き込みは逼迫時に隔フレームへ間引く — scrollTop 代入はレイアウト/
+     * ペイント要求と scroll イベント (_scheduleImgGate・prefetch
+     * debounce 等) の起動点なので、弱端末で追従由来の負荷がほぼ半減する。
+     * 「60fps を狙って逼迫→配送バースト停滞」を繰り返すより、安定した
+     * 低レート書き込みの方が体感が滑らか。skip したフレームの位置は
+     * f.pos 側で進み続けるので、間引きは表示遅延1フレーム分に留まる。 */
+    f.starve = (dt > STARVE_DT_MS)
+      ? Math.min(STARVE_MAX, f.starve + 2) : Math.max(0, f.starve - 1);
+    var skip = f.starve >= STARVE_ON && (++f.wrNo % 2 === 0);
+    if (skip) {
+      // skip フレームは sc.scrollTop すら読まない — 読み取り自体が dirty
+      // layout のフラッシュを誘発し得るので、安くする趣旨に反する。
+      if (_trace) _tracePush({t: ts, k: 'k', x: x, T: T});
+    } else {
+      var w = _writeFollow(x);
+      if (_trace) _tracePush({t: ts, k: 'w', x: x, w: w, T: T});
+    }
+    if (_diag) {
+      var st = _stats;
+      st.ticks++;
+      if (skip) st.skips++; else st.writes++;
+      if (dt <= STARVE_DT_MS) st.gapOk++;
+      else if (dt < 120) st.gap60++; else st.gap120++;
+      var cost = _perfNow() - c0;
+      st.costSum += cost;
+      if (cost > st.costMax) st.costMax = cost;
+    }
     var s = f.stream;
     if ((s.vel === 0 || ts - s.t0 >= STALE_MS) &&
         Math.abs(f.pos - s.top) < POSITION_EPS_PX &&
         Math.abs(f.s1 - f.pos) < POSITION_EPS_PX) {
       f.pos = s.top;
       f.s1 = s.top;
-      _writeFollow(s.top);
+      _writeFollow(s.top);          // 最終位置は間引かず必ず書く
       f.active = false;
       return;
     }
@@ -916,6 +977,24 @@
 
   if (window.__BOOKQ_TEST_MODE__ === 'true') {
     _trace = [];
+    /* 追従中の長時間タスクを stats.longtasks に記録 (#135) — 停止→再開の
+     * 正体が画像デコード・deferred job・GC のどれかを、recvGapMax /
+     * staleArrivals（配送遅延の計測）との時系列相関で実機から特定する
+     * ための前提。未対応環境（旧 iOS Safari 等）は observe/ctor が投げる
+     * ので握り潰す。 */
+    try {
+      if (typeof PerformanceObserver === 'function') {
+        _ltObs = new PerformanceObserver(function (list) {
+          var es = list.getEntries();
+          for (var i = 0; i < es.length; i++) {
+            _stats.longtasks.push(
+              {t: es[i].startTime, dur: es[i].duration});
+            if (_stats.longtasks.length > 64) _stats.longtasks.shift();
+          }
+        });
+        _ltObs.observe({entryTypes: ['longtask']});
+      }
+    } catch (e) {}
     window.__pairBrowseSync = {
       get armed() { return _armed; },
       get unlocked() { return _unlocked; },
@@ -939,6 +1018,22 @@
         };
       },
       get trace() { return _trace ? _trace.slice() : []; },
+      /* 追従パフォーマンス計測 (#135) — ticks/writes/skips は DOM への
+       * scrollTop 書き込み頻度、costAvg/costMax は tick 内の JS コスト、
+       * frameGaps は rAF dt 分布、recvGapMax/staleArrivals は配送遅延、
+       * longtasks はメインスレッド長時間タスク、starve は現在の逼迫度。 */
+      get stats() {
+        var s = _stats;
+        return {
+          ticks: s.ticks, writes: s.writes, skips: s.skips,
+          costAvg: s.ticks ? s.costSum / s.ticks : 0,
+          costMax: s.costMax,
+          frameGaps: {ok: s.gapOk, g60: s.gap60, g120: s.gap120},
+          recvGapMax: s.recvGapMax, staleArrivals: s.staleArrivals,
+          longtasks: s.longtasks.slice(),
+          starve: _follow ? _follow.starve : 0,
+        };
+      },
       get fps() {
         var w = (_trace || []).filter(function (e) { return e.k === 'w'; });
         if (w.length < 2) return null;
