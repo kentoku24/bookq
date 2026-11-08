@@ -9,8 +9,7 @@
 --
 -- The hidden set is library-global: every hidden_roots row lives under
 -- the sentinel user_key '*' (GLOBAL_USER_KEY in both implementations).
--- The column name stays `user_key` for schema compatibility; first
--- connect folds any legacy per-user rows into '*' as a union.
+-- The column name stays `user_key` for schema compatibility.
 --
 -- Applied idempotently on first connect; the trailing PRAGMA stamps the
 -- schema version. When changing this file, bump the version here AND in
