@@ -139,13 +139,13 @@ jobs:
             curl -sf http://127.0.0.1:8080/api/folders && break || sleep 1
           done
           curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null \
-            || { docker logs viewer-rs viewer; echo "gateway never healthy"; exit 1; }
+            || { docker logs viewer-rs; docker logs viewer; echo "gateway never healthy"; exit 1; }
           # Cold index answers 202 + Retry-After; poll until the build lands.
           for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/tree)
             [ "$code" = "200" ] && break || sleep 1
           done
-          [ "$code" = "200" ] || { docker logs viewer-rs viewer; echo "tree never warmed"; exit 1; }
+          [ "$code" = "200" ] || { docker logs viewer-rs; docker logs viewer; echo "tree never warmed"; exit 1; }
 
       - name: Schemathesis via gateway
         run: |

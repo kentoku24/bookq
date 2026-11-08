@@ -26,7 +26,13 @@ RUN mkdir -p rust/bookq-core/src rust/viewer-rs/src \
 COPY rust/ ./rust/
 # api/user-state-schema.sql is embedded via include_str! (#200)
 COPY api/ ./api/
-RUN cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs \
+# BuildKit COPY preserves context mtimes, so the freshly-checked-out real
+# sources look OLDER than the stub build's fingerprint and cargo would
+# ship the stub binary (observed: final build "Finished in 0.08s").
+# cargo clean -p forces exactly the workspace crates to rebuild while
+# keeping every third-party dep artifact from the cached layer.
+RUN cargo clean --manifest-path rust/Cargo.toml -p bookq-core -p viewer-rs \
+    && cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs \
     && cp rust/target/release/viewer-rs /viewer-rs-bin
 
 FROM debian:bookworm-slim
