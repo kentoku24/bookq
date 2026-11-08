@@ -37,6 +37,17 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v5
+        with:
+          # v5 defaults cache-read-only on non-default branches — let
+          # same-repo PRs write so the cache warms; fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+          # Default includes omit wrapper + configuration-cache; without them
+          # every job re-downloads Gradle and re-pays the ~2min configure phase.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            wrapper
+            configuration-cache
 
       # Installed platform on this repo is android-37.2 (minor release);
       # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
@@ -84,6 +95,17 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v5
+        with:
+          # v5 defaults cache-read-only on non-default branches — let
+          # same-repo PRs write so the cache warms; fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+          # Default includes omit wrapper + configuration-cache; without them
+          # every job re-downloads Gradle and re-pays the ~2min configure phase.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            wrapper
+            configuration-cache
 
       - name: Install Android SDK packages
         working-directory: android
@@ -130,6 +152,8 @@ jobs:
           api-level: 35
           arch: x86_64
           target: google_apis
+          # Runner has 4 vCPUs; the action default of 2 leaves half idle.
+          cores: 4
           disable-animations: true
           working-directory: android
           script: bash "$GITHUB_WORKSPACE/.github/scripts/android-ui-test.sh"
