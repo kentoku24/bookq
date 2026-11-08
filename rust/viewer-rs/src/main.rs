@@ -96,8 +96,9 @@ pub(crate) struct AppState {
     pub(crate) allowed_emails: std::sync::Arc<std::collections::HashSet<String>>,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
-    /// M4: per-process reading positions (`app.state.reading_positions`).
-    pub(crate) positions: std::sync::Arc<state::Positions>,
+    /// M4+375: per-user reading positions in the shared user-state SQLite
+    /// store (`ReadingPositionStore`) — same DB the Python viewer writes.
+    pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
     /// `SECRET_KEY` — Bearer JWT verify + visibility owner HMAC.
@@ -245,8 +246,9 @@ async fn vary_session_cookie(
     res
 }
 
-/// `/api/v1/reading-positions` — M4: per-folder LWW + tombstones, fully
-/// native (positions are per-process ephemeral upstream as well).
+/// `/api/v1/reading-positions` — M4+375: per-folder LWW + tombstones,
+/// native on the shared user-state SQLite store (same rows the Python
+/// viewer reads/writes, so py/rs cannot diverge — #263 resolved).
 async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("positions") {
         return proxy(&st.upstream, req).await;
@@ -254,8 +256,15 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
     let Some(user) = caller_or_proxy(&st, req.headers()) else {
         return proxy(&st.upstream, req).await;
     };
-    // `_position_user_key`: str(email or "unknown").lower()
-    let key = user.email.to_lowercase();
+    // `user_key_for_email`: strip().lower() — an empty key is a 403, never
+    // a shared bucket (same posture as the Python `_position_user_key`).
+    let key = user.email.trim().to_lowercase();
+    if key.is_empty() {
+        return state::detail(
+            axum::http::StatusCode::FORBIDDEN,
+            "session has no usable identity",
+        );
+    }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
@@ -263,8 +272,13 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
     match *req.method() {
         axum::http::Method::GET => {
             let folder = q.get("folder").map(|s| s.as_str());
-            serve::maybe_gzip(&headers, state::list_positions(&st.positions, &key, folder), true)
-                .await
+            let res = state::list_positions(
+                st.position_store.clone(),
+                &key,
+                folder.map(|s| s.to_string()),
+            )
+            .await;
+            serve::maybe_gzip(&headers, res, true).await
         }
         axum::http::Method::PUT => {
             // `folder` is required → missing keeps FastAPI's 422 upstream.
@@ -279,10 +293,15 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
                         .await
                 }
             };
-            state::put_position(&st.positions, &key, &folder, &body)
+            state::put_position(st.position_store.clone(), &key, &folder, &body).await
         }
         axum::http::Method::DELETE => {
-            state::delete_positions(&st.positions, &key, q.get("folder").map(|s| s.as_str()))
+            state::delete_positions(
+                st.position_store.clone(),
+                &key,
+                q.get("folder").map(|s| s.as_str()),
+            )
+            .await
         }
         _ => return proxy(&st.upstream, req).await,
     }
@@ -838,7 +857,7 @@ async fn main() {
         native: std::sync::Arc::new(native),
         allowed_emails: std::sync::Arc::new(allowed_emails),
         index: index.clone(),
-        positions: std::sync::Arc::new(state::Positions::default()),
+        position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
