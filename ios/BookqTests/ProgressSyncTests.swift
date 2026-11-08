@@ -194,6 +194,24 @@ final class ProgressSyncTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }
 
+    /// attach() resets the outgoing sync — a queued PUT must not survive
+    /// the transport swap and land under the next account's token.
+    func testAttachResetsOutgoingSync() async {
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
+        let oldSync = ProgressSync(api: api)
+        oldSync.sleep = { _ in }
+        let store = ReadingProgressStore()
+        store.attach(oldSync)
+        store.record(path: "A", page: 1, total: 10)   // queues a PUT on oldSync
+        // Swap transports before the 2s debounce can fire — same-actor
+        // ordering makes this deterministic.
+        let newSync = ProgressSync(api: api)
+        newSync.sleep = { _ in }
+        store.attach(newSync)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 0)
+    }
+
     /// mergeRemote writes the position WITHOUT re-pushing (no echo loop).
     func testMergeRemoteDoesNotEcho() async {
         StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }

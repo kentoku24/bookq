@@ -35,8 +35,14 @@ final class ReadingProgressStore: ObservableObject {
         load()
     }
 
-    /// Attach the server transport (called after configureAPI).
-    func attach(_ sync: ProgressSync?) { self.sync = sync }
+    /// Attach the server transport (called after configureAPI). The
+    /// outgoing sync is reset first: its pending debounce / in-flight
+    /// PUT would otherwise land under the NEW account's token and leak
+    /// the previous identity's position into the new server slot.
+    func attach(_ sync: ProgressSync?) {
+        self.sync?.reset()
+        self.sync = sync
+    }
 
     /// One-time move of the pre-scope key into the active account scope —
     /// only a concrete account (non-"anon" email) may claim it, mirroring
