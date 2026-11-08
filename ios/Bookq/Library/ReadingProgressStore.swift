@@ -4,6 +4,13 @@ import Foundation
 /// Local reading positions — `bookq_progress` equivalent (user-defaults
 /// JSON, cap 50 newest). Wire-format mirrors the web: {page,total,ts} per
 /// path. `ProgressSync` handles the single remote slot.
+///
+/// Storage is namespaced per server+account (#375, absorbs #265): the
+/// UserDefaults key is `bookq_progress_v1:<host>|<email>` via
+/// `scopeProvider`, the same scope OfflineStore uses, so a server or
+/// account switch can never push one identity's local progress under
+/// another. The pre-scope `bookq_progress_v1` key migrates once into a
+/// concrete account scope and is then removed.
 @MainActor
 final class ReadingProgressStore: ObservableObject {
     struct Entry: Codable, Equatable {
@@ -15,16 +22,48 @@ final class ReadingProgressStore: ObservableObject {
 
     @Published private(set) var entries: [String: Entry] = [:]
 
-    private let key = "bookq_progress_v1"
+    private let legacyKey = "bookq_progress_v1"
+    private let scopeProvider: () -> String
+    private var lastScope: String?
+    private var scopedKey: String { "\(legacyKey):\(scopeProvider())" }
     private(set) var sync: ProgressSync?
 
-    init() { load() }
+    init(scopeProvider: @escaping () -> String = { "anon|anon" }) {
+        self.scopeProvider = scopeProvider
+        lastScope = scopeProvider()
+        migrateLegacyIfNeeded()
+        load()
+    }
 
     /// Attach the server transport (called after configureAPI).
     func attach(_ sync: ProgressSync?) { self.sync = sync }
 
+    /// One-time move of the pre-scope key into the active account scope —
+    /// only a concrete account (non-"anon" email) may claim it, mirroring
+    /// OfflineStore.migrateLegacyIfNeeded so a signed-out scope can't
+    /// strand a signed-in user's progress.
+    private func migrateLegacyIfNeeded() {
+        let s = scopeProvider()
+        guard let sep = s.lastIndex(of: "|"),
+              s[s.index(after: sep)...] != "anon",
+              UserDefaults.standard.data(forKey: scopedKey) == nil,
+              let data = UserDefaults.standard.data(forKey: legacyKey) else { return }
+        UserDefaults.standard.set(data, forKey: scopedKey)
+        UserDefaults.standard.removeObject(forKey: legacyKey)
+    }
+
+    /// Re-read state after a server/account switch — the new scope has
+    /// its own entries; in-memory leftovers would leak across users.
+    func scopeChanged() {
+        let s = scopeProvider()
+        guard s != lastScope else { return }
+        lastScope = s
+        migrateLegacyIfNeeded()
+        load()
+    }
+
     func load() {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = UserDefaults.standard.data(forKey: scopedKey),
               let decoded = try? JSONDecoder().decode([String: Entry].self, from: data) else {
             entries = [:]
             return
@@ -34,7 +73,7 @@ final class ReadingProgressStore: ObservableObject {
 
     func save() {
         if let data = try? JSONEncoder().encode(entries) {
-            UserDefaults.standard.set(data, forKey: key)
+            UserDefaults.standard.set(data, forKey: scopedKey)
         }
     }
 
