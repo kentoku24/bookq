@@ -15,6 +15,7 @@
   const empty = document.getElementById("empty");
   const zonePrev = document.getElementById("zone-prev");
   const zoneToggle = document.getElementById("zone-toggle");
+  const imgRetryBtn = document.getElementById("img-retry");
   const zoneNext = document.getElementById("zone-next");
   const toolbar = document.getElementById("toolbar");
   const pageSlider = document.getElementById("page-slider");
@@ -602,6 +603,7 @@
     chapterLabels = [];
     for (const k of Object.keys(spreadEls)) spreadEls[k].remove();
     spreadEls = {}; pageAR = {}; lastAR = 0.7; anchorSpread = 0;
+    for (const k of Object.keys(imgFail)) clearImgFail(Number(k));
     for (const k of Object.keys(pairBlankCells)) pairBlankCells[k].remove();
     pairBlankCells = {};
     track.style.transition = "none";
@@ -667,6 +669,13 @@
   let stripCells = {};      // { idx: HTMLDivElement } — page-cell wrappers
   let spreadEls = {};       // { spreadNo: HTMLDivElement } — .spread-container wrappers
   let pageAR = {};          // { idx: naturalWidth/naturalHeight } — survives evictStrip
+  // Image failure retry state (#156) — survives strip eviction like pageAR
+  // so scrolling back re-arms the fetch instead of inheriting a dead <img>.
+  // count = consecutive failures, nextAt = earliest auto-retry (exponential
+  // backoff), timer = armed retry timeout. Cleared per work in resetStrip().
+  let imgFail = {};
+  const IMG_RETRY_MAX = 3;        // automatic retries before manual-only
+  const IMG_RETRY_BASE_MS = 800;  // backoff: 800ms → 1.6s → 3.2s
   let lastAR = 0.7;         // fallback aspect for not-yet-loaded pages (~manga 1:1.4)
   const PREFETCH_AHEAD = 8;  // pages pre-fetched forward (manga: next is to the left)
   const PREFETCH_BEHIND = 3; // pages kept behind
@@ -2534,6 +2543,122 @@
     return true;
   }
 
+  // ── image failure retry (#156) ──
+  // A single failed fetch must not leave the page black until reload:
+  // failures are tracked per index, auto-retried with exponential
+  // backoff up to IMG_RETRY_MAX, then surfaced as a manual 画像を
+  // 再読み込み button on the current page.
+
+  function clearImgFail(idx){
+    const f = imgFail[idx];
+    if (f && f.timer){ clearTimeout(f.timer); f.timer = 0; }
+    delete imgFail[idx];
+  }
+
+  function disarmImgRetry(idx){
+    const f = imgFail[idx];
+    if (!f) return;
+    if (f.timer){ clearTimeout(f.timer); f.timer = 0; }
+    // The bound <img> is gone (evicted/purged) — its fetch is no longer
+    // ours, so a later revisit must be allowed to retry.
+    f.fetching = false;
+  }
+
+  function imgRetryWait(f){
+    return IMG_RETRY_BASE_MS * Math.pow(2, f.count - 1);
+  }
+
+  function armImgRetryTimer(idx){
+    const f = imgFail[idx];
+    if (!f || f.timer) return;
+    const wait = Math.max(0, f.nextAt - performance.now());
+    f.timer = setTimeout(() => { f.timer = 0; retryStripImage(idx, false); }, wait);
+  }
+
+  // Re-fetch a failed strip image. Automatic retries are bounded by
+  // IMG_RETRY_MAX; `manual` (the on-page button) resets the budget.
+  function retryStripImage(idx, manual){
+    const img = stripImgs[idx];
+    const f = imgFail[idx];
+    if (!img || !f || f.fetching) return false;
+    const url = getUrl(idx);
+    if (!url) return false;
+    if (manual){ f.count = 0; f.nextAt = 0; }
+    else if (f.count > IMG_RETRY_MAX) return false;
+    else if (performance.now() < f.nextAt){ armImgRetryTimer(idx); return false; }
+    // The previous attempt consumed the one-shot error listener — re-arm
+    // it or a second failure would go untracked.
+    img.addEventListener("error", () => onStripImgError(idx, img), {once:true});
+    f.fetching = true;
+    img.src = url;
+    return true;
+  }
+
+  // Revisit path: an existing cell whose fetch failed gets another chance
+  // once its backoff has elapsed (an auto-retry may already be armed).
+  function maybeRetryStripImage(idx){
+    const f = imgFail[idx];
+    if (!f || f.count > IMG_RETRY_MAX) return;
+    if (performance.now() >= f.nextAt) retryStripImage(idx, false);
+    else armImgRetryTimer(idx);
+  }
+
+  function onStripImgError(idx, img){
+    if (stripImgs[idx] !== img) return;
+    // H7 gate (same rule snapTo's onCurError applies): a decoded bitmap
+    // (naturalWidth > 0) means this error is a recycling/abort/synthetic
+    // artifact, not a fetch failure — pooled imgs are src-reset on
+    // release, so a genuine failure always arrives with nw === 0.
+    if (img.naturalWidth !== 0) return;
+    // Same settle as a successful decode for the spinner's purposes —
+    // the broken-image state must be visible, not an endless spinner.
+    // Distinct from .pair-blank: this is a fetch failure, not an
+    // intentional empty side.
+    img.classList.add("loaded");
+    const f = imgFail[idx] || (imgFail[idx] = {count: 0, nextAt: 0, timer: 0});
+    f.fetching = false;
+    f.count += 1;
+    f.nextAt = performance.now() + imgRetryWait(f);
+    if (f.count <= IMG_RETRY_MAX) armImgRetryTimer(idx);
+    updateImgRetryBtn();
+    // A failure on the page on screen keeps the ⚠ honest: the manual
+    // retry button resets it optimistically, so a repeat failure must
+    // put it back (and keep the spinner settled, like onCurError does).
+    if (idx === displayIdxFor(currentIdx)){
+      imgContainer.classList.remove("loading");
+      spinner.style.display = "none";
+      if (!counter.textContent.endsWith("⚠")){
+        counter.textContent = warnCounterLabel(currentIdx, idx) + " ⚠";
+      }
+    }
+  }
+
+  // The manual retry affordance belongs to the CURRENT page only: it
+  // appears once automatic retries are spent and hides on any state
+  // change that moves the reader or heals the image.
+  function updateImgRetryBtn(){
+    if (!imgRetryBtn) return;
+    const dIdx = displayIdxFor(currentIdx);
+    const f = (dIdx >= 0) ? imgFail[dIdx] : null;
+    imgRetryBtn.hidden = !(f && f.count > IMG_RETRY_MAX && stripImgs[dIdx]);
+  }
+
+  // "N / M" counter label for the ⚠ path — same computation snapTo uses
+  // for the normal label (paired: position within the chapter of the
+  // DISPLAY index; solo: of the logical index), so a retry failure can
+  // restore the warning honestly after the button's optimistic reset.
+  function warnCounterLabel(idx, dIdx){
+    if (pairStrip && pairStrip.active){
+      const info = getCurrentChapterInfo(idx);
+      return (dIdx - chapterBoundaries[info.chapterIdx] + 1) + " / " + getChapterRealCount(info.chapterIdx);
+    }
+    if (chapterList.length > 1){
+      const info = getCurrentChapterInfo(idx);
+      return (getChapterLocalRealIdx(idx) + 1) + " / " + getChapterRealCount(info.chapterIdx);
+    }
+    return (idx + 1) + " / " + images.length;
+  }
+
   function ensureStripImage(idx){
     if (idx < 0 || idx >= images.length) return null;
     const imgData = images[idx];
@@ -2544,7 +2669,7 @@
     // page of a spread whose assigned side is blank) must never get image DOM
     // — that's what keeps the adjacent peer page off the viewport edge.
     if (pairStrip && pairStrip.active && !pairStrip.renderSet.has(idx)) return null;
-    if (stripImgs[idx]) return stripImgs[idx];
+    if (stripImgs[idx]) { maybeRetryStripImage(idx); return stripImgs[idx]; }
     const cell = document.createElement("div");
     cell.className = "page-cell";
     // Acquire from pool instead of creating a new <img> — eliminates GC
@@ -2569,11 +2694,18 @@
         if (!sliding && spreadOf(idx) === anchorSpread) applyTrackTransform(currentIdx, 0, false);
       }
       img.classList.add("loaded");
+      // A healed image drops its failure record; when it is the page on
+      // screen, refresh the ⚠ counter and retry affordance honestly.
+      clearImgFail(idx);
+      if (idx === displayIdxFor(currentIdx)){
+        updateImgRetryBtn();
+        if (counter.textContent.endsWith("⚠")) snapTo(currentIdx, false);
+      }
       // Freshly fetched and still adjacent — decode now rather than letting the
       // first post-turn raster pay it (Gecko decodes lazily at paint).
       if (Math.abs(idx - currentIdx) <= 2) predecode(img);
     }, {once:true});
-    img.addEventListener("error", () => { if (stripImgs[idx] === img) img.classList.add("loaded"); }, {once:true});
+    img.addEventListener("error", () => onStripImgError(idx, img), {once:true});
     // Fetch priority by distance: the page the reader will see next must not
     // share bandwidth equally with the seven pages behind it. Without this, a
     // fast forward tap lands on a still-downloading page (previous pages are
@@ -2668,6 +2800,9 @@
         const cell = stripCells[k];
         if (cell) cell.remove();
         if (img) imagePool.release(img);  // return to pool, not delete
+        // imgFail[i] survives like pageAR — a revisit re-arms the fetch —
+        // but its pending auto-retry must not outlive the cell.
+        disarmImgRetry(i);
         delete stripImgs[k];
         delete stripCells[k];
         // pageAR[i] is deliberately kept — scrolling back must not re-measure.
@@ -2728,6 +2863,7 @@
     // actually renders of it (-1 = the assigned side is blank → no <img>).
     const dispIdx = displayIdxFor(idx);
     currentIdx = idx;
+    updateImgRetryBtn();
     syncChapterSlider(idx);
     imgContainer.classList.toggle("pair-blank", !!(pairStrip && pairStrip.active && dispIdx < 0));
     // Chapter-aware counter and folder name
@@ -2877,20 +3013,7 @@
       if (cur.getAttribute("src") !== getUrl(dIdx)) return;
       imgContainer.classList.remove("loading");
       spinner.style.display = "none";
-      let displayIdx, total;
-      if (pairStrip && pairStrip.active){
-        const info = getCurrentChapterInfo(idx);
-        displayIdx = dIdx - chapterBoundaries[info.chapterIdx] + 1;
-        total = getChapterRealCount(info.chapterIdx);
-      } else if (chapterList.length > 1) {
-        const info = getCurrentChapterInfo(idx);
-        displayIdx = getChapterLocalRealIdx(idx) + 1;
-        total = getChapterRealCount(info.chapterIdx);
-      } else {
-        displayIdx = idx + 1;
-        total = images.length;
-      }
-      counter.textContent = displayIdx + " / " + total + " ⚠";
+      counter.textContent = warnCounterLabel(idx, dIdx) + " ⚠";
     };
     if (pairStrip && pairStrip.active && dispIdx < 0){
       // Blank side: nothing to decode — hide the spinner, keep the distinct
@@ -3138,6 +3261,7 @@
         if (cell) cell.remove();
         const img = stripImgs[k];
         if (img) imagePool.release(img);
+        disarmImgRetry(i);
         delete stripImgs[k];
         delete stripCells[k];
       }
@@ -3550,6 +3674,20 @@
     toggleToolbarZone();
   });
   zoneNext.addEventListener("click", e => { if (suppressClickNow()) return; e.stopPropagation(); if (tapForward === 'left') navTurn(-1, true, "tap"); else navTurn(1, true, "tap"); });
+  // Manual image retry (#156): the on-page affordance for a page whose
+  // automatic retries are spent. Sits above the tap zones (z-index) so it
+  // never turns a page; stopPropagation keeps it off the zone handlers.
+  if (imgRetryBtn) imgRetryBtn.addEventListener("click", e => {
+    e.stopPropagation();
+    const dIdx = displayIdxFor(currentIdx);
+    if (dIdx < 0 || !retryStripImage(dIdx, true)) return;
+    updateImgRetryBtn();
+    // Optimistic reset until the fetch resolves: spinner + plain counter.
+    // A repeat failure re-enters onStripImgError and re-arms everything.
+    imgContainer.classList.add("loading");
+    spinner.style.display = "block";
+    counter.textContent = counter.textContent.replace(/ ⚠$/, "");
+  });
 
   // ── keyboard ──
   document.addEventListener("keydown", e => {
