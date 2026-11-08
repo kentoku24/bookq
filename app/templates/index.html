@@ -49,6 +49,7 @@
 <script>window.__BOOKQ_TEST_MODE__ = "{{ 'true' if test_mode else 'false' }}";</script>
 <script>window.__BOOKQ_VISIBILITY_OWNER__ = {{ visibility_owner | tojson }};</script>
 <script>window.__BOOKQ_VISIBILITY_SNAPSHOT__ = {{ visibility_snapshot | tojson }};</script>
+<script>window.__BOOKQ_PROGRESS_USER__ = {{ progress_user_key | tojson }};</script>
 {% if thumbnail_perf %}<script>{{ thumbnail_probe | safe }}</script>
 {% endif %}</head>
 <body>

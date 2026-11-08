@@ -926,6 +926,9 @@ async def index(request: Request):
         "ua_android": ua_android,
         "visibility_owner": visibility_owner_value,
         "visibility_snapshot": visibility_snapshot,
+        # Same normalized user-state key as folder visibility — scopes the
+        # client's localStorage progress per account (#375).
+        "progress_user_key": visibility_user_key,
     }
     if thumb_perf:
         context["thumbnail_perf"] = True

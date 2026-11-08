@@ -118,7 +118,7 @@ def test_resume_btn_clears_footer(page):
     # {page, total, ts}); simple_manga is a leaf in the conftest fixture
     # tree (tests/conftest.py downloads_tree) and in
     # tests/fixtures/uiux_tree.py, so no dynamic resolution is needed.
-    page.evaluate("localStorage.setItem('bookq_progress', JSON.stringify({'simple_manga':{page:4,total:10,ts:Date.now()}}))")
+    page.evaluate("localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify({'simple_manga':{page:4,total:10,ts:Date.now()}}))")
     page.reload()
     page.wait_for_selector(".tile")
 
