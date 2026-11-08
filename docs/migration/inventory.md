@@ -74,7 +74,7 @@
 | `GET /api/search?q=&artist=&tag=` | 要 | relevance 検索。hidden roots はサーバ側除外（`include_hidden` で本人のみ opt-out）。202 ゲート |
 | `GET /api/metadata/facets?path=` | 要 | `{artists, tags}`。同上の hidden 除外・202 ゲート |
 | `POST /api/refresh` | 要 | index lock 下で同期 full rebuild → `{status, folders}` |
-| `GET/PUT/DELETE /api/reading-position` | 要 | ユーザー1件・ts 最大勝ち・DELETE は tombstone・`?hard=1` は test mode のみ・未来 ts 拒否・インメモリのみ |
+| `GET/PUT/DELETE /api/reading-position` | 要 | ユーザー1件・ts 最大勝ち・DELETE は tombstone・`?hard=1` は test mode のみ・未来 ts 拒否・~~インメモリのみ~~ → #375 で user-state SQLite 永続化 |
 | `GET/PUT /api/folder-visibility` | 要 | `{owner, revision, hiddenRoots}`。PUT は `x-bookq-visibility-owner` HMAC 照合 + `{"root","hidden"}` 厳格スキーマ + ツリー top-level ノード所属検証（hide のみ） |
 | `GET /health`, `/api/version` | 不要 | liveness と version JSON |
 | `GET /auth/login|callback|logout` | — | Google OAuth。callback は allowlist 外 403、`/` へ 303 |
@@ -91,7 +91,7 @@
 - **thumb/sprite/view disk cache**: `BOOKQ_CACHE_DIR` or tmpdir 系、`thumbs/<w>/`・`sprites/<w>/` 各 cap 5000、遅延 eviction（oldest mtime）
 - **PDF count memo**: `(path,mtime_ns,size)` キー 300s プロセス内 memo
 - **reader_sync**: `app.state` 内のみ（単一ワーカー前提、再起動で消失）。heartbeat PING 5s / 無応答 15s / code・resume TTL 各 5min / match 窓 2min / load タイムアウト 120s
-- **reading_positions**: `app.state` インメモリのみ（再起動で消失 — 許容済み設計）
+- **reading_positions**: ~~`app.state` インメモリのみ~~ → #375 で `folder-visibility.sqlite3` の `position_*` テーブル（schema v2）に永続化。py/rs 共有、再起動で消えない
 - **folder_visibility**: `BOOKQ_STATE_DIR/folder-visibility.sqlite3`（WAL、user-state volume で永続）
 
 ### 4.3 外部フォーマット

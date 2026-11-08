@@ -58,7 +58,7 @@
     `{status:"stale"}` (書き込みは行わない)。
   - **delete-all tombstone との競合**: `ts <= tombstone_ts` → `{status:"stale"}`。
   - 正常 → `{status:"ok"}`。2xx 系は受理扱いでよい (`ok`/`stale` は best-effort)。
-  - **上限**: user 100 (`_POSITION_MAX_USERS`, LRU 追い出し)、folder 512。
+  - **上限**: user 100 (`POSITION_MAX_USERS`, LRU 追い出し)、folder 512。
 - **DELETE**: `?folder=` → その folder に tombstone を記録 (in-flight な古い PUT が
   復活させない)。`?folder` なし → delete-all tombstone_ts を記録。
 - **永続化** (#375): **user-state SQLite に永続** — `BOOKQ_STATE_DIR/

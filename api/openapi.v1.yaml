@@ -413,6 +413,7 @@ paths:
                   positions:
                     type: array
                     items: {$ref: "#/components/schemas/ReadingPosition"}
+        "403": {$ref: "#/components/responses/Forbidden"}
     put:
       tags: [state]
       operationId: putReadingPosition
@@ -448,6 +449,7 @@ paths:
                 properties:
                   status: {type: string, enum: [ok, stale]}
         "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "422": {$ref: "#/components/responses/ValidationError"}
     delete:
       tags: [state]
@@ -469,6 +471,7 @@ paths:
                 properties:
                   status: {type: string, enum: [ok]}
         "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/v1/folder-visibility:
     get:
