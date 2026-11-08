@@ -3,8 +3,7 @@
 Stdlib ``sqlite3`` only — one row per (scope, hidden root); unhide deletes
 the row. The hidden set is shared by every authenticated user: all rows
 live under the single ``GLOBAL_USER_KEY`` sentinel (``*`` — never a valid
-email-derived user key), and first connect folds any legacy per-user rows
-into it as a union. A monotonically increasing ``revision`` bumps only
+email-derived user key). A monotonically increasing ``revision`` bumps only
 when the hidden set actually changes (same-value writes are idempotent).
 """
 
@@ -51,42 +50,6 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
             f"user-state schema file stamped v{stamped}; this build "
             f"expects v{SCHEMA_VERSION} — bump SCHEMA_VERSION with the DDL"
         )
-
-
-def _migrate_to_global(conn: sqlite3.Connection) -> None:
-    """Fold legacy per-user hidden rows into ``GLOBAL_USER_KEY`` (union).
-
-    Runs once per process inside the schema-init connection; idempotent —
-    after the first run no non-global rows remain, so ``moved`` is 0 and
-    the global revision is untouched. The union keeps every root any user
-    ever hid; per-user ``visibility_users`` rows are dead weight once the
-    set is shared, so they go too.
-    """
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        moved = conn.execute(
-            "INSERT OR IGNORE INTO hidden_roots (user_key, root)"
-            " SELECT ?, root FROM hidden_roots WHERE user_key != ?",
-            (GLOBAL_USER_KEY, GLOBAL_USER_KEY),
-        ).rowcount
-        conn.execute(
-            "DELETE FROM hidden_roots WHERE user_key != ?", (GLOBAL_USER_KEY,)
-        )
-        conn.execute(
-            "DELETE FROM visibility_users WHERE user_key != ?",
-            (GLOBAL_USER_KEY,),
-        )
-        if moved:
-            conn.execute(
-                "INSERT INTO visibility_users (user_key, revision)"
-                " VALUES (?, 1) ON CONFLICT(user_key) DO UPDATE"
-                " SET revision = revision + 1",
-                (GLOBAL_USER_KEY,),
-            )
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
 
 
 @dataclass(frozen=True)
@@ -181,7 +144,6 @@ class FolderVisibilityStore:
                         conn.execute("PRAGMA journal_mode=WAL")
                         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
                         _apply_schema(conn)
-                        _migrate_to_global(conn)
                     finally:
                         conn.close()
                     try:

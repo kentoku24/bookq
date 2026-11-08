@@ -82,7 +82,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - `BOOKQ_TEST_MODE=true` が必須 — `app/auth.py` の `_TEST_MODE` は import 時に一度だけ読まれ、OAuth をバイパスして mock user を返す。
 - `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
 - `uvicorn[standard]` は `requirements-dev.txt` 側のみに存在 (runtime `requirements.txt` は hypercorn)。`--with-requirements requirements-dev.txt` の付与を省略しないこと。
-- 隠しルート機能は `app/folder_visibility*.py` + `app/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存され、初回 connect で旧 per-user 行を和集合マイグレーションする。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
+- 隠しルート機能は `app/folder_visibility*.py` + `app/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
 
 ### デプロイ / ネットワーク
 

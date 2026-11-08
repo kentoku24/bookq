@@ -8,8 +8,7 @@
 //! * folder visibility persists in the shared `user-state` SQLite volume —
 //!   the same DB the Python viewer writes, so one writer's rows are the
 //!   other's reads. The hidden set is library-global: every row lives under
-//!   `GLOBAL_USER_KEY` (matching `app/folder_visibility.py`), and first
-//!   connect folds legacy per-user rows into it as a union. Schema/
+//!   `GLOBAL_USER_KEY` (matching `app/folder_visibility.py`). Schema/
 //!   transaction semantics are ported verbatim (`app/folder_visibility.py`):
 //!   WAL, busy_timeout 5s, revision bumps only on an actual change, fresh
 //!   connection per operation.
@@ -351,7 +350,6 @@ impl VisibilityStore {
                      expects v{VIS_SCHEMA_VERSION} — bump VIS_SCHEMA_VERSION \
                      with the DDL"
                 );
-                migrate_to_global(&conn)?;
                 drop(conn);
                 let _ = std::fs::set_permissions(
                     &self.path,
@@ -440,34 +438,6 @@ impl VisibilityStore {
             hidden_roots: roots,
         })
     }
-}
-
-/// `_migrate_to_global` — fold legacy per-user hidden rows into
-/// `GLOBAL_USER_KEY` (union), then drop them. Idempotent: once no
-/// non-global rows remain `moved` is 0 and the revision is untouched.
-fn migrate_to_global(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let moved = tx.execute(
-        "INSERT OR IGNORE INTO hidden_roots (user_key, root) \
-         SELECT ?1, root FROM hidden_roots WHERE user_key != ?1",
-        [GLOBAL_USER_KEY],
-    )?;
-    tx.execute(
-        "DELETE FROM hidden_roots WHERE user_key != ?1",
-        [GLOBAL_USER_KEY],
-    )?;
-    tx.execute(
-        "DELETE FROM visibility_users WHERE user_key != ?1",
-        [GLOBAL_USER_KEY],
-    )?;
-    if moved > 0 {
-        tx.execute(
-            "INSERT INTO visibility_users (user_key, revision) VALUES (?1, 1) \
-             ON CONFLICT(user_key) DO UPDATE SET revision = revision + 1",
-            [GLOBAL_USER_KEY],
-        )?;
-    }
-    tx.commit()
 }
 
 /// `visibility_owner` — purpose-scoped HMAC-SHA256 hex of the user key.
