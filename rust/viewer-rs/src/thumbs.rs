@@ -32,8 +32,9 @@ use image::ImageDecoder;
 use sha1::{Digest, Sha1};
 
 use crate::serve::{
-    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file, is_rar_path,
-    is_within, not_modified, realpath, resolve_archive, suffix_lower, Serve,
+    archive_not_modified, fmt_mtime, http_date, is_exposable_plain_file, is_image_entry,
+    is_pdf_file, is_rar_path, is_within, not_modified, realpath, resolve_archive, suffix_lower,
+    Serve,
 };
 
 const CACHE_MAX_AGE: i64 = 86400;
@@ -146,6 +147,11 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
     }
     let file_path =
         realpath(&file_path).map_err(|_| detail(StatusCode::NOT_FOUND, "File not found"))?;
+    // Same exposure contract as Python's _stat_source: image extensions
+    // only, no dotfiles.
+    if !is_exposable_plain_file(&file_path) {
+        return Err(detail(StatusCode::NOT_FOUND, "File not found"));
+    }
     if !file_path.is_file() {
         return Err(detail(StatusCode::NOT_FOUND, "File not found"));
     }
@@ -221,6 +227,11 @@ fn load_source_bytes(
     }
     let file_path =
         realpath(&file_path).map_err(|_| detail(StatusCode::NOT_FOUND, "File not found"))?;
+    // Same exposure contract as Python's load_source_bytes: image
+    // extensions only, no dotfiles.
+    if !is_exposable_plain_file(&file_path) {
+        return Err(detail(StatusCode::NOT_FOUND, "File not found"));
+    }
     if !file_path.is_file() {
         return Err(detail(StatusCode::NOT_FOUND, "File not found"));
     }
