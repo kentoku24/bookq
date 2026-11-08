@@ -12,28 +12,48 @@ on:
   # app/tests PRs are gated here (#230). A cheaper browser-free lane is not possible;
   # read #230 before trying one again.
   pull_request:
-    paths:
-      - ".github/workflows/*.yml"
-      - ".github/scripts/*.sh"
-      - "app/**"
-      - "tests/**"
-      - "requirements.txt"
-      - "requirements-dev.txt"
-      - "Dockerfile"
-      - "docker-compose*.yml"
-      # pytest golden-frame harness input (#210) — a case-file-only edit must
-      # still run tests/test_reader_sync_golden.py.
-      - "api/reader-sync-cases.json"
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 concurrency:
   group: oc-smoke-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  # Job-level path gating so every PR reports these check names — see
+  # android.yml changes-android for why workflow-level paths: would
+  # deadlock required status checks (#382).
+  changes-workflow-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        # pytest golden-frame harness input (#210) — a case-file-only
+        # edit must still run tests/test_reader_sync_golden.py, hence
+        # api/reader-sync-cases.json below.
+        with:
+          filters: |
+            run:
+              - ".github/workflows/*.yml"
+              - ".github/scripts/*.sh"
+              - "app/**"
+              - "tests/**"
+              - "requirements.txt"
+              - "requirements-dev.txt"
+              - "Dockerfile"
+              - "docker-compose*.yml"
+              - "api/reader-sync-cases.json"
+
   validate:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -53,6 +73,8 @@ jobs:
   # Mirrors the verification tail of opencode-auto.yml
   # (implement / research / implement-direct / research-direct).
   uv-gate:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # chromium-only gate (mirrors opencode-auto.yml)
