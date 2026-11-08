@@ -1168,6 +1168,79 @@ def test_approve_with_stale_member_id_does_not_swap_candidate():
     assert session.paired
 
 
+def test_apply_log_is_bounded(monkeypatch):
+    """M1: apply_log は forensic 用途のみ — APPLY_LOG_MAX を超える分は
+    古い順に切り捨てられ、長時間セッションでも無制限に増えない。"""
+    monkeypatch.setattr("app.reader_sync.sessions.APPLY_LOG_MAX", 8)
+    clock = FakeClock()
+    reg = _reg(clock)
+    leader, follower = _connect(reg, "leader"), _connect(reg, "follower")
+    sid, _, _ = _pair(reg, leader, follower)
+    session = reg.sessions[sid]
+    leader.frames(); follower.frames()
+    for i in range(12):
+        _send(reg, leader, _request(
+            "SWAP_SIDES", {"leaderSide": "left" if i % 2 else "right"},
+            session_id=sid, request_id=f"sw{i}",
+            work_epoch=session.work_epoch,
+            base_revision=session.revision))
+        leader.frames(); follower.frames()
+    assert len(session.apply_log) == 8
+    seqs = [e["seq"] for e in session.apply_log]
+    assert seqs == sorted(seqs)                    # oldest-first order kept
+    assert seqs[-1] == session.apply_seq           # tail is the newest commit
+    assert session.apply_log[-1]["requestId"] == "sw11"
+
+
+def test_unbound_links_are_reaped_but_bound_links_survive():
+    """A socket that never binds a member must not live forever just
+    because it answers PINGs — and an unbound link left by _end_session
+    is collected the same way."""
+    clock = FakeClock()
+    reg = _reg(clock)
+    idle = _connect(reg, "idle")                       # never binds
+    leader = _connect(reg, "leader")
+    created, _ = _create_session(reg, leader)          # bound — survives
+
+    # keep both links answering PINGs through the reap window; only the
+    # unbound one should be collected
+    for _ in range(7):
+        clock.advance(10.0)
+        reg.tick()
+        for link in (idle, leader):
+            for f in link.frames():
+                if f["type"] == "PING":
+                    _send(reg, link, {"v": 1, "type": "PONG", "seq": f["seq"]})
+    assert idle.close_reason == "unbound_idle"
+    assert idle.id not in reg.links
+    assert leader.id in reg.links and leader.member is not None
+
+    # a member unbound by _end_session becomes anonymous and is reaped too
+    orphan = _connect(reg, "orphan")
+    _join(reg, orphan, created["code"])
+    reg._end_session(reg.sessions[created["sessionId"]], "test")
+    assert orphan.member is None
+    _advance_alive(reg, clock, orphan, 61.0)
+    reg.tick()
+    assert orphan.close_reason == "unbound_idle"
+
+
+def test_unbound_link_due_wakes_the_ticker():
+    """next_wakeup_delay must include the anonymous-link expiry — otherwise
+    the ticker sleeps to the next ping due (or the 60s fallback) and the
+    reap fires late."""
+    clock = FakeClock()
+    # heartbeat / no-response dues pushed past the anon TTL so the earliest
+    # due is provably the anonymous reaper's.
+    reg = _reg(clock, heartbeat_interval=120.0, no_response_timeout=200.0)
+    idle = _connect(reg, "idle")
+    assert reg.next_wakeup_delay() == pytest.approx(60.0, abs=0.05)
+    clock.advance(61.0)
+    _send(reg, idle, {"v": 1, "type": "PONG", "seq": 0})
+    reg.tick()
+    assert idle.close_reason == "unbound_idle"
+
+
 def test_relayed_request_reject_goes_to_origin_link():
     """On the leader-sequenced plane a follower's rejected request is
     answered on the *follower's* link — not on the relay's."""

@@ -76,6 +76,10 @@ pub const END_SHUTDOWN: &str = "shutdown";
 pub const DEDUP_WINDOW: usize = 256;
 pub const DEDUP_TOMBSTONE_MAX: usize = 8192;
 
+/// apply_log is forensic bookkeeping only — cap it so a long reading
+/// session cannot grow it without bound (mirrors sessions.py APPLY_LOG_MAX).
+pub const APPLY_LOG_MAX: usize = 4096;
+
 /// UI_SYNC rate cap per member — excess frames drop silently so a buggy
 /// sender can't fill the peer's bounded outq.
 pub const UI_SYNC_WINDOW_SEC: f64 = 1.0;
@@ -1880,6 +1884,10 @@ impl Inner {
             log_entry.insert("revision".into(), frame["revision"].clone());
             log_entry.insert("spreadId".into(), frame["spreadId"].clone());
             s.apply_log.push(Value::Object(log_entry));
+            if s.apply_log.len() > APPLY_LOG_MAX {
+                let overflow = s.apply_log.len() - APPLY_LOG_MAX;
+                s.apply_log.drain(..overflow);
+            }
         }
         tracing::info!(
             "reader-sync apply rev={} type={} role={} link={}",
@@ -2067,6 +2075,10 @@ impl Inner {
             le.insert("revision".into(), frame["revision"].clone());
             le.insert("spreadId".into(), frame["spreadId"].clone());
             s.apply_log.push(Value::Object(le));
+            if s.apply_log.len() > APPLY_LOG_MAX {
+                let overflow = s.apply_log.len() - APPLY_LOG_MAX;
+                s.apply_log.drain(..overflow);
+            }
         }
         self.send_manifest(None, sid, Some(chunks));
         tracing::info!(
