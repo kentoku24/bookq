@@ -14,6 +14,9 @@
 #     ~1min of probes+instrumentation instead of another Gradle invocation.
 #     Pass/fail is read from the `OK (N tests)` / `FAILURES!!!` summary —
 #     `am instrument`'s exit status alone is not a reliable test verdict.
+#     The app module ships ABI splits (arm64-v8a / x86_64 / universal), so
+#     the APK is picked by the emulator's `ro.product.cpu.abi` with the
+#     universal APK as fallback.
 #  3. One in-session retry — the second attempt reuses the already-booted
 #     emulator, so it costs seconds rather than a fresh boot.
 #
@@ -26,7 +29,7 @@ PROBE_URL="$SERVER_URL/api/v1/health"
 PROBE_ATTEMPTS="${PROBE_ATTEMPTS:-60}"
 PROBE_SLEEP="${PROBE_SLEEP:-2}"
 
-APP_APK="${APP_APK:-app/build/outputs/apk/debug/app-debug.apk}"
+APP_APK="${APP_APK:-}"
 TEST_APK="${TEST_APK:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 RESULTS_FILE="${RESULTS_FILE:-build/outputs/android-ui-test-results.txt}"
 
@@ -66,8 +69,23 @@ build_apks() {
 }
 
 install_apks() {
-  adb install -r "$APP_APK"
-  adb install -r "$TEST_APK"
+  local app_apk="$APP_APK"
+  if [[ -z "$app_apk" ]]; then
+    local abi
+    abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+    app_apk="app/build/outputs/apk/debug/app-${abi}-debug.apk"
+    [[ -f "$app_apk" ]] || app_apk="app/build/outputs/apk/debug/app-universal-debug.apk"
+  fi
+  local apk
+  for apk in "$app_apk" "$TEST_APK"; do
+    if [[ ! -f "$apk" ]]; then
+      echo "ERROR: APK not found: $apk"
+      ls app/build/outputs/apk/debug/ app/build/outputs/apk/androidTest/debug/ 2>/dev/null || true
+      return 1
+    fi
+  done
+  adb install -r "$app_apk" || return 1
+  adb install -r "$TEST_APK" || return 1
 }
 
 instrumentation_component() {
