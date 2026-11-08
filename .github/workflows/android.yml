@@ -5,22 +5,45 @@ name: android
 
 on:
   pull_request:
-    paths:
-      - "android/**"
-      - "api/**"
-      - ".github/workflows/android.yml"
-      # The ui job boots the repo's FastAPI server and asserts on
-      # /api/v1/* — server or dependency changes can break the client.
-      - "app/**"
-      - "requirements*.txt"
-      - "rust/viewer-rs/**"
   workflow_dispatch:
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 jobs:
+  # Path gating lives at job level, not on.pull_request.paths: required
+  # status checks need every check name reported on every PR, and a
+  # workflow-level filter leaves the check pending forever on
+  # non-matching PRs (#382). Non-matching jobs end `skipped`, which
+  # satisfies a required check.
+  changes-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        # workflow_dispatch keeps running everything, as before.
+        if: github.event_name == 'pull_request'
+        # The ui job boots the repo's FastAPI server and asserts on
+        # /api/v1/* — server or dependency changes can break the client,
+        # hence app/** and requirements*.txt below.
+        with:
+          filters: |
+            run:
+              - "android/**"
+              - "api/**"
+              - ".github/workflows/android.yml"
+              - "app/**"
+              - "requirements*.txt"
+              - "rust/viewer-rs/**"
+
   unit:
+    needs: changes-android
+    if: github.event_name == 'workflow_dispatch' || needs.changes-android.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -69,6 +92,8 @@ jobs:
           if-no-files-found: ignore
 
   ui:
+    needs: changes-android
+    if: github.event_name == 'workflow_dispatch' || needs.changes-android.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
