@@ -369,15 +369,15 @@ async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !st.native.enabled("search") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
     }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+    // `_user` still gates auth upstream; hidden roots are library-global.
+    let Some(_user) = caller_or_proxy(&st, req.headers()) else {
         return proxy(&st.upstream, req).await;
     };
-    let key = user.email.trim().to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match search::api_search(&st, &key, &q).await {
+    match search::api_search(&st, &q).await {
         serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
         serve::Serve::Proxy => proxy(&st.upstream, req).await,
     }
@@ -389,15 +389,15 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !st.native.enabled("facets") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
     }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+    // `_user` still gates auth upstream; hidden roots are library-global.
+    let Some(_user) = caller_or_proxy(&st, req.headers()) else {
         return proxy(&st.upstream, req).await;
     };
-    let key = user.email.trim().to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match search::api_facets(&st, &key, &q).await {
+    match search::api_facets(&st, &q).await {
         serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
         serve::Serve::Proxy => proxy(&st.upstream, req).await,
     }

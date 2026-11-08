@@ -7,9 +7,12 @@
 //!   same contract while every request on this backend routes through it).
 //! * folder visibility persists in the shared `user-state` SQLite volume —
 //!   the same DB the Python viewer writes, so one writer's rows are the
-//!   other's reads. Schema/transaction semantics are ported verbatim
-//!   (`app/folder_visibility.py`): WAL, busy_timeout 5s, revision bumps only
-//!   on an actual change, fresh connection per operation.
+//!   other's reads. The hidden set is library-global: every row lives under
+//!   `GLOBAL_USER_KEY` (matching `app/folder_visibility.py`), and first
+//!   connect folds legacy per-user rows into it as a union. Schema/
+//!   transaction semantics are ported verbatim (`app/folder_visibility.py`):
+//!   WAL, busy_timeout 5s, revision bumps only on an actual change, fresh
+//!   connection per operation.
 //!
 //! Caller identity: handlers take the resolved user key (`_position_user_key`
 //! / `user_key_for_email` equivalents) — test mode's mock user or a Bearer
@@ -295,6 +298,11 @@ pub fn delete_positions(pos: &Positions, user_key: &str, folder: Option<&str>) -
 const VIS_SCHEMA: &str = include_str!("../../../api/user-state-schema.sql");
 const VIS_SCHEMA_VERSION: i64 = 1;
 
+/// Library-global hidden-set key — must equal `GLOBAL_USER_KEY` in
+/// `app/folder_visibility.py`. `*` can never collide with an email-derived
+/// user key; the per-user `user_key` param still feeds the owner HMAC only.
+pub const GLOBAL_USER_KEY: &str = "*";
+
 pub struct VisibilityStore {
     path: PathBuf,
     init: Mutex<bool>,
@@ -343,6 +351,7 @@ impl VisibilityStore {
                      expects v{VIS_SCHEMA_VERSION} — bump VIS_SCHEMA_VERSION \
                      with the DDL"
                 );
+                migrate_to_global(&conn)?;
                 drop(conn);
                 let _ = std::fs::set_permissions(
                     &self.path,
@@ -433,6 +442,34 @@ impl VisibilityStore {
     }
 }
 
+/// `_migrate_to_global` — fold legacy per-user hidden rows into
+/// `GLOBAL_USER_KEY` (union), then drop them. Idempotent: once no
+/// non-global rows remain `moved` is 0 and the revision is untouched.
+fn migrate_to_global(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let moved = tx.execute(
+        "INSERT OR IGNORE INTO hidden_roots (user_key, root) \
+         SELECT ?1, root FROM hidden_roots WHERE user_key != ?1",
+        [GLOBAL_USER_KEY],
+    )?;
+    tx.execute(
+        "DELETE FROM hidden_roots WHERE user_key != ?1",
+        [GLOBAL_USER_KEY],
+    )?;
+    tx.execute(
+        "DELETE FROM visibility_users WHERE user_key != ?1",
+        [GLOBAL_USER_KEY],
+    )?;
+    if moved > 0 {
+        tx.execute(
+            "INSERT INTO visibility_users (user_key, revision) VALUES (?1, 1) \
+             ON CONFLICT(user_key) DO UPDATE SET revision = revision + 1",
+            [GLOBAL_USER_KEY],
+        )?;
+    }
+    tx.commit()
+}
+
 /// `visibility_owner` — purpose-scoped HMAC-SHA256 hex of the user key.
 pub fn visibility_owner(user_key: &str, secret: &str) -> String {
     let mut mac =
@@ -497,11 +534,11 @@ fn owner_token(st: &AppState, user_key: &str) -> String {
     visibility_owner(user_key, &st.secret_key)
 }
 
-/// GET /api/v1/folder-visibility
+/// GET /api/v1/folder-visibility — the library-global snapshot; `user_key`
+/// feeds only the per-user owner token.
 pub async fn get_folder_visibility(st: &AppState, user_key: &str) -> Response {
     let store = st.visibility.clone();
-    let key = user_key.to_string();
-    let snap = tokio::task::spawn_blocking(move || store.read(&key))
+    let snap = tokio::task::spawn_blocking(move || store.read(GLOBAL_USER_KEY))
         .await
         .ok()
         .and_then(|r| r.ok());
@@ -566,8 +603,7 @@ pub async fn put_folder_visibility(
         // Read first; only a root not already hidden needs tree membership.
         let snap = tokio::task::spawn_blocking({
             let store = store.clone();
-            let key = user_key.to_string();
-            move || store.read(&key)
+            move || store.read(GLOBAL_USER_KEY)
         })
         .await
         .ok()
@@ -594,11 +630,12 @@ pub async fn put_folder_visibility(
         }
     }
     let root2 = root.to_string();
-    let key = user_key.to_string();
-    let snap = tokio::task::spawn_blocking(move || store.set_hidden(&key, &root2, hidden))
-        .await
-        .ok()
-        .and_then(|r| r.ok());
+    let snap = tokio::task::spawn_blocking(move || {
+        store.set_hidden(GLOBAL_USER_KEY, &root2, hidden)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
     match snap {
         Some(s) => vis_response(&owner, &s),
         None => vis_detail(StatusCode::SERVICE_UNAVAILABLE, "visibility store unavailable"),

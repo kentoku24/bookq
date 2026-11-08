@@ -24,7 +24,11 @@ from starlette.concurrency import run_in_threadpool
 from app import auth as auth_module
 from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
-from app.folder_visibility import user_key_for_email, visibility_owner
+from app.folder_visibility import (
+    GLOBAL_USER_KEY,
+    user_key_for_email,
+    visibility_owner,
+)
 from app.metadata import MetadataIndex
 from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
@@ -890,15 +894,18 @@ async def index(request: Request):
         if visibility_user_key
         else None
     )
-    # Embed the caller's visibility snapshot so the first paint is already
-    # filtered — the client still runs its GET afterwards (re-sync only).
-    # Store failure -> None embed -> the client's normal loading gate.
+    # Embed the library-global visibility snapshot so the first paint is
+    # already filtered — the client still runs its GET afterwards
+    # (re-sync only). Store failure -> None embed -> the client's normal
+    # loading gate.
     visibility_snapshot = None
     if visibility_owner_value is not None:
         _vis_store = getattr(request.app.state, "folder_visibility", None)
         if _vis_store is not None:
             try:
-                _vis_snap = await run_in_threadpool(_vis_store.read, visibility_user_key)
+                _vis_snap = await run_in_threadpool(
+                    _vis_store.read, GLOBAL_USER_KEY
+                )
                 visibility_snapshot = {
                     "owner": visibility_owner_value,
                     "revision": _vis_snap.revision,

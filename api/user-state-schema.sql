@@ -7,6 +7,11 @@
 -- external API contract (api/openapi.v1.yaml), and provisional — when
 -- FastAPI retires, viewer-rs inherits this file as-is.
 --
+-- The hidden set is library-global: every hidden_roots row lives under
+-- the sentinel user_key '*' (GLOBAL_USER_KEY in both implementations).
+-- The column name stays `user_key` for schema compatibility; first
+-- connect folds any legacy per-user rows into '*' as a union.
+--
 -- Applied idempotently on first connect; the trailing PRAGMA stamps the
 -- schema version. When changing this file, bump the version here AND in
 -- SCHEMA_VERSION (app/folder_visibility.py) / VIS_SCHEMA_VERSION

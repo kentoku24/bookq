@@ -2,7 +2,9 @@
 
 Pure store-level tests (no HTTP): constructor performs no I/O, schema is
 created lazily on first use, read/write return consistent snapshots, revisions
-only bump on real state changes, and separate user keys are fully isolated.
+only bump on real state changes. Production rows all live under
+``GLOBAL_USER_KEY`` — the store itself stays a generic keyed KV, and first
+connect folds legacy per-user rows into the global key as a union.
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt \\
@@ -16,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from app.folder_visibility import (
+    GLOBAL_USER_KEY,
     FolderVisibilityStore,
     user_key_for_email,
     validate_root,
@@ -41,11 +44,13 @@ def test_read_empty_snapshot(db_path: Path):
 
 
 def test_set_hidden_persists_across_instances(db_path: Path):
-    snap = FolderVisibilityStore(db_path).set_hidden("alice@example.com", "作品A", True)
+    # GLOBAL_USER_KEY is the production key — a fresh store instance's init
+    # migration must leave its rows alone (only non-global keys get folded).
+    snap = FolderVisibilityStore(db_path).set_hidden(GLOBAL_USER_KEY, "作品A", True)
     assert snap.revision == 1
     assert snap.hidden_roots == ("作品A",)
     # A brand-new store object over the same DB file sees the same state.
-    snap2 = FolderVisibilityStore(db_path).read("alice@example.com")
+    snap2 = FolderVisibilityStore(db_path).read(GLOBAL_USER_KEY)
     assert snap2.revision == 1
     assert snap2.hidden_roots == ("作品A",)
 
@@ -75,7 +80,29 @@ def test_same_value_writes_are_idempotent(db_path: Path):
     assert snap.hidden_roots == ("作品A",)
 
 
-def test_users_are_isolated(db_path: Path):
+def test_legacy_per_user_rows_fold_into_global_union(db_path: Path):
+    """Pre-global DBs held one hidden set per user key. The first connect
+    of a new store instance migrates: every legacy root lands under
+    GLOBAL_USER_KEY (union, IGNORE on duplicates), legacy rows are dropped,
+    and the global revision bumps exactly once — re-runs are no-ops."""
+    store = FolderVisibilityStore(db_path)
+    store.set_hidden("alice@example.com", "作品A", True)
+    store.set_hidden("bob@example.com", "series", True)
+    store.set_hidden("alice@example.com", "keep", True)
+
+    migrated = FolderVisibilityStore(db_path).read(GLOBAL_USER_KEY)
+    assert migrated.hidden_roots == ("keep", "series", "作品A")
+    assert migrated.revision == 1
+    # Legacy keys are gone — nothing readable under them anymore.
+    again = FolderVisibilityStore(db_path)
+    assert again.read("alice@example.com").hidden_roots == ()
+    assert again.read(GLOBAL_USER_KEY).revision == 1  # idempotent, no re-bump
+
+
+def test_generic_keys_isolated_within_one_instance(db_path: Path):
+    """The store stays a generic keyed KV: arbitrary keys coexist until the
+    next process init folds non-global rows away (production never writes
+    them — routes pin GLOBAL_USER_KEY)."""
     store = FolderVisibilityStore(db_path)
     store.set_hidden("alice@example.com", "作品A", True)
     assert store.read("bob@example.com").hidden_roots == ()
