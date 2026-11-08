@@ -2,9 +2,9 @@
 
 Covers: auth (401), owner header (403 missing / 409 mismatch), strict input
 validation (400/415), root existence/type checks (404/403 via _is_within),
-per-user isolation + email normalization, idempotent writes, missing-root
-unhide, generic 503 on store failure, private no-store + Vary: Cookie headers,
-and the index template's opaque owner context.
+library-global sharing + per-user owner tokens, idempotent writes,
+missing-root unhide, generic 503 on store failure, private no-store +
+Vary: Cookie headers, and the index template's opaque owner context.
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt \\
@@ -262,17 +262,23 @@ def test_put_owner_mismatch_is_409_and_writes_nothing(make_client):
     assert bob.get("/api/folder-visibility").json()["hiddenRoots"] == []
 
 
-def test_users_are_isolated_and_email_is_normalized(make_client):
+def test_hidden_set_is_shared_and_owner_stays_per_user(make_client):
+    """The hidden set is library-global: Alice's hide is visible to Bob.
+    The owner token remains per-user (email-normalized) — it guards the
+    writer against stale tabs, not the data scope."""
     alice = make_client(email="Alice@Example.com")
-    _put(alice, "作品A", True, _owner(alice))
+    alice_owner = _owner(alice)
+    _put(alice, "作品A", True, alice_owner)
 
     bob = make_client(email="bob@example.com")
-    assert bob.get("/api/folder-visibility").json()["hiddenRoots"] == []
+    assert bob.get("/api/folder-visibility").json()["hiddenRoots"] == ["作品A"]
+    assert _owner(bob) != alice_owner
 
-    # Same person, different casing/whitespace -> same user key, same data.
+    # Same person, different casing/whitespace -> same user key -> same owner.
     alice2 = make_client(email="  alice@example.COM  ")
     resp = alice2.get("/api/folder-visibility")
     assert resp.json()["hiddenRoots"] == ["作品A"]
+    assert resp.json()["owner"] == alice_owner
 
 
 def test_session_without_email_gets_no_shared_user(make_client, tmp_path):
@@ -285,11 +291,11 @@ def test_session_without_email_gets_no_shared_user(make_client, tmp_path):
         headers={OWNER_HEADER: "anything"},
     )
     assert resp.status_code == 403
-    # Nothing was stored under a fallback "unknown" account.
-    from app.folder_visibility import DB_FILENAME
+    # Nothing was stored — not under a fallback user, not globally.
+    from app.folder_visibility import DB_FILENAME, GLOBAL_USER_KEY
 
     store = FolderVisibilityStore(Path(os.environ["BOOKQ_STATE_DIR"]) / DB_FILENAME)
-    snap = store.read("unknown")
+    snap = store.read(GLOBAL_USER_KEY)
     assert snap.revision == 0 and snap.hidden_roots == ()
 
 
@@ -558,16 +564,16 @@ def test_facets_exclude_hidden_roots_server_side(make_client, library):
     assert set(body["artists"]) == {"HiddenArtist", "VisibleArtist"}
 
 
-def test_facets_exclusion_is_per_user(make_client, library):
-    """Alice's hidden root must not narrow Bob's facet list — the memo is
-    keyed by the caller's own exclude set."""
+def test_facets_exclusion_is_global(make_client, library):
+    """Alice's hidden root narrows Bob's facet list too — the hidden set is
+    library-global, so every caller's exclude set is the same."""
     _seed_metadata(library)
     alice = make_client(email="alice@example.com")
     _put(alice, "作品A", True, _owner(alice))
     bob = make_client(email="bob@example.com")
     body = bob.get("/api/metadata/facets").json()
-    assert set(body["artists"]) == {"HiddenArtist", "VisibleArtist"}
-    assert set(body["tags"]) == {"hiddentag", "visibletag"}
+    assert body["artists"] == ["VisibleArtist"]
+    assert body["tags"] == ["visibletag"]
 
 
 # ── index snapshot embed (review round 2) ────────────────────────────────
@@ -607,14 +613,16 @@ def test_index_embeds_visibility_snapshot(make_client, library):
     assert "test@example.com" not in line
 
 
-def test_index_snapshot_is_scoped_to_the_caller(make_client, library):
-    """fix5: another user's hidden roots never appear in this user's page."""
+def test_index_snapshot_is_global(make_client, library):
+    """The embedded snapshot is the library-global hidden set — Alice's
+    hide appears on the page regardless of who renders it. (index() uses
+    get_current_user, so the page user is always the test-mode mock.)"""
     alice = make_client(email="alice@example.com")
     _put(alice, "作品A", True, _owner(alice))
-    bob = make_client(email="bob@example.com")
-    resp = bob.get("/")
+    resp = alice.get("/")
     snap = _embed_snapshot(resp)
-    assert snap["hiddenRoots"] == []    # Alice's hidden root never leaks
+    assert snap["hiddenRoots"] == ["作品A"]
+    assert snap["owner"] == visibility_owner("test@example.com", SECRET)
 
 
 def test_index_snapshot_null_on_store_failure(make_client, tmp_path):

@@ -53,10 +53,12 @@ info:
     `ETag` / `If-None-Match` と `Range: bytes=` をサポートする。
 
     ### 隠しルート（セキュリティ契約）
-    呼び出しユーザーの hidden roots 配下のコンテンツは
+    hidden roots は**ライブラリ全体で共有**（全認証ユーザーに同一の
+    セットが効く）。hidden roots 配下のコンテンツは
     **サーバ側で除外**する。クライアント側フィルタはレスポンス本体に
     該当データを含めてしまうため認めない。`include_hidden=true` は
-    呼び出しユーザー自身の hidden セットにのみ適用される。
+    この共有 hidden セットの除外をスキップする（閲覧者個人の
+    全表示モード用。一時的・非永続）。
 
     ## 振る舞いの正本
 
@@ -472,7 +474,7 @@ paths:
     get:
       tags: [state]
       operationId: getFolderVisibility
-      summary: 呼び出しユーザーの隠しルート一覧
+      summary: ライブラリ共有の隠しルート一覧（全ユーザー共通）
       responses:
         "200":
           description: "可視性スナップショット。`Cache-Control: private, no-store`"

@@ -66,7 +66,10 @@
 
 `GET/PUT /api/v1/folder-visibility` (参照: `app/folder_visibility.py`)。
 
-- **owner トークン**:
+- **hiddenRoots はライブラリ共有**: 全認証ユーザーに同一のセットが効く。
+  DB 上は sentinel `user_key = "*"` (`GLOBAL_USER_KEY`) 配下に保存され、
+  初回 connect で旧 per-user 行を和集合マイグレーションする。
+- **owner トークン** (書き込み者の stale タブ対策。データのスコープではない):
   `hex(HMAC-SHA256(key=SECRET_KEY, msg="folder-visibility:v1:" + user_key))`
   - `user_key` = `email.strip().lower()`
   - `X-Bookq-Visibility-Owner` ヘッダで提示する。クライアントは自身の email と

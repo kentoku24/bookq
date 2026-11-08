@@ -1,10 +1,10 @@
-"""Per-user folder visibility API: GET/PUT /api/folder-visibility.
+"""Folder visibility API: GET/PUT /api/folder-visibility — library-global.
 
-The DB user is always derived from the authenticated session email — request
-bodies, query params and the owner header never select a user. The owner
-header (a purpose-scoped HMAC token) is only compared against the value
-computed for the session user, so a stale tab cannot write into an account
-that was switched in another tab.
+The hidden set is shared by every authenticated user: the store row is
+always ``GLOBAL_USER_KEY``, never the caller's identity. The session email
+still derives the per-user ``owner`` HMAC echoed in responses and required
+on PUT, so a stale tab cannot write after its account was switched in
+another tab — the header guards the *writer*, not the data scope.
 """
 
 import hmac
@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.auth import require_auth
 from app.folder_visibility import (
+    GLOBAL_USER_KEY,
     VisibilitySnapshot,
     user_key_for_email,
     validate_root,
@@ -51,12 +52,12 @@ def _store(request: Request):
 
 
 async def hidden_roots_for_request(request: Request, user: dict) -> tuple[str, ...]:
-    """The session user's hidden roots — same 403/503 posture as the
+    """The library-global hidden roots — same 403/503 posture as the
     visibility GET. Shared by routes.py's metadata endpoints so a failed
     read fails CLOSED (never serves an unfiltered facet/search list).
     """
-    user_key = _user_key(user)
-    snap = await _store_call(_store(request).read, user_key)
+    _user_key(user)  # malformed session -> 403, same as the GET
+    snap = await _store_call(_store(request).read, GLOBAL_USER_KEY)
     return snap.hidden_roots
 
 
@@ -109,7 +110,7 @@ def _respond(owner: str, snap: VisibilitySnapshot) -> JSONResponse:
 async def get_folder_visibility(request: Request, user: dict = Depends(require_auth)):
     user_key = _user_key(user)
     owner = visibility_owner(user_key, request.app.state.settings.secret_key)
-    snap = await _store_call(_store(request).read, user_key)
+    snap = await _store_call(_store(request).read, GLOBAL_USER_KEY)
     return _respond(owner, snap)
 
 
@@ -153,7 +154,7 @@ async def put_folder_visibility(request: Request, user: dict = Depends(require_a
 
     store = _store(request)
     if hidden:
-        snap = await _store_call(store.read, user_key)
+        snap = await _store_call(store.read, GLOBAL_USER_KEY)
         if root not in snap.hidden_roots:
             # Must equal a current top-level folder node's name — tree
             # membership already subsumes containment and archive/PDF roots
@@ -162,5 +163,5 @@ async def put_folder_visibility(request: Request, user: dict = Depends(require_a
             names = await _top_level_folder_names(request)
             if root not in names:
                 raise _err(404, "no such top-level folder or archive")
-    snap = await _store_call(store.set_hidden, user_key, root, hidden)
+    snap = await _store_call(store.set_hidden, GLOBAL_USER_KEY, root, hidden)
     return _respond(owner, snap)
