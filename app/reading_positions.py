@@ -196,8 +196,13 @@ class PositionBook:
 
     def _trim(self) -> None:
         """Bound the per-folder map; evict the least-recently-written
-        entry (first minimum in insertion order, like dict min())."""
-        if len(self.folders) > POSITION_MAX_FOLDERS:
+        entry (first minimum in insertion order, like dict min()).
+
+        ``while`` — not the old in-memory ``if`` — because delete_folder
+        can grow the map past the bound without trimming, and viewer-rs's
+        port evicts down to the bound on the next write; a single evict
+        would leave the two backends holding different folder sets."""
+        while len(self.folders) > POSITION_MAX_FOLDERS:
             stalest = min(
                 self.folders,
                 key=lambda f: self.folders[f].get("updated_at", 0),
