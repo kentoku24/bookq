@@ -264,6 +264,38 @@
     };
   }
 
+  /* UI_SYNC payload -> wire shape. 必須フィールドはサーバと同じ範囲で
+   * 厳格拒否 — ここで通してもサーバが ERR_RANGE で落とす frame を
+   * 「送信済み」と誤認させない。任意フィールド (mode/scrollH/pred) は
+   * 不正値なら削って送る — frame 自体を捨てると位置情報 (top/viewH)
+   * ごと失われる（受信側は欠落を legacy 変換・実測追従として安全に
+   * 処理する）。emit するキーは asyncapi UiSyncPayload と一致させる
+   * 契約 — PairClient.normalizeUiSyncPayload で公開し、テストの stub が
+   * この本物の正規化を通るようにする（verbatim stub は pred 脱落を
+   * 見逃した #262 の原因）。 */
+  function normalizeUiSyncPayload(payload) {
+    if (!payload || payload.view !== 'browse') return null;
+    var top = payload.top, vh = payload.viewH;
+    if (typeof top !== 'number' || !isFinite(top) || top < 0) return null;
+    if (typeof vh !== 'number' || !isFinite(vh) || vh <= 0 ||
+        vh > 100000) return null;
+    var p = {
+      view: 'browse',
+      path: (payload.path === undefined || payload.path === null)
+        ? null : String(payload.path),
+      top: top, viewH: vh,
+    };
+    if (payload.mode === 'tile' || payload.mode === 'list' ||
+        payload.mode === 'card') p.mode = payload.mode;
+    var sh = payload.scrollH;
+    if (typeof sh === 'number' && isFinite(sh) && sh > 0 && sh <= 1e8)
+      p.scrollH = sh;
+    var pr = payload.pred;
+    if (typeof pr === 'number' && isFinite(pr) && pr >= 0)
+      p.pred = pr;
+    return p;
+  }
+
   /* ── client ─────────────────────────────────────────────────────────── */
 
   function createClient(opts) {
@@ -1138,27 +1170,8 @@
     function sendUiSync(payload) {
       if (_destroyed || _term || _left || !_member || !_linkOpen() ||
           !_paired()) return false;
-      if (!payload || payload.view !== 'browse') return false;
-      var top = payload.top, vh = payload.viewH;
-      if (typeof top !== 'number' || !isFinite(top) || top < 0) return false;
-      // 必須フィールドはサーバと同じ範範囲で厳格拒否 — ここで通しても
-      // サーバが ERR_RANGE で落とす frame を「送信済み」と誤認させない。
-      if (typeof vh !== 'number' || !isFinite(vh) || vh <= 0 ||
-          vh > 100000) return false;
-      var p = {
-        view: 'browse',
-        path: (payload.path === undefined || payload.path === null)
-          ? null : String(payload.path),
-        top: top, viewH: vh,
-      };
-      if (payload.mode === 'tile' || payload.mode === 'list' ||
-          payload.mode === 'card') p.mode = payload.mode;
-      // scrollH は任意フィールド — 不正値なら削って送る。frame 自体を捨てると
-      // 位置情報 (top/viewH) ごと失われる（受信側は scrollH なしを legacy
-      // px 変換として安全に処理する）。
-      var sh = payload.scrollH;
-      if (typeof sh === 'number' && isFinite(sh) && sh > 0 && sh <= 1e8)
-        p.scrollH = sh;
+      var p = normalizeUiSyncPayload(payload);
+      if (!p) return false;
       return _ctlSend(_req('UI_SYNC', p));
     }
 
@@ -1839,5 +1852,6 @@
     canonicalJson: canonicalJson,
     manifestDigestHex: manifestDigestHex,
     peekPersistedResume: peekPersistedResume,
+    normalizeUiSyncPayload: normalizeUiSyncPayload,
   };
 })();
