@@ -17,6 +17,7 @@ from app.auth import router as auth_router, init_oauth
 from app.auth_token import token_router
 from app.folder_visibility import FolderVisibilityStore
 from app.folder_visibility_routes import router as folder_visibility_router
+from app.reading_positions import ReadingPositionStore
 from app.routes import _background_fill, _index_disabled, _warm_covers, api_router, warmup_metadata_index
 from app.reader_sync.sessions import SessionRegistry
 from app.reader_sync.transport import reader_sync_ws, resolve_reader_work
@@ -230,9 +231,10 @@ def create_app() -> FastAPI:
     app.state.reader_sync = SessionRegistry(work_resolver=resolve_reader_work)
     app.add_api_websocket_route("/ws/reader-sync", reader_sync_ws)
 
-    # Server-held "続きから" resume point: one latest record per user email,
-    # in-memory only (a container restart loses it — accepted trade-off).
-    app.state.reading_positions = {}
+    # Server-held "続きから" resume point: per-user slots persisted in the
+    # shared user-state SQLite DB (schema v2) — survives restarts and is
+    # shared with viewer-rs (#375). Same file as folder visibility.
+    app.state.reading_position_store = ReadingPositionStore(settings.state_path)
 
     @app.exception_handler(401)
     async def unauthorized_handler(request: Request, exc: Exception):

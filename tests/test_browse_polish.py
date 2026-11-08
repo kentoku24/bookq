@@ -34,7 +34,7 @@ def test_split_display_name_unit(page, server):
 
 def _make_progress(page, folder, pg=3):
     page.evaluate(
-        "([f,p]) => localStorage.setItem('bookq_progress', JSON.stringify({[f]:{page:p,total:30,ts:Date.now()}}))",
+        "([f,p]) => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify({[f]:{page:p,total:30,ts:Date.now()}}))",
         [folder, pg],
     )
 

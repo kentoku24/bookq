@@ -75,6 +75,10 @@
   // ── OfflineStore / cache naming: shared with the harness via offline-core.js ──
   const OfflineStore = window.OfflineStore;
   const { encodePath, escapeHtml, folderHasOnlyImages, folderHasImages, fmt: fmtBytes, dedupedBytes, rawBytes } = window.OfflineCore;
+  // One-time: adopt the pre-#375 fixed `bookq_progress` key into this
+  // account's scoped key, then drop the legacy key so another account on
+  // this browser can't inherit it. Idempotent — runs every boot.
+  if (window.OfflineCore.migrateProgress) window.OfflineCore.migrateProgress();
   let offlineMap = {};
   let offlineRecordMap = new Map();
   let offlineParentPaths = new Set();
@@ -488,7 +492,12 @@
   // _buildRenderCtx) — never call get() per tile. getAllSafe/pick are the
   // one-shot path; corrupt values degrade to {} so the grid never falls.
   const ReadingProgress = {
-    KEY: 'bookq_progress',
+    // Account-scoped key (#375): `bookq_progress:<email>` via OfflineCore;
+    // falls back to the legacy fixed key when no user is injected.
+    get KEY() {
+      const oc = window.OfflineCore;
+      return (oc && oc.progressKey) ? oc.progressKey() : 'bookq_progress';
+    },
     _saveTimer: null,
     getAll() { try { return JSON.parse(localStorage.getItem(this.KEY)) || {}; } catch(e) { console.warn(e); return {}; } },
     getAllSafe() { try { return JSON.parse(localStorage.getItem(this.KEY)) || {}; } catch(e) { return {}; } },

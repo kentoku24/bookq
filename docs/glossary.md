@@ -415,7 +415,7 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **説明**: 作品キャッシュとメタをまとめて解放する。
 
 ### 全データ削除 ／ 全消去 (Wipe All)
-- **根拠**: `OfflineCore.wipeTargets()` / `OfflineCore.wipeClientData()` (offline-core.js) と ⑥ 全消去の `doWipeAll()` (offline-harness.html) （`bookq-work-*` / `bookq-api-*` / `bookq-images-*` を削除、`bookq-shell-*` は保持。IndexedDB は作品レコード+ツリー スナップショットを `OfflineStore.clear()` で消し、`bookq_progress` 等の読書データも削除）
+- **根拠**: `OfflineCore.wipeTargets()` / `OfflineCore.wipeClientData()` (offline-core.js) と ⑥ 全消去の `doWipeAll()` (offline-harness.html) （`bookq-work-*` / `bookq-api-*` / `bookq-images-*` を削除、`bookq-shell-*` は保持。IndexedDB は作品レコード+ツリー スナップショットを `OfflineStore.clear()` で消し、`bookq_progress:<email>` 等の読書データも削除）
 - **説明**: 端末のデータをまとめて消す出口。**IndexedDB レコードを持たない「閲覧だけで作られた `bookq-work-*`」も対象**に含む（保存作品が0件でもボタンが有効）。QA フラグ（`bookq_harness` / `bookq_enable_sw` / `bookq_touch` / `bookq_perf`）とアプリ本体の SHELL は残す。ブラウザのメモリキャッシュ／HTTPキャッシュは消せないため、**既に画面に出ている画像はアプリを開き直すまで古いままになり得る**（2026-10-15 の実機確認: 消去直後の同一セッションでは旧バイト、Safari を終了して開き直すと新バイト）。
 
 ### オフラインバッジと操作ボタン (Offline Badge & Controls)
@@ -465,7 +465,7 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **説明**: ログイン前のディープリンクを OAuth 往復の間だけ退避して復帰させる。
 
 ### しおりストア (Reading Progress Store)
-- **根拠**: localStorage `bookq_progress` / `ReadingProgress` （最大50件）
+- **根拠**: localStorage `bookq_progress:<email>`（`OfflineCore.progressKey()` が解決、旧 `bookq_progress` は一度だけ移行）/ `ReadingProgress` （最大50件）
 - **説明**: 作品ごとの続きページを保存し、上限50件で古いものから落とす。
 
 ### 表示設定ランタイム (Layout Prefs)

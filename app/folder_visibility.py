@@ -27,8 +27,10 @@ _BUSY_TIMEOUT_MS = 5000
 # The DDL lives in one shared file (#200) — api/user-state-schema.sql is
 # the single source FastAPI and viewer-rs both apply. This constant must
 # equal the file's `PRAGMA user_version` stamp; a DB stamped newer than
-# it is refused rather than silently downgraded.
-SCHEMA_VERSION = 1
+# it is refused rather than silently downgraded. v2 added the reading-
+# position tables (#375) — the constant versions the whole user-state DB,
+# not just the visibility tables.
+SCHEMA_VERSION = 2
 _SCHEMA_PATH = (
     Path(__file__).resolve().parent.parent / "api" / "user-state-schema.sql"
 )

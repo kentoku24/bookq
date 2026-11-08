@@ -253,7 +253,7 @@ def test_resume_hop_keeps_url_consistent(page, server):
     # group browse, then loadImages("group/episodes") returns [] → empty branch
     # → root browse + no-hash URL.
     page.evaluate(
-        "localStorage.setItem('bookq_progress', "
+        "localStorage.setItem(window.OfflineCore.progressKey(), "
         "JSON.stringify({'group/episodes': {page: 0, total: 1, ts: Date.now()}}))"
     )
     page.reload()
@@ -265,7 +265,7 @@ def test_resume_hop_keeps_url_consistent(page, server):
 
 def test_resume_leaf_opens_book(page, server):
     page.evaluate(
-        "localStorage.setItem('bookq_progress', "
+        "localStorage.setItem(window.OfflineCore.progressKey(), "
         "JSON.stringify({'group/deep_series/vol1': {page: 0, total: 2, ts: Date.now()}}))"
     )
     page.reload()
