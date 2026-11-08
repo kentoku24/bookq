@@ -206,6 +206,19 @@ SETUP_JS = r"""
   window.__fireResize = function () {
     window.dispatchEvent(new Event('resize'));
   };
+
+  // longtask を合成できる fake PerformanceObserver — pairSync.js は
+  // ロード時に1つだけ作って observe するので、その cb を掴んで発火する。
+  var __ltCb = null;
+  window.PerformanceObserver = function (cb) {
+    this.observe = function () { __ltCb = cb; };
+    this.disconnect = function () { __ltCb = null; };
+  };
+  window.__fireLongtask = function (dur) {
+    if (__ltCb) __ltCb({getEntries: function () {
+      return [{startTime: window.__clock.now(), duration: dur}];
+    }});
+  };
 })();
 """
 
@@ -1066,3 +1079,78 @@ def test_reduced_motion_still_rejects_while_input_held(pair_page):
     _apply(pg, 200)
     assert _scroll(pg) == pytest.approx(600, abs=2)
     pg.evaluate("() => window.__setReduce(false)")
+
+
+# ── #135: 適応書き込みスロットル + 診断 stats ──────────────────────────────
+
+
+def test_starved_frames_skip_alternate_writes(pair_page):
+    """持続する遅いフレーム (dt>34ms) では DOM 書き込みが隔フレームに間引
+    かれるが、積分は毎フレーム進むので軌跡は連続のまま収束する。"""
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    pg.evaluate("() => window.__clock.advance(60)")
+    _apply(pg, 200)
+    for _ in range(7):
+        pg.evaluate("() => window.__clock.frame(50)")
+    st = pg.evaluate("() => window.__pairBrowseSync.stats")
+    assert st["starve"] > 0
+    assert st["skips"] >= 1
+    assert st["skips"] < st["writes"], \
+        "throttle must alternate, not stop writes entirely"
+    assert st["frameGaps"]["g60"] >= 7
+    skipped = [e for e in pg.evaluate("() => window.__pairBrowseSync.trace")
+               if e["k"] == "k"]
+    assert skipped, "starved frames must appear as 'k' trace entries"
+    # the settle write is never throttled — final position still lands
+    pg.evaluate("() => window.__clock.frames(60, 50)")
+    assert _scroll(pg) == pytest.approx(600, abs=2)
+    assert _hook(pg)["active"] is False
+
+
+def test_throttle_recovers_after_frames_improve(pair_page):
+    """starve は良好フレームで減衰する — 回復後は毎フレーム書き込みに戻る。"""
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    pg.evaluate("() => window.__clock.advance(60)")
+    _apply(pg, 200)
+    pg.evaluate("() => window.__clock.frames(4, 50)")
+    s0 = pg.evaluate("() => window.__pairBrowseSync.stats")
+    assert s0["starve"] >= 4
+    pg.evaluate("() => window.__clock.advance(60)")
+    _apply(pg, 400)
+    pg.evaluate("() => window.__clock.frames(10, 16)")
+    s1 = pg.evaluate("() => window.__pairBrowseSync.stats")
+    assert s1["starve"] == 0
+    assert s1["skips"] - s0["skips"] <= 2, \
+        "recovered frames must return to full-rate writes"
+    pg.evaluate("() => window.__clock.frames(40, 16)")
+    assert _scroll(pg) == pytest.approx(800, abs=2)
+
+
+def test_stats_record_longtasks_and_recv_gaps(pair_page):
+    """配送遅延 (recvGap/staleArrivals) と長時間タスクが同一タイムラインで
+    観測できる — 停滞の切り分けに必要な計測。"""
+    pg = pair_page
+    _arm_follower(pg)
+    _apply(pg, 100)
+    pg.evaluate("() => window.__clock.advance(60)")
+    _apply(pg, 200)
+    pg.evaluate("() => window.__clock.advance(300)")
+    _apply(pg, 260)
+    pg.evaluate("() => window.__fireLongtask(120)")
+    st = pg.evaluate("() => window.__pairBrowseSync.stats")
+    assert st["recvGapMax"] >= 300
+    assert st["staleArrivals"] == 1
+    assert st["longtasks"][-1]["dur"] == 120
+    assert st["ticks"] == 0          # no rAF frames have run yet
+    pg.evaluate("() => window.__clock.frames(5, 16)")
+    st2 = pg.evaluate("() => window.__pairBrowseSync.stats")
+    assert st2["ticks"] >= 5
+    # every tick lands in exactly one gap bucket; the first tick carries the
+    # rAF that stayed queued through the 300ms advance — correctly a gap
+    fg = st2["frameGaps"]
+    assert fg["ok"] + fg["g60"] + fg["g120"] == st2["ticks"]
+    assert st2["costAvg"] >= 0 and st2["costMax"] >= 0
