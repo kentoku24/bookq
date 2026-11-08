@@ -181,7 +181,7 @@ body.zoomed #zone-prev,body.zoomed #zone-next{pointer-events:none}
 /* #zone-toggle's default left:30%/width:40% (below) already matches this;
    the zoomed-only override was a redundant dead rule. */
 body.zoomed #hint{display:none}
-#img-container,#img-track,#img-track *,#zone-prev,#zone-next,#zone-toggle,#hint,#spread-controls,#spread-controls *,#empty{touch-action:none}
+#img-container,#img-track,#img-track *,#zone-prev,#zone-next,#zone-toggle,#hint,#spread-controls,#spread-controls *,#empty,#img-retry{touch-action:none}
 #toolbar #menu-btn,#toolbar #folder-name,#toolbar #counter{touch-action:none}
 #page-slider-wrap,#page-slider{touch-action:pan-x}
 #img-track{position:absolute;top:0;left:0;height:100%;will-change:transform;transition:transform .25s ease}
@@ -214,6 +214,11 @@ body.portrait #img-track .spread-container{bottom:50%;transform:translateY(50%)}
 
 /* touch zones — excluded from toolbar/slider area */
 #zone-prev,#zone-next,#zone-toggle{position:absolute;top:0;bottom:0;z-index:2;cursor:pointer}
+/* manual image retry (#156): floats above the tap zones so it never turns
+   a page; only visible while the current page's auto-retries are spent */
+#img-retry{position:absolute;left:50%;bottom:calc(64px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:3;padding:10px 18px;min-height:44px;border-radius:999px;border:1px solid #4a4a52;background:rgba(28,28,32,.92);color:#ddd;font-size:14px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+#img-retry[hidden]{display:none}
+body.overview-open #img-retry{pointer-events:none!important;opacity:0}
 #zone-prev{left:0;width:30%}      /* tap → next page (advance) */
 #zone-toggle{left:30%;width:40%}  /* tap → toggle toolbar */
 #zone-next{right:0;width:30%}     /* tap → previous page (go back) */
