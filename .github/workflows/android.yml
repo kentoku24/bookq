@@ -59,7 +59,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@v6
 
       # Installed platform on this repo is android-37.2 (minor release);
       # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
@@ -108,7 +108,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@v6
 
       - name: Install Android SDK packages
         working-directory: android
