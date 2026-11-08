@@ -9,15 +9,30 @@ FROM rust:1-slim-bookworm AS rsbuilder
 # g++ compiles the bundled RARLAB unrar C++ (bookq-core `unrar` dep).
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+
+# Dependency layer (#380): manifests + stub sources so this `cargo build`
+# compiles only third-party crates (~3min). The stub RUN sits before the
+# real-source COPY, so source-only edits keep this layer — and its
+# type=gha cache entry — intact; only workspace crates rebuild below.
+# Keep the stub list in sync with `members` in rust/Cargo.toml.
+COPY rust/Cargo.toml rust/Cargo.lock ./rust/
+COPY rust/bookq-core/Cargo.toml ./rust/bookq-core/Cargo.toml
+COPY rust/viewer-rs/Cargo.toml ./rust/viewer-rs/Cargo.toml
+RUN mkdir -p rust/bookq-core/src rust/viewer-rs/src \
+    && : > rust/bookq-core/src/lib.rs \
+    && printf 'fn main() {}\n' > rust/viewer-rs/src/main.rs \
+    && cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs
+
 COPY rust/ ./rust/
 # api/user-state-schema.sql is embedded via include_str! (#200)
 COPY api/ ./api/
-RUN cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs
+RUN cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs \
+    && cp rust/target/release/viewer-rs /viewer-rs-bin
 
 FROM debian:bookworm-slim
 # libstdc++6 carries the unrar C++ runtime the binary links against.
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 && rm -rf /var/lib/apt/lists/*
-COPY --from=rsbuilder /src/rust/target/release/viewer-rs /usr/local/bin/viewer-rs
+COPY --from=rsbuilder /viewer-rs-bin /usr/local/bin/viewer-rs
 
 # Upstream the proxy falls through to; overridden by compose.
 ENV BOOKQ_UPSTREAM=http://viewer:8080
