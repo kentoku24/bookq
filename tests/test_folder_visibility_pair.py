@@ -318,10 +318,21 @@ def test_boot_resume_waits_for_visibility_ready(request, vis_env):
         pg.reload()
         pg.wait_for_function("() => document.readyState !== 'loading'")
         assert _wait_held(held), "visibility GET was never issued"
-        pg.wait_for_timeout(400)
+        # The held GET races the client's own 3s fetch abort (GET_TIMEOUT_MS):
+        # an abort resolves ready() as 'error' and _boot resumes anyway —
+        # the old fixed-sleep+roundtrips assert window could outlast it.
+        # Snapshot the judgment and both socket probes in ONE evaluate so the
+        # window is ~ms; a buggy immediate resume creates its WebSocket at
+        # script-eval time (route capture already proves it would exist).
+        snap = pg.evaluate(
+            "() => ({rs: window.FolderVisibility &&"
+            " window.FolderVisibility.readyState,"
+            " conns: window.__wsConns.length,"
+            " log: window.__wsLog.length})")
+        assert snap["rs"] == "loading", \
+            f"visibility abort raced the assert window: {snap}"
         # 判断前: _boot の resume は待機 — ソケットはまだ存在しない
-        assert pg.evaluate("() => window.__wsConns.length") == 0
-        assert pg.evaluate("() => window.__wsLog.length") == 0
+        assert snap["conns"] == 0 and snap["log"] == 0
         # 判断が着いてから resume() → RESUME が wire に出る
         # (wsはconstructor時点で __wsConns に載るが RESUME は onopen 後 —
         #  socket存在ではなく frame 自体を待つ)
