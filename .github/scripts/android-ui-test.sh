@@ -107,8 +107,11 @@ run_tests() {
     -e bookqExpectedFolder "$EXPECTED_FOLDER" \
     "$comp" 2>&1 | tee "$RESULTS_FILE"
   # The runner prints "OK (N tests)" on success and "FAILURES!!!" on test
-  # failures; am's own exit status does not distinguish the two.
-  if grep -q 'FAILURES' "$RESULTS_FILE" || ! grep -q 'OK (' "$RESULTS_FILE"; then
+  # failures; am's own exit status does not distinguish the two. N must be
+  # >0 — "OK (0 tests)" would be a silent pass if instrumentation ever
+  # resolved to an empty suite.
+  if grep -q 'FAILURES' "$RESULTS_FILE" \
+    || ! grep -qE 'OK \([1-9][0-9]* tests?\)' "$RESULTS_FILE"; then
     return 1
   fi
 }
