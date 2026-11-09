@@ -151,10 +151,16 @@ struct FolderLevelView: View {
         let pres = visibility.presentation(
             entry.path, editable: visibility.isTopLevel(entry.path))
         let rowMode = model.config.layoutMode != .tile
+        let name = BrowseModel.splitDisplayName(node.name).leaf
         return ZStack(alignment: .topTrailing) {
             // Row layouts are too short to stack the eye below
             // the download button — park it to the button's left.
             ZStack(alignment: rowMode ? .topTrailing : .bottomTrailing) {
+                // The Button wraps the visual so its hit region is exactly
+                // the tile's bounds. Safe now that RemoteImageView keeps a
+                // single stable Image (only the UIImage value changes on
+                // load) — the earlier if/else placeholder↔image swap is
+                // what left this Button's hit-test frame stale.
                 Button { onFolderTap(entry) } label: {
                     FolderTileView(
                         path: entry.path,
@@ -165,8 +171,11 @@ struct FolderLevelView: View {
                         meta: entry.node.metadata,
                         vis: pres
                     )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(name)
+                .accessibilityAddTraits(.isButton)
                 if pres?.toggle == true {
                     VisibilityEyeButton(
                         path: entry.path,
@@ -194,8 +203,11 @@ struct FolderLevelView: View {
             Button { onOpen(entry.path) } label: {
                 SelfTileView(node: entry.node, path: entry.path,
                              layout: model.config.layoutMode)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("このフォルダを読む")
+            .accessibilityAddTraits(.isButton)
             // the self-tile is itself the download target
             OfflineButton(path: entry.path, leaves: [entry.path],
                           store: offline)
