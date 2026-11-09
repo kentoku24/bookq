@@ -60,6 +60,31 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v6
+        with:
+          # v6 defaults cache-read-only on non-default branches — let
+          # same-repo PRs write so the cache warms; fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+          # Default includes omit wrapper; without it every job
+          # re-downloads the Gradle distribution.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            wrapper
+
+      # configuration-cache lives in the project .gradle/ dir, which
+      # setup-gradle's gradle-home cache does not cover — persist it so
+      # the task-graph configuration phase is skipped on warm runs.
+      # Per-job keys: unit and ui request different task graphs, so each
+      # keeps its own entries. Gradle re-validates the fingerprint itself,
+      # so a stale restore is safe (it just recomputes).
+      - name: Cache Gradle configuration-cache
+        uses: actions/cache@v6
+        with:
+          path: android/.gradle/configuration-cache
+          key: android-config-cache-${{ github.job }}-${{ hashFiles('android/**/*.gradle.kts', 'android/**/*.gradle', 'android/gradle.properties', 'android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-config-cache-${{ github.job }}-
+            android-config-cache-
 
       # Installed platform on this repo is android-37.2 (minor release);
       # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
@@ -109,6 +134,26 @@ jobs:
           java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v6
+        with:
+          # v6 defaults cache-read-only on non-default branches — let
+          # same-repo PRs write so the cache warms; fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+          # Default includes omit wrapper; without it every job
+          # re-downloads the Gradle distribution.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            wrapper
+
+      # Same configuration-cache persistence as the unit job — see there.
+      - name: Cache Gradle configuration-cache
+        uses: actions/cache@v6
+        with:
+          path: android/.gradle/configuration-cache
+          key: android-config-cache-${{ github.job }}-${{ hashFiles('android/**/*.gradle.kts', 'android/**/*.gradle', 'android/gradle.properties', 'android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-config-cache-${{ github.job }}-
+            android-config-cache-
 
       - name: Install Android SDK packages
         working-directory: android
@@ -155,6 +200,8 @@ jobs:
           api-level: 35
           arch: x86_64
           target: google_apis
+          # Runner has 4 vCPUs; the action default of 2 leaves half idle.
+          cores: 4
           disable-animations: true
           working-directory: android
           script: bash "$GITHUB_WORKSPACE/.github/scripts/android-ui-test.sh"
@@ -164,5 +211,7 @@ jobs:
         if: always()
         with:
           name: android-connected-test-report
-          path: android/app/build/reports/androidTests/
+          path: |
+            android/app/build/reports/androidTests/
+            android/build/outputs/android-ui-test-results.txt
           if-no-files-found: ignore
