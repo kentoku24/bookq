@@ -69,6 +69,19 @@ struct PairManifest: Equatable {
 
 /// pairModel.turnIndex — chapter clamp when !crossChapter.
 enum PairModel {
+    /// Contiguous `chapterFolder` run containing `index` — the chapter's
+    /// spread bounds [lo, hi] inclusive. Chapters never share a spread,
+    /// so the run is exact (web getChapterSpreadRange for the pair table).
+    static func chapterRange(in table: [PairSpread],
+                             index: Int) -> (lo: Int, hi: Int)? {
+        guard table.indices.contains(index) else { return nil }
+        let chapter = table[index].chapterFolder
+        var lo = index, hi = index
+        while lo > 0 && table[lo - 1].chapterFolder == chapter { lo -= 1 }
+        while hi + 1 < table.count && table[hi + 1].chapterFolder == chapter { hi += 1 }
+        return (lo, hi)
+    }
+
     static func turnIndex(in table: [PairSpread], index: Int,
                           delta: Int, crossChapter: Bool) -> Int? {
         guard !table.isEmpty, index >= 0, index < table.count else { return nil }
@@ -77,11 +90,8 @@ enum PairModel {
         if crossChapter {
             return max(0, min(target, table.count - 1))
         }
-        let chapter = table[index].chapterFolder
-        var lo = index, hi = index
-        while lo > 0 && table[lo - 1].chapterFolder == chapter { lo -= 1 }
-        while hi + 1 < table.count && table[hi + 1].chapterFolder == chapter { hi += 1 }
-        return max(lo, min(target, hi))
+        guard let r = chapterRange(in: table, index: index) else { return nil }
+        return max(r.lo, min(target, r.hi))
     }
 
     /// Canonical projection (§3.2): leader renders leaderSide, follower the
