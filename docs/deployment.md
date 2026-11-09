@@ -315,7 +315,7 @@ docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tails
 docker compose --profile rs stop viewer-rs
 ```
 
-切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions は per-process で揮発**（py 側も in-memory dict で再起動で消える既存仕様）のため、切替/切戻しの瞬間に「どこまで読んだか」は失われる — ユーザー影響として許容する判断（最終ページは手動で戻れる、永続破壊ではない）。
+切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、py/rs どちらが書いても同じ DB を読むため、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 
 ---
 

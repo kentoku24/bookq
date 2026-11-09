@@ -25,11 +25,18 @@ from app import auth as auth_module
 from app.archive import ARCHIVE_EXTENSIONS, is_archive_file, list_archive_entries
 from app.auth import get_current_user, require_auth
 from app.folder_visibility import (
+    DB_FILENAME,
     GLOBAL_USER_KEY,
     user_key_for_email,
     visibility_owner,
 )
 from app.metadata import MetadataIndex
+from app.reading_positions import (
+    REJECTED,
+    STALE,
+    ReadingPositionStore,
+    position_user_key,
+)
 from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
 
@@ -919,6 +926,9 @@ async def index(request: Request):
         "ua_android": ua_android,
         "visibility_owner": visibility_owner_value,
         "visibility_snapshot": visibility_snapshot,
+        # Same normalized user-state key as folder visibility — scopes the
+        # client's localStorage progress per account (#375).
+        "progress_user_key": visibility_user_key,
     }
     if thumb_perf:
         context["thumbnail_perf"] = True
@@ -1703,130 +1713,66 @@ async def serve_thumb_sprite(
 #
 # The "続きから" pill mirrors its newest localStorage entry here so a fresh
 # device (or a browser restart) can resume where another device left off.
-# Per-user store on app.state — single worker assumed (production runs one
-# hypercorn worker), and a container restart losing records is an accepted
-# trade-off. The stored folder path is opaque data: it is never resolved
-# against the filesystem here, only echoed back, so no containment check
-# applies.
+# Records live in the shared user-state SQLite DB (api/user-state-schema.sql
+# v2) via app.reading_positions — per-user slots survive restarts and are
+# shared with viewer-rs when BOOKQ_RS_NATIVE=positions is enabled (#375).
+# The stored folder path is opaque data: it is never resolved against the
+# filesystem here, only echoed back, so no containment check applies.
 #
-# Store shape per user: ``{"folders": {folder: rec|tombstone},
-# "tombstone_ts": int, "updated_at": float}``. The v1 API is per-folder
-# last-writer-wins; the v0 API keeps its single-slot semantics on top —
-# v0 GET reads the newest folder record, v0 PUT accepts only a global
-# newest, and both delete-alls land on ``tombstone_ts``.
-_POSITION_MAX_USERS = 100
-_POSITION_MAX_FOLDERS = 512
-# How far into the future a client ts may reach before being clamped.
-# 5 minutes tolerates ordinary clock drift while bounding a wrong-clock
-# write's damage to the same window.
-_POSITION_TS_FUTURE_SLACK_MS = 300_000
+# Slot rules (LWW, tombstones, future-ts guard, bounds) live in
+# app.reading_positions.PositionBook — the same rules viewer-rs ports,
+# pinned by tests/fixtures/positions_cases.json. Handlers below only do
+# HTTP validation and adapt store results to status codes.
 
 
-def _positions(request: Request) -> dict:
-    """Return the per-user position map, lazily created on app.state.
+def _position_store(request: Request) -> ReadingPositionStore:
+    """Return the SQLite position store, lazily created on app.state.
 
     getattr-first so SimpleNamespace stub states (tests) work the same as
-    the real Starlette State.
+    the real Starlette State; construction performs no I/O.
     """
     state = request.app.state
-    pos = getattr(state, "reading_positions", None)
-    if not isinstance(pos, dict):
-        pos = {}
+    store = getattr(state, "reading_position_store", None)
+    if not isinstance(store, ReadingPositionStore):
+        settings = getattr(state, "settings", None)
+        path = getattr(settings, "state_path", None)
+        if path is None:
+            state_dir = os.environ.get("BOOKQ_STATE_DIR", "").strip()
+            base = (
+                Path(state_dir).expanduser()
+                if state_dir
+                else Path.home() / ".local" / "share" / "bookq"
+            )
+            path = base / DB_FILENAME
+        store = ReadingPositionStore(Path(path))
         try:
-            state.reading_positions = pos
+            state.reading_position_store = store
         except Exception:
             pass
-    return pos
+    return store
+
+
+async def _position_store_call(fn, *args):
+    """Run one store operation off the event loop; failures -> generic 503.
+
+    Only the exception type is logged: DB messages can carry SQL, local
+    paths or user data, none of which belong in logs or the response.
+    """
+    try:
+        return await run_in_threadpool(fn, *args)
+    except Exception as exc:
+        logger.warning("reading-position store failure type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="reading-position store unavailable")
 
 
 def _position_user_key(user: dict) -> str:
-    email = user.get("email") if isinstance(user, dict) else None
-    return str(email or "unknown").lower()
-
-
-def _user_position_slot(positions: dict, key: str, create: bool = True) -> dict | None:
-    """The caller's ``{folders, tombstone_ts, updated_at}`` slot."""
-    slot = positions.get(key)
-    if not isinstance(slot, dict) or not isinstance(slot.get("folders"), dict):
-        if not create:
-            return None
-        slot = {"folders": {}, "tombstone_ts": 0, "updated_at": 0.0}
-        positions[key] = slot
-    return slot
-
-
-def _latest_position(slot: dict | None) -> dict | None:
-    """The newest non-tombstone record across the slot's folders (v0 view)."""
-    latest = None
-    for rec in (slot or {}).get("folders", {}).values():
-        if rec.get("tombstone"):
-            continue
-        if latest is None or rec["ts"] > latest["ts"]:
-            latest = rec
-    return latest
-
-
-def _slot_max_ts(slot: dict | None) -> int:
-    """Newest ts over every folder record, tombstones included."""
-    ts = (slot or {}).get("tombstone_ts", 0)
-    for rec in (slot or {}).get("folders", {}).values():
-        if rec.get("ts", 0) > ts:
-            ts = rec["ts"]
-    return ts
-
-
-def _live_max_ts(slot: dict | None) -> int:
-    """Newest ts over non-tombstone folder records only."""
-    ts = 0
-    for rec in (slot or {}).get("folders", {}).values():
-        if not rec.get("tombstone") and rec.get("ts", 0) > ts:
-            ts = rec["ts"]
-    return ts
-
-
-def _store_position_v0(slot: dict, rec: dict) -> bool:
-    """v0 single-slot semantics: accept only a global newest write.
-
-    Rejects at-or-below a delete-all tombstone, at-or-below this folder's
-    own delete tombstone, and strictly below the live newest — the same
-    "newest ts wins, tombstone ties lose" contract the single-slot store
-    had, extended over per-folder records.
-    """
-    if rec["ts"] <= slot["tombstone_ts"]:
-        return False
-    existing = slot["folders"].get(rec["folder"])
-    if existing is not None and existing.get("tombstone") and rec["ts"] <= existing["ts"]:
-        return False
-    if rec["ts"] < _live_max_ts(slot):
-        return False
-    slot["folders"][rec["folder"]] = rec
-    return True
-
-
-def _store_position_v1(slot: dict, rec: dict) -> bool:
-    """v1 per-folder last-writer-wins: reject only an older/equal ts for the
-    SAME folder, or at-or-below a delete-all tombstone."""
-    if rec["ts"] <= slot["tombstone_ts"]:
-        return False
-    existing = slot["folders"].get(rec["folder"])
-    if existing is not None:
-        if existing.get("tombstone"):
-            if rec["ts"] <= existing["ts"]:
-                return False
-        elif rec["ts"] < existing["ts"]:
-            return False
-    slot["folders"][rec["folder"]] = rec
-    return True
-
-
-def _trim_position_slot(slot: dict) -> None:
-    """Bound the per-folder map; evict the least-recently-written entry."""
-    if len(slot["folders"]) > _POSITION_MAX_FOLDERS:
-        stalest = min(
-            slot["folders"],
-            key=lambda f: slot["folders"][f].get("updated_at", 0),
-        )
-        del slot["folders"][stalest]
+    """The caller's position-store key — 403 when the session carries no
+    usable email (never a shared "unknown" bucket: that would let one
+    malformed session read or wipe another account's positions)."""
+    key = position_user_key(user)
+    if key is None:
+        raise HTTPException(status_code=403, detail="session has no usable identity")
+    return key
 
 
 def _validate_folder_param(folder) -> str:
@@ -1842,18 +1788,28 @@ def _validate_folder_param(folder) -> str:
     return folder
 
 
+# SQLite INTEGER / Rust i64 bound — viewer-rs's as_int rejects anything
+# outside i64, and an out-of-range Python int would OverflowError inside
+# sqlite3 and surface as a bogus 503 instead of a validation 400.
+_INT64_MIN = -(1 << 63)
+_INT64_MAX = (1 << 63) - 1
+
+
 def _as_int(v) -> int | None:
     """JSON Schema `integer` admits integral floats (2716.0) — coerce them.
 
-    bools and non-integral/non-finite values stay rejected.
+    bools, non-integral/non-finite values and ints outside the i64 range
+    the store can hold stay rejected.
     """
     if isinstance(v, bool):
         return None
     if isinstance(v, int):
-        return v
-    if isinstance(v, float) and math.isfinite(v) and v.is_integer():
-        return int(v)
-    return None
+        n = v
+    elif isinstance(v, float) and math.isfinite(v) and v.is_integer():
+        n = int(v)
+    else:
+        return None
+    return n if _INT64_MIN <= n <= _INT64_MAX else None
 
 
 def _validate_position_body_v1(body) -> dict:
@@ -1908,9 +1864,10 @@ async def get_reading_position(request: Request, user: dict = Depends(require_au
     v0 single-slot view over the per-folder store: the newest non-tombstone
     record across all folders.
     """
-    slot = _user_position_slot(_positions(request), _position_user_key(user), create=False)
+    key = _position_user_key(user)
+    position = await _position_store_call(_position_store(request).latest, key)
     return JSONResponse(
-        content={"position": _latest_position(slot)},
+        content={"position": position},
         headers={"Cache-Control": "no-store"},
     )
 
@@ -1931,7 +1888,9 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     rec = _validate_position_payload(body)
-    # Reject far-future ts: one wrong-clock device must not poison the
+    key = _position_user_key(user)
+    result = await _position_store_call(_position_store(request).put_v0, key, rec)
+    # REJECTED = far-future ts: one wrong-clock device must not poison the
     # slot — an unchecked future ts would reject every honest PUT as
     # stale, and even the DELETE tombstone would inherit it. Clamping is
     # NOT a fix: a continuously-writing skewed device would keep its
@@ -1939,21 +1898,10 @@ async def put_reading_position(request: Request, user: dict = Depends(require_au
     # Dropping (400) leaves the honest record in place; the client treats
     # non-retryable 4xx as a drop, so a wrong-clock device simply doesn't
     # sync until its clock is fixed.
-    if rec["ts"] > int(time.time() * 1000) + _POSITION_TS_FUTURE_SLACK_MS:
+    if result == REJECTED:
         raise HTTPException(status_code=400, detail="ts too far in the future")
-    rec["updated_at"] = time.time()
-    positions = _positions(request)
-    key = _position_user_key(user)
-    if key not in positions and len(positions) >= _POSITION_MAX_USERS:
-        # Bound the map under a misconfigured deployment — the email
-        # allowlist keeps this unreachable in practice.
-        stalest = min(positions, key=lambda k: positions[k].get("updated_at", 0))
-        del positions[stalest]
-    slot = _user_position_slot(positions, key)
-    if not _store_position_v0(slot, rec):
+    if result == STALE:
         return {"status": "stale"}
-    slot["updated_at"] = rec["updated_at"]
-    _trim_position_slot(slot)
     return {"status": "ok"}
 
 
@@ -1972,15 +1920,10 @@ async def delete_reading_position(
     reset fixture needs a truly clean slate, since a tombstone would
     legitimately reject the next test's freshly-written record.
     """
-    positions = _positions(request)
     key = _position_user_key(user)
+    store = _position_store(request)
     if hard and auth_module._TEST_MODE:
-        positions.pop(key, None)
+        await _position_store_call(store.delete_user, key)
         return {"status": "ok"}
-    slot = _user_position_slot(positions, key)
-    positions[key] = {
-        "folders": {},
-        "tombstone_ts": _slot_max_ts(slot),
-        "updated_at": time.time(),
-    }
+    await _position_store_call(store.delete_all, key)
     return {"status": "ok"}

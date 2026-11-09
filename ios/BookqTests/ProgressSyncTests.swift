@@ -13,6 +13,8 @@ final class ProgressSyncTests: XCTestCase {
     override func setUp() async throws {
         StubURLProtocol.reset()
         UserDefaults.standard.removeObject(forKey: "bookq_progress_v1")
+        // Scoped key used by the default "anon|anon" scopeProvider.
+        UserDefaults.standard.removeObject(forKey: "bookq_progress_v1:anon|anon")
         api = StubURLProtocol.api()
         sync = ProgressSync(api: api)
         sync.sleep = { _ in }            // timers fire immediately
@@ -192,6 +194,24 @@ final class ProgressSyncTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 1)
     }
 
+    /// attach() resets the outgoing sync — a queued PUT must not survive
+    /// the transport swap and land under the next account's token.
+    func testAttachResetsOutgoingSync() async {
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
+        let oldSync = ProgressSync(api: api)
+        oldSync.sleep = { _ in }
+        let store = ReadingProgressStore()
+        store.attach(oldSync)
+        store.record(path: "A", page: 1, total: 10)   // queues a PUT on oldSync
+        // Swap transports before the 2s debounce can fire — same-actor
+        // ordering makes this deterministic.
+        let newSync = ProgressSync(api: api)
+        newSync.sleep = { _ in }
+        store.attach(newSync)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/reading-positions"), 0)
+    }
+
     /// mergeRemote writes the position WITHOUT re-pushing (no echo loop).
     func testMergeRemoteDoesNotEcho() async {
         StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
@@ -271,5 +291,51 @@ final class ProgressSyncTests: XCTestCase {
         XCTAssertEqual(store.entries.count, 50)
         XCTAssertNil(store.entries["F0"])
         XCTAssertNotNil(store.entries["F59"])
+    }
+
+    // MARK: - Account scoping (#375 / #265)
+
+    /// Different account scopes never see each other's entries, even for
+    /// the same folder path — the pre-#265 fixed key leaked across users.
+    func testScopesAreIsolated() {
+        var account = "alice@example.com"
+        let store = ReadingProgressStore(scopeProvider: { "h|\(account)" })
+        store.mergeRemote(path: "A", page: 3, total: 10, ts: 1)
+
+        account = "bob@example.com"
+        store.scopeChanged()
+        XCTAssertTrue(store.entries.isEmpty)
+
+        store.mergeRemote(path: "A", page: 9, total: 10, ts: 2)
+        account = "alice@example.com"
+        store.scopeChanged()
+        XCTAssertEqual(store.entries["A"]?.page, 3)   // alice's, not bob's
+    }
+
+    /// Legacy `bookq_progress_v1` migrates once into a concrete account
+    /// scope, then the old key is gone.
+    func testLegacyKeyMigratesToAccountScope() throws {
+        let legacy: [String: ReadingProgressStore.Entry] = [
+            "W": .init(page: 4, total: 10, ts: 7, title: nil)]
+        let data = try JSONEncoder().encode(legacy)
+        UserDefaults.standard.set(data, forKey: "bookq_progress_v1")
+
+        let store = ReadingProgressStore(
+            scopeProvider: { "h|carol@example.com" })
+        XCTAssertEqual(store.entries["W"]?.page, 4)
+        XCTAssertNil(UserDefaults.standard.data(forKey: "bookq_progress_v1"))
+    }
+
+    /// The anonymous scope must not claim the legacy key — a signed-out
+    /// session would strand a signed-in user's progress (OfflineStore
+    /// parity).
+    func testAnonScopeDoesNotClaimLegacy() throws {
+        let legacy: [String: ReadingProgressStore.Entry] = [
+            "W": .init(page: 4, total: 10, ts: 7, title: nil)]
+        let data = try JSONEncoder().encode(legacy)
+        UserDefaults.standard.set(data, forKey: "bookq_progress_v1")
+
+        _ = ReadingProgressStore(scopeProvider: { "h|anon" })
+        XCTAssertNotNil(UserDefaults.standard.data(forKey: "bookq_progress_v1"))
     }
 }

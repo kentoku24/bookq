@@ -68,8 +68,11 @@ def test_no_localstorage_for_layout(landscape_page, server):
     keys = landscape_page.evaluate("Object.keys(localStorage)")
     # bookq.folderVisibility.v1.<owner> は仕様上のowner別snapshot cache
     # (offline起動用) — レイアウト状態ではないため許可する。
+    # bookq_progress(:<email>)? は読書進捗 — アカウントスコープ化 (#375) 後は
+    # `bookq_progress:<email>` 形式も許可する。
     assert all(
-        k in ("bookq_progress", "bookq_persist_toast")
+        k == "bookq_progress" or k.startswith("bookq_progress:")
+        or k == "bookq_persist_toast"
         or k.startswith("bookq.folderVisibility.v1.")
         for k in keys
     ), keys

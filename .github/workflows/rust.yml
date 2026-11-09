@@ -5,25 +5,45 @@ name: rust
 
 on:
   pull_request:
-    paths:
-      - "rust/**"
-      - "Dockerfile.viewer-rs"
-      - "docker-compose.*-rs.yml"
-      - ".github/workflows/rust.yml"
-      # gateway-contract inputs (#199): the OpenAPI spec + expected-statuses
-      # overrides drive the suite, and the job builds the Python Dockerfile.
-      # api/** also covers api/reader-sync-cases.json — the cargo golden
-      # harness input (#210), so a case-file-only edit still triggers this.
-      - "api/**"
-      - "schemathesis.toml"
-      - "Dockerfile"
   workflow_dispatch:
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 jobs:
+  # Job-level path gating so every PR reports these check names — see
+  # android.yml changes-android for why workflow-level paths: would
+  # deadlock required status checks (#382).
+  changes-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        # gateway-contract inputs (#199): the OpenAPI spec +
+        # expected-statuses overrides drive the suite, and the job builds
+        # the Python Dockerfile. api/** also covers
+        # api/reader-sync-cases.json — the cargo golden harness input
+        # (#210), so a case-file-only edit still triggers this.
+        with:
+          filters: |
+            run:
+              - "rust/**"
+              - "Dockerfile.viewer-rs"
+              - "docker-compose.*-rs.yml"
+              - ".github/workflows/rust.yml"
+              - "api/**"
+              - "schemathesis.toml"
+              - "Dockerfile"
+
   test:
+    needs: changes-rust
+    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,6 +67,8 @@ jobs:
         run: cargo test --workspace
 
   image-build:
+    needs: changes-rust
+    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -75,6 +97,8 @@ jobs:
   # `server` response header discriminates which backend answered
   # (`hypercorn-h11` = proxied to FastAPI, absent = viewer-rs native).
   gateway-contract:
+    needs: changes-rust
+    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

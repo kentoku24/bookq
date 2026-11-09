@@ -232,7 +232,7 @@ def test_pair_establish_shares_leader_spread(devs):
     pl, pf = devs
     # Seed a stale resume point on the follower — it must be ignored.
     pf.evaluate(
-        "() => localStorage.setItem('bookq_progress', JSON.stringify("
+        "() => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify("
         "{'long': {page: 20, total: 30, ts: Date.now()}}))")
     _open(pl, "long", "p005.png")
     _pair_now(pl, pf)
@@ -527,9 +527,10 @@ def test_anchor_hash_and_progress_on_both_and_blank_side(devs):
     # never null, never the peer's side.
     for p in (pl, pf):
         p.wait_for_function(
-            "() => JSON.parse(localStorage.getItem('bookq_progress') || '{}')"
-            "['simple_manga'] && JSON.parse(localStorage.getItem"
-            "('bookq_progress'))['simple_manga'].page === 4",
+            "() => { const k = window.OfflineCore.progressKey();"
+            " return JSON.parse(localStorage.getItem(k) || '{}')"
+            "['simple_manga'] && JSON.parse(localStorage.getItem(k))"
+            "['simple_manga'].page === 4; }",
             timeout=5000)
 
 

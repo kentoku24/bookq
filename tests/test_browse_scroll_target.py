@@ -126,7 +126,7 @@ def _navigate(page, path, child):
 
 
 def _seed_progress(page, entries):
-    page.evaluate("(o) => localStorage.setItem('bookq_progress', JSON.stringify(o))", entries)
+    page.evaluate("(o) => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify(o))", entries)
     page.reload()
     page.wait_for_selector(".tile")
     page.wait_for_function("() => window.treeLoaded === true")
@@ -336,7 +336,7 @@ def test_decide_exposes_decision_table(small):
     assert d({"level": None, "cause": "restore", "hasSaved": True}) == {"via": "saved", "anchor": None}
     assert d({"level": SERIES, "cause": "restore", "hasSaved": True}) == {"via": "saved", "anchor": None}
     small.evaluate(
-        "(e) => localStorage.setItem('bookq_progress', JSON.stringify(e))",
+        "(e) => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify(e))",
         {EP3: {"page": 0, "total": 7, "ts": 1}},
     )
     assert d({"level": SERIES, "cause": "open", "hasSaved": False}) == {"via": "progress", "anchor": EP3}
@@ -364,7 +364,7 @@ def test_decide_exposes_decision_table(small):
 
     # 直下の子のみ: group 直下に既読は無い（既読は孫の deep_series/vol1 だけ）→ 上端
     small.evaluate(
-        "(e) => localStorage.setItem('bookq_progress', JSON.stringify(e))",
+        "(e) => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify(e))",
         {"group/deep_series/vol1": {"page": 0, "total": 2, "ts": 1}},
     )
     _navigate(small, "group", "group/deep_series")
