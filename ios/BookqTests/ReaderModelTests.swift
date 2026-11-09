@@ -205,6 +205,60 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(r1.hi, 2)
     }
 
+    // MARK: - chapter-local slider (web syncChapterSlider parity)
+
+    func testChapterSliderSingleChapterFullBook() {
+        // Single chapter: the slider spans the whole book, as before.
+        // spreads [[0,1],[2,3],[4]] → span 2.
+        let w = ReaderWork.assemble(clickedPath: "a",
+                                    chapters: [chapter("a", "a", 5)],
+                                    pageMode: .spread, spreadOffset: 0)
+        XCTAssertEqual(w.chapterSliderMax(at: 0), 2)
+        XCTAssertEqual(w.idxToChapterSlider(0), 0)
+        XCTAssertEqual(w.idxToChapterSlider(4), 2)
+        XCTAssertEqual(w.chapterSliderToIdx(0, at: 0), 0)
+        XCTAssertEqual(w.chapterSliderToIdx(1, at: 0), 2)
+        XCTAssertEqual(w.chapterSliderToIdx(2, at: 0), 4)
+    }
+
+    func testChapterSliderCrossChapterScoped() {
+        // ch0: 3 imgs / ch1: 4 imgs, offset0 → 1 spacer before ch1.
+        // spreads [[0,1],[2],[4,5],[6,7]] — ch0 owns spreads 0-1,
+        // ch1 owns 2-3 (boundaries [0,4]).
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 3),
+                                               chapter("02", "w/02", 4)],
+                                    pageMode: .spread, spreadOffset: 0)
+        // ch0 side: span covers only its 2 spreads.
+        XCTAssertEqual(w.chapterSliderMax(at: 2), 1)
+        XCTAssertEqual(w.idxToChapterSlider(0), 0)
+        XCTAssertEqual(w.idxToChapterSlider(2), 1)
+        XCTAssertEqual(w.chapterSliderToIdx(0, at: 2), 0)
+        XCTAssertEqual(w.chapterSliderToIdx(1, at: 2), 2)
+        // ch1 side: global idx 5 → chapter1 local spread 0, idx 6 → 1.
+        XCTAssertEqual(w.chapterSliderMax(at: 5), 1)
+        XCTAssertEqual(w.idxToChapterSlider(5), 0)
+        XCTAssertEqual(w.idxToChapterSlider(6), 1)
+        XCTAssertEqual(w.chapterSliderToIdx(0, at: 5), 4)
+        XCTAssertEqual(w.chapterSliderToIdx(1, at: 5), 6)
+    }
+
+    func testChapterSliderToIdxClampsToChapterNotBook() {
+        // The whole point of the change: a slider value can never resolve
+        // into a sibling chapter — overflow clamps to the chapter's own
+        // hi, underflow to its own lo.
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 3),
+                                               chapter("02", "w/02", 4)],
+                                    pageMode: .spread, spreadOffset: 0)
+        // at ch0 (idx 2): val 99 → ch0's last spread first page (2),
+        // never ch1's first page (4).
+        XCTAssertEqual(w.chapterSliderToIdx(99, at: 2), 2)
+        XCTAssertEqual(w.chapterSliderToIdx(-9, at: 5), 4)
+        // idxToChapterSlider on a spacer global index stays in range.
+        XCTAssertEqual(w.idxToChapterSlider(3), 0)
+    }
+
     // MARK: - tap zones (test_viewer_tapmode: L/R modes + center chrome)
 
     func testZoneActionLeftMode() {

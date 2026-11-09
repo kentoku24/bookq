@@ -368,6 +368,39 @@ struct ReaderWork: Equatable {
         return max(0, idxToSpread[idx])
     }
 
+    // MARK: - chapter-local slider (web syncChapterSlider family)
+
+    /// Spread range [lo, hi] of the chapter `globalIdx` belongs to —
+    /// `chapterSpreadRange` resolved through `chapterInfo`.
+    func chapterSliderRange(at globalIdx: Int) -> (lo: Int, hi: Int) {
+        chapterSpreadRange(chapterInfo(at: globalIdx).chapterIdx)
+    }
+
+    /// `chapterSliderMax` — the slider's span: hi - lo spreads inside the
+    /// current chapter only. Cross-chapter moves never come from the
+    /// slider; they happen via page turns at the chapter edges.
+    func chapterSliderMax(at globalIdx: Int) -> Int {
+        let r = chapterSliderRange(at: globalIdx)
+        return max(r.hi - r.lo, 0)
+    }
+
+    /// `idxToChapterSlider` — global index → slider value: the spread's
+    /// offset inside its chapter, clamped to 0...span.
+    func idxToChapterSlider(_ globalIdx: Int) -> Int {
+        let r = chapterSliderRange(at: globalIdx)
+        return min(max(spreadOf(globalIdx) - r.lo, 0), max(r.hi - r.lo, 0))
+    }
+
+    /// `chapterSliderToIdx` — slider value → first global page of the
+    /// clamped chapter-local spread (`spreads[...].pages[0]` parity).
+    /// nil when the resolved spread is out of table.
+    func chapterSliderToIdx(_ val: Int, at globalIdx: Int) -> Int? {
+        let r = chapterSliderRange(at: globalIdx)
+        let s = min(max(r.lo + val, r.lo), r.hi)
+        guard spreads.indices.contains(s) else { return nil }
+        return spreads[s].first
+    }
+
     /// Next/prev spread navigation — `goNext`/`goPrev`.
     func nextSpreadFirstPage(after globalIdx: Int) -> Int? {
         let s = spreadOf(globalIdx)
