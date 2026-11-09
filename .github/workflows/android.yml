@@ -71,6 +71,21 @@ jobs:
             notifications
             wrapper
 
+      # configuration-cache lives in the project .gradle/ dir, which
+      # setup-gradle's gradle-home cache does not cover — persist it so
+      # the task-graph configuration phase is skipped on warm runs.
+      # Per-job keys: unit and ui request different task graphs, so each
+      # keeps its own entries. Gradle re-validates the fingerprint itself,
+      # so a stale restore is safe (it just recomputes).
+      - name: Cache Gradle configuration-cache
+        uses: actions/cache@v6
+        with:
+          path: android/.gradle/configuration-cache
+          key: android-config-cache-${{ github.job }}-${{ hashFiles('android/**/*.gradle.kts', 'android/**/*.gradle', 'android/gradle.properties', 'android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-config-cache-${{ github.job }}-
+            android-config-cache-
+
       # Installed platform on this repo is android-37.2 (minor release);
       # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
       - name: Install Android SDK packages
@@ -129,6 +144,16 @@ jobs:
             caches
             notifications
             wrapper
+
+      # Same configuration-cache persistence as the unit job — see there.
+      - name: Cache Gradle configuration-cache
+        uses: actions/cache@v6
+        with:
+          path: android/.gradle/configuration-cache
+          key: android-config-cache-${{ github.job }}-${{ hashFiles('android/**/*.gradle.kts', 'android/**/*.gradle', 'android/gradle.properties', 'android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-config-cache-${{ github.job }}-
+            android-config-cache-
 
       - name: Install Android SDK packages
         working-directory: android

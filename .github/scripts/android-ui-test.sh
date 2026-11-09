@@ -68,6 +68,23 @@ build_apks() {
   ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
 }
 
+wait_for_adb() {
+  # The emulator-runner action returns once the guest boots, but the adb
+  # transport can still be mid-reconnect — and install_apks runs before
+  # the server probe, so a dropped device here would exit before any
+  # retry path exists.
+  local i
+  for i in $(seq 1 60); do
+    if adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | grep -q '^1'; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: adb/device not ready after 120s"
+  adb devices
+  return 1
+}
+
 install_apks() {
   local app_apk="$APP_APK"
   if [[ -z "$app_apk" ]]; then
@@ -120,6 +137,7 @@ echo "== build APKs"
 build_apks || exit 1
 
 echo "== install APKs"
+wait_for_adb || exit 1
 install_apks || exit 1
 
 echo "== emulator->server connectivity gate: $PROBE_URL"
