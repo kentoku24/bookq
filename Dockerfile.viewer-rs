@@ -31,8 +31,10 @@ COPY api/ ./api/
 # stub binary (observed: final build "Finished in 0.08s"). touch forces
 # every copied file newer than the fingerprint so exactly the workspace
 # crates rebuild; third-party dep artifacts stay cached. api/ is touched
-# too — include_str! tracks that file's mtime the same way.
-RUN find rust api -type f -exec touch {} + \
+# too — include_str! tracks that file's mtime the same way. rust/target
+# is pruned: it holds the stub build's dep artifacts + dep-info files,
+# and touching those could flip cargo's freshness check either way.
+RUN find rust api -type f -not -path '*/target/*' -exec touch {} + \
     && cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs \
     && cp rust/target/release/viewer-rs /viewer-rs-bin
 
