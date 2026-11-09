@@ -188,7 +188,10 @@ struct FolderLevelView: View {
     private func selfCell(path: String, node: TreeNode) -> some View {
         let entry = (path: path, node: node)
         return ZStack(alignment: .topTrailing) {
-            Button { onFolderTap(entry) } label: {
+            // Self tiles always open the reader at their own path (web
+            // `data-read-self` → loadImages) — never drillsDown, or a
+            // mixed folder would drill instead of reading its own images.
+            Button { onOpen(entry.path) } label: {
                 SelfTileView(node: entry.node, path: entry.path,
                              layout: model.config.layoutMode)
             }
