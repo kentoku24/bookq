@@ -57,6 +57,20 @@ pub(crate) struct Native {
     set: std::collections::HashSet<String>,
 }
 
+/// Endpoint groups that answer from the same in-process tree/index snapshot
+/// and therefore have to be cut over together (#281).
+///
+/// `tree` / `search` / `facets` / `images` all read [`folders::IndexState`]:
+/// enabling only some of them makes browse and search report different
+/// generations from different backends (#261). `reader-sync`'s catalog
+/// resolver builds its manifest from the same tree, so a native socket with a
+/// proxied tree resolves `OPEN_WORK` against the other backend's flatten/fill
+/// state.
+const NATIVE_GROUPS: [&[&str]; 2] = [
+    &["tree", "search", "facets", "images"],
+    &["tree", "reader-sync"],
+];
+
 impl Native {
     fn from_env() -> Self {
         let test_mode = std::env::var("BOOKQ_TEST_MODE")
@@ -77,12 +91,49 @@ impl Native {
                 }
             }
         }
+        Self::from_parts(test_mode, all, set)
+    }
+
+    /// Env-free constructor: the gate below is unit-tested against it instead
+    /// of mutating process-global `BOOKQ_RS_NATIVE` (which cargo's parallel
+    /// test threads share).
+    fn from_parts(test_mode: bool, all: bool, set: std::collections::HashSet<String>) -> Self {
         Self { test_mode, all, set }
     }
 
     pub(crate) fn enabled(&self, ep: &str) -> bool {
         self.all || self.set.contains(ep)
     }
+
+    /// Groups where at least one member is native and at least one is not.
+    ///
+    /// All-or-nothing per group is the only safe cutover state: a partial one
+    /// silently splits the index between the two backends. Groups nobody has
+    /// enabled are fine — that is the "all proxy" fallback posture.
+    pub(crate) fn partial_groups(&self) -> Vec<&'static [&'static str]> {
+        NATIVE_GROUPS
+            .iter()
+            .copied()
+            .filter(|group| {
+                let enabled = group.iter().filter(|ep| self.enabled(ep)).count();
+                enabled > 0 && enabled < group.len()
+            })
+            .collect()
+    }
+}
+
+/// `BOOKQ_RS_NATIVE_STRICT=1` promotes the partial-group warning to a start-up
+/// failure, so a cutover runbook can gate on "the gateway refused a split
+/// configuration" instead of grepping logs.
+fn native_strict() -> bool {
+    matches!(
+        std::env::var("BOOKQ_RS_NATIVE_STRICT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 #[derive(Clone)]
@@ -832,6 +883,27 @@ async fn main() {
     let downloads = std::fs::canonicalize(&downloads).unwrap_or(downloads);
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
     let native = Native::from_env();
+    // #281: a partial group is a silent split-brain — browse answers from one
+    // backend's index, search from the other's. Warn only, because production
+    // deliberately walks through partial states while rolling out; the strict
+    // flag is for cutover runbooks and CI, where a split config must not boot.
+    let partial_groups = native.partial_groups();
+    for group in &partial_groups {
+        tracing::warn!(
+            group = ?group,
+            native_set = ?native.set,
+            native_all = native.all,
+            "partial native cutover: group members read one tree/index snapshot and must be enabled together (#281)"
+        );
+    }
+    if !partial_groups.is_empty() && native_strict() {
+        tracing::error!(
+            groups = ?partial_groups,
+            native_set = ?native.set,
+            "BOOKQ_RS_NATIVE_STRICT: refusing a partial native cutover"
+        );
+        std::process::exit(2);
+    }
     let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
         .unwrap_or_default()
         .split(',')
@@ -924,4 +996,54 @@ async fn main() {
         })
         .await
         .expect("serve failed");
+}
+
+#[cfg(test)]
+mod native_gate_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn native(set: &[&str]) -> Native {
+        Native::from_parts(false, false, set.iter().map(|e| e.to_string()).collect())
+    }
+
+    fn all_native() -> Native {
+        Native::from_parts(false, true, HashSet::new())
+    }
+
+    #[test]
+    fn partial_index_group_is_flagged() {
+        // The live production posture this issue is about: tree + images are
+        // native while search/facets still answer from the Python index.
+        let partial = native(&["tree", "images"]).partial_groups();
+        assert_eq!(partial, vec![NATIVE_GROUPS[0], NATIVE_GROUPS[1]]);
+    }
+
+    #[test]
+    fn single_index_member_is_flagged_once() {
+        // `search` alone splits INDEX_GROUP; MANIFEST_GROUP has nobody enabled
+        // and must stay quiet (all-proxy is a valid posture).
+        let partial = native(&["search"]).partial_groups();
+        assert_eq!(partial, vec![NATIVE_GROUPS[0]]);
+    }
+
+    #[test]
+    fn complete_groups_are_quiet() {
+        let n = native(&["tree", "search", "facets", "images", "reader-sync"]);
+        assert!(n.partial_groups().is_empty());
+    }
+
+    #[test]
+    fn all_proxy_and_all_native_are_quiet() {
+        assert!(native(&[]).partial_groups().is_empty());
+        assert!(all_native().partial_groups().is_empty());
+    }
+
+    #[test]
+    fn ungrouped_endpoints_never_warn() {
+        // thumb/view/image/visibility/positions/health/version/refresh are
+        // independent of the shared snapshot: no group covers them.
+        let n = native(&["thumb", "view", "image", "visibility", "positions"]);
+        assert!(n.partial_groups().is_empty());
+    }
 }
