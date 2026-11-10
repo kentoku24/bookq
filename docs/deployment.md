@@ -334,14 +334,19 @@ import 基盤 (~120MB) まで下がる。
 | Cloudflare ダッシュボード | tunnel ingress | `http://viewer-rs:8080` |
 
 ```bash
-# 1) .env を上表に更新してから、py を index 非保持で再作成
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build viewer
-# 2) viewer-rs を全 native で再作成
+# 1) Cloudflare ダッシュボードの ingress を http://viewer-rs:8080 に変更
+#    （rs は未 native の endpoint を py に proxy するのでこの時点では無停止）
+# 2) viewer-rs を全 native で再作成（.env の BOOKQ_RS_NATIVE 行は削除）
 docker compose -f docker-compose.yml -f docker-compose.prd-image.yml --profile rs up -d --no-build viewer-rs
 # 3) tailscale serve の向き先を viewer-rs に（数秒の断）
+#    .env に TS_SERVE_TARGET=http://viewer-rs:8080 を追加してから
 docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-# 4) Cloudflare ダッシュボードの ingress を http://viewer-rs:8080 に変更
+# 4) 最後に py を index 非保持で再作成（.env に BOOKQ_DISABLE_INDEX=1）
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build viewer
 ```
+
+この順序なら各段階で「全経路が少なくとも 1 つの index 保持者に届く」ため、
+`BOOKQ_DISABLE_INDEX=1` の 503 窓が公開されない。
 
 - rollback: `BOOKQ_DISABLE_INDEX` を空に戻して viewer 再作成。コード差し戻し不要。
 
