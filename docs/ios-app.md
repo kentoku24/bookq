@@ -68,10 +68,13 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 
 ## リーダー仕様（web parity）
 
-- 縦=1ページ / 横=spread（spreadOffset 0=通常ペア、1=表紙単独、spread 離脱で 0 に
-  リセット）を `spread.js` 通りに再現。RTL: 右端=最初のページ。タップゾーンは
-  端30%=送り / 反対端30%=戻し / 中央=UI トグルで、`tapForward` 相当の
-  方向切替ボタンあり（セッション限定・デフォルト左=次）。
+- 縦=1ページ / 横=spread（spreadOffset 0=通常ペア、1=表紙単独）を `spread.js`
+  通りに再現。**iOS 差異**: spreadOffset はモード離脱でリセットせず、
+  single モードでも同じペアリングをページペア (peek/めくり方向) に使う
+  ため offset トグルは常時表示（web は spread 時のみ・離脱で 0 リセット）。
+  RTL: 右端=最初のページ。タップゾーンは端30%=送り / 反対端30%=戻し /
+  中央=UI トグルで、`tapForward` 相当の方向切替ボタンあり
+  （セッション限定・デフォルト左=次）。
 - ページ送りは TabView ではなく自前の ZStack ページャ。視覚状態は連続値
   `pos`（spread 単位、小数=めくり途中）で、`floor(pos)` が上層として右へ
   スライドし `ceil(pos)` が下に静止する — pos 上昇=現在 spread が右へ
@@ -79,6 +82,20 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   1 つの式で両方向を表現するため、ドラッグ中の指の反転は向きの再判定
   なしに `pos` が原点を通って戻るだけで処理できる。`PageTurnMath`
   純粋関数がドラッグデルタ・端ラバーバンド・コミット方向判定を担当。
+- **single モードの見開きペア認識**（iOS 独自、web には無い）:
+  `ReaderWork.pairRoles`/`intraIntervals` が spreadOffset のペアリングを
+  1ページ spread に適用する（章をまたぐペアは dissolve — spread は
+  章を混ぜない不変条件を維持）。rest 時、ペア相手ページは物理側の端に
+  **1px だけ常時覗く**（1ページ目=次ページの右端が左端に、2ページ目=
+  前ページの左端が右端に）。ピッチは実測ページ幅から算出する
+  strip pitch `(viewWidth+pageWidth)/2-1` で、レターボックスされた
+  landscape でも画面端に 1pt のコンテンツ sliver が出る。
+  ペア内のめくり（1→2ページ目）は strip
+  レイアウト `(pos-index)*stripPitch` で両ページが互いにスライドし、
+  一瞬見開きのように並ぶ。ペアをまたぐめくりは従来の stack
+  （次=裏から露出 / 前=右から被さる）のまま。退出位置と次の peek
+  位置が一致するため peek→めくり→peek はシームレスで、戻る方向も
+  鏡像になる。
   ドラッグと ←/→ キーは**章をまたぐ**（本全体 `[0, spreads.count-1]`
   にクランプ、両端のみラバーバンド→バウンスバック）。タップゾーン・
   スワイプ・矢印キーの全ページ送り操作が章跨ぎ可 — エピソード間の

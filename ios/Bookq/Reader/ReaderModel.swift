@@ -74,6 +74,33 @@ enum PageTurnMath {
     /// fully revealed → 0.
     static let stackScrimMax: CGFloat = 0.35
 
+    /// Strip pitch for a single-mode pair interval — `(viewWidth +
+    /// meanPageWidth) / 2 - 1pt`, where `pageWidth` is the pair's mean
+    /// displayed page width (`spreadFit` width: `min(viewportW,
+    /// ar * viewportH)`). The mate's cell is full-viewport wide with the
+    /// page centred inside, so this pitch puts the mate's inner image
+    /// edge exactly 1pt inside the screen edge — a true 1pt peek of page
+    /// content at any aspect ratio. Full-width pages (portrait) give
+    /// `viewWidth - 1`; letterboxed pages (landscape single) pitch by
+    /// less than the viewport so the sliver still lands on the screen
+    /// edge instead of the page edge (where it would show the whole
+    /// mate page, not a peek). Averaging the pair's two widths keeps
+    /// peek → strip → peek seamless when the mates' aspects differ.
+    static func stripPitch(viewWidth: CGFloat, pageWidth: CGFloat) -> CGFloat {
+        max((viewWidth + pageWidth) / 2 - 1, 0)
+    }
+
+    /// Whether `pos` sits strictly inside an intra-spread interval —
+    /// `[floor(pos), floor(pos)+1]` is a pair adjacency, so the two
+    /// pages of one spread pair slide past each other (strip layout)
+    /// instead of the stack reveal. Integer `pos` is a rest state and
+    /// always false here; the rest peek is handled separately.
+    static func inStripInterval(_ pos: CGFloat,
+                                intraIntervals: Set<Int>) -> Bool {
+        let j = Int(floor(pos))
+        return pos != CGFloat(j) && intraIntervals.contains(j)
+    }
+
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
     /// -1 = backward (drag left) — the manga/RTL convention shared with
@@ -137,6 +164,23 @@ enum PageTurnMath {
     }
 }
 
+/// A page's position inside its spread pair — single-page mode only.
+/// `mate` is the mate page's *display* spread index (single mode has
+/// one page per spread, so it names the adjacent pager layer).
+enum SpreadPairRole: Equatable {
+    case solo
+    case first(mate: Int)     // 1ページ目 — right page, read first
+    case second(mate: Int)    // 2ページ目 — left/facing page
+
+    /// The mate's display-spread index, nil for unpaired pages.
+    var mateSpread: Int? {
+        switch self {
+        case .solo: return nil
+        case .first(let m), .second(let m): return m
+        }
+    }
+}
+
 struct ReaderWork: Equatable {
     var clickedPath: String
     var images: [PageRef]             // global, including spacers
@@ -147,6 +191,14 @@ struct ReaderWork: Equatable {
     var spreads: [[Int]]              // per-spread page indices (non-spacer only)
     var idxToSpread: [Int]            // global idx → spread index (-1 spacer)
     var pageMode: ReaderPageMode
+    /// Single-mode spread pairing: the offset-aware spread grouping
+    /// applied to one-page spreads — each display spread's role inside
+    /// its pair. `.spread` mode leaves every role `.solo` (the pair is
+    /// already side-by-side there).
+    var pairRoles: [SpreadPairRole] = []
+    /// Display-spread j where [j, j+1] are the two pages of one pair —
+    /// the pager's "intra-spread" turn intervals (strip layout).
+    var intraIntervals: Set<Int> = []
 
     var isCrossChapter: Bool { chapters.count > 1 }
 
@@ -280,22 +332,28 @@ struct ReaderWork: Equatable {
         return work.rebuildSpreads(offset: spreadOffset)
     }
 
+    /// Spread-mode grouping shared by `.spread` display spreads and the
+    /// single-mode pair map: `offset` solo pages then consecutive pairs
+    /// over global indices (spacers included — filtered per use).
+    static func spreadGroups(n: Int, offset: Int) -> [[Int]] {
+        var groups: [[Int]] = []
+        var i = 0
+        while i < offset && i < n { groups.append([i]); i += 1 }
+        while i < n {
+            let g = (i + 1 < n) ? [i, i + 1] : [i]
+            groups.append(g)
+            i += g.count
+        }
+        return groups
+    }
+
     /// `rebuildSpreads` (spread.js) — groups pages into spreads, filters
     /// spacers, marks chapter-start spreads.
     func rebuildSpreads(offset: Int) -> ReaderWork {
-        var groups: [[Int]] = []
         let n = images.count
-        if pageMode == .spread {
-            var i = 0
-            while i < offset && i < n { groups.append([i]); i += 1 }
-            while i < n {
-                let g = (i + 1 < n) ? [i, i + 1] : [i]
-                groups.append(g)
-                i += g.count
-            }
-        } else {
-            for i in 0..<n { groups.append([i]) }
-        }
+        let groups = pageMode == .spread
+            ? Self.spreadGroups(n: n, offset: offset)
+            : (0..<n).map { [$0] }
         var spreads: [[Int]] = []
         var i2s = [Int](repeating: -1, count: n)
         for g in groups {
@@ -308,7 +366,39 @@ struct ReaderWork: Equatable {
         var w = self
         w.spreads = spreads
         w.idxToSpread = i2s
+        w.rebuildPairLayout(offset: offset)
         return w
+    }
+
+    /// Single-mode pair layout: which display spread is the first
+    /// (1ページ目) or second (2ページ目) page of its spread pair, and
+    /// the mate's display spread. Pair membership comes from the
+    /// spread-mode grouping (offset-aware) applied to global indices;
+    /// pairs that would straddle a chapter boundary are dissolved —
+    /// spreads never mix chapters, so a chapter edge stays a stack
+    /// turn even when single-mode offset pairing would pair across it
+    /// (single-mode spacer padding is computed for offset 0).
+    private mutating func rebuildPairLayout(offset: Int) {
+        pairRoles = [SpreadPairRole](repeating: .solo, count: spreads.count)
+        intraIntervals = []
+        guard pageMode == .single else { return }
+        let boundarySet = Set(boundaries.dropFirst())
+        // global page idx → (isFirst, mate global idx); only real pairs.
+        var pairPos: [Int: (first: Bool, mate: Int)] = [:]
+        for g in Self.spreadGroups(n: images.count, offset: offset) {
+            let pages = g.filter { !images[$0].isSpacer }
+            guard pages.count == 2, !boundarySet.contains(pages[1]) else { continue }
+            pairPos[pages[0]] = (true, pages[1])
+            pairPos[pages[1]] = (false, pages[0])
+        }
+        for (s, spread) in spreads.enumerated() {
+            guard let g = spread.first, let p = pairPos[g] else { continue }
+            let mateSpread = idxToSpread[p.mate]
+            pairRoles[s] = p.first ? .first(mate: mateSpread) : .second(mate: mateSpread)
+            // Mates are adjacent real pages, hence adjacent display
+            // spreads — [s, s+1] is the pair's intra-spread interval.
+            if p.first && mateSpread == s + 1 { intraIntervals.insert(s) }
+        }
     }
 
     /// New work after a mode/offset change (runtime toggle — no re-pad).
