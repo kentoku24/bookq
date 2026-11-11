@@ -179,6 +179,22 @@ pub(crate) fn is_image_entry(name: &str) -> bool {
     IMAGE_EXTENSIONS.contains(&suffix_lower(Path::new(base)).as_str())
 }
 
+/// Plain-file exposure contract shared by `serve_image`, `stat_source` and
+/// `load_source_bytes`: image suffixes only, no dotfiles — the same rule
+/// Python applies via `IMAGE_EXTENSIONS` + `name.startswith(".")` and the
+/// scanner's `list_images`. Anything else under downloads (notes, stray
+/// HTML, loose PDFs) is not a work page — and `text/html` here would be
+/// stored XSS in this origin.
+pub(crate) fn is_exposable_plain_file(path: &Path) -> bool {
+    if !IMAGE_EXTENSIONS.contains(&suffix_lower(path).as_str()) {
+        return false;
+    }
+    !path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'))
+}
+
 /// `_finalize`: image filter + first-wins dedupe + natural sort + 2000 cap.
 fn finalize(names: impl IntoIterator<Item = String>, keep_order: bool) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -434,6 +450,20 @@ fn archive_bytes_response(
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
     set_header(&mut r, header::CONTENT_TYPE, media);
+    set_header(
+        &mut r,
+        header::HeaderName::from_static("x-content-type-options"),
+        "nosniff",
+    );
+    if media == "image/svg+xml" {
+        // Same rationale as Python's /image/ + /thumb/ + /view/: SVG is an
+        // active document — served top-level it runs script in this origin.
+        set_header(
+            &mut r,
+            header::HeaderName::from_static("content-security-policy"),
+            "default-src 'none'; sandbox",
+        );
+    }
     if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
         if let Some((start, end)) = parse_archive_range(range_header, data.len() as u64) {
             *r.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -596,6 +626,9 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
         Ok(p) => p,
         Err(_) => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
     };
+    if !is_exposable_plain_file(&file_path) {
+        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+    }
     let stat = match file_path.metadata().ok().filter(|m| m.is_file()) {
         Some(m) => m,
         None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
@@ -734,6 +767,20 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
     set_header(&mut r, header::CONTENT_TYPE, guess_type(&path.to_string_lossy()));
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
+    set_header(
+        &mut r,
+        header::HeaderName::from_static("x-content-type-options"),
+        "nosniff",
+    );
+    if suffix_lower(path) == ".svg" {
+        // Same rationale as Python's /image/ + /thumb/ + /view/: SVG is an
+        // active document — served top-level it runs script in this origin.
+        set_header(
+            &mut r,
+            header::HeaderName::from_static("content-security-policy"),
+            "default-src 'none'; sandbox",
+        );
+    }
     match plan_range(headers, size) {
         RangePlan::Full => match std::fs::read(path) {
             // Whole-buffer read: ReaderStream's 8KB chunks pay a per-chunk
@@ -902,6 +949,21 @@ mod tests {
         assert!(!is_image_entry("dir/"));
         assert!(!is_image_entry("a//b.jpg"));
         assert!(!is_image_entry("x.txt"));
+    }
+
+    #[test]
+    fn plain_file_exposure_contract() {
+        // Same rule as Python's serve_image/list_images: image suffixes
+        // only, no dotfiles — junk under downloads must 404, not serve.
+        assert!(is_exposable_plain_file(Path::new("a/b/01.jpg")));
+        assert!(is_exposable_plain_file(Path::new("01.PNG")));
+        assert!(is_exposable_plain_file(Path::new("pic.svg")));
+        assert!(!is_exposable_plain_file(Path::new("note.txt")));
+        assert!(!is_exposable_plain_file(Path::new("page.html")));
+        assert!(!is_exposable_plain_file(Path::new("doc.pdf")));
+        assert!(!is_exposable_plain_file(Path::new(".hidden.png")));
+        assert!(!is_exposable_plain_file(Path::new("dir/.png")));
+        assert!(!is_exposable_plain_file(Path::new("noext")));
     }
 
     #[test]

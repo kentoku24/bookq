@@ -126,6 +126,19 @@ async function cacheFirst(req) {
   }
   if (!fresh) return hit;
   if (fresh.status === 304) return hit;
+  if (fresh.status === 401 || fresh.status === 403) {
+    // The origin affirmatively rejected the caller (logout, expired
+    // session, rotated SECRET_KEY): cached bytes must not keep flowing to
+    // an unauthenticated client. Evict so a later offline window can't
+    // resurrect them either. Other failures (404/500/network) keep the
+    // stale copy — revalidation must never turn a readable page into an
+    // error.
+    await c.delete(req).catch(() => {});
+    for (const alt of thumbWidthFallbacks(req.url)) {
+      await c.delete(alt).catch(() => {});
+    }
+    return fresh;
+  }
   if (fresh.ok && fresh.status !== 206) {
     await c.put(req, fresh.clone()).catch(() => {});
     return fresh;
@@ -141,6 +154,21 @@ async function networkFirst(req, cacheName) {
     if (res.ok && res.status !== 202) {
       const clone = res.clone();
       (await caches.open(cacheName)).put(req, clone).catch(() => {});
+    } else if (res.status === 401 || res.status === 403) {
+      // Auth is gone (logout / expired session / rotated SECRET_KEY): drop
+      // the stale copy too, or an offline window would keep serving
+      // library structure + metadata to a logged-out client.
+      const c = await caches.open(cacheName);
+      await c.delete(req).catch(() => {});
+      // thumb-sprite also matches its pre-v= cache-buster URL offline —
+      // evict that variant too or it resurrects the same sheet.
+      if (req.url.includes('/api/v1/thumb-sprite')) {
+        try {
+          const u = new URL(req.url);
+          u.searchParams.delete('v');
+          await c.delete(u.href).catch(() => {});
+        } catch (e) {}
+      }
     }
     return res;
   } catch {
@@ -270,8 +298,18 @@ self.addEventListener("fetch", (event) => {
       (async () => {
         try {
           const preload = await event.preloadResponse;
-          if (preload) return preload;
-          const res = await fetch(request);
+          const res = preload || await fetch(request);
+          // Keep the '/' shell entry in step with the auth state the
+          // server just answered — the precached copy may hold the
+          // authenticated viewer page (visibility-snapshot embed) from
+          // install time. The logout wipe page relies on this to leave
+          // the login page behind.
+          if (res && res.ok && url.pathname === '/') {
+            try {
+              const c = await caches.open(SHELL_CACHE);
+              await c.put(new Request('/'), res.clone());
+            } catch (e) {}
+          }
           return res;
         } catch {
           // "/" is always precached, so it has to come AFTER offline.html —

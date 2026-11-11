@@ -37,7 +37,7 @@ from app.reading_positions import (
     ReadingPositionStore,
     position_user_key,
 )
-from app.scanner import PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
+from app.scanner import IMAGE_EXTENSIONS, PDF_EXTENSIONS, _scan_archive_node, _scan_pdf_node, folder_cover_fields, is_pdf_file, list_images, natural_key, scan_tree
 from app.tree_signature import compute_signature
 
 logger = logging.getLogger(__name__)
@@ -1521,7 +1521,12 @@ def _archive_bytes_response(
         "ETag": etag,
         "Last-Modified": last_modified,
         "Accept-Ranges": "bytes",
+        "X-Content-Type-Options": "nosniff",
     }
+    if media_type == "image/svg+xml":
+        # Same rationale as /thumb/ and /view/: SVG is an active document —
+        # served top-level it runs script in this origin, so sandbox it.
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
     range_header = request.headers.get("range")
     if range_header:
         parsed = _parse_range(range_header, len(data))
@@ -1629,6 +1634,12 @@ async def serve_image(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     file_path = file_path.resolve()
+    # Same exposure contract as list_images/the scanner: image extensions
+    # only, no dotfiles. Anything else under downloads (notes, stray HTML,
+    # loose PDFs) is not a work page — and text/html here would be stored
+    # XSS in this origin.
+    if file_path.suffix.lower() not in IMAGE_EXTENSIONS or file_path.name.startswith("."):
+        raise HTTPException(status_code=404, detail="File not found")
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -1653,15 +1664,21 @@ async def serve_image(
         except (TypeError, ValueError):
             pass  # Invalid date header — proceed normally
 
+    headers = {
+        "Cache-Control": "private, max-age=3600",
+        "ETag": etag,
+        "Last-Modified": last_modified,
+        "X-Content-Type-Options": "nosniff",
+    }
+    if ctype == "image/svg+xml":
+        # Same rationale as /thumb/ and /view/: SVG is an active document —
+        # served top-level it runs script in this origin, so sandbox it.
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
     return FileResponse(
         path=str(file_path),
         stat_result=stat,
         media_type=ctype or "application/octet-stream",
-        headers={
-            "Cache-Control": "private, max-age=3600",
-            "ETag": etag,
-            "Last-Modified": last_modified,
-        },
+        headers=headers,
     )
 
 

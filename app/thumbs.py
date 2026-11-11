@@ -123,6 +123,7 @@ async def load_source_bytes(
     ``_resolve_archive`` + ``render_pdf_page`` — never plain ``open``.
     """
     from app.routes import _is_within, _resolve_archive
+    from app.scanner import IMAGE_EXTENSIONS
 
     resolved = _resolve_archive(downloads_dir, path)
     if resolved is not None:
@@ -145,6 +146,11 @@ async def load_source_bytes(
     if not _is_within(downloads_dir, file_path):
         raise HTTPException(status_code=403, detail="Forbidden")
     file_path = file_path.resolve()
+    # Same exposure contract as serve_image/list_images: image extensions
+    # only, no dotfiles — junk under downloads must 404 here, not 500 on
+    # a decode attempt downstream.
+    if file_path.suffix.lower() not in IMAGE_EXTENSIONS or file_path.name.startswith("."):
+        raise HTTPException(status_code=404, detail="File not found")
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -176,6 +182,7 @@ def _stat_source(downloads_dir: Path, path: str) -> tuple[float, float, str]:
     ArchiveToolMissing→501 likewise surface only on the miss path.
     """
     from app.routes import _is_within, _resolve_archive
+    from app.scanner import IMAGE_EXTENSIONS
 
     resolved = _resolve_archive(downloads_dir, path)
     if resolved is not None:
@@ -198,6 +205,10 @@ def _stat_source(downloads_dir: Path, path: str) -> tuple[float, float, str]:
     if not _is_within(downloads_dir, file_path):
         raise HTTPException(status_code=403, detail="Forbidden")
     file_path = file_path.resolve()
+    # Same exposure contract as serve_image/list_images (see
+    # load_source_bytes): image extensions only, no dotfiles.
+    if file_path.suffix.lower() not in IMAGE_EXTENSIONS or file_path.name.startswith("."):
+        raise HTTPException(status_code=404, detail="File not found")
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 

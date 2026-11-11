@@ -195,7 +195,18 @@ def create_app() -> FastAPI:
     _configure_logging()
     settings = load_settings()
 
-    app = FastAPI(title="bookq", version="2.0.0", lifespan=lifespan)
+    # Public deployment (#349): the interactive API docs disclose the full
+    # endpoint surface to unauthenticated visitors — keep them in dev/test,
+    # off in production.
+    _docs_enabled = os.getenv("BOOKQ_ENV", "").strip().lower() != "production"
+    app = FastAPI(
+        title="bookq",
+        version="2.0.0",
+        lifespan=lifespan,
+        docs_url="/docs" if _docs_enabled else None,
+        redoc_url="/redoc" if _docs_enabled else None,
+        openapi_url="/openapi.json" if _docs_enabled else None,
+    )
     app.state.settings = settings
 
     # SessionMiddleware required by authlib for OAuth state storage
