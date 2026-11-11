@@ -73,6 +73,17 @@ final class AppModel: ObservableObject {
             config.serverURLString = injected
         }
         auth.restore()
+        // `BOOKQ_TEST_TOKEN` env or `-testToken <jwt>` argv seeds a dummy
+        // pair for simulator/dev runs against BOOKQ_TEST_MODE servers,
+        // which accept any Bearer — only the JWT `sub` claim is decoded
+        // client-side to build AuthUser. Seeded after restore() so it
+        // wins over a stale Keychain pair.
+        if let token = Self.injectedTestToken() {
+            print("[bookq] test token injected")
+            auth.testSeed(TokenPair(TokenPairResponse(
+                access_token: token, token_type: "Bearer",
+                expires_in: 3600, refresh_token: "")))
+        }
         if config.baseURL != nil {
             configureAPI()
             phase = .booting
@@ -88,6 +99,19 @@ final class AppModel: ObservableObject {
         }
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-serverURL"), i + 1 < args.count
+        else { return nil }
+        let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
+    }
+
+    /// `BOOKQ_TEST_TOKEN` env var or `-testToken <jwt>` argv pair, or nil.
+    static func injectedTestToken() -> String? {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_TEST_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+            return e
+        }
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-testToken"), i + 1 < args.count
         else { return nil }
         let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
         return v.isEmpty ? nil : v
