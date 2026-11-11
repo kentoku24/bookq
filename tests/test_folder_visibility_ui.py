@@ -225,6 +225,12 @@ def test_keyboard_toggle_no_viewer_no_double_put(vpage):
 
 
 def test_identical_refresh_does_not_rerender(vpage):
+    # vpage only waits for .tile — since the index build went nonblocking the
+    # first visibility GET can still be in flight. Gate on 'ready' so the
+    # probe measures the explicit refresh alone, not the loading→ready
+    # status edge that legitimately re-renders once.
+    vpage.wait_for_function(
+        "() => window.FolderVisibility.readyState === 'ready'")
     vpage.evaluate(
         "window.__muts=0;new MutationObserver(()=>window.__muts++)"
         ".observe(document.getElementById('tile-grid'),{childList:true,subtree:true})"
