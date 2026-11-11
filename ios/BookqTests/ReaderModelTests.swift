@@ -539,4 +539,36 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(PageTurnMath.coveredFraction(5.5, count: 6), 0)
         XCTAssertEqual(PageTurnMath.coveredFraction(6.2, count: 6), 0)
     }
+
+    // MARK: - strip layout (single-mode pair turns)
+
+    func testStripPitchFullWidthPage() {
+        // Portrait pages fill the viewport width → pitch = vw − 1pt,
+        // the classic "width - 1" strip step.
+        XCTAssertEqual(PageTurnMath.stripPitch(viewWidth: 440, pageWidth: 440),
+                       439, accuracy: 0.0001)
+    }
+
+    func testStripPitchLetterboxedPage() {
+        // Landscape single: a 280pt page centered in a 956pt viewport
+        // pitches by less than vw so the mate's *image* edge — not its
+        // cell edge — lands 1pt inside the screen edge.
+        XCTAssertEqual(PageTurnMath.stripPitch(viewWidth: 956, pageWidth: 280),
+                       617, accuracy: 0.0001)
+        // Degenerate inputs clamp at 0 rather than going negative.
+        XCTAssertEqual(PageTurnMath.stripPitch(viewWidth: 0, pageWidth: 0), 0)
+    }
+
+    func testInStripInterval() {
+        let intervals: Set<Int> = [0, 2]
+        // Strictly inside a pair interval → strip layout.
+        XCTAssertTrue(PageTurnMath.inStripInterval(0.5, intraIntervals: intervals))
+        XCTAssertTrue(PageTurnMath.inStripInterval(2.7, intraIntervals: intervals))
+        // Integral pos = rest state → never strip (peek handles it).
+        XCTAssertFalse(PageTurnMath.inStripInterval(0.0, intraIntervals: intervals))
+        XCTAssertFalse(PageTurnMath.inStripInterval(2.0, intraIntervals: intervals))
+        // Outside any pair interval → stack layout.
+        XCTAssertFalse(PageTurnMath.inStripInterval(1.5, intraIntervals: intervals))
+        XCTAssertFalse(PageTurnMath.inStripInterval(3.5, intraIntervals: intervals))
+    }
 }

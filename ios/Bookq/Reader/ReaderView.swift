@@ -225,7 +225,10 @@ struct ReaderView: View {
     /// mid-turn or for unpaired pages — PagerLayer turns it into a
     /// ±pitch offset + opacity + top zIndex.
     private func restPeekSpread(in work: ReaderWork) -> Int? {
-        guard pos >= 0, pos == CGFloat(Int(floor(pos))) else { return nil }
+        // posTarget gate: a multi-spread chase can sit on an intermediate
+        // integer for a tick — don't flash that spread's mate sliver.
+        guard pos >= 0, pos == CGFloat(Int(floor(pos))),
+              pos == CGFloat(posTarget) else { return nil }
         let s = Int(floor(pos))
         guard work.pairRoles.indices.contains(s) else { return nil }
         return work.pairRoles[s].mateSpread
@@ -928,6 +931,11 @@ private struct PagerLayer<Content: View>: View {
             .opacity(opacity)
             .offset(x: offset)
             .zIndex(z)
+            // The peek layer is decorative — its frame is a full
+            // viewport cell shifted off-screen, so without this the
+            // transparent container claims touches (pinch/pan) over a
+            // vw−pitch dead band on the settled page's edge.
+            .allowsHitTesting(index != peekSpread)
     }
 
     /// Depth scrim on the static (`ceil`) spread — the covered page
