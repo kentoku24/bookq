@@ -158,31 +158,42 @@ iPad Safari では7日間起動しないとオフライン保存が自動削除�
 
 ### アイコン
 
-2026-10-09 にブランドマークを「bq」リガチャ（濃紺グラデーションの squircle + クリーム→ピーチの字形）へ刷新。マスターはユーザー提供の 1254×1254 PNG（`bq-icon.png`、リポジトリ外）で、派生は Pillow で生成する。`favicon.svg` / `logo.svg` はマスター計測（タイル 1238px → 32 単位、÷38.7）に基づき手描き（トレース生成はユーザー許可 2026-08-29 で可）。
+2026-10-09 にブランドマークを「bq」リガチャ（濃紺グラデーションの squircle + クリーム→ピーチの字形）へ刷新。2026-10-25 に対角配置（b 左下 / q 右上）へ磨き直し、以降のマスターは `favicon.svg` の Chromium レンダ（透過 PNG）で、派生は Pillow で生成する。`favicon.svg` / `logo.svg` はマスター計測（タイル 1238px → 32 単位、÷38.7）に基づき手描き（トレース生成はユーザー許可 2026-08-29 で可）。初代マスターはユーザー提供の 1254×1254 PNG（`bq-icon.png`、リポジトリ外）だった。
 
 - `icons/icon-192.png` / `icon-512.png` — squircle の角を透明 alpha にしたもの（任意マスクで破綻しない）
 - `icons/icon-512-maskable.png` — squircle 408px を `#0f172a` にペースト（safe zone 80%）
-- `apple-touch-icon.png` — 白コーナーを消すため中心を 1.30 倍ズームした full-bleed 180×180（opaque RGB、iOS マスクに継ぎ目なし）
+- `apple-touch-icon.png` — 透過コーナーを残さないよう中心を 1.30 倍ズームした full-bleed 180×180（opaque RGB、iOS マスクに継ぎ目なし）
 - `favicon-32x32.png` / `favicon.ico`（16/32/48） — squircle から縮小
-- `favicon.svg` / `logo.svg` — 手描きベクター。背景 = 縦 linear + 上部 radial glow、字形 = b ニアホワイト / q 縦グラデ（クリーム→ピーチ）、ボウルの編み込みは clipPath で上下の重なりを入れ替え
+- `favicon.svg` / `logo.svg` — 手描きベクター。背景 = 縦 linear + 上部 radial glow、字形 = b ニアホワイト / q 縦グラデ（クリーム→ピーチ）の対角配置（b 左下・stem 上方、q 右上・tail 下方）
 
-`manifest.json` は `192 any` / `512 any` / `512 maskable` の3エントリに分離し `any maskable` の一括指定は使わない。生成例（マスターから）:
+`manifest.json` は `192 any` / `512 any` / `512 maskable` の3エントリに分離し `any maskable` の一括指定は使わない。生成例（`favicon.svg` を Playwright で透過レンダしてから Pillow）:
 
 ```bash
+python3 - <<'PY'  # マスター PNG を作る (app/static/favicon.svg → bq-master.png)
+import pathlib
+from playwright.sync_api import sync_playwright
+S = 1536
+svg = pathlib.Path('app/static/favicon.svg').read_text().replace('<svg ', f'<svg width="{S}" height="{S}" ', 1)
+with sync_playwright() as p:
+    pg = p.chromium.launch().new_page(viewport={'width': S, 'height': S})
+    pg.set_content(f'<!doctype html><body style="margin:0">{svg}')
+    pg.screenshot(path='bq-master.png', omit_background=True)
+PY
 python3 - <<'PY'
-from PIL import Image, ImageDraw
-src = Image.open('bq-icon.png').convert('RGB').crop((6, 4, 1244, 1246))  # 白マージンを除去
-SS, erode, r = 4, 4, 300.8  # 角丸半径フィット値・エッジ残差ぶんの侵食
+from PIL import Image, ImageChops, ImageDraw
+src = Image.open('bq-master.png').convert('RGBA')
+SS, erode = 4, 4; r = 7.8/32*src.width  # 角丸半径 (viewBox rx) ・エッジ残差ぶんの侵食
 m = Image.new('L', (src.width*SS, src.height*SS), 0)
 ImageDraw.Draw(m).rounded_rectangle((erode*SS, erode*SS, src.width*SS-1-erode*SS, src.height*SS-1-erode*SS), radius=(r-erode)*SS, fill=255)
-master = src.convert('RGBA'); master.putalpha(m.resize(src.size, Image.BOX))
+master = src.copy(); master.putalpha(ImageChops.darker(src.getchannel('A'), m.resize(src.size, Image.BOX)))
 master.resize((512,512), Image.LANCZOS).save('app/static/icons/icon-512.png')
 master.resize((192,192), Image.LANCZOS).save('app/static/icons/icon-192.png')
 master.resize((32,32), Image.LANCZOS).save('app/static/favicon-32x32.png')
-master.resize((32,32), Image.LANCZOS).save('app/static/favicon.ico', sizes=[(16,16),(32,32),(48,48)])
+master.resize((48,48), Image.LANCZOS).save('app/static/favicon.ico', sizes=[(16,16),(32,32),(48,48)])
 mk = Image.new('RGB', (512,512), '#0f172a'); fg = master.resize((408,408), Image.LANCZOS); mk.paste(fg, (52,52), fg)
 mk.save('app/static/icons/icon-512-maskable.png')
-big = src.resize((int(src.width*1.3), int(src.height*1.3)), Image.LANCZOS)
+flat = Image.new('RGB', src.size, '#011D5F'); flat.paste(src, (0,0), src)  # 透過角を畳み込んで opaque 化
+big = flat.resize((int(src.width*1.3), int(src.height*1.3)), Image.LANCZOS)
 x0, y0 = (big.width-src.width)//2, (big.height-src.height)//2
 big.crop((x0, y0, x0+src.width, y0+src.height)).resize((180,180), Image.LANCZOS).save('app/static/apple-touch-icon.png')
 PY
