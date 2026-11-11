@@ -90,7 +90,8 @@ jobs:
           HTTP status/latency/cf-ray, failure classification, deployed sha).
 
           Your task:
-          1. Read the issue: gh issue view <ISSUE_NUMBER> --comments
+          1. Read the issue (number given at the bottom of this prompt):
+             gh issue view <that number> --comments
           2. Analyze which layer deviated — Cloudflare edge -> cloudflared
              tunnel -> viewer/viewer-rs -> app — and the most likely cause,
              using the bundle plus repo docs (docs/deployment.md describes the
@@ -99,8 +100,8 @@ jobs:
              checks only: /api/health, /api/v1/health, /api/version, /,
              /auth/login, /api/folders expecting 401, /static/sw.js,
              /static/app.js).
-          4. Post your findings as ONE comment on the issue via
-             `gh issue comment <ISSUE_NUMBER>` covering: verdict, most likely
+          4. Post your findings as ONE comment on that issue via
+             `gh issue comment <that number>` covering: verdict, most likely
              root cause, suggested next steps for the operator.
 
           Constraints: do NOT modify code, do NOT open PRs, do NOT close or
