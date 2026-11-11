@@ -27,6 +27,9 @@ struct ReaderView: View {
     /// back to it still correctly refuses page drags.
     @State private var zoomedPages: Set<Int> = []
     @State private var pageAR: [Int: CGFloat] = [:]  // measured AR per page
+    /// Web `lastAR` parity — aspect ratio assumed for pages not yet
+    /// measured, so an unmeasured spread doesn't fall back to a fixed 0.7.
+    @State private var lastAR: CGFloat = 0.7
     @State private var viewportSize: CGSize = .zero
     @State private var saveTask: Task<Void, Never>?
     @State private var showOverview = false
@@ -67,7 +70,7 @@ struct ReaderView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color.black
                 content(in: geo.size)
             }
             .onAppear { viewportSize = geo.size }
@@ -79,6 +82,12 @@ struct ReaderView: View {
             }
             .task { await load(viewport: geo.size) }
         }
+        // Full-screen geometry: geo.size spans the unsafe regions too, so
+        // spreadFit sizes pages against the whole display like the web
+        // viewer's window.innerWidth/innerHeight. The chrome overlay keeps
+        // its own safe-area insets — overlay content is inset by the
+        // system even though the geometry underneath ignores them.
+        .ignoresSafeArea()
         .statusBarHidden(!showChrome)
         .overlay(alignment: .top) { if showChrome { chrome } }
         .onDisappear {
@@ -264,7 +273,7 @@ struct ReaderView: View {
             Color.black
         } else {
             let fast = tier == .fast
-            let ars = pages.map { pageAR[$0] ?? 0.7 }
+            let ars = pages.map { pageAR[$0] ?? lastAR }
             let gap: CGFloat = 5
             let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
             HStack(spacing: gap) {
@@ -301,6 +310,7 @@ struct ReaderView: View {
         ) {
             RemoteImageView(url: url, contentMode: .fit) { img in
                 let ar = img.size.width / max(img.size.height, 1)
+                if lastAR != ar { lastAR = ar }
                 if pageAR[idx] != ar { pageAR[idx] = ar }
             }
             .background(Color.black)
@@ -643,7 +653,7 @@ struct ReaderView: View {
     private func publishExternal() {
         guard let work else { return }
         ext.updatePresentation(.init(
-            work: work, currentIdx: currentIdx, pageAR: pageAR,
+            work: work, currentIdx: currentIdx, pageAR: pageAR, lastAR: lastAR,
             spreadOffset: spreadOffset, landscapeSpread: landscapeSpread,
             urlFor: { [model] page in
                 model.api?.pageURL(folder: page.folder, name: page.name,

@@ -110,8 +110,14 @@ struct RemoteImageView: View {
         // No cover URL = absent thumb (web shows the neutral placeholder);
         // ⚠️ is reserved for a fetch that actually failed.
         guard let url else { return }
-        image = await RemoteImageLoader.shared.load(url)
-        failed = image == nil
-        if let image { onImageLoaded?(image) }
+        let img = await RemoteImageLoader.shared.load(url)
+        // `.task(id: url)` cancels this task when the url changes (tier
+        // flip, spread regroup). The awaited loader call still returns —
+        // without this guard a slow stale fetch would overwrite the newer
+        // image (and fire onImageLoaded for the wrong page) permanently.
+        guard !Task.isCancelled else { return }
+        image = img
+        failed = img == nil
+        if let img { onImageLoaded?(img) }
     }
 }

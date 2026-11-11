@@ -15,12 +15,16 @@ struct PairedReaderView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color.black
                 content(in: geo.size)
             }
             .statusBarHidden(!showChrome)
             .overlay(alignment: .top) { if showChrome { chrome } }
         }
+        // Full-screen geometry (ReaderView parity): pages use every point
+        // of the display; the chrome overlay keeps its own safe-area
+        // insets automatically.
+        .ignoresSafeArea()
         .onChange(of: scenePhase) { _, ph in pair.scenePhase(ph) }
         .onDisappear {
             // Leader closing the paired view = browsing the work list —

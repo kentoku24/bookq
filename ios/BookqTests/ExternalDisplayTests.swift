@@ -12,7 +12,7 @@ final class ExternalDisplayTests: XCTestCase {
             chapters: [ReaderChapter(name: "w", fullPath: "w",
                                      images: [PageRef(name: "1.jpg", folder: "w")])],
             pageMode: .single, spreadOffset: 0)
-        return .init(work: work, currentIdx: 0, pageAR: [:],
+        return .init(work: work, currentIdx: 0, pageAR: [:], lastAR: 0.7,
                      spreadOffset: 0, landscapeSpread: true, urlFor: { _ in nil })
     }
 
