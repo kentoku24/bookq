@@ -108,17 +108,17 @@ def _count_rebuilds(monkeypatch):
 
 
 def _count_dumps(monkeypatch):
-    """Monkeypatch counter for json.dumps (body serialization)."""
+    """Monkeypatch counter for orjson.dumps (body serialization)."""
     import app.routes as routes
 
     calls = {"n": 0}
-    real = routes.json.dumps
+    real = routes.orjson.dumps
 
     def counting(*a, **kw):
         calls["n"] += 1
         return real(*a, **kw)
 
-    monkeypatch.setattr(routes.json, "dumps", counting)
+    monkeypatch.setattr(routes.orjson, "dumps", counting)
     return calls
 
 

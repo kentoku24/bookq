@@ -4,7 +4,7 @@ The mismatch path of ``_folder_tree`` (``GET /api/folders?since=<stale>`` and
 ``GET /api/v1/tree?since=<stale>``) used to re-serialize the multi-MB tree on
 EVERY poll request — the fill-poll hot spot. It now goes through
 ``_folders_response`` keyed ``(key_ns + "-since", "", None)`` under
-``(gen, gen_int)``, so json.dumps+sha1 run once per generation and the
+``(gen, gen_int)``, so orjson.dumps+sha1 run once per generation and the
 response carries ETag/Cache-Control like every other tree payload.
 
 Run:
@@ -57,13 +57,13 @@ def test_since_mismatch_body_serialized_once_per_generation(client, monkeypatch)
 
     get_folders_ready(client)
     calls = {"n": 0}
-    real = routes.json.dumps
+    real = routes.orjson.dumps
 
     def counting(*a, **kw):
         calls["n"] += 1
         return real(*a, **kw)
 
-    monkeypatch.setattr(routes.json, "dumps", counting)
+    monkeypatch.setattr(routes.orjson, "dumps", counting)
 
     r1 = client.get("/api/folders", params={"since": 0})
     assert r1.status_code == 200
