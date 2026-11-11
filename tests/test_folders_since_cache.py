@@ -197,3 +197,53 @@ def test_since_body_changes_across_generation_bump(client):
     # And the once-stale client now hits the since==generation 304 short-cut.
     r4 = client.get("/api/folders", params={"since": gen1 + 1})
     assert r4.status_code == 304
+
+
+def test_poll_304s_do_not_stamp_fill_idle_gate(client):
+    """#243: payload-free poll responses must not re-stamp ``last_request_at``.
+
+    ``_background_fill`` pauses while ``app.state.last_request_at`` is fresh
+    (``_FILL_IDLE_SECONDS``). The stamp used to sit at the top of
+    ``_folder_tree``, so a connected client's ``?since=<current>`` poll —
+    every few seconds while a tab stays open — kept the idle gate shut and
+    the fill starved forever. Only responses carrying a body may stamp.
+    """
+    get_folders_ready(client)
+    gen = _generation(client)
+    state = client.app.state
+
+    # The fill-poller's hot path: ?since=<current> → 304, no stamp.
+    state.last_request_at = 0.0
+    r = client.get("/api/folders", params={"since": gen})
+    assert r.status_code == 304
+    assert state.last_request_at == 0.0, (
+        "since==generation 304 re-stamped last_request_at — "
+        "the fill's idle gate stays shut while a client polls"
+    )
+    # Same contract on the v1 endpoint.
+    r_v1 = client.get("/api/v1/tree", params={"since": gen})
+    assert r_v1.status_code == 304
+    assert state.last_request_at == 0.0
+
+    # An If-None-Match revalidation is payload-free too — no stamp.
+    etag = client.get("/api/folders").headers["etag"]
+    state.last_request_at = 0.0
+    r_inm = client.get("/api/folders", headers={"If-None-Match": etag})
+    assert r_inm.status_code == 304
+    assert state.last_request_at == 0.0
+
+    # Body responses still stamp — the gate's whole purpose.
+    state.last_request_at = 0.0
+    r_full = client.get("/api/folders")
+    assert r_full.status_code == 200
+    assert state.last_request_at > 0.0, "full-tree payload must stamp"
+
+    state.last_request_at = 0.0
+    r_mismatch = client.get("/api/folders", params={"since": 0})
+    assert r_mismatch.status_code == 200
+    assert state.last_request_at > 0.0, "since-mismatch payload must stamp"
+
+    state.last_request_at = 0.0
+    r_shallow = client.get("/api/folders", params={"depth": 1})
+    assert r_shallow.status_code == 200
+    assert state.last_request_at > 0.0, "shallow payload must stamp"

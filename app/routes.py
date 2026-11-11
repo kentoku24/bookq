@@ -93,8 +93,10 @@ async def _rebuild_into_cache(app) -> None:
 # Shallow-warmup background fill pacing (plan shallow-warmup-fill T3): one
 # opaque archive node is materialized at a time, with this pause between
 # items, and the fill pauses entirely while a request arrived within
-# _FILL_IDLE_SECONDS (app.state.last_request_at, stamped by /api/folders,
-# /thumb/ and /api/thumb-sprite).
+# _FILL_IDLE_SECONDS (app.state.last_request_at, stamped only by responses
+# that carry a body — the folders payloads, /thumb/, /view/ and
+# /api/thumb-sprite; the ?since / If-None-Match 304 and 202 poll exits
+# deliberately do NOT stamp, or a poller would hold the gate shut (#243)).
 _FILL_IDLE_SECONDS = 10.0
 _FILL_STEP_SECONDS = 0.2
 
@@ -976,6 +978,10 @@ def _folders_response(
     left the tree unchanged, and changes only when the tree itself changes.
     The fill generation (*gen_int*) is appended as a suffix, so a
     background-filled tree revalidates even when the digest prefix matches.
+
+    A served body also stamps ``app.state.last_request_at`` — the
+    ``_background_fill`` idle gate — while the If-None-Match 304 exit does
+    not (#243: payload-free poll responses must not keep the gate shut).
     """
     body_cache = getattr(request.app.state, "folders_body_cache", None)
     if (
@@ -1023,6 +1029,11 @@ def _folders_response(
         # 304 has no body; Content-Encoding/Vary still describe the stored
         # representation a revalidating cache holds.
         return Response(status_code=304, headers=headers)
+    # Only an outgoing body counts as request activity for _background_fill's
+    # idle gate: the If-None-Match 304 above and _folder_tree's ?since-304 /
+    # 202 exits carry no payload and must not stamp — a poller's 304 loop
+    # would otherwise keep last_request_at fresh and starve the fill (#243).
+    request.app.state.last_request_at = time.time()
     return Response(content=body, media_type="application/json", headers=headers)
 
 
@@ -1072,7 +1083,12 @@ async def _folder_tree(
         since = None
     if depth is not None and depth < 1:
         raise HTTPException(status_code=400, detail="depth must be >= 1")
-    request.app.state.last_request_at = time.time()
+    # No last_request_at stamp up front (#243): every payload-free exit —
+    # the 202 and the ?since-304 below, plus the 304s inside
+    # _folders_response — must not feed _background_fill's idle gate, or a
+    # connected client's ?since poll loop re-stamps it every few seconds
+    # and the fill never runs. The stamp lives at the outgoing body
+    # instead: inside _folders_response and at the live-FS fallback's tail.
     key_ns = "v1" if v1 else "v0"
 
     def _wrap(nodes: list[dict], kind: str, gen_int: int):
@@ -1090,6 +1106,8 @@ async def _folder_tree(
             # no-store, never _FOLDERS_CACHE_CONTROL: a private 60s-cached
             # 202 would feed the client's retry loop stale bodies long after
             # the build landed (and stay out of the SW api cache too).
+            # Payload-free for the fill idle gate too: a client's Retry-After
+            # loop must not re-stamp last_request_at (#243).
             return JSONResponse(
                 {"detail": "metadata index building"},
                 status_code=202,
@@ -1101,6 +1119,7 @@ async def _folder_tree(
         gen = cache_data["timestamp"]
         gen_int = int(cache_data.get("generation", 1) or 1)
         if since is not None and since == gen_int:
+            # The fill-poller's hot path — payload-free, so no idle stamp.
             return Response(status_code=304, headers={"Cache-Control": _FOLDERS_CACHE_CONTROL})
         lookup = {c.folder_path: c for c in index.comics}
         _attach_metadata(tree, lookup, "")
@@ -1222,6 +1241,10 @@ async def _folder_tree(
         "if-none-match"
     ) == etag:
         return Response(status_code=304, headers=headers)
+    # Same stamp rule as _folders_response (#243): the outgoing body is real
+    # request activity for _background_fill's idle gate; the payload-free
+    # If-None-Match 304 above must not stamp.
+    request.app.state.last_request_at = time.time()
     return Response(content=body, media_type="application/json", headers=headers)
 
 
