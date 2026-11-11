@@ -1,7 +1,9 @@
-"""Per-user persistent folder visibility (hidden top-level roots).
+"""Persistent folder visibility (hidden top-level roots), library-global.
 
-Stdlib ``sqlite3`` only — one row per (user, hidden root); unhide deletes the
-row. Each user has a monotonically increasing ``revision`` that bumps only
+Stdlib ``sqlite3`` only — one row per (scope, hidden root); unhide deletes
+the row. The hidden set is shared by every authenticated user: all rows
+live under the single ``GLOBAL_USER_KEY`` sentinel (``*`` — never a valid
+email-derived user key). A monotonically increasing ``revision`` bumps only
 when the hidden set actually changes (same-value writes are idempotent).
 """
 
@@ -15,14 +17,20 @@ from pathlib import Path
 
 DB_FILENAME = "folder-visibility.sqlite3"
 OWNER_PURPOSE = "folder-visibility:v1:"
+# The hidden set is library-global: every row lives under this sentinel
+# ``user_key``. ``*`` can never collide with an email-derived user key.
+# viewer-rs keeps the same constant (rust/viewer-rs/src/state.rs).
+GLOBAL_USER_KEY = "*"
 MAX_ROOT_LENGTH = 2048
 _BUSY_TIMEOUT_MS = 5000
 
 # The DDL lives in one shared file (#200) — api/user-state-schema.sql is
 # the single source FastAPI and viewer-rs both apply. This constant must
 # equal the file's `PRAGMA user_version` stamp; a DB stamped newer than
-# it is refused rather than silently downgraded.
-SCHEMA_VERSION = 1
+# it is refused rather than silently downgraded. v2 added the reading-
+# position tables (#375) — the constant versions the whole user-state DB,
+# not just the visibility tables.
+SCHEMA_VERSION = 2
 _SCHEMA_PATH = (
     Path(__file__).resolve().parent.parent / "api" / "user-state-schema.sql"
 )

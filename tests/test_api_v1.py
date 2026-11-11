@@ -227,6 +227,12 @@ def test_positions_put_validation(server):
     status, _, _ = _req(server, "PUT", "/api/v1/reading-positions?folder=/abs",
                         {"page": 0, "total": 5, "ts": 1})
     assert status == 400  # leading slash rejected
+    # ints beyond SQLite i64 must 400 (Rust as_int parity), not 503
+    for field, bad in (("page", 1 << 63), ("total", 1 << 63), ("ts", 1 << 63)):
+        body = {"page": 0, "total": 5, "ts": 1, field: bad}
+        status, _, _ = _req(server, "PUT",
+                            "/api/v1/reading-positions?folder=long", body)
+        assert status == 400, field
 
 
 # ── v0 ↔ v1 store interplay ──────────────────────────────────────────

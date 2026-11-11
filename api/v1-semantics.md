@@ -46,7 +46,9 @@
 
 `GET/PUT/DELETE /api/v1/reading-positions` (参照: `app/api_v1.py`)。
 
-- **user key**: `str(email or "unknown").lower()` — ユーザー毎に独立した slot。
+- **user key**: `user_key_for_email(email)` = `strip().lower()` — ユーザー毎に
+  独立した slot。email が取れない呼び出しは **403** (共有 "unknown" バケットへは
+  フォールバックしない — `app/reading_positions.py::position_user_key`)。
 - **GET**: `{positions: [{folder,page,total,ts}]}` — **ts 降順 (newest first)**。
   `?folder=` で単一 folder に絞れる (tombstone/不在時は空配列)。
 - **PUT**: `?folder=` 必須 (省略 → 422)、body `{page,total,ts}`。
@@ -56,17 +58,26 @@
     `{status:"stale"}` (書き込みは行わない)。
   - **delete-all tombstone との競合**: `ts <= tombstone_ts` → `{status:"stale"}`。
   - 正常 → `{status:"ok"}`。2xx 系は受理扱いでよい (`ok`/`stale` は best-effort)。
-  - **上限**: user 100 (`_POSITION_MAX_USERS`, LRU 追い出し)、folder 512。
+  - **上限**: user 100 (`POSITION_MAX_USERS`, LRU 追い出し)、folder 512。
 - **DELETE**: `?folder=` → その folder に tombstone を記録 (in-flight な古い PUT が
   復活させない)。`?folder` なし → delete-all tombstone_ts を記録。
-- **揮発性**: **per-process in-memory** — 再起動・backend 切替 (strangler flip) で
-  全消失する設計。永続性を期待しないこと。
+- **永続化** (#375): **user-state SQLite に永続** — `BOOKQ_STATE_DIR/
+  folder-visibility.sqlite3` の `position_users`/`position_folders`
+  (schema v2、`api/user-state-schema.sql` が py/rs 共通の DDL 正本)。
+  FastAPI (`app/reading_positions.py`) と viewer-rs
+  (`rust/viewer-rs/src/state.rs`) が同じ DB を読み書きするため、
+  再起動・コンテナ再起動・strangler flip のいずれでも位置は失われない。
+  規則実装は `PositionBook` (純粋 LWW/検証) と store に分離され、
+  `tests/fixtures/positions_cases.json` が py/rs 共通の conformance fixture。
+  v0 `/api/reading-position` は同ストアの「ユーザー最新1件」互換ビュー。
 
 ## 3. folder-visibility
 
 `GET/PUT /api/v1/folder-visibility` (参照: `app/folder_visibility.py`)。
 
-- **owner トークン**:
+- **hiddenRoots はライブラリ共有**: 全認証ユーザーに同一のセットが効く。
+  DB 上は sentinel `user_key = "*"` (`GLOBAL_USER_KEY`) 配下に保存される。
+- **owner トークン** (書き込み者の stale タブ対策。データのスコープではない):
   `hex(HMAC-SHA256(key=SECRET_KEY, msg="folder-visibility:v1:" + user_key))`
   - `user_key` = `email.strip().lower()`
   - `X-Bookq-Visibility-Owner` ヘッダで提示する。クライアントは自身の email と

@@ -169,7 +169,7 @@ def test_back_forward_after_manual_hidden_hash_edit(vpage, vis_env):
 
 def test_resume_button_skips_hidden_newest(vpage, vis_env):
     vpage.evaluate(
-        "localStorage.setItem('bookq_progress', JSON.stringify({"
+        "localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify({"
         "'keep_a':{page:0,total:1,ts:1000},'hide_me':{page:1,total:2,ts:2000}}))"
     )
     vis_put(vis_env, "hide_me", True)

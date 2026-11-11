@@ -24,6 +24,7 @@ final class ProgressSync {
     private var pending: Record?
     private var inFlight = false
     private var timer: Task<Void, Never>?
+    private var sendTask: Task<Void, Never>?
     private var lastSentKey: String?
     private var retryDelay: Double = 0
     private var epoch = 0
@@ -70,7 +71,7 @@ final class ProgressSync {
         pending = nil
         inFlight = true
         let gen = epoch
-        Task {
+        sendTask = Task {
             let outcome: String
             do {
                 _ = try await api.putReadingPosition(ReadingPosition(
@@ -109,6 +110,23 @@ final class ProgressSync {
         }
     }
 
+    /// Detach: drop every queued/in-flight send WITHOUT touching the
+    /// server. `ReadingProgressStore.attach` calls this on the outgoing
+    /// sync — the api client reads the shared token box per request, so
+    /// an account-A debounce/in-flight PUT surviving the switch would
+    /// land under account B's credentials and write A's position into
+    /// B's server slot. `epoch` bump also voids the in-flight
+    /// completion's bookkeeping; `sendTask?.cancel()` aborts the
+    /// URLSession request while it is still on the client.
+    func reset() {
+        pending = nil
+        lastSentKey = nil
+        retryDelay = 0
+        epoch += 1
+        timer?.cancel(); timer = nil
+        sendTask?.cancel(); sendTask = nil
+    }
+
     /// DELETE the record and drop everything that could write back.
     func remove() async -> Bool {
         pending = nil
@@ -116,6 +134,7 @@ final class ProgressSync {
         retryDelay = 0
         epoch += 1
         timer?.cancel(); timer = nil
+        sendTask?.cancel(); sendTask = nil
         do {
             try await api.deleteReadingPosition()
             return true

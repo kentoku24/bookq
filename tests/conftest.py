@@ -352,9 +352,9 @@ def server(downloads_tree: Path) -> str:
 
 @pytest.fixture(autouse=True)
 def _reset_reading_position(request):
-    """Clear the session server's in-memory resume point before each test.
+    """Clear the session server's stored resume point before each test.
 
-    `server` is session-scoped, so app.state.reading_positions survives across
+    `server` is session-scoped, so the reading-position store survives across
     tests: a page turn's debounced PUT in one test would leak into the NEXT
     test's boot pull, merge into its fresh localStorage, and steer the opened
     page off "1 / N". Worse, the previous test's teardown (context.close →

@@ -57,6 +57,20 @@ pub(crate) struct Native {
     set: std::collections::HashSet<String>,
 }
 
+/// Endpoint groups that answer from the same in-process tree/index snapshot
+/// and therefore have to be cut over together (#281).
+///
+/// `tree` / `search` / `facets` / `images` all read [`folders::IndexState`]:
+/// enabling only some of them makes browse and search report different
+/// generations from different backends (#261). `reader-sync`'s catalog
+/// resolver builds its manifest from the same tree, so a native socket with a
+/// proxied tree resolves `OPEN_WORK` against the other backend's flatten/fill
+/// state.
+const NATIVE_GROUPS: [&[&str]; 2] = [
+    &["tree", "search", "facets", "images"],
+    &["tree", "reader-sync"],
+];
+
 impl Native {
     fn from_env() -> Self {
         let test_mode = std::env::var("BOOKQ_TEST_MODE")
@@ -77,12 +91,49 @@ impl Native {
                 }
             }
         }
+        Self::from_parts(test_mode, all, set)
+    }
+
+    /// Env-free constructor: the gate below is unit-tested against it instead
+    /// of mutating process-global `BOOKQ_RS_NATIVE` (which cargo's parallel
+    /// test threads share).
+    fn from_parts(test_mode: bool, all: bool, set: std::collections::HashSet<String>) -> Self {
         Self { test_mode, all, set }
     }
 
     pub(crate) fn enabled(&self, ep: &str) -> bool {
         self.all || self.set.contains(ep)
     }
+
+    /// Groups where at least one member is native and at least one is not.
+    ///
+    /// All-or-nothing per group is the only safe cutover state: a partial one
+    /// silently splits the index between the two backends. Groups nobody has
+    /// enabled are fine — that is the "all proxy" fallback posture.
+    pub(crate) fn partial_groups(&self) -> Vec<&'static [&'static str]> {
+        NATIVE_GROUPS
+            .iter()
+            .copied()
+            .filter(|group| {
+                let enabled = group.iter().filter(|ep| self.enabled(ep)).count();
+                enabled > 0 && enabled < group.len()
+            })
+            .collect()
+    }
+}
+
+/// `BOOKQ_RS_NATIVE_STRICT=1` promotes the partial-group warning to a start-up
+/// failure, so a cutover runbook can gate on "the gateway refused a split
+/// configuration" instead of grepping logs.
+fn native_strict() -> bool {
+    matches!(
+        std::env::var("BOOKQ_RS_NATIVE_STRICT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 #[derive(Clone)]
@@ -96,8 +147,9 @@ pub(crate) struct AppState {
     pub(crate) allowed_emails: std::sync::Arc<std::collections::HashSet<String>>,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
-    /// M4: per-process reading positions (`app.state.reading_positions`).
-    pub(crate) positions: std::sync::Arc<state::Positions>,
+    /// M4+375: per-user reading positions in the shared user-state SQLite
+    /// store (`ReadingPositionStore`) — same DB the Python viewer writes.
+    pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
     /// `SECRET_KEY` — Bearer JWT verify + visibility owner HMAC.
@@ -245,8 +297,9 @@ async fn vary_session_cookie(
     res
 }
 
-/// `/api/v1/reading-positions` — M4: per-folder LWW + tombstones, fully
-/// native (positions are per-process ephemeral upstream as well).
+/// `/api/v1/reading-positions` — M4+375: per-folder LWW + tombstones,
+/// native on the shared user-state SQLite store (same rows the Python
+/// viewer reads/writes, so py/rs cannot diverge — #263 resolved).
 async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("positions") {
         return proxy(&st.upstream, req).await;
@@ -254,8 +307,15 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
     let Some(user) = caller_or_proxy(&st, req.headers()) else {
         return proxy(&st.upstream, req).await;
     };
-    // `_position_user_key`: str(email or "unknown").lower()
-    let key = user.email.to_lowercase();
+    // `user_key_for_email`: strip().lower() — an empty key is a 403, never
+    // a shared bucket (same posture as the Python `_position_user_key`).
+    let key = user.email.trim().to_lowercase();
+    if key.is_empty() {
+        return state::detail(
+            axum::http::StatusCode::FORBIDDEN,
+            "session has no usable identity",
+        );
+    }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
@@ -263,8 +323,13 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
     match *req.method() {
         axum::http::Method::GET => {
             let folder = q.get("folder").map(|s| s.as_str());
-            serve::maybe_gzip(&headers, state::list_positions(&st.positions, &key, folder), true)
-                .await
+            let res = state::list_positions(
+                st.position_store.clone(),
+                &key,
+                folder.map(|s| s.to_string()),
+            )
+            .await;
+            serve::maybe_gzip(&headers, res, true).await
         }
         axum::http::Method::PUT => {
             // `folder` is required → missing keeps FastAPI's 422 upstream.
@@ -279,10 +344,15 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
                         .await
                 }
             };
-            state::put_position(&st.positions, &key, &folder, &body)
+            state::put_position(st.position_store.clone(), &key, &folder, &body).await
         }
         axum::http::Method::DELETE => {
-            state::delete_positions(&st.positions, &key, q.get("folder").map(|s| s.as_str()))
+            state::delete_positions(
+                st.position_store.clone(),
+                &key,
+                q.get("folder").map(|s| s.as_str()),
+            )
+            .await
         }
         _ => return proxy(&st.upstream, req).await,
     }
@@ -369,15 +439,15 @@ async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !st.native.enabled("search") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
     }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+    // `_user` still gates auth upstream; hidden roots are library-global.
+    let Some(_user) = caller_or_proxy(&st, req.headers()) else {
         return proxy(&st.upstream, req).await;
     };
-    let key = user.email.trim().to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match search::api_search(&st, &key, &q).await {
+    match search::api_search(&st, &q).await {
         serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
         serve::Serve::Proxy => proxy(&st.upstream, req).await,
     }
@@ -389,15 +459,15 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !st.native.enabled("facets") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
     }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
+    // `_user` still gates auth upstream; hidden roots are library-global.
+    let Some(_user) = caller_or_proxy(&st, req.headers()) else {
         return proxy(&st.upstream, req).await;
     };
-    let key = user.email.trim().to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match search::api_facets(&st, &key, &q).await {
+    match search::api_facets(&st, &q).await {
         serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
         serve::Serve::Proxy => proxy(&st.upstream, req).await,
     }
@@ -813,6 +883,27 @@ async fn main() {
     let downloads = std::fs::canonicalize(&downloads).unwrap_or(downloads);
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
     let native = Native::from_env();
+    // #281: a partial group is a silent split-brain — browse answers from one
+    // backend's index, search from the other's. Warn only, because production
+    // deliberately walks through partial states while rolling out; the strict
+    // flag is for cutover runbooks and CI, where a split config must not boot.
+    let partial_groups = native.partial_groups();
+    for group in &partial_groups {
+        tracing::warn!(
+            group = ?group,
+            native_set = ?native.set,
+            native_all = native.all,
+            "partial native cutover: group members read one tree/index snapshot and must be enabled together (#281)"
+        );
+    }
+    if !partial_groups.is_empty() && native_strict() {
+        tracing::error!(
+            groups = ?partial_groups,
+            native_set = ?native.set,
+            "BOOKQ_RS_NATIVE_STRICT: refusing a partial native cutover"
+        );
+        std::process::exit(2);
+    }
     let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
         .unwrap_or_default()
         .split(',')
@@ -838,7 +929,7 @@ async fn main() {
         native: std::sync::Arc::new(native),
         allowed_emails: std::sync::Arc::new(allowed_emails),
         index: index.clone(),
-        positions: std::sync::Arc::new(state::Positions::default()),
+        position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
@@ -905,4 +996,54 @@ async fn main() {
         })
         .await
         .expect("serve failed");
+}
+
+#[cfg(test)]
+mod native_gate_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn native(set: &[&str]) -> Native {
+        Native::from_parts(false, false, set.iter().map(|e| e.to_string()).collect())
+    }
+
+    fn all_native() -> Native {
+        Native::from_parts(false, true, HashSet::new())
+    }
+
+    #[test]
+    fn partial_index_group_is_flagged() {
+        // The live production posture this issue is about: tree + images are
+        // native while search/facets still answer from the Python index.
+        let partial = native(&["tree", "images"]).partial_groups();
+        assert_eq!(partial, vec![NATIVE_GROUPS[0], NATIVE_GROUPS[1]]);
+    }
+
+    #[test]
+    fn single_index_member_is_flagged_once() {
+        // `search` alone splits INDEX_GROUP; MANIFEST_GROUP has nobody enabled
+        // and must stay quiet (all-proxy is a valid posture).
+        let partial = native(&["search"]).partial_groups();
+        assert_eq!(partial, vec![NATIVE_GROUPS[0]]);
+    }
+
+    #[test]
+    fn complete_groups_are_quiet() {
+        let n = native(&["tree", "search", "facets", "images", "reader-sync"]);
+        assert!(n.partial_groups().is_empty());
+    }
+
+    #[test]
+    fn all_proxy_and_all_native_are_quiet() {
+        assert!(native(&[]).partial_groups().is_empty());
+        assert!(all_native().partial_groups().is_empty());
+    }
+
+    #[test]
+    fn ungrouped_endpoints_never_warn() {
+        // thumb/view/image/visibility/positions/health/version/refresh are
+        // independent of the shared snapshot: no group covers them.
+        let n = native(&["thumb", "view", "image", "visibility", "positions"]);
+        assert!(n.partial_groups().is_empty());
+    }
 }

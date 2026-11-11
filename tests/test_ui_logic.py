@@ -501,7 +501,7 @@ def test_f_key_close_inerts_resume_pill(page):
     # Seed a reading position so the resume pill is eligible, then reload so
     # the init flow (loadFolders → renderView → updateResumeButton) shows it.
     page.evaluate(
-        """() => localStorage.setItem('bookq_progress', JSON.stringify(
+        """() => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify(
              {'simple_manga': {page: 1, total: 5, ts: Date.now()}}
            ))"""
     )

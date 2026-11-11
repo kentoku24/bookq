@@ -108,6 +108,11 @@ def test_put_validation(server):
         # json.loads accepts NaN/Infinity — int() would 500, must be 400
         {"folder": "f", "page": 0, "total": 1, "ts": float("nan")},
         {"folder": "f", "page": 0, "total": 1, "ts": float("inf")},
+        # ints beyond SQLite i64 must 400, not OverflowError -> 503
+        {"folder": "f", "page": 0, "total": 1 << 63},
+        {"folder": "f", "page": 1 << 63, "total": 5},
+        {"folder": "f", "page": 0, "total": 5, "ts": 1 << 63},
+        {"folder": "f", "page": 0.0, "total": float(1 << 63)},
     ):
         status, _ = _req(server, "PUT", "/api/reading-position", body)
         assert status == 400, body
@@ -265,7 +270,7 @@ def test_failed_pull_never_selfheals(page, server):
 
     page.route("**/api/v1/reading-positions*", on_route)
     page.evaluate(
-        "localStorage.setItem('bookq_progress', "
+        "localStorage.setItem(window.OfflineCore.progressKey(), "
         "JSON.stringify({'local/book': {page: 0, total: 10, ts: %d}}))" % (base + 1000)
     )
     page.reload()
@@ -311,14 +316,14 @@ def test_boot_pull_merges_newer_remote(page, server):
          {"folder": "series/vol1", "page": 1, "total": 2,
           "ts": int(time.time() * 1000)})
     page.evaluate(
-        "localStorage.setItem('bookq_progress', "
+        "localStorage.setItem(window.OfflineCore.progressKey(), "
         "JSON.stringify({'long': {page: 0, total: 30, ts: 1}}))"
     )
     page.reload()
     page.wait_for_selector(".tile")
     page.wait_for_function(
         """() => {
-            const p = JSON.parse(localStorage.getItem('bookq_progress') || '{}');
+            const p = JSON.parse(localStorage.getItem(window.OfflineCore.progressKey()) || '{}');
             return p['series/vol1'] && p['series/vol1'].page === 1;
         }""",
         timeout=8000,
@@ -331,7 +336,7 @@ def test_boot_pushes_newer_local_to_server(page, server):
     _req(server, "PUT", "/api/reading-position",
          {"folder": "long", "page": 1, "total": 30, "ts": 1})
     page.evaluate(
-        "localStorage.setItem('bookq_progress', "
+        "localStorage.setItem(window.OfflineCore.progressKey(), "
         "JSON.stringify({'series/vol1': {page: 0, total: 2, ts: %d}}))"
         % int(time.time() * 1000)
     )

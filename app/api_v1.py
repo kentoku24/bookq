@@ -15,22 +15,16 @@ from starlette.concurrency import run_in_threadpool
 
 from app.auth import require_auth
 from app.folder_visibility_routes import get_folder_visibility, put_folder_visibility
+from app.reading_positions import REJECTED, STALE
 from app.routes import (
-    _POSITION_MAX_FOLDERS,
-    _POSITION_MAX_USERS,
-    _POSITION_TS_FUTURE_SLACK_MS,
     _QueryInt,
     _facets_impl,
     _folder_tree,
-    _latest_position,
     _list_folder_images,
+    _position_store,
+    _position_store_call,
     _position_user_key,
-    _positions,
     _search_impl,
-    _slot_max_ts,
-    _store_position_v1,
-    _trim_position_slot,
-    _user_position_slot,
     _validate_folder_param,
     _validate_position_body_v1,
     refresh_index,
@@ -181,17 +175,9 @@ async def v1_list_reading_positions(
     user: dict = Depends(require_auth),
 ):
     """The caller's reading positions — ``{positions: [...]}``, newest first."""
-    slot = _user_position_slot(_positions(request), _position_user_key(user), create=False)
-    folders = (slot or {}).get("folders", {})
-    if folder is not None:
-        rec = folders.get(folder)
-        recs = [rec] if rec is not None and not rec.get("tombstone") else []
-    else:
-        recs = sorted(
-            (r for r in folders.values() if not r.get("tombstone")),
-            key=lambda r: r["ts"],
-            reverse=True,
-        )
+    key = _position_user_key(user)
+    store = _position_store(request)
+    recs = await _position_store_call(store.list_positions, key, folder)
     return JSONResponse(
         content={
             "positions": [
@@ -215,21 +201,16 @@ async def v1_put_reading_position(
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON body")
     rec = _validate_position_body_v1(body)
-    # Same wrong-clock guard as v0 — see put_reading_position's comment.
-    if rec["ts"] > int(time.time() * 1000) + _POSITION_TS_FUTURE_SLACK_MS:
-        raise HTTPException(status_code=400, detail="ts too far in the future")
     rec["folder"] = folder
-    rec["updated_at"] = time.time()
-    positions = _positions(request)
     key = _position_user_key(user)
-    if key not in positions and len(positions) >= _POSITION_MAX_USERS:
-        stalest = min(positions, key=lambda k: positions[k].get("updated_at", 0))
-        del positions[stalest]
-    slot = _user_position_slot(positions, key)
-    if not _store_position_v1(slot, rec):
+    store = _position_store(request)
+    result = await _position_store_call(store.put_v1, key, rec)
+    # REJECTED = far-future ts — same wrong-clock guard as v0; see
+    # put_reading_position's comment in app.routes.
+    if result == REJECTED:
+        raise HTTPException(status_code=400, detail="ts too far in the future")
+    if result == STALE:
         return {"status": "stale"}
-    slot["updated_at"] = rec["updated_at"]
-    _trim_position_slot(slot)
     return {"status": "ok"}
 
 
@@ -244,24 +225,14 @@ async def v1_delete_reading_positions(
     Both leave a tombstone so a stale in-flight PUT can't resurrect the
     wiped record — the same contract as the v0 delete.
     """
-    positions = _positions(request)
-    key = _position_user_key(user)
-    slot = _user_position_slot(positions, key)
-    slot["updated_at"] = time.time()
     if folder is not None:
         _validate_folder_param(folder)
-        prev = slot["folders"].get(folder)
-        slot["folders"][folder] = {
-            "tombstone": True,
-            "ts": (prev or {}).get("ts", 0),
-            "updated_at": time.time(),
-        }
+    key = _position_user_key(user)
+    store = _position_store(request)
+    if folder is None:
+        await _position_store_call(store.delete_all, key)
     else:
-        positions[key] = {
-            "folders": {},
-            "tombstone_ts": _slot_max_ts(slot),
-            "updated_at": slot["updated_at"],
-        }
+        await _position_store_call(store.delete_folder, key, folder)
     return {"status": "ok"}
 
 

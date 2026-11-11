@@ -2,11 +2,23 @@
 
 `folder-visibility.sqlite3` on the `user-state` volume (`/var/lib/bookq`)
 is **not** an external API contract. It is an internal backend contract
-shared between FastAPI (`app/folder_visibility.py`) and viewer-rs
+shared between FastAPI (`app/folder_visibility.py` +
+`app/reading_positions.py`) and viewer-rs
 (`rust/viewer-rs/src/state.rs`) while the strangler migration (#163)
 routes some endpoints natively and proxies the rest: one writer's rows
 are the other's reads, which is what makes per-endpoint cutover/rollback
 free.
+
+The DB holds two feature families, each keyed by the authenticated
+user's normalized email:
+
+- Folder visibility (`visibility_users`, `hidden_roots`) — added at
+  schema v1.
+- Reading positions (`position_users`, `position_folders`) — added at
+  schema v2 (#375). Per-user, per-folder last-write-wins records with
+  delete tombstones; both `/api/reading-position` (v0 latest-only view)
+  and `/api/v1/reading-positions` read/write the same tables, so a
+  process restart or a py↔rs route flip no longer loses progress.
 
 - The DDL lives in exactly one file: `api/user-state-schema.sql`. Both
   implementations apply it idempotently on first connect — FastAPI reads

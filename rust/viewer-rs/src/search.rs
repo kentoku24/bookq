@@ -3,9 +3,9 @@
 //! Ports `app/routes.py::_search_impl` / `_facets_impl` over the shared
 //! index cache: relevance scoring (`_calculate_relevance`), artist/tag
 //! filters (`_matches_filters`), the `(-score, natural_key, name)` ordering,
-//! and the fail-closed hidden-root exclusion — the caller's roots are read
-//! from the shared visibility SQLite and a failed read answers 503, never
-//! an unfiltered list (`hidden_roots_for_request` posture).
+//! and the fail-closed hidden-root exclusion — the library-global roots are
+//! read from the shared visibility SQLite and a failed read answers 503,
+//! never an unfiltered list (`hidden_roots_for_request` posture).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use bookq_core::ComicRec;
 
 use crate::folders::{ensure_tree_and_index, CacheData, Ensure};
 use crate::serve::Serve;
-use crate::state::{covered_by_roots, VisibilityStore};
+use crate::state::{covered_by_roots, VisibilityStore, GLOBAL_USER_KEY};
 use crate::tree;
 use crate::AppState;
 
@@ -59,11 +59,11 @@ fn building() -> Response {
     res
 }
 
-/// `_visibility_hidden_roots` — the caller's hidden roots, fail-closed.
-async fn hidden_roots(st: &AppState, user_key: &str) -> Option<Vec<String>> {
+/// `_visibility_hidden_roots` — the library-global hidden roots,
+/// fail-closed. Same for every caller; `include_hidden` opts out.
+async fn hidden_roots(st: &AppState) -> Option<Vec<String>> {
     let store: Arc<VisibilityStore> = st.visibility.clone();
-    let key = user_key.to_string();
-    tokio::task::spawn_blocking(move || store.read(&key))
+    tokio::task::spawn_blocking(move || store.read(GLOBAL_USER_KEY))
         .await
         .ok()
         .and_then(|r| r.ok())
@@ -225,7 +225,6 @@ fn bool_param(q: &HashMap<String, String>, name: &str) -> Option<Option<bool>> {
 /// produced (202/503) or the call must proxy (Failed).
 async fn index_and_hidden(
     st: &AppState,
-    user_key: &str,
     include_hidden: bool,
 ) -> Result<(Arc<CacheData>, Vec<String>), Response> {
     let data = match ensure_tree_and_index(&st.index, &st.downloads).await {
@@ -236,7 +235,7 @@ async fn index_and_hidden(
     let hidden = if include_hidden {
         Vec::new()
     } else {
-        match hidden_roots(st, user_key).await {
+        match hidden_roots(st).await {
             Some(h) => h,
             None => {
                 return Err(detail(
@@ -251,14 +250,14 @@ async fn index_and_hidden(
 
 /// `GET /api/v1/search` — `_search_impl`. `sort` is `Literal["relevance"]`
 /// upstream: any other value falls through to keep FastAPI's 422.
-pub async fn api_search(st: &AppState, user_key: &str, q: &HashMap<String, String>) -> Serve {
+pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
     if q.get("sort").map(|s| s.as_str()).unwrap_or("relevance") != "relevance" {
         return Serve::Proxy;
     }
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
         return Serve::Proxy;
     };
-    let (data, hidden) = match index_and_hidden(st, user_key, include_hidden.unwrap()).await {
+    let (data, hidden) = match index_and_hidden(st, include_hidden.unwrap()).await {
         Ok(x) => x,
         Err(res) => return Serve::Done(res),
     };
@@ -294,11 +293,11 @@ pub async fn api_search(st: &AppState, user_key: &str, q: &HashMap<String, Strin
 
 /// `GET /api/v1/facets` — `_facets_impl`. `path` is a raw string filter
 /// (no traversal check upstream — a non-matching value just empties the set).
-pub async fn api_facets(st: &AppState, user_key: &str, q: &HashMap<String, String>) -> Serve {
+pub async fn api_facets(st: &AppState, q: &HashMap<String, String>) -> Serve {
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
         return Serve::Proxy;
     };
-    let (data, hidden) = match index_and_hidden(st, user_key, include_hidden.unwrap()).await {
+    let (data, hidden) = match index_and_hidden(st, include_hidden.unwrap()).await {
         Ok(x) => x,
         Err(res) => return Serve::Done(res),
     };

@@ -5,25 +5,45 @@ name: rust
 
 on:
   pull_request:
-    paths:
-      - "rust/**"
-      - "Dockerfile.viewer-rs"
-      - "docker-compose.*-rs.yml"
-      - ".github/workflows/rust.yml"
-      # gateway-contract inputs (#199): the OpenAPI spec + expected-statuses
-      # overrides drive the suite, and the job builds the Python Dockerfile.
-      # api/** also covers api/reader-sync-cases.json — the cargo golden
-      # harness input (#210), so a case-file-only edit still triggers this.
-      - "api/**"
-      - "schemathesis.toml"
-      - "Dockerfile"
   workflow_dispatch:
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 jobs:
+  # Job-level path gating so every PR reports these check names — see
+  # android.yml changes-android for why workflow-level paths: would
+  # deadlock required status checks (#382).
+  changes-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        # gateway-contract inputs (#199): the OpenAPI spec +
+        # expected-statuses overrides drive the suite, and the job builds
+        # the Python Dockerfile. api/** also covers
+        # api/reader-sync-cases.json — the cargo golden harness input
+        # (#210), so a case-file-only edit still triggers this.
+        with:
+          filters: |
+            run:
+              - "rust/**"
+              - "Dockerfile.viewer-rs"
+              - "docker-compose.*-rs.yml"
+              - ".github/workflows/rust.yml"
+              - "api/**"
+              - "schemathesis.toml"
+              - "Dockerfile"
+
   test:
+    needs: changes-rust
+    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -47,6 +67,8 @@ jobs:
         run: cargo test --workspace
 
   image-build:
+    needs: changes-rust
+    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,8 +76,20 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: docker/setup-buildx-action@v3
+
+      # Exposes ACTIONS_RUNTIME_TOKEN/ACTIONS_*_URL to the shell — without
+      # them `type=gha` cache-from/to is skipped silently (#380).
+      - uses: crazy-max/ghaction-github-runtime@v4
+
+      # type=gha layer cache: unchanged Cargo.lock/deps rebuild in seconds
+      # instead of a full cold cargo build (#380).
       - name: docker build viewer-rs
-        run: docker build -f Dockerfile.viewer-rs .
+        run: >-
+          docker buildx build
+          --cache-from type=gha,scope=viewer-rs
+          --cache-to type=gha,mode=max,scope=viewer-rs
+          -f Dockerfile.viewer-rs .
 
   # Issue #199 — the same Schemathesis suite api-contract.yml runs against
   # FastAPI, but pointed at the viewer-rs gateway: every v1 operation must
@@ -63,6 +97,8 @@ jobs:
   # `server` response header discriminates which backend answered
   # (`hypercorn-h11` = proxied to FastAPI, absent = viewer-rs native).
   gateway-contract:
+    needs: changes-rust
+    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -88,10 +124,23 @@ jobs:
                   z.writestr(f"{i+1:02d}.jpg", b.getvalue())
           EOF
 
+      - uses: docker/setup-buildx-action@v3
+
+      # Same runtime env exposure as image-build — required for type=gha.
+      - uses: crazy-max/ghaction-github-runtime@v4
+
+      # --load puts the images in the daemon for the compose-free `docker run`
+      # below; per-image scopes keep the Python and Rust caches independent.
       - name: Build images
         run: |
-          docker build -t bookq-ci:viewer -f Dockerfile .
-          docker build -t bookq-ci:viewer-rs -f Dockerfile.viewer-rs .
+          docker buildx build --load \
+            --cache-from type=gha,scope=viewer \
+            --cache-to type=gha,mode=max,scope=viewer \
+            -t bookq-ci:viewer -f Dockerfile .
+          docker buildx build --load \
+            --cache-from type=gha,scope=viewer-rs \
+            --cache-to type=gha,mode=max,scope=viewer-rs \
+            -t bookq-ci:viewer-rs -f Dockerfile.viewer-rs .
 
       - name: Start viewer + viewer-rs
         run: |
@@ -121,13 +170,13 @@ jobs:
             curl -sf http://127.0.0.1:8080/api/folders && break || sleep 1
           done
           curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null \
-            || { docker logs viewer-rs viewer; echo "gateway never healthy"; exit 1; }
+            || { docker logs viewer-rs || true; docker logs viewer || true; echo "gateway never healthy"; exit 1; }
           # Cold index answers 202 + Retry-After; poll until the build lands.
           for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/tree)
             [ "$code" = "200" ] && break || sleep 1
           done
-          [ "$code" = "200" ] || { docker logs viewer-rs viewer; echo "tree never warmed"; exit 1; }
+          [ "$code" = "200" ] || { docker logs viewer-rs || true; docker logs viewer || true; echo "tree never warmed"; exit 1; }
 
       - name: Schemathesis via gateway
         run: |

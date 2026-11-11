@@ -507,6 +507,46 @@
   const DATA_CACHE_PREFIXES = ["bookq-work-", "bookq-api-", "bookq-images-"];
   const WIPE_STORAGE_KEYS = ["bookq_progress", "bookq_persist_toast"];
   const WIPE_SESSION_KEYS = ["bookq_auto_sync_done", "bookq_return_hash"];
+
+  // ── Reading-progress localStorage key (#375) ──────────────────────────
+  // Progress is scoped per authenticated account: `bookq_progress:<email>`
+  // (the normalized user-state key index.html injects as
+  // __BOOKQ_PROGRESS_USER__). localStorage is already origin-scoped, so the
+  // email alone separates accounts on one server. The pre-#375 fixed key
+  // `bookq_progress` is legacy: migrateProgress() moves it into the current
+  // account's scoped key once, then removes it so a different account on
+  // the same browser can never inherit it. With no injected user (harness
+  // pages, SW context) the legacy key is used unchanged.
+  const LEGACY_PROGRESS_KEY = "bookq_progress";
+
+  function progressKey() {
+    const u = globalThis.__BOOKQ_PROGRESS_USER__;
+    return (typeof u === "string" && u) ? LEGACY_PROGRESS_KEY + ":" + u : LEGACY_PROGRESS_KEY;
+  }
+
+  // Every progress key present — the scoped one plus any stale legacy or
+  // other-account keys a wipe must also remove.
+  function progressStorageKeys() {
+    const out = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k === LEGACY_PROGRESS_KEY || k.indexOf(LEGACY_PROGRESS_KEY + ":") === 0) out.push(k);
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  function migrateProgress() {
+    const scoped = progressKey();
+    if (scoped === LEGACY_PROGRESS_KEY) return;  // no account context — nothing to scope
+    try {
+      if (localStorage.getItem(scoped) === null && localStorage.getItem(LEGACY_PROGRESS_KEY) !== null) {
+        localStorage.setItem(scoped, localStorage.getItem(LEGACY_PROGRESS_KEY));
+      }
+      localStorage.removeItem(LEGACY_PROGRESS_KEY);
+    } catch (e) { console.warn(e); }
+  }
   // Kept on purpose (QA/registration flags, not reading data):
   // bookq_harness / bookq_enable_sw / bookq_touch / bookq_perf.
 
@@ -532,6 +572,11 @@
     for (const k of WIPE_STORAGE_KEYS) {
       try { if (localStorage.getItem(k) !== null) report.keys.push(k); } catch (e) {}
     }
+    // Account-scoped progress keys (#375) — `bookq_progress` alone no
+    // longer covers them.
+    for (const k of progressStorageKeys()) {
+      if (!report.keys.includes(k)) report.keys.push(k);
+    }
     return report;
   }
 
@@ -546,6 +591,9 @@
     try { await OfflineStore.clear(); } catch (e) { console.warn(e); }  // records + tree snapshot
     for (const k of WIPE_STORAGE_KEYS) {
       try { if (localStorage.getItem(k) !== null) { localStorage.removeItem(k); deleted.keys.push(k); } } catch (e) {}
+    }
+    for (const k of progressStorageKeys()) {
+      try { if (localStorage.getItem(k) !== null) { localStorage.removeItem(k); if (!deleted.keys.includes(k)) deleted.keys.push(k); } } catch (e) {}
     }
     for (const k of WIPE_SESSION_KEYS) {
       try { if (sessionStorage.getItem(k) !== null) { sessionStorage.removeItem(k); deleted.keys.push(k); } } catch (e) {}
@@ -564,7 +612,7 @@
   globalThis.OfflineStore = OfflineStore;
   globalThis.OfflineTree = OfflineTree;
   globalThis.OfflineThumb = OfflineThumb;
-  var api = { encodePath, imageUrl, thumbUrl, viewUrl, coverWidth, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS };
+  var api = { encodePath, imageUrl, thumbUrl, viewUrl, coverWidth, cacheNameFor, escapeHtml, folderHasOnlyImages, folderHasImages, fmt, dedupedBytes, rawBytes, OfflineStore, OfflineThumb, OfflineTree, collectThumbUrls: OfflineThumb.collectThumbUrls, wipeTargets, wipeClientData, isDataCacheName, SHELL_CACHE_PREFIX, DATA_CACHE_PREFIXES, WIPE_STORAGE_KEYS, WIPE_SESSION_KEYS, progressKey, progressStorageKeys, migrateProgress };
   // Single reader-page URL source for the viewer AND downloadWork — the flag
   // (?view=jpeg / localStorage bookq_view=jpeg, set by app.js) must resolve
   // identically in both or offline caches would key pages the viewer never
