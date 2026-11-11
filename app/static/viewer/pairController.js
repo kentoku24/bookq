@@ -546,7 +546,14 @@
     if (!FV || typeof FV.ready !== 'function') {
       // Module absent (stale shell): keep the old immediate rejoin — the
       // watchdog repairs the mixed deploy.
-      try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+      try {
+        // resume() returns a promise — a wire failure rejects it, so the
+        // catch is what actually prevents an unhandled rejection (the
+        // try/catch only covers _ensureClient's synchronous throw).
+        _ensureClient().resume().catch(function () {
+          /* outcome lands via resume-rejected/ended state paths */
+        });
+      } catch (e) { /* rejoin is best-effort */ }
       return;
     }
     FV.ready().then(function () {
@@ -555,7 +562,11 @@
       if (!_readCreds() && !_hasPersistedResume()) {
         return;   // a leave during the wait dropped the creds
       }
-      try { _ensureClient().resume(); } catch (e) { /* rejoin is best-effort */ }
+      try {
+        _ensureClient().resume().catch(function () {
+          /* outcome lands via resume-rejected/ended state paths */
+        });
+      } catch (e) { /* rejoin is best-effort */ }
     });
   }
 

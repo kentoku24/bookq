@@ -43,6 +43,9 @@ from app.reader_sync import catalog, model, protocol  # noqa: E402
 
 PAIR_CLIENT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairClient.js"
 PAIR_TRANSPORT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairTransport.js"
+PAIR_CONTROLLER_JS = (
+    REPO_ROOT / "app" / "static" / "viewer" / "pairController.js"
+)
 
 
 @pytest.fixture
@@ -2059,3 +2062,67 @@ def test_peek_persisted_resume_gate(pc_page):
     assert res["none"] is None and res["fresh"] is None
     assert res["stale"] is True and res["expired"] is None
     assert res["malformed"] is None
+
+
+# ── pairController _boot credential rejoin (#208 M5 residual) ──────────
+#
+# _boot() calls client.resume() which returns a promise — the try/catch
+# only covers _ensureClient's synchronous throw, so a wire failure would
+# surface as an unhandledrejection unless the call site attaches .catch.
+
+_BOOT_STUB_JS = """() => {
+  window.__resumeCalls = 0;
+  window.__unhandledRejections = 0;
+  window.addEventListener('unhandledrejection', function () {
+    window.__unhandledRejections++;
+  });
+  try {
+    window.sessionStorage.setItem('bookq.readerSync.v1', JSON.stringify(
+      {sessionId: 'S1', memberId: 'm1', resumeToken: 'tok'}));
+  } catch (e) { /* about:blank storage may be unavailable — the
+                  peekPersistedResume stub below still gates _boot open */ }
+  window.PairClient = {
+    peekPersistedResume: function () {
+      return {sessionId: 'S1', memberId: 'm1', resumeToken: 'tok'};
+    },
+    createClient: function () {
+      return {
+        subscribe: function () { return function () {}; },
+        resume: function () {
+          window.__resumeCalls++;
+          return Promise.reject(new Error('wire gone'));
+        },
+      };
+    },
+  };
+}"""
+
+
+def _boot_probe(pc_page):
+    pc_page.add_script_tag(path=str(PAIR_CONTROLLER_JS))
+    pc_page.wait_for_timeout(100)
+    return pc_page.evaluate(
+        "() => ({calls: window.__resumeCalls,"
+        " unhandled: window.__unhandledRejections})")
+
+
+def test_boot_resume_rejection_is_handled_with_visibility(pc_page):
+    """Production path: FolderVisibility.ready() gates the rejoin, then a
+    rejected resume() must not escape as an unhandled rejection."""
+    pc_page.evaluate(
+        """() => { window.FolderVisibility = {
+             ready: function () { return Promise.resolve(); }}; }"""
+    )
+    pc_page.evaluate(_BOOT_STUB_JS)
+    res = _boot_probe(pc_page)
+    assert res["calls"] == 1
+    assert res["unhandled"] == 0
+
+
+def test_boot_resume_rejection_is_handled_without_visibility(pc_page):
+    """Stale-shell path: FolderVisibility absent ⇒ immediate rejoin — the
+    same rejection must still be swallowed."""
+    pc_page.evaluate(_BOOT_STUB_JS)
+    res = _boot_probe(pc_page)
+    assert res["calls"] == 1
+    assert res["unhandled"] == 0
