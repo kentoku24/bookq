@@ -84,32 +84,42 @@ struct RemoteImageView: View {
     @State private var image: UIImage?
     @State private var failed = false
 
-    var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: contentMode)
-            } else {
-                placeholder
-            }
+    /// Solid dark-gray stand-in rendered while `image == nil`. Keeping the
+    /// body a single `Image` (only the UIImage value changes on load) avoids
+    /// the if/else view-identity swap that left Buttons inside grid cells
+    /// with stale hit-test/accessibility frames.
+    private static let placeholderImage: UIImage = {
+        let size = CGSize(width: 2, height: 3)
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor(white: 0.16, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
         }
-        .task(id: url) { await load() }
-    }
+    }()
 
-    private var placeholder: some View {
-        Rectangle()
-            .fill(Color(white: 0.16))
+    var body: some View {
+        // Read the cache synchronously so a warm image renders on the FIRST
+        // pass — an async nil→image swap mid-layout is what left grid-cell
+        // Buttons with stale hit-test frames.
+        let cached = url.flatMap { RemoteImageLoader.shared.image(for: $0) }
+        return Image(uiImage: image ?? cached ?? Self.placeholderImage)
+            .resizable()
+            .aspectRatio(contentMode: contentMode)
             .overlay {
                 Image(systemName: failed ? "exclamationmark.triangle" : "book.closed")
                     .foregroundStyle(.secondary)
+                    .opacity((image ?? cached) == nil ? 1 : 0)
             }
+            .task(id: url) { await load() }
     }
 
     private func load() async {
         // No cover URL = absent thumb (web shows the neutral placeholder);
         // ⚠️ is reserved for a fetch that actually failed.
         guard let url else { return }
+        // Always store into @State — the body is a single stable Image, so
+        // this write can't change the view's structure (and thus can't
+        // stale a Button's hit-test frame the way the old if/else swap did).
+        // Keeping the value also survives a later NSCache eviction.
         image = await RemoteImageLoader.shared.load(url)
         failed = image == nil
         if let image { onImageLoaded?(image) }

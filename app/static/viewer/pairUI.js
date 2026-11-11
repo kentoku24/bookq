@@ -48,6 +48,51 @@
     'webrtc-dc': '端末間直接',
   };
   const SIDE_LABEL = { right: '右側担当', left: '左側担当' };
+  // Wire-stable reason codes → user-facing text (#158). The protocol
+  // vocabulary (sessions.py REJECT reasons, state.py sequencer rejects,
+  // END reasons, manifest ERROR codes, local client errors) never reaches
+  // the UI raw — unknown codes fall back to a generic message and are
+  // logged for debugging instead.
+  const REASON_TEXT = {
+    bad_code: 'コードが正しくありません',
+    code_consumed: 'このコードは既に使われています',
+    code_expired: 'コードの有効期限が切れました',
+    expired_code: 'コードの有効期限が切れました',
+    bad_resume: '再接続情報が無効です',
+    resume_expired: '再接続の有効期限が切れました',
+    resume_in_use: 'この端末は別の画面で接続中です',
+    credentials_lost: '接続情報が失われました。もう一度ペアリングしてください',
+    peer_offline: '相手がオフラインです',
+    not_paired: 'ペアが成立していません',
+    not_leader: 'leader のみ実行できます',
+    no_pending: '参加リクエストがありません',
+    already_bound: '既に接続中です',
+    no_session: 'セッションが見つかりません',
+    wrong_session: 'セッションが一致しません',
+    malformed: 'リクエストが不正です',
+    rejected: '参加が拒否されました',
+    left: '相手が解除しました',
+    session_lost: '接続が切れました',
+    shutdown: 'サーバーが再起動しました',
+    incompatible: 'アプリのバージョンが一致しません。更新してください',
+    forbidden: 'アクセスが拒否されました',
+    not_found: '作品が見つかりません',
+    empty_work: '作品にページがありません',
+    broken_archive: '作品ファイルを読み込めません',
+    page_not_found: 'ページが見つかりません',
+    no_initial_page: '開始ページがありません',
+    range: 'ページ指定が範囲外です',
+    size: '作品が大きすぎます',
+    timeout: '読み込みがタイムアウトしました',
+    apply_failed: '状態の適用に失敗しました',
+    manifest_error: '作品情報の読み込みに失敗しました',
+    error: 'エラーが発生しました',
+  };
+  function errorTextFor(reason) {
+    if (reason && REASON_TEXT[reason]) return REASON_TEXT[reason];
+    if (reason) console.info('[pairUI] unmapped error reason:', reason);
+    return 'エラーが発生しました';
+  }
   // States in which the session section (swap / change-work / leave) and the
   // side+transport indicators are meaningful.
   const SESSION_STATES = ['connected', 'reconnecting', 'peer-away', 'loading'];
@@ -78,6 +123,10 @@
   let inertSnapshot = null; // [[el, hadInertAttr]]
   let built = false;
   let els = {};
+  // #158: a failed join's reason survives the error→ended transition so
+  // the code form can show it inline instead of losing it on 解除.
+  let lastJoinError = null;   // mapped message from the latest error state
+  let joinNoticeShown = false; // one-shot: already surfaced in the join form
 
   function st() {
     return (ctl && ctl.state) || { status: 'idle' };
@@ -136,8 +185,10 @@
         '<div id="pair-sec-error" class="pair-sec" hidden>' +
           '<p id="pair-error-text" class="pair-note"></p>' +
           '<div class="pair-row">' +
-            '<button id="pair-error-close" type="button">閉じる</button>' +
-            '<button id="pair-error-leave" type="button" class="pair-danger">解除</button>' +
+            '<button id="pair-error-close" type="button" ' +
+              'aria-label="エラー表示を閉じる (接続の試行は保持されます)">あとで</button>' +
+            '<button id="pair-error-leave" type="button" class="pair-danger" ' +
+              'aria-label="接続を破棄して最初からやり直す">やり直す</button>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -336,9 +387,26 @@
         els.changeWork.hidden = role !== 'leader';
         els.changeWork.disabled = role !== 'leader';
       } else if (sec === els.secError) {
-        els.errorText.textContent = s.error || 'エラーが発生しました';
+        const msg = errorTextFor(s.error);
+        els.errorText.textContent = msg;
+        // Carry the reason into the join form when 解除 returns there —
+        // only join-flow errors (joinView was up when the error hit).
+        // joinNoticeShown re-arms so a fresh failure surfaces again.
+        lastJoinError = joinView ? msg : null;
+        joinNoticeShown = false;
       } else if (sec === els.secJoin) {
-        els.joinSubmit.disabled = els.codeInput.value.length !== 6;
+        if (lastJoinError && !joinNoticeShown) {
+          // One-shot carry-over (#158): show the failed join's reason
+          // inline and reset the field so the same wrong code isn't
+          // resubmitted blindly. Consumed once — later renders leave
+          // the user's typing alone.
+          joinNoticeShown = true;
+          joinError(lastJoinError);
+          els.codeInput.value = '';
+          els.joinSubmit.disabled = true;
+        } else {
+          els.joinSubmit.disabled = els.codeInput.value.length !== 6;
+        }
       }
     }
 
@@ -425,6 +493,10 @@
     const v = els.codeInput.value;
     if (!/^\d{6}$/.test(v) || !ctl || joinPending) return;
     joinPending = true;   // cleared when the join view re-opens
+    // A fresh attempt retires the carried-over failure notice (#158).
+    lastJoinError = null;
+    joinNoticeShown = false;
+    joinError('');
     Promise.resolve(ctl.join(v)).catch(() => {});
   }
 
@@ -489,7 +561,9 @@
       els.scanVideo.play().catch(() => {});
       scanRAF = requestAnimationFrame(scanTick);
     }).catch(() => {
-      joinError('カメラを起動できませんでした');
+      // A carried-over join-failure notice (#158) outranks the camera
+      // error — the getUserMedia rejection can land after it was shown.
+      if (!joinNoticeShown) joinError('カメラを起動できませんでした');
     });
   }
 
@@ -605,6 +679,8 @@
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
       joinPending = false;
+      lastJoinError = null;
+      joinNoticeShown = false;
       render();
       // Camera is the primary entry path here; no autofocus so the soft
       // keyboard stays down over the live preview.
@@ -624,6 +700,8 @@
       if (ctl) ctl.leave();
       joinView = true;
       joinPending = false;
+      lastJoinError = null;
+      joinNoticeShown = false;
       render();
       startScan();
     });

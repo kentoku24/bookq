@@ -64,6 +64,40 @@ final class PairModelTests: XCTestCase {
                                          crossChapter: true))
     }
 
+    // MARK: - chapterRange (chapter-local slider bounds)
+
+    /// chapterRange returns the contiguous chapterFolder run around
+    /// index — the same bounds turnIndex clamps to when !crossChapter.
+    func testChapterRangeFindsRuns() {
+        // table: c0s0,c0s1 @ "W/ch1" ; c1s0,c1s1 @ "W/ch2"
+        for i in [0, 1] {
+            let r = PairModel.chapterRange(in: table, index: i)
+            XCTAssertEqual(r?.lo, 0)
+            XCTAssertEqual(r?.hi, 1)
+        }
+        for i in [2, 3] {
+            let r = PairModel.chapterRange(in: table, index: i)
+            XCTAssertEqual(r?.lo, 2)
+            XCTAssertEqual(r?.hi, 3)
+        }
+    }
+
+    /// Out-of-range → nil; a single-chapter table is one full run;
+    /// repeated folder names in non-adjacent runs stay separate.
+    func testChapterRangeEdges() {
+        XCTAssertNil(PairModel.chapterRange(in: table, index: -1))
+        XCTAssertNil(PairModel.chapterRange(in: table, index: 4))
+        XCTAssertNil(PairModel.chapterRange(in: [], index: 0))
+        let single = [spread("s0", "W/ch1"), spread("s1", "W/ch1")]
+        XCTAssertEqual(PairModel.chapterRange(in: single, index: 0)?.hi, 1)
+        XCTAssertEqual(PairModel.chapterRange(in: single, index: 1)?.lo, 0)
+        // ch1 / ch2 / ch1 — the two ch1 runs must not merge.
+        let split = [spread("a", "W/ch1"), spread("b", "W/ch2"),
+                     spread("c", "W/ch1")]
+        XCTAssertEqual(PairModel.chapterRange(in: split, index: 0)?.hi, 0)
+        XCTAssertEqual(PairModel.chapterRange(in: split, index: 2)?.lo, 2)
+    }
+
     // MARK: - project
 
     /// Leader gets leaderSide, follower the opposite side; ref == nil

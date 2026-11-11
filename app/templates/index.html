@@ -49,6 +49,7 @@
 <script>window.__BOOKQ_TEST_MODE__ = "{{ 'true' if test_mode else 'false' }}";</script>
 <script>window.__BOOKQ_VISIBILITY_OWNER__ = {{ visibility_owner | tojson }};</script>
 <script>window.__BOOKQ_VISIBILITY_SNAPSHOT__ = {{ visibility_snapshot | tojson }};</script>
+<script>window.__BOOKQ_PROGRESS_USER__ = {{ progress_user_key | tojson }};</script>
 {% if thumbnail_perf %}<script>{{ thumbnail_probe | safe }}</script>
 {% endif %}</head>
 <body>
@@ -121,6 +122,7 @@
     <div id="zone-prev" title="次のページ"></div>
     <div id="zone-toggle" title="ツールバー表示切替"></div>
     <div id="zone-next" title="前のページ"></div>
+    <button id="img-retry" type="button" hidden>↻ 画像を再読み込み</button>
   </div>
   <div id="hint">スワイプ / ← → でページ送り &nbsp;|&nbsp; 中央タップでツールバー</div>
   <div id="spread-controls">

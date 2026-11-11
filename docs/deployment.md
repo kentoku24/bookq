@@ -286,6 +286,23 @@ docker compose ps -q tailscale | xargs docker exec tailscale serve status
 
 既定値は検証済みの全 native 面を列挙 (#320): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
 
+#### endpoint cutover 条件
+
+endpoint を native にする前提は、次の 3 つを満たすこと:
+
+| 条件 | 確認方法 |
+|---|---|
+| Python 側にテストケースがある（挙動の正本が決まっている） | 対象 endpoint の `tests/test_*.py` と、共有ケースがあれば `api/*cases.json` |
+| `cargo test --workspace` が通る | `rust/` で実行（CI `rust.yml` の `test`） |
+| gateway-contract (#199) が該当 endpoint を native で通る | CI `rust.yml` の `gateway-contract` — `BOOKQ_RS_NATIVE=all` の gateway に Schemathesis（`api/openapi.v1.yaml` 全 op）+ native/proxy 判定 |
+
+加えて、**同じ in-process tree/index スナップショットを読む endpoint はまとめて切り替える**（#281）。viewer-rs は起動時に次のグループの部分有効を検出して WARN する:
+
+- `tree, search, facets, images` — 同一スナップショットの読み手。部分有効は browse と検索が別バックエンドの索引世代を返す状態になる（#261）。
+- `tree, reader-sync` — reader-sync の catalog resolver は tree から manifest を組むため、世代が揃っていないと `OPEN_WORK` が解決できない。
+
+`BOOKQ_RS_NATIVE_STRICT=1` を viewer-rs に渡すと、部分グループは ERROR + `exit 2` で起動そのものを拒否する（cutover 手順・CI 用）。既定は WARN のみ — 部分状態を通りながらのロールアウトを壊さないため。
+
 #### フルネイティブモード (#320): py の index/tree を持たない運用
 
 `BOOKQ_RS_NATIVE` が全 index 消費者をカバーする状態で、viewer 側に
@@ -302,6 +319,35 @@ import 基盤 (~120MB) まで下がる。
   `/view`・health など index 非依存の経路は従来どおり動く。
 - 設定は必ず **`BOOKQ_RS_NATIVE` (全 index 消費者) と対で**行うこと。
   片方だけだと py に native 未処理の index 要求が届き 503 になる。
+- **Cloudflare Tunnel 経由も viewer-rs に向けること**。cloudflared は
+  remotely-managed tunnel で ingress は Cloudflare ダッシュボード側
+  （`http://viewer:8080`）が正本で、compose からは変えられない。py を
+  `BOOKQ_DISABLE_INDEX=1` にしたまま ingress が `viewer:8080` を向いていると、
+  公開ドメイン（iOS/Android の `BASE_URL`）経由の tree/search が 503 になる。
+- cutover 時の設定差分と反映順:
+
+| 場所 | キー | 切替後 |
+|---|---|---|
+| `.env` | `BOOKQ_RS_NATIVE` | 行を削除（compose 既定の全リストを継承） |
+| `.env` | `TS_SERVE_TARGET` | `http://viewer-rs:8080` |
+| `.env` | `BOOKQ_DISABLE_INDEX` | `1` |
+| Cloudflare ダッシュボード | tunnel ingress | `http://viewer-rs:8080` |
+
+```bash
+# 1) Cloudflare ダッシュボードの ingress を http://viewer-rs:8080 に変更
+#    （rs は未 native の endpoint を py に proxy するのでこの時点では無停止）
+# 2) viewer-rs を全 native で再作成（.env の BOOKQ_RS_NATIVE 行は削除）
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml --profile rs up -d --no-build viewer-rs
+# 3) tailscale serve の向き先を viewer-rs に（数秒の断）
+#    .env に TS_SERVE_TARGET=http://viewer-rs:8080 を追加してから
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
+# 4) 最後に py を index 非保持で再作成（.env に BOOKQ_DISABLE_INDEX=1）
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build viewer
+```
+
+この順序なら各段階で「全経路が少なくとも 1 つの index 保持者に届く」ため、
+`BOOKQ_DISABLE_INDEX=1` の 503 窓が公開されない。
+
 - rollback: `BOOKQ_DISABLE_INDEX` を空に戻して viewer 再作成。コード差し戻し不要。
 
 #### rollback
@@ -315,7 +361,7 @@ docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tails
 docker compose --profile rs stop viewer-rs
 ```
 
-切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions は per-process で揮発**（py 側も in-memory dict で再起動で消える既存仕様）のため、切替/切戻しの瞬間に「どこまで読んだか」は失われる — ユーザー影響として許容する判断（最終ページは手動で戻れる、永続破壊ではない）。
+切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、py/rs どちらが書いても同じ DB を読むため、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 
 ---
 

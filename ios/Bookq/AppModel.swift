@@ -21,7 +21,14 @@ final class AppModel: ObservableObject {
 
     let config = AppConfig()
     let auth = AuthManager()
-    let progress = ReadingProgressStore()
+    /// Local reading positions — namespaced by host+account like
+    /// `offline` so a server/account switch never exposes another
+    /// identity's progress (#375). Lazy: the scope closure needs self.
+    private(set) lazy var progress = ReadingProgressStore(
+        scopeProvider: { [weak self] in
+            let host = self?.config.baseURL?.host ?? "anon"
+            return "\(host)|\(self?.auth.user?.email ?? "anon")"
+        })
     /// Offline downloads — survives API rebuilds via provider closures.
     /// Records/files are namespaced by host+account so a server or user
     /// switch can never expose another scope's downloads.
@@ -192,6 +199,7 @@ final class AppModel: ObservableObject {
             // snapshot.
             visibility.accountChanged(knownOwner: auth.user?.email)
             offline.scopeChanged()
+            progress.scopeChanged()
             phase = .ready
             Task { await progress.syncWithServer() }
             pair.bootResume()
@@ -253,6 +261,7 @@ final class AppModel: ObservableObject {
         visibility.accountChanged()
         configureAPI()
         offline.scopeChanged()
+        progress.scopeChanged()
         Task { await boot() }
     }
 
@@ -262,6 +271,7 @@ final class AppModel: ObservableObject {
         // owner's hidden roots or offline records.
         visibility.accountChanged(knownOwner: auth.user?.email)
         offline.scopeChanged()
+        progress.scopeChanged()
         phase = .ready
     }
 

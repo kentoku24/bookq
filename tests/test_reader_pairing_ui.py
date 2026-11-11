@@ -517,11 +517,72 @@ def test_error_section_offers_leave(page, server):
     _open_ui(page)
     _emit(page, "{status:'error', error:'apply_failed'}")
     _only_section_visible(page, "#pair-sec-error")
-    expect(page.locator("#pair-error-text")).to_contain_text("apply_failed")
+    # #158: wire reason codes map to Japanese — the raw code stays out of
+    # the UI (it is still available via console for debugging).
+    expect(page.locator("#pair-error-text")).to_contain_text("状態の適用に失敗しました")
+    expect(page.locator("#pair-error-text")).not_to_contain_text("apply_failed")
     page.click("#pair-error-leave")
     assert page.evaluate("window.__pairCalls") == ["leave"]
     _emit(page, "{status:'ended'}")
     _only_section_visible(page, "#pair-sec-choice")
+
+
+def test_error_reason_maps_known_codes(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'error', error:'bad_code'}")
+    expect(page.locator("#pair-error-text")).to_contain_text("コードが正しくありません")
+    expect(page.locator("#pair-error-text")).not_to_contain_text("bad_code")
+    _emit(page, "{status:'error', error:'code_expired'}")
+    expect(page.locator("#pair-error-text")).to_contain_text("コードの有効期限が切れました")
+
+
+def test_error_reason_unknown_shows_generic(page, server):
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'error', error:'some_future_reason'}")
+    expect(page.locator("#pair-error-text")).to_contain_text("エラーが発生しました")
+    expect(page.locator("#pair-error-text")).not_to_contain_text("some_future_reason")
+
+
+def test_failed_join_returns_to_form_with_reason(page, server):
+    """#158: 解除 after a failed code join lands back on the join form —
+    the reason stays visible inline and the field is reset."""
+    _with_mock(page)
+    _open_ui(page)
+    page.click("#pair-join-open")
+    page.fill("#pair-code-input", "000000")
+    assert page.evaluate("window.__pairCalls") == ["join:000000"]
+    _emit(page, "{status:'connecting'}")
+    _emit(page, "{status:'error', error:'bad_code'}")
+    _only_section_visible(page, "#pair-sec-error")
+    expect(page.locator("#pair-error-text")).to_contain_text("コードが正しくありません")
+    page.click("#pair-error-leave")
+    assert "leave" in page.evaluate("window.__pairCalls")
+    _emit(page, "{status:'ended'}")
+    _only_section_visible(page, "#pair-sec-join")
+    expect(page.locator("#pair-join-err")).to_contain_text("コードが正しくありません")
+    assert page.locator("#pair-code-input").input_value() == ""
+    # A fresh submit clears the carried-over notice.
+    page.fill("#pair-code-input", "123456")
+    page.click("#pair-join-submit")
+    expect(page.locator("#pair-join-err")).to_be_hidden()
+
+
+def test_error_without_join_view_does_not_leak_into_form(page, server):
+    """#158: an error that did not come from the join flow must not
+    surface inside the code form later."""
+    _with_mock(page)
+    _open_ui(page)
+    _emit(page, "{status:'error', error:'bad_code'}")
+    page.click("#pair-error-leave")
+    _emit(page, "{status:'ended'}")
+    _only_section_visible(page, "#pair-sec-choice")
+    page.click("#pair-join-open")
+    _only_section_visible(page, "#pair-sec-join")
+    # joinOpen is a fresh intent — no stale reason, no forced clearing of
+    # whatever the camera-error notice holds.
+    assert page.locator("#pair-code-input").input_value() == ""
 
 
 def test_pair_status_hides_with_toolbar(page, server):

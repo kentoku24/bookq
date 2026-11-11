@@ -71,7 +71,9 @@
       var RP = window.ReadingProgress;
       if (RP && typeof RP.getAllSafe === 'function') return RP.getAllSafe() || {};
       if (RP && typeof RP.getAll === 'function') return RP.getAll() || {};
-      var raw = (window.localStorage) ? window.localStorage.getItem('bookq_progress') : null;
+      var oc = window.OfflineCore;
+      var key = (oc && oc.progressKey) ? oc.progressKey() : 'bookq_progress';
+      var raw = (window.localStorage) ? window.localStorage.getItem(key) : null;
       if (!raw) return {};
       return JSON.parse(raw) || {};
     } catch(e){ return {}; }

@@ -2,7 +2,8 @@
 
 Pure store-level tests (no HTTP): constructor performs no I/O, schema is
 created lazily on first use, read/write return consistent snapshots, revisions
-only bump on real state changes, and separate user keys are fully isolated.
+only bump on real state changes. Production rows all live under
+``GLOBAL_USER_KEY`` — the store itself stays a generic keyed KV.
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt \\
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from app.folder_visibility import (
+    GLOBAL_USER_KEY,
     FolderVisibilityStore,
     user_key_for_email,
     validate_root,
@@ -41,11 +43,13 @@ def test_read_empty_snapshot(db_path: Path):
 
 
 def test_set_hidden_persists_across_instances(db_path: Path):
-    snap = FolderVisibilityStore(db_path).set_hidden("alice@example.com", "作品A", True)
+    # GLOBAL_USER_KEY is the production key — rows persist across store
+    # instances over the same DB file.
+    snap = FolderVisibilityStore(db_path).set_hidden(GLOBAL_USER_KEY, "作品A", True)
     assert snap.revision == 1
     assert snap.hidden_roots == ("作品A",)
     # A brand-new store object over the same DB file sees the same state.
-    snap2 = FolderVisibilityStore(db_path).read("alice@example.com")
+    snap2 = FolderVisibilityStore(db_path).read(GLOBAL_USER_KEY)
     assert snap2.revision == 1
     assert snap2.hidden_roots == ("作品A",)
 
@@ -75,7 +79,9 @@ def test_same_value_writes_are_idempotent(db_path: Path):
     assert snap.hidden_roots == ("作品A",)
 
 
-def test_users_are_isolated(db_path: Path):
+def test_generic_keys_isolated_within_one_instance(db_path: Path):
+    """The store stays a generic keyed KV: arbitrary keys coexist
+    (production never writes them — routes pin GLOBAL_USER_KEY)."""
     store = FolderVisibilityStore(db_path)
     store.set_hidden("alice@example.com", "作品A", True)
     assert store.read("bob@example.com").hidden_roots == ()

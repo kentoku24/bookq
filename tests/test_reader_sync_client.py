@@ -721,12 +721,15 @@ def test_ready_applied_notifications_and_intent_gating(pc_page):
           // gating: TURN while reading goes out…
           const inReading = c.sendIntent({type: 'turn', delta: 1,
                                           crossChapter: true, fromChapter: null});
-          // …but not while loading / selecting / disconnected
+          // …but during 'loading' the intent is QUEUED (returns true,
+          // flushes on the next 'reading' STATE — #155), while
+          // selecting / disconnected still drop outright.
           s.fire(rig.st('S1', 7, {workEpoch: 1, manifestVersion: 1,
                                   phase: 'loading', spreadId: 'c0:s1',
                                   presence: rig.presence(2)}));
           const inLoading = c.sendIntent({type: 'turn', delta: 1,
                                           crossChapter: true, fromChapter: null});
+          const turnsSoFar = s.sent.filter(f => f.type === 'TURN').length;
           s.fire(rig.st('S1', 8, {workEpoch: 1, manifestVersion: 1,
                                   phase: 'selecting', spreadId: 'c0:s1',
                                   presence: rig.presence(2)}));
@@ -736,7 +739,7 @@ def test_ready_applied_notifications_and_intent_gating(pc_page):
           const inDown = c.sendIntent({type: 'turn', delta: 1,
                                        crossChapter: true, fromChapter: null});
           return {opens, owSent, readyIdx, appliedReport, inReading,
-                  inLoading, inSelecting, inDown,
+                  inLoading, turnsSoFar, inSelecting, inDown,
                   turns: s.sent.filter(f => f.type === 'TURN').length,
                   gotos: s.sent.filter(f => f.type === 'GOTO').length,
                   evlog: rig.evlog};
@@ -749,9 +752,186 @@ def test_ready_applied_notifications_and_intent_gating(pc_page):
     assert res["appliedReport"] and res["appliedReport"][0]["payload"]["requestId"] == "srv-r1"
     assert "applied" in res["evlog"]
     assert res["inReading"] is True
-    assert res["inLoading"] is False and res["inSelecting"] is False
+    # loading queues (accepted, not yet on the wire — turnsSoFar still
+    # counts only the earlier reading-phase send); the queued turn is
+    # dropped by the following 'selecting' STATE — never sent.
+    assert res["inLoading"] is True and res["turnsSoFar"] == 1
+    assert res["inSelecting"] is False
     assert res["inDown"] is False
     assert res["turns"] == 1 and res["gotos"] == 0
+
+
+def test_loading_intent_flushes_on_reading(pc_page):
+    """#155: SET_OFFSET -> immediate TURN — the turn is held through the
+    'loading' rebuild window and flushed on 'reading' with the NEW
+    workEpoch/baseRevision, never the stale ones captured at tap time."""
+    res = pc_page.evaluate(
+        """async (manifestFrames) => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          c.sendIntent({type: 'openWork', folder: 'simple_manga',
+                        page: {folder: 'simple_manga', name: '1.png'}});
+          for (const f of manifestFrames) s.fire(f);
+          s.fire(rig.st('S1', 5, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          // offset toggle -> SET_OFFSET on the wire, then the rebuild
+          // window: server-derived 'loading' until the new manifest READies.
+          const offOk = c.sendIntent({type: 'setOffset', offset: 1});
+          s.fire(rig.st('S1', 6, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'loading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          const turnOk = c.sendIntent({type: 'turn', delta: 1,
+                                       crossChapter: true, fromChapter: null});
+          const duringLoad = s.sent.filter(f => f.type === 'TURN').length;
+          // rebuild commits: epoch bumps, everyone READY -> 'reading'
+          s.fire(rig.st('S1', 7, {workEpoch: 2, manifestVersion: 2,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          const turns = s.sent.filter(f => f.type === 'TURN');
+          const last = turns[turns.length - 1];
+          return {offOk, turnOk, duringLoad,
+                  turnEpoch: last ? last.workEpoch : null,
+                  turnBaseRev: last ? last.baseRevision : null,
+                  turnMv: last ? last.payload.manifestVersion : null,
+                  turnDelta: last ? last.payload.delta : null};
+        }""",
+        _manifest_frames(_manifest(), "S1", 1, 1),
+    )
+    assert res["offOk"] is True and res["turnOk"] is True
+    assert res["duringLoad"] == 0                       # queued, not sent
+    assert res["turnEpoch"] == 2                        # post-rebuild epoch
+    assert res["turnBaseRev"] == 7                      # fresh baseRevision
+    assert res["turnMv"] == 2 and res["turnDelta"] == 1
+
+
+def test_loading_queue_keeps_latest_intent(pc_page):
+    """#155: only the LATEST gated intent survives the loading window —
+    a turn superseded by a goto flushes as the goto alone."""
+    res = pc_page.evaluate(
+        """async (manifestFrames) => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          c.sendIntent({type: 'openWork', folder: 'simple_manga',
+                        page: {folder: 'simple_manga', name: '1.png'}});
+          for (const f of manifestFrames) s.fire(f);
+          s.fire(rig.st('S1', 5, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          s.fire(rig.st('S1', 6, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'loading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          c.sendIntent({type: 'turn', delta: -1,
+                        crossChapter: true, fromChapter: null});
+          c.sendIntent({type: 'goto',
+                        page: {folder: 'simple_manga', name: '3.png'}});
+          s.fire(rig.st('S1', 7, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          return {turns: s.sent.filter(f => f.type === 'TURN').length,
+                  gotos: s.sent.filter(f => f.type === 'GOTO').length,
+                  gotoPage: (s.sent.filter(f => f.type === 'GOTO').pop() || {})
+                             .payload &&
+                             s.sent.filter(f => f.type === 'GOTO').pop()
+                               .payload.page.name};
+        }""",
+        _manifest_frames(_manifest(), "S1", 1, 1),
+    )
+    assert res["turns"] == 0 and res["gotos"] == 1
+    assert res["gotoPage"] == "3.png"
+
+
+def test_loading_queue_dropped_on_pause(pc_page):
+    """#155: a queued intent must not fire into an unrelated later
+    session — 'paused'/'selecting' clear it before 'reading' returns."""
+    res = pc_page.evaluate(
+        """async (manifestFrames) => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          c.sendIntent({type: 'openWork', folder: 'simple_manga',
+                        page: {folder: 'simple_manga', name: '1.png'}});
+          for (const f of manifestFrames) s.fire(f);
+          s.fire(rig.st('S1', 5, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          s.fire(rig.st('S1', 6, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'loading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          c.sendIntent({type: 'turn', delta: 1,
+                        crossChapter: true, fromChapter: null});
+          // peer drops mid-rebuild -> paused clears the queue
+          s.fire(rig.st('S1', 7, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'paused', spreadId: 'c0:s0',
+                                  presence: rig.presence(1)}));
+          // peer returns, rebuild finishes -> reading, but no turn fires
+          s.fire(rig.st('S1', 8, {workEpoch: 2, manifestVersion: 2,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          return {turns: s.sent.filter(f => f.type === 'TURN').length};
+        }""",
+        _manifest_frames(_manifest(), "S1", 1, 1),
+    )
+    assert res["turns"] == 0
+
+
+def test_rejected_gated_op_requeues_through_rebuild(pc_page):
+    """#155 wire path: a TURN that beats the loading STATE still loses —
+    the server REJECTs not_ready/stale_epoch with a snapshot; the client
+    re-queues and flushes it once 'reading' returns."""
+    res = pc_page.evaluate(
+        """async (manifestFrames) => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          c.sendIntent({type: 'openWork', folder: 'simple_manga',
+                        page: {folder: 'simple_manga', name: '1.png'}});
+          for (const f of manifestFrames) s.fire(f);
+          s.fire(rig.st('S1', 5, {workEpoch: 1, manifestVersion: 1,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          // client still sees 'reading' — the turn goes on the wire, but
+          // the server already entered the rebuild and rejects it.
+          c.sendIntent({type: 'turn', delta: 1,
+                        crossChapter: true, fromChapter: null});
+          const sent1 = s.sent.filter(f => f.type === 'TURN');
+          const reqFrame = sent1[sent1.length - 1];
+          s.fire(rig.rej(reqFrame, 'not_ready',
+                         rig.st('S1', 6, {workEpoch: 1, manifestVersion: 1,
+                                          phase: 'loading', spreadId: 'c0:s0',
+                                          presence: rig.presence(2)})));
+          const afterReject = s.sent.filter(f => f.type === 'TURN').length;
+          // rebuild commits -> 'reading' -> the intent is re-sent fresh
+          s.fire(rig.st('S1', 7, {workEpoch: 2, manifestVersion: 2,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          const turns = s.sent.filter(f => f.type === 'TURN');
+          const last = turns[turns.length - 1];
+          // second reject path: stale_epoch behaves identically
+          c.sendIntent({type: 'turn', delta: -1,
+                        crossChapter: true, fromChapter: null});
+          const req2 = s.sent.filter(f => f.type === 'TURN').pop();
+          s.fire(rig.rej(req2, 'stale_epoch',
+                         rig.st('S1', 8, {workEpoch: 2, manifestVersion: 2,
+                                          phase: 'loading', spreadId: 'c0:s0',
+                                          presence: rig.presence(2)})));
+          s.fire(rig.st('S1', 9, {workEpoch: 3, manifestVersion: 3,
+                                  phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          const all = s.sent.filter(f => f.type === 'TURN');
+          return {afterReject, resentEpoch: last ? last.workEpoch : null,
+                  totalTurns: all.length,
+                  lastDelta: all[all.length - 1].payload.delta,
+                  lastEpoch: all[all.length - 1].workEpoch};
+        }""",
+        _manifest_frames(_manifest(), "S1", 1, 1),
+    )
+    assert res["afterReject"] == 1                     # reject itself sends nothing
+    assert res["resentEpoch"] == 2                     # re-sent on post-rebuild epoch
+    assert res["totalTurns"] == 4                      # 2 sent + 2 requeued flushes
+    assert res["lastDelta"] == -1 and res["lastEpoch"] == 3
 
 
 def _run_scenario(pg, factory_name):

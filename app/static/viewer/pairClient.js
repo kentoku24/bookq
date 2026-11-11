@@ -331,6 +331,8 @@
     var _mchunks = null;             // in-flight chunk reassembly
     var _deferredState = null;       // newest STATE waiting on its manifest
     var _appliedPending = {};        // revision -> committed requestId (APPLIED report)
+    var _pendingPageIntent = null;   // latest reading-gated intent held through 'loading' (#155)
+    var _sentGated = {};             // requestId -> intent, sent gated ops (reject requeue)
     var _readyFor = null;            // "epoch:mv" already READYed
     var _timers = {};                // id -> true (outstanding injected timers)
     var _retry = 0;
@@ -872,6 +874,8 @@
       _mchunks = null;
       _deferredState = null;
       _appliedPending = {};
+      _pendingPageIntent = null;
+      _sentGated = {};
       _readyFor = null;
       _retry = 0;
       _offlineSince = null;
@@ -1115,7 +1119,20 @@
         default:
           return false;
       }
-      if (_READING_GATED[f.type] && phase !== 'reading') return false;
+      if (_READING_GATED[f.type] && phase !== 'reading') {
+        // 'loading' is the transient manifest-rebuild window (SET_OFFSET /
+        // OPEN_WORK re-resolve): hold the LATEST gated intent and flush it
+        // when READY brings the phase back to 'reading' — a tap during the
+        // rebuild must not die silently (#155). Other non-reading phases
+        // (paused/selecting/waiting) keep the drop: a queued turn fired
+        // into an unrelated later session would be worse than a lost tap.
+        if (phase === 'loading') {
+          _pendingPageIntent = intent;
+          return true;
+        }
+        return false;
+      }
+      if (_READING_GATED[f.type]) _sentGated[f.requestId] = intent;
       return _dataSend(f);
     }
 
@@ -1268,6 +1285,7 @@
     }
 
     function _onAck(f) {
+      if (_sentGated[f.requestId]) delete _sentGated[f.requestId];
       var p = _pending[f.requestId];
       if (!p) return;
       delete _pending[f.requestId];
@@ -1361,6 +1379,19 @@
       if (f.snapshot && typeof f.snapshot === 'object') {
         _adoptSnapshot(f.snapshot);
       }
+      // A gated op rejected inside the transient rebuild window
+      // (not_ready / stale epoch·revision·manifest) is re-queued like a
+      // locally gated intent — the adopted snapshot re-armed the phase,
+      // and the flush delivers it once 'reading' returns (#155).
+      var gt = _sentGated[f.requestId];
+      delete _sentGated[f.requestId];
+      if (gt && (reason === 'not_ready' || reason === 'stale_epoch' ||
+                 reason === 'stale_revision' || reason === 'stale_manifest') &&
+          (f.request === 'TURN' || f.request === 'GOTO' ||
+           f.request === 'SET_OFFSET' || f.request === 'SWAP_SIDES')) {
+        _pendingPageIntent = gt;
+        _maybeFlushPageIntent(_lastState ? _lastState.phase : null);
+      }
       _event('rejected', {reason: reason, request: f.request,
                           requestId: f.requestId});
       _notify();
@@ -1380,6 +1411,22 @@
       _onState(pseudo);
     }
 
+    /* A gated intent held through 'loading' flushes on the first 'reading'
+     * STATE — _sendIntentInternal rebuilds the frame so workEpoch /
+     * baseRevision / manifestVersion are the post-rebuild values, never
+     * the stale ones captured at queue time. A failed send keeps the
+     * intent queued (the next STATE retries); any other phase drops it —
+     * paused/selecting means the user's context moved on. */
+    function _maybeFlushPageIntent(phase) {
+      var it = _pendingPageIntent;
+      if (!it) return;
+      if (phase === 'reading') {
+        if (_sendIntentInternal(it)) _pendingPageIntent = null;
+      } else if (phase !== 'loading') {
+        _pendingPageIntent = null;
+      }
+    }
+
     function _onState(f) {
       if (typeof f.revision !== 'number' || typeof f.workEpoch !== 'number') {
         return;
@@ -1396,6 +1443,7 @@
       }
       _maybeApply(f);
       _maybeStartDc();
+      _maybeFlushPageIntent(f.phase);
       _notify();
     }
 
@@ -1758,6 +1806,8 @@
       _plane = 'server-ws';
       _reportedPlane = 'server-ws';
       _syncDataT();
+      _pendingPageIntent = null;
+      _sentGated = {};
       _event('ended', {reason: endReason});
       _notify();
     }
