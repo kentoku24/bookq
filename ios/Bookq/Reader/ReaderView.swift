@@ -98,6 +98,10 @@ struct ReaderView: View {
         }
         .modifier(ExternalAccessoryModifier(ext: ext))
         .onChange(of: pageAR) { _, _ in publishExternal() }
+        // lastAR can move without pageAR (re-measure of an already-recorded
+        // value) — the external display's unmeasured-page fit would stay
+        // stale until the next turn otherwise.
+        .onChange(of: lastAR) { _, _ in publishExternal() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
                 saveCurrentPosition()
