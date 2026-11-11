@@ -79,13 +79,21 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   1 つの式で両方向を表現するため、ドラッグ中の指の反転は向きの再判定
   なしに `pos` が原点を通って戻るだけで処理できる。`PageTurnMath`
   純粋関数がドラッグデルタ・端ラバーバンド・コミット方向判定を担当。
-  ドラッグと ←/→ キーの移動範囲は現在章の spread 範囲
-  （`chapterSpreadRange` = web `getChapterSpreadRange`）にクランプされ、
-  章端ではラバーバンド→バウンスバック。タップゾーンのみ章跨ぎ可
-  （web の crossChapter:true/false と同じ区分）。コミット閾値は
+  ドラッグと ←/→ キーは**章をまたぐ**（本全体 `[0, spreads.count-1]`
+  にクランプ、両端のみラバーバンド→バウンスバック）。タップゾーン・
+  スワイプ・矢印キーの全ページ送り操作が章跨ぎ可 — エピソード間の
+  移動は「最後のページでの送り」「最初のページでの戻し」でのみ起きる
+  （**web/Android はスワイプ・キーを章内 clamp するが、iOS はユーザ
+  要望で意図的に全操作を章跨ぎにしている差異**）。コミット閾値は
   web touchend と同じ `min(10%幅, 70pt)` + flick 予測 50%。
   `currentIdx` はコミット開始時点で着地し、カウンタ/スライダー/外部
   ディスプレイはアニメーションと同時に動く（web の strip 追従と同じ）。
+- ページスライダーは**現在エピソード (章) のみにスコープ**
+  （web `syncChapterSlider`/`idxToChapterSlider`/`chapterSliderToIdx`
+  相当の `chapterSliderMax`/`idxToChapterSlider`/`chapterSliderToIdx`
+  を `ReaderWork` に実装）。RTL: 右端=章の最初のページ、左端=最後の
+  ページ。章をまたいだ時点で範囲が新しい章に追従する。スライダーから
+  他エピソードへは飛べない（ジャンプはページ送りのみ）。
 - 連打は合流しない: タップ毎に `posTarget` が 1 spread 進み、`pos` が
   定速チェイスで追従する。10 taps/s 程度でも各タップが 1 ページ送りとして
   計上され、ページは連続値を通って高速にめくれる（アニメーションの
@@ -101,7 +109,7 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   `OverviewView` を開く。章見出し・章ローカルページ番号・現ページ
   ハイライト・現ページへ 1/3 位置スクロール・タップジャンプ
   （ページャと同じアニメーションで遷移）。
-- キーボード（iPad/外付け）: ←=次 / →=前（章内 clamp、端で no-op）/
+- キーボード（iPad/外付け）: ←=次 / →=前（章跨ぎ可、両端で no-op）/
   Home=即時で章頭・End=章末 spread 先頭ページへアニメーション遷移
   （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
   （web・Android と同じ RTL 規約）。
@@ -154,8 +162,10 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 - `Sync/PairSheet.swift` — ペアリング UI（作成=コード+QR / 6桁参加 /
   MATCH 自動接続 / セッション情報 / 切断）。
 - `Sync/PairedReaderView.swift` — pairedView.js 相当。自分の side の
-  単ページ描画、タップゾーン TURN(cross)、スワイプ/キー TURN(clamp)、
-  スライダー GOTO、offset/入替トグル。leader が閉じると
+  単ページ描画、タップゾーン/スワイプ/キー TURN(cross — ソロリーダーと
+  同じく全ページ送り操作が章跨ぎ可)、章ローカルスライダー GOTO
+  （`PairModel.chapterRange` で現在 chapterFolder の spread 範囲に
+  スコープ）、offset/入替トグル。leader が閉じると
   SET_ACTIVITY selecting。
 - `LibraryView` — leader+paired の作品タップは OPEN_WORK intent に
   ルーティング（solo リーダーは開かない）。phase→reading で

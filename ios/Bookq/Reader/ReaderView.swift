@@ -177,8 +177,8 @@ struct ReaderView: View {
         // Home/End = chapter edges, G = overview.
         .focusable()
         .focusEffectDisabled()
-        .onKeyPress(.rightArrow) { turn(-1, in: work, crossChapter: false); return .handled }
-        .onKeyPress(.leftArrow) { turn(1, in: work, crossChapter: false); return .handled }
+        .onKeyPress(.rightArrow) { turn(-1, in: work); return .handled }
+        .onKeyPress(.leftArrow) { turn(1, in: work); return .handled }
         .onKeyPress(keys: [.init("g"), .init("G")]) { _ in
             showOverview = true; return .handled
         }
@@ -437,20 +437,27 @@ struct ReaderView: View {
         .foregroundStyle(.white)
     }
 
+    /// Chapter-local slider (web `syncChapterSlider` family): the range
+    /// spans only the CURRENT chapter's spreads — RTL puts the chapter's
+    /// first page at the right end and its last page at the left. When
+    /// `currentIdx` crosses into another chapter the helpers re-derive
+    /// the range, so the slider remaps automatically. Episode changes
+    /// come only from page turns at the edges, never the slider.
     private func sliderRow(_ work: ReaderWork) -> some View {
-        Slider(
+        let span = work.chapterSliderMax(at: currentIdx)
+        return Slider(
             value: Binding(
-                get: { Double(work.spreadOf(currentIdx)) },
+                get: { Double(work.idxToChapterSlider(currentIdx)) },
                 set: { v in
-                    let s = Int(v.rounded())
-                    if s < work.spreads.count, let first = work.spreads[s].first {
-                        snapTo(first, in: work)
+                    if let idx = work.chapterSliderToIdx(
+                        Int(v.rounded()), at: currentIdx) {
+                        snapTo(idx, in: work)
                     }
                 }),
-            in: 0...Double(max(work.spreads.count - 1, 1)),
+            in: 0...Double(max(span, 1)),
             step: 1
         )
-        .disabled(work.spreads.count <= 1)
+        .disabled(span <= 0)
         .environment(\.layoutDirection, .rightToLeft)
         .padding(.horizontal, 20)
         .padding(.bottom, 30)
@@ -471,10 +478,11 @@ struct ReaderView: View {
 
     // MARK: - Navigation
 
-    /// Spread-granularity turn — web navTurn/goNext/goPrev. Taps pass
-    /// `crossChapter` (edge zones cross chapters freely); arrow keys
-    /// clamp to the current chapter's spread range and no-op at its
-    /// edge (`t == s` after clamping, same as web's early return).
+    /// Spread-granularity turn — web navTurn/goNext/goPrev. Every turn
+    /// path crosses chapters at the edges (taps, arrow keys; swipes
+    /// cross via the book-wide drag clamp) — episode changes only ever
+    /// come from page turns, never jumps. `crossChapter` stays for
+    /// goNext/goPrev signature parity; all callers use the default.
     /// Every accepted turn lands immediately: `posTarget` steps one
     /// spread and the `pos` chase follows it, so rapid taps each count
     /// as a turn (the pager fast-forwards instead of queueing).
@@ -600,13 +608,13 @@ struct ReaderView: View {
             dragTransBase = v.translation.width
         }
         guard let base = dragBase else { return }
-        // Chapter bounds are the drag's rubber-band edge — web damps
-        // `dragPx` past them (`currentIdx` vs chapter min/max page).
-        // For a single-chapter work the range IS the book edge.
-        let b = chapterSpreadBounds(in: work)
+        // The drag range is the whole work — swipes cross chapters like
+        // taps do (iOS divergence from web/Android, which clamp swipes
+        // to the chapter). Only the book's own edges rubber-band.
         let raw = base + PageTurnMath.dragDelta(
             dx: dx - dragTransBase, viewWidth: size.width)
-        pos = PageTurnMath.rangeClamp(raw, lo: b.lo, hi: b.hi)
+        pos = PageTurnMath.rangeClamp(raw, lo: 0,
+                                      hi: max(work.spreads.count - 1, 0))
     }
 
     /// Release: commit completes the turn in the flick/travel direction,
@@ -621,14 +629,13 @@ struct ReaderView: View {
         // The release translation can be ahead of the last onChanged —
         // settle `pos` on it before deciding commit vs cancel. Both are
         // measured from `dragTransBase` (the translation at lock time).
-        // Swipes never cross chapters (web commitSwipeTurn clamps the
-        // target spread to the chapter range).
-        let b = chapterSpreadBounds(in: work)
+        // The commit range is the whole work — swipes cross chapters
+        // (iOS divergence from web commitSwipeTurn's chapter clamp).
         let relDx = v.translation.width - dragTransBase
         pos = PageTurnMath.rangeClamp(
             base + PageTurnMath.dragDelta(dx: relDx,
                                           viewWidth: size.width),
-            lo: b.lo, hi: b.hi)
+            lo: 0, hi: n - 1)
         let commit = !pinchActive ? PageTurnMath.commitDirection(
             translation: relDx,
             predicted: v.predictedEndTranslation.width - dragTransBase,
@@ -640,7 +647,7 @@ struct ReaderView: View {
             // still counts as one more spread in the commit direction.
             var t = dir > 0 ? Int(pos.rounded(.up)) : Int(pos.rounded(.down))
             if CGFloat(t) == pos { t += dir }
-            target = min(max(t, b.lo), b.hi)
+            target = min(max(t, 0), n - 1)
         }
         if target != posTarget, let landing = work.spreads[safe: target]?.first {
             applyLanding(landing, in: work)

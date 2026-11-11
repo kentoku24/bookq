@@ -113,4 +113,34 @@ final class BrowseModelTests: XCTestCase {
         XCTAssertEqual(BrowseModel.filter(entries, query: "").count, 2)
         XCTAssertEqual(BrowseModel.filter(entries, query: "zzz").count, 0)
     }
+
+    // MARK: grid columns — LazyVGrid .adaptive fit parity
+
+    func testGridColumnsRowLayoutsAreSingleColumn() {
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: false, minimum: 110,
+                                               availableWidth: 377), 1)
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: false, minimum: 150,
+                                               availableWidth: 1024), 1)
+    }
+
+    func testGridColumnsAdaptiveFit() {
+        // iPhone content width ≈377pt → 3 columns at minimum 110.
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: true, minimum: 110,
+                                               availableWidth: 377), 3)
+        // n*min + (n-1)*spacing <= width: 2*110+8=228 fits, 3*110+16=346 doesn't.
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: true, minimum: 110,
+                                               availableWidth: 230), 2)
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: true, minimum: 110,
+                                               availableWidth: 110), 1)
+        // iPad-class width at minimum 150 → 4 columns.
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: true, minimum: 150,
+                                               availableWidth: 700), 4)
+    }
+
+    func testGridColumnsDegenerateWidth() {
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: true, minimum: 110,
+                                               availableWidth: 0), 1)
+        XCTAssertEqual(BrowseModel.gridColumns(isTileLayout: true, minimum: 110,
+                                               availableWidth: -50), 1)
+    }
 }

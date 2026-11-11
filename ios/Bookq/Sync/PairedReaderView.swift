@@ -87,14 +87,16 @@ struct PairedReaderView: View {
             else { withAnimation { showChrome.toggle() } }
         })
         // Web parity: edge taps cross chapters; keys/swipes clamp in-chapter.
+        // iOS divergence (solo reader parity): keys/swipes cross chapters
+        // too — every page-turn op may cross, jumps never do.
         .gesture(DragGesture(minimumDistance: 40).onEnded { ev in
             guard !zoomed else { return }
-            if ev.translation.width > 0 { turn(-1, cross: false) }
-            else { turn(1, cross: false) }
+            if ev.translation.width > 0 { turn(-1) }
+            else { turn(1) }
         })
         .focusable().focusEffectDisabled()
-        .onKeyPress(.rightArrow) { turn(1, cross: false); return .handled }
-        .onKeyPress(.leftArrow) { turn(-1, cross: false); return .handled }
+        .onKeyPress(.rightArrow) { turn(1); return .handled }
+        .onKeyPress(.leftArrow) { turn(-1); return .handled }
     }
 
     private func turn(_ delta: Int, cross: Bool = true) {
@@ -185,20 +187,30 @@ struct PairedReaderView: View {
         .disabled(pair.phase != .reading)
     }
 
-    /// Slider → GOTO the target spread's anchor (right) PageRef.
+    /// Chapter-local slider → GOTO the target spread's anchor (right)
+    /// PageRef. The range spans only the CURRENT chapter's contiguous
+    /// `chapterFolder` run (web `syncChapterSlider` parity) — episode
+    /// changes come from page turns at the edges, never the slider.
     private func sliderRow(_ m: PairManifest, _ p: PairProjection) -> some View {
-        Slider(
+        let r = PairModel.chapterRange(in: m.spreadTable,
+                                       index: p.spreadIndex)
+        let lo = r?.lo ?? 0
+        let hi = r?.hi ?? max(m.spreadTable.count - 1, 0)
+        let span = max(hi - lo, 0)
+        return Slider(
             value: Binding(
-                get: { Double(p.spreadIndex) },
+                get: {
+                    Double(min(max(p.spreadIndex - lo, 0), span))
+                },
                 set: { v in
-                    let s = Int(v.rounded())
-                    guard s >= 0, s < m.spreadTable.count else { return }
+                    let s = min(max(lo + Int(v.rounded()), lo), hi)
+                    guard m.spreadTable.indices.contains(s) else { return }
                     pair.goto(page: m.spreadTable[s].right)
                 }),
-            in: 0...Double(max(m.spreadTable.count - 1, 1)),
+            in: 0...Double(max(span, 1)),
             step: 1
         )
-        .disabled(m.spreadTable.count <= 1)
+        .disabled(span <= 0)
         .environment(\.layoutDirection, .rightToLeft)
         .padding(.horizontal, 20)
         .padding(.bottom, 30)
