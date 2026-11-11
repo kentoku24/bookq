@@ -980,3 +980,46 @@ def test_session_strip_hidden_at_idle_and_tappable(page, server):
     strip.click()
     expect(page.locator("#pair-overlay")).to_be_visible()
     _only_section_visible(page, "#pair-sec-session")
+
+
+# Mock variant whose wire ops REJECT — a failed create/join/connect must
+# surface via the existing error/status path, never an uncaught rejection.
+REJECT_JS = (
+    MOCK_JS.replace(
+        "create() { window.__pairCalls.push('create'); },",
+        """connect(pick) {
+      window.__pairCalls.push(pick ? 'connect:' + pick : 'connect');
+      if (pick) return Promise.reject(new Error('wire'));
+      return Promise.resolve(window.__pairConnectResult || null);
+    },
+    create() { window.__pairCalls.push('create');
+               return Promise.reject(new Error('wire')); },""")
+    .replace(
+        "join(code) { window.__pairCalls.push('join:' + code); },",
+        """join(code) { window.__pairCalls.push('join:' + code);
+               return Promise.reject(new Error('wire')); },""")
+    + """
+window.__unhandledRejections = 0;
+window.addEventListener('unhandledrejection', function () {
+  window.__unhandledRejections++;
+});
+""")
+
+
+def test_wire_op_rejections_are_not_unhandled(page, server):
+    """wire 失敗 (REJECT/接続断) で reject する create/join/connect 呼び出しが
+    uncaught promise rejection を残さない — UI 通知は既存の error/status 経路。"""
+    _with_mock(page, js=REJECT_JS)
+    page.evaluate("window.__pairConnectResult = {ambiguous:true, candidates:["
+                  "{id:'tok-a', leaderName:'A', ageSec:3}]}")
+    _open_ui(page)                                    # connect() -> picker
+    _only_section_visible(page, "#pair-sec-picker")
+    page.locator(".pair-pick").first.click()          # connect('tok-a') rejects
+    page.click("#pair-picker-back")                   # picker stays after a pick
+    page.click("#pair-create")                        # create() rejects
+    page.click("#pair-join-open")
+    page.locator("#pair-code-input").fill("123456")   # 6th digit submits
+    page.wait_for_timeout(400)                        # let rejections surface
+    assert page.evaluate("window.__pairCalls") == [
+        "connect", "connect:tok-a", "create", "join:123456"]
+    assert page.evaluate("window.__unhandledRejections") == 0

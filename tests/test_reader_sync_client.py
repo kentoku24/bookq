@@ -43,6 +43,9 @@ from app.reader_sync import catalog, model, protocol  # noqa: E402
 
 PAIR_CLIENT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairClient.js"
 PAIR_TRANSPORT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairTransport.js"
+PAIR_CONTROLLER_JS = (
+    REPO_ROOT / "app" / "static" / "viewer" / "pairController.js"
+)
 
 
 @pytest.fixture
@@ -1116,8 +1119,11 @@ def test_manifest_digest_verified_against_real_catalog(pc_page):
     改ざんチャンクはERRORで落ち、READYもapplyも起きない。"""
     manifest = _manifest(work="夏 の 本")      # non-ASCII exercises ensure_ascii parity
     frames = _manifest_frames(manifest, "S1", 1, 1)
+    # the tampered rig pairs into session S2 — MANIFEST frames are
+    # session-scoped, so its chunks must carry S2's id to even be read
+    frames2 = _manifest_frames(manifest, "S2", 1, 1)
     res = pc_page.evaluate(
-        """async (frames) => {
+        """async ({frames, frames2}) => {
           const rig = window.__mkRig();
           const c = rig.mkClient();
           const s = await rig.pairLeader(c);
@@ -1134,7 +1140,7 @@ def test_manifest_digest_verified_against_real_catalog(pc_page):
           const c2 = rig2.mkClient();
           const s2 = await rig2.pairLeader(c2, 'S2');
           const nBefore = rig2.applied.length;
-          const bad = frames.map(f => Object.assign({}, f,
+          const bad = frames2.map(f => Object.assign({}, f,
             f.index === 0 ? {data: f.data.slice(0, -1) + ' '} : {}));
           for (const f of bad) s2.fire(f);
           return {okReady, okManifest,
@@ -1143,13 +1149,104 @@ def test_manifest_digest_verified_against_real_catalog(pc_page):
                   badStatus: c2.state.status, badErr: c2.state.error,
                   ev1: rig.evlog, ev2: rig2.evlog};
         }""",
-        frames,
+        {"frames": frames, "frames2": frames2},
     )
     assert res["okReady"] == 1
     assert res["okManifest"] == "夏 の 本"             # real manifest applied
     assert "manifest" in res["ev1"] and "ready" in res["ev1"]
     assert res["badReady"] == 0 and res["badApplied"] == 0
     assert res["badStatus"] == "error" and res["badErr"]
+
+
+def test_manifest_foreign_session_does_not_poison(pc_page):
+    """M3: another session's MANIFEST frames must be dropped on arrival —
+    a foreign manifest occupying _manifest would shadow the deferred
+    commit STATE (silent apply stall) and READY a work we never got."""
+    real = _manifest(work="real_work")
+    foreign = _manifest(work="foreign_work")
+    frames_s1 = _manifest_frames(real, "S1", 1, 1)
+    frames_s9 = _manifest_frames(foreign, "S9", 1, 1)
+    res = pc_page.evaluate(
+        """async ({framesS1, framesS9}) => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c, 'S1');
+          // commit STATE needing manifestVersion 1 — deferred until a
+          // manifest for THIS session lands
+          s.fire(rig.st('S1', 3, {phase: 'reading', spreadId: 'c0:s0',
+                                  workEpoch: 1, manifestVersion: 1,
+                                  presence: rig.presence(2)}));
+          for (const f of framesS9) s.fire(f);      // foreign-session poison
+          const afterForeign = {
+            applied: rig.applied.length,
+            readySent: s.sent.filter(x => x.type === 'READY').length,
+            manifestEv: rig.evlog.filter(e => e === 'manifest').length,
+          };
+          for (const f of framesS1) s.fire(f);      // the real manifest
+          return {afterForeign,
+                  readySent: s.sent.filter(x => x.type === 'READY').length,
+                  applied: rig.applied};
+        }""",
+        {"framesS1": frames_s1, "framesS9": frames_s9},
+    )
+    # foreign chunks changed nothing: no READY, no manifest event, no apply
+    assert res["afterForeign"] == {"applied": 2, "readySent": 0,
+                                   "manifestEv": 0}
+    # the real manifest still completes the flow: READY + deferred apply
+    assert res["readySent"] == 1
+    assert res["applied"][-1]["manifest"] == "real_work"
+
+
+def test_stale_datat_repicks_to_live_channel(pc_page):
+    """M4: _dataSend must re-pick a stale _dataT instead of writing onto a
+    dead transport — a frame in the switch gap rides server-ws, not a
+    closed DC, and an orphaned (replaced) channel is never selected."""
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairFollower(c);
+          s.fire(rig.st('S1', 3, {phase: 'reading', spreadId: 'c0:s0',
+                                  presence: rig.presence(2)}));
+          // adapter-shaped channel: _adapt returns it verbatim, so a
+          // re-attach of the same object keeps _dc.t identical while
+          // _dc.up flips false — the exact stale-selection window.
+          const sent = [];
+          const adc = {onframe: null, onclose: null, onopen: null,
+                       readyState: 'open',
+                       send: o => sent.push(JSON.parse(JSON.stringify(o))),
+                       close: () => { adc.readyState = 'closed';
+                                      if (adc.onclose) adc.onclose(); }};
+          c.attachDataChannel(adc);            // readyState open -> dc up now
+          s.fire({v: 1, type: 'TRANSPORT_STATE', sessionId: 'S1',
+                  dataPlane: 'webrtc-dc', revision: 4});   // _dataT = adc
+          c.sendIntent({type: 'turn', delta: 1, crossChapter: true});
+          const dcGot = sent.filter(f => f.type === 'TURN').length;
+          // window 1: same-adapter re-attach leaves _dataT === _dc.t while
+          // _dc.up is false (open deferred)
+          adc.readyState = 'connecting';
+          c.attachDataChannel(adc);
+          const wsBefore = s.sent.length;
+          const ok1 = c.sendIntent({type: 'turn', delta: 1, crossChapter: true});
+          const wsTurns1 = s.sent.slice(wsBefore)
+                             .filter(f => f.type === 'TURN').length;
+          // window 2: a fresh channel attaches while _dataT still selects
+          // the previous adapter — the orphan must not swallow the frame
+          adc.readyState = 'open'; adc.onopen();           // re-up the adc
+          const dc2 = rig.dcChannel();
+          c.attachDataChannel(dc2);            // closes adc; _dataT stale
+          const wsBefore2 = s.sent.length;
+          const ok2 = c.sendIntent({type: 'turn', delta: 1, crossChapter: true});
+          const wsTurns2 = s.sent.slice(wsBefore2)
+                             .filter(f => f.type === 'TURN').length;
+          const adcTurns = sent.filter(f => f.type === 'TURN').length;
+          return {dcGot, ok1, wsTurns1, ok2, wsTurns2, adcTurns};
+        }"""
+    )
+    assert res["dcGot"] == 1                     # plane really was the dc
+    assert res["ok1"] is True and res["wsTurns1"] == 1   # gap -> ws fallback
+    assert res["ok2"] is True and res["wsTurns2"] == 1   # orphan -> ws too
+    assert res["adcTurns"] == 1                  # nothing written post-close
 
 
 def test_pong_answers_server_heartbeat(pc_page):
@@ -1965,3 +2062,67 @@ def test_peek_persisted_resume_gate(pc_page):
     assert res["none"] is None and res["fresh"] is None
     assert res["stale"] is True and res["expired"] is None
     assert res["malformed"] is None
+
+
+# ── pairController _boot credential rejoin (#208 M5 residual) ──────────
+#
+# _boot() calls client.resume() which returns a promise — the try/catch
+# only covers _ensureClient's synchronous throw, so a wire failure would
+# surface as an unhandledrejection unless the call site attaches .catch.
+
+_BOOT_STUB_JS = """() => {
+  window.__resumeCalls = 0;
+  window.__unhandledRejections = 0;
+  window.addEventListener('unhandledrejection', function () {
+    window.__unhandledRejections++;
+  });
+  try {
+    window.sessionStorage.setItem('bookq.readerSync.v1', JSON.stringify(
+      {sessionId: 'S1', memberId: 'm1', resumeToken: 'tok'}));
+  } catch (e) { /* about:blank storage may be unavailable — the
+                  peekPersistedResume stub below still gates _boot open */ }
+  window.PairClient = {
+    peekPersistedResume: function () {
+      return {sessionId: 'S1', memberId: 'm1', resumeToken: 'tok'};
+    },
+    createClient: function () {
+      return {
+        subscribe: function () { return function () {}; },
+        resume: function () {
+          window.__resumeCalls++;
+          return Promise.reject(new Error('wire gone'));
+        },
+      };
+    },
+  };
+}"""
+
+
+def _boot_probe(pc_page):
+    pc_page.add_script_tag(path=str(PAIR_CONTROLLER_JS))
+    pc_page.wait_for_timeout(100)
+    return pc_page.evaluate(
+        "() => ({calls: window.__resumeCalls,"
+        " unhandled: window.__unhandledRejections})")
+
+
+def test_boot_resume_rejection_is_handled_with_visibility(pc_page):
+    """Production path: FolderVisibility.ready() gates the rejoin, then a
+    rejected resume() must not escape as an unhandled rejection."""
+    pc_page.evaluate(
+        """() => { window.FolderVisibility = {
+             ready: function () { return Promise.resolve(); }}; }"""
+    )
+    pc_page.evaluate(_BOOT_STUB_JS)
+    res = _boot_probe(pc_page)
+    assert res["calls"] == 1
+    assert res["unhandled"] == 0
+
+
+def test_boot_resume_rejection_is_handled_without_visibility(pc_page):
+    """Stale-shell path: FolderVisibility absent ⇒ immediate rejoin — the
+    same rejection must still be swallowed."""
+    pc_page.evaluate(_BOOT_STUB_JS)
+    res = _boot_probe(pc_page)
+    assert res["calls"] == 1
+    assert res["unhandled"] == 0
