@@ -33,6 +33,9 @@ pub const CODE_TTL_SECONDS: f64 = 300.0;
 pub const RESUME_WINDOW_SECONDS: f64 = 300.0;
 pub const MATCH_WINDOW_SECONDS: f64 = 120.0;
 pub const LOAD_TIMEOUT_SECONDS: f64 = 120.0;
+/// a link that never binds a member is reaped (mirrors sessions.py
+/// ANON_LINK_TTL_SECONDS).
+pub const ANON_LINK_TTL_SECONDS: f64 = 60.0;
 pub const SEND_QUEUE_MAX: usize = 64;
 /// Bulk (manifest-chunk) traffic bypasses the bounded frame queue but stays
 /// bounded in bytes: two full manifests is the most one link may buffer.
@@ -172,6 +175,10 @@ pub struct Link {
     pub alive: bool,
     pub last_rx: Instant,
     pub next_ping_due: Instant,
+    /// Anonymous-link bookkeeping: a link that never binds a member (or
+    /// loses its member to end_session) is reaped by tick() after
+    /// anon_link_ttl — a PONG-answering socket must not idle forever.
+    pub unbound_since: Option<Instant>,
     pub ping_seq: u64,
     pub user: Option<Value>,
     close: watch::Sender<Option<(u16, String)>>,
@@ -197,6 +204,7 @@ impl Link {
             alive: true,
             last_rx: now,
             next_ping_due: now + heartbeat,
+            unbound_since: None,
             ping_seq: 0,
             user,
             close,
@@ -444,6 +452,7 @@ pub struct Inner {
     bulk_max: usize,
     no_response_timeout: Duration,
     resume_window: Duration,
+    anon_link_ttl: Duration,
     wake: Arc<Notify>,
 }
 
@@ -458,6 +467,7 @@ impl Registry {
                 bulk_max: SEND_BULK_MAX_BYTES,
                 no_response_timeout: Duration::from_secs_f64(NO_RESPONSE_TIMEOUT),
                 resume_window: Duration::from_secs_f64(RESUME_WINDOW_SECONDS),
+                anon_link_ttl: Duration::from_secs_f64(ANON_LINK_TTL_SECONDS),
                 wake: wake.clone(),
             }),
             wake,
@@ -632,6 +642,7 @@ impl Inner {
     pub fn register_link(&mut self, mut link: Link, heartbeat: Duration) -> String {
         link.last_rx = Instant::now();
         link.next_ping_due = link.last_rx + heartbeat;
+        link.unbound_since = Some(link.last_rx);
         let id = link.id.clone();
         self.links.insert(id.clone(), link);
         let hello = protocol::frame(&[
@@ -1011,6 +1022,7 @@ impl Inner {
         self.by_code.insert(code.clone(), sid.clone());
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
+            l.unbound_since = None;
         }
         self.ack(
             link_id,
@@ -1085,6 +1097,7 @@ impl Inner {
         s.code_consumed = true; // single-use while a join is live
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
+            l.unbound_since = None;
         }
         let leader = self
             .session(sid)
@@ -1313,6 +1326,7 @@ impl Inner {
         };
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
+            l.unbound_since = None;
         }
         self.ack(
             link_id,
@@ -2228,6 +2242,9 @@ impl Inner {
                 self.send_obj(lid, &frame);
                 if let Some(l) = self.links.get_mut(lid) {
                     l.member_id = None;
+                    // the socket may outlive the session — mark it
+                    // anonymous so the unbound-link reaper can collect it.
+                    l.unbound_since = Some(Instant::now());
                 }
             }
         }
@@ -2250,6 +2267,14 @@ impl Inner {
             }
             if now.duration_since(link.last_rx) >= self.no_response_timeout {
                 self.close_link(&lid, "no_response", WS_CLOSE_POLICY);
+                continue;
+            }
+            if link.member_id.is_none()
+                && link
+                    .unbound_since
+                    .is_some_and(|u| now.duration_since(u) >= self.anon_link_ttl)
+            {
+                self.close_link(&lid, "unbound_idle", WS_CLOSE_POLICY);
                 continue;
             }
             if now >= link.next_ping_due {
@@ -2293,6 +2318,11 @@ impl Inner {
             }
             dues.push(l.next_ping_due);
             dues.push(l.last_rx + self.no_response_timeout);
+            if l.member_id.is_none() {
+                if let Some(u) = l.unbound_since {
+                    dues.push(u + self.anon_link_ttl);
+                }
+            }
         }
         for s in &self.sessions {
             if !s.paired() {
@@ -2466,6 +2496,67 @@ mod tests {
         let ack = next_json(&mut r2);
         assert_eq!(ack["type"], "ACK");
         assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn unbound_links_are_reaped_but_bound_links_survive() {
+        // M2 mirror of test_unbound_links_are_reaped_but_bound_links_survive:
+        // a socket that never binds a member must not live forever just
+        // because it answers PINGs — and a link unbound by end_session is
+        // collected the same way. Real Instant has no fake clock, so the
+        // TTL is exercised by backdating unbound_since.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (idle, mut rx_idle) = mk_link(&mut inner);
+        let _ = next_json(&mut rx_idle); // HELLO
+        let (leader, mut rx_leader) = mk_link(&mut inner);
+        let _ = next_json(&mut rx_leader); // HELLO
+        inner.dispatch(&reg, &leader, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut rx_leader);
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let _ = next_json(&mut rx_leader); // STATE waiting
+
+        // only the unbound link is collected; the bound one survives
+        {
+            let l = inner.links.get_mut(&idle).unwrap();
+            l.unbound_since = Some(Instant::now() - Duration::from_secs(61));
+        }
+        inner.tick();
+        assert!(!inner.links.contains_key(&idle));
+        assert!(inner.links.contains_key(&leader));
+        assert!(inner.links[&leader].member_id.is_some());
+
+        // a member unbound by end_session becomes anonymous and is reaped
+        inner.dispatch(
+            &reg,
+            &leader,
+            &req("LEAVE", &sid, Value::Object(Map::new())),
+        );
+        assert!(inner.links.contains_key(&leader));
+        assert!(inner.links[&leader].member_id.is_none());
+        {
+            let l = inner.links.get_mut(&leader).unwrap();
+            l.unbound_since = Some(Instant::now() - Duration::from_secs(61));
+        }
+        inner.tick();
+        assert!(!inner.links.contains_key(&leader));
+    }
+
+    #[tokio::test]
+    async fn unbound_link_due_wakes_the_ticker() {
+        // next_wakeup_delay must include the anonymous-link expiry —
+        // otherwise the ticker sleeps to the next ping due and the reap
+        // fires late. An already-expired anon deadline clamps to the 50ms
+        // floor, distinguishable from the ~5s ping due.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (idle, mut rx_idle) = mk_link(&mut inner);
+        let _ = next_json(&mut rx_idle);
+        {
+            let l = inner.links.get_mut(&idle).unwrap();
+            l.unbound_since = Some(Instant::now() - Duration::from_secs(61));
+        }
+        assert_eq!(inner.next_wakeup_delay(), Duration::from_millis(50));
     }
 }
 
