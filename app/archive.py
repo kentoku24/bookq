@@ -214,7 +214,7 @@ def build_archive_tree(entries: list[str]) -> list[dict]:
     return built[id(root)]
 
 
-def _zip_names(path: Path) -> list[str]:
+def _zip_names_uncached(path: Path) -> list[str]:
     try:
         with zipfile.ZipFile(path) as zf:
             return [info.filename for info in zf.infolist()]
@@ -222,7 +222,7 @@ def _zip_names(path: Path) -> list[str]:
         return []
 
 
-def _rar_names(path: Path) -> list[str]:
+def _rar_names_uncached(path: Path) -> list[str]:
     try:
         import rarfile
 
@@ -285,21 +285,35 @@ def _epub_spine_images(zf: zipfile.ZipFile) -> list[str]:
     return out
 
 
-def _epub_entries(path: Path) -> list[str]:
+def _epub_names_from_zf(zf: zipfile.ZipFile) -> tuple[list[str], list[str]]:
+    """(raw infolist names, spine-resolved names) from an open epub ZipFile.
+
+    A spine-level failure yields an empty spine list — the caller falls back
+    to natural order over *raw*, exactly like the uncached path.
+    """
+    raw = [info.filename for info in zf.infolist()]
     try:
-        with zipfile.ZipFile(path) as zf:
-            raw = [info.filename for info in zf.infolist()]
-            try:
-                spine = _epub_spine_images(zf)
-            except Exception:
-                spine = []
+        spine = _epub_spine_images(zf)
     except Exception:
-        return []
+        spine = []
+    return raw, spine
+
+
+def _epub_finalize(raw: list[str], spine: list[str]) -> list[str]:
     present = set(raw)
     ordered = _finalize([n for n in spine if n in present], keep_order=True)
     if ordered:
         return ordered
     return _finalize(raw)
+
+
+def _epub_entries_uncached(path: Path) -> list[str]:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            raw, spine = _epub_names_from_zf(zf)
+    except Exception:
+        return []
+    return _epub_finalize(raw, spine)
 
 
 def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
@@ -358,7 +372,7 @@ def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
     return entries
 
 
-# ── open-archive memo (read_archive_entry hot path) ──────────────────────
+# ── open-archive memo (read_archive_entry + listing hot paths) ───────────
 #
 # Serving /image/<archive>/<entry> used to re-open the archive — re-parsing
 # every header / the ZIP central directory / all RAR blocks — on every page
@@ -366,6 +380,9 @@ def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
 # work, so open archive objects are memoized in a small LRU keyed by
 # (resolved path, st_mtime_ns, st_size): a modified archive is a different
 # key and gets re-opened, while its stale object ages out and is closed.
+# #256 additionally serves ``list_archive_entries`` through the same memo
+# (names/epub captured lazily on the entry), so a chapter's listing and
+# page reads share one parse — the Rust `Parsed` design (fb1a469/c1c3e03).
 #
 # rarfile.RarFile and zipfile.ZipFile are NOT thread-safe (each entry open
 # seeks one shared file object) and read_archive_entry runs under
@@ -382,13 +399,23 @@ class _OpenArchive:
 
     ``obj`` becomes None once the entry has been evicted and closed; readers
     holding the entry then fall back to an uncached open.
+
+    ``names``/``epub`` lazily capture the listing derivations so
+    ``list_archive_entries`` rides the same open object (#256 — the Rust
+    ``Parsed`` enum's stored names/spine): a chapter's listing and page
+    reads share ONE open+parse instead of paying it per side. Both are
+    computed under ``lock`` — the shared seekable object is not
+    thread-safe, and ``_epub_names_from_zf`` issues many entry reads that
+    must serialize against concurrent page reads.
     """
 
-    __slots__ = ("obj", "lock")
+    __slots__ = ("obj", "lock", "names", "epub")
 
     def __init__(self, obj) -> None:
         self.obj = obj
         self.lock = threading.Lock()
+        self.names: list[str] | None = None
+        self.epub: tuple[list[str], list[str]] | None = None
 
 
 _open_archives: "OrderedDict[tuple[str, int, int], _OpenArchive]" = OrderedDict()
@@ -466,6 +493,78 @@ def _clear_open_archive_cache() -> None:
                 return
             _, entry = _open_archives.popitem(last=False)
         _close_open_archive(entry)
+
+
+# ── memo-backed listings (#256) ──────────────────────────────────────────
+#
+# ``list_archive_entries`` used to open a FRESH archive on every disk-cache
+# miss even though the read path memoizes open archives — a chapter paid
+# open+parse once for its listing and again for its first page. The Rust
+# ``bookq_core::open_archive`` stores parsed names on the memo object and
+# serves listings through it (viewer-rs fb1a469 / c1c3e03); these wrappers
+# do the same: capture names/epub once on the ``_OpenArchive`` under its
+# lock, fall back to the uncached one-shot functions on any cache
+# unavailability (no key / evicted / open failure), never cache failures.
+
+
+def _zip_names(path: Path) -> list[str]:
+    try:
+        entry = _open_archive_entry(path, zipfile.ZipFile)
+    except Exception:
+        return _zip_names_uncached(path)
+    if entry is None:
+        return _zip_names_uncached(path)
+    with entry.lock:
+        if entry.obj is None:
+            return _zip_names_uncached(path)
+        if entry.names is None:
+            try:
+                entry.names = [i.filename for i in entry.obj.infolist()]
+            except Exception:
+                return []
+        return list(entry.names)
+
+
+def _rar_names(path: Path) -> list[str]:
+    try:
+        import rarfile
+
+        entry = _open_archive_entry(path, lambda p: rarfile.RarFile(str(p)))
+    except Exception:
+        return _rar_names_uncached(path)
+    if entry is None:
+        return _rar_names_uncached(path)
+    with entry.lock:
+        if entry.obj is None:
+            return _rar_names_uncached(path)
+        if entry.names is None:
+            try:
+                entry.names = [
+                    i.filename for i in entry.obj.infolist() if not i.is_dir()
+                ]
+            except Exception:
+                return []
+        return list(entry.names)
+
+
+def _epub_entries(path: Path) -> list[str]:
+    try:
+        entry = _open_archive_entry(path, zipfile.ZipFile)
+    except Exception:
+        return _epub_entries_uncached(path)
+    if entry is None:
+        return _epub_entries_uncached(path)
+    with entry.lock:
+        if entry.obj is None:
+            return _epub_entries_uncached(path)
+        if entry.epub is None:
+            try:
+                entry.epub = _epub_names_from_zf(entry.obj)
+            except Exception:
+                return []
+        raw, spine = entry.epub
+    # finalize per call (dedupe/cap/order), matching _epub_entries_uncached.
+    return _epub_finalize(raw, spine)
 
 
 # ── RAR sequential-extract tmp cache (issue #246) ────────────────────────

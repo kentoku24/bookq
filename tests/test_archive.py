@@ -878,6 +878,125 @@ def test_read_archive_entry_concurrent_reads(tmp_path: Path, archive_memo, monke
     assert len(calls) == opens_so_far
 
 
+# ── memo-backed listings (#256) ──────────────────────────────────────────
+#
+# list_archive_entries' live path (the _zip_names/_rar_names/_epub_entries
+# layer under the disk cache) rides the same open-archive memo as
+# read_archive_entry, so a chapter's listing and page reads share ONE
+# open+parse — mirroring Rust bookq_core::open_archive's stored names.
+
+
+def test_zip_listing_and_read_share_one_open(tmp_path: Path, archive_memo, monkeypatch):
+    """_zip_names then read_archive_entry then _zip_names — all through one
+    opened ZipFile, exactly like the Rust memo's shared Parsed object."""
+    zpath = tmp_path / "work.zip"
+    _make_test_zip(zpath, {"1.png": b"one", "2.png": b"two"})
+    calls = _counting_zipfile(monkeypatch)
+    assert archive_memo._zip_names(zpath) == ["1.png", "2.png"]
+    assert archive_memo.read_archive_entry(zpath, "2.png") == b"two"
+    assert archive_memo._zip_names(zpath) == ["1.png", "2.png"]
+    assert len(calls) == 1
+
+
+def test_rar_listing_and_read_share_one_open(archive_tree: Path, archive_memo, monkeypatch):
+    """A cached RarFile serves infolist() listings and .read() pages."""
+    rarfile = pytest.importorskip("rarfile")
+
+    real = rarfile.RarFile
+    calls = []
+
+    class CountingRarFile(real):
+        def __init__(self, *a, **k):
+            calls.append(a)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(rarfile, "RarFile", CountingRarFile)
+    cbr = archive_tree / "book.cbr"
+    names = archive_memo._rar_names(cbr)
+    assert "10.png" in names and "ch1/1.png" in names
+    data = archive_memo.read_archive_entry(cbr, "2.png")
+    assert data == (archive_tree / "src_2.png").read_bytes()
+    assert archive_memo._rar_names(cbr) == names
+    assert len(calls) == 1
+
+
+def test_epub_spine_resolved_once_on_memo(archive_tree: Path, archive_memo, monkeypatch):
+    """The OPF spine walk (container.xml + OPF + every spine doc) runs once
+    per memoized archive — the second listing reuses the stored tuple."""
+    epub = archive_tree / "manga.epub"
+    spine_calls = []
+    real_spine = archive_memo._epub_spine_images
+
+    def spy(zf):
+        spine_calls.append(zf)
+        return real_spine(zf)
+
+    monkeypatch.setattr(archive_memo, "_epub_spine_images", spy)
+    calls = _counting_zipfile(monkeypatch)
+    first = archive_memo._epub_entries(epub)
+    assert len(calls) == 1 and len(spine_calls) == 1
+    second = archive_memo._epub_entries(epub)
+    assert second == first
+    assert len(calls) == 1 and len(spine_calls) == 1
+    # Page reads share the same open object too.
+    assert archive_memo.read_archive_entry(epub, "OEBPS/Images/a_p1.png") is not None
+    assert len(calls) == 1
+
+
+def test_epub_memo_matches_uncached(archive_tree: Path, archive_memo):
+    """Memo and uncached paths agree — spine order, broken fallback, svg."""
+    for name in ("manga.epub", "svg.epub", "broken.epub"):
+        p = archive_tree / name
+        assert archive_memo._epub_entries(p) == archive_memo._epub_entries_uncached(p)
+
+
+def test_zip_rar_memo_match_uncached(archive_tree: Path, archive_memo):
+    pytest.importorskip("rarfile")
+    assert archive_memo._zip_names(archive_tree / "work.zip") == archive_memo._zip_names_uncached(
+        archive_tree / "work.zip"
+    )
+    assert archive_memo._rar_names(archive_tree / "book.cbr") == archive_memo._rar_names_uncached(
+        archive_tree / "book.cbr"
+    )
+
+
+def test_listing_uncached_fallback_for_unstatable(tmp_path: Path, archive_memo):
+    """No cache key (file can't be stat'ed) → uncached open → same []."""
+    missing = tmp_path / "nope.zip"
+    assert archive_memo._zip_names(missing) == []
+    assert archive_memo._epub_entries(missing) == []
+    assert len(archive_memo._open_archives) == 0
+
+
+def test_listing_caller_cannot_mutate_cached_names(tmp_path: Path, archive_memo, monkeypatch):
+    """_zip_names returns a copy — mutating it can't corrupt the memo."""
+    zpath = tmp_path / "work.zip"
+    _make_test_zip(zpath, {"a.png": b"a", "b.png": b"b"})
+    first = archive_memo._zip_names(zpath)
+    first.reverse()
+    first.append("evil.png")
+    assert archive_memo._zip_names(zpath) == ["a.png", "b.png"]
+
+
+def test_list_archive_entries_second_live_pass_no_reopen(
+    tmp_path: Path, archive_memo, monkeypatch
+):
+    """End-to-end through the disk cache: a second live listing (disk store
+    patched to miss) hits the memo — no second archive open."""
+    from app import warmup_cache
+    from app.archive import list_archive_entries
+
+    downloads = _isolate_cache(tmp_path, monkeypatch)
+    zpath = downloads / "work.zip"
+    _make_test_zip(zpath, {"1.png": b"one", "2.png": b"two"})
+    calls = _counting_zipfile(monkeypatch)
+    assert list_archive_entries(zpath) == ["1.png", "2.png"]
+    assert len(calls) == 1
+    monkeypatch.setattr(warmup_cache, "get_archive_entries", lambda *a, **k: None)
+    assert list_archive_entries(zpath) == ["1.png", "2.png"]
+    assert len(calls) == 1
+
+
 # ── #246: RAR sequential-extract tmp cache ───────────────────────────────
 #
 # The rar5 fixture marks solid via the real archive/main + per-entry flags
@@ -1057,3 +1176,4 @@ def test_rar_ext_prune_evicts_oldest_dirs(tmp_path: Path, archive_memo, monkeypa
     monkeypatch.setattr(archive_memo, "_RAR_EXT_MAX_DIRS", 2)
     archive_memo._prune_rar_ext(ext_root)
     assert sorted(p.name for p in ext_root.iterdir()) == ["d2", "d3"]
+
