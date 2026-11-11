@@ -995,3 +995,185 @@ def test_list_archive_entries_second_live_pass_no_reopen(
     monkeypatch.setattr(warmup_cache, "get_archive_entries", lambda *a, **k: None)
     assert list_archive_entries(zpath) == ["1.png", "2.png"]
     assert len(calls) == 1
+
+
+# ── #246: RAR sequential-extract tmp cache ───────────────────────────────
+#
+# The rar5 fixture marks solid via the real archive/main + per-entry flags
+# (``RarFile.is_solid()`` / ``RarInfo.flags & RAR_FILE_SOLID`` report true)
+# and method bits via the compression-info vint, but payloads stay
+# store-format — no rar encoder exists on this platform. Solid-archive tests
+# therefore exercise REAL extract-all runs (the tool just copies the stored
+# bytes out), while the compressed-entry test stubs ``RarFile.read`` at the
+# boundary the spec allows.
+
+
+def _rar_ext_root(tmp_path: Path, monkeypatch) -> Path:
+    """Isolate the rar-ext tmp namespace + in-memory extraction state."""
+    import app.archive as archive_mod
+
+    monkeypatch.setenv("BOOKQ_THUMB_CACHE_DIR", str(tmp_path / "thumbcache"))
+    archive_mod._clear_rar_ext_state()
+    archive_mod._clear_open_archive_cache()
+    return tmp_path / "thumbcache" / "rar-ext"
+
+
+def _counting_popen(monkeypatch) -> list:
+    """Count rarfile subprocess launches (tool checks + extractions).
+
+    ``_require_rar_tool()`` resolves the tool first, so only extraction /
+    per-entry read spawns land in the counter.
+    """
+    rarfile = pytest.importorskip("rarfile")
+    real = rarfile.custom_popen
+    calls: list = []
+
+    def spy(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(rarfile, "custom_popen", spy)
+    return calls
+
+
+def test_solid_rar_extracts_once_then_serves_tmp(tmp_path: Path, archive_memo, monkeypatch):
+    """#246 (a): a SOLID archive runs ONE extract-all pass on the first read;
+    every later page is a tmp file serve with zero subprocess spawns."""
+    _require_rar_tool()
+    ext_root = _rar_ext_root(tmp_path, monkeypatch)
+    pages = {
+        "1.png": b"page-one" * 8,
+        "2.png": b"page-two" * 8,
+        "d/3.png": b"page-three" * 8,
+    }
+    cbr = tmp_path / "solid.cbr"
+    make_rar5_store(cbr, list(pages.items()), solid=True)
+    calls = _counting_popen(monkeypatch)
+    from app.archive import read_archive_entry
+
+    for name, data in pages.items():
+        assert read_archive_entry(cbr, name) == data
+        assert len(calls) == 1, f"{name}: extra spawns {calls[1:]}"
+    # The whole chapter is published under <digest>/x/; a second pass over
+    # the pages still spawns nothing.
+    assert list(ext_root.glob("*/x/1.png")) and list(ext_root.glob("*/x/d/3.png"))
+    for name, data in pages.items():
+        assert read_archive_entry(cbr, name) == data
+    assert len(calls) == 1
+
+
+def test_compressed_rar_entry_cached_after_first_read(tmp_path: Path, archive_memo, monkeypatch):
+    """#246 (b): a compressed non-solid entry respawns the extractor per read
+    today; after the first successful read the per-entry tmp file serves it."""
+    rarfile = pytest.importorskip("rarfile")
+    ext_root = _rar_ext_root(tmp_path, monkeypatch)
+    payload = b"COMPRESSED-BYTES" * 4
+    cbr = tmp_path / "comp.cbr"
+    make_rar5_store(cbr, [("1.png", payload), ("2.png", b"P2")], method=3)
+    reads: list[str] = []
+
+    def fake_read(self, info, *args, **kwargs):
+        reads.append(info.filename)
+        return payload
+
+    monkeypatch.setattr(rarfile.RarFile, "read", fake_read)
+    from app.archive import read_archive_entry
+
+    assert read_archive_entry(cbr, "1.png") == payload
+    assert read_archive_entry(cbr, "1.png") == payload
+    assert reads == ["1.png"]  # second read was a tmp hit — no respawn
+    assert list(ext_root.glob("*/s/*"))
+    # A different compressed entry still extracts once, then caches.
+    assert read_archive_entry(cbr, "2.png") == payload
+    assert read_archive_entry(cbr, "2.png") == payload
+    assert reads == ["1.png", "2.png"]
+
+
+def test_stored_rar_entry_never_touches_tmp(tmp_path: Path, archive_memo, monkeypatch):
+    """#246 (c): stored (uncompressed) entries keep the in-process direct
+    read — no rar-ext dir and no extraction state is created."""
+    ext_root = _rar_ext_root(tmp_path, monkeypatch)
+    cbr = tmp_path / "store.cbr"
+    make_rar5_store(cbr, [("1.png", b"STORED")])
+    from app.archive import read_archive_entry
+
+    assert read_archive_entry(cbr, "1.png") == b"STORED"
+    assert not ext_root.exists()
+    assert len(archive_memo._rar_ext_states) == 0
+
+
+def test_rar_tmp_cache_invalidates_on_archive_change(tmp_path: Path, archive_memo, monkeypatch):
+    """#246 (d): the tmp dir key embeds (path, mtime, size) — a rewritten
+    archive re-extracts into a NEW version dir and serves the new bytes."""
+    _require_rar_tool()
+    ext_root = _rar_ext_root(tmp_path, monkeypatch)
+    cbr = tmp_path / "solid.cbr"
+    make_rar5_store(cbr, [("1.png", b"V1")], solid=True)
+    calls = _counting_popen(monkeypatch)
+    from app.archive import read_archive_entry
+
+    assert read_archive_entry(cbr, "1.png") == b"V1"
+    assert len(calls) == 1
+    make_rar5_store(cbr, [("1.png", b"V2-DIFFERENT")], solid=True)
+    st = cbr.stat()
+    os.utime(cbr, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert read_archive_entry(cbr, "1.png") == b"V2-DIFFERENT"
+    assert len(calls) == 2
+    assert len(list(ext_root.iterdir())) == 2
+
+
+def test_solid_rar_concurrent_first_reads_extract_once(tmp_path: Path, archive_memo, monkeypatch):
+    """#246 (e): threads racing the first pages of a solid archive run ONE
+    extraction — per-archive serialization turns the rest into tmp hits."""
+    _require_rar_tool()
+    _rar_ext_root(tmp_path, monkeypatch)
+    pages = {f"{i}.png": f"pg-{i}".encode() * 3 for i in range(8)}
+    cbr = tmp_path / "solid.cbr"
+    make_rar5_store(cbr, list(pages.items()), solid=True)
+    calls = _counting_popen(monkeypatch)
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.archive import read_archive_entry
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(lambda i: read_archive_entry(cbr, f"{i}.png"), range(8)))
+    assert results == [pages[f"{i}.png"] for i in range(8)]
+    assert len(calls) == 1
+
+
+def test_solid_rar_failed_extraction_falls_back(tmp_path: Path, archive_memo, monkeypatch):
+    """#246: a failed extract-all keeps serving on the legacy per-entry path
+    and is not retried per page — never a regression vs today."""
+    _require_rar_tool()
+    _rar_ext_root(tmp_path, monkeypatch)
+    import app.archive as archive_mod
+
+    cbr = tmp_path / "solid.cbr"
+    make_rar5_store(cbr, [("1.png", b"FALLBACK")], solid=True)
+    monkeypatch.setattr(
+        archive_mod, "_rar_extract_all_cmdline", lambda *a: ["/nonexistent-bookq-tool"]
+    )
+    calls = _counting_popen(monkeypatch)
+    from app.archive import read_archive_entry
+
+    assert read_archive_entry(cbr, "1.png") == b"FALLBACK"
+    assert read_archive_entry(cbr, "1.png") == b"FALLBACK"
+    assert len(calls) == 1
+
+
+def test_rar_ext_prune_evicts_oldest_dirs(tmp_path: Path, archive_memo, monkeypatch):
+    """rar-ext pruning mirrors the thumbs regime: cap on archive-version
+    dirs, oldest-mtime-first; stale .part-* staging dirs are reaped too."""
+    _rar_ext_root(tmp_path, monkeypatch)
+    ext_root = tmp_path / "thumbcache" / "rar-ext"
+    for i in range(4):
+        d = ext_root / f"d{i}"
+        d.mkdir(parents=True)
+        os.utime(d, (i, i))
+    stale = ext_root / "gone.part-1.dead"
+    stale.mkdir()
+    os.utime(stale, (0, 0))
+    monkeypatch.setattr(archive_memo, "_RAR_EXT_MAX_DIRS", 2)
+    archive_memo._prune_rar_ext(ext_root)
+    assert sorted(p.name for p in ext_root.iterdir()) == ["d2", "d3"]
+
