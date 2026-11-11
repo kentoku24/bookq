@@ -91,83 +91,129 @@ struct FolderLevelView: View {
     @ViewBuilder
     private func grid(folders: [(path: String, node: TreeNode)],
                       selfTiles: [(path: String, node: TreeNode)]) -> some View {
-        ScrollView {
-            // #folder-count equivalent
-            Text("\(folders.count + selfTiles.count) 件")
-                .font(.caption2).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.horizontal, 12).padding(.top, 4)
-            LazyVGrid(columns: columns, spacing: 8, pinnedViews: []) {
-                ForEach(folders, id: \.path) { entry in
-                    let leaves = library.leafPaths(under: entry.path)
-                    let pres = visibility.presentation(
-                        entry.path, editable: visibility.isTopLevel(entry.path))
-                    let rowMode = model.config.layoutMode != .tile
-                    ZStack(alignment: .topTrailing) {
-                        // Row layouts are too short to stack the eye below
-                        // the download button — park it to the button's left.
-                        ZStack(alignment: rowMode ? .topTrailing : .bottomTrailing) {
-                            Button { onFolderTap(entry) } label: {
-                                FolderTileView(
-                                    path: entry.path,
-                                    node: entry.node,
-                                    layout: model.config.layoutMode,
-                                    progress: progress.progress(for: entry.path, leaves: leaves),
-                                    leaves: leaves,
-                                    meta: entry.node.metadata,
-                                    vis: pres
-                                )
+        // Row-chunked manual grid — same workaround as SearchResultsView:
+        // LazyVGrid children under `.searchable` receive shifting proposals
+        // and keep stale/unequal frames, so taps land on neighboring cells.
+        // Explicit cell widths keep every frame deterministic.
+        let items = folders.map { BrowseTile.folder(path: $0.path, node: $0.node) }
+            + selfTiles.map { BrowseTile.selfTile(path: $0.path, node: $0.node) }
+        GeometryReader { geo in
+            ScrollView {
+                // #folder-count equivalent
+                Text("\(items.count) 件")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.horizontal, 12).padding(.top, 4)
+                // -16 = the LazyVStack's horizontal .padding(8) on both sides.
+                let cols = BrowseModel.gridColumns(
+                    isTileLayout: model.config.layoutMode == .tile,
+                    minimum: hSize == .regular ? 150 : 110,
+                    availableWidth: geo.size.width - 16)
+                let w = (geo.size.width - 16 - 8 * CGFloat(cols - 1)) / CGFloat(cols)
+                LazyVStack(spacing: 8) {
+                    ForEach(Array(stride(from: 0, to: items.count, by: cols)),
+                            id: \.self) { start in
+                        HStack(alignment: .top, spacing: 8) {
+                            ForEach(items[start..<min(start + cols, items.count)]) { entry in
+                                tileCell(entry)
+                                    .frame(width: w, alignment: .top)
                             }
-                            .buttonStyle(.plain)
-                            if pres?.toggle == true {
-                                VisibilityEyeButton(
-                                    path: entry.path,
-                                    hidden: pres?.hidden == true,
-                                    onError: { saveError = $0 })
-                                    .padding(EdgeInsets(top: 5, leading: 5,
-                                                        bottom: 5,
-                                                        trailing: rowMode ? 44 : 5))
+                            ForEach(0..<max(0, start + cols - items.count),
+                                    id: \.self) { _ in
+                                Color.clear.frame(width: w, height: 0)
                             }
                         }
-                        if !leaves.isEmpty {
-                            OfflineButton(path: entry.path, leaves: leaves, store: offline)
-                                .padding(5)
-                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .id(entry.path)
                 }
-                ForEach(selfTiles, id: \.path) { entry in
-                    ZStack(alignment: .topTrailing) {
-                        Button { onFolderTap(entry) } label: {
-                            SelfTileView(node: entry.node, path: entry.path,
-                                         layout: model.config.layoutMode)
-                        }
-                        .buttonStyle(.plain)
-                        // the self-tile is itself the download target
-                        OfflineButton(path: entry.path, leaves: [entry.path],
-                                      store: offline)
-                            .padding(5)
-                    }
-                    .id("self-\(entry.path)")
-                }
+                .scrollTargetLayout()
+                // Recreate on membership/order changes — the same guard
+                // the LazyVGrid version carried.
+                .id(items.map(\.id))
+                .padding(8)
             }
-            .scrollTargetLayout()
-            // Recreate on membership/order changes — LazyVGrid can leave
-            // stale per-item frames when an existing id shifts cells.
-            .id(folders.map(\.path) + selfTiles.map(\.path))
-            .padding(8)
         }
     }
 
-    private var columns: [GridItem] {
-        switch model.config.layoutMode {
-        case .tile:
-            // adaptive grid: ~3 columns iPhone, more on iPad
-            let min: CGFloat = hSize == .regular ? 150 : 110
-            return [GridItem(.adaptive(minimum: min), spacing: 8)]
-        case .list, .card:
-            return [GridItem(.flexible(), spacing: 8)]
+    @ViewBuilder
+    private func tileCell(_ entry: BrowseTile) -> some View {
+        switch entry {
+        case .folder(let path, let node):
+            folderCell(path: path, node: node)
+        case .selfTile(let path, let node):
+            selfCell(path: path, node: node)
         }
+    }
+
+    private func folderCell(path: String, node: TreeNode) -> some View {
+        let entry = (path: path, node: node)
+        let leaves = library.leafPaths(under: entry.path)
+        let pres = visibility.presentation(
+            entry.path, editable: visibility.isTopLevel(entry.path))
+        let rowMode = model.config.layoutMode != .tile
+        let name = BrowseModel.splitDisplayName(node.name).leaf
+        return ZStack(alignment: .topTrailing) {
+            // Row layouts are too short to stack the eye below
+            // the download button — park it to the button's left.
+            ZStack(alignment: rowMode ? .topTrailing : .bottomTrailing) {
+                // The Button wraps the visual so its hit region is exactly
+                // the tile's bounds. Safe now that RemoteImageView keeps a
+                // single stable Image (only the UIImage value changes on
+                // load) — the earlier if/else placeholder↔image swap is
+                // what left this Button's hit-test frame stale.
+                Button { onFolderTap(entry) } label: {
+                    FolderTileView(
+                        path: entry.path,
+                        node: entry.node,
+                        layout: model.config.layoutMode,
+                        progress: progress.progress(for: entry.path, leaves: leaves),
+                        leaves: leaves,
+                        meta: entry.node.metadata,
+                        vis: pres
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(name)
+                .accessibilityAddTraits(.isButton)
+                if pres?.toggle == true {
+                    VisibilityEyeButton(
+                        path: entry.path,
+                        hidden: pres?.hidden == true,
+                        onError: { saveError = $0 })
+                        .padding(EdgeInsets(top: 5, leading: 5,
+                                            bottom: 5,
+                                            trailing: rowMode ? 44 : 5))
+                }
+            }
+            if !leaves.isEmpty {
+                OfflineButton(path: entry.path, leaves: leaves, store: offline)
+                    .padding(5)
+            }
+        }
+        .id(entry.path)
+    }
+
+    private func selfCell(path: String, node: TreeNode) -> some View {
+        let entry = (path: path, node: node)
+        return ZStack(alignment: .topTrailing) {
+            // Self tiles always open the reader at their own path (web
+            // `data-read-self` → loadImages) — never drillsDown, or a
+            // mixed folder would drill instead of reading its own images.
+            Button { onOpen(entry.path) } label: {
+                SelfTileView(node: entry.node, path: entry.path,
+                             layout: model.config.layoutMode)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("このフォルダを読む")
+            .accessibilityAddTraits(.isButton)
+            // the self-tile is itself the download target
+            OfflineButton(path: entry.path, leaves: [entry.path],
+                          store: offline)
+                .padding(5)
+        }
+        .id("self-\(entry.path)")
     }
 
     /// `guardPath` gate — pending judgments queue behind a refresh rather
@@ -193,6 +239,20 @@ struct FolderLevelView: View {
             model.pushLevel(entry.path)
         } else {
             onOpen(entry.path)
+        }
+    }
+}
+
+/// Grid cell identity — a mixed folder shows BOTH a folder tile and a
+/// "read self" tile at the same path, so the two kinds are namespaced.
+private enum BrowseTile: Identifiable {
+    case folder(path: String, node: TreeNode)
+    case selfTile(path: String, node: TreeNode)
+
+    var id: String {
+        switch self {
+        case .folder(let p, _): return "folder|\(p)"
+        case .selfTile(let p, _): return "self|\(p)"
         }
     }
 }

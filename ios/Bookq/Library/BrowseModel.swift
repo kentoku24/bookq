@@ -115,4 +115,17 @@ enum BrowseModel {
             $0.node.name.lowercased().contains(q) || $0.path.lowercased().contains(q)
         }
     }
+
+    // MARK: - Grid columns
+
+    /// Column count for the browse grid's row-chunked layout — mirrors
+    /// LazyVGrid `.adaptive(minimum:spacing:)`: the largest n where
+    /// `n*minimum + (n-1)*spacing <= availableWidth`. Row layouts
+    /// (list/card) are always single-column.
+    static func gridColumns(isTileLayout: Bool, minimum: CGFloat,
+                            availableWidth: CGFloat,
+                            spacing: CGFloat = 8) -> Int {
+        guard isTileLayout, availableWidth > 0 else { return 1 }
+        return max(1, Int((availableWidth + spacing) / (minimum + spacing)))
+    }
 }
