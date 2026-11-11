@@ -8,8 +8,10 @@ yields ``None`` so the API renders an empty message / 404 instead of a 500.
 
 import logging
 import posixpath
+import threading
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -207,7 +209,7 @@ def build_archive_tree(entries: list[str]) -> list[dict]:
     return built[id(root)]
 
 
-def _zip_names(path: Path) -> list[str]:
+def _zip_names_uncached(path: Path) -> list[str]:
     try:
         with zipfile.ZipFile(path) as zf:
             return [info.filename for info in zf.infolist()]
@@ -215,7 +217,7 @@ def _zip_names(path: Path) -> list[str]:
         return []
 
 
-def _rar_names(path: Path) -> list[str]:
+def _rar_names_uncached(path: Path) -> list[str]:
     try:
         import rarfile
 
@@ -278,21 +280,35 @@ def _epub_spine_images(zf: zipfile.ZipFile) -> list[str]:
     return out
 
 
-def _epub_entries(path: Path) -> list[str]:
+def _epub_names_from_zf(zf: zipfile.ZipFile) -> tuple[list[str], list[str]]:
+    """(raw infolist names, spine-resolved names) from an open epub ZipFile.
+
+    A spine-level failure yields an empty spine list — the caller falls back
+    to natural order over *raw*, exactly like the uncached path.
+    """
+    raw = [info.filename for info in zf.infolist()]
     try:
-        with zipfile.ZipFile(path) as zf:
-            raw = [info.filename for info in zf.infolist()]
-            try:
-                spine = _epub_spine_images(zf)
-            except Exception:
-                spine = []
+        spine = _epub_spine_images(zf)
     except Exception:
-        return []
+        spine = []
+    return raw, spine
+
+
+def _epub_finalize(raw: list[str], spine: list[str]) -> list[str]:
     present = set(raw)
     ordered = _finalize([n for n in spine if n in present], keep_order=True)
     if ordered:
         return ordered
     return _finalize(raw)
+
+
+def _epub_entries_uncached(path: Path) -> list[str]:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            raw, spine = _epub_names_from_zf(zf)
+    except Exception:
+        return []
+    return _epub_finalize(raw, spine)
 
 
 def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
@@ -351,22 +367,256 @@ def list_archive_entries(archive_path: Path, downloads_root=None) -> list[str]:
     return entries
 
 
-def _read_zip(path: Path, inner: str) -> bytes | None:
+# ── open-archive memo (read_archive_entry + listing hot paths) ───────────
+#
+# Serving /image/<archive>/<entry> used to re-open the archive — re-parsing
+# every header / the ZIP central directory / all RAR blocks — on every page
+# request. A reading session issues one request per page against the same
+# work, so open archive objects are memoized in a small LRU keyed by
+# (resolved path, st_mtime_ns, st_size): a modified archive is a different
+# key and gets re-opened, while its stale object ages out and is closed.
+# #256 additionally serves ``list_archive_entries`` through the same memo
+# (names/epub captured lazily on the entry), so a chapter's listing and
+# page reads share one parse — the Rust `Parsed` design (fb1a469/c1c3e03).
+#
+# rarfile.RarFile and zipfile.ZipFile are NOT thread-safe (each entry open
+# seeks one shared file object) and read_archive_entry runs under
+# run_in_threadpool, so every cached object carries a private lock that
+# serializes its reads; the LRU itself is guarded by _open_archives_lock.
+# Eviction closes the object under its own lock — a thread that fetched the
+# entry just before eviction sees ``obj is None`` and falls back to a
+# direct one-shot open, so a closed file is never read through.
+_OPEN_ARCHIVE_CACHE_MAX = 8
+
+
+class _OpenArchive:
+    """One cached open archive (zipfile.ZipFile / rarfile.RarFile) + its lock.
+
+    ``obj`` becomes None once the entry has been evicted and closed; readers
+    holding the entry then fall back to an uncached open.
+
+    ``names``/``epub`` lazily capture the listing derivations so
+    ``list_archive_entries`` rides the same open object (#256 — the Rust
+    ``Parsed`` enum's stored names/spine): a chapter's listing and page
+    reads share ONE open+parse instead of paying it per side. Both are
+    computed under ``lock`` — the shared seekable object is not
+    thread-safe, and ``_epub_names_from_zf`` issues many entry reads that
+    must serialize against concurrent page reads.
+    """
+
+    __slots__ = ("obj", "lock", "names", "epub")
+
+    def __init__(self, obj) -> None:
+        self.obj = obj
+        self.lock = threading.Lock()
+        self.names: list[str] | None = None
+        self.epub: tuple[list[str], list[str]] | None = None
+
+
+_open_archives: "OrderedDict[tuple[str, int, int], _OpenArchive]" = OrderedDict()
+_open_archives_lock = threading.Lock()
+
+
+def _archive_cache_key(path: Path) -> tuple[str, int, int] | None:
+    """LRU key: resolved path + (mtime, size) so an edited file re-opens."""
+    try:
+        st = path.stat()
+    except (OSError, ValueError):
+        return None
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        resolved = path
+    return (str(resolved), st.st_mtime_ns, st.st_size)
+
+
+def _close_open_archive(entry: _OpenArchive) -> None:
+    """Close a cached archive object, serialized against in-flight readers."""
+    with entry.lock:
+        obj, entry.obj = entry.obj, None
+    if obj is not None:
+        try:
+            obj.close()
+        except Exception:
+            pass
+
+
+def _open_archive_entry(path: Path, open_fn) -> _OpenArchive | None:
+    """Return the cached open archive for *path*, opening via *open_fn* on miss.
+
+    ``None`` means "no cache key" (unstat'able path) — callers then do a
+    direct one-shot open. *open_fn* exceptions propagate so callers keep
+    classifying them exactly as before (rarfile.RarCannotExec →
+    ArchiveToolMissing, anything else → None). Open failures are not
+    cached: the next request retries.
+    """
+    key = _archive_cache_key(path)
+    if key is None:
+        return None
+    with _open_archives_lock:
+        hit = _open_archives.get(key)
+        if hit is not None:
+            _open_archives.move_to_end(key)
+            return hit
+    # Open outside the LRU lock: header parsing can be slow and must not
+    # serialize unrelated archive traffic. If another thread won the race,
+    # the loser object is closed unused.
+    obj = open_fn(path)
+    entry = _OpenArchive(obj)
+    loser = evicted = None
+    with _open_archives_lock:
+        existing = _open_archives.get(key)
+        if existing is not None:
+            _open_archives.move_to_end(key)
+            loser = entry
+            entry = existing
+        else:
+            _open_archives[key] = entry
+            if len(_open_archives) > _OPEN_ARCHIVE_CACHE_MAX:
+                _, evicted = _open_archives.popitem(last=False)
+    for e in (loser, evicted):
+        if e is not None:
+            _close_open_archive(e)
+    return entry
+
+
+def _clear_open_archive_cache() -> None:
+    """Drop and close every cached open archive (test isolation)."""
+    while True:
+        with _open_archives_lock:
+            if not _open_archives:
+                return
+            _, entry = _open_archives.popitem(last=False)
+        _close_open_archive(entry)
+
+
+# ── memo-backed listings (#256) ──────────────────────────────────────────
+#
+# ``list_archive_entries`` used to open a FRESH archive on every disk-cache
+# miss even though the read path memoizes open archives — a chapter paid
+# open+parse once for its listing and again for its first page. The Rust
+# ``bookq_core::open_archive`` stores parsed names on the memo object and
+# serves listings through it (viewer-rs fb1a469 / c1c3e03); these wrappers
+# do the same: capture names/epub once on the ``_OpenArchive`` under its
+# lock, fall back to the uncached one-shot functions on any cache
+# unavailability (no key / evicted / open failure), never cache failures.
+
+
+def _zip_names(path: Path) -> list[str]:
+    try:
+        entry = _open_archive_entry(path, zipfile.ZipFile)
+    except Exception:
+        return _zip_names_uncached(path)
+    if entry is None:
+        return _zip_names_uncached(path)
+    with entry.lock:
+        if entry.obj is None:
+            return _zip_names_uncached(path)
+        if entry.names is None:
+            try:
+                entry.names = [i.filename for i in entry.obj.infolist()]
+            except Exception:
+                return []
+        return list(entry.names)
+
+
+def _rar_names(path: Path) -> list[str]:
+    try:
+        import rarfile
+
+        entry = _open_archive_entry(path, lambda p: rarfile.RarFile(str(p)))
+    except Exception:
+        return _rar_names_uncached(path)
+    if entry is None:
+        return _rar_names_uncached(path)
+    with entry.lock:
+        if entry.obj is None:
+            return _rar_names_uncached(path)
+        if entry.names is None:
+            try:
+                entry.names = [
+                    i.filename for i in entry.obj.infolist() if not i.is_dir()
+                ]
+            except Exception:
+                return []
+        return list(entry.names)
+
+
+def _epub_entries(path: Path) -> list[str]:
+    try:
+        entry = _open_archive_entry(path, zipfile.ZipFile)
+    except Exception:
+        return _epub_entries_uncached(path)
+    if entry is None:
+        return _epub_entries_uncached(path)
+    with entry.lock:
+        if entry.obj is None:
+            return _epub_entries_uncached(path)
+        if entry.epub is None:
+            try:
+                entry.epub = _epub_names_from_zf(entry.obj)
+            except Exception:
+                return []
+        raw, spine = entry.epub
+    # finalize per call (dedupe/cap/order), matching _epub_entries_uncached.
+    return _epub_finalize(raw, spine)
+
+
+def _zip_entry_bytes(zf: zipfile.ZipFile, inner: str) -> bytes | None:
+    try:
+        info = zf.getinfo(inner)
+    except KeyError:
+        return None
+    with zf.open(info) as fp:
+        return fp.read()
+
+
+def _read_zip_uncached(path: Path, inner: str) -> bytes | None:
     try:
         with zipfile.ZipFile(path) as zf:
-            if inner not in zf.namelist():
-                return None
-            with zf.open(inner) as fp:
-                return fp.read()
+            return _zip_entry_bytes(zf, inner)
     except Exception:
         return None
 
 
-def _read_rar(path: Path, inner: str) -> bytes | None:
+def _read_zip(path: Path, inner: str) -> bytes | None:
     try:
-        import rarfile
-    except ImportError as exc:
-        raise ArchiveToolMissing("RAR support requires the rarfile package") from exc
+        entry = _open_archive_entry(path, zipfile.ZipFile)
+    except Exception:
+        return None
+    if entry is None:
+        return _read_zip_uncached(path, inner)
+    with entry.lock:
+        if entry.obj is None:
+            return _read_zip_uncached(path, inner)
+        try:
+            return _zip_entry_bytes(entry.obj, inner)
+        except Exception:
+            return None
+
+
+def _rar_entry_bytes(rf, inner: str, path: Path, rarfile) -> bytes | None:
+    """Read *inner* from an open RarFile. Raises ArchiveToolMissing when the
+    external extractor is absent; every other failure logs and yields None."""
+    try:
+        info = rf.getinfo(inner)
+    except rarfile.NoRarEntry:
+        return None
+    except Exception as exc:
+        logger.debug("RAR list failed for %s: %r", path, exc)
+        return None
+    try:
+        return rf.read(info)
+    except rarfile.RarCannotExec as exc:
+        raise ArchiveToolMissing(
+            "RAR extraction requires 7-Zip (7z) or unrar on PATH"
+        ) from exc
+    except Exception as exc:
+        logger.warning("RAR extraction failed for %s!%s: %r", path, inner, exc)
+        return None
+
+
+def _read_rar_uncached(path: Path, inner: str, rarfile) -> bytes | None:
     try:
         rf = rarfile.RarFile(str(path))
     except rarfile.RarCannotExec as exc:
@@ -377,26 +627,37 @@ def _read_rar(path: Path, inner: str) -> bytes | None:
         logger.debug("RAR open failed for %s: %r", path, exc)
         return None
     with rf:
-        try:
-            names = rf.namelist()
-        except Exception as exc:
-            logger.debug("RAR list failed for %s: %r", path, exc)
-            return None
-        if inner not in names:
-            return None
-        try:
-            return rf.read(inner)
-        except rarfile.RarCannotExec as exc:
-            raise ArchiveToolMissing(
-                "RAR extraction requires 7-Zip (7z) or unrar on PATH"
-            ) from exc
-        except Exception as exc:
-            logger.warning("RAR extraction failed for %s!%s: %r", path, inner, exc)
-            return None
+        return _rar_entry_bytes(rf, inner, path, rarfile)
+
+
+def _read_rar(path: Path, inner: str) -> bytes | None:
+    try:
+        import rarfile
+    except ImportError as exc:
+        raise ArchiveToolMissing("RAR support requires the rarfile package") from exc
+    try:
+        entry = _open_archive_entry(path, lambda p: rarfile.RarFile(str(p)))
+    except rarfile.RarCannotExec as exc:
+        raise ArchiveToolMissing(
+            "RAR extraction requires 7-Zip (7z) or unrar on PATH"
+        ) from exc
+    except Exception as exc:
+        logger.debug("RAR open failed for %s: %r", path, exc)
+        return None
+    if entry is None:
+        return _read_rar_uncached(path, inner, rarfile)
+    with entry.lock:
+        if entry.obj is None:
+            return _read_rar_uncached(path, inner, rarfile)
+        return _rar_entry_bytes(entry.obj, inner, path, rarfile)
 
 
 def read_archive_entry(archive_path: Path, inner: str) -> bytes | None:
     """Return the raw bytes of one image entry, or ``None`` if it cannot be served.
+
+    Open archives are memoized across requests (see ``_open_archive_entry``)
+    so repeat page reads skip the full header re-parse; .zip/.cbz/.epub go
+    through ``_read_zip`` (EPUB is a ZIP) and .rar/.cbr through ``_read_rar``.
 
     Raises :class:`ArchiveToolMissing` only when the format is recognised but
     the external extractor is absent — callers turn that into HTTP 501.
