@@ -52,9 +52,10 @@ SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 COMMENT_THROTTLE_MIN = 60
 
 # HTTP statuses that mean "Cloudflare edge could not get a usable response
-# from the origin" — tunnel down, cloudflared dead, or viewer refusing.
-CF_ERROR_STATUSES = {520, 521, 522, 523, 525, 526, 530}
-# 502/524 also appear for origin failures; only count them as tunnel-layer
+# from the origin" — tunnel down, cloudflared dead, viewer refusing, or the
+# origin timing out (524).
+CF_ERROR_STATUSES = {520, 521, 522, 523, 524, 525, 526, 530}
+# 502/504 also appear for origin failures; only count them as tunnel-layer
 # when the body carries Cloudflare's error branding.
 CF_BRANDED_STATUSES = {502, 504}
 CF_BODY_MARKER = b"cloudflare"

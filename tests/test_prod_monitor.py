@@ -28,7 +28,7 @@ def _http(status, body=b"", error=None, headers=None):
 # classify_status
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("status", [520, 521, 522, 523, 525, 526, 530])
+@pytest.mark.parametrize("status", [520, 521, 522, 523, 524, 525, 526, 530])
 def test_cf_error_statuses_are_cf_tunnel(status):
     assert pm.classify_status(status, b"") == "cf_tunnel"
 
