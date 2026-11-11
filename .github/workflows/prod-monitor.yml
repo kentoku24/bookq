@@ -1,0 +1,139 @@
+name: prod-monitor
+run-name: "prod-monitor ${{ github.event_name }} run#${{ github.run_id }}"
+
+# 本番監視 (#監視設計): 公開ドメインの無認証エンドポイントを 10 分毎に
+# プローブし、逸脱を `monitor` ラベル付き issue に構造化レポートする。
+# 障害の新規検知・signature 変更時のみ analyze ジョブが opencode を
+# 直接実行して診断コメントを投稿する（GITHUB_TOKEN 製 issue は bot
+# ゲートで ai/* ラベルが効かないため、opencode-auto 経由ではなく
+# この workflow 内で完結させる）。自動復旧はしない。
+# 詳細は docs/deployment.md「本番監視」参照。
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: prod-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      action: ${{ steps.report.outputs.action }}
+      needs_analysis: ${{ steps.report.outputs.needs_analysis }}
+      issue_number: ${{ steps.report.outputs.issue_number }}
+      summary: ${{ steps.report.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Probe production endpoints
+        env:
+          BOOKQ_MONITOR_BASE_URL: https://bookq.mats.dpdns.org
+          BOOKQ_MONITOR_OUT: monitor-result.json
+        run: python3 scripts/prod_monitor.py probe
+
+      - name: Upsert incident issue
+        id: report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOOKQ_MONITOR_RESULT: monitor-result.json
+          BOOKQ_MONITOR_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/prod_monitor.py report
+
+      - name: Upload probe result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-monitor-result
+          path: monitor-result.json
+          if-no-files-found: ignore
+
+  # 障害の新規検知・signature 変更時のみ実行。issue 本文の診断
+  # バンドルを読んで層の切り分け・最有力原因・次の一手をコメントする。
+  # 定期実行では走らないのでコストは障害時のみ。
+  analyze:
+    needs: monitor
+    if: needs.monitor.outputs.needs_analysis == 'true' && needs.monitor.outputs.issue_number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build prompt.txt (heredoc from env — NO shell expansion)
+        env:
+          ISSUE_NUMBER: ${{ needs.monitor.outputs.issue_number }}
+          SUMMARY: ${{ needs.monitor.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > prompt.txt <<'TEMPLATE'
+          A production monitoring probe for bookq (a personal manga/image viewer
+          behind Cloudflare Tunnel -> cloudflared -> FastAPI viewer, plus a
+          viewer-rs Rust gateway on the tailnet path) detected a service
+          deviation on the public domain https://bookq.mats.dpdns.org.
+
+          The GitHub issue below contains the full diagnostic bundle (per-endpoint
+          HTTP status/latency/cf-ray, failure classification, deployed sha).
+
+          Your task:
+          1. Read the issue: gh issue view <ISSUE_NUMBER> --comments
+          2. Analyze which layer deviated — Cloudflare edge -> cloudflared
+             tunnel -> viewer/viewer-rs -> app — and the most likely cause,
+             using the bundle plus repo docs (docs/deployment.md describes the
+             architecture and past incidents such as the 502 network issue).
+          3. You may re-probe the public endpoints yourself (unauthenticated
+             checks only: /api/health, /api/v1/health, /api/version, /,
+             /auth/login, /api/folders expecting 401, /static/sw.js,
+             /static/app.js).
+          4. Post your findings as ONE comment on the issue via
+             `gh issue comment <ISSUE_NUMBER>` covering: verdict, most likely
+             root cause, suggested next steps for the operator.
+
+          Constraints: do NOT modify code, do NOT open PRs, do NOT close or
+          relabel the issue, do NOT attempt remediation commands.
+          TEMPLATE
+          printf '\nIssue number: %s\nMonitor summary: %s\nProbe run: %s\n' \
+            "$ISSUE_NUMBER" "$SUMMARY" "$RUN_URL" >> prompt.txt
+
+      - name: Configure git auth (GH_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "bookq-monitor"
+          git config user.email "bot@users.noreply.github.com"
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install opencode CLI
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Run opencode analysis
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - name: Report analysis failure on issue
+        if: failure() && needs.monitor.outputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ needs.monitor.outputs.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⚠️ 分析ジョブ (analyze) が失敗しました。run: ${RUN_URL} — 診断バンドルは issue 本文を参照してください。"
