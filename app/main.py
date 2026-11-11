@@ -172,7 +172,8 @@ async def lifespan(app: FastAPI):
     # semantics; all fill errors are swallowed per item inside the task.
     # Startup cover pre-warming (plan thumb-warmup-stale-serve Todo 3):
     # warm every folder's single cover into the thumb disk cache right
-    # away (no idle gating). Same fire-and-forget shape as the fill above;
+    # away, each job idle-gated on last_request_at the same way as the
+    # fill. Same fire-and-forget shape as the fill above;
     # all warm errors are swallowed per job inside the task.
     # #320: both tasks only exist to enrich the tree — under
     # BOOKQ_DISABLE_INDEX there is no tree, so they are never spawned.
