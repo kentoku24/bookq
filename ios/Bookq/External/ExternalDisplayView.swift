@@ -112,7 +112,7 @@ struct ExternalReaderView: View {
 
     private func spreadCell(ext: ReaderWork, pages: [Int], in size: CGSize) -> some View {
         let gap: CGFloat = 5
-        let ars = pages.map { p.pageAR[$0] ?? 0.7 }
+        let ars = pages.map { p.pageAR[$0] ?? p.lastAR }
         let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
         return HStack(spacing: gap) {
             ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in

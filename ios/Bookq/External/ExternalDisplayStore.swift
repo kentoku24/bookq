@@ -18,6 +18,8 @@ final class ExternalDisplayStore: ObservableObject {
         var work: ReaderWork
         var currentIdx: Int
         var pageAR: [Int: CGFloat]
+        /// Web `lastAR` parity — fallback AR for pages not yet measured.
+        var lastAR: CGFloat = 0.7
         var spreadOffset: Int
         var landscapeSpread: Bool
         var urlFor: (PageRef) -> URL?
