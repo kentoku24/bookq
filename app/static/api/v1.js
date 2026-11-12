@@ -7,8 +7,7 @@
  *
  * Contract source of truth: api/openapi.v1.yaml. The response shapes the
  * unwrap helpers accept are typed in `app/static/api/api-types.d.ts`,
- * generated with:
- *   npx openapi-typescript@7 api/openapi.v1.yaml -o app/static/api/api-types.d.ts
+ * generated with `scripts/api/codegen.sh` (CI fails on drift).
  */
 (function () {
   "use strict";

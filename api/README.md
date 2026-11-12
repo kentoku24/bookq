@@ -9,6 +9,14 @@
 | `v1-semantics.md` | v1 REST の意味論正本 (ETag 世代・positions LWW・owner HMAC・PKCE ライフサイクル・gzip)。openapi.v1.yaml とセットで読む |
 | `asyncapi.yaml` | `/ws/reader-sync` のワイヤ形式 (AsyncAPI 3.0) |
 | `reader-sync-protocol.md` | reader-sync の振る舞い契約 (フェーズ機械・逐次化・拒否理由・MANIFEST)。asyncapi.yaml とセットで読む |
+| `dist/` | 生成物 (codegen のみが書く。手編集禁止): `openapi.v1.json` / `asyncapi.json` + Web 型 `app/static/api/api-types.d.ts` |
+
+## 生成物の再生成
+
+spec を編集したら必ず `./scripts/api/codegen.sh` を実行する
+(ツール版固定のためローカルと CI は同一出力)。
+CI (`api-spec-lint.yml` の codegen-drift job) が再生成後の
+`git diff --exit-code` で drift を fail させる。
 
 ## 編集規約
 
