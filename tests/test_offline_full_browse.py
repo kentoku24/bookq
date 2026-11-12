@@ -162,7 +162,8 @@ def test_api_folders_offline_recovery(page, server):
     sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
     assert "res.clone()" in sw_text and "caches.open" in sw_text, "SW networkFirst must clone before put"
     # SW still has /api/folders alias fallback (app no longer populates Cache entry)
-    assert "caches.match('/api/v1/tree')" in sw_text or 'caches.match("/api/folders")' in sw_text, "SW must have /api/folders alias fallback"
+    # #236: the tree path comes from api/endpoints.js (API_PATHS.tree), never hard-coded.
+    assert "caches.match(_treePath)" in sw_text or 'caches.match("/api/folders")' in sw_text, "SW must have /api/folders alias fallback"
     assert "ignoreSearch" in sw_text, "SW must have ignoreSearch fallback"
 
     # verify app.js uses IDB-only and no longer caches.put/match for /api/folders

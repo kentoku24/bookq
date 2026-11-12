@@ -48,17 +48,22 @@ def test_shell_precache_v2_count():
     # visibility module must exist in the same shell as the app that wires it.
     # offline/connectivity.js (3-state machine) must be precached too — the
     # offline-first boot reads it before any network resolves.
-    assert len(entries) == 35, f"expected 35 SHELL_ASSETS, got {len(entries)}: {entries}"
+    # api/endpoints.js (#236 generated path constants) joins the shell — the
+    # SW importScripts it and the page loads it before api/v1.js.
+    assert len(entries) == 36, f"expected 36 SHELL_ASSETS, got {len(entries)}: {entries}"
     assert '"/static/offline/connectivity.js"' in m.group(1), "SHELL_ASSETS must precache offline/connectivity.js"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
     assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
     assert '"/static/browse/visibility.js"' in m.group(1), "SHELL_ASSETS must precache browse/visibility.js"
+    assert '"/static/api/endpoints.js"' in m.group(1), "SHELL_ASSETS must precache api/endpoints.js (#236)"
     assert "new Request" in text and "reload" in text, "install must use new Request with cache:reload"
 
 def test_static_swr_branch_order_and_guard():
     text = SW_PATH.read_text(encoding="utf-8")
     assert "staticSWR" in text or "StaleWhileRevalidate" in text or "caches.match" in text
-    health_idx = text.find("/api/v1/health")
+    # #236: the health probe path comes from api/endpoints.js, never hard-coded.
+    assert "importScripts('/static/offline-core.js', '/static/api/endpoints.js')" in text
+    health_idx = text.find("API_PATHS.health")
     # static branch is in fetch handler: startsWith('/static/') && ['script','style'...
     fetch_section = text[text.find('self.addEventListener("fetch"'):]
     static_idx = fetch_section.find("startsWith('/static/')")
@@ -73,7 +78,7 @@ def test_static_swr_branch_order_and_guard():
     assert image_idx != -1
     assert static_idx < image_idx, f"branch order wrong: static {static_idx} image {image_idx} in fetch handler"
     # global order health before static
-    assert text.find("/api/v1/health") < text.find("staticSWR") or text.find("/api/v1/health") < fetch_section.find("startsWith('/static/')") + text.find('self.addEventListener("fetch"')
+    assert text.find("API_PATHS.health") < text.find("staticSWR") or text.find("API_PATHS.health") < fetch_section.find("startsWith('/static/')") + text.find('self.addEventListener("fetch"')
     assert "!url.pathname.startsWith('/static/')" in text, "image branch must guard !/static/"
     assert "['script','style','image','font','css']" in text or '["script"' in text or "request.destination" in text
 
@@ -92,7 +97,8 @@ def test_visibility_api_is_network_only():
     Cache API)."""
     text = SW_PATH.read_text(encoding="utf-8")
     fetch_section = text[text.find('self.addEventListener("fetch"'):]
-    vis_idx = fetch_section.find("'/api/v1/folder-visibility'")
+    # #236: path via api/endpoints.js (API_PATHS), never a hard-coded string.
+    vis_idx = fetch_section.find("API_PATHS.folderVisibility")
     api_idx = fetch_section.find("startsWith('/api/')")
     assert vis_idx != -1, "dedicated /api/v1/folder-visibility branch missing"
     assert api_idx != -1, "generic /api/ NetworkFirst branch missing"
