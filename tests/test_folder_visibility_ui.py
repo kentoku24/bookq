@@ -462,6 +462,12 @@ def test_shallow_window_filters_hidden_ancestor_tile(fvpage, flat_vis_env):
             held_full.append(route)
 
     fvpage.route("**/api/v1/tree*", _route)
+    # Cold boot only: a warm IDB snapshot makes _onOnline take the revalidate
+    # path (full GET only, no depth=1 stage), so `shallow` would never be set.
+    # Delete the snapshot to force the loadFolders shallow→full path.
+    fvpage.evaluate(
+        "async () => { if (window.OfflineTree) await window.OfflineTree.delTree(); }"
+    )
     fvpage.reload()
     fvpage.wait_for_function(
         "window.FolderVisibility && "

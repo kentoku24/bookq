@@ -46,7 +46,10 @@ def test_shell_precache_v2_count():
     # the boot pull must exist in the same shell as app.js that calls it.
     # browse/visibility.js (per-user hidden roots) joins the shell — the
     # visibility module must exist in the same shell as the app that wires it.
-    assert len(entries) == 34, f"expected 33 SHELL_ASSETS, got {len(entries)}: {entries}"
+    # offline/connectivity.js (3-state machine) must be precached too — the
+    # offline-first boot reads it before any network resolves.
+    assert len(entries) == 35, f"expected 35 SHELL_ASSETS, got {len(entries)}: {entries}"
+    assert '"/static/offline/connectivity.js"' in m.group(1), "SHELL_ASSETS must precache offline/connectivity.js"
     assert '"/static/viewer/navigation.js"' in m.group(1), "SHELL_ASSETS must precache viewer/navigation.js"
     assert '"/static/viewer/pairController.js"' in m.group(1), "SHELL_ASSETS must precache viewer/pairController.js"
     assert '"/static/browse/visibility.js"' in m.group(1), "SHELL_ASSETS must precache browse/visibility.js"
