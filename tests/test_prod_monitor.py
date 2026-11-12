@@ -68,13 +68,22 @@ def test_eval_health_transport_is_unreachable():
     assert not oc.ok and oc.fail_class == "unreachable"
 
 
-def test_eval_folders_gate_200_is_auth_bypass():
-    oc = pm.eval_folders_gate(_http(200, b'{"folders":[]}'))
+def test_eval_auth_gate_200_is_auth_bypass():
+    oc = pm.eval_auth_gate(_http(200, b'{"nodes":[]}'))
     assert not oc.ok and oc.fail_class == "auth_bypass"
 
 
-def test_eval_folders_gate_401_passes():
-    assert pm.eval_folders_gate(_http(401, b"")).ok
+def test_eval_auth_gate_401_passes():
+    assert pm.eval_auth_gate(_http(401, b"")).ok
+
+
+def test_eval_version_gate_401_passes():
+    assert pm.eval_version_gate(_http(401, b"")).ok
+
+
+def test_eval_version_gate_200_is_auth_bypass():
+    oc = pm.eval_version_gate(_http(200, b'{"version":"2.0.0","sha":"abc1234","build_date":"d"}'))
+    assert not oc.ok and oc.fail_class == "auth_bypass"
 
 
 def test_eval_auth_login_redirect_ok():
@@ -92,16 +101,6 @@ def test_eval_auth_login_200_is_contract_break():
     assert not oc.ok and oc.fail_class == "contract_break"
 
 
-def test_eval_version_extracts_sha():
-    oc = pm.eval_version(_http(200, b'{"version":"2.0.0","sha":"2614ce9c2fcc","build_date":"2026-11-09"}'))
-    assert oc.ok and oc.extra["sha"] == "2614ce9c2fcc"
-
-
-def test_eval_version_bad_sha_is_contract_break():
-    oc = pm.eval_version(_http(200, b'{"sha":""}'))
-    assert not oc.ok and oc.fail_class == "contract_break"
-
-
 def test_eval_static_app_size_floor():
     assert not pm.eval_static_app(_http(200, b"x" * 50_000)).ok
     assert pm.eval_static_app(_http(200, b"x" * 200_000)).ok
@@ -114,17 +113,16 @@ def test_eval_static_app_size_floor():
 def _stub_fetch_ok(url, timeout):
     path = url.split("bookq.mats.dpdns.org")[-1]
     bodies = {
-        "/api/health": b'{"status":"ok"}',
         "/api/v1/health": b'{"status":"ok"}',
-        "/api/version": b'{"version":"2.0.0","sha":"2614ce9c2fcc","build_date":"d"}',
         "/": "<html><title>bookq — ログイン</title></html>".encode(),
-        "/api/folders": b"",
+        "/api/v1/version": b"",
+        "/api/v1/tree": b"",
         "/static/sw.js": b"bookq-shell-v1",
         "/static/app.js": b"x" * 200_000,
     }
     if path == "/auth/login":
         return _http(302, headers={"location": "https://accounts.google.com/x"})
-    status = 401 if path == "/api/folders" else 200
+    status = 401 if path in ("/api/v1/version", "/api/v1/tree") else 200
     return _http(status, bodies.get(path, b""))
 
 
@@ -133,8 +131,13 @@ def test_run_probe_all_ok(monkeypatch):
     result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
     assert result["verdict"] == "ok"
     assert result["signature"] == "ok"
-    assert result["version"]["sha"] == "2614ce9c2fcc"
+    # v1-only: /api/v1/version requires auth, so no sha is observable.
+    assert result["version"] is None
     assert len(result["checks"]) == len(pm.CHECKS)
+    assert {c["id"] for c in result["checks"]} == {
+        "v1_health", "v1_version_gate", "root", "auth_login",
+        "tree_gate", "static_sw", "static_app",
+    }
 
 
 def test_run_probe_all_down(monkeypatch):
@@ -145,18 +148,29 @@ def test_run_probe_all_down(monkeypatch):
     assert result["verdict"] == "fail"
     assert result["classification"] == "unreachable"
     assert result["signature"].startswith("unreachable:")
-    assert "health" in result["signature"]
+    assert "v1_health" in result["signature"]
 
 
 def test_run_probe_auth_bypass_is_top_class(monkeypatch):
     def bypass(url, timeout):
-        if url.endswith("/api/folders"):
-            return _http(200, b'{"folders":[]}')
+        if url.endswith("/api/v1/tree"):
+            return _http(200, b'{"kind":"tree","nodes":[],"generation":1}')
         return _stub_fetch_ok(url, timeout)
     monkeypatch.setattr(pm, "fetch", bypass)
     result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
     assert result["classification"] == "auth_bypass"
-    assert "folders_gate" in result["signature"]
+    assert "tree_gate" in result["signature"]
+
+
+def test_run_probe_version_gate_bypass_is_auth_bypass(monkeypatch):
+    def bypass(url, timeout):
+        if url.endswith("/api/v1/version"):
+            return _http(200, b'{"version":"2.0.0","sha":"abc1234","build_date":"d"}')
+        return _stub_fetch_ok(url, timeout)
+    monkeypatch.setattr(pm, "fetch", bypass)
+    result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
+    assert result["classification"] == "auth_bypass"
+    assert "v1_version_gate" in result["signature"]
 
 
 def test_probe_error_result_is_valid_fail():
@@ -170,9 +184,9 @@ def test_probe_error_result_is_valid_fail():
 # ---------------------------------------------------------------------------
 
 def test_sig_marker_roundtrip():
-    body = "text <!-- monitor-sig:cf_tunnel:health,version --> tail"
+    body = "text <!-- monitor-sig:cf_tunnel:tree_gate,v1_health --> tail"
     m = pm.SIG_MARKER_RE.search(body)
-    assert m and m.group(1) == "cf_tunnel:health,version"
+    assert m and m.group(1) == "cf_tunnel:tree_gate,v1_health"
 
 
 def test_decide_fail_action_signature_change_triggers_analysis():
@@ -212,12 +226,12 @@ def test_format_duration():
 def test_render_issue_body_has_marker_and_context():
     result = {
         "verdict": "fail", "classification": "cf_tunnel",
-        "signature": "cf_tunnel:health", "summary": "cf_tunnel: 1/8 checks failed (health)",
+        "signature": "cf_tunnel:v1_health", "summary": "cf_tunnel: 1/7 checks failed (v1_health)",
         "ts": "2026-11-11T00:00:00Z", "base_url": "https://x",
-        "version": {"sha": "abc1234", "build_date": "d"},
-        "checks": [{"id": "health", "ok": False, "status": 502, "latency_ms": 5, "detail": "HTTP 502"}],
+        "version": None,
+        "checks": [{"id": "v1_health", "ok": False, "status": 502, "latency_ms": 5, "detail": "HTTP 502"}],
     }
     body = pm.render_issue_body(result, "https://run", "deadbeef")
-    assert "<!-- monitor-sig:cf_tunnel:health -->" in body
-    assert "abc1234" in body and "deadbeef" in body
+    assert "<!-- monitor-sig:cf_tunnel:v1_health -->" in body
+    assert "unknown" in body and "deadbeef" in body
     assert "cf_tunnel" in body
