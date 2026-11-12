@@ -680,11 +680,14 @@ async fn pair_report_post(st: &AppState, req: Request<Body>) -> Response {
     let gen = report_gen(obj.get("gen"));
     let dominated = {
         let mut map = st.pair_reports.lock().unwrap();
-        let dominated = map.get(&cid).is_some_and(|cur| {
-            gen < report_gen(cur.as_object().and_then(|m| m.get("gen")))
-        });
+        let dominated = map
+            .get(&cid)
+            .is_some_and(|cur| gen < report_gen(cur.as_object().and_then(|m| m.get("gen"))));
         if !dominated {
-            obj.insert("received_at".to_string(), serde_json::json!(pair_now_secs()));
+            obj.insert(
+                "received_at".to_string(),
+                serde_json::json!(pair_now_secs()),
+            );
             map.insert(cid, serde_json::Value::Object(obj));
         }
         dominated
@@ -1342,7 +1345,11 @@ mod pair_hook_tests {
         let st = test_state(true);
         // Gen-less report stores; the id key is popped, received_at stamped.
         let (status, body) = body_json(
-            pair_report_post(&st, post_req(json!({"id": "c1", "pc": {"phase": "reading"}}))).await,
+            pair_report_post(
+                &st,
+                post_req(json!({"id": "c1", "pc": {"phase": "reading"}})),
+            )
+            .await,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -1369,7 +1376,10 @@ mod pair_hook_tests {
             pair_report_post(&st, post_req(json!({"id": "c1", "gen": 3, "pc": 2}))).await,
         )
         .await;
-        assert_eq!((status, body), (StatusCode::OK, json!({"ok": true, "dropped": true})));
+        assert_eq!(
+            (status, body),
+            (StatusCode::OK, json!({"ok": true, "dropped": true}))
+        );
         let get = Request::builder()
             .method("GET")
             .uri("/api/v1/pair-report?id=c1")
@@ -1393,7 +1403,8 @@ mod pair_hook_tests {
     #[tokio::test]
     async fn post_requires_id() {
         let st = test_state(true);
-        let (status, body) = body_json(pair_report_post(&st, post_req(json!({"pc": {}}))).await).await;
+        let (status, body) =
+            body_json(pair_report_post(&st, post_req(json!({"pc": {}}))).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body, json!({"detail": "id required"}));
     }
@@ -1408,13 +1419,19 @@ mod pair_hook_tests {
             .uri("/api/v1/pair-report")
             .body(Body::from(r#"{"id":"c1"}"#))
             .unwrap();
-        assert_eq!(pair_report(State(st.clone()), post).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            pair_report(State(st.clone()), post).await.status(),
+            StatusCode::NOT_FOUND
+        );
         let get = Request::builder()
             .method("GET")
             .uri("/api/v1/pair-report?id=c1")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(pair_report(State(st.clone()), get).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            pair_report(State(st.clone()), get).await.status(),
+            StatusCode::NOT_FOUND
+        );
         let reset = Request::builder()
             .method("POST")
             .uri("/api/v1/pair-reset")
