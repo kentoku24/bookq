@@ -226,7 +226,6 @@
     return Promise.resolve(false);
   }
   let _onlineRevalidateLast = 0;
-  let _onlineRevalidateTimer = null;
   // Todo 5: warm-only conditional fetch. Keys mirror the server
   // _folders_response cache keys (path,depth): root full vs shallow1.
   // Cold first fetch (loadFolders stages) stays unconditional — ETag never
@@ -359,17 +358,13 @@
     }
     return _revalidateInFlight;
   }
-  function scheduleOnlineRevalidation(){
-    if(_onlineRevalidateTimer) clearTimeout(_onlineRevalidateTimer);
-    _onlineRevalidateTimer = setTimeout(()=>{ _onlineRevalidateTimer=null; revalidateFoldersForOnline(); }, 500);
-  }
   // Connectivity state transitions (bookq:connectivity-change) own reconnect
   // and revalidation now; the raw OS events only update the local meter.
   window.addEventListener('online',()=>{ updateStorageBar(); });
   // Going offline must invalidate the freshness stamp: an online→offline→online
   // flip inside the 5-minute window has to revalidate immediately, since the
   // tree could not be revalidated while offline.
-  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; if(_onlineRevalidateTimer){ clearTimeout(_onlineRevalidateTimer); _onlineRevalidateTimer = null; } updateStorageBar(); });
+  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; updateStorageBar(); });
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   function ensurePersist(deps){
     if(persistRequested) return;

@@ -68,7 +68,7 @@ iOS も同じクエリ・ヘッダを送りワイヤ形状を揃える。
 | 結果 | 判定 |
 |---|---|
 | fetch 解決かつ `res.ok` かつ `X-Bookq-SWCache` ヘッダ無し | 成功 → `reportSuccess` |
-| fetch 解決かつ `res.ok` かつ `X-Bookq-SWCache` ヘッダ有り | 中立 (キャッシュ応答はオンラインの証拠にしない) |
+| fetch 解決かつ `res.ok` かつ `X-Bookq-SWCache` ヘッダ有り | 失敗 → `reportFail` (マーカーはネットワークレグ自体の失敗を意味する) |
 | HTTP 502 / 503 / 504 | 失敗 → `reportFail` (プロキシ到達・上流不可) |
 | その他の HTTP ステータス (4xx, 500 等) | 中立 (サーバは応答している) |
 | fetch 拒否 `TypeError` (SW `Response.error()` 含む) | 失敗 → `reportFail` |

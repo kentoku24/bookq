@@ -31,6 +31,7 @@
   var _state = "offline";        // "offline" | "connecting" | "online"
   var _connecting = null;        // active cycle promise — connect() coalesces
   var _attempt = 0;              // current attempt index (debug surface)
+  var _gen = 0;                  // cycle generation — stale .then must not touch state
 
   function _el() { return document.getElementById("offline-status"); }
 
@@ -97,7 +98,12 @@
   function connect(deps) {
     if (_state === "connecting" && _connecting) return _connecting;
     _setState("connecting");
+    // Generation guard: a late-resolving older cycle must not clear a newer
+    // cycle's _connecting handle or demote its live 'connecting' state
+    // (reportSuccess→online→reportFail→connect() interleaves otherwise).
+    var g = ++_gen;
     _connecting = _runAttempts(deps).then(function (ok) {
+      if (g !== _gen) return _state === "online";
       _connecting = null;
       // A reportSuccess may have landed 'online' already — don't demote it.
       if (ok) _setState("online");
