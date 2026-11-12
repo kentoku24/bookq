@@ -16,7 +16,19 @@ unrar = "0.5.8"
 # zlib-rs backend: miniz_oxide inflates ~2-3x slower than zlib C; zlib-rs is
 # pure Rust, faster than C zlib, and self-contained (no system zlib needed).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# pdfium-render (PDFium engine — same renderer pypdfium2 wraps, #402).
+# Default features: pdfium_latest (=8125 bindings) + image_025 + thread_safe
+# (mutex-serialized access; render calls ride spawn_blocking like unrar).
+# Dynamic linking only: the .so ships in the viewer-rs image
+# (Dockerfile.viewer-rs) and PDFIUM_DYNAMIC_LIB_PATH points at it at
+# runtime; when no library is present every entry point degrades to the
+# lopdf/regex fallback so cargo test stays green without the .so.
+pdfium-render = "0.9.5"
+# PNG encoder for rendered pages (pure-Rust; unifies with pdfium-render's
+# image 0.25 so DynamicImage types match across the two crates).
+image = { version = "0.25", default-features = false, features = ["png"] }
 lopdf = "0.42"
 roxmltree = "0.20"
+serde_json = "1"
 sha2 = "0.10"
 toml = "0.8"
