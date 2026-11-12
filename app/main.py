@@ -244,6 +244,18 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "private, no-store", "Vary": "Cookie"},
         )
 
+    # v0 deprecation (#212/#407): legacy /api/* (non-v1) responses carry
+    # `Deprecation: true` (RFC 8594). No `Sunset` header — shutdown rides
+    # with the viewer stop (#410), date TBD, so a calendar Sunset would be
+    # fiction. viewer-rs proxies v0 upstream, so the header flows through.
+    @app.middleware("http")
+    async def _v0_deprecation_middleware(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/api/") and not path.startswith("/api/v1/"):
+            response.headers["Deprecation"] = "true"
+        return response
+
     return app
 
 

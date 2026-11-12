@@ -587,13 +587,17 @@ paths:
         "401": {description: コード / verifier / refresh token 不正}
 
   # ── v0 互換 (deprecated: v1 へ移行後に削除) ────────────────────────
+  # 退役方針 (#212/#407): 全 3 client は v1 移行済み。v0 応答には
+  # `Deprecation: true` ヘッダを付与する。`Sunset` ヘッダは送出しない —
+  # shutdown は viewer 停止時 (#410, 日付未定) のため暦日 Sunset は書けない。
+  # 各 v0 operation の description に同旨を記載する。
   /api/folders:
     get:
       tags: [tree]
       deprecated: true
       operationId: legacyGetFolders
       summary: "[v0] GET /api/v1/tree を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: path
           in: query
@@ -635,7 +639,7 @@ paths:
       deprecated: true
       operationId: legacyListImages
       summary: "[v0] 素配列を返す旧版。GET /api/v1/images を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -659,7 +663,7 @@ paths:
       deprecated: true
       operationId: legacySearch
       summary: "[v0] GET /api/v1/search を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: q
           in: query
@@ -695,7 +699,7 @@ paths:
       deprecated: true
       operationId: legacyFacets
       summary: "[v0] GET /api/v1/facets を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: path
           in: query
@@ -718,7 +722,7 @@ paths:
       deprecated: true
       operationId: legacyRefresh
       summary: "[v0] POST /api/v1/index/refresh を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: 再構築完了
@@ -736,7 +740,7 @@ paths:
       deprecated: true
       operationId: legacyHealth
       summary: "[v0] GET /api/v1/health を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       security: []
       responses:
         "200":
@@ -754,7 +758,7 @@ paths:
       deprecated: true
       operationId: legacyVersion
       summary: "[v0] GET /api/v1/version を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "バージョン情報。`Cache-Control: no-store`"
@@ -773,7 +777,7 @@ paths:
       deprecated: true
       operationId: legacyThumbSprite
       summary: "[v0] GET /api/v1/thumb-sprite を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -808,7 +812,7 @@ paths:
       deprecated: true
       operationId: legacyGetReadingPosition
       summary: "[v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "`{position: レコードまたは null}` — 常にオブジェクト envelope"
@@ -829,7 +833,7 @@ paths:
       deprecated: true
       operationId: legacyPutReadingPosition
       summary: "[v0] newest-ts-wins 単一レコード"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       requestBody:
         required: true
         content:
@@ -862,7 +866,7 @@ paths:
       deprecated: true
       operationId: legacyDeleteReadingPosition
       summary: "[v0] 最新レコードの消去"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -885,7 +889,7 @@ paths:
       deprecated: true
       operationId: legacyGetFolderVisibility
       summary: "[v0] GET /api/v1/folder-visibility を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "可視性スナップショット。`Cache-Control: private, no-store`"
@@ -897,7 +901,7 @@ paths:
       deprecated: true
       operationId: legacyPutFolderVisibility
       summary: "[v0] PUT /api/v1/folder-visibility を使う"
-      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: x-bookq-visibility-owner
           in: header
