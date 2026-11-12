@@ -164,6 +164,9 @@ pub(crate) struct AppState {
     pub(crate) build_date: String,
     /// M8: dual-reader session registry (`app.state.reader_sync`).
     pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
+    /// TEST_MODE-only pair-report state bridge (#405) — in-memory map keyed
+    /// by client id, the native port of `app/api_v1.py::_PAIR_REPORTS`.
+    pub(crate) pair_reports: std::sync::Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -545,6 +548,202 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
         // Build failure propagates upstream in Python — proxy for parity.
         None => proxy(&st.upstream, req).await,
     }
+}
+
+// ── TEST_MODE hooks: /api/v1/pair-report + /api/v1/pair-reset ────────────────
+// Native ports of `app/api_v1.py`'s `_PAIR_REPORTS` map and its two test
+// hooks (#405): the in-page `?pair_report=<cid>` hook (pairSync.js, test
+// mode only) POSTs PairController/PairedView state here so the dual-reader
+// verification runner can read structured state back over HTTP from clients
+// it cannot JS-eval (iOS Simulator Safari, PWA webclips), and `pair-reset`
+// ends every live reader-sync session so a stale link-dropped session can't
+// hijack the next MATCH. Gated on `native.test_mode` only — never on
+// `enabled(...)`: outside test mode both answer 404, mirroring
+// `_pair_report_gate`. Deliberately NOT in `api/openapi.v1.yaml` — a test
+// hook, not API contract (axum generates no schema, so nothing to exclude).
+
+fn pair_json(status: StatusCode, body: serde_json::Value) -> Response {
+    let mut res = Response::builder()
+        .status(status)
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    res
+}
+
+/// `_pair_report_gate` — FastAPI renders `HTTPException(404)` with no
+/// explicit detail as exactly this body; the native gate mirrors it so the
+/// hook's 404 probe can't tell native from Python.
+fn pair_gate_denied() -> Response {
+    pair_json(
+        StatusCode::NOT_FOUND,
+        serde_json::json!({"detail": "Not Found"}),
+    )
+}
+
+/// `str(body.get("id") or "")[:64]` — falsy ids (missing, null, "", 0,
+/// false, empty containers) become "" and 400 below. Truncation is by chars,
+/// like Python's slice.
+fn report_cid(v: Option<&serde_json::Value>) -> String {
+    use serde_json::Value;
+    let s = match v {
+        None | Some(Value::Null) => return String::new(),
+        Some(Value::Bool(false)) => return String::new(),
+        Some(Value::Bool(true)) => "True".to_string(),
+        Some(Value::Number(n)) => {
+            if n.as_i64() == Some(0) || n.as_f64() == Some(0.0) {
+                return String::new();
+            }
+            n.to_string()
+        }
+        Some(Value::String(s)) => {
+            if s.is_empty() {
+                return String::new();
+            }
+            s.clone()
+        }
+        // Non-empty containers have no hook-id use; treat as missing.
+        Some(Value::Array(_)) | Some(Value::Object(_)) => return String::new(),
+    };
+    s.chars().take(64).collect()
+}
+
+/// `int(body.get("gen") or 0)` — a falsy gen (missing, null, 0, "", false)
+/// is generation 0; floats truncate like Python's `int()`.
+fn report_gen(v: Option<&serde_json::Value>) -> i64 {
+    use serde_json::Value;
+    match v {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => 0,
+        Some(Value::Bool(true)) => 1,
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f.trunc() as i64))
+            .unwrap_or(0),
+        Some(Value::String(s)) => s.trim().parse::<i64>().unwrap_or_else(|_| {
+            s.trim()
+                .parse::<f64>()
+                .map(|f| f.trunc() as i64)
+                .unwrap_or(0)
+        }),
+        Some(Value::Array(_)) | Some(Value::Object(_)) => 0,
+    }
+}
+
+fn pair_now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// `POST /api/v1/pair-report` — store `{id, gen?, ...state}` keyed by client
+/// id. A parked tab from a previous run keeps POSTing under the same id, so
+/// only the newest generation wins (`rpt_gen` from the launch URL); gen-less
+/// posts lose to any gen'd report.
+async fn pair_report_post(st: &AppState, req: Request<Body>) -> Response {
+    let body = req.into_body();
+    let bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return pair_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"detail": "invalid JSON body"}),
+            )
+        }
+    };
+    let mut obj = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(m)) => m,
+        Ok(_) => {
+            return pair_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"detail": "expected JSON object"}),
+            )
+        }
+        Err(_) => {
+            return pair_json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"detail": "invalid JSON body"}),
+            )
+        }
+    };
+    let cid = report_cid(obj.get("id"));
+    if cid.is_empty() {
+        return pair_json(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"detail": "id required"}),
+        );
+    }
+    obj.remove("id");
+    let gen = report_gen(obj.get("gen"));
+    let dominated = {
+        let mut map = st.pair_reports.lock().unwrap();
+        let dominated = map.get(&cid).is_some_and(|cur| {
+            gen < report_gen(cur.as_object().and_then(|m| m.get("gen")))
+        });
+        if !dominated {
+            obj.insert("received_at".to_string(), serde_json::json!(pair_now_secs()));
+            map.insert(cid, serde_json::Value::Object(obj));
+        }
+        dominated
+    };
+    if dominated {
+        pair_json(
+            StatusCode::OK,
+            serde_json::json!({"ok": true, "dropped": true}),
+        )
+    } else {
+        pair_json(StatusCode::OK, serde_json::json!({"ok": true}))
+    }
+}
+
+/// `GET /api/v1/pair-report?id=` — read the stored state back (`null` when
+/// the id was never posted). A missing `id` keeps FastAPI's 422 upstream.
+async fn pair_report_get(st: &AppState, req: Request<Body>) -> Response {
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let Some(id) = q.get("id") else {
+        return proxy(&st.upstream, req).await;
+    };
+    let state = st
+        .pair_reports
+        .lock()
+        .unwrap()
+        .get(id)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    pair_json(StatusCode::OK, serde_json::json!({"state": state}))
+}
+
+async fn pair_report(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.test_mode {
+        return pair_gate_denied();
+    }
+    if req.method() == axum::http::Method::POST {
+        return pair_report_post(&st, req).await;
+    }
+    if req.method() == axum::http::Method::GET {
+        return pair_report_get(&st, req).await;
+    }
+    proxy(&st.upstream, req).await
+}
+
+/// `POST /api/v1/pair-reset` — end every live reader-sync session with
+/// "reset". A simulator client that went idle by link-drop never LEAVEd —
+/// its server-side session lingers in the resume window and hijacks the
+/// next MATCH.
+async fn pair_reset(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.test_mode {
+        return pair_gate_denied();
+    }
+    if req.method() != axum::http::Method::POST {
+        return proxy(&st.upstream, req).await;
+    }
+    let ended = st.registry.end_all("reset").await;
+    pair_json(StatusCode::OK, serde_json::json!({"ended": ended}))
 }
 
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
@@ -934,6 +1133,7 @@ async fn main() {
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
+        pair_reports: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         thumb_cache: PathBuf::from(
             std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
         ),
@@ -971,6 +1171,10 @@ async fn main() {
         .route("/api/v1/health", any(api_health))
         .route("/api/v1/version", any(api_version))
         .route("/api/v1/index/refresh", any(api_refresh))
+        // TEST_MODE-only dual-reader verification hooks (#405) — native
+        // under `test_mode`, 404 otherwise; never in the OpenAPI contract.
+        .route("/api/v1/pair-report", any(pair_report))
+        .route("/api/v1/pair-reset", any(pair_reset))
         // M8: dual-reader sync socket — native under "reader-sync" gate;
         // otherwise the upgrade is spliced to Python unchanged.
         .route("/ws/reader-sync", any(reader_sync_ws))

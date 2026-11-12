@@ -493,6 +493,19 @@ impl Registry {
         g.detach_link(link_id);
     }
 
+    /// TEST_MODE hook (#405): end every live session with `reason` — the
+    /// native port of `POST /api/v1/pair-reset`, which drops stale
+    /// link-dropped sessions so they can't hijack the next MATCH.
+    pub async fn end_all(&self, reason: &str) -> usize {
+        let mut g = self.inner.lock().await;
+        let sids: Vec<String> = g.sessions.iter().map(|s| s.id.clone()).collect();
+        let n = sids.len();
+        for sid in sids {
+            g.end_session(&sid, reason);
+        }
+        n
+    }
+
     /// Ticker task — runs every time-driven transition.
     pub async fn run_ticker(self: &Arc<Self>) {
         loop {
