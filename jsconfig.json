@@ -1,0 +1,27 @@
+{
+  // #236: PWA type inspection. `checkJs` runs tsc over plain scripts so a
+  // spec response-shape change breaks the typed client (and its typed call
+  // sites) at compile time instead of only in Playwright E2E.
+  //
+  // Staged rollout (see issue): the composition root `app/static/app.js` and
+  // the Service Worker (`sw.js`, a separate global scope) stay out for now.
+  // `strict` is next — this file starts with checkJs-only so the first green
+  // run is reachable; tightening must not silently re-exclude files.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2020",
+    "moduleResolution": "node",
+    "lib": ["es2020", "dom", "dom.iterable"],
+    "strict": false
+  },
+  "include": [
+    "app/static/api/**/*",
+    "app/static/progress/**/*",
+    "app/static/browse/visibility.js",
+    "app/static/offline/storeAdapter.js",
+    "app/static/search/facets.js"
+  ],
+  "exclude": ["node_modules", "app/static/vendor/**/*"]
+}
