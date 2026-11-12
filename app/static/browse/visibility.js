@@ -5,7 +5,7 @@
  * localStorage entry for offline boot), the transient normal/full-display
  * mode (never persisted), and the shared O(1) visibility predicates the
  * renderers and navigation guards consume.
- * Loads after offline-core.js (escapeHtml), hash/render/facets/app.js.
+ * Loads after offline-core.js (escapeHtml), before hash/render/facets/app.js.
  *
  * Wire (#236): GET/PUT go through the typed window.BookqApi client
  * (app/static/api/v1.js) — endpoint paths and snapshot shapes are spec-typed,
