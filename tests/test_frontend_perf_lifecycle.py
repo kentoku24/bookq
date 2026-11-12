@@ -1552,3 +1552,732 @@ def test_stale_recovery_cannot_mark_newer_load_ready(browser, server):
         assert out["loaded"] is True, "the newer load must complete and mark ready"
     finally:
         context.close()
+
+
+# ── connection/load-generation ownership (offline-vs-revalidation races) ──────
+
+GATE_REVALIDATE_JS = """() => {
+    // Records every post-install full /api/v1/tree request (the revalidation
+    // path; depth=1 shallow and the initial load are excluded) and lets the
+    // test park each response behind a per-index release gate.
+    window.__rv = {reqs: [], gates: {}, plans: {}};
+    const of = window.fetch.bind(window);
+    window.fetch = (u, i) => {
+        const url = typeof u === 'string' ? u : (u && u.url) || '';
+        if (url === '/api/v1/tree') {
+            const idx = window.__rv.reqs.length;
+            window.__rv.reqs.push({
+                url,
+                inm: (i && i.headers && i.headers['If-None-Match']) || null,
+            });
+            const plan = window.__rv.plans[idx];
+            if (plan) {
+                return new Promise(resolve => {
+                    window.__rv.gates[idx] = () => resolve(plan());
+                });
+            }
+        }
+        return of(u, i);
+    };
+}"""
+
+HOLD_INDEX_JS = """() => {
+    window.__heldIdx = [];
+    window.__origPM = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function(...args){
+        window.__heldIdx.push({port: this, args});
+    };
+}"""
+
+# add_init_script evaluates but does not invoke `() => {}` expressions —
+# the same hookup as bare statements for page-load-time installation.
+HOLD_INDEX_INIT_JS = """
+    window.__heldIdx = [];
+    window.__origPM = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function(...args){
+        window.__heldIdx.push({port: this, args});
+    };
+"""
+
+# Restore BEFORE replaying: each replayed post wakes a continuation that may
+# post the next yield — that must go through the real postMessage or the
+# build re-stalls on a post nobody will release.
+RELEASE_INDEX_JS = """() => {
+    MessagePort.prototype.postMessage = window.__origPM;
+    const q = window.__heldIdx.splice(0);
+    for (const m of q) window.__origPM.apply(m.port, m.args);
+}"""
+
+
+def test_revalidate_waits_out_held_full_load_index(browser, server):
+    """A revalidation must wait for the in-flight full load instead of racing
+    it for the shared index: the first load's async index is held mid-yield
+    while a revalidation is queued — it must not fetch, must not bump the
+    index generation under the held build, and must finish without owning
+    readiness. On release the load publishes tree+map and drains the pending
+    deep link itself."""
+    big = (
+        '[{"name":"big","type":"folder","children":['
+        + ",".join(
+            f'{{"name":"p{i}.png","type":"image"}}' for i in range(20000)
+        )
+        + "]}]"
+    )
+    shallow = '[{"name":"big","type":"folder","thumb":"p0.png"}]'
+    hits = []
+
+    context, page = _new_page(browser)
+    page.add_init_script(HOLD_INDEX_INIT_JS)
+
+    def handler(route):
+        url = route.request.url
+        hits.append(url)
+        if "depth=1" in url:
+            route.fulfill(
+                status=200, content_type="application/json", body=shallow
+            )
+        else:
+            route.fulfill(status=200, content_type="application/json", body=big)
+
+    page.route("**/api/v1/tree*", handler)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function(
+            "() => window.__heldIdx.length > 0", timeout=15000
+        )
+        assert page.evaluate("() => window.__BOOKQ_DEBUG.shallow") is True
+        assert page.evaluate("() => window.treeLoaded === false") is True
+        # Deep link queued while !treeLoaded — applyUrlState early-returns and
+        # only the full load's drain may re-run it.
+        page.evaluate("() => { location.hash = '#/browse/big'; }")
+        page.evaluate(
+            """() => {
+                window.__rDone = false;
+                window.revalidateFoldersForOnline().then(
+                    () => { window.__rDone = true; },
+                    () => { window.__rDone = true; });
+            }"""
+        )
+        page.wait_for_timeout(400)
+        assert page.evaluate("() => window.__rDone") is False, (
+            "revalidation must still be waiting on the in-flight load"
+        )
+        full_hits = [u for u in hits if "depth=1" not in u]
+        assert len(full_hits) == 1, (
+            f"revalidation must not fetch while a load owns the pipeline: {hits}"
+        )
+        # Release the held index yields → the load must complete unharmed —
+        # if the revalidation had superseded it, the held build resolves null
+        # and treeLoaded never flips.
+        page.evaluate(RELEASE_INDEX_JS)
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        page.wait_for_function("() => window.__rDone === true", timeout=8000)
+        assert page.evaluate("() => window.__BOOKQ_DEBUG.shallow") is False
+        assert page.evaluate("() => window.buildNodeMap().has('big')")
+        assert page.evaluate(
+            "() => window.__cc_thumbIndex.tree === window.__BOOKQ_DEBUG.getTree()"
+        )
+        page.wait_for_function(
+            "() => window.currentBrowsePath === 'big'", timeout=8000
+        )
+        # The revalidation drained through the freshness gate after the load
+        # stamped — it never issued its own request.
+        full_hits = [u for u in hits if "depth=1" not in u]
+        assert len(full_hits) == 1, (
+            f"revalidation must not have fetched at all: {hits}"
+        )
+    finally:
+        try:
+            page.unroute("**/api/v1/tree*")
+        except Exception:
+            pass
+        context.close()
+
+
+def test_offline_settling_304_does_not_stamp_reconnect_gate(browser, server):
+    """A conditional request whose 304 lands while offline must NOT stamp the
+    freshness gate: a reconnect inside the 5-minute window then issues a fresh
+    conditional request. No clock spoofing anywhere — the offline event itself
+    resets the stamp."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        page.evaluate(GATE_REVALIDATE_JS)
+        page.evaluate(
+            "() => { window.__rv.plans[0] = "
+            "() => new Response(null, {status: 304}); }"
+        )
+        # Trigger a revalidation on the synthetic event flip (the 'offline'
+        # listener resets the stamp; the 'online' debounce fires the request).
+        page.evaluate(
+            "() => { window.dispatchEvent(new Event('offline'));"
+            "        window.dispatchEvent(new Event('online')); }"
+        )
+        page.wait_for_function("() => window.__rv.reqs.length === 1", timeout=10000)
+        # The request is held; go really offline (navigator.onLine=false) and
+        # let the stale 304 settle there.
+        context.set_offline(True)
+        try:
+            page.evaluate("() => window.__rv.gates[0]()")
+            page.wait_for_timeout(300)
+        finally:
+            context.set_offline(False)
+        # Reconnect (<5min, real clock): if the stale 304 had stamped the gate,
+        # this revalidation would be eaten and no second request would appear.
+        page.wait_for_function("() => window.__rv.reqs.length >= 2", timeout=10000)
+        reqs = page.evaluate("() => window.__rv.reqs")
+        assert reqs[1]["url"].endswith("/api/v1/tree"), reqs
+        assert reqs[1]["inm"], (
+            f"reconnect must issue a fresh conditional request: {reqs}"
+        )
+    finally:
+        context.close()
+
+
+def test_fast_reconnect_supersedes_held_revalidation(browser, server):
+    """offline→online while the old revalidation is still held: the new
+    connection must start a NEW request before the old settles, a concurrent
+    revalidate must coalesce with the new one (no third fetch), and the stale
+    old response must not mutate tree/ETag/stamp."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        page.evaluate(GATE_REVALIDATE_JS)
+        stale_json = (
+            '[{"name":"STALEMARK","type":"folder",'
+            '"children":[{"name":"s.png","type":"image"}]}]'
+        )
+        page.evaluate(
+            """(staleJson) => {
+                window.__rv.plans[0] = () => new Response(staleJson, {
+                    status: 200,
+                    headers: {'Content-Type': 'application/json',
+                              'ETag': '"STALETAG"'}});
+                window.__rv.plans[1] = () => new Response(null, {status: 304});
+            }""",
+            stale_json,
+        )
+        out = page.evaluate(
+            """async () => {
+                const tick = () => new Promise(r => setTimeout(r, 60));
+                const D = window.__BOOKQ_DEBUG;
+                const etag0 = D.etagByKey.get(':full');
+                // Connection 1: revalidation starts and parks on the held fetch.
+                window.dispatchEvent(new Event('offline'));
+                window.dispatchEvent(new Event('online'));
+                const p1 = window.revalidateFoldersForOnline();
+                await tick();
+                const reqsAfter1 = window.__rv.reqs.length;
+                // Fast offline→online: the held request is now obsolete; the
+                // reconnect must start a NEW request without waiting for it.
+                window.dispatchEvent(new Event('offline'));
+                window.dispatchEvent(new Event('online'));
+                const p2 = window.revalidateFoldersForOnline();
+                await tick();
+                const reqsAfter2 = window.__rv.reqs.length;
+                // A concurrent revalidation must coalesce with the NEW
+                // request — same tracked promise, no third fetch.
+                const p3 = window.revalidateFoldersForOnline();
+                const coalesced = (p3 === p2);
+                // Resolve the stale request while the new one is still held.
+                window.__rv.gates[0]();
+                await p1;
+                await tick();
+                const afterStale = {
+                    tree: D.getTree().map(n => n.name),
+                    etag: D.etagByKey.get(':full'),
+                };
+                // New request completes (304 → freshness stamp only).
+                window.__rv.gates[1]();
+                await p2;
+                // The NEW request's stamp now gates an immediate revalidate —
+                // no further fetch.
+                await window.revalidateFoldersForOnline();
+                return {reqsAfter1, reqsAfter2, coalesced,
+                        etag0, afterStale, reqs: window.__rv.reqs};
+            }"""
+        )
+        assert out["reqsAfter1"] == 1, out
+        assert out["reqsAfter2"] == 2, (
+            f"reconnect must start a new request while the old is held: {out['reqs']}"
+        )
+        assert out["coalesced"] is True, (
+            "concurrent revalidate must return the in-flight new request"
+        )
+        assert len(out["reqs"]) == 2, (
+            f"coalescing must prevent a third fetch: {out['reqs']}"
+        )
+        assert "STALEMARK" not in out["afterStale"]["tree"], (
+            f"stale response must not replace the tree: {out['afterStale']}"
+        )
+        assert out["afterStale"]["etag"] == out["etag0"], (
+            f"stale ETag must not overwrite the warm tag: {out['afterStale']}"
+        )
+    finally:
+        context.close()
+
+
+def test_offline_mid_revalidation_index_cannot_publish(browser, server):
+    """Going offline while the revalidation's async index is held kills that
+    build through the connection predicate — the shared index generation is
+    NOT bumped (a foreign in-progress build, standing in for an active full
+    load's, still publishes across the same transition). The stale map never
+    reaches _nodeMapCache/tree/ETag, and the reconnect fetches afresh."""
+    stale_json = (
+        '[{"name":"STALEMARK","type":"folder","children":['
+        + ",".join(
+            f'{{"name":"s{i}.png","type":"image"}}' for i in range(600)
+        )
+        + "]}]"
+    )
+    recon_json = (
+        '[{"name":"RECONMARK","type":"folder",'
+        '"children":[{"name":"r.png","type":"image"}]}]'
+    )
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        page.evaluate(GATE_REVALIDATE_JS)
+        page.evaluate(
+            """([staleJson, reconJson]) => {
+                window.__rv.plans[0] = () => new Response(staleJson, {
+                    status: 200,
+                    headers: {'Content-Type': 'application/json',
+                              'ETag': '"STALETAG"'}});
+                window.__rv.plans[1] = () => new Response(reconJson, {
+                    status: 200,
+                    headers: {'Content-Type': 'application/json',
+                              'ETag': '"NEWTAG"'}});
+            }""",
+            [stale_json, recon_json],
+        )
+        page.evaluate(HOLD_INDEX_JS)
+        base = page.evaluate(
+            """() => ({
+                tree: window.__BOOKQ_DEBUG.getTree().map(n => n.name),
+                etag: window.__BOOKQ_DEBUG.etagByKey.get(':full'),
+            })"""
+        )
+        # Phase 1: a foreign async index build (no isCurrent predicate — the
+        # same shape a full load's build has) is held across an offline flip.
+        page.evaluate(
+            """() => {
+                const mt = [{name:'manualmarker', type:'folder',
+                    children: Array.from({length: 600}, (_, i) =>
+                        ({name:'m'+i+'.png', type:'image'}))}];
+                window.__pManual = window.setFullPathsAndIndexAsync(mt);
+            }"""
+        )
+        page.wait_for_function("() => window.__heldIdx.length >= 1", timeout=8000)
+        # Start the revalidation on this connection — it parks on the held
+        # conditional fetch while the manual build is still paused.
+        page.evaluate(
+            "() => { window.dispatchEvent(new Event('offline'));"
+            "        window.dispatchEvent(new Event('online'));"
+            "        window.__pRv = window.revalidateFoldersForOnline(); }"
+        )
+        out1 = page.evaluate(
+            """async () => {
+                const q = window.__heldIdx.splice(0);
+                for (const m of q) window.__origPM.apply(m.port, m.args);
+                const map = await window.__pManual;
+                return {published: !!map};
+            }"""
+        )
+        assert out1["published"], (
+            "'offline' must not bump the shared index gen — the foreign "
+            "build that was held across the transition still publishes"
+        )
+        # Phase 2: the revalidation's fetch resolves; its index build (latest
+        # generation, so indexGen alone cannot kill it) is held mid-yield.
+        page.wait_for_function("() => window.__rv.reqs.length === 1", timeout=8000)
+        page.evaluate("() => window.__rv.gates[0]()")
+        page.wait_for_function("() => window.__heldIdx.length >= 1", timeout=8000)
+        page.evaluate("() => window.dispatchEvent(new Event('offline'))")
+        out2 = page.evaluate(
+            """async () => {
+                const q = window.__heldIdx.splice(0);
+                MessagePort.prototype.postMessage = window.__origPM;
+                for (const m of q) window.__origPM.apply(m.port, m.args);
+                await window.__pRv;
+                await new Promise(r => setTimeout(r, 30));
+                const D = window.__BOOKQ_DEBUG;
+                const idxName = (window.__cc_thumbIndex
+                    && window.__cc_thumbIndex.tree
+                    && window.__cc_thumbIndex.tree[0]
+                    && window.__cc_thumbIndex.tree[0].name) || null;
+                return {tree: D.getTree().map(n => n.name),
+                        etag: D.etagByKey.get(':full'),
+                        idxName};
+            }"""
+        )
+        assert "STALEMARK" not in out2["tree"], (
+            f"stale revalidation must not replace the tree: {out2}"
+        )
+        assert out2["idxName"] != "STALEMARK", (
+            f"stale index build must never publish its map: {out2}"
+        )
+        assert out2["etag"] == base["etag"], (
+            f"stale response must not write the ETag slot: {out2}"
+        )
+        assert out2["tree"] == base["tree"], (
+            f"stale response must not mutate the tree: {out2}"
+        )
+        # Reconnect: a fresh conditional request completes and publishes.
+        page.evaluate(
+            "() => { window.dispatchEvent(new Event('online'));"
+            "        window.__pRv2 = window.revalidateFoldersForOnline(); }"
+        )
+        page.wait_for_function("() => window.__rv.reqs.length === 2", timeout=8000)
+        page.evaluate("() => window.__rv.gates[1]()")
+        page.wait_for_function(
+            "() => window.__BOOKQ_DEBUG.getTree()[0].name === 'RECONMARK'",
+            timeout=8000,
+        )
+        reqs = page.evaluate("() => window.__rv.reqs")
+        assert reqs[1]["inm"], f"reconnect request must be conditional: {reqs}"
+    finally:
+        context.close()
+
+
+def test_invalid_writer_inputs_do_not_cancel_pending_deferred(browser, server):
+    """putTree(non-array)/putJson(empty|non-string) are resolved no-ops taken
+    BEFORE latest-wins cancellation: a pending valid deferred write must
+    survive them untouched and still land once idle flushes."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                const held = [];
+                const origRIC = window.requestIdleCallback;
+                window.requestIdleCallback = (fn) => {
+                    held.push(fn);
+                    return held.length;
+                };
+                try {
+                    await window.OfflineTree.delTree();
+                    held.length = 0;
+                    const baseHeld = held.length;
+                    const p = window.OfflineTree.putJson(
+                        JSON.stringify([{name:'VALID', type:'folder',
+                            children:[]}]),
+                        {defer: true});
+                    // Every malformed input below must resolve as a no-op
+                    // WITHOUT cancelling the pending valid write. (Non-empty
+                    // strings intentionally still reach the worker/fallback —
+                    // no synchronous JSON.parse probe of the raw payload.)
+                    await Promise.all([
+                        window.OfflineTree.putTree(null),
+                        window.OfflineTree.putTree({}),
+                        window.OfflineTree.putTree('not-a-tree'),
+                        window.OfflineTree.putTree(7),
+                        window.OfflineTree.putJson(''),
+                        window.OfflineTree.putJson(null),
+                        window.OfflineTree.putJson(42),
+                    ]);
+                    await new Promise(r => setTimeout(r, 60));
+                    // Other modules may legitimately enqueue their own idle
+                    // work — only the deferred write's callback must remain.
+                    const stillQueued = held.length - baseHeld;
+                    let settled = false;
+                    p.then(() => { settled = true; }, () => { settled = true; });
+                    await new Promise(r => setTimeout(r, 30));
+                    const settledEarly = settled;
+                    held.splice(0).forEach(f => f());
+                    await p;
+                    const t = await window.OfflineTree.getTree();
+                    return {stillQueued, settledEarly,
+                            names: t && t.map(n => n.name)};
+                } finally { window.requestIdleCallback = origRIC; }
+            }"""
+        )
+        assert out["stillQueued"] >= 1, (
+            f"invalid inputs must not cancel the pending deferred write: {out}"
+        )
+        assert out["settledEarly"] is False, (
+            f"the valid write must stay pending until idle runs: {out}"
+        )
+        assert out["names"] == ["VALID"], out
+    finally:
+        context.close()
+
+
+def test_putjson_large_worker_roundtrip_no_main_parse(browser, server):
+    """Synthetic large-snapshot proof: the raw JSON text must go through the
+    Worker path (never the main-thread JSON.parse) and still land in IDB."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                await window.OfflineTree.delTree();
+                const tree = [{name:'large', type:'folder',
+                    children: Array.from({length: 176000}, (_, i) =>
+                        ({name:'page-'+i+'.png', type:'image'}))}];
+                const raw = JSON.stringify(tree);
+                const origParse = JSON.parse;
+                const OrigWorker = window.Worker;
+                let mainParses = 0, workers = 0;
+                JSON.parse = function (s) {
+                    if (s === raw) mainParses++;
+                    return origParse.apply(JSON, arguments);
+                };
+                window.Worker = class extends OrigWorker {
+                    constructor(...a){ workers++; super(...a); }
+                };
+                try {
+                    await window.OfflineTree.putJson(raw);
+                } finally {
+                    JSON.parse = origParse;
+                    window.Worker = OrigWorker;
+                }
+                const t = await window.OfflineTree.getTree();
+                return {rawLen: raw.length, mainParses, workers,
+                        kids: t && t[0] && t[0].children.length};
+            }"""
+        )
+        assert out["rawLen"] >= 3800000, out
+        assert out["workers"] >= 1, (
+            f"the large write must use the Worker path: {out}"
+        )
+        assert out["mainParses"] == 0, (
+            f"raw payload must never hit main-thread JSON.parse: {out}"
+        )
+        assert out["kids"] == 176000, out
+    finally:
+        context.close()
+
+
+def test_putjson_worker_timeout_falls_back_once(browser, server):
+    """Controlled 10s timeout: the captured timeout callback is invoked
+    manually — no real 10s sleep. It must terminate the hung worker and run
+    exactly one fallback persist, and a stale job's timer must not terminate
+    or write the newer job."""
+    context = browser.new_context(viewport={"width": 1280, "height": 800})
+    page = context.new_page()
+    page.add_init_script(
+        """window.__fakeWorkers = [];
+        window.__treeTimers = [];
+        const __origST = window.setTimeout;
+        window.setTimeout = function (fn, ms) {
+            if (ms === 10000) {
+                window.__treeTimers.push(fn);
+                return -900 - window.__treeTimers.length;
+            }
+            return __origST.apply(window, arguments);
+        };
+        window.Worker = class {
+            constructor(){
+                this.onmessage = null; this.onerror = null;
+                this.terminated = false; window.__fakeWorkers.push(this);
+            }
+            postMessage(m){ this.lastMsg = m; }
+            terminate(){ this.terminated = true; }
+        };"""
+    )
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                await window.OfflineTree.delTree();
+                const mk = n => JSON.stringify(
+                    [{name:n, type:'folder', children:[]}]);
+                const base = window.__fakeWorkers.length;
+                const tBase = window.__treeTimers.length;
+                // Job A: worker never answers → parks on its 10s timer.
+                const pA = window.OfflineTree.putJson(mk('JOB_A'))
+                    .then(() => true, () => false);
+                const wA = window.__fakeWorkers[base];
+                // Job B supersedes: A is terminated + settled, B parks on its
+                // own timer.
+                const pB = window.OfflineTree.putJson(mk('JOB_B'))
+                    .then(() => true, () => false);
+                const wB = window.__fakeWorkers[base + 1];
+                const aTerminatedEarly = wA.terminated === true;
+                const paEarly = await pA;
+                // Stale timer A fires — must be a no-op: cannot terminate
+                // worker B or write a stale fallback.
+                if (window.__treeTimers[tBase]) window.__treeTimers[tBase]();
+                await new Promise(r => setTimeout(r, 60));
+                const bAliveAfterStale = !wB.terminated;
+                const t1 = await window.OfflineTree.getTree();
+                // Timer B fires → terminate B + exactly one fallback persist.
+                if (window.__treeTimers[tBase + 1]) {
+                    window.__treeTimers[tBase + 1]();
+                }
+                const pbOk = await pB;
+                const bTerminated = wB.terminated === true;
+                const t2 = await window.OfflineTree.getTree();
+                return {aTerminatedEarly, paEarly, bAliveAfterStale,
+                        t1: t1 && t1.map(n => n.name),
+                        pbOk, bTerminated,
+                        t2: t2 && t2.map(n => n.name),
+                        workers: window.__fakeWorkers.length - base};
+            }"""
+        )
+        assert out["aTerminatedEarly"], (
+            f"superseding write must terminate worker A: {out}"
+        )
+        assert out["paEarly"] is True, (
+            f"canceled job A must resolve, not reject: {out}"
+        )
+        assert out["bAliveAfterStale"], (
+            f"stale timer A must not terminate worker B: {out}"
+        )
+        assert out["t1"] is None, (
+            f"stale timer A must not persist a fallback: {out}"
+        )
+        assert out["workers"] == 2, (
+            f"no extra worker may spawn for the fallback: {out}"
+        )
+        assert out["bTerminated"], f"timer B must terminate worker B: {out}"
+        assert out["pbOk"] is True, out
+        assert out["t2"] == ["JOB_B"], (
+            f"exactly one fallback persist, of the newest job: {out}"
+        )
+    finally:
+        context.close()
+
+
+def test_stale_body_and_reject_never_warn_or_fall_through(browser, server):
+    """Superseded loads must not warn 'Malformed folders response'/'falling
+    through to full' nor issue their stale full-stage request — a delayed
+    stale response.body and a stale rejected shallow fetch both bail on the
+    generation guard. A CURRENT malformed response still warns and falls
+    through (the resilience path is preserved)."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                const warns = [];
+                const origWarn = console.warn;
+                console.warn = function(...a){
+                    warns.push(a.map(String).join(' '));
+                    return origWarn.apply(console, a);
+                };
+                const tB = [{name:'LOADB', type:'folder',
+                    children:[{name:'b.png', type:'image'}]}];
+                const mkRes = data => ({
+                    ok: true, status: 200,
+                    headers: {get: () => null},
+                    text: async () => JSON.stringify(data),
+                    json: async () => data,
+                });
+                const fetches = [];
+                const isShallow = u => u.indexOf('depth=1') >= 0;
+                const isFull = u => u === '/api/v1/tree';
+                const tick = (ms) => new Promise(r => setTimeout(r, ms));
+                try {
+                    // (1) Delayed stale response.body: load A's shallow text()
+                    // parks until load B already owns the generation, then
+                    // arrives malformed — the staleness gate must swallow it.
+                    let releaseText;
+                    const shallowA = {
+                        ok: true, status: 200, headers: {get: () => null},
+                        text: () => new Promise(r => {
+                            releaseText = () => r('not-json!!');
+                        }),
+                    };
+                    const fA = u => {
+                        fetches.push('A:' + u);
+                        if (isShallow(u)) return Promise.resolve(shallowA);
+                        return Promise.resolve(mkRes(
+                            [{name:'ASTALE', type:'folder', children:[]}]));
+                    };
+                    const pA = window.loadFolders({}, {fetch: fA});
+                    await tick(60);
+                    const pB = window.loadFolders({}, {fetch: u => {
+                        fetches.push('B:' + u);
+                        return Promise.resolve(mkRes(tB));
+                    }});
+                    releaseText();
+                    await pA; await pB;
+                    // (2) Stale rejected shallow fetch: same guard, through
+                    // the catch arm.
+                    let rejectShallow;
+                    const fC = u => {
+                        fetches.push('C:' + u);
+                        if (isShallow(u))
+                            return new Promise((res, rej) => {
+                                rejectShallow = rej;
+                            });
+                        return Promise.resolve(mkRes(
+                            [{name:'CSTALE', type:'folder', children:[]}]));
+                    };
+                    const pC = window.loadFolders({}, {fetch: fC});
+                    await tick(30);
+                    const pD = window.loadFolders({}, {fetch: u => {
+                        fetches.push('D:' + u);
+                        return Promise.resolve(mkRes(tB));
+                    }});
+                    rejectShallow(new Error('stale net drop'));
+                    await pC; await pD;
+                    const staleWarns = warns.slice();
+                    // (3) A CURRENT malformed shallow response still warns and
+                    // falls through to the full fetch — resilience preserved.
+                    const fE = u => {
+                        fetches.push('E:' + u);
+                        if (isShallow(u)) return Promise.resolve({
+                            ok: true, status: 200,
+                            headers: {get: () => null},
+                            text: async () => 'still-not-json',
+                        });
+                        return Promise.resolve(mkRes(tB));
+                    };
+                    await window.loadFolders({}, {fetch: fE});
+                    const warnsE = warns.slice(staleWarns.length);
+                    return {staleWarns, warnsE, fetches,
+                            tree: window.__BOOKQ_DEBUG.getTree()
+                                .map(n => n.name)};
+                } finally { console.warn = origWarn; }
+            }"""
+        )
+        assert out["tree"] == ["LOADB"], out
+        bad = [
+            w for w in out["staleWarns"]
+            if "Malformed" in w or "falling through" in w
+        ]
+        assert not bad, (
+            f"stale responses must not warn or fall through: {bad}"
+        )
+        stale_fulls = [
+            f for f in out["fetches"]
+            if f.startswith(("A:", "C:")) and "depth=1" not in f
+        ]
+        assert not stale_fulls, (
+            f"superseded loads must not issue a full fetch: {stale_fulls}"
+        )
+        real_warn = [
+            w for w in out["warnsE"]
+            if "Malformed" in w or "falling through" in w
+        ]
+        assert real_warn, (
+            "a current malformed shallow response must still warn and fall "
+            f"through to the full fetch: {out['warnsE']}"
+        )
+        e_fulls = [
+            f for f in out["fetches"]
+            if f.startswith("E:") and "depth=1" not in f
+        ]
+        assert len(e_fulls) == 1, (
+            f"current malformed shallow must fall through to one full fetch: "
+            f"{out['fetches']}"
+        )
+    finally:
+        context.close()

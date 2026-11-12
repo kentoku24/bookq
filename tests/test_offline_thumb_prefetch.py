@@ -337,7 +337,7 @@ def test_thumb_prefetch_cached(page, server):
     single_thumb_extra = page.evaluate(
         """async () => {
             const treeProbe = (()=>{ try{ return window.tree||null;}catch{return null}})();
-            const data = treeProbe || await fetch('/api/folders').then(r=>r.json());
+            const data = treeProbe || await fetch('/api/v1/tree').then(r=>r.json());
             let thumbOnlyFolders = 0;
             let thumbsFolders = 0;
             function walk(nodes){
@@ -651,5 +651,110 @@ def test_prefetch_viewport_rank_deterministic(browser, server):
             "/thumb/aboveedge/cover.png",
             "/thumb/belowedge/cover.png",
         ], f"exact visible→above→below order expected, got {result}"
+    finally:
+        context.close()
+
+
+def test_prefetch_viewport_scope_real_cache_api(browser, server):
+    """Real Cache API proof of the viewport-limited scope: on the NORMAL page
+    (no ?offline flag, service workers blocked so nothing else can seed the
+    caches), a manual prefetch must fetch+cache exactly the visible and near
+    tiles and leave the far tile's URL uncached — verified through real
+    caches.match/caches.put, not fetch-call spying alone."""
+    context = browser.new_context(
+        viewport={"width": 800, "height": 600}, service_workers="block"
+    )
+    page = context.new_page()
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        # Hold idle callbacks and capture only JS-side fetch for the unique
+        # probe URLs (native <img> loads are a different path and are never
+        # asserted on). The Cache API itself stays 100% real.
+        page.evaluate(
+            """() => {
+                try { window.FillPoll.stop(); } catch(e) {}
+                window.__idleQueue = [];
+                window.requestIdleCallback = (fn) => {
+                    window.__idleQueue.push(fn);
+                    return window.__idleQueue.length;
+                };
+                window.__cap = [];
+                const of = window.fetch.bind(window);
+                window.fetch = (input, init) => {
+                    const u = typeof input === 'string'
+                        ? input : (input && input.url) || '';
+                    if (u.indexOf('/thumb/scope-proof/') === 0) {
+                        window.__cap.push(u);
+                        return Promise.resolve(
+                            new Response('thumb-bytes', {status: 200}));
+                    }
+                    return of(input, init);
+                };
+            }"""
+        )
+        # Pinned clipped scrollport + fixed tile rects: visible / near-below /
+        # far-below.
+        page.evaluate(
+            """() => {
+                const s = document.getElementById('sidebar-scroll');
+                s.getBoundingClientRect = () => ({
+                    top: 100, bottom: 300, left: 20, right: 220,
+                    width: 200, height: 200});
+                document.getElementById('sidebar').classList.add('open');
+                const grid = document.getElementById('tile-grid');
+                const specs = [
+                    ['visible', {top: 150, bottom: 170}],
+                    ['near',    {top: 400, bottom: 420}],
+                    ['far',     {top: 600, bottom: 620}],
+                ];
+                grid.innerHTML = specs.map(([n]) =>
+                    `<div class="tile" data-path="scope-proof">`
+                    + `<img src="/thumb/scope-proof/${n}.png"></div>`
+                ).join('');
+                grid.querySelectorAll('.tile').forEach((el, i) => {
+                    const [, r] = specs[i];
+                    el.getBoundingClientRect = () => ({
+                        top: r.top, bottom: r.bottom, left: 40, right: 60,
+                        width: 20, height: r.bottom - r.top});
+                });
+            }"""
+        )
+        # Drain the MutationObserver-triggered schedule, cancel any queued
+        # batch, then reset the capture — the manual prefetch below is the
+        # only batch that may record.
+        page.wait_for_timeout(300)
+        page.evaluate(
+            """() => {
+                const q = window.__idleQueue.splice(0);
+                q.forEach(f => { try { f(); } catch(e){} });
+                window.ThumbPrefetch.cancelThumbPrefetch();
+                window.__cap.length = 0;
+            }"""
+        )
+        page.wait_for_timeout(150)
+        page.evaluate("() => { window.__idleQueue.splice(0); }")
+        out = page.evaluate(
+            """async () => {
+                await window.__BOOKQ_DEBUG.prefetchThumbs();
+                const c = await caches.open(
+                    window.OfflineStore.cacheNameFor('scope-proof'));
+                const vis = await c.match('/thumb/scope-proof/visible.png');
+                const near = await c.match('/thumb/scope-proof/near.png');
+                const far = await c.match('/thumb/scope-proof/far.png');
+                const farGlobal =
+                    await caches.match('/thumb/scope-proof/far.png');
+                return {calls: window.__cap.slice(),
+                        cached: {visible: !!vis, near: !!near, far: !!far,
+                                 farGlobal: !!farGlobal}};
+            }"""
+        )
+        assert out["calls"] == [
+            "/thumb/scope-proof/visible.png",
+            "/thumb/scope-proof/near.png",
+        ], f"exactly visible+near must be fetched, got {out['calls']}"
+        assert out["cached"] == {
+            "visible": True, "near": True, "far": False, "farGlobal": False
+        }, f"real Cache API must hold visible+near only: {out['cached']}"
     finally:
         context.close()
