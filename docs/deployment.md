@@ -309,6 +309,8 @@ docker compose ps -q tailscale | xargs docker exec tailscale serve status
 
 既定値は検証済みの全 native 面を列挙 (#320): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
 
+`auth` (#400) — `/auth/login|callback|logout` + `/api/v1/auth/token` を 1 つのゲートとして native 化する（callback が mint する認可コードを token endpoint が同プロセスで引き換えるため分割不可）。必要 env は `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`BASE_URL`/`SECRET_KEY`（compose 配線済み、`.env` 由来）。未設定のまま列挙に入れても surface 全体が proxy に留まり WARN が出る（`BOOKQ_RS_NATIVE_STRICT=1` では起動拒否）。Schemathesis では実 Google 往復を通せないため、**live OAuth 確認が済むまで既定リストには含めない**。
+
 #### endpoint cutover 条件
 
 endpoint を native にする前提は、次の 3 つを満たすこと:

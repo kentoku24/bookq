@@ -16,6 +16,10 @@ hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
 percent-encoding = "2"
+rand = "0.9"
+# Google OAuth round-trip (token exchange + userinfo) — webpki roots so
+# the slim image needs no ca-certificates package (#400).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 hyper = { version = "1", features = ["full"] }
