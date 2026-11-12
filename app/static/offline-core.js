@@ -12,10 +12,21 @@
 (function () {
   // Per-segment percent-encoding — the single URL builder behind /image/
   // (imageUrl: viewer + downloads) and /thumb/ (thumbUrl: browse covers).
-  // Slashes stay slashes so the viewer, the browse-grid thumbnails and downloadWork's cache
-  // keys all name the same resource with the same string (caches.match is
-  // exact-URL). Whole-path encodeURIComponent would turn "/" into "%2F" and
-  // silently produce a second, non-matching URL for the same image.
+  // Slashes stay slashes so the viewer, the browse-grid thumbnails and
+  // downloadWork's cache keys all name the same resource with the same string
+  // (caches.match is exact-URL). Whole-path encodeURIComponent would turn "/"
+  // into "%2F" and silently produce a second, non-matching URL for the same image.
+  //
+  // Client-only dev against the spec mock (#237): `?api_base=<mock>` re-bases
+  // media URLs too (same rule as BookqApi in api/v1.js). SW importScripts has
+  // no query — try/catch keeps it same-origin there.
+  var _mediaBase = "";
+  try {
+    var _loc = (typeof window !== "undefined" && window.location) ? window.location : location;
+    var _m = /[?&]api_base=([^&]+)/.exec(_loc.search || "");
+    if (_m) _mediaBase = decodeURIComponent(_m[1]).replace(/\/+$/, "");
+  } catch (e) { /* stay same-origin */ }
+  function _murl(p) { return _mediaBase + p; }
   function encodePath(p) {
     return String(p).split("/").map(encodeURIComponent).join("/");
   }
@@ -27,7 +38,7 @@
   // shape (caches.match is exact-URL).
   function imageUrl(folder, name) {
     var inner = folder ? folder + "/" + name : name;
-    return "/image/" + encodePath(inner);
+    return _murl("/image/" + encodePath(inner));
   }
 
   // Browse-list cover builder (Todo 4): same per-segment encoding as
@@ -38,7 +49,7 @@
     // Same empty-folder rule as imageUrl above: root covers are
     // "/thumb/<name>?w=..", never "/thumb//<name>?w=..".
     var inner = folder ? folder + "/" + name : name;
-    return "/thumb/" + encodePath(inner) + "?w=" + width;
+    return _murl("/thumb/" + encodePath(inner) + "?w=" + width);
   }
 
   // The cover width class this device's browse grid requests. dpr>=2 renders
@@ -56,7 +67,7 @@
   // format). Only used via readerUrl, gated by OfflineCore.readerUseView.
   function viewUrl(folder, name) {
     var inner = folder ? folder + "/" + name : name;
-    return "/view/" + encodePath(inner);
+    return _murl("/view/" + encodePath(inner));
   }
 
   function cacheNameFor(folder) {

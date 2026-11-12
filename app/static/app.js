@@ -1207,7 +1207,8 @@
         if (OC && OC.thumbUrl) return OC.thumbUrl(fp, name, w);
       } catch(e) { console.warn(e); }
       const width = (w === 200 || w === 800) ? w : 400;
-      return "/thumb/" + String(fp).split("/").map(encodeURIComponent).join("/")
+      const _mb = (typeof globalThis !== "undefined" && globalThis.BookqApi && globalThis.BookqApi.base) || "";
+      return _mb + "/thumb/" + String(fp).split("/").map(encodeURIComponent).join("/")
         + "/" + String(name).split("/").map(encodeURIComponent).join("/") + "?w=" + width;
     }
     const stack = [{list: nodes, i: 0, parentPath: ""}];
