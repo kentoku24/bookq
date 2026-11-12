@@ -225,6 +225,23 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertTrue(s.subtreeHasDownload("chain"))
     }
 
+    /// A record on an existing FLATTENED leaf (`a`→`b/c`) resolves via
+    /// node(at:) — it must not synthesize a duplicate `a/b` folder chain
+    /// beside the real node (web `findNodeByPath` missing-check parity).
+    func testRecordOnFlattenedLeafNotDuplicated() async {
+        let tree: [[String: Any]] = [
+            ["name": "a", "type": "folder", "children": [
+                ["name": "b/c", "type": "folder", "children":
+                    [["name": "p1.png", "type": "image"]]]]],
+        ]
+        let s = await loadedOfflineStore(tree)
+        s.offline?.testPut(leafRec("a/b/c"))
+        let kids = s.levelFolders(path: "a").map(\.path)
+        XCTAssertEqual(kids, ["a/b/c"],
+                       "flattened leaf must not gain a synthetic sibling chain")
+        XCTAssertTrue(s.workReadable("a/b/c"))
+    }
+
     /// While online the filter disengages — the full tree is browsable
     /// and nothing is synthesized.
     func testOnlineDisablesOfflineFilter() async {

@@ -164,7 +164,13 @@ final class LibraryStore: ObservableObject {
         guard offlineMode, let recs = offline?.records else { return tree }
         var merged = tree
         for (_, rec) in recs where rec.cachedCount > 0 && !rec.folder.isEmpty {
-            ensureSynthPath(&merged, rec)
+            // Web `missing` check parity: only synthesize paths absent from
+            // the tree. node(at:) resolves flattened names by composed path,
+            // so a record on an existing flattened leaf (`a`→`b/c`) is
+            // skipped — synthesizing would double a `a/b` folder beside it.
+            if BrowseModel.node(at: rec.folder, in: merged) == nil {
+                ensureSynthPath(&merged, rec)
+            }
         }
         return merged
     }

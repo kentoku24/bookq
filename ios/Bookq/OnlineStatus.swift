@@ -25,6 +25,9 @@ final class OnlineStatusStore: ObservableObject {
     private let backoffs: [TimeInterval]
     private let maxAttempts: Int
     private var cycle: Task<Bool, Never>?
+    /// Cycle generation — a late-finishing older cycle must not clear a
+    /// newer cycle's handle or demote its live `.connecting` state.
+    private var cycleGen = 0
 
     /// `probeTimeout`/`backoffs`/`maxAttempts` are injectable so tests can
     /// shrink the ~15 s budget; production keeps spec §4 values.
@@ -59,9 +62,12 @@ final class OnlineStatusStore: ObservableObject {
     func connect() -> Task<Bool, Never> {
         if state == .connecting, let cycle { return cycle }
         state = .connecting
+        cycleGen += 1
+        let g = cycleGen
         let t = Task<Bool, Never> { [weak self] in
             guard let self else { return false }
             let ok = await self.runAttempts()
+            guard g == self.cycleGen else { return self.state == .online }
             // A reportSuccess may have landed 'online' already — don't
             // demote it.
             if ok { self.state = .online }
