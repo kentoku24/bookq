@@ -109,6 +109,132 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertEqual(s2.tree.count, 1)   // snapshot kept
         XCTAssertNotNil(s2.error)
     }
+
+    // MARK: - Offline browse filtering (docs/offline-spec.md §6/§8)
+
+    /// Two leaves + one two-episode series — the shape the uniform
+    /// offline filter is judged against.
+    nonisolated private var offlineTreeJSON: [[String: Any]] {
+        [
+            ["name": "作品A", "type": "folder", "children":
+                [["name": "a1.png", "type": "image"]]],
+            ["name": "作品B", "type": "folder", "children":
+                [["name": "b1.png", "type": "image"]]],
+            ["name": "series", "type": "folder", "children": [
+                ["name": "ep1", "type": "folder", "children":
+                    [["name": "e1.png", "type": "image"]]],
+                ["name": "ep2", "type": "folder", "children":
+                    [["name": "e2.png", "type": "image"]]]]],
+        ]
+    }
+
+    private func offlineStore() -> OfflineStore {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("off-\(UUID().uuidString)", isDirectory: true)
+        return OfflineStore(apiProvider: { nil }, root: tmp)
+    }
+
+    private func leafRec(_ folder: String,
+                         _ names: [String] = ["p1.png"]) -> OfflineStore.LeafRecord {
+        OfflineStore.LeafRecord(folder: folder, pageCount: names.count,
+                                cachedCount: names.count, bytes: 1,
+                                thumb: names.first, names: names,
+                                addedAt: 0, lastReadAt: 0)
+    }
+
+    private func loadedOfflineStore(_ nodes: [[String: Any]]) async -> LibraryStore {
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.json(["kind": "tree", "nodes": nodes, "generation": 1])
+        }
+        let s = LibraryStore(api: api())
+        await s.load()
+        s.offline = OfflineStore(apiProvider: { nil }, root:
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("off-\(UUID().uuidString)", isDirectory: true))
+        // Default state is .offline → the filter engages (no probes run).
+        s.online = OnlineStatusStore(apiProvider: { nil })
+        return s
+    }
+
+    /// Root level with downloads: every episode stays listed and only
+    /// the downloaded one is readable; branches without downloads hide.
+    func testOfflineRootLevelFilter() async {
+        let s = await loadedOfflineStore(offlineTreeJSON)
+        s.offline?.testPut(leafRec("作品A"))
+        s.offline?.testPut(leafRec("series/ep1"))
+
+        let root = s.levelFolders(path: "").map(\.path).sorted()
+        XCTAssertEqual(root, ["series", "作品A", "作品B"].sorted(),
+                       "level with downloads lists all episodes + eligible branches")
+        XCTAssertFalse(s.tileUnavailable(path: "作品A", episodeLike: true))
+        XCTAssertTrue(s.tileUnavailable(path: "作品B", episodeLike: true))
+        XCTAssertTrue(s.workReadable("作品A"))
+        XCTAssertFalse(s.workReadable("作品B"))
+        XCTAssertFalse(s.workReadable("series"), "ep2 has no record")
+
+        let eps = s.levelFolders(path: "series").map(\.path).sorted()
+        XCTAssertEqual(eps, ["series/ep1", "series/ep2"])
+        XCTAssertTrue(s.tileUnavailable(path: "series/ep2", episodeLike: true))
+    }
+
+    /// A branch with zero downloads disappears entirely offline —
+    /// including while drilling (levelHasDl = subtreeHasDownload).
+    func testOfflineBranchWithoutDownloadsHidden() async {
+        let tree: [[String: Any]] = [
+            ["name": "作品A", "type": "folder", "children":
+                [["name": "a1.png", "type": "image"]]],
+            ["name": "clean", "type": "folder", "children": [
+                ["name": "c1", "type": "folder", "children":
+                    [["name": "p.png", "type": "image"]]]]],
+        ]
+        let s = await loadedOfflineStore(tree)
+        s.offline?.testPut(leafRec("作品A"))
+        XCTAssertEqual(s.levelFolders(path: "").map(\.path), ["作品A"])
+        XCTAssertTrue(s.levelFolders(path: "clean").isEmpty)
+        XCTAssertFalse(s.subtreeHasDownload("clean"))
+    }
+
+    /// spec §8: a record whose path is missing from the snapshot still
+    /// surfaces — synthesized intermediate + leaf nodes, readable.
+    func testOfflineSynthesizesMissingRecordPaths() async {
+        let s = await loadedOfflineStore(offlineTreeJSON)
+        s.offline?.testPut(leafRec("dl-only/ch-1", ["p1.png", "p2.png"]))
+
+        XCTAssertTrue(s.levelFolders(path: "").contains { $0.path == "dl-only" },
+                      "synthesized parent must surface offline")
+        let eps = s.levelFolders(path: "dl-only").map(\.path)
+        XCTAssertEqual(eps, ["dl-only/ch-1"])
+        XCTAssertTrue(s.workReadable("dl-only/ch-1"))
+        XCTAssertTrue(BrowseModel.hasOnlyImages(s.node(at: "dl-only/ch-1")!),
+                      "synthesized leaf behaves like an episode node")
+        XCTAssertEqual(s.leafPaths(under: "dl-only"), ["dl-only/ch-1"])
+    }
+
+    /// A record nested under an existing LEAF is not materialized —
+    /// synthesizing inside a leaf would double-render the flattened node
+    /// (web `_ensureSynthPath` leaf-ancestor guard parity).
+    func testRecordUnderLeafAncestorNotSynthesized() async {
+        let tree: [[String: Any]] = [
+            ["name": "chain", "type": "folder", "children":
+                [["name": "p1.png", "type": "image"]]],
+        ]
+        let s = await loadedOfflineStore(tree)
+        s.offline?.testPut(leafRec("chain/only/leaf"))
+        XCTAssertEqual(s.levelFolders(path: "").map(\.path), ["chain"])
+        XCTAssertNil(s.node(at: "chain/only/leaf"))
+        XCTAssertTrue(s.subtreeHasDownload("chain"))
+    }
+
+    /// While online the filter disengages — the full tree is browsable
+    /// and nothing is synthesized.
+    func testOnlineDisablesOfflineFilter() async {
+        let s = await loadedOfflineStore(offlineTreeJSON)
+        s.offline?.testPut(leafRec("作品A"))
+        s.online?.reportSuccess()   // .online
+        let root = s.levelFolders(path: "").map(\.path).sorted()
+        XCTAssertEqual(root, ["series", "作品A", "作品B"].sorted())
+        XCTAssertFalse(s.tileUnavailable(path: "作品B", episodeLike: true))
+    }
 }
 
 /// AppModel.initialPageRef — web `_resolveInitialPageRef`/`_pickRef`

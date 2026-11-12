@@ -16,10 +16,15 @@ final class StubURLProtocol: URLProtocol {
     }
 
     nonisolated(unsafe) static var handler: ((URLRequest) -> Response)?
+    /// When set, every request fails with this URLError code instead of
+    /// reaching `handler` — the only way to exercise "no response" paths
+    /// (URLError, never an HTTP status) under a URLProtocol stub.
+    nonisolated(unsafe) static var failWith: URLError.Code?
     nonisolated(unsafe) static var requests: [Rec] = []
 
     static func reset() {
         handler = nil
+        failWith = nil
         requests = []
     }
 
@@ -28,6 +33,10 @@ final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         Self.requests.append(Rec(request: request, body: Self.body(of: request)))
+        if let code = Self.failWith {
+            client?.urlProtocol(self, didFailWithError: URLError(code))
+            return
+        }
         let r = Self.handler?(request)
             ?? Response(status: 500, body: Data("no stub".utf8))
         let http = HTTPURLResponse(url: request.url!, statusCode: r.status,
