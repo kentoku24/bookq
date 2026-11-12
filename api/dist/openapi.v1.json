@@ -1,0 +1,2050 @@
+{
+  "components": {
+    "responses": {
+      "BadRequest": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "パラメータ不正"
+      },
+      "Conflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "競合（visibility owner mismatch 等の同時更新衝突）"
+      },
+      "Forbidden": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "パスがダウンロードルート外 / 権限なし"
+      },
+      "IndexBuilding": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "properties": {
+                "detail": {
+                  "example": "metadata index building",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detail"
+              ],
+              "type": "object"
+            }
+          }
+        },
+        "description": "メタデータインデックス構築中。`Retry-After` 秒後に再送。\n`Cache-Control: no-store`（SW/プライベートキャッシュ不可）。\n",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "default": 2,
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "対象が存在しない"
+      },
+      "ServiceUnavailable": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "user-state ストアの読み書き失敗（fail-closed。ディスク/DB 障害時）"
+      },
+      "ValidationError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "properties": {
+                "detail": {
+                  "items": {
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "description": "入力バリデーション失敗（FastAPI 自動バリデーション。`detail` は issue 配列）"
+      }
+    },
+    "schemas": {
+      "ComicMetadata": {
+        "properties": {
+          "artist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "folder_name": {
+            "type": "string"
+          },
+          "folder_path": {
+            "type": "string"
+          },
+          "has_metadata": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title_en": {
+            "type": "string"
+          },
+          "title_jp": {
+            "type": "string"
+          },
+          "total_pages": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "folder_path",
+          "folder_name",
+          "artist",
+          "tags",
+          "source",
+          "has_metadata",
+          "total_pages"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "code": {
+            "description": "機械可読コード（新規 endpoint で任意付与。v0 互換では省略可）",
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "type": "object"
+      },
+      "Facets": {
+        "description": "`{artists, tags}` のみ（parodies キーは返さない）",
+        "properties": {
+          "artists": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "artists",
+          "tags"
+        ],
+        "type": "object"
+      },
+      "FolderVisibility": {
+        "properties": {
+          "hiddenRoots": {
+            "description": "先頭パスセグメント（書庫も対象）",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "owner": {
+            "description": "PUT 時に x-bookq-visibility-owner でエコーバック",
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner",
+          "revision",
+          "hiddenRoots"
+        ],
+        "type": "object"
+      },
+      "ReadingPosition": {
+        "properties": {
+          "folder": {
+            "description": "不透明文字列。サーバは FS 解決しない",
+            "type": "string"
+          },
+          "page": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ts": {
+            "description": "ms epoch、newest-wins",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "folder",
+          "page",
+          "total",
+          "ts"
+        ],
+        "type": "object"
+      },
+      "TreeNode": {
+        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。\n",
+        "properties": {
+          "archive": {
+            "description": "書庫仮想フォルダ",
+            "type": "boolean"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/TreeNode"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "has_metadata": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/ComicMetadata"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pdf": {
+            "description": "書庫かつ PDF",
+            "type": "boolean"
+          },
+          "subtree_facets": {
+            "$ref": "#/components/schemas/Facets"
+          },
+          "thumb": {
+            "description": "サブツリー DFS 最初の画像のフォルダ相対名",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thumbs": {
+            "description": "直下の 2+ サブフォルダが thumb を持つ時のみ存在",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 9,
+            "type": "array"
+          },
+          "type": {
+            "enum": [
+              "folder",
+              "image"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "TreeResponse": {
+        "properties": {
+          "generation": {
+            "type": "integer"
+          },
+          "kind": {
+            "description": "tree=全木 / children=depth 指定の浅い一覧",
+            "enum": [
+              "tree",
+              "children"
+            ],
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/TreeNode"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "nodes",
+          "generation"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "/api/v1/auth/token 発行の Bearer token（ネイティブ向け）",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "cookieAuth": {
+        "description": "Google OAuth 後の署名 session cookie（ブラウザ向け）",
+        "in": "cookie",
+        "name": "session",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "name": "bookq"
+    },
+    "description": "bookq サーバ/クライアント間の単一の正 (single source of truth)。\n\nこの spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。\nFastAPI (`app/`) と Rust (`server-rs/`) の両実装はこの spec に対して\nSchemathesis 契約テストで検証される。iOS / Web クライアントはこの spec\nからコード生成する。\n\n## 認証\n\n全 `/api/**`・`/image/**`・`/thumb/**`・`/view/**`・`/ws/**` は認証必須。\n\n- `cookieAuth`: Google OAuth → 署名 session cookie（ブラウザ向け、現行）\n- `bearerAuth`: `POST /api/v1/auth/token` で発行する Bearer token\n  （ネイティブ向け、RFC 8252 PKCE フロー）\n\n## 共通セマンティクス\n\n### パス文字列\n`folder` / `{path}` 系パラメータはすべてダウンロードルート相対の\nPOSIX パス。先頭・末尾 `/` 不可、`..` 不可。URL 埋め込み時は\n**セグメント単位で percent-encode** する（`/` → `%2F` にしない。\n全体 encode は別 URL になりキャッシュ不一致を起こす）。\n\n### 書庫の仮想フォルダ\n`.zip .cbz .rar .cbr .epub` は `type: \"folder\", archive: true` の\nノードとして現れる。書庫内部のパスは longest-prefix 解決:\n`<…>/work.cbz/vol01/page.png` は書庫 `work.cbz` のエントリ\n`vol01/page.png` を指す。`.pdf` は `archive: true, pdf: true`。\n\n### ツリーの flatten\n「画像を持たず子フォルダが1つだけ」のフォルダは親に潰し込まれ、\n子ノードの `name` が `\"parent/child\"` になる。`name` が `/` を\n含むのはこの規約による正常形であり、クライアントはそのまま\nパス連結に使ってよい。\n\n### サムネイル解決\nノードの `thumb` / `thumbs[]` は**フォルダ相対のファイル名**。\nクライアントは `/image/<fullPath>/<thumb>` に解決する\n（`fullPath` = 親パス + `name` の連結）。\n\n### インデックス構築中\nメタデータインデックス構築中は `202 + Retry-After` を返す。\nクライアントは Retry-After 後に同一リクエストを再送する。\n\n### 排他・鮮度\n`generation` はライブラリ世代番号。`since=<generation>` で\n既知世代と一致する場合 304 を返す。メディア endpoint は\n`ETag` / `If-None-Match` と `Range: bytes=` をサポートする。\n\n### 隠しルート（セキュリティ契約）\nhidden roots は**ライブラリ全体で共有**（全認証ユーザーに同一の\nセットが効く）。hidden roots 配下のコンテンツは\n**サーバ側で除外**する。クライアント側フィルタはレスポンス本体に\n該当データを含めてしまうため認めない。`include_hidden=true` は\nこの共有 hidden セットの除外をスキップする（閲覧者個人の\n全表示モード用。一時的・非永続）。\n\n## 振る舞いの正本\n\nwire shape に表れない意味論（ETag 世代・positions LWW・\nvisibility owner HMAC・PKCE ライフサイクル・gzip 対象）は\n**`api/v1-semantics.md`** が正本。spec と併せて読むこと。\n",
+    "title": "bookq API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/folder-visibility": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyGetFolderVisibility",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderVisibility"
+                }
+              }
+            },
+            "description": "可視性スナップショット。`Cache-Control: private, no-store`"
+          }
+        },
+        "summary": "[v0] GET /api/v1/folder-visibility を使う",
+        "tags": [
+          "state"
+        ]
+      },
+      "put": {
+        "deprecated": true,
+        "operationId": "legacyPutFolderVisibility",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-bookq-visibility-owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "hidden": {
+                    "type": "boolean"
+                  },
+                  "root": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "root",
+                  "hidden"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderVisibility"
+                }
+              }
+            },
+            "description": "更新後の可視性スナップショット"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "[v0] PUT /api/v1/folder-visibility を使う",
+        "tags": [
+          "state"
+        ]
+      }
+    },
+    "/api/folders": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyGetFolders",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "depth",
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "items": {
+                        "$ref": "#/components/schemas/TreeNode"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "properties": {
+                        "generation": {
+                          "type": "integer"
+                        },
+                        "tree": {
+                          "items": {
+                            "$ref": "#/components/schemas/TreeNode"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "tree",
+                        "generation"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "v0 は 3 shape を返す: `since` 指定時 `{tree, generation}`、\nそれ以外はノード配列（素配列）。\n"
+          },
+          "202": {
+            "$ref": "#/components/responses/IndexBuilding"
+          },
+          "304": {
+            "description": "since 一致"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "[v0] GET /api/v1/tree を使う",
+        "tags": [
+          "tree"
+        ]
+      }
+    },
+    "/api/health": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [],
+        "summary": "[v0] GET /api/v1/health を使う",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/images": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyListImages",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "画像名の素配列"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "[v0] 素配列を返す旧版。GET /api/v1/images を使う",
+        "tags": [
+          "tree"
+        ]
+      }
+    },
+    "/api/metadata/facets": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyFacets",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_hidden",
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Facets"
+                }
+              }
+            },
+            "description": "利用可能なファセット値"
+          },
+          "202": {
+            "$ref": "#/components/responses/IndexBuilding"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "[v0] GET /api/v1/facets を使う",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/api/reading-position": {
+      "delete": {
+        "deprecated": true,
+        "operationId": "legacyDeleteReadingPosition",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "folder",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "消去完了"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "[v0] 最新レコードの消去",
+        "tags": [
+          "state"
+        ]
+      },
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyGetReadingPosition",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "position": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/ReadingPosition"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "position"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`{position: レコードまたは null}` — 常にオブジェクト envelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "[v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う",
+        "tags": [
+          "state"
+        ]
+      },
+      "put": {
+        "deprecated": true,
+        "operationId": "legacyPutReadingPosition",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "folder": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "page": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "total": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "ts": {
+                    "description": "クライアント ms epoch。省略/null = サーバ受信時刻",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "folder",
+                  "page",
+                  "total"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "stale"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "適用結果（ok = 採用、stale = 古い ts で棄却）"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "[v0] newest-ts-wins 単一レコード",
+        "tags": [
+          "state"
+        ]
+      }
+    },
+    "/api/refresh": {
+      "post": {
+        "deprecated": true,
+        "operationId": "legacyRefresh",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "folders": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "再構築完了"
+          }
+        },
+        "summary": "[v0] POST /api/v1/index/refresh を使う",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/search": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacySearch",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "artist",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tag",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_hidden",
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    },
+                    "results": {
+                      "items": {
+                        "$ref": "#/components/schemas/ComicMetadata"
+                      },
+                      "type": "array"
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "検索結果（relevance 降順）"
+          },
+          "202": {
+            "$ref": "#/components/responses/IndexBuilding"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "[v0] GET /api/v1/search を使う",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/api/thumb-sprite": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyThumbSprite",
+        "parameters": [
+          {
+            "example": "Series/vol1",
+            "in": "query",
+            "name": "folder",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "example": "p00.jpg,p01.jpg,p02.jpg",
+            "in": "query",
+            "name": "names",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "200/400/800 のいずれか。それ以外（非数値含む）は 400 に正規化",
+            "in": "query",
+            "name": "w",
+            "schema": {
+              "default": "400",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "rows",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "合成 JPEG"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "[v0] GET /api/v1/thumb-sprite を使う",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/auth/token": {
+      "post": {
+        "description": "ネイティブクライアント向け（RFC 8252）。`/auth/login?client=native`\nが custom scheme (`bookq://auth?code=…`) にリダイレクトし、\nその `code` + PKCE `code_verifier` をここで交換する。\n",
+        "operationId": "exchangeToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "properties": {
+                      "code": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "code_verifier": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "grant_type": {
+                        "const": "authorization_code",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grant_type",
+                      "code",
+                      "code_verifier"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "grant_type": {
+                        "const": "refresh_token",
+                        "type": "string"
+                      },
+                      "refresh_token": {
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "grant_type",
+                      "refresh_token"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "access_token": {
+                      "type": "string"
+                    },
+                    "expires_in": {
+                      "description": "秒",
+                      "type": "integer"
+                    },
+                    "refresh_token": {
+                      "type": "string"
+                    },
+                    "token_type": {
+                      "const": "Bearer",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "access_token",
+                    "token_type",
+                    "expires_in"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "トークン発行"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "コード / verifier / refresh token 不正"
+          }
+        },
+        "security": [],
+        "summary": "認可コード / リフレッシュトークンを Bearer token に交換",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/facets": {
+      "get": {
+        "operationId": "getFacets",
+        "parameters": [
+          {
+            "description": "スコープするサブツリーパス（空 = 全体）",
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_hidden",
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Facets"
+                }
+              }
+            },
+            "description": "利用可能なファセット値"
+          },
+          "202": {
+            "$ref": "#/components/responses/IndexBuilding"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "フィルタ用ファセット一覧",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/api/v1/folder-visibility": {
+      "get": {
+        "operationId": "getFolderVisibility",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderVisibility"
+                }
+              }
+            },
+            "description": "可視性スナップショット。`Cache-Control: private, no-store`"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "ストア読み取り失敗（fail-closed：フィルタなし一覧は返さない）"
+          }
+        },
+        "summary": "ライブラリ共有の隠しルート一覧（全ユーザー共通）",
+        "tags": [
+          "state"
+        ]
+      },
+      "put": {
+        "operationId": "putFolderVisibility",
+        "parameters": [
+          {
+            "description": "GET が返した `owner` トークンをエコーバック",
+            "in": "header",
+            "name": "x-bookq-visibility-owner",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "hidden": {
+                    "type": "boolean"
+                  },
+                  "root": {
+                    "description": "先頭パスセグメント（書庫名も可）",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "root",
+                  "hidden"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "body は `{root, hidden}` の2キーのみ（追加キーは 400）",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderVisibility"
+                }
+              }
+            },
+            "description": "更新後スナップショット"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "隠しルートの単項目トグル（v0 と同一契約）",
+        "tags": [
+          "state"
+        ]
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "ok"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "security": [],
+        "summary": "死活監視",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/v1/images": {
+      "get": {
+        "description": "`folder` が通常ディレクトリなら直下の画像名、書庫ファイルなら\n書庫内エントリ名、書庫内プレフィックスならその配下の相対名を返す。\n再帰しない（直下のみ）。順序は natural sort（漢数字正規化含む）。\n",
+        "operationId": "listImages",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "folder": {
+                      "type": "string"
+                    },
+                    "images": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "folder",
+                    "images"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "画像名リスト"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "書庫形式は解釈可能だが展開ツールが無い（RAR compressed entry 等）"
+          }
+        },
+        "summary": "フォルダ / 書庫 / 書庫内プレフィックスの画像一覧",
+        "tags": [
+          "tree"
+        ]
+      }
+    },
+    "/api/v1/index/refresh": {
+      "post": {
+        "description": "完了後にレスポンスを返す。次の /api/v1/tree 読み取りは新内容を見る。",
+        "operationId": "refreshIndex",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "folders": {
+                      "description": "インデックスされた作品数",
+                      "type": "integer"
+                    },
+                    "status": {
+                      "enum": [
+                        "ok"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "folders"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "再構築完了"
+          }
+        },
+        "summary": "メタデータインデックス同期再構築",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/v1/reading-positions": {
+      "delete": {
+        "operationId": "deleteReadingPosition",
+        "parameters": [
+          {
+            "description": "省略時は全件消去（既存「全消去」ハーネス相当）",
+            "in": "query",
+            "name": "folder",
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "ok"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "消去完了"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "読書位置の消去",
+        "tags": [
+          "state"
+        ]
+      },
+      "get": {
+        "operationId": "listReadingPositions",
+        "parameters": [
+          {
+            "description": "指定時はその作品の位置のみ",
+            "in": "query",
+            "name": "folder",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "positions": {
+                      "items": {
+                        "$ref": "#/components/schemas/ReadingPosition"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "positions"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "位置レコード群"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "呼び出しユーザーの読書位置一覧（per-folder LWW）",
+        "tags": [
+          "state"
+        ]
+      },
+      "put": {
+        "operationId": "putReadingPosition",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "folder",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "page": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "total": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "ts": {
+                    "description": "クライアント ms epoch。未来側は ±5min クランプ",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "page",
+                  "total",
+                  "ts"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "stale"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`{\"status\":\"ok\"}` 受理、`{\"status\":\"stale\"}` 既知より古い ts で棄却\n"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "読書位置の記録（newest ts wins）",
+        "tags": [
+          "state"
+        ]
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "operationId": "search",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "artist",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "description": "カンマ区切り",
+            "in": "query",
+            "name": "tag",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "default": "relevance",
+              "enum": [
+                "relevance"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_hidden",
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    },
+                    "results": {
+                      "items": {
+                        "$ref": "#/components/schemas/ComicMetadata"
+                      },
+                      "type": "array"
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "query",
+                    "total",
+                    "results"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "検索結果（relevance 降順）"
+          },
+          "202": {
+            "$ref": "#/components/responses/IndexBuilding"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "作品検索",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/api/v1/thumb-sprite": {
+      "get": {
+        "operationId": "getThumbSprite",
+        "parameters": [
+          {
+            "description": "書庫ファイルまたはディレクトリ",
+            "example": "Series/vol1",
+            "in": "query",
+            "name": "folder",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "カンマ区切りエントリ名（folder 相対。上限あり、超過分は無視）",
+            "example": "p00.jpg,p01.jpg,p02.jpg",
+            "in": "query",
+            "name": "names",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "200/400/800 のいずれか。それ以外（非数値含む）は 400 に正規化",
+            "in": "query",
+            "name": "w",
+            "schema": {
+              "default": "400",
+              "type": "string"
+            }
+          },
+          {
+            "description": "例 `3,3,3` — 2D グリッド構成。省略・不正値は横ストリップへフォールバック",
+            "in": "query",
+            "name": "rows",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "合成 JPEG"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "コンタクトシート（multi-thumb グリッド用合成画像）",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/tree": {
+      "get": {
+        "description": "`depth` 省略で全木を返す。`depth>=1` で `path` 直下の\nfolder 型子ノードのみを浅く返す（`children: []`、`metadata`/\n`subtree_facets` キーなし）。\n\n`since` に既知の `generation` を渡すと、一致時 304、\n不一致時は全木を返す（`since` 指定時は常に全木モード）。\n",
+        "operationId": "getTree",
+        "parameters": [
+          {
+            "description": "サブツリーパス（空 = ルート）",
+            "in": "query",
+            "name": "path",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          },
+          {
+            "description": "省略 = 全木",
+            "in": "query",
+            "name": "depth",
+            "schema": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "既知 generation。一致 = 304",
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TreeResponse"
+                }
+              }
+            },
+            "description": "ツリー。`ETag` + `Cache-Control: private, max-age=60`"
+          },
+          "202": {
+            "$ref": "#/components/responses/IndexBuilding"
+          },
+          "304": {
+            "description": "since が generation に一致（本体なし）"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        },
+        "summary": "フォルダツリー取得（全木または浅い一覧）",
+        "tags": [
+          "tree"
+        ]
+      }
+    },
+    "/api/v1/version": {
+      "get": {
+        "operationId": "getVersion",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "build_date": {
+                      "type": "string"
+                    },
+                    "sha": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "sha",
+                    "build_date"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "バージョン情報。`Cache-Control: no-store`"
+          }
+        },
+        "summary": "サーババージョン",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/version": {
+      "get": {
+        "deprecated": true,
+        "operationId": "legacyVersion",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "build_date": {
+                      "type": "string"
+                    },
+                    "sha": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "バージョン情報。`Cache-Control: no-store`"
+          }
+        },
+        "summary": "[v0] GET /api/v1/version を使う",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/image/{path}": {
+      "get": {
+        "operationId": "getImage",
+        "parameters": [
+          {
+            "description": "セグメント単位 percent-encode 済みパス",
+            "example": "Series/vol1/p00.jpg",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "schema": {
+              "pattern": "^bytes=",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "画像バイナリ"
+          },
+          "206": {
+            "description": "Range レスポンス"
+          },
+          "304": {
+            "description": "ETag 一致"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "不正な Range ヘッダ等。Starlette の FileResponse Range 処理は\n`text/plain` ボディを返す（`{\"detail\": …}` JSON とは別形式）。\n"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "画像本体（Range / ETag 対応）",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/thumb/{path}": {
+      "get": {
+        "operationId": "getThumb",
+        "parameters": [
+          {
+            "example": "Series/vol1/p00.jpg",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "200/400/800 のいずれか。それ以外（非数値含む）は 400 に正規化",
+            "in": "query",
+            "name": "w",
+            "schema": {
+              "default": "400",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "サムネ JPEG"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "リサイズ JPEG サムネイル",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/view/{path}": {
+      "get": {
+        "operationId": "getView",
+        "parameters": [
+          {
+            "example": "Series/vol1/p00.jpg",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "正規化画像"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "リーダー用正規化ページ",
+        "tags": [
+          "media"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "cookieAuth": []
+    },
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "Same origin (production behind tailscale serve)",
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "meta"
+    },
+    {
+      "name": "tree"
+    },
+    {
+      "name": "search"
+    },
+    {
+      "name": "media"
+    },
+    {
+      "name": "state"
+    },
+    {
+      "name": "auth"
+    }
+  ]
+}
