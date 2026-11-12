@@ -89,9 +89,11 @@ final class AppModel: ObservableObject {
         #endif
         if config.baseURL != nil {
             configureAPI()
-            phase = .booting
             Task { await boot() }
         }
+        // spec §6 gate: a download may only START while online — deletion
+        // stays a local operation in every state.
+        offline.onlineProvider = { [weak self] in self?.online.isOnline ?? false }
     }
 
     /// `BOOKQ_SERVER_URL` env var or `-serverURL <url>` argv pair, or nil.
@@ -145,10 +147,19 @@ final class AppModel: ObservableObject {
                            tokenProvider: { [box = auth.tokenBox] in box.token },
                            tokenRefresher: { [weak self] in
                                await self?.auth.refreshAccessToken()
-                           })
+                           },
+                           reporter: ConnectivityReporter(
+                               success: { [weak self] in
+                                   Task { @MainActor in self?.online.reportSuccess() }
+                               },
+                               unreachable: { [weak self] in
+                                   Task { @MainActor in self?.online.reportFail() }
+                               }))
         self.api = api
         self.library = LibraryStore(api: api)
         self.library?.visibility = visibility
+        self.library?.offline = offline
+        self.library?.online = online
         RemoteImageLoader.shared.api = api
         RemoteImageLoader.shared.clear()  // server switch: stale images must not resolve
         RemoteImageLoader.shared.offlineResolver = { [weak offline] in
@@ -208,17 +219,20 @@ final class AppModel: ObservableObject {
         return PairPageRef(folder: folder, name: names[idx])
     }
 
-    /// Probe the server. 401 → login required; 200 → ready.
+    /// spec §7 offline-first boot: never gate the UI on a probe — the
+    /// library renders its snapshot immediately (`.ready`) and the
+    /// version/auth probe runs in the background. 401 still routes to
+    /// `.login`; a dead server just leaves the machine `.connecting`
+    /// (the badge shows it) instead of stranding the user on onboarding.
     /// `GET /api/v1/version` doubles as the auth probe — v1 has no /me,
-    /// identity comes from the access-token JWT claims instead.
-    /// The probe is time-boxed: a dead tailnet host blackholes TCP inside
-    /// the default connection timeout (~75 s), leaving the spinner up with
-    /// no way out. 15 s is far above any healthy probe RTT.
+    /// identity comes from the access-token JWT claims instead. The probe
+    /// stays time-boxed at 15 s (dead hosts blackhole TCP inside the
+    /// default ~75 s connection timeout).
     func boot() async {
         guard let api else { phase = .onboarding; return }
-        phase = .booting
         bootError = nil
-        print("[bookq] boot: probing \(api.baseURL)")
+        phase = .ready
+        print("[bookq] boot: ready (offline-first), probing \(api.baseURL)")
         do {
             _ = try await Self.withTimeout(seconds: 15) { try await api.version() }
             // Account switch — the previous user's per-account state
@@ -229,20 +243,15 @@ final class AppModel: ObservableObject {
             visibility.accountChanged(knownOwner: auth.user?.email)
             offline.scopeChanged()
             progress.scopeChanged()
-            phase = .ready
             Task { await progress.syncWithServer() }
             pair.bootResume()
-            print("[bookq] boot: ready")
+            print("[bookq] boot: probe ok")
         } catch APIError.unauthorized {
             phase = .login
             print("[bookq] boot: unauthorized → login")
         } catch {
             bootError = error.localizedDescription
-            // Web parity: a dead server is not a setup problem when we hold
-            // a tree snapshot — enter the library offline (SW cache parity)
-            // instead of dumping the user on the onboarding screen.
-            phase = (library?.tree.isEmpty == false) ? .ready : .onboarding
-            print("[bookq] boot: \(error) → \(phase == .ready ? "ready(offline)" : "onboarding")")
+            print("[bookq] boot: probe failed → stays ready (offline): \(error)")
         }
     }
 

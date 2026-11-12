@@ -14,6 +14,7 @@ struct FolderLevelView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var progress: ReadingProgressStore
     @EnvironmentObject private var offline: OfflineStore
+    @EnvironmentObject private var online: OnlineStatusStore
     @EnvironmentObject private var visibility: VisibilityStore
     @Environment(\.horizontalSizeClass) private var hSize
     @State private var query = ""
@@ -35,8 +36,12 @@ struct FolderLevelView: View {
 
         // `blockedGridHtml` — never paint an unfiltered list while the
         // visibility judgment is unknown (loading/error without snapshot).
+        // spec §9 fail-open: while offline/connecting the visibility
+        // service may be unreachable — the download filter (levelFolders)
+        // is already the stricter gate, so open the grid instead of
+        // hanging on a judgment that cannot complete.
         Group {
-            switch visibility.blockedState {
+            switch online.isOnline ? visibility.blockedState : .none {
             case .loading:
                 VStack { Spacer(); ProgressView("読込中…"); Spacer() }
             case .error:
@@ -152,6 +157,10 @@ struct FolderLevelView: View {
             entry.path, editable: visibility.isTopLevel(entry.path))
         let rowMode = model.config.layoutMode != .tile
         let name = BrowseModel.splitDisplayName(node.name).leaf
+        // spec §6 greying — leaf tiles without a download record render
+        // dimmed + badged (the tap is rejected in `openWork` upstream).
+        let unavail = library.tileUnavailable(
+            path: entry.path, episodeLike: BrowseModel.hasOnlyImages(node))
         return ZStack(alignment: .topTrailing) {
             // Row layouts are too short to stack the eye below
             // the download button — park it to the button's left.
@@ -169,7 +178,8 @@ struct FolderLevelView: View {
                         progress: progress.progress(for: entry.path, leaves: leaves),
                         leaves: leaves,
                         meta: entry.node.metadata,
-                        vis: pres
+                        vis: pres,
+                        unavailable: unavail
                     )
                     .contentShape(Rectangle())
                 }
@@ -196,13 +206,17 @@ struct FolderLevelView: View {
 
     private func selfCell(path: String, node: TreeNode) -> some View {
         let entry = (path: path, node: node)
+        // spec §6: a self tile is always episode-like — grey unless its
+        // own record is downloaded.
+        let unavail = library.tileUnavailable(path: entry.path, episodeLike: true)
         return ZStack(alignment: .topTrailing) {
             // Self tiles always open the reader at their own path (web
             // `data-read-self` → loadImages) — never drillsDown, or a
             // mixed folder would drill instead of reading its own images.
             Button { onOpen(entry.path) } label: {
                 SelfTileView(node: entry.node, path: entry.path,
-                             layout: model.config.layoutMode)
+                             layout: model.config.layoutMode,
+                             unavailable: unavail)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -293,24 +307,41 @@ struct SelfTileView: View {
     let node: TreeNode
     let path: String
     var layout: AppConfig.LayoutMode = .tile
+    /// spec §6 `.off-unavail` — same offline badge treatment as
+    /// FolderTileView.
+    var unavailable: Bool = false
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        if layout == .tile {
-            VStack(alignment: .leading, spacing: 4) {
-                cover
-                Text("このフォルダを読む")
-                    .font(.caption).lineLimit(2)
+        Group {
+            if layout == .tile {
+                VStack(alignment: .leading, spacing: 4) {
+                    cover
+                    Text("このフォルダを読む")
+                        .font(.caption).lineLimit(2)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    cover.frame(width: (layout == .card ? 72 : 44) * 2 / 3,
+                                height: layout == .card ? 72 : 44)
+                    Text("このフォルダを読む").font(.subheadline)
+                    Spacer()
+                    Image(systemName: "book").foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
             }
-        } else {
-            HStack(spacing: 10) {
-                cover.frame(width: (layout == .card ? 72 : 44) * 2 / 3,
-                            height: layout == .card ? 72 : 44)
-                Text("このフォルダを読む").font(.subheadline)
-                Spacer()
-                Image(systemName: "book").foregroundStyle(.tertiary)
+        }
+        .saturation(unavailable ? 0 : 1)
+        .opacity(unavailable ? 0.55 : 1)
+        .overlay(alignment: .top) {
+            if unavailable {
+                Text("オフライン")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.black.opacity(0.7), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(4)
             }
-            .contentShape(Rectangle())
         }
     }
 
