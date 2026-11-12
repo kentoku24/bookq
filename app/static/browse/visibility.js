@@ -5,12 +5,16 @@
  * localStorage entry for offline boot), the transient normal/full-display
  * mode (never persisted), and the shared O(1) visibility predicates the
  * renderers and navigation guards consume.
- * Loads after offline-core.js (escapeHtml), before hash/render/facets/app.js.
+ * Loads after offline-core.js (escapeHtml), hash/render/facets/app.js.
+ *
+ * Wire (#236): GET/PUT go through the typed window.BookqApi client
+ * (app/static/api/v1.js) — endpoint paths and snapshot shapes are spec-typed,
+ * so a response-shape change breaks tsc instead of only E2E.
  */
+// @ts-check
 (function () {
   var API_VERSION = 1;
-  var URL = (globalThis.BookqApi && globalThis.BookqApi.endpoints.folderVisibility) || "/api/v1/folder-visibility";
-  var OWNER_HEADER = "X-Bookq-Visibility-Owner";
+  var URL = window.BookqApi.endpoints.folderVisibility;
   var GET_TIMEOUT_MS = 3000;
   var CACHE_PREFIX = "bookq.folderVisibility.v1.";
   var COALESCE_MS = 400;
@@ -44,6 +48,13 @@
   var _readyPromise = new Promise(function(res){ _readyResolve = res; });
 
   function _esc(s){ return window.OfflineCore.escapeHtml(s); }
+
+  // tsc helper: EventTarget has no .closest in lib.dom — the guarded any
+  // cast keeps the runtime shape (null when not an Element) without DOM lies.
+  function _closest(target, selector){
+    var t = /** @type {any} */ (target);
+    return (t && t.closest) ? t.closest(selector) : null;
+  }
 
   function _sig(revision, roots){
     // NUL-joined: roots may contain "/" and "," — a plain join collides
@@ -128,35 +139,34 @@
     _scheduleRefresh();
   }
 
-  function _get(){
+  async function _get(){
     // offline は GET せず netErr 相当に倒す (spec §3: 自動リトライ無し) —
     // refresh() 側が読んだ owner ローカル snapshot が readonly フォール
     // バックとしてそのまま適用される。connecting 中は通常通り発行する —
-    // 成功応答は到達証拠 (spec §5) として状態機械を online に引き上げる。
+    // 成功応答は到達証拠 (spec §5) として状態機械を online に引き上げる
+    // (verdict は BookqApi→fetchJson 既定の Connectivity.fetch が流す)。
     if (window.Connectivity && window.Connectivity.isOffline()){
-      return Promise.resolve({ netErr: true });
+      return { netErr: true };
     }
     var ctl = (typeof AbortController === "function") ? new AbortController() : null;
     var timer = ctl ? setTimeout(function(){ try { ctl.abort(); } catch(e){} }, GET_TIMEOUT_MS) : null;
-    var opts = { credentials: "same-origin", cache: "no-store" };
-    if (ctl) opts.signal = ctl.signal;
-    // Connectivity.fetch で判定を状態機械に流す (docs/offline-spec.md §5)。
-    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
-    return _cf(URL, opts).then(function(res){
+    try {
+      var snap = await window.BookqApi.getVisibility({ signal: ctl ? ctl.signal : null });
       if (timer) clearTimeout(timer);
-      if (res.status === 401 || res.status === 403) return { authFail: true };
-      if (!res.ok) return { httpErr: res.status };
-      return res.json().then(function(j){ return { json: j }; });
-    }).catch(function(){
+      return { json: snap };
+    } catch (err) {
       if (timer) clearTimeout(timer);
+      var status = (err && typeof err.status === "number") ? err.status : 0;
+      if (status === 401 || status === 403) return { authFail: true };
+      if (status !== 0) return { httpErr: status };
       return { netErr: true };
-    });
+    }
   }
 
   function _resolveGet(out, cached, issueGen){
     if (out === null) return;                 // defensive — nothing resolves null
     var prevStatus = _status;
-    if (out.json){
+    if (out && typeof out === "object" && "json" in out && out.json){
       if (issueGen >= _appliedGen){
         var j = out.json;
         var srvOwner = (typeof j.owner === "string" && j.owner) ? j.owner : _owner;
@@ -173,7 +183,7 @@
       }
       // else: a newer request's response already applied — this older GET
       // never lands over it (a PUT issued later still wins).
-    } else if (out.authFail){
+    } else if (out && typeof out === "object" && "authFail" in out){
       // Never continue on another account's snapshot.
       _status = "error"; _lastError = "auth";
     } else if (cached){
@@ -406,25 +416,44 @@
     }
     return root;
   }
-  function setHidden(root, hidden){
+  async function setHidden(root, hidden){
     if (_validRootPath(root) === null)
-      return Promise.resolve({ ok: false, invalid: true });
-    if (_saving) return Promise.resolve({ ok: false, busy: true });
+      return { ok: false, invalid: true };
+    if (_saving) return { ok: false, busy: true };
     if (_readOnly || _offline || (typeof navigator !== "undefined" && navigator.onLine === false)
         || (window.Connectivity && window.Connectivity.isOffline())){
       _updateStatusDom();
-      return Promise.resolve({ ok: false, offline: true });
+      return { ok: false, offline: true };
     }
     _saving = true; _setGridBusy(true); _updateStatusDom();
     var issueGen = ++_reqGen;
-    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
-    return _cf(URL, {
-      method: "PUT", credentials: "same-origin", cache: "no-store",
-      headers: { "Content-Type": "application/json", [OWNER_HEADER]: _owner },
-      body: JSON.stringify({ root: root, hidden: !!hidden })
-    }).then(function(res){
+    try {
+      var snap = await window.BookqApi.putVisibility(root, !!hidden, _owner || "");
       _saving = false; _setGridBusy(false);
-      if (res.status === 409){
+      var srvOwner = snap.owner;
+      var srvRev = snap.revision;
+      // The PUT response is the authoritative post-write snapshot — applied
+      // when it is not behind the local revision. A PUT resolving BEHIND
+      // the current revision means another device's write landed via a
+      // GET while this write was in flight: the stale payload is not
+      // adopted; exactly one convergence GET pulls the true head instead.
+      // (owner 切替の force 採用はこの大小比較より優先。)
+      _appliedGen = Math.max(_appliedGen, issueGen);
+      _status = "ready"; _readOnly = false; _lastError = null;
+      if (srvOwner !== _owner || srvRev >= _revision){
+        _applySnapshot(srvOwner, srvRev, snap.hiddenRoots,
+          { force: srvOwner !== _owner, allowDownrev: true });
+        _convergenceSent = false;
+      } else {
+        _convergeOnce();
+      }
+      _updateStatusDom();
+      _resolveReady();
+      return { ok: true };
+    } catch (err) {
+      _saving = false; _setGridBusy(false);
+      var status = (err && typeof err.status === "number") ? err.status : 0;
+      if (status === 409){
         // The owner the page booted under is stale — pull the server's
         // authoritative owner/snapshot instead of writing to another user.
         _status = "error"; _lastError = "owner"; _updateStatusDom();
@@ -432,45 +461,16 @@
         _resolveReady();
         return { ok: false, status: 409 };
       }
-      if (res.status === 401 || res.status === 403){
+      if (status === 401 || status === 403){
         _status = "error"; _lastError = "auth"; _updateStatusDom();
         _resolveReady();
-        return { ok: false, status: res.status };
+        return { ok: false, status: status };
       }
-      if (!res.ok){
-        _lastError = "save"; _updateStatusDom();
-        _resolveReady();
-        return { ok: false, status: res.status };
-      }
-      return res.json().then(function(j){
-        var srvOwner = (typeof j.owner === "string" && j.owner) ? j.owner : _owner;
-        var srvRev = (typeof j.revision === "number") ? j.revision : 0;
-        // The PUT response is the authoritative post-write snapshot — applied
-        // when it is not behind the local revision. A PUT resolving BEHIND
-        // the current revision means another device's write landed via a
-        // GET while this write was in flight: the stale payload is not
-        // adopted; exactly one convergence GET pulls the true head instead.
-        // (owner 切替の force 採用はこの大小比較より優先。)
-        _appliedGen = Math.max(_appliedGen, issueGen);
-        _status = "ready"; _readOnly = false; _lastError = null;
-        if (srvOwner !== _owner || srvRev >= _revision){
-          _applySnapshot(srvOwner, srvRev,
-            Array.isArray(j.hiddenRoots) ? j.hiddenRoots : [],
-            { force: srvOwner !== _owner, allowDownrev: true });
-          _convergenceSent = false;
-        } else {
-          _convergeOnce();
-        }
-        _updateStatusDom();
-        _resolveReady();
-        return { ok: true };
-      });
-    }).catch(function(){
-      _saving = false; _setGridBusy(false);
       _lastError = "save"; _updateStatusDom();
       _resolveReady();
+      if (status !== 0) return { ok: false, status: status };
       return { ok: false, net: true };
-    });
+    }
   }
 
   // ── mode: memory only, never persisted ──
@@ -518,17 +518,18 @@
   // survives innerHTML replacement, never lets the tile-open handler see it.
   function _bindDelegatedToggle(){
     var grid = document.getElementById("tile-grid");
-    if (!grid || grid.__fvDelegated) return;
-    grid.__fvDelegated = true;
+    var g = /** @type {any} */ (grid);
+    if (!grid || g.__fvDelegated) return;
+    g.__fvDelegated = true;
     grid.addEventListener("click", function(e){
-      var rt = e.target && e.target.closest ? e.target.closest(".fv-grid-retry") : null;
+      var rt = _closest(e.target, ".fv-grid-retry");
       if (rt && grid.contains(rt)){
         e.preventDefault(); e.stopPropagation();
         if (e.stopImmediatePropagation) e.stopImmediatePropagation();
         _startRetry();
         return;
       }
-      var btn = e.target && e.target.closest ? e.target.closest(".visibility-toggle") : null;
+      var btn = _closest(e.target, ".visibility-toggle");
       if (!btn || !grid.contains(btn)) return;
       e.preventDefault();
       e.stopPropagation();
@@ -570,8 +571,9 @@
   // sidebar's 280px edge (closing the sidebar / hitting viewer controls).
   function _bindEntryGesture(){
     var h = document.getElementById("browse-header");
-    if (!h || h.__fvGesture) return;
-    h.__fvGesture = true;
+    var hh = /** @type {any} */ (h);
+    if (!h || hh.__fvGesture) return;
+    hh.__fvGesture = true;
     var drag = null; // {icon, x0, y0, pid, armed}
     var eatClick = false;
     // Swallow exactly the click produced by an activating release — it is
@@ -603,7 +605,7 @@
       }
     }
     h.addEventListener("pointerdown", function(e){
-      var icon = e.target && e.target.closest ? e.target.closest("#browse-root-icon") : null;
+      var icon = _closest(e.target, "#browse-root-icon");
       if (!icon || !h.contains(icon)) return;
       // リリースがヘッダ外に出ても必ず icon（→ document まで bubble）へ届く
       // よう pointerdown 時点で capture する — arm 時点の capture だと外側

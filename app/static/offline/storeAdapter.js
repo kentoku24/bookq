@@ -1,8 +1,18 @@
 /* bookq offline/storeAdapter — download/delete/progress & offline UI.
  * Plain global script: defines window.downloadWork, deleteWork, getOfflineBtnState,
  * offlineControlsHtml etc. Depends on window.tree, window.OfflineStore etc.
+ *
+ * Wire (#236): the leaf image listing goes through the typed window.BookqApi
+ * client (app/static/api/v1.js) — the `{folder, images[]}` envelope is
+ * spec-typed, so a response-shape change breaks tsc instead of only E2E.
  */
+// @ts-check
 (function () {
+  // EventTarget has no .closest in lib.dom — guarded any cast, null-safe.
+  function _closestEl(target, selector){
+    var t = /** @type {any} */ (target);
+    return (t && t.closest) ? t.closest(selector) : null;
+  }
   var OfflineStore = window.OfflineStore;
   // escapeHtml / folderHasOnlyImages come from offline-core.js, which
   // index.html's defer chain loads before this file — single definition, no
@@ -255,7 +265,7 @@
       backdrop.addEventListener('click',function(ev){ if(ev.target===backdrop) done(false); });
       backdrop.querySelector('.quota-ok').addEventListener('click',function(){done(true);});
       backdrop.querySelector('.quota-cancel').addEventListener('click',function(){done(false);});
-      backdrop.querySelector('.quota-ok').focus();
+      /** @type {any} */ (backdrop.querySelector('.quota-ok')).focus();
     });
     return _quotaModalPromise;
   }
@@ -269,13 +279,13 @@
     }
     try{
       var esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(folder) : folder.replace(/["\\]/g,'\\$&');
-      var els = document.querySelectorAll('.offline-btn[data-folder="'+esc+'"] .progress-ring');
+      var els = /** @type {any} */ (document.querySelectorAll('.offline-btn[data-folder="'+esc+'"] .progress-ring'));
       if(!els.length) els = document.querySelectorAll('.offline-btn[data-path="'+esc+'"] .progress-ring');
       if(!els.length) els = document.querySelectorAll('[data-folder="'+esc+'"] .progress-ring');
       if(!els.length) els = document.querySelectorAll('[data-path="'+esc+'"] .progress-ring');
       if(!els.length){
         els = Array.from(document.querySelectorAll('.offline-btn .progress-ring')).filter(function(ring){
-          var btn = ring.closest('.offline-btn');
+          var btn = /** @type {any} */ (ring.closest('.offline-btn'));
           return btn && btn.dataset.folder === folder;
         });
       }
@@ -310,12 +320,11 @@
     var leafFileMap = new Map();
     async function fetchLeafFiles(lp){
       throwIfAborted();
-      // 正規ルートは /api/images — listing フェーズとして観測される
-      // (is-listing)。flatten 葉は /api/images?folder=<leaf> がディスク
-      // 直下しか列挙しないため常に [] を返す; オフラインでは fetch 自体が
-      // 失敗する。両ケースのフォールバックとして、画像のみの葉では
-      // node.children のファイル名 ("only/leaf/1.png" 形式) を使う —
-      // viewer のオフライン fast path と同じ経路。
+      // flatten 葉は listing がディスク直下しか列挙しないため常に [] を
+      // 返し得る; オフラインでは fetch 自体が失敗する。両ケースの
+      // フォールバックとして、画像のみの葉では node.children の
+      // ファイル名 ("only/leaf/1.png" 形式) を使う — viewer の
+      // オフライン fast path と同じ経路。
       var inMem = [];
       try {
         var node = _nodeAt(lp);
@@ -326,17 +335,12 @@
       } catch(e) {}
       var files = null;
       try {
-        var res = await _fetch(globalThis.BookqApi.imagesUrl(lp), {signal});
-        if(res.ok){
-          files = globalThis.BookqApi.imagesOf(await res.json());
-          if(!files) throw new Error("malformed images response for "+lp);
-        } else if(!inMem.length) {
-          throw new Error("list failed "+res.status+" for "+lp);
-        }
+        files = await window.BookqApi.getImages(lp, { fetch: _fetch, signal: signal });
       } catch(e) {
         if(e && e.name==='AbortError') throw e;
         if(!inMem.length) throw e;
       }
+      throwIfAborted();
       if(files && files.length) return files;
       if(inMem.length) return inMem;
       return files || [];
@@ -556,16 +560,16 @@
   }
   function findOfflineBtn(folder){
     for(var b of document.querySelectorAll('.offline-btn')){
-      if(b.dataset.folder===folder) return b;
+      if(/** @type {any} */ (b).dataset.folder===folder) return b;
     }
     return null;
   }
   function focusOfflineBtn(folder){
-    var b=findOfflineBtn(folder);
+    var b= /** @type {any} */ (findOfflineBtn(folder));
     if(b) try{ b.focus({preventScroll:true}); } catch(e) { console.warn(e); }
   }
   function openPartialPopover(folder){
-    var wasOpen = [...document.querySelectorAll('.ux-pop')].some(function(p){return p.dataset.folder===folder;});
+    var wasOpen = [...document.querySelectorAll('.ux-pop')].some(function(p){return /** @type {any} */ (p).dataset.folder===folder;});
     closeAllPartialPops();
     if(wasOpen){ focusOfflineBtn(folder); return; }
     var btn = findOfflineBtn(folder);
@@ -583,7 +587,7 @@
       +'<button class="del"><span class="ic">\uD83D\uDDD1</span><span>削除<span class="sub">'+(prog.cachedCount||0)+' ページ分の保存データ</span></span></button>';
     host.appendChild(pop);
     var h=pop.offsetHeight, br=btn.getBoundingClientRect();
-    if(br.bottom+8+h>window.innerHeight){ pop.style.top=(btn.offsetTop-h-6)+'px'; }
+    if(br.bottom+8+h>window.innerHeight){ pop.style.top=(/** @type {any} */ (btn).offsetTop-h-6)+'px'; }
     pop.querySelector('.resume').addEventListener('click', function(ev){
       ev.stopPropagation();
       closeAllPartialPops();
@@ -596,7 +600,7 @@
       deleteWork(folder);
       focusOfflineBtn(folder);
     });
-    var first=pop.querySelector('button');
+    var first= /** @type {any} */ (pop.querySelector('button'));
     if(first) try{ first.focus({preventScroll:true}); } catch(e) { console.warn(e); }
   }
   window.closeAllPartialPops = closeAllPartialPops;
@@ -612,10 +616,11 @@
       return;
     }
     // Avoid double-attach if app.js also attaches
-    if(tileGrid.__offlineListenerAttached) return;
-    tileGrid.__offlineListenerAttached = true;
+    var _tg = /** @type {any} */ (tileGrid);
+    if(_tg.__offlineListenerAttached) return;
+    _tg.__offlineListenerAttached = true;
     tileGrid.addEventListener('click', function(e){
-      var btn = e.target.closest && e.target.closest('.offline-btn');
+      var btn = /** @type {any} */ (_closestEl(e.target, '.offline-btn'));
       if(!btn) return;
       e.stopPropagation();
       var folder = btn.dataset.folder;
@@ -649,7 +654,8 @@
   if(!window.__offlineGlobalDismissAttached){
     window.__offlineGlobalDismissAttached = true;
     document.addEventListener('click', function(e){
-      if(e.target.closest && (e.target.closest('.offline-btn') || e.target.closest('.ux-pop'))) return;
+      var _t = /** @type {any} */ (e.target);
+      if(_t && _t.closest && (_t.closest('.offline-btn') || _t.closest('.ux-pop'))) return;
       var changed=false;
       if(document.querySelector('.ux-pop')){ closeAllPartialPops(); changed=true; }
       if(_confirmMap.size>0){
@@ -665,7 +671,7 @@
       if(e.key !== 'Escape') return;
       var changed=false;
       var popped=false;
-      var popFolders=[...document.querySelectorAll('.ux-pop')].map(function(p){return p.dataset.folder;});
+      var popFolders=[...document.querySelectorAll('.ux-pop')].map(function(p){return /** @type {any} */ (p).dataset.folder;});
       if(popFolders.length){ closeAllPartialPops(); popped=true; changed=true; }
       if(_confirmMap.size>0){
         for(var f of [..._confirmMap.keys()]){

@@ -172,6 +172,7 @@ code{background:#222;border:1px solid #2a2a2a;border-radius:4px;padding:1px 4px;
 </main>
 <div class="footer"><a href="/">← Viewer に戻る</a> &nbsp;·&nbsp; <a href="/static/offline-harness.html?harness=1">harness=1 で開く</a></div>
 <script src="/static/offline-core.js"></script>
+<script src="/static/api/endpoints.js"></script>
 <script src="/static/api/v1.js"></script>
 <script src="/static/progress/sync.js"></script>
 <script>
@@ -243,10 +244,8 @@ harness.getLeafPathsFor = getLeafPathsFor;
 
 async function fetchTree(){
   try{
-    const r = await fetch('/api/v1/tree');
-    if(!r.ok) return;
-    const data = await r.json();
-    tree = (data && data.nodes) || data;
+    const data = await window.BookqApi.getTree();
+    tree = (data && data.nodes) || [];
     window.tree = tree;
     setFullPaths(tree, "");
     populateTargetSelect();
@@ -312,7 +311,7 @@ async function probeSignals(){
     const c=new AbortController();
     const t=setTimeout(()=>{ try{c.abort();}catch{} }, 1200);
     try{
-      const r=await fetch('/api/v1/health?online_check=1&_t='+Date.now()+'_'+i,{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:c.signal});
+      const r=await fetch(window.BookqApi.endpoints.health+'?online_check=1&_t='+Date.now()+'_'+i,{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:c.signal});
       return !!r.ok;
     }catch{
       return false;
@@ -330,7 +329,7 @@ async function loadVersion(){
   const sEl=document.getElementById('harness-version-sha');
   const dEl=document.getElementById('harness-version-date');
   try{
-    const r=await fetch('/api/v1/version',{cache:'no-store'});
+    const r=await fetch(window.BookqApi.endpoints.version,{cache:'no-store'});
     if(!r.ok) throw new Error('not ok '+r.status);
     const j=await r.json();
     if(vEl) vEl.textContent=j.version||'unknown';
@@ -438,7 +437,7 @@ async function refresh(){
     const online = navigator.onLine;
     let healthOk=false;
     try{
-      const r=await fetch('/api/v1/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}});
+      const r=await fetch(window.BookqApi.endpoints.health+'?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}});
       healthOk=r.ok;
     }catch{ healthOk=false; }
     if(statusEl){
@@ -548,12 +547,12 @@ async function refresh(){
     if(apiEl){
       let cached=false, cachedIgnore=false, hitWithQS=false;
       if('caches' in window){
-        try{ const r1=await caches.match('/api/v1/tree'); cached=!!r1; }catch{}
-        try{ const r2=await caches.match('/api/v1/tree', {ignoreSearch:true}); cachedIgnore=!!r2; }catch{}
-        try{ const r3=await caches.match('/api/v1/tree?_harness=1', {ignoreSearch:true}); hitWithQS=!!r3; }catch{}
+        try{ const r1=await caches.match(window.BookqApi.endpoints.tree); cached=!!r1; }catch{}
+        try{ const r2=await caches.match(window.BookqApi.endpoints.tree, {ignoreSearch:true}); cachedIgnore=!!r2; }catch{}
+        try{ const r3=await caches.match(window.BookqApi.endpoints.tree+'?_harness=1', {ignoreSearch:true}); hitWithQS=!!r3; }catch{}
       }
       // keep exact substrings required for grep/verification
-      apiEl.textContent=`/api/v1/tree cached ${cached} (ignoreSearch ${cachedIgnore}) — hitWithQS ${hitWithQS} — caches.match + ignoreSearch fallback ${cached||cachedIgnore?"hit":"miss"}`;
+      apiEl.textContent=`${window.BookqApi.endpoints.tree} cached ${cached} (ignoreSearch ${cachedIgnore}) — hitWithQS ${hitWithQS} — caches.match + ignoreSearch fallback ${cached||cachedIgnore?"hit":"miss"}`;
       window.__harnessApiCached=cached;
       window.__harnessApiCachedIgnore=cachedIgnore;
     }
@@ -618,7 +617,7 @@ document.getElementById('btn-health-abort')?.addEventListener('click', async ()=
   if(hint) hint.textContent='health abort: fetch を AbortController で中断中…';
   try{
     const ctl=new AbortController();
-    const p=fetch('/api/v1/health?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:ctl.signal});
+    const p=fetch(window.BookqApi.endpoints.health+'?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'},signal:ctl.signal});
     ctl.abort();
     await p;
   }catch(e){

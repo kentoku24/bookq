@@ -40,11 +40,18 @@
  * Non-GET methods bypass the service worker entirely (sw.js only handles
  * GET). The GET rides the api networkFirst cache, which is a feature: an
  * offline pull still returns the last known position.
+ *
+ * Wire (#236): all transport goes through the typed window.BookqApi client
+ * (app/static/api/v1.js). Error responses surface as ApiError with the spec
+ * `code`; a malformed 200 is treated as a failure (retry), never as "empty"
+ * — pushing a stale local record over a newer remote one stays impossible.
  */
+// @ts-check
 (function () {
   "use strict";
-  var _API = (globalThis.BookqApi && globalThis.BookqApi.endpoints) || {};
-  var URL = _API.readingPositions || "/api/v1/reading-positions";
+  /**
+   * @typedef {import('../api/bookq-api').FetchOpts} FetchOpts
+   */
   var DEBOUNCE_MS = 2000;
   var RETRY_MAX_MS = 60000;
   var _timer = null;          // send timer (debounce or retry backoff)
@@ -65,7 +72,11 @@
   }
 
   // 408/429 are transient; every other 4xx is a definitive rejection.
-  function _droppable(status) {
+  // ApiError.status carries the HTTP status; a transport failure has no
+  // status at all (undefined → 0 → retry, like the old fetch-throw path).
+  // @param {unknown} err
+  function _droppable(err) {
+    var status = (err && typeof err.status === "number") ? err.status : 0;
     return status >= 400 && status < 500 && status !== 408 && status !== 429;
   }
 
@@ -79,20 +90,16 @@
     var gen = _epoch;
     var ac = typeof AbortController !== "undefined" ? new AbortController() : null;
     _inFlightAbort = ac;
-    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
-    _cf((globalThis.BookqApi && globalThis.BookqApi.putPositionUrl ? globalThis.BookqApi.putPositionUrl(rec.folder) : URL + "?folder=" + encodeURIComponent(rec.folder)), {
-      method: "PUT",
-      credentials: "same-origin",
-      keepalive: true,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ page: rec.page, total: rec.total, ts: rec.ts }),
-      signal: ac ? ac.signal : undefined,
-    }).then(function (res) {
-      if (res && res.ok) { _lastSentKey = _key(rec); return "sent"; }
-      if (res && _droppable(res.status)) return "dropped";
-      return "retry";
-    }).catch(function () {
-      return "retry";   // network error / aborted / offline
+    /** @type {import('../api/bookq-api').FetchOpts} */
+    var putOpts = { signal: ac ? ac.signal : null };
+    window.BookqApi.putPosition(
+      { folder: rec.folder, page: rec.page, total: rec.total, ts: rec.ts },
+      putOpts
+    ).then(function () {
+      _lastSentKey = _key(rec); return "sent";
+    }, function (err) {
+      if (_droppable(err)) return "dropped";
+      return "retry";   // network error / aborted / offline / 5xx / malformed
     }).then(function (outcome) {
       _inFlight = false;
       _inFlightAbort = null;
@@ -131,11 +138,8 @@
 
   async function pull() {
     try {
-      var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
-      var res = await _cf(URL, { credentials: "same-origin", cache: "no-store" });
-      if (!res || !res.ok) return { ok: false };
-      var data = await res.json();
-      var pos = (globalThis.BookqApi && globalThis.BookqApi.latestPositionOf) ? globalThis.BookqApi.latestPositionOf(data) : (data && (data.positions ? data.positions[0] : data.position)) || null;
+      var positions = await window.BookqApi.getPositions();
+      var pos = (positions && positions[0]) || null;
       if (!pos || typeof pos.folder !== "string" || !Number.isFinite(pos.page)) {
         return { ok: true, position: null };
       }
@@ -143,7 +147,7 @@
     } catch (e) { return { ok: false }; }
   }
 
-  function remove() {
+  async function remove() {
     // Drop everything that could still write back AFTER the DELETE lands:
     // the queued record, the retry timer, the dedup key and the in-flight
     // PUT (abort + epoch bump so its completion requeues nothing).
@@ -154,11 +158,8 @@
     if (_timer) { clearTimeout(_timer); _timer = null; }
     try { if (_inFlightAbort) _inFlightAbort.abort(); } catch (e) {}
     try {
-      var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
-      return _cf(URL, { method: "DELETE", credentials: "same-origin", keepalive: true })
-        .then(function (res) { return !!(res && res.ok); })
-        .catch(function () { return false; });
-    } catch (e) { return Promise.resolve(false); }
+      return await window.BookqApi.deletePositions();
+    } catch (e) { return false; }
   }
 
   // Page-hide flushes the debounced record immediately — visibilitychange is

@@ -1112,8 +1112,10 @@
         if (body === last && Date.now() - lastPost < 5000) return;
         last = body;
         lastPost = Date.now();
+        // #236: test-hook path comes from api/endpoints.js, never hard-coded.
+        // Connectivity.fetch で判定を状態機械に流す (docs/offline-spec.md §5)。
         var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
-        _cf('/api/v1/pair-report', {
+        _cf(window.BookqApi.endpoints.pairReport, {
           method: 'POST', cache: 'no-store', keepalive: true,
           headers: {'Content-Type': 'application/json'},
           body: body,

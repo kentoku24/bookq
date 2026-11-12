@@ -187,7 +187,12 @@
    * @returns {Promise<{ status: number, body: unknown, headers: Headers, res: Response }>}
    */
   function fetchJson(url, init, fetchFn) {
-    var fn = fetchFn || globalThis.fetch.bind(globalThis);
+    // spec §5: app requests ride Connectivity.fetch so every response feeds
+    // the verdicts (SW-marked or unreachable evidence demotes). Explicit
+    // opts.fetch (tests, download manager) still wins.
+    var fn = fetchFn
+      || (globalThis.Connectivity && globalThis.Connectivity.fetch)
+      || globalThis.fetch.bind(globalThis);
     var merged = Object.assign({}, init);
     if (!merged.credentials) merged.credentials = "same-origin";
     return fn(url, merged).then(function (res) {
@@ -212,7 +217,9 @@
    * @returns {Promise<Response>}
    */
   function fetchWithBuildingRetry(url, fetchFn, opts) {
-    var fn = fetchFn || globalThis.fetch.bind(globalThis);
+    var fn = fetchFn
+      || (globalThis.Connectivity && globalThis.Connectivity.fetch)
+      || globalThis.fetch.bind(globalThis);
     var maxAttempts = (opts && typeof opts.maxAttempts === "number") ? opts.maxAttempts : 10;
     var isCurrent = (opts && opts.isCurrent) || null;
     var init = Object.assign({}, (opts && opts.init) || {});
@@ -461,7 +468,9 @@
     var qs = queryString(query || {});
     var url = qs ? E.readingPositions + "?" + qs : E.readingPositions;
     var init = { method: "DELETE", credentials: "same-origin", keepalive: true, signal: (opts && opts.signal) || undefined };
-    var fn = (opts && opts.fetch) || globalThis.fetch.bind(globalThis);
+    var fn = (opts && opts.fetch)
+      || (globalThis.Connectivity && globalThis.Connectivity.fetch)
+      || globalThis.fetch.bind(globalThis);
     return fn(url, /** @type {RequestInit} */ (init)).then(function (res) {
       return !!(res && res.ok);
     });
