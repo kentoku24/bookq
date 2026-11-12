@@ -6,9 +6,9 @@
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
 //!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
-//!   - RAR/CBR multipart sets whose volumes are missing/invalid (native
-//!     store-concat + unrar chain cover complete sets; incomplete ones
-//!     proxy so upstream 7z decides, #403)
+//!   - RAR/CBR multipart sets beyond store-concat (compressed members,
+//!     missing volumes proxy so upstream 7z decides, #403 — the bundled
+//!     unrar aborts on some compressed multipart, never chained there)
 //!   - multi-range requests are served as 200 full (contract shrink —
 //!     OpenAPI documents single `Range: bytes=` only; archive entries
 //!     already ignore multi-range → 200, so plain files match, #403)
@@ -569,8 +569,9 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 // ── /image/{path} ─────────────────────────────────────────────────────────────
 
 /// `serve_image` — archive-entry reads and plain-file serving.
-/// RAR/CBR entries extract in-process (bundled unrar + multipart store
-/// concat); only PDF pages proxy upstream. Multi-range is a contract
+/// RAR/CBR store entries (incl. multipart store-concat) extract
+/// in-process; compressed multipart proxies (unrar abort risk); only PDF
+/// pages always proxy upstream. Multi-range is a contract
 /// shrink (200 full) on both plain and archive paths — see `serve_plain_file`.
 pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if let Some((archive, inner)) = resolve_archive(downloads, path) {
@@ -645,8 +646,8 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
     let multipart = is_rar_path(archive) && bookq_core::rar_needs_upstream(archive);
     let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
-        // #403: multipart sets try native first (store-concat + unrar
-        // chain); a native miss proxies to upstream 7z instead of 404.
+        // #403: multipart store sets read native; a miss (compressed,
+        // missing volumes) proxies to upstream 7z instead of 404.
         None if multipart => return Serve::Proxy,
         None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
     };

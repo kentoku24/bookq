@@ -2323,9 +2323,10 @@ fn rar3_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>>
 
 /// Full member listing with the extraction-side metadata — crc/size for
 /// the misalignment check, `hdr_idx` (the ordinal unrar's walk uses), and
-/// `needs_upstream`: a multipart set whose volumes are all present reads
-/// natively now (#403 — unrar chains + store-concat below); only sets with
-/// missing/unreadable volumes need upstream 7z.
+/// `needs_upstream`: a multipart set whose store members are all present
+/// reads natively via store-concat (#403); compressed members and sets
+/// with missing volumes need upstream 7z (the bundled unrar aborts on
+/// some compressed multipart — never chained for multipart).
 /// `None` → Python fallback (rarfile decides).
 fn rar_entries(path: &Path) -> Option<(Vec<Entry>, bool)> {
     let (ver, ofs) = match find_sfx(path) {
@@ -2351,8 +2352,9 @@ pub fn rar_names(path: &Path) -> Option<Vec<(String, bool)>> {
         .map(|(es, _)| es.into_iter().map(|e| (e.filename, e.is_dir)).collect())
 }
 
-/// `true` when the archive is a multipart set — reads try native first
-/// (unrar chain + store-concat, #403) and proxy only on failure.
+/// `true` when the archive is a multipart set — store reads go native
+/// (#403 store-concat); anything else proxies on miss (compressed
+/// multipart is never sent to the bundled unrar — process-abort risk).
 pub fn rar_needs_upstream(path: &Path) -> bool {
     match open_archive(path) {
         Some(oa) => oa.rar_needs_upstream(),
@@ -2369,10 +2371,12 @@ pub fn rar_needs_upstream(path: &Path) -> bool {
 pub fn rar_read_entry(path: &Path, inner: &str) -> Option<Vec<u8>> {
     let (entries, needs_upstream) = rar_entries(path)?;
     if needs_upstream {
-        // #403: multipart sets read natively when complete. Store members
-        // concat raw parts (DirectReader parity); anything else chains via
-        // the bundled unrar (proven on real `rar` output). Failure → None
-        // so routes proxy to upstream 7z instead of 404-ing.
+        // #403: multipart store members concat raw parts (DirectReader
+        // parity). Anything else (compressed/encrypted/missing volumes)
+        // returns None so routes proxy to upstream 7z — the bundled
+        // unrar's UCM_CHANGEVOLUME path aborts the process on some
+        // compressed multipart sets (unrar.rs from_ptr_truncate UB), so
+        // the ordinal chain is never attempted for multipart.
         if let Ok((ver, ofs)) = find_sfx(path) {
             let store = match ver {
                 5 => rar5_read_store(path, ofs, inner),
@@ -2383,9 +2387,8 @@ pub fn rar_read_entry(path: &Path, inner: &str) -> Option<Vec<u8>> {
                 return store;
             }
         }
-        let e = entries.iter().rposition(|e| e.filename == inner && !e.is_dir)?;
-        let want = &entries[e];
-        return rar_read_ordinal(path, want.hdr_idx, inner, want);
+        let _ = entries;
+        return None;
     }
     let e = entries.iter().rposition(|e| e.filename == inner && !e.is_dir)?;
     let want = &entries[e];
@@ -2557,7 +2560,9 @@ impl OpenArchive {
                 needs_upstream,
             } => {
                 if *needs_upstream {
-                    // #403: same try-native-then-proxy as `rar_read_entry`.
+                    // #403: same contract as `rar_read_entry` — store-concat
+                    // only, never the unrar ordinal chain (process-abort
+                    // risk on compressed multipart).
                     if let Ok((ver, ofs)) = find_sfx(path) {
                         let store = match ver {
                             5 => rar5_read_store(path, ofs, inner),
@@ -2568,9 +2573,7 @@ impl OpenArchive {
                             return store;
                         }
                     }
-                    let e = entries.iter().rposition(|e| e.filename == inner && !e.is_dir)?;
-                    let want = &entries[e];
-                    return rar_read_ordinal(path, want.hdr_idx, inner, want);
+                    return None;
                 }
                 let e = entries.iter().rposition(|e| e.filename == inner && !e.is_dir)?;
                 let want = &entries[e];
