@@ -403,14 +403,29 @@ jobs:
           rm -f prompt.txt
           git add -A
           git commit -m "feat(ai): resolve issue #${ISSUE_NUMBER}" || echo "nothing to commit"
-          git push origin "$branch"
+          # The agent may have committed + opened the PR from a branch other
+          # than the one this step checked out (it can stay on main/HEAD).
+          # Count any open PR whose title references the issue as served —
+          # otherwise we push an empty branch and `gh pr create` fails with
+          # "No commits between main and ..." (#426).
           if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             echo "PR for $branch already open (created by the agent)"
-          else
-            gh pr create --repo "$REPO" --base main --head "$branch" \
-              --title "feat(ai): resolve issue #${ISSUE_NUMBER}" \
-              --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
+            exit 0
           fi
+          if [ "$(gh pr list --repo "$REPO" --state open --search "in:title \"#${ISSUE_NUMBER}\"" --json number --jq 'length')" -gt 0 ]; then
+            echo "an open PR already references #${ISSUE_NUMBER}"
+            exit 0
+          fi
+          if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+            # Nothing pushed and no PR anywhere — the agent produced no
+            # output. Fail here instead of leaving a junk empty branch.
+            echo "::error::no commits and no PR for #${ISSUE_NUMBER} — agent produced nothing"
+            exit 1
+          fi
+          git push origin "$branch"
+          gh pr create --repo "$REPO" --base main --head "$branch" \
+            --title "feat(ai): resolve issue #${ISSUE_NUMBER}" \
+            --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
 
       - name: Success label transition
         if: success()
@@ -537,14 +552,24 @@ jobs:
           rm -f prompt.txt
           git add -A
           git commit -m "docs(ai): research report for issue #${ISSUE_NUMBER}" || echo "nothing to commit"
-          git push origin "$branch"
+          # Same guard as implement-direct (#426): an open PR whose title
+          # references the issue counts as served; never push an empty branch.
           if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             echo "PR for $branch already open (created by the agent)"
-          else
-            gh pr create --repo "$REPO" --base main --head "$branch" \
-              --title "docs(ai): research report for issue #${ISSUE_NUMBER}" \
-              --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
+            exit 0
           fi
+          if [ "$(gh pr list --repo "$REPO" --state open --search "in:title \"#${ISSUE_NUMBER}\"" --json number --jq 'length')" -gt 0 ]; then
+            echo "an open PR already references #${ISSUE_NUMBER}"
+            exit 0
+          fi
+          if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+            echo "::error::no commits and no PR for #${ISSUE_NUMBER} — agent produced nothing"
+            exit 1
+          fi
+          git push origin "$branch"
+          gh pr create --repo "$REPO" --base main --head "$branch" \
+            --title "docs(ai): research report for issue #${ISSUE_NUMBER}" \
+            --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
 
       - name: Success label transition
         if: success()
