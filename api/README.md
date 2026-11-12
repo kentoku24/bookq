@@ -22,5 +22,38 @@
 - **CI**: Spectral lint が PR で両 spec を検査し、Schemathesis が
   `openapi.v1.yaml` の実装適合を property-based で検証する
   (`.github/workflows/api-contract.yml`、意味的拒否は `schemathesis.toml` で許容)。
-  ローカル確認:
+  さらに `api-breaking` ワークフローが PR の base リビジョンとの差分を
+  `scripts/api_breaking_check.py` で検査し、後方互換を壊す変更
+  (required 追加・プロパティ削除・enum 値削除・型変更・path/operation 削除等)
+  を fail させる。ローカル確認:
   `npx @stoplight/spectral-cli lint api/openapi.v1.yaml api/asyncapi.yaml`
+
+## 破壊的変更の検出 (CI)
+
+`.github/workflows/api-breaking.yml` は PR で `openapi.v1.yaml` /
+`asyncapi.yaml` を base リビジョンと比較し、旧クライアント
+(App Store 配布で古いバイナリが残る iOS、キャッシュされた PWA shell) を
+壊す変更を検出する。Spectral (形の lint) と Schemathesis (現実装⇔現 spec
+の一致) は spec と実装の同時破壊を見逃すため、この差分検査が最後の砦。
+
+検出対象 (抜粋): path/operation/channel/message の削除、response status の
+削除、required パラメータの追加、`required` エントリの追加、プロパティ
+削除、enum 値削除・const 変更、型変更、operationId 変更。通過する追加的
+変更: optional プロパティ追加、enum 値追加、新規 path/operation。
+詳細ルールは `scripts/api_breaking_check.py` の docstring を参照。
+単体テストは `tests/test_api_breaking_check.py` (受入条件の 4 項目 +
+例外運用を含む)。
+
+## 破壊的変更の例外運用
+
+原則、破壊的変更は新バージョン (`openapi.v2.yaml` 等) を切って行う
+(v0 退役の手順は #212)。やむを得ず現行 v1 を壊す場合のみ、以下の
+すべてを満たすこと:
+
+1. PR に `api-breaking` ラベルを付与する (CI の breaking 検査は
+   fail せず報告のみになる: `--allow-breaking`)。
+2. 影響を受ける旧クライアント (iOS / PWA) の移行計画を PR 本文に記載する。
+3. `info.version` の扱いに注意する: 現行 `1.0.0` は契約世代を示し、
+   破壊的変更時は minor 以上の bump を検討する (semver 厳密運用は任意)。
+
+ラベル無しで breaking 検査が赤の PR はマージしない。
