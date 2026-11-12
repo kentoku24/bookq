@@ -102,7 +102,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - Kotlin + Compose (M3) ネイティブクライアント。minSdk 35、modules `:core` (純 Kotlin) / `:data` (OkHttp+Keystore) / `:app`。詳細は `docs/android-app.md`。
 - 必須 env: `JAVA_HOME=$(brew --prefix openjdk@21)` `ANDROID_HOME=$HOME/Library/Android/sdk`。`android/local.properties` に `sdk.dir`。
 - テスト+ビルド: `cd android && ./gradlew :core:test :data:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`。
-- UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://10.0.2.2:8080`）。
+- UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://10.0.2.2:8080`）。`:data` の androidTest（KeystoreTokenStoreTest、self-instrumenting でサーバー不要）は `./gradlew :data:connectedDebugAndroidTest` — CI の `ui` ジョブでも `am instrument` で実行される。
 - 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
 
