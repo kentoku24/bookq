@@ -227,7 +227,11 @@ def test_offline_core_single_source():
 
     # sw.js shares cacheNameFor instead of redefining it
     sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
-    assert "importScripts('/static/offline-core.js')" in sw_text
+    # sw.js importScripts both files in one call (#236: offline-core.js for
+    # cacheNameFor + api/endpoints.js for API_PATHS) — prefix match accepts
+    # the multi-arg form (see test_sw_offline_contract.py verbatim assert).
+    assert "importScripts('/static/offline-core.js'" in sw_text
+    assert "'/static/api/endpoints.js'" in sw_text
     assert "self.OfflineCore" in sw_text
     assert "function cacheNameFor" not in sw_text, "sw.js must not keep its own cacheNameFor"
     assert '"/static/offline-core.js"' in sw_text, "offline-core.js must stay precached for offline importScripts"

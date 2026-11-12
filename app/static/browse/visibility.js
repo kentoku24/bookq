@@ -14,7 +14,14 @@
 // @ts-check
 (function () {
   var API_VERSION = 1;
-  var URL = window.BookqApi.endpoints.folderVisibility;
+  // NOTE (#236): transport goes through the typed window.BookqApi client
+  // (getVisibility/putVisibility) — no load-time endpoint dereference here.
+  // The pre-#236 URL var (guarded endpoints lookup with a hardcoded fallback)
+  // was removed with the direct fetch calls: an unguarded
+  // `window.BookqApi.endpoints...` throws when this file is evaluated
+  // standalone (unit-test stub), and a hardcoded fallback string would
+  // violate the no-literals-outside-api/ guard
+  // (tests/test_pwa_api_client.py).
   var GET_TIMEOUT_MS = 3000;
   var CACHE_PREFIX = "bookq.folderVisibility.v1.";
   var COALESCE_MS = 400;
