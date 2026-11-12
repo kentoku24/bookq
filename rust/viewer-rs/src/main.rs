@@ -31,6 +31,7 @@ use std::path::PathBuf;
 mod auth;
 mod folders;
 mod oauth;
+mod pair_report;
 mod reader_sync;
 mod search;
 mod serve;
@@ -175,6 +176,8 @@ pub(crate) struct AppState {
     /// read it from the image too (asset edits apply on the next
     /// `dev.sh up` rebuild, not live).
     pub(crate) app_dir: PathBuf,
+    /// TEST_MODE-only pair-report store (`app/api_v1.py::_PAIR_REPORTS`).
+    pub(crate) pair_reports: std::sync::Arc<pair_report::PairReports>,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -1239,6 +1242,9 @@ async fn main() {
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
+        pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
+            std::collections::HashMap::new(),
+        )),
         thumb_cache: PathBuf::from(
             std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
         ),
@@ -1294,6 +1300,10 @@ async fn main() {
         .route("/auth/callback", any(auth_callback))
         .route("/auth/logout", any(auth_logout))
         .route("/api/v1/auth/token", any(auth_token))
+        // TEST_MODE-only dual-reader verification hooks (#405) — always
+        // 404 outside test mode, never part of the OpenAPI contract.
+        .route("/api/v1/pair-report", any(pair_report::handle_report))
+        .route("/api/v1/pair-reset", any(pair_report::handle_reset))
         // M8: dual-reader sync socket — native under "reader-sync" gate;
         // otherwise the upgrade is spliced to Python unchanged.
         .route("/ws/reader-sync", any(reader_sync_ws))
@@ -1364,5 +1374,228 @@ mod native_gate_tests {
         // independent of the shared snapshot: no group covers them.
         let n = native(&["thumb", "view", "image", "visibility", "positions"]);
         assert!(n.partial_groups().is_empty());
+    }
+
+    /// Minimal AppState for the test-hook handlers: nothing here touches
+    /// the network (pair-report/reset are served from memory/the registry)
+    /// or the filesystem (the SQLite stores are never consulted).
+    fn hook_state(test_mode: bool) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "bookq-pair-hook-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index = std::sync::Arc::new(folders::IndexState::new());
+        let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
+        AppState {
+            upstream: Upstream {
+                client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
+                authority: "127.0.0.1:9".parse().unwrap(),
+            },
+            downloads: dir.join("dl"),
+            native: std::sync::Arc::new(Native::from_parts(test_mode, false, HashSet::new())),
+            allowed_emails: std::sync::Arc::new(HashSet::new()),
+            index,
+            position_store: std::sync::Arc::new(state::PositionStore::new(&dir)),
+            visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
+            session_key: None,
+            secret_key: "test-secret".into(),
+            registry,
+            thumb_cache: dir.join("thumbs"),
+            git_sha: "test".into(),
+            build_date: "test".into(),
+            pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+
+    fn http_req(method: &str, uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn body_json(res: Response) -> (StatusCode, serde_json::Value) {
+        let status = res.status();
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn pair_report_roundtrip_native_in_test_mode() {
+        let st = hook_state(true);
+        // POST stores (id stripped, received_at stamped) …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req(
+                    "POST",
+                    "/api/v1/pair-report",
+                    r#"{"id":"pytest-bridge","gen":1,"pc":{"phase":"reading"},"pv":{"left":"1"}}"#,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true}));
+        // … GET reads it back …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req("GET", "/api/v1/pair-report?id=pytest-bridge", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"]["pc"], serde_json::json!({"phase": "reading"}));
+        assert_eq!(body["state"]["pv"], serde_json::json!({"left": "1"}));
+        assert!(body["state"].get("id").is_none());
+        assert!(body["state"]["received_at"].as_f64().unwrap() > 0.0);
+        // … a stale gen from a parked tab drops …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req(
+                    "POST",
+                    "/api/v1/pair-report",
+                    r#"{"id":"pytest-bridge","gen":0,"pc":{"phase":"stale"}}"#,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "dropped": true}));
+        // … unknown ids read back null …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req("GET", "/api/v1/pair-report?id=never-posted", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"state": null}));
+        // … and a missing id is a 400 like the Python router.
+        let (status, _) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-report", r#"{"pc":{}}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn pair_hooks_404_outside_test_mode() {
+        let st = hook_state(false);
+        for (handler, req) in [
+            (
+                "report-post",
+                http_req("POST", "/api/v1/pair-report", r#"{"id":"x"}"#),
+            ),
+            ("report-get", http_req("GET", "/api/v1/pair-report?id=x", "")),
+        ] {
+            let (status, body) =
+                body_json(pair_report::handle_report(State(st.clone()), req).await).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{handler}");
+            assert_eq!(body, serde_json::json!({"detail": "Not Found"}), "{handler}");
+        }
+        let (status, body) = body_json(
+            pair_report::handle_reset(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-reset", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, serde_json::json!({"detail": "Not Found"}));
+    }
+
+    #[tokio::test]
+    async fn pair_reset_ends_live_session_through_handler() {
+        let st = hook_state(true);
+        // One live session behind a registered link.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<reader_sync::OutItem>(st.registry.send_queue_max());
+        let (close_tx, _close_rx) = tokio::sync::watch::channel(None);
+        let link = reader_sync::Link::new(
+            tx,
+            close_tx,
+            None,
+            std::time::Instant::now(),
+            st.registry.heartbeat_interval(),
+        );
+        let lid = st
+            .registry
+            .inner
+            .lock()
+            .await
+            .register_link(link, st.registry.heartbeat_interval());
+        let create = reader_sync::protocol::encode_frame(&reader_sync::protocol::frame(&[
+            (
+                "v",
+                serde_json::Value::from(reader_sync::protocol::PROTOCOL_VERSION),
+            ),
+            ("type", serde_json::Value::String("CREATE".into())),
+            ("requestId", serde_json::Value::String("r1".into())),
+            ("sessionId", serde_json::Value::String(String::new())),
+            ("workEpoch", serde_json::Value::from(0)),
+            ("baseRevision", serde_json::Value::from(0)),
+            ("payload", serde_json::Value::Object(serde_json::Map::new())),
+        ]))
+        .unwrap();
+        st.registry.handle_raw(&lid, create.as_bytes()).await;
+        // The handler ends it with "reset" …
+        let (status, body) = body_json(
+            pair_report::handle_reset(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-reset", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ended": 1}));
+        // … and the member link observes the END frame …
+        let mut saw_end = false;
+        while let Ok(item) = rx.try_recv() {
+            if let reader_sync::OutItem::Text(raw) = item {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if v["type"] == "END" {
+                    assert_eq!(v["reason"], "reset");
+                    saw_end = true;
+                }
+            }
+        }
+        assert!(saw_end);
+        assert_eq!(st.registry.session_count().await, 0);
+        // … a second reset ends nothing.
+        let (status, body) = body_json(
+            pair_report::handle_reset(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-reset", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ended": 0}));
     }
 }
