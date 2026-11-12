@@ -254,20 +254,20 @@ docker rm -f <迷子のコンテナ名>
 
 `.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン `https://bookq.mats.dpdns.org` の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
 
-プローブ本体は `scripts/prod_monitor.py`（stdlib + `gh` CLI のみ）。8 つの check:
+プローブ本体は `scripts/prod_monitor.py`（stdlib + `gh` CLI のみ）。7 つの check（#407 で v1 のみに整理 — v0 は viewer 停止と同時廃止のため監視対象外）:
 
 | check | path | 意味 |
 |---|---|---|
-| `health` / `v1_health` | `/api/health`, `/api/v1/health` | edge→tunnel→app の生存 |
-| `version` | `/api/version` | 稼働 sha / build_date の記録（drift は記録のみ、alert しない） |
+| `v1_health` | `/api/v1/health` | edge→tunnel→app の生存 |
+| `v1_version_gate` | `/api/v1/version` | 認証ゲートが 401 を返すこと（200 = バージョン情報漏洩で最重要。#359 の回帰監視を兼ねる。sha 記録は v1 が認証必須のため廃止） |
 | `root` | `/` | ログインページ shell の配信 |
 | `auth_login` | `/auth/login` | OAuth 開始リダイレクト（302 → accounts.google.com） |
-| `folders_gate` | `/api/folders` | 認証ゲートが 401 を返すこと（200 = 認証バイパスで最重要） |
+| `tree_gate` | `/api/v1/tree` | 認証ゲートが 401 を返すこと（200 = 認証バイパスで最重要） |
 | `static_sw` / `static_app` | `/static/sw.js`, `/static/app.js` | SW・メインバンドルの配信健全性 |
 
 失敗は層別に分類される: `unreachable`（transport 不能 = ホスト/回線/DNS）、`cf_tunnel`（CF 520-530 系 or CF ブランドの 502/504 = tunnel/origin 到達不能）、`app_error`（app の JSON 5xx）、`contract_break`（200 だが内容不一致）、`auth_bypass`（認証ゲート喪失）、`probe_error`（監視スクリプト自体の故障 — 盲点化を防ぐため fail として issue 化）。
 
-**issue ライフサイクル**: FAIL 検知で `monitor` ラベル付き issue を作成（本文に全 check の HTTP/latency/cf-ray・分類・deployed sha・run URL を収録）。同じ signature の継続障害は 60 分毎のハートビートコメントのみ、signature 変更時は即コメント＋再分析。全 check 回復で復旧コメントを残して自動 close。解析ジョブは新規検知・signature 変更時のみ `opencode run` を実行し、層の切り分けと最有力原因を issue にコメントする（`GITHUB_TOKEN` 製 issue は sender が `github-actions[bot]` で opencode-auto の bot ゲートを通らないため、この workflow 内で完結させている）。
+**issue ライフサイクル**: FAIL 検知で `monitor` ラベル付き issue を作成（本文に全 check の HTTP/latency/cf-ray・分類・run URL を収録）。同じ signature の継続障害は 60 分毎のハートビートコメントのみ、signature 変更時は即コメント＋再分析。全 check 回復で復旧コメントを残して自動 close。解析ジョブは新規検知・signature 変更時のみ `opencode run` を実行し、層の切り分けと最有力原因を issue にコメントする（`GITHUB_TOKEN` 製 issue は sender が `github-actions[bot]` で opencode-auto の bot ゲートを通らないため、この workflow 内で完結させている）。
 
 **カバレッジ外（既知の隙間）**: tailnet 経路 `*.ts.net`（serve/viewer-rs 側だけの障害は拾えない）、認証付き API のコンテンツ正しさ（folders 一覧・画像・検索は無認証では 401 確認まで）、ホスト指標（disk/memory/docker events）。認証面まで監視するには monitor token 付き `/api/monitor/*` endpoint の新設が必要。検知遅延は cron 間隔 + GH スケジューラ遅延で実質 ~10-20 分。
 
