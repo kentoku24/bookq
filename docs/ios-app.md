@@ -208,4 +208,24 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
 - 外部ディスプレイはシミュレータで生成できないため投影経路は実機 QA のみ
   （単体テストは state machine/レイアウト helper のみカバー）
-- UI 自動テストなし（単体テストのみ）
+
+## テスト
+
+- `BookqTests`（単体 + `SpecConformanceTests` 契約スイート）と
+  `BookqUITests`（XCUITest UX スイート）の 2 ターゲット。`Bookq.xcscheme`
+  の Testables に両方登録済みで `xcodebuild test` が両方走る。
+- UI テストは `BookqUITests/UITestSupport.swift` が `-serverURL` /
+  `-testToken` 起動引数で TEST_MODE サーバーへ直接接続する（fixture は
+  android.yml と同じ合成木: Series/vol1+vol2, Other）。タップ対象は
+  `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
+  `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
+  （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。
+- CI: `.github/workflows/ios.yml`（`macos-latest`、pull_request +
+  workflow_dispatch）。paths-filter で `ios/**` `api/**` `app/**`
+  `requirements*.txt` `rust/viewer-rs/**` に限定し、非対象 PR では
+  skipped になる（required check 互換）。`.github/scripts/ios-ui-test.sh`
+  がシミュレータ選択（iPhone 13 優先・最新 runtime へフォールバック）→
+  DerivedData キャッシュ → `build-for-testing` → `BookqTests` →
+  `BookqUITests` を一括実行し、xcresult + サーバーログを artifact 化する。
+  実行時間はジョブサマリに記録される（macOS 分は ubuntu の約10倍のため、
+  required 化の判断材料とする）。
