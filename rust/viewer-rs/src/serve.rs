@@ -5,11 +5,15 @@
 //! module cannot serve with *proven* identical semantics returns
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
-//!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
 //!   - RAR/CBR members of *multipart* sets (the bundled unrar can't chain
 //!     volumes; single-volume entries extract in-process)
 //!   - multi-range requests (hypercorn emits multipart/byteranges with a
 //!     random boundary — byte parity is impossible; single ranges are native)
+//!   - PDF renders when no PDFium shared library is bound (the render
+//!     degrades to `None` and upstream — which owns pypdfium2 — decides)
+//!
+//! PDF page counting/rendering is native via `bookq_core::pdf` (pdfium-render
+//! on the same PDFium engine pypdfium2 wraps, #402).
 //!
 //! Auth: native serving is gated on `BOOKQ_TEST_MODE=true`. The Python side
 //! gates these routes behind `require_auth`; that session-cookie check is
@@ -454,8 +458,8 @@ fn archive_bytes_response(
 
 /// `_list_folder_images` + the v1 route's response shaping.
 /// Success = `{"folder": <raw query>, "images": [...]}`; errors keep the
-/// shared `{detail}` shape unwrapped. Returns `Serve::Proxy` whenever a PDF
-/// is involved — pypdfium2 semantics cannot be reproduced natively yet.
+/// shared `{detail}` shape unwrapped. PDF files list their synthetic
+/// `pNNN.png` pages natively (memoized count, same engine as pypdfium2).
 pub fn api_images(downloads: &Path, folder: &str) -> Serve {
     let folder_path = downloads.join(folder);
     if !is_within(downloads, &folder_path) {
@@ -470,14 +474,13 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
         return Serve::Done(json_list(folder, names));
     }
     if is_pdf_file(&resolved) {
-        return Serve::Proxy; // pdf_page_count needs pypdfium2
+        let count = bookq_core::pdf_page_count(&resolved);
+        let names = (0..count).map(bookq_core::pdf_page_name).collect();
+        return Serve::Done(json_list(folder, names));
     }
     if let Some((archive, inner)) = resolve_archive(downloads, folder) {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
-        }
-        if is_pdf_file(&archive) {
-            return Serve::Proxy;
         }
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
@@ -567,20 +570,21 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 // ── /image/{path} ─────────────────────────────────────────────────────────────
 
 /// `serve_image` — archive-entry reads and plain-file serving.
-/// RAR/CBR entries extract in-process via bundled unrar; only PDF pages
-/// (pypdfium2) and multi-range requests still proxy upstream.
+/// RAR/CBR entries extract in-process via bundled unrar; only multipart
+/// RAR sets, unrenderable PDF pages (no PDFium library bound) and
+/// multi-range requests still proxy upstream.
 pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if let Some((archive, inner)) = resolve_archive(downloads, path) {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
-        if is_pdf_file(&archive) {
-            return Serve::Proxy; // pdf render → upstream pypdfium2
-        }
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
             Err(_) => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
         };
+        if is_pdf_file(&archive_resolved) {
+            return serve_pdf_page(&archive_resolved, &inner, headers);
+        }
         return serve_archive_entry(&archive_resolved, &inner, headers);
     }
 
@@ -615,7 +619,8 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     serve_plain_file(&file_path, size, &etag, &last_modified, headers)
 }
 
-/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR (pdf proxies upstream).
+/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR (PDF pages have
+/// their own branch below; multipart RAR sets proxy upstream).
 fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
     if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
         return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
@@ -655,6 +660,101 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
         &last_modified,
         mtime,
     ))
+}
+
+/// `_serve_archive_entry`'s PDF twin — port of the `is_pdf_file(archive)`
+/// branch: `pNNN.png` selection, `"mtime-size-pdf{idx}"` etag, conditional
+/// 304 and Range 206 support, `image/png` media type.
+///
+/// A page that cannot be rendered (no PDFium library bound, corrupt
+/// document) proxies upstream instead of 501ing: upstream owns pypdfium2
+/// and answers from the same contract.
+fn serve_pdf_page(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
+    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
+    }
+    let stat = match archive.metadata() {
+        Ok(m) => m,
+        Err(_) => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
+    };
+    let mtime = stat
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let last_modified = http_date(mtime);
+    // Memoized count (same layering as `pdf_page_count` in archive_pdf.py:
+    // memo → restart-spanning disk cache → live read).
+    let count = bookq_core::pdf_page_count(archive);
+    let Some(idx) = bookq_core::parse_pdf_page_name(inner, count) else {
+        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+    };
+    let etag = format!("\"{}-{}-pdf{idx}\"", fmt_mtime(mtime), stat.len());
+    if archive_not_modified(headers, &etag, mtime) {
+        return Serve::Done(not_modified());
+    }
+    let data = match bookq_core::render_pdf_page(archive, idx) {
+        Some(d) => d,
+        None => return Serve::Proxy,
+    };
+    Serve::Done(archive_bytes_response(
+        headers,
+        data,
+        "image/png",
+        &etag,
+        &last_modified,
+        mtime,
+    ))
+}
+
+/// xref-valid 2-page PDF (200x300pt pages) — test fixture shared by the
+/// serve- and thumbs-level PDF contract tests (same shape as the
+/// `bookq_core::pdf` fixture). Test builds only.
+#[cfg(test)]
+pub(crate) fn write_valid_pdf(path: &Path) {
+    let mut objs: Vec<(u32, Vec<u8>)> = Vec::new();
+    objs.push((1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()));
+    objs.push((2, b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec()));
+    for n in [3u32, 4] {
+        objs.push((
+            n,
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Contents {} 0 R >>",
+                n + 2
+            )
+            .into_bytes(),
+        ));
+    }
+    for n in [5u32, 6] {
+        let stream = format!("BT /F1 12 Tf 10 280 Td (Page {}) Tj ET", n - 4);
+        objs.push((
+            n,
+            format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream).into_bytes(),
+        ));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offs = Vec::new();
+    for (num, body) in &objs {
+        offs.push((*num, out.len()));
+        out.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n", objs.len() + 1).as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for (_, o) in &offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    std::fs::write(path, out).unwrap();
 }
 
 // ── Plain-file response with hypercorn `pathsend` Range semantics ─────────────
@@ -912,6 +1012,107 @@ mod tests {
         let h2 = hdrs(&[("if-modified-since", "Sat, 31 Oct 2026 02:00:00 GMT")]);
         assert!(archive_not_modified(&h2, "\"x\"", 1_700_000_000.9)); // int(mtime) <= ts
         assert!(!archive_not_modified(&h2, "\"x\"", 1_800_000_000.9)); // mtime after header
+    }
+
+    // ── PDF page contract (#402) ───────────────────────────────────────────
+
+    fn pdf_dirs(tag: &str) -> PathBuf {
+        let dl = std::env::temp_dir().join(format!(
+            "bq-pdf-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dl).unwrap();
+        dl.canonicalize().unwrap()
+    }
+
+    fn done_parts(s: Serve) -> Response {
+        match s {
+            Serve::Done(r) => r,
+            Serve::Proxy => panic!("expected Done, got Proxy"),
+        }
+    }
+
+    #[test]
+    fn api_images_lists_pdf_pages_natively() {
+        let dl = pdf_dirs("img");
+        write_valid_pdf(&dl.join("doc.pdf"));
+        let res = done_parts(api_images(&dl, "doc.pdf"));
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body();
+        let bytes = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use http_body_util::BodyExt;
+                body.collect().await.unwrap().to_bytes()
+            });
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"folder": "doc.pdf", "images": ["p001.png", "p002.png"]})
+        );
+        // A pdf-inner prefix that matches no page still 404s like Python.
+        match api_images(&dl, "doc.pdf/nope") {
+            Serve::Done(r) => assert_eq!(r.status(), StatusCode::NOT_FOUND),
+            Serve::Proxy => panic!("expected 404, got Proxy"),
+        }
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    /// `/image/<pdf>/pNNN.png` — etag/304/Range contract plus the
+    /// no-library proxy fallback. Render assertions run only when a PDFium
+    /// library is bound (same ladder as Python-without-pypdfium2).
+    #[test]
+    fn image_serves_pdf_page() {
+        let dl = pdf_dirs("srv");
+        let pdf = dl.join("doc.pdf");
+        write_valid_pdf(&pdf);
+        let st = pdf.metadata().unwrap();
+        let mtime = st
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let etag = format!("\"{}-{}-pdf0\"", fmt_mtime(mtime), st.len());
+
+        // Bad page names 404 regardless of the library (count-gated first).
+        for bad in ["p000.png", "p003.png", "cover.png", "p01.jpg"] {
+            let rel = format!("doc.pdf/{bad}");
+            match image(&dl, &rel, &hdrs(&[])) {
+                Serve::Done(r) => assert_eq!(r.status(), StatusCode::NOT_FOUND, "{bad}"),
+                Serve::Proxy => panic!("{bad}: expected 404, got Proxy"),
+            }
+        }
+        if !bookq_core::pdfium_available() {
+            assert!(matches!(image(&dl, "doc.pdf/p001.png", &hdrs(&[])), Serve::Proxy));
+            std::fs::remove_dir_all(&dl).ok();
+            return;
+        }
+        let res = done_parts(image(&dl, "doc.pdf/p001.png", &hdrs(&[])));
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(res.headers()[header::ETAG], etag.as_str());
+        assert_eq!(res.headers()[header::ACCEPT_RANGES], "bytes");
+        // Conditional → 304 with the same etag derivation.
+        let res304 = done_parts(image(
+            &dl,
+            "doc.pdf/p001.png",
+            &hdrs(&[("if-none-match", etag.as_str())]),
+        ));
+        assert_eq!(res304.status(), StatusCode::NOT_MODIFIED);
+        // Valid single range → 206 with byte-exact Content-Range.
+        let res206 = done_parts(image(&dl, "doc.pdf/p001.png", &hdrs(&[("range", "bytes=0-9")])));
+        assert_eq!(res206.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(res206.headers()["content-range"]
+            .to_str()
+            .unwrap()
+            .starts_with("bytes 0-9/"));
+        std::fs::remove_dir_all(&dl).ok();
     }
 }
 

@@ -7,15 +7,16 @@
 //! thumbnail, JPEG encode) and stored into the same cache dir with the
 //! same atomic tmp+rename + oldest-mtime prune as `_store_thumb`.
 //!
-//! Still proxied: sources only upstream can reach (PDF pages — pypdfium2;
-//! multipart RAR sets — `rar_needs_upstream`, since bundled unrar cannot
-//! chain volumes), formats the `image` crate can't decode that Pillow
-//! might (`.avif`, `.tiff`, archive files used as sources — gated by
-//! `NATIVE_DECODE` before the payload read), archive entries we fail to
-//! extract (unsupported compression/CRC — upstream decides), and the
-//! sprite compose path (misses proxy). Single-volume RAR members read
-//! in-process via `bookq_core` (bundled unrar), so `/view` on a rar/cbr
-//! entry is native end to end.
+//! Still proxied: sources only upstream can reach (multipart RAR sets —
+//! `rar_needs_upstream`, since bundled unrar cannot chain volumes; PDF pages
+//! when no PDFium library is bound), formats the `image` crate can't decode
+//! that Pillow might (`.avif`, `.tiff`, archive files used as sources —
+//! gated by `NATIVE_DECODE` before the payload read), archive entries we
+//! fail to extract (unsupported compression/CRC — upstream decides), and
+//! the sprite compose path (misses proxy). Single-volume RAR members read
+//! in-process via `bookq_core` (bundled unrar), and PDF pages render
+//! in-process via PDFium (`bookq_core::pdf`, same engine as pypdfium2), so
+//! `/view` on a rar/cbr entry or a pdf page is native end to end.
 //!
 //! Known output deviation: the `image` JpegEncoder emits 4:4:4 (no chroma
 //! subsampling), so generated files run somewhat larger than Pillow's
@@ -162,11 +163,14 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
 /// `load_source_bytes` — source payload + (mtime, size, cache-key) for the
 /// `/view` passthrough branch and the thumb/view generate paths. Returns
 /// `Err` for the guard failures (400/403/404) and `Ok(None)` for "needs
-/// upstream tooling" (pdf pages — pypdfium2; multipart RAR — bundled
-/// unrar can't chain volumes; archive entries we can't extract —
-/// unsupported compression or CRC failure included) so callers proxy
-/// instead of reproducing 501/404 semantics Python owns. Single-volume
-/// RAR/CBR members read natively via `archive_read_entry`.
+/// upstream tooling" (unrenderable PDF pages — no PDFium library bound;
+/// multipart RAR — bundled unrar can't chain volumes; archive entries we
+/// can't extract — unsupported compression or CRC failure included) so
+/// callers proxy instead of reproducing 501/404 semantics Python owns.
+/// Single-volume RAR/CBR members read natively via `archive_read_entry`;
+/// PDF pages render natively via `bookq_core::render_pdf_page` (same PDFium
+/// engine pypdfium2 wraps) — a rendered PNG feeds the same JPEG generate
+/// path as any other image source.
 fn load_source_bytes(
     downloads: &Path,
     path: &str,
@@ -183,11 +187,29 @@ fn load_source_bytes(
         let Some((mtime, size)) = stat_mtime_size(&archive) else {
             return Err(detail(StatusCode::NOT_FOUND, "File not found"));
         };
-        // PDF pages stay upstream (pypdfium2); rar/cbr entries read
+        // PDF pages render in-process (PDFium); rar/cbr entries read
         // natively via `archive_read_entry` → bundled unrar — except
         // multipart sets, which 7z chains volumes for upstream.
         if is_pdf_file(&archive) {
-            return Ok(None);
+            // `parse_pdf_page_name` needs the count; the memoized
+            // `pdf_page_count` keeps this stat-cheap on repeat requests.
+            let count = bookq_core::pdf_page_count(&archive);
+            let Some(idx) = bookq_core::parse_pdf_page_name(&inner, count) else {
+                return Err(detail(StatusCode::NOT_FOUND, "File not found"));
+            };
+            let key = format!(
+                "{}|{inner}|{}|{}",
+                archive.display(),
+                py_float(mtime),
+                size as u64
+            );
+            return match bookq_core::render_pdf_page(&archive, idx) {
+                Some(data) => Ok(Some((data, mtime, size, key))),
+                // No PDFium library (or a corrupt document): upstream owns
+                // pypdfium2 and decides 501 vs bytes — same posture as an
+                // undecodable archive entry below.
+                None => Ok(None),
+            };
         }
         if is_rar_path(&archive) && bookq_core::rar_needs_upstream(&archive) {
             return Ok(None);
@@ -500,7 +522,8 @@ fn view_etag(mtime: f64, size: f64, digest: &str) -> String {
 /// `handle_thumb` — stat fast path + shared-cache hit; a miss renders
 /// in-process (SVG sources pass their bytes through like Pillow's
 /// `_make_thumb_bytes`), falling back to proxy only when the source can't
-/// be reached natively (rar/pdf) or the `image` crate can't decode it.
+/// be reached natively (multipart rar, or a PDF page with no PDFium
+/// library bound) or the `image` crate can't decode it.
 pub fn thumb(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Serve {
     let width = normalize_width(w);
     let (mtime, size, key) = match stat_source(downloads, path) {
@@ -648,8 +671,8 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap) -> 
 
 /// `handle_view`'s normalized-format miss path: `load_source_bytes` →
 /// re-derive etag/dest → recheck the cache → `make_view_bytes` →
-/// `_store_thumb`. Sources only upstream can reach (rar/pdf) and decodes
-/// the `image` crate can't handle still proxy.
+/// `_store_thumb`. Multipart-rar sources, PDF pages with no PDFium library
+/// bound, and decodes the `image` crate can't handle still proxy.
 fn generate_view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if !native_decodable(path) {
         return Serve::Proxy; // e.g. .avif — decode would fail after the read
@@ -1167,5 +1190,57 @@ mod tests {
         assert!(mean_r > 215, "boundary mean R {mean_r} — not premultiplied");
     }
 
+    // ── PDF page contract (#402) ──────────────────────────────────────────
 
+    /// `/thumb/<pdf>/pNNN.png` miss → PDFium render → JPEG under
+    /// `thumbs/<w>/` with the shared etag; without a bound PDFium library
+    /// the miss proxies so upstream (pypdfium2) decides.
+    #[test]
+    fn thumb_renders_pdf_page() {
+        let (dl, cache) = tmp_dirs("pdf-t");
+        crate::serve::write_valid_pdf(&dl.join("doc.pdf"));
+        let h = HeaderMap::new();
+        if !bookq_core::pdfium_available() {
+            assert!(matches!(
+                thumb(&dl, &cache, "doc.pdf/p001.png", None, &h),
+                Serve::Proxy
+            ));
+            std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+            return;
+        }
+        let res = thumb(&dl, &cache, "doc.pdf/p001.png", None, &h);
+        let Serve::Done(r) = res else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(std::fs::read_dir(cache.join("thumbs/400")).unwrap().count(), 1);
+        // Bad page names 404 (count-gated before any render).
+        assert_eq!(
+            status(&thumb(&dl, &cache, "doc.pdf/p009.png", None, &h)),
+            StatusCode::NOT_FOUND
+        );
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `/view/<pdf>/pNNN.png` serves the rendered PNG straight through
+    /// (`.png` is a passthrough suffix — same as Python's
+    /// `load_source_bytes` → passthrough branch).
+    #[test]
+    fn view_passthrough_pdf_page() {
+        let (dl, cache) = tmp_dirs("pdf-v");
+        crate::serve::write_valid_pdf(&dl.join("doc.pdf"));
+        let h = HeaderMap::new();
+        if !bookq_core::pdfium_available() {
+            assert!(matches!(
+                view(&dl, &cache, "doc.pdf/p001.png", &h),
+                Serve::Proxy
+            ));
+            std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+            return;
+        }
+        let res = view(&dl, &cache, "doc.pdf/p001.png", &h);
+        let Serve::Done(r) = res else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
 }
