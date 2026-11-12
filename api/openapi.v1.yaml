@@ -115,6 +115,10 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, enum: [ok]}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {status: ok}
 
   /api/v1/version:
     get:
@@ -133,6 +137,13 @@ paths:
                   version: {type: string}
                   sha: {type: string}
                   build_date: {type: string}
+              examples:
+                default:
+                  summary: 正常系
+                  value:
+                    version: "1.0.0"
+                    sha: "abc1234"
+                    build_date: "2026-05-01T00:00:00Z"
 
   /api/v1/tree:
     get:
@@ -165,6 +176,42 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/TreeResponse"}
+              examples:
+                default:
+                  summary: 全木（flatten・サムネ解決込み）
+                  value:
+                    kind: tree
+                    generation: 7
+                    nodes:
+                      - name: "Series"
+                        type: folder
+                        children:
+                          - name: "vol1"
+                            type: folder
+                            thumb: "p00.jpg"
+                            children:
+                              - name: "p00.jpg"
+                                type: image
+                              - name: "p01.jpg"
+                                type: image
+                      - name: "work.cbz"
+                        type: folder
+                        archive: true
+                        thumb: "cover.jpg"
+                        children: []
+                children:
+                  summary: depth=1 の浅い一覧
+                  value:
+                    kind: children
+                    generation: 7
+                    nodes:
+                      - name: "Series"
+                        type: folder
+                        children: []
+                      - name: "work.cbz"
+                        type: folder
+                        archive: true
+                        children: []
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "304": {description: since が generation に一致（本体なし）}
         "400": {$ref: "#/components/responses/BadRequest"}
@@ -199,6 +246,17 @@ paths:
                   images:
                     type: array
                     items: {type: string}
+              examples:
+                default:
+                  summary: 正常系（natural sort 済み）
+                  value:
+                    folder: "Series/vol1"
+                    images: ["p00.jpg", "p01.jpg", "p02.jpg"]
+                empty:
+                  summary: 画像なしフォルダ
+                  value:
+                    folder: "Series/empty"
+                    images: []
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
@@ -244,6 +302,28 @@ paths:
                   results:
                     type: array
                     items: {$ref: "#/components/schemas/ComicMetadata"}
+              examples:
+                default:
+                  summary: 正常系（1件ヒット）
+                  value:
+                    query: "vol1"
+                    total: 1
+                    results:
+                      - folder_path: "Series/vol1"
+                        folder_name: "vol1"
+                        title_jp: "サンプル作品"
+                        title_en: "Sample Work"
+                        artist: ["sample-artist"]
+                        tags: ["tag1", "tag2"]
+                        source: "test"
+                        has_metadata: true
+                        total_pages: 3
+                empty:
+                  summary: ヒットなし
+                  value:
+                    query: "no-such-work"
+                    total: 0
+                    results: []
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "422": {$ref: "#/components/responses/ValidationError"}
 
@@ -266,6 +346,12 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Facets"}
+              examples:
+                default:
+                  summary: 正常系
+                  value:
+                    artists: ["sample-artist"]
+                    tags: ["tag1", "tag2"]
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "422": {$ref: "#/components/responses/ValidationError"}
 
@@ -286,6 +372,10 @@ paths:
                 properties:
                   status: {type: string, enum: [ok]}
                   folders: {type: integer, description: インデックスされた作品数}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {status: ok, folders: 3}
 
   /api/v1/thumb-sprite:
     get:
@@ -431,6 +521,30 @@ paths:
                   positions:
                     type: array
                     items: {$ref: "#/components/schemas/ReadingPosition"}
+              examples:
+                default:
+                  summary: 正常系（2件）
+                  value:
+                    positions:
+                      - folder: "Series/vol1"
+                        page: 2
+                        total: 10
+                        ts: 1716000000000
+                      - folder: "work.cbz"
+                        page: 0
+                        total: 5
+                        ts: 1715900000000
+                single:
+                  summary: folder 絞り込み（1件）
+                  value:
+                    positions:
+                      - folder: "Series/vol1"
+                        page: 2
+                        total: 10
+                        ts: 1716000000000
+                empty:
+                  summary: 記録なし
+                  value: {positions: []}
         "403": {$ref: "#/components/responses/Forbidden"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
     put:
@@ -456,6 +570,10 @@ paths:
                   type: integer
                   minimum: 0
                   description: クライアント ms epoch。未来側は ±5min クランプ
+            examples:
+              default:
+                summary: 正常系リクエスト
+                value: {page: 2, total: 10, ts: 1716000000000}
       responses:
         "200":
           description: |
@@ -467,6 +585,13 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, enum: [ok, stale]}
+              examples:
+                ok:
+                  summary: 受理
+                  value: {status: ok}
+                stale:
+                  summary: 古い ts で棄却（newest-wins）
+                  value: {status: stale}
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "422": {$ref: "#/components/responses/ValidationError"}
@@ -490,6 +615,10 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, enum: [ok]}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {status: ok}
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
@@ -505,6 +634,19 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}
+              examples:
+                default:
+                  summary: 正常系（1件 hidden）
+                  value:
+                    owner: "owner-abc123"
+                    revision: 4
+                    hiddenRoots: ["Secret"]
+                empty:
+                  summary: hidden なし
+                  value:
+                    owner: "owner-abc123"
+                    revision: 4
+                    hiddenRoots: []
         "503":
           description: ストア読み取り失敗（fail-closed：フィルタなし一覧は返さない）
           content:
@@ -532,12 +674,26 @@ paths:
               properties:
                 root: {type: string, description: 先頭パスセグメント（書庫名も可）}
                 hidden: {type: boolean}
+            examples:
+              hide:
+                summary: 隠す
+                value: {root: "Secret", hidden: true}
+              unhide:
+                summary: 戻す
+                value: {root: "Secret", hidden: false}
       responses:
         "200":
           description: 更新後スナップショット
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}
+              examples:
+                default:
+                  summary: 更新後
+                  value:
+                    owner: "owner-def456"
+                    revision: 5
+                    hiddenRoots: ["Secret"]
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "409": {$ref: "#/components/responses/Conflict"}
@@ -570,6 +726,18 @@ paths:
                   properties:
                     grant_type: {type: string, const: refresh_token}
                     refresh_token: {type: string, minLength: 1}
+            examples:
+              authorization_code:
+                summary: 認可コード交換
+                value:
+                  grant_type: authorization_code
+                  code: "authcode-123"
+                  code_verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+              refresh_token:
+                summary: リフレッシュ
+                value:
+                  grant_type: refresh_token
+                  refresh_token: "refresh-abc"
       responses:
         "200":
           description: トークン発行
@@ -583,6 +751,14 @@ paths:
                   token_type: {type: string, const: Bearer}
                   expires_in: {type: integer, description: 秒}
                   refresh_token: {type: string}
+              examples:
+                default:
+                  summary: 正常系
+                  value:
+                    access_token: "eyJhbGciOiJIUzI1NiJ9.spec-example"
+                    token_type: Bearer
+                    expires_in: 3600
+                    refresh_token: "refresh-abc123"
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {description: コード / verifier / refresh token 不正}
 
@@ -956,26 +1132,49 @@ components:
             required: [detail]
             properties:
               detail: {type: string, example: "metadata index building"}
+          examples:
+            index_building:
+              summary: 構築中（Retry-After で再送）
+              value: {detail: "metadata index building"}
     BadRequest:
       description: パラメータ不正
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: パラメータ不正
+              value: {detail: "invalid folder parameter"}
     Forbidden:
       description: パスがダウンロードルート外 / 権限なし
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: 経路外アクセス
+              value: {detail: "path escapes downloads root"}
+            hidden:
+              summary: hidden 配下（サーバ側除外）
+              value: {detail: "path is hidden"}
     NotFound:
       description: 対象が存在しない
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: 対象なし
+              value: {detail: "not found: Series/vol1"}
     Conflict:
       description: 競合（visibility owner mismatch 等の同時更新衝突）
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            owner_mismatch:
+              summary: visibility owner 不一致（stale タブ）
+              value: {detail: "visibility owner mismatch", code: "owner_mismatch"}
     ValidationError:
       description: 入力バリデーション失敗（FastAPI 自動バリデーション。`detail` は issue 配列）
       content:
@@ -986,11 +1185,21 @@ components:
               detail:
                 type: array
                 items: {type: object}
+          examples:
+            default:
+              summary: バリデーション失敗
+              value:
+                detail:
+                  - {loc: ["query", "folder"], msg: "field required", type: "missing"}
     ServiceUnavailable:
       description: user-state ストアの読み書き失敗（fail-closed。ディスク/DB 障害時）
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: ストア障害（fail-closed）
+              value: {detail: "user-state store unavailable"}
 
   schemas:
     Error:
