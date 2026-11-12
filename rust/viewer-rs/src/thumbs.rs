@@ -7,18 +7,18 @@
 //! thumbnail, JPEG encode) and stored into the same cache dir with the
 //! same atomic tmp+rename + oldest-mtime prune as `_store_thumb`.
 //!
-//! Still proxied: sources only upstream can reach (PDF pages — pypdfium2;
-//! multipart RAR sets — `rar_needs_upstream`, since bundled unrar cannot
-//! chain volumes), formats the `image` crate can't decode that Pillow
+//! Still proxied: sources only upstream can reach (PDF pages — pypdfium2),
+//! formats the `image` crate can't decode that Pillow
 //! might (`.avif`, `.tiff`, archive files used as sources — gated by
 //! `NATIVE_DECODE` before the payload read) and archive entries we fail to
-//! extract (unsupported compression/CRC — upstream decides). Sprite misses
-//! compose in-process (9-cell strip + `rows` grid, same `sprites/<w>/`
-//! namespace as `thumbs.py`); a sheet needing an upstream-only source
-//! (PDF page, multipart RAR member, `.avif`/`.tiff` cell Pillow could
+//! extract (unsupported compression/CRC/missing volumes — upstream decides).
+//! Sprite misses compose in-process (9-cell strip + `rows` grid, same
+//! `sprites/<w>/` namespace as `thumbs.py`); a sheet needing an
+//! upstream-only source (PDF page, `.avif`/`.tiff` cell Pillow could
 //! decode) proxies whole so Python renders it instead of a gray cell.
-//! Single-volume RAR members read in-process via `bookq_core` (bundled
-//! unrar), so `/view` on a rar/cbr entry is native end to end.
+//! RAR members incl. multipart store sets read in-process via
+//! `bookq_core` (bundled unrar + #403 store-concat), so `/view` on a
+//! rar/cbr entry is native end to end.
 //!
 //! Known output deviation: the `image` JpegEncoder emits 4:4:4 (no chroma
 //! subsampling), so generated files run somewhat larger than Pillow's
@@ -35,7 +35,7 @@ use image::ImageDecoder;
 use sha1::{Digest, Sha1};
 
 use crate::serve::{
-    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file, is_rar_path,
+    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file,
     is_within, not_modified, realpath, resolve_archive, suffix_lower, Serve,
 };
 
@@ -187,12 +187,10 @@ fn load_source_bytes(
             return Err(detail(StatusCode::NOT_FOUND, "File not found"));
         };
         // PDF pages stay upstream (pypdfium2); rar/cbr entries read
-        // natively via `archive_read_entry` → bundled unrar — except
-        // multipart sets, which 7z chains volumes for upstream.
+        // natively via `archive_read_entry` (bundled unrar + #403
+        // multipart store-concat). A native miss (`None`) proxies so
+        // upstream 7z decides — same contract as the /image path.
         if is_pdf_file(&archive) {
-            return Ok(None);
-        }
-        if is_rar_path(&archive) && bookq_core::rar_needs_upstream(&archive) {
             return Ok(None);
         }
         if !is_image_entry(&inner) {

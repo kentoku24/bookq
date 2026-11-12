@@ -642,12 +642,12 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serv
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
     }
-    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
-        // Multipart set — the bundled unrar can't chain volumes; 7z can.
-        return Serve::Proxy;
-    }
+    let multipart = is_rar_path(archive) && bookq_core::rar_needs_upstream(archive);
     let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
+        // #403: multipart sets try native first (store-concat + unrar
+        // chain); a native miss proxies to upstream 7z instead of 404.
+        None if multipart => return Serve::Proxy,
         None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
     };
     Serve::Done(archive_bytes_response(

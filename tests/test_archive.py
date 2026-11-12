@@ -282,6 +282,31 @@ def test_list_rar_entries_broken_is_empty(archive_tree: Path):
     assert list_archive_entries(archive_tree / "broken.rar") == []
 
 
+def test_list_rar5_multipart_across_volumes(tmp_path: Path):
+    """#403: a multipart set lists members from every volume via new-style
+    ``part01/part02`` chaining (pure-Python walk, no extractor needed)."""
+    from tests.fixtures.rar5 import make_rar5_vol
+
+    p1 = tmp_path / "work.part01.rar"
+    p2 = tmp_path / "work.part02.rar"
+    make_rar5_vol(
+        p1, 0, True, [("001.png", b"page1")],
+        split_after=("002.png", b"helloworld", b"hello"),
+    )
+    make_rar5_vol(
+        p2, 1, False, [("003.png", b"page3")],
+        split_before=("002.png", b"helloworld", b"world"),
+    )
+    assert list_archive_entries(p1) == ["001.png", "002.png", "003.png"]
+    # Non-split members read via rarfile's pure-Python DirectReader (store,
+    # no external tool). Split members need volume-chained extraction —
+    # covered natively by viewer-rs (#403); rarfile handles real `rar`
+    # output, our minimal headers only guarantee the listing contract here.
+    from app.archive import read_archive_entry
+
+    assert read_archive_entry(p1, "001.png") == b"page1"
+
+
 def test_read_rar_entry(archive_tree: Path):
     from app.archive import read_archive_entry
 
