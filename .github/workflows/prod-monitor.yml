@@ -69,6 +69,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -123,9 +124,25 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
+      # OPENCODE_ZEN_API_KEY (static secret) expired — exchange the job's OIDC
+      # token for a 1h OpenCode API key instead (client_id is a public cred id).
+      - name: Sign in to OpenCode
+        env:
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
       - name: Run opencode analysis
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
 
