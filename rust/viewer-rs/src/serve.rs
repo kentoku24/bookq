@@ -6,10 +6,12 @@
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
 //!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
-//!   - RAR/CBR members of *multipart* sets (the bundled unrar can't chain
-//!     volumes; single-volume entries extract in-process)
-//!   - multi-range requests (hypercorn emits multipart/byteranges with a
-//!     random boundary — byte parity is impossible; single ranges are native)
+//!   - RAR/CBR multipart sets whose volumes are missing/invalid (native
+//!     store-concat + unrar chain cover complete sets; incomplete ones
+//!     proxy so upstream 7z decides, #403)
+//!   - multi-range requests are served as 200 full (contract shrink —
+//!     OpenAPI documents single `Range: bytes=` only; archive entries
+//!     already ignore multi-range → 200, so plain files match, #403)
 //!
 //! Auth: native serving is gated on `BOOKQ_TEST_MODE=true`. The Python side
 //! gates these routes behind `require_auth`; that session-cookie check is
@@ -567,8 +569,9 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 // ── /image/{path} ─────────────────────────────────────────────────────────────
 
 /// `serve_image` — archive-entry reads and plain-file serving.
-/// RAR/CBR entries extract in-process via bundled unrar; only PDF pages
-/// (pypdfium2) and multi-range requests still proxy upstream.
+/// RAR/CBR entries extract in-process (bundled unrar + multipart store
+/// concat); only PDF pages proxy upstream. Multi-range is a contract
+/// shrink (200 full) on both plain and archive paths — see `serve_plain_file`.
 pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if let Some((archive, inner)) = resolve_archive(downloads, path) {
         if !is_within(downloads, &archive) {
@@ -770,9 +773,20 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
                 Err(_) => Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
             }
         }
-        // hypercorn answers multi-range with multipart/byteranges under a
-        // random boundary — unmatchable, so defer the request to upstream.
-        RangePlan::Multi => Serve::Proxy,
+        // #403 contract shrink: multi-range is served as 200 full.
+        // Upstream hypercorn answers 206 multipart/byteranges under a
+        // random boundary — unmatchable for byte parity — and OpenAPI
+        // documents single `Range: bytes=` only. Archive entries already
+        // ignore multi-range → 200 (`parse_archive_range`), so plain
+        // files match by doing the same instead of proxying.
+        RangePlan::Multi => match std::fs::read(path) {
+            Ok(bytes) => {
+                set_header(&mut r, header::CONTENT_LENGTH, &size.to_string());
+                *r.body_mut() = Body::from(bytes);
+                Serve::Done(r)
+            }
+            Err(_) => Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
+        },
         RangePlan::BadRequest(msg) => {
             let mut r = response(StatusCode::BAD_REQUEST, Body::from(msg.to_string()));
             set_header(&mut r, header::CONTENT_TYPE, "text/plain; charset=utf-8");
@@ -876,6 +890,35 @@ mod tests {
         assert!(matches!(plan_range(&h("bytes=999999999999-"), 100), RangePlan::Unsatisfiable));
         assert!(matches!(plan_range(&h("bytes=-0"), 100), RangePlan::Unsatisfiable));
         assert!(matches!(plan_range(&h("bytes=0-1,5-9"), 100), RangePlan::Multi));
+    }
+
+    /// #403 contract shrink: multi-range on plain files serves 200 full
+    /// natively (matching the archive path's ignore → 200), instead of
+    /// proxying for a random-boundary multipart/byteranges.
+    #[test]
+    fn multi_range_serves_200_full() {
+        let dir = std::env::temp_dir().join(format!(
+            "bq-multirange-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.bin");
+        let payload: Vec<u8> = (0..100u8).collect();
+        std::fs::write(&p, &payload).unwrap();
+        let h = hdrs(&[("range", "bytes=0-9,20-29")]);
+        let out = serve_plain_file(&p, 100, "\"etag\"", "Thu, 01 Jan 1970 00:00:00 GMT", &h);
+        let Serve::Done(r) = out else {
+            panic!("multi-range must not proxy");
+        };
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers().get(header::ACCEPT_RANGES).unwrap(), "bytes");
+        assert!(r.headers().get(header::CONTENT_RANGE).is_none());
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 
     #[test]
