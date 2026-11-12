@@ -10,6 +10,7 @@ license = "Proprietary"
 bookq-core = { path = "../bookq-core" }
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+crc32fast = "1"
 flate2 = { version = "1", features = ["zlib"] }
 futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"

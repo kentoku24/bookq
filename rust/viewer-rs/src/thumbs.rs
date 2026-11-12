@@ -9,13 +9,14 @@
 //!
 //! Still proxied: sources only upstream can reach (PDF pages — pypdfium2;
 //! multipart RAR sets — `rar_needs_upstream`, since bundled unrar cannot
-//! chain volumes), formats the `image` crate can't decode that Pillow
-//! might (`.avif`, `.tiff`, archive files used as sources — gated by
-//! `NATIVE_DECODE` before the payload read), archive entries we fail to
-//! extract (unsupported compression/CRC — upstream decides), and the
-//! sprite compose path (misses proxy). Single-volume RAR members read
-//! in-process via `bookq_core` (bundled unrar), so `/view` on a rar/cbr
-//! entry is native end to end.
+//! chain volumes) and formats the `image` crate can't decode that Pillow
+//! might (`.avif`, `.tiff` — a whole sprite whose cells need them proxies
+//! so the sheet matches Python instead of graying; undecodable archive
+//! entries we fail to extract still gray per-cell like Python's fail-open,
+//! since upstream would 404 them too). Single-volume RAR members read
+//! in-process via `bookq_core` (bundled unrar), so sprites over rar/cbr
+//! entries are native end to end. SVG cells gray on both sides (neither
+//! decoder renders SVG into a sheet).
 //!
 //! Known output deviation: the `image` JpegEncoder emits 4:4:4 (no chroma
 //! subsampling), so generated files run somewhat larger than Pillow's
@@ -28,6 +29,7 @@ use std::path::Path;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
+use image::GenericImage;
 use image::ImageDecoder;
 use sha1::{Digest, Sha1};
 
@@ -863,14 +865,194 @@ pub fn thumb_sprite(
         .join("sprites")
         .join(cell.to_string())
         .join(format!("{digest}.jpg"));
-    if !dest.is_file() {
+    if dest.is_file() {
+        let body = match std::fs::read(&dest) {
+            Ok(b) => b,
+            Err(_) => return Serve::Proxy,
+        };
+        return Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false));
+    }
+    generate_sprite(
+        downloads,
+        cache,
+        folder,
+        &folder_path,
+        is_archive,
+        &names,
+        &rows,
+        grid_size,
+        cell,
+        &key,
+        &etag,
+        etag_mtime,
+    )
+}
+
+// ── sprite compose (contact-sheet synthesis, #404) ────────────────────────────
+
+/// Fail-open cell fill — `SPRITE_GRAY` (128,128,128): one bad entry paints
+/// its cell instead of failing the sheet.
+const SPRITE_GRAY: [u8; 3] = [128, 128, 128];
+
+/// `compose_sprite` strip: `cells.len()` slots of `width` px side by side;
+/// height is the tallest cell (aspect kept per cell, never stretched —
+/// narrow cells leave gray padding inside their slot, like Pillow pasting
+/// a smaller thumb at `(i*width, 0)`). `None` cells stay gray. `None` when
+/// every cell failed — the caller answers 404 like the all-fail path.
+fn compose_strip(cells: &[Option<image::DynamicImage>], width: i64) -> Option<Vec<u8>> {
+    let w = (width as u32).max(1);
+    let sheet_h = cells
+        .iter()
+        .filter_map(|c| c.as_ref().map(|im| im.height()))
+        .max()?;
+    let mut sheet = image::RgbImage::from_pixel(cells.len() as u32 * w, sheet_h, image::Rgb(SPRITE_GRAY));
+    for (i, cell) in cells.iter().enumerate() {
+        if let Some(im) = cell {
+            // `thumbnail_box` never upscales, so the thumb always fits its slot.
+            let _ = sheet.copy_from(&im.to_rgb8(), i as u32 * w, 0);
+        }
+    }
+    jpeg_encode(&image::DynamicImage::ImageRgb8(sheet), JPEG_QUALITY)
+}
+
+/// CSS `object-fit:cover` over `ImageOps.fit`: scale so both dimensions fill
+/// `(w, h)`, then center-crop. Smaller sources upscale (a tile is always
+/// full-bleed, unlike the strip path).
+fn cover_crop(im: image::DynamicImage, w: u32, h: u32) -> image::RgbImage {
+    let (sw, sh) = (im.width().max(1) as f64, im.height().max(1) as f64);
+    let scale = (w as f64 / sw).max(h as f64 / sh);
+    let nw = ((sw * scale).ceil() as u32).max(1);
+    let nh = ((sh * scale).ceil() as u32).max(1);
+    let resized = im.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+    let rgb = resized.to_rgb8();
+    let x = nw.saturating_sub(w) / 2;
+    let y = nh.saturating_sub(h) / 2;
+    image::imageops::crop_imm(&rgb, x, y, w.min(nw), h.min(nh)).to_image()
+}
+
+/// `compose_sprite_grid`: the 2D sheet matching the DOM multi-thumb grid —
+/// one `object-fit:cover` img per tile at `size` (the `w`-class dims), rows
+/// sharing the width equally. Failed cells stay gray. Returns the JPEG and
+/// the count of rendered cells so the caller maps all-fail to 404.
+fn compose_grid(raws: &[Option<Vec<u8>>], rows: &[i64], size: (i64, i64)) -> Option<(Vec<u8>, usize)> {
+    let (sw, sh) = (size.0.max(1) as u32, size.1.max(1) as u32);
+    let mut sheet = image::RgbImage::from_pixel(sw, sh, image::Rgb(SPRITE_GRAY));
+    let row_h = sh / (rows.len() as u32).max(1);
+    let mut ok = 0usize;
+    let mut idx = 0usize;
+    for (r, items) in rows.iter().enumerate() {
+        let cw = sw / (*items as u32).max(1);
+        for c in 0..*items {
+            if idx >= raws.len() {
+                break;
+            }
+            let raw = &raws[idx];
+            idx += 1;
+            let Some(b) = raw else { continue };
+            let Some(im) = load_oriented(b) else { continue };
+            let cell = cover_crop(im, cw, row_h);
+            // Grid math guarantees fit; a short last row/column leaves the
+            // integer-division remainder gray, like Pillow's fixed paste offsets.
+            let _ = sheet.copy_from(&cell, (c as u32) * cw, (r as u32) * row_h);
+            ok += 1;
+        }
+    }
+    jpeg_encode(&image::DynamicImage::ImageRgb8(sheet), JPEG_QUALITY).map(|jpg| (jpg, ok))
+}
+
+/// `handle_thumb_sprite`'s miss path: load every cell's source bytes, compose
+/// the sheet, store it under the shared `sprites/<cell>/` namespace.
+/// Mirrors the Python fail-open contract: per-entry failures gray the cell,
+/// all-fail answers 404. Whole-sheet proxy (never a partial sheet) when a
+/// cell needs upstream tooling (PDF render, multipart RAR) or a format only
+/// Pillow renders (avif/tiff) — graying those would diverge from Python.
+#[allow(clippy::too_many_arguments)]
+fn generate_sprite(
+    downloads: &Path,
+    cache: &Path,
+    folder: &str,
+    folder_path: &Path,
+    is_archive: bool,
+    names: &[String],
+    rows: &Option<Vec<i64>>,
+    grid_size: (i64, i64),
+    cell: i64,
+    key: &str,
+    etag: &str,
+    etag_mtime: f64,
+) -> Serve {
+    if is_archive && is_rar_path(folder_path) && bookq_core::rar_needs_upstream(folder_path) {
         return Serve::Proxy;
     }
-    let body = match std::fs::read(&dest) {
-        Ok(b) => b,
-        Err(_) => return Serve::Proxy,
+    let raws: Vec<Option<Vec<u8>>> = if is_archive {
+        names
+            .iter()
+            .map(|name| {
+                if !crate::serve::is_image_entry(name) {
+                    return None;
+                }
+                crate::serve::archive_read_entry(folder_path, name)
+            })
+            .collect()
+    } else {
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if dir_sprite_name_bad(name) {
+                out.push(None);
+                continue;
+            }
+            match load_source_bytes(downloads, &format!("{folder}/{name}")) {
+                Ok(Some((data, _, _, _))) => out.push(Some(data)),
+                // Needs upstream tooling (PDF render, multipart RAR) — the
+                // whole sheet must come from Python, not a grayed native one.
+                Ok(None) => return Serve::Proxy,
+                Err(_) => out.push(None),
+            }
+        }
+        out
     };
-    Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false))
+    // Pillow renders these but `image` can't — proxy the sheet instead of
+    // graying. SVG grays on both sides (neither side renders it into a
+    // sheet), so it stays a fail-open cell.
+    for (name, raw) in names.iter().zip(raws.iter()) {
+        if raw.is_some() {
+            let s = suffix_lower(Path::new(name));
+            if !NATIVE_DECODE.contains(&s.as_str()) && s != ".svg" {
+                return Serve::Proxy;
+            }
+        }
+    }
+    let Ok(_permit) = GEN_PERMITS.blocking_acquire() else {
+        return Serve::Proxy;
+    };
+    let body = if let Some(rows) = rows {
+        match compose_grid(&raws, rows, grid_size) {
+            Some((jpg, n)) if n > 0 => jpg,
+            _ => {
+                return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+            }
+        }
+    } else {
+        let w = (cell as u32).max(1);
+        let thumbs: Vec<Option<image::DynamicImage>> = raws
+            .iter()
+            .map(|raw| {
+                raw.as_ref()
+                    .and_then(|b| load_oriented(b))
+                    .map(|im| thumbnail_box(im, w, w.saturating_mul(4)))
+            })
+            .collect();
+        match compose_strip(&thumbs, cell) {
+            None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
+            Some(jpg) => jpg,
+        }
+    };
+    let dest = cache
+        .join("sprites")
+        .join(cell.to_string())
+        .join(format!("{}.jpg", sha1hex(key)));
+    store_cached(&dest, &body);
+    Serve::Done(media_response(body, "image/jpeg", etag, etag_mtime, false))
 }
 
 #[cfg(test)]
