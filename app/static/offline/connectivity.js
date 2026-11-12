@@ -67,7 +67,13 @@
     var f = (deps && deps.fetch) || fetch;
     var ctl = (typeof AbortController === "function") ? new AbortController() : null;
     var timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) {} }, PROBE_TIMEOUT_MS) : null;
-    var url = globalThis.BookqApi.endpoints.health + "?online_check=1&_t=" + Date.now();
+    var url;
+    try {
+      url = globalThis.BookqApi.endpoints.health + "?online_check=1&_t=" + Date.now();
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      return Promise.resolve(false);
+    }
     return f(url, {
       method: "GET", cache: "no-store", credentials: "same-origin",
       headers: { "X-Online-Check": "1" },
