@@ -8,6 +8,7 @@ license = "Proprietary"
 
 [dependencies]
 bookq-core = { path = "../bookq-core" }
+crc32fast = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 flate2 = { version = "1", features = ["zlib"] }
