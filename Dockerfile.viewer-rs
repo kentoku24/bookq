@@ -43,9 +43,17 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 && rm -rf /var/lib/apt/lists/*
 COPY --from=rsbuilder /viewer-rs-bin /usr/local/bin/viewer-rs
 
+# #401 native shell/static: only the three payload trees the Rust server
+# reads — Python sources intentionally stay out of the Rust image.
+COPY app/static /app/static
+COPY app/templates /app/templates
+COPY app/perf /app/perf
+
 # Upstream the proxy falls through to; overridden by compose.
 ENV BOOKQ_UPSTREAM=http://viewer:8080
 ENV BOOKQ_BIND=0.0.0.0:8080
+# #401 shell/static payload root (the /app tree copied above).
+ENV BOOKQ_APP_DIR=/app
 
 # Same build-arg contract as Dockerfile — /api/v1/version reports these.
 ARG GIT_SHA=""
