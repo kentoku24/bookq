@@ -1,0 +1,131 @@
+{
+  "format": 1,
+  "languages": ["js", "swift"],
+  "doc": "Solo spreads: from padded global images + chapter boundaries + pageMode + spreadOffset decide spreads and the spacer map. Ports: app/static/viewer/spread.js (rebuildSpreads: offset leading singletons then pairs, spacers dropped, chapterStart when a spread's first page is a non-zero boundary) and ios ReaderWork.assemble/rebuildSpreads (same padding rule pad=(startIdx-spreadOff+2)%2 before each chapter boundary + same grouping). Images use {folder, name}; spacers are {folder:'', name:'__spacer__', isSpacer:true}. expectSpreads lists global indices per spread; expectChapterStart flags chapter-opening spreads; expectIdxToSpread maps every global index (-1 for spacers). Python pins the file's declaration only (no solo-spread port on the server).",
+  "cases": [
+    {
+      "name": "single-mode-5",
+      "images": [
+        {"folder": "a", "name": "1"},
+        {"folder": "a", "name": "2"},
+        {"folder": "a", "name": "3"},
+        {"folder": "a", "name": "4"},
+        {"folder": "a", "name": "5"}
+      ],
+      "chapterBoundaries": [0],
+      "pageMode": "single",
+      "spreadOffset": 0,
+      "expectSpreads": [[0], [1], [2], [3], [4]],
+      "expectChapterStart": [false, false, false, false, false],
+      "expectIdxToSpread": [0, 1, 2, 3, 4]
+    },
+    {
+      "name": "spread-5-offset0",
+      "images": [
+        {"folder": "a", "name": "1"},
+        {"folder": "a", "name": "2"},
+        {"folder": "a", "name": "3"},
+        {"folder": "a", "name": "4"},
+        {"folder": "a", "name": "5"}
+      ],
+      "chapterBoundaries": [0],
+      "pageMode": "spread",
+      "spreadOffset": 0,
+      "expectSpreads": [[0, 1], [2, 3], [4]],
+      "expectChapterStart": [false, false, false],
+      "expectIdxToSpread": [0, 0, 1, 1, 2]
+    },
+    {
+      "name": "spread-5-offset1",
+      "images": [
+        {"folder": "a", "name": "1"},
+        {"folder": "a", "name": "2"},
+        {"folder": "a", "name": "3"},
+        {"folder": "a", "name": "4"},
+        {"folder": "a", "name": "5"}
+      ],
+      "chapterBoundaries": [0],
+      "pageMode": "spread",
+      "spreadOffset": 1,
+      "expectSpreads": [[0], [1, 2], [3, 4]],
+      "expectChapterStart": [false, false, false],
+      "expectIdxToSpread": [0, 1, 1, 2, 2]
+    },
+    {
+      "name": "cross-even-no-spacer",
+      "images": [
+        {"folder": "w/01", "name": "1"},
+        {"folder": "w/01", "name": "2"},
+        {"folder": "w/01", "name": "3"},
+        {"folder": "w/01", "name": "4"},
+        {"folder": "w/02", "name": "1"},
+        {"folder": "w/02", "name": "2"}
+      ],
+      "chapterBoundaries": [0, 4],
+      "pageMode": "spread",
+      "spreadOffset": 0,
+      "expectSpreads": [[0, 1], [2, 3], [4, 5]],
+      "expectChapterStart": [false, false, true],
+      "expectIdxToSpread": [0, 0, 1, 1, 2, 2]
+    },
+    {
+      "name": "cross-odd-boundary-spacer",
+      "images": [
+        {"folder": "w/01", "name": "1"},
+        {"folder": "w/01", "name": "2"},
+        {"folder": "w/01", "name": "3"},
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/02", "name": "1"},
+        {"folder": "w/02", "name": "2"},
+        {"folder": "w/02", "name": "3"},
+        {"folder": "w/02", "name": "4"}
+      ],
+      "chapterBoundaries": [0, 4],
+      "pageMode": "spread",
+      "spreadOffset": 0,
+      "expectSpreads": [[0, 1], [2], [4, 5], [6, 7]],
+      "expectChapterStart": [false, false, true, false],
+      "expectIdxToSpread": [0, 0, 1, -1, 2, 2, 3, 3]
+    },
+    {
+      "name": "cross-offset1-leading-spacer",
+      "images": [
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/01", "name": "1"},
+        {"folder": "w/01", "name": "2"},
+        {"folder": "w/01", "name": "3"},
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/02", "name": "1"},
+        {"folder": "w/02", "name": "2"}
+      ],
+      "chapterBoundaries": [1, 5],
+      "pageMode": "spread",
+      "spreadOffset": 1,
+      "expectSpreads": [[1, 2], [3], [5, 6]],
+      "expectChapterStart": [false, false, true],
+      "expectIdxToSpread": [-1, 0, 0, 1, -1, 2, 2]
+    },
+    {
+      "name": "spacer-only-group-dropped",
+      "images": [
+        {"folder": "", "name": "__spacer__", "isSpacer": true}
+      ],
+      "chapterBoundaries": [0],
+      "pageMode": "spread",
+      "spreadOffset": 0,
+      "expectSpreads": [],
+      "expectChapterStart": [],
+      "expectIdxToSpread": [-1]
+    },
+    {
+      "name": "empty-images",
+      "images": [],
+      "chapterBoundaries": [0],
+      "pageMode": "spread",
+      "spreadOffset": 0,
+      "expectSpreads": [],
+      "expectChapterStart": [],
+      "expectIdxToSpread": []
+    }
+  ]
+}

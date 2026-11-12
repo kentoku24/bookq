@@ -1,0 +1,184 @@
+{
+  "format": 1,
+  "languages": ["python", "js", "swift"],
+  "doc": "Work composition: from a library tree and an opened folder decide the chapter list. Ports: app/reader_sync/catalog.py (_sibling_leaf_folders + chapter assembly), app/static/app.js (getSiblingLeafFolders + loadImages), ios ReaderWork.siblingLeaves/chapters. Rules: (1) raw depth len(folder.split('/'))-1 < 2 -> single chapter; (2) structural parent found by composed parent/name walk (names containing '/' are never split); root-level nodes have no parent run; (3) parent children filtered to folder nodes whose children are all images must be >1, else single; (4) a mixed opened folder (own images + subfolders) reads its direct images only. Cross-chapter chapter names are the node names verbatim (flattened names kept); single-chapter names are the basename. Trees use {name, type, children} with type folder|image; image nodes carry no children.",
+  "cases": [
+    {
+      "name": "shallow-depth1-single",
+      "tree": [
+        {"name": "w", "type": "folder", "children": [
+          {"name": "01", "type": "folder", "children": [
+            {"name": "p1.png", "type": "image"},
+            {"name": "p2.png", "type": "image"}
+          ]},
+          {"name": "02", "type": "folder", "children": [
+            {"name": "p1.png", "type": "image"}
+          ]},
+          {"name": "sub", "type": "folder", "children": [
+            {"name": "x", "type": "folder", "children": [
+              {"name": "a.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "folder": "w/01",
+      "expectCross": false,
+      "expectChapterFolders": ["w/01"],
+      "expectChapters": [
+        {"name": "01", "folder": "w/01", "pages": ["p1.png", "p2.png"]}
+      ]
+    },
+    {
+      "name": "depth2-cross",
+      "tree": [
+        {"name": "group", "type": "folder", "children": [
+          {"name": "series", "type": "folder", "children": [
+            {"name": "vol1", "type": "folder", "children": [
+              {"name": "p1.png", "type": "image"},
+              {"name": "p2.png", "type": "image"},
+              {"name": "p3.png", "type": "image"},
+              {"name": "p4.png", "type": "image"}
+            ]},
+            {"name": "vol2", "type": "folder", "children": [
+              {"name": "x.png", "type": "image"},
+              {"name": "y.png", "type": "image"}
+            ]}
+          ]},
+          {"name": "other", "type": "folder", "children": [
+            {"name": "1.png", "type": "image"}
+          ]}
+        ]}
+      ],
+      "folder": "group/series/vol1",
+      "expectCross": true,
+      "expectChapterFolders": ["group/series/vol1", "group/series/vol2"],
+      "expectChapters": [
+        {"name": "vol1", "folder": "group/series/vol1", "pages": ["p1.png", "p2.png", "p3.png", "p4.png"]},
+        {"name": "vol2", "folder": "group/series/vol2", "pages": ["x.png", "y.png"]}
+      ]
+    },
+    {
+      "name": "depth2-mixed-self-single",
+      "tree": [
+        {"name": "group", "type": "folder", "children": [
+          {"name": "series", "type": "folder", "children": [
+            {"name": "vol1", "type": "folder", "children": [
+              {"name": "p1.png", "type": "image"},
+              {"name": "extra", "type": "folder", "children": [
+                {"name": "e.png", "type": "image"}
+              ]}
+            ]},
+            {"name": "vol2", "type": "folder", "children": [
+              {"name": "p1.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "folder": "group/series/vol1",
+      "expectCross": false,
+      "expectChapterFolders": ["group/series/vol1"],
+      "expectChapters": [
+        {"name": "vol1", "folder": "group/series/vol1", "pages": ["p1.png"]}
+      ]
+    },
+    {
+      "name": "flatten-name-cross",
+      "tree": [
+        {"name": "manga", "type": "folder", "children": [
+          {"name": "series", "type": "folder", "children": [
+            {"name": "vol1", "type": "folder", "children": [
+              {"name": "a.png", "type": "image"},
+              {"name": "b.png", "type": "image"}
+            ]},
+            {"name": "inner/vol2", "type": "folder", "children": [
+              {"name": "c.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "folder": "manga/series/inner/vol2",
+      "expectCross": true,
+      "expectChapterFolders": ["manga/series/vol1", "manga/series/inner/vol2"],
+      "expectChapters": [
+        {"name": "vol1", "folder": "manga/series/vol1", "pages": ["a.png", "b.png"]},
+        {"name": "inner/vol2", "folder": "manga/series/inner/vol2", "pages": ["c.png"]}
+      ]
+    },
+    {
+      "name": "root-level-single",
+      "tree": [
+        {"name": "a", "type": "folder", "children": [
+          {"name": "p.png", "type": "image"}
+        ]},
+        {"name": "b", "type": "folder", "children": [
+          {"name": "q.png", "type": "image"}
+        ]}
+      ],
+      "folder": "a",
+      "expectCross": false,
+      "expectChapterFolders": ["a"],
+      "expectChapters": [
+        {"name": "a", "folder": "a", "pages": ["p.png"]}
+      ]
+    },
+    {
+      "name": "depth2-single-leaf-sibling-run",
+      "tree": [
+        {"name": "g", "type": "folder", "children": [
+          {"name": "s", "type": "folder", "children": [
+            {"name": "leaf", "type": "folder", "children": [
+              {"name": "i1.png", "type": "image"}
+            ]},
+            {"name": "branch", "type": "folder", "children": [
+              {"name": "sub", "type": "folder", "children": [
+                {"name": "i2.png", "type": "image"}
+              ]}
+            ]}
+          ]}
+        ]}
+      ],
+      "folder": "g/s/leaf",
+      "expectCross": false,
+      "expectChapterFolders": ["g/s/leaf"],
+      "expectChapters": [
+        {"name": "leaf", "folder": "g/s/leaf", "pages": ["i1.png"]}
+      ]
+    },
+    {
+      "name": "opaque-archive-fallback",
+      "tree": [
+        {"name": "group", "type": "folder", "children": [
+          {"name": "series", "type": "folder", "children": [
+            {"name": "vol1", "type": "folder", "children": [
+              {"name": "p1.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "folder": "arch/book.cbz",
+      "expectCross": false,
+      "expectChapterFolders": ["arch/book.cbz"],
+      "expectChapters": [
+        {"name": "book.cbz", "folder": "arch/book.cbz", "pages": []}
+      ]
+    },
+    {
+      "name": "pdf-fallback",
+      "tree": [
+        {"name": "group", "type": "folder", "children": [
+          {"name": "series", "type": "folder", "children": [
+            {"name": "vol1", "type": "folder", "children": [
+              {"name": "p1.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "folder": "docs/book.pdf",
+      "expectCross": false,
+      "expectChapterFolders": ["docs/book.pdf"],
+      "expectChapters": [
+        {"name": "book.pdf", "folder": "docs/book.pdf", "pages": []}
+      ]
+    }
+  ]
+}

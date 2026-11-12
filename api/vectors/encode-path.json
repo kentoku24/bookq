@@ -1,0 +1,81 @@
+{
+  "format": 1,
+  "languages": ["python", "js", "swift"],
+  "doc": "Path encoding: per-segment percent-encoding that mirrors JS encodeURIComponent (app/static/offline-core.js encodePath). '/' stays a separator (flattened names like parent/child become two segments); every other char outside A-Z a-z 0-9 - _ . ! ~ * ' ( ) is %XX UTF-8 upper-hex. imageUrl is '/image/' + encodePath(folder + '/' + name), with the empty-folder rule (root file -> '/image/<name>', never '//'). Ports: python urllib.parse.quote per segment, OfflineCore.encodePath/imageUrl, ios ImageURL.encodePath (+ '/image/' join). Each case gives the composed path and its encoding; image cases additionally give folder/file and the full /image/ URL.",
+  "cases": [
+    {
+      "name": "ascii-simple",
+      "path": "manga/vol1/p001.png",
+      "expect": "manga/vol1/p001.png",
+      "folder": "manga/vol1",
+      "file": "p001.png",
+      "expectImageUrl": "/image/manga/vol1/p001.png"
+    },
+    {
+      "name": "spaces",
+      "path": "a b/c d.png",
+      "expect": "a%20b/c%20d.png",
+      "folder": "a b",
+      "file": "c d.png",
+      "expectImageUrl": "/image/a%20b/c%20d.png"
+    },
+    {
+      "name": "japanese",
+      "path": "作品名/第1巻/第1話.png",
+      "expect": "%E4%BD%9C%E5%93%81%E5%90%8D/%E7%AC%AC1%E5%B7%BB/%E7%AC%AC1%E8%A9%B1.png",
+      "folder": "作品名/第1巻",
+      "file": "第1話.png",
+      "expectImageUrl": "/image/%E4%BD%9C%E5%93%81%E5%90%8D/%E7%AC%AC1%E5%B7%BB/%E7%AC%AC1%E8%A9%B1.png"
+    },
+    {
+      "name": "reserved-chars",
+      "path": "f/a+b#c?d%e.png",
+      "expect": "f/a%2Bb%23c%3Fd%25e.png",
+      "folder": "f",
+      "file": "a+b#c?d%e.png",
+      "expectImageUrl": "/image/f/a%2Bb%23c%3Fd%25e.png"
+    },
+    {
+      "name": "unreserved-passthrough",
+      "path": "f/-_.!~*'().png",
+      "expect": "f/-_.!~*'().png",
+      "folder": "f",
+      "file": "-_.!~*'().png",
+      "expectImageUrl": "/image/f/-_.!~*'().png"
+    },
+    {
+      "name": "slash-in-name-archive-inner",
+      "path": "vol/arc.cbz/001.jpg",
+      "expect": "vol/arc.cbz/001.jpg",
+      "folder": "vol",
+      "file": "arc.cbz/001.jpg",
+      "expectImageUrl": "/image/vol/arc.cbz/001.jpg"
+    },
+    {
+      "name": "empty-folder-root-file",
+      "path": "cover.png",
+      "expect": "cover.png",
+      "folder": "",
+      "file": "cover.png",
+      "expectImageUrl": "/image/cover.png"
+    },
+    {
+      "name": "flattened-composed",
+      "path": "wrap/inner/vol1/p 1.png",
+      "expect": "wrap/inner/vol1/p%201.png",
+      "folder": "wrap/inner/vol1",
+      "file": "p 1.png",
+      "expectImageUrl": "/image/wrap/inner/vol1/p%201.png"
+    },
+    {
+      "name": "leading-trailing-slash-preserved",
+      "path": "/a/",
+      "expect": "/a/"
+    },
+    {
+      "name": "empty-path",
+      "path": "",
+      "expect": ""
+    }
+  ]
+}

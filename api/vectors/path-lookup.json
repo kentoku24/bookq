@@ -1,0 +1,192 @@
+{
+  "format": 1,
+  "languages": ["python", "js", "swift"],
+  "doc": "Path lookup: from a composed path (which may contain '/' inside flattened node names) resolve the node and its structural parent. Ports: app/routes.py (_find_tree_node) + app/reader_sync/catalog.py (_find_container), app/static/app.js (findNodeByPath/getParentPath via findParentPath prefix walk), ios BrowseModel.node(at:) (+ parent verified structurally). Node names are NEVER split on '/': matching is always on the composed parent/name path. A root-level match has parent null. Trees use {name, type, children} with type folder|image.",
+  "cases": [
+    {
+      "name": "flattened-root-leaf",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"},
+          {"name": "p2", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "Series/巻1",
+      "expectNode": {"name": "Series/巻1", "type": "folder"},
+      "expectParent": null
+    },
+    {
+      "name": "flattened-child-parent",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "r/wrap/x",
+      "expectNode": {"name": "wrap/x", "type": "folder"},
+      "expectParent": "r"
+    },
+    {
+      "name": "deep-nested",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "a/b/c",
+      "expectNode": {"name": "c", "type": "folder"},
+      "expectParent": "a/b"
+    },
+    {
+      "name": "intermediate-folder",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "a/b",
+      "expectNode": {"name": "b", "type": "folder"},
+      "expectParent": "a"
+    },
+    {
+      "name": "root-node",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "a",
+      "expectNode": {"name": "a", "type": "folder"},
+      "expectParent": null
+    },
+    {
+      "name": "missing-path",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "a/b/nope",
+      "expectNode": null,
+      "expectParent": null
+    },
+    {
+      "name": "prefix-trap-flattened",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "r/wrap",
+      "expectNode": null,
+      "expectParent": null
+    },
+    {
+      "name": "empty-target",
+      "tree": [
+        {"name": "Series/巻1", "type": "folder", "children": [
+          {"name": "p1", "type": "image"}
+        ]},
+        {"name": "r", "type": "folder", "children": [
+          {"name": "wrap/x", "type": "folder", "children": [
+            {"name": "p", "type": "image"}
+          ]}
+        ]},
+        {"name": "a", "type": "folder", "children": [
+          {"name": "b", "type": "folder", "children": [
+            {"name": "c", "type": "folder", "children": [
+              {"name": "p.png", "type": "image"}
+            ]}
+          ]}
+        ]}
+      ],
+      "target": "",
+      "expectNode": null,
+      "expectParent": null
+    }
+  ]
+}
