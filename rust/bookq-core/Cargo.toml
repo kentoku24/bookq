@@ -16,7 +16,14 @@ unrar = "0.5.8"
 # zlib-rs backend: miniz_oxide inflates ~2-3x slower than zlib C; zlib-rs is
 # pure Rust, faster than C zlib, and self-contained (no system zlib needed).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# PNG encode for the pdfium-render bitmap (issue #402). Narrow features —
+# pdfium-render's own `image_latest` pulls the decode side.
+image = { version = "0.25", default-features = false, features = ["png"] }
 lopdf = "0.42"
+# Same PDFium engine as pypdfium2 (issue #402): render + page count parity.
+# Runtime-bound (no link time): a missing libpdfium degrades to proxy.
+pdfium-render = "0.9"
+serde_json = "1"
 roxmltree = "0.20"
 sha2 = "0.10"
 toml = "0.8"
