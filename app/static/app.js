@@ -225,7 +225,7 @@
   const etagByKey = new Map();
   function _foldersEtagKey(depth){ return ":" + (depth ? "shallow" + depth : "full"); }
   const _rawFoldersText = new WeakMap();
-  async function readFoldersResponse(res, depth, isCurrent){
+  async function readFoldersResponse(res, depth, isCurrent, out){
     if(res.status === 304){
       // Warm revalidation hit: server tree unchanged. No body; the caller
       // keeps the current tree with zero redraws and no retry loop.
@@ -253,9 +253,15 @@
     if (!_cur()) return;
     try {
       const etag = res.headers ? res.headers.get("ETag") : null;
-      const key = _foldersEtagKey(depth);
-      if (etag) etagByKey.set(key, etag);
-      else etagByKey.delete(key);
+      // With `out`, the ETag is handed back instead of committed: the caller
+      // decides when (or whether) the response's tag may enter etagByKey, so
+      // a response that goes stale mid-pipeline never leaves its tag behind.
+      if (out) { out.etag = etag; }
+      else {
+        const key = _foldersEtagKey(depth);
+        if (etag) etagByKey.set(key, etag);
+        else etagByKey.delete(key);
+      }
     } catch(e) { console.warn(e); }
     return data;
   }
@@ -269,7 +275,7 @@
     const warmEtag = etagByKey.get(_foldersEtagKey(depth));
     if (warmEtag) init.headers = {"If-None-Match": warmEtag};
     const res = await _d.fetch(url, init);
-    return readFoldersResponse(res, depth, opts && opts.isCurrent);
+    return readFoldersResponse(res, depth, opts && opts.isCurrent, opts && opts.out);
   }
   // tree carries _fullPath from setFullPaths; /api/folders does not — strip it for deep-equal.
   function isSameTree(a, b){
@@ -291,16 +297,51 @@
     return next;
   }
   let _revalidateInFlight = null;
-  async function _revalidateFoldersForOnlineInner(deps){
+  // Bumped on every offline transition so a revalidation started on an older
+  // connection can never publish/mutate once a reconnect has happened — its
+  // continuations, ETag writes, indexing, cache/persist/render/stamp all gate
+  // on the captured generation, no network abort required.
+  let _onlineConnectionGen = 0;
+  async function _revalidateFoldersForOnlineInner(deps, connectionGen){
     const _d = _resolveDeps(deps);
     try{
       if(typeof navigator!=='undefined' && !navigator.onLine) return;
+      // Never race an in-flight full load for index/tree ownership: wait out
+      // whichever load is active, looping if a newer load replaced the
+      // awaited one, and bail if this connection died meanwhile.
+      while (_loadFoldersInFlight) {
+        try { await _loadFoldersInFlight; } catch(e) { /* the load path owns its failure */ }
+        if (connectionGen !== _onlineConnectionGen) return;
+        if (typeof navigator!=='undefined' && !navigator.onLine) return;
+      }
+      // With no load in flight but readiness unsettled (never loaded or still
+      // shallow), only a full load may own readiness/shallow/deep-link drain.
+      if (!treeLoaded || _shallowMode) {
+        await loadFolders({preservePath:true}, _d);
+        return;
+      }
       const now=Date.now();
       if(now - _onlineRevalidateLast < 5*60*1000) return;
       const loadGen = _loadFoldersGen;
-      const result = await fetchLatestFolders(_d, {isCurrent: function(){ return loadGen === _loadFoldersGen; }});
+      const isCurrent = function(){
+        return loadGen === _loadFoldersGen &&
+          connectionGen === _onlineConnectionGen &&
+          (typeof navigator==='undefined' || navigator.onLine);
+      };
+      // The response ETag is captured, not committed: it only enters
+      // etagByKey when this revalidation actually decides to apply/stamp —
+      // a response that goes stale mid-index leaves no tag that could 304
+      // the needed reconnect refresh away.
+      const eout = {};
+      const result = await fetchLatestFolders(_d, {isCurrent: isCurrent, out: eout});
+      const commitEtag = function(){
+        if (!("etag" in eout)) return;
+        const key = _foldersEtagKey(null);
+        if (eout.etag) etagByKey.set(key, eout.etag);
+        else etagByKey.delete(key);
+      };
       if(!result) return;
-      if (loadGen !== _loadFoldersGen) return;
+      if (!isCurrent()) return;
       if(result && result.notModified){
         // 304: tree unchanged — stamp the gate, redraw nothing, loop never.
         _onlineRevalidateLast = now;
@@ -308,11 +349,13 @@
       }
       const data = result;
       if(isSameTree(tree, data)){
+        commitEtag();
         _onlineRevalidateLast = now;
         return;
       }
-      const map = await setFullPathsAndIndexAsync(data);
-      if(!map || loadGen !== _loadFoldersGen) return;
+      const map = await setFullPathsAndIndexAsync(data, {isCurrent: isCurrent});
+      if(!map || !isCurrent()) return;
+      commitEtag();
       tree = data;
       invalidateLeafPaths();
       if(currentBrowsePath && !getNodeAt(currentBrowsePath)){
@@ -322,9 +365,9 @@
         const c = await (_d.caches || caches).open("bookq-api-v1");
         await c.put(globalThis.BookqApi.endpoints.tree, new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
       } catch(e) { console.warn(e); }
-      if (loadGen !== _loadFoldersGen) return;
+      if (!isCurrent()) return;
       try{ await refreshOfflineMap(); } catch(e) { console.warn(e); }
-      if (loadGen !== _loadFoldersGen) return;
+      if (!isCurrent()) return;
       // IDB is the sole offline tree source (IDB-only since 8aacd57): persist
       // the revalidated tree alongside Cache, otherwise the next offline
       // reload would serve the stale snapshot. Full-only, background, never
@@ -338,10 +381,15 @@
   }
   function revalidateFoldersForOnline(deps){
     if(!_revalidateInFlight){
-      _revalidateInFlight = _revalidateFoldersForOnlineInner(deps).then(
-        function(){ _revalidateInFlight = null; },
-        function(e){ _revalidateInFlight = null; console.warn(e); }
+      const connectionGen = _onlineConnectionGen;
+      const inner = _revalidateFoldersForOnlineInner(deps, connectionGen);
+      // Identity-guarded cleanup: an offline-detached obsolete request may
+      // settle after a new slot exists and must not clear it.
+      const tracked = inner.then(
+        function(){ if (_revalidateInFlight === tracked) _revalidateInFlight = null; },
+        function(e){ if (_revalidateInFlight === tracked) _revalidateInFlight = null; console.warn(e); }
       );
+      _revalidateInFlight = tracked;
     }
     return _revalidateInFlight;
   }
@@ -352,8 +400,11 @@
   window.addEventListener('online',()=>{ updateOnlineStatus(); updateStorageBar(); scheduleOnlineRevalidation(); });
   // Going offline must invalidate the freshness stamp: an online→offline→online
   // flip inside the 5-minute window has to revalidate immediately, since the
-  // tree could not be revalidated while offline.
-  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; if(_onlineRevalidateTimer){ clearTimeout(_onlineRevalidateTimer); _onlineRevalidateTimer = null; } updateOnlineStatus(); updateStorageBar(); });
+  // tree could not be revalidated while offline. The connection bump also
+  // voids every continuation of any in-flight revalidation, and detaching the
+  // slot lets the reconnect start a NEW request without waiting for the
+  // obsolete one to settle.
+  window.addEventListener('offline',()=>{ _onlineConnectionGen++; _onlineRevalidateLast = 0; if(_onlineRevalidateTimer){ clearTimeout(_onlineRevalidateTimer); _onlineRevalidateTimer = null; } _revalidateInFlight = null; updateOnlineStatus(); updateStorageBar(); });
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   function ensurePersist(deps){
     if(persistRequested) return;
@@ -1273,14 +1324,16 @@
     _indexGen++;
     return _buildIndexSync(nodes, provisional);
   }
-  function setFullPathsAndIndexAsync(nodes){
+  function setFullPathsAndIndexAsync(nodes, opts){
+    const isCurrent = (opts && typeof opts.isCurrent === "function") ? opts.isCurrent : null;
     const gen = ++_indexGen;
     const b = _indexBuilder(nodes);
+    const cur = function(){ return gen === _indexGen && (!isCurrent || isCurrent()); };
     return new Promise(function(resolve){
       function loop(){
-        if (gen !== _indexGen){ resolve(null); return; }
+        if (!cur()){ resolve(null); return; }
         if (b.step()){
-          if (gen !== _indexGen){ resolve(null); return; }
+          if (!cur()){ resolve(null); return; }
           _publishIndex(nodes, b, false);
           resolve(b.map);
           return;
@@ -1539,7 +1592,22 @@
   }
 
   let _loadFoldersGen = 0;
-  async function loadFolders(opts, deps){
+  // The promise of the currently-active load, tracked so reconnect
+  // revalidation can wait for whichever full load owns readiness/indexing
+  // instead of racing it for the shared index.
+  let _loadFoldersInFlight = null;
+  function loadFolders(opts, deps){
+    const p = _loadFoldersInner(opts, deps);
+    _loadFoldersInFlight = p;
+    // Identity-guarded cleanup on both outcomes; the derived promise resolves
+    // either way so a rejected load cannot surface a new unhandled rejection.
+    p.then(
+      function(){ if (_loadFoldersInFlight === p) _loadFoldersInFlight = null; },
+      function(){ if (_loadFoldersInFlight === p) _loadFoldersInFlight = null; }
+    );
+    return p;
+  }
+  async function _loadFoldersInner(opts, deps){
     const _d = _resolveDeps(deps);
     const _fetch = _d.fetch;
     const preservePath = !!(opts && opts.preservePath);
@@ -1611,9 +1679,15 @@
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
       if (!await restoreTree(data, {shallow:true})) return;
       shallowOk = true;
-    } catch(e){ console.warn("shallow folders failed, falling through to full", e); }
+    } catch(e){
+      // A superseded load must not warn about or fall through to a stale full
+      // fetch — the newer generation owns the pipeline now.
+      if (_loadGen !== _loadFoldersGen) return;
+      console.warn("shallow folders failed, falling through to full", e);
+    }
     // Stage 2: full tree in the background — final DOM identical to full-only.
-    const _applyFullRes = async function(res){
+    const _applyFullRes = async function(res, connectionGen){
+      if (connectionGen === undefined) connectionGen = _onlineConnectionGen;
       const data = await readFoldersResponse(res, null, () => _loadGen === _loadFoldersGen);
       if (_loadGen !== _loadFoldersGen) return false;
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
@@ -1622,10 +1696,11 @@
       // never delay first paint.
       if (!await restoreTree(data, {shallow:false})) return false;
       if (_loadGen !== _loadFoldersGen) return false;
-      // Stamp only a genuinely-online load: an offline cold start must keep
-      // _onlineRevalidateLast=0 so the reconnect revalidation fires instead
-      // of being eaten by the freshness gate.
-      if (typeof navigator === 'undefined' || navigator.onLine) _onlineRevalidateLast = Date.now();
+      // Stamp only a genuinely-online load on the SAME connection the fetch
+      // started on: an offline cold start (or an offline flip during the
+      // fetch/index build) must keep _onlineRevalidateLast=0 so the queued
+      // reconnect revalidation fires instead of being eaten by the gate.
+      if ((typeof navigator === 'undefined' || navigator.onLine) && connectionGen === _onlineConnectionGen) _onlineRevalidateLast = Date.now();
       _persistTreeSnapshot(data, {defer:true});
       // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
@@ -1652,15 +1727,17 @@
       setTimeout(async function(){
         if (_loadGen !== _loadFoldersGen) return;
         try {
+          const retryConnGen = _onlineConnectionGen;
           const res2 = await _fetch(globalThis.BookqApi.endpoints.tree, {credentials: 'same-origin'});
           if (_loadGen !== _loadFoldersGen) return;
           if (res2.status === 202){ _scheduleFullRetry(); return; }
           if (!res2.ok) throw new Error("http "+res2.status);
-          await _applyFullRes(res2);
+          await _applyFullRes(res2, retryConnGen);
         } catch(e){ console.warn("full folders retry failed", e); _scheduleFullRetry(); }
       }, Math.min(1500 * _fullRetry, 5000));
     };
     try {
+      const loadConnGen = _onlineConnectionGen;
       const res = await _fetch(globalThis.BookqApi.endpoints.tree, {credentials: 'same-origin'});
       if (_loadGen !== _loadFoldersGen) return;
       if (res.status === 202){
@@ -1671,7 +1748,7 @@
         throw new Error("index building");
       }
       if (!res.ok) throw new Error("http "+res.status);
-      await _applyFullRes(res);
+      await _applyFullRes(res, loadConnGen);
     } catch(e){
       // Recovery work is only valid while this load generation still owns the
       // pipeline — a newer loadFolders must never see stale marks/renders.
