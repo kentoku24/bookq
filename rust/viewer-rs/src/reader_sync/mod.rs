@@ -517,6 +517,11 @@ impl Registry {
         n
     }
 
+    /// Live session count (gateway tests assert reset empties the registry).
+    pub async fn session_count(&self) -> usize {
+        self.inner.lock().await.sessions.len()
+    }
+
     /// Ticker task — runs every time-driven transition.
     pub async fn run_ticker(self: &Arc<Self>) {
         loop {
