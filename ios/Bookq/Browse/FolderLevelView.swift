@@ -185,6 +185,7 @@ struct FolderLevelView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(name)
+                .accessibilityIdentifier("tile:\(entry.path)")
                 .accessibilityAddTraits(.isButton)
                 if pres?.toggle == true {
                     VisibilityEyeButton(
@@ -221,6 +222,7 @@ struct FolderLevelView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("このフォルダを読む")
+            .accessibilityIdentifier("selfTile:\(entry.path)")
             .accessibilityAddTraits(.isButton)
             // the self-tile is itself the download target
             OfflineButton(path: entry.path, leaves: [entry.path],
@@ -304,6 +306,7 @@ struct VisibilityEyeButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(hidden ? "再表示する" : "非表示にする")
+        .accessibilityIdentifier("visToggle:\(path)")
     }
 }
 

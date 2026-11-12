@@ -197,5 +197,7 @@ struct OnlineStatusBadge: View {
             .foregroundStyle(tint)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(.ultraThinMaterial, in: Capsule())
+            .accessibilityLabel(online.online ? "オンライン" : "オフライン")
+            .accessibilityIdentifier("onlineBadge")
     }
 }

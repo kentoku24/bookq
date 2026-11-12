@@ -163,6 +163,7 @@ struct LibraryView: View {
                         Text("\(chips.count)").font(.caption2)
                     }
                 }
+                .accessibilityIdentifier("facetBtn")
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 5) {
                         ForEach(Array(chips.enumerated()), id: \.offset) { _, c in
@@ -249,11 +250,13 @@ struct LibraryView: View {
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
+            .accessibilityIdentifier("layoutMenuBtn")
         }
         ToolbarItem(placement: .automatic) {
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape")
             }
+            .accessibilityIdentifier("settingsBtn")
         }
         ToolbarItem(placement: .automatic) {
             Button { showPair = true } label: {
@@ -263,6 +266,7 @@ struct LibraryView: View {
             .accessibilityLabel("ペアリング")
             // spec §6: pairing initiation is disabled offline/connecting.
             .disabled(!online.isOnline)
+            .accessibilityIdentifier("pairBtn")
         }
     }
 

@@ -101,6 +101,7 @@ struct SearchResultsView: View {
                         leaves: leaves, meta: r, vis: pres)
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("tile:\(path)")
                 if pres?.toggle == true {
                     VisibilityEyeButton(
                         path: path,

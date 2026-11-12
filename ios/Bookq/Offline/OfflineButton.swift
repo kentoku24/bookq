@@ -55,6 +55,7 @@ struct OfflineButton: View {
             Button("キャンセル", role: .cancel) {}
         }
         .accessibilityLabel(accessibility)
+        .accessibilityIdentifier("offlineBtn:\(path)")
     }
 
     private var icon: String {

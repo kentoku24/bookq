@@ -60,6 +60,7 @@ struct FolderTileView: View {
                 .background(.black.opacity(0.7), in: Capsule())
                 .foregroundStyle(.white)
                 .padding(4)
+                .accessibilityIdentifier("visBadge:\(path)")
         }
     }
 

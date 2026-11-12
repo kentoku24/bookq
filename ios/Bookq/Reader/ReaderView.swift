@@ -339,9 +339,11 @@ struct ReaderView: View {
                         .padding(10)
                         .background(.black.opacity(0.5), in: Circle())
                 }
+                .accessibilityIdentifier("readerClose")
                 Spacer()
                 VStack(spacing: 2) {
                     Text(counterText).font(.subheadline).monospacedDigit()
+                        .accessibilityIdentifier("readerCounter")
                     // External-display bring-up diagnostic (temporary):
                     // mode/bounds when connected, else availability state.
                     if let s = ext.externalScreen {
@@ -466,6 +468,7 @@ struct ReaderView: View {
         .padding(.horizontal, 20)
         .padding(.bottom, 30)
         .tint(.white)
+        .accessibilityIdentifier("readerSlider")
     }
 
     /// `idx+1 / total` — real index, or chapter-local when cross-chapter.
