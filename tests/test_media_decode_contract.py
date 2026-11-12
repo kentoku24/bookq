@@ -122,7 +122,7 @@ def test_decode_sets_match_rust():
     rs = (repo / "rust/viewer-rs/src/thumbs.rs").read_text()
 
     def _parse(name: str) -> set[str]:
-        m = re.search(r"const " + name + r": &[&str] = &\[([^\]]*)\]", rs)
+        m = re.search(r"const\s+" + name + r"\s*:[^=]*=\s*&\[([^\]]*)\]", rs)
         assert m, f"{name} not found in thumbs.rs"
         return set(re.findall(r'"(\.[a-z0-9]+)"', m.group(1)))
 
