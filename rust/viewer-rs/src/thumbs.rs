@@ -1349,5 +1349,249 @@ mod tests {
         assert!(mean_r > 215, "boundary mean R {mean_r} — not premultiplied");
     }
 
+    // ── sprite compose + miss synthesis (#404) ──────────────────────────────
+
+    fn solid_raw(w: u32, h: u32, px: [u8; 3]) -> Vec<u8> {
+        png_rgb(w, h, px)
+    }
+
+    fn cached_sprite_body(cache: &Path) -> Vec<u8> {
+        let entries: Vec<_> = std::fs::read_dir(cache.join("sprites/200"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(entries.len(), 1, "one sheet must land in sprites/200/");
+        std::fs::read(entries[0].path()).unwrap()
+    }
+
+    fn sprite_call(
+        dl: &Path,
+        cache: &Path,
+        pairs: &[(&str, &str)],
+    ) -> Serve {
+        let mut q = HashMap::new();
+        let mut parts = Vec::new();
+        for (k, v) in pairs {
+            q.insert(k.to_string(), v.to_string());
+            parts.push(format!("{k}={v}"));
+        }
+        thumb_sprite(dl, cache, &q, &parts.join("&"), &HeaderMap::new())
+    }
+
+    /// Minimal stored (method-0) ZIP so the archive miss path is exercised
+    /// without a writer dependency. `bookq_core` reads the same bytes.
+    fn stored_zip(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut offsets = Vec::new();
+        for (name, data) in files {
+            offsets.push(out.len() as u32);
+            let crc = crc32fast::hash(data);
+            let n = data.len() as u32;
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&n.to_le_bytes());
+            out.extend_from_slice(&n.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+        }
+        let cd_start = out.len() as u32;
+        let mut central = Vec::new();
+        for ((name, data), off) in files.iter().zip(offsets) {
+            let n = data.len() as u32;
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            central.extend_from_slice(&n.to_le_bytes());
+            central.extend_from_slice(&n.to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes());
+            central.extend_from_slice(&off.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        out.extend_from_slice(&central);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_start.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// Strip: 3 cells of 400x300 → thumbs of 200x150 → (600,150) sheet with
+    /// the cell colors intact (mirrors the Python 600-wide assertion).
+    #[test]
+    fn sprite_strip_dims_and_colors() {
+        let raws = [
+            Some(solid_raw(400, 300, [255, 0, 0])),
+            Some(solid_raw(400, 300, [0, 255, 0])),
+            Some(solid_raw(400, 300, [0, 0, 255])),
+        ];
+        let thumbs: Vec<Option<image::DynamicImage>> = raws
+            .iter()
+            .map(|r| {
+                r.as_ref()
+                    .and_then(|b| load_oriented(b))
+                    .map(|im| thumbnail_box(im, 200, 800))
+            })
+            .collect();
+        let jpg = compose_strip(&thumbs, 200).unwrap();
+        assert_eq!(jpeg_dims(&jpg), (600, 150));
+        let dec = image::load_from_memory(&jpg).unwrap().to_rgb8();
+        assert!(dec.get_pixel(100, 75)[0] > 200);
+        assert!(dec.get_pixel(300, 75)[1] > 200);
+        assert!(dec.get_pixel(500, 75)[2] > 200);
+    }
+
+    /// Strip fail-open: a bad middle cell paints gray, the rest intact;
+    /// all-fail returns None so the caller answers 404.
+    #[test]
+    fn sprite_strip_gray_cell_and_all_fail() {
+        let thumbs = [
+            Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                200,
+                150,
+                image::Rgb([255, 0, 0]),
+            ))),
+            None,
+            Some(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                200,
+                150,
+                image::Rgb([0, 0, 255]),
+            ))),
+        ];
+        let jpg = compose_strip(&thumbs, 200).unwrap();
+        assert_eq!(jpeg_dims(&jpg), (600, 150));
+        let dec = image::load_from_memory(&jpg).unwrap().to_rgb8();
+        let mid = dec.get_pixel(300, 75);
+        assert!((mid[0] as i16 - 128).abs() <= 12);
+        assert!((mid[1] as i16 - 128).abs() <= 12);
+        assert!((mid[2] as i16 - 128).abs() <= 12);
+        assert!(compose_strip(&[None, None], 200).is_none());
+    }
+
+    /// Grid: rows=2,2 at the w=400 class → (480,720); corners keep their
+    /// cell colors through the cover-crop (mirrors the Python grid test).
+    #[test]
+    fn sprite_grid_dims_and_colors() {
+        let raws = [
+            Some(solid_raw(400, 300, [255, 0, 0])),
+            Some(solid_raw(400, 300, [0, 255, 0])),
+            Some(solid_raw(400, 300, [0, 0, 255])),
+            Some(solid_raw(400, 300, [255, 0, 255])),
+        ];
+        let (jpg, ok) = compose_grid(&raws, &[2, 2], (480, 720)).unwrap();
+        assert_eq!(ok, 4);
+        assert_eq!(jpeg_dims(&jpg), (480, 720));
+        let dec = image::load_from_memory(&jpg).unwrap().to_rgb8();
+        assert!(dec.get_pixel(120, 180)[0] > 200);
+        assert!(dec.get_pixel(360, 180)[1] > 200);
+        assert!(dec.get_pixel(120, 540)[2] > 200);
+        // w=200 class → the small sheet (240,360).
+        let (small, _) = compose_grid(&raws, &[2, 2], (240, 360)).unwrap();
+        assert_eq!(jpeg_dims(&small), (240, 360));
+    }
+
+    /// Grid all-fail reports ok=0 (caller 404s); narrow tall sources still
+    /// fill their tile (cover upscales, unlike the strip path).
+    #[test]
+    fn sprite_grid_all_fail_and_cover_fill() {
+        let (jpg, ok) = compose_grid(&[None, None], &[1, 1], (240, 360)).unwrap();
+        assert_eq!(ok, 0);
+        assert_eq!(jpeg_dims(&jpg), (240, 360));
+        let raws = [Some(solid_raw(40, 400, [9, 9, 200]))];
+        let (tall, ok) = compose_grid(&raws, &[1], (240, 360)).unwrap();
+        assert_eq!(ok, 1);
+        assert_eq!(jpeg_dims(&tall), (240, 360));
+        let dec = image::load_from_memory(&tall).unwrap().to_rgb8();
+        assert!(dec.get_pixel(120, 180)[2] > 150);
+    }
+
+    /// Dir-sprite miss → native 200 JPEG in `sprites/200/`; repeat is a hit.
+    #[test]
+    fn sprite_dir_miss_synthesizes_and_caches() {
+        let (dl, cache) = tmp_dirs("s1");
+        std::fs::write(dl.join("r.png"), solid_raw(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), solid_raw(400, 300, [0, 255, 0])).unwrap();
+        std::fs::write(dl.join("b.png"), solid_raw(400, 300, [0, 0, 255])).unwrap();
+        let res = sprite_call(&dl, &cache, &[("folder", "."), ("names", "r.png,g.png,b.png"), ("w", "200")]);
+        let Serve::Done(r) = res else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(jpeg_dims(&cached_sprite_body(&cache)), (600, 150));
+        // Second call is a shared-cache hit with identical bytes.
+        let before = cached_sprite_body(&cache);
+        let res2 = sprite_call(&dl, &cache, &[("folder", "."), ("names", "r.png,g.png,b.png"), ("w", "200")]);
+        assert!(matches!(res2, Serve::Done(ref r) if r.status() == StatusCode::OK));
+        assert_eq!(cached_sprite_body(&cache), before);
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Dir-sprite grid miss → (480,720) sheet cached under the same namespace.
+    #[test]
+    fn sprite_dir_grid_miss_synthesizes() {
+        let (dl, cache) = tmp_dirs("s2");
+        for (n, px) in [("r.png", [255, 0, 0]), ("g.png", [0, 255, 0]), ("b.png", [0, 0, 255]), ("p.png", [255, 0, 255])] {
+            std::fs::write(dl.join(n), solid_raw(400, 300, px)).unwrap();
+        }
+        let res = sprite_call(
+            &dl,
+            &cache,
+            &[("folder", "."), ("names", "r.png,g.png,b.png,p.png"), ("rows", "2,2"), ("w", "400")],
+        );
+        let Serve::Done(r) = res else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(jpeg_dims(&cached_sprite_body(&cache)), (480, 720));
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Archive miss reads entries natively; all-bad names → 404; invalid
+    /// rows fall back to the strip; bad folders keep their 400/404.
+    #[test]
+    fn sprite_archive_miss_and_validation() {
+        let (dl, cache) = tmp_dirs("s3");
+        let zip = stored_zip(&[
+            ("r.png", solid_raw(400, 300, [255, 0, 0])),
+            ("g.png", solid_raw(400, 300, [0, 255, 0])),
+            ("b.png", solid_raw(400, 300, [0, 0, 255])),
+        ]);
+        std::fs::write(dl.join("work.zip"), zip).unwrap();
+        let res = sprite_call(&dl, &cache, &[("folder", "work.zip"), ("names", "r.png,g.png,b.png"), ("w", "200")]);
+        let Serve::Done(r) = res else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(jpeg_dims(&cached_sprite_body(&cache)), (600, 150));
+        // All-bad → 404 (nothing cached for it).
+        let res = sprite_call(&dl, &cache, &[("folder", "work.zip"), ("names", "nope.png,nada.png")]);
+        assert_eq!(status(&res), StatusCode::NOT_FOUND);
+        // Invalid rows → strip fallback.
+        let res = sprite_call(&dl, &cache, &[("folder", "work.zip"), ("names", "r.png,g.png"), ("rows", "x")]);
+        let Serve::Done(r) = res else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::OK);
+        // Validation contract: missing names → 400, bad folder → 400/404.
+        let res = sprite_call(&dl, &cache, &[("folder", "work.zip")]);
+        assert_eq!(status(&res), StatusCode::BAD_REQUEST);
+        let res = sprite_call(&dl, &cache, &[("folder", "/abs"), ("names", "r.png")]);
+        assert_eq!(status(&res), StatusCode::BAD_REQUEST);
+        let res = sprite_call(&dl, &cache, &[("folder", "nope.zip"), ("names", "a.png")]);
+        assert_eq!(status(&res), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
 
 }
