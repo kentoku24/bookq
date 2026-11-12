@@ -1,7 +1,7 @@
 {
   "format": 1,
   "languages": ["js", "swift"],
-  "doc": "Solo spreads: from padded global images + chapter boundaries + pageMode + spreadOffset decide spreads and the spacer map. Ports: app/static/viewer/spread.js (rebuildSpreads: offset leading singletons then pairs, spacers dropped, chapterStart when a spread's first page is a non-zero boundary) and ios ReaderWork.assemble/rebuildSpreads (same padding rule pad=(startIdx-spreadOff+2)%2 before each chapter boundary + same grouping). Images use {folder, name}; spacers are {folder:'', name:'__spacer__', isSpacer:true}. expectSpreads lists global indices per spread; expectChapterStart flags chapter-opening spreads; expectIdxToSpread maps every global index (-1 for spacers). Python pins the file's declaration only (no solo-spread port on the server).",
+  "doc": "Solo spreads: from padded global images + chapter boundaries + pageMode + spreadOffset decide spreads and the spacer map. Ports: app/static/viewer/spread.js (rebuildSpreads: offset leading singletons then pairs, spacers dropped, chapterStart when a spread's first page is a non-zero boundary) and ios ReaderWork.assemble/rebuildSpreads (same padding rule pad=(startIdx-spreadOff+2)%2 before each chapter boundary + same grouping). Images use {folder, name}; spacers are {folder:'', name:'__spacer__', isSpacer:true}. expectSpreads lists global indices per spread; expectChapterStart flags chapter-opening spreads; expectIdxToSpread maps every global index (-1 for spacers; JS keeps these slots as holes/undefined and normalizes to -1, Swift stores -1). Python pins the file's declaration only (no solo-spread port on the server).",
   "cases": [
     {
       "name": "single-mode-5",
