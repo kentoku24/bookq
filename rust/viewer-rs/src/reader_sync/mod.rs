@@ -2468,6 +2468,34 @@ mod tests {
         assert_eq!(ack["type"], "ACK");
         assert_eq!(ack["data"]["role"], "leader");
     }
+
+    /// `end_all("reset")` (#405) — every live session ends with the reset
+    /// reason and each member link observes its END frame.
+    #[tokio::test]
+    async fn end_all_resets_every_live_session() {
+        let reg = reg_for_test();
+        let mut rxs = Vec::new();
+        for _ in 0..2 {
+            let mut inner = reg.inner.lock().await;
+            let (lid, mut rx) = mk_link(&mut inner);
+            inner.dispatch(&reg, &lid, &req("CREATE", "", Value::Object(Map::new())));
+            let _ = next_json(&mut rx); // HELLO
+            let ack = next_json(&mut rx); // ACK
+            assert_eq!(ack["type"], "ACK");
+            let _ = next_json(&mut rx); // STATE
+            rxs.push(rx);
+        }
+        assert_eq!(reg.inner.lock().await.sessions.len(), 2);
+        assert_eq!(reg.end_all("reset").await, 2);
+        assert!(reg.inner.lock().await.sessions.is_empty());
+        for mut rx in rxs {
+            let end = next_json(&mut rx);
+            assert_eq!(end["type"], "END");
+            assert_eq!(end["reason"], "reset");
+        }
+        // Idempotent on an empty registry.
+        assert_eq!(reg.end_all("reset").await, 0);
+    }
 }
 
 #[cfg(test)]

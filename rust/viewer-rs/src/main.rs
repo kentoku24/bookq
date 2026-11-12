@@ -1251,3 +1251,193 @@ mod native_gate_tests {
         assert!(n.partial_groups().is_empty());
     }
 }
+
+#[cfg(test)]
+mod pair_hook_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn report_cid_shapes() {
+        // `str(body.get("id") or "")`: falsy ids are missing.
+        assert_eq!(report_cid(None), "");
+        assert_eq!(report_cid(Some(&json!(null))), "");
+        assert_eq!(report_cid(Some(&json!(""))), "");
+        assert_eq!(report_cid(Some(&json!(0))), "");
+        assert_eq!(report_cid(Some(&json!(false))), "");
+        assert_eq!(report_cid(Some(&json!([]))), "");
+        assert_eq!(report_cid(Some(&json!({}))), "");
+        assert_eq!(report_cid(Some(&json!("abc"))), "abc");
+        assert_eq!(report_cid(Some(&json!(7))), "7");
+        // `[:64]` truncates by chars, not bytes.
+        assert_eq!(report_cid(Some(&json!("x".repeat(100)))).len(), 64);
+        assert_eq!(
+            report_cid(Some(&json!("あ".repeat(100)))).chars().count(),
+            64
+        );
+    }
+
+    #[test]
+    fn report_gen_shapes() {
+        // `int(body.get("gen") or 0)`: falsy gens are generation 0.
+        assert_eq!(report_gen(None), 0);
+        assert_eq!(report_gen(Some(&json!(null))), 0);
+        assert_eq!(report_gen(Some(&json!(0))), 0);
+        assert_eq!(report_gen(Some(&json!(""))), 0);
+        assert_eq!(report_gen(Some(&json!(false))), 0);
+        assert_eq!(report_gen(Some(&json!(true))), 1);
+        assert_eq!(report_gen(Some(&json!(3))), 3);
+        assert_eq!(report_gen(Some(&json!("12"))), 12);
+        assert_eq!(report_gen(Some(&json!(2.9))), 2);
+    }
+
+    fn test_state(test_mode: bool) -> AppState {
+        let index = std::sync::Arc::new(folders::IndexState::new());
+        let downloads = PathBuf::from("/nonexistent-test-downloads");
+        let dir = PathBuf::from("/nonexistent-test-state");
+        AppState {
+            upstream: Upstream {
+                client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
+                authority: "example.com:8080".parse().unwrap(),
+            },
+            downloads: downloads.clone(),
+            native: std::sync::Arc::new(Native::from_parts(
+                test_mode,
+                test_mode,
+                std::collections::HashSet::new(),
+            )),
+            allowed_emails: std::sync::Arc::new(std::collections::HashSet::new()),
+            index: index.clone(),
+            position_store: std::sync::Arc::new(state::PositionStore::new(&dir)),
+            visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
+            secret_key: "test-secret".to_string(),
+            session_key: None,
+            thumb_cache: PathBuf::from("/nonexistent-test-thumbs"),
+            git_sha: "test".to_string(),
+            build_date: "test".to_string(),
+            registry: reader_sync::Registry::new(index, downloads),
+            pair_reports: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn post_req(body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/pair-report")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap()
+    }
+
+    async fn body_json(res: Response) -> (StatusCode, serde_json::Value) {
+        let status = res.status();
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn post_get_roundtrip_and_gen_drop() {
+        let st = test_state(true);
+        // Gen-less report stores; the id key is popped, received_at stamped.
+        let (status, body) = body_json(
+            pair_report_post(&st, post_req(json!({"id": "c1", "pc": {"phase": "reading"}}))).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"ok": true}));
+
+        let get = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pair-report?id=c1")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = body_json(pair_report_get(&st, get).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"]["pc"], json!({"phase": "reading"}));
+        assert!(body["state"].get("id").is_none());
+        assert!(body["state"]["received_at"].as_f64().unwrap() > 0.0);
+
+        // Newer generation wins; an older repost from a parked tab drops.
+        let (status, body) = body_json(
+            pair_report_post(&st, post_req(json!({"id": "c1", "gen": 5, "pc": 1}))).await,
+        )
+        .await;
+        assert_eq!((status, body), (StatusCode::OK, json!({"ok": true})));
+        let (status, body) = body_json(
+            pair_report_post(&st, post_req(json!({"id": "c1", "gen": 3, "pc": 2}))).await,
+        )
+        .await;
+        assert_eq!((status, body), (StatusCode::OK, json!({"ok": true, "dropped": true})));
+        let get = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pair-report?id=c1")
+            .body(Body::empty())
+            .unwrap();
+        let (_, body) = body_json(pair_report_get(&st, get).await).await;
+        assert_eq!(body["state"]["pc"], json!(1));
+        assert_eq!(body["state"]["gen"], json!(5));
+
+        // Unknown id reads back null, like the Python `dict.get`.
+        let get = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pair-report?id=never-posted")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = body_json(pair_report_get(&st, get).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"state": null}));
+    }
+
+    #[tokio::test]
+    async fn post_requires_id() {
+        let st = test_state(true);
+        let (status, body) = body_json(pair_report_post(&st, post_req(json!({"pc": {}}))).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, json!({"detail": "id required"}));
+    }
+
+    /// Outside test mode the hooks must not exist (404) — even with every
+    /// native surface enabled, mirroring `_pair_report_gate`.
+    #[tokio::test]
+    async fn gate_denies_outside_test_mode() {
+        let st = test_state(false);
+        let post = Request::builder()
+            .method("POST")
+            .uri("/api/v1/pair-report")
+            .body(Body::from(r#"{"id":"c1"}"#))
+            .unwrap();
+        assert_eq!(pair_report(State(st.clone()), post).await.status(), StatusCode::NOT_FOUND);
+        let get = Request::builder()
+            .method("GET")
+            .uri("/api/v1/pair-report?id=c1")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(pair_report(State(st.clone()), get).await.status(), StatusCode::NOT_FOUND);
+        let reset = Request::builder()
+            .method("POST")
+            .uri("/api/v1/pair-reset")
+            .body(Body::empty())
+            .unwrap();
+        let res = pair_reset(State(st.clone()), reset).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let (_, body) = body_json(res).await;
+        assert_eq!(body, json!({"detail": "Not Found"}));
+    }
+
+    #[tokio::test]
+    async fn reset_reports_ended_count() {
+        // Empty registry — the handler delegates counting to `end_all`
+        // (covered with live sessions in reader_sync's own tests).
+        let st = test_state(true);
+        let reset = Request::builder()
+            .method("POST")
+            .uri("/api/v1/pair-reset")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = body_json(pair_reset(State(st), reset).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"ended": 0}));
+    }
+}
