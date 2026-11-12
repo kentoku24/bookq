@@ -275,11 +275,24 @@ fn media_response(
 
 // ── cache-miss generation (the Pillow pipeline, in-process) ──────────────────
 
-/// Extensions the enabled `image` features can decode — anything else
-/// proxies BEFORE the source load: pulling a whole `.avif`/`.tiff`/`.cbz`
-/// payload just to fail `into_decoder` pays the read twice (the broken-
-/// image case repeats it on EVERY request, uncached).
+/// Media decode 契約 (#406。正本は `api/v1-semantics.md` §7、py 側の対応物は
+/// `app/thumbs.py::COMMON_NATIVE_SUFFIXES` — 両定数は手動同期で
+/// `tests/test_media_decode_contract.py` が一致を検証する)。
+///
+/// `NATIVE_DECODE`: 有効な `image` features が decode できる拡張子 —
+/// それ以外は source load の前に proxy する (`.avif`/`.tiff`/`.cbz` 全体を
+/// 読んで `into_decoder` で失敗するのは read を二重に払う — broken-image は
+/// キャッシュ不可で毎リクエスト繰り返すため)。
+/// `DECODE_PYTHON_ONLY`: Pillow ≥13 が decode するが `image` crate
+/// (bmp/gif/jpeg/png/webp のみ) はしない — Proxy → upstream 200 で
+/// client 可視は同じ 200。
+/// `DECODE_UNSUPPORTED_EXAMPLES`: 両 backend とも decode 不可の代表例 —
+/// Python 404 == Rust Proxy → upstream 404 で同じ 404。
 const NATIVE_DECODE: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
+/// Pillow-only (Pillow ≥13 libavif 同梱): Rust は Proxy → upstream 200.
+const DECODE_PYTHON_ONLY: &[&str] = &[".avif", ".tif", ".tiff"];
+/// Neither backend decodes (representative examples): 404 on both.
+const DECODE_UNSUPPORTED_EXAMPLES: &[&str] = &[".heic", ".heif", ".jxl"];
 
 fn native_decodable(path: &str) -> bool {
     NATIVE_DECODE.contains(&suffix_lower(Path::new(path)).as_str())
@@ -1094,6 +1107,51 @@ mod tests {
             thumb(&dl, &cache, "x.png", None, &h),
             Serve::Proxy
         ));
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Decode 契約 (#406): gate 真理値表 — 共通集合のみ native、
+    /// Python-only (avif/tiff) と両側 unsupported (heic/heif/jxl) は Proxy
+    /// (upstream Python が 200 / 404 を決める)。`NATIVE_DECODE` に形式を
+    /// 足したら `DECODE_*` と `app/thumbs.py` + spec §7 も同時更新すること.
+    #[test]
+    fn decode_gate_truth_table() {
+        for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"] {
+            assert!(native_decodable(&format!("p{ext}")), "{ext} native");
+            assert!(
+                !DECODE_PYTHON_ONLY.contains(&ext),
+                "{ext} must not be python-only"
+            );
+            assert!(
+                !DECODE_UNSUPPORTED_EXAMPLES.contains(&ext),
+                "{ext} must not be unsupported"
+            );
+        }
+        for ext in DECODE_PYTHON_ONLY {
+            assert!(!native_decodable(&format!("p{ext}")), "{ext} proxies");
+        }
+        for ext in DECODE_UNSUPPORTED_EXAMPLES {
+            assert!(!native_decodable(&format!("p{ext}")), "{ext} proxies");
+        }
+        // Case-insensitive: suffix_lower 前提 (e.g. P.AVIF proxies too).
+        assert!(!native_decodable("p.AVIF"));
+        assert!(native_decodable("p.PNG"));
+    }
+
+    /// Python-only と両側 unsupported の拡張子は /thumb・/view ともに
+    /// payload を読む前に Proxy — client 可視 status は upstream Python が
+    /// 決める (genuine avif/tiff → 200、heic/garbage → 404)。
+    #[test]
+    fn thumb_view_python_only_and_unsupported_proxy() {
+        let (dl, cache) = tmp_dirs("t5");
+        std::fs::write(dl.join("a.tiff"), b"garbage").unwrap();
+        std::fs::write(dl.join("b.heic"), b"garbage").unwrap();
+        std::fs::write(dl.join("c.jxl"), b"garbage").unwrap();
+        let h = HeaderMap::new();
+        for name in ["a.tiff", "b.heic", "c.jxl"] {
+            assert!(matches!(thumb(&dl, &cache, name, None, &h), Serve::Proxy), "{name} thumb");
+            assert!(matches!(view(&dl, &cache, name, &h), Serve::Proxy), "{name} view");
+        }
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
