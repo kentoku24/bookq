@@ -14,7 +14,7 @@
   function _resolveDeps(deps){
     deps = deps || {};
     return {
-      fetch: deps.fetch || (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch),
+      fetch: deps.fetch || (typeof window !== 'undefined' && window.Connectivity && window.Connectivity.fetch ? window.Connectivity.fetch : (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch)),
       caches: deps.caches || (typeof window !== 'undefined' ? window.caches : (typeof caches !== 'undefined' ? caches : undefined)),
       storage: deps.storage || (typeof navigator !== 'undefined' ? navigator.storage : undefined),
       OfflineStore: deps.OfflineStore || window.OfflineStore
@@ -68,6 +68,20 @@
     })(tree);
     if(leaves.length) return [...new Set(leaves)];
     return [folder];
+  }
+  // window.getNodeAt が無いコンテキスト (harness 等) 向けのツリー走査。
+  function _nodeAt(p){
+    if (window.getNodeAt) { try { return window.getNodeAt(p); } catch(e) {} }
+    var tree = window.tree || [];
+    var found = null;
+    (function walk(nodes){
+      for (var n of nodes){
+        if (found) return;
+        if (n._fullPath === p){ found = n; return; }
+        if (n.children && p.indexOf((n._fullPath || "") + "/") === 0) walk(n.children);
+      }
+    })(tree);
+    return found;
   }
   function getLeafPathsFor(folder, deps){
     if(deps && deps.tree !== undefined) return computeLeafPathsFor(folder, deps);
@@ -270,6 +284,13 @@
   }
 
   async function downloadWork(folder, deps){
+    // spec §6 機能ゲート: オフライン/接続中はダウンロードを開始しない
+    // (全入口 — IDLE タップ・popover 続き・else 分岐 — の単一関門)。
+    // 削除はローカル操作なので deleteWork 側は許可のまま。
+    if (typeof window !== 'undefined' && window.Connectivity && !window.Connectivity.isOnline()){
+      try { if (window.showErrorToast) window.showErrorToast("オフラインのためダウンロードできません"); } catch(e){ console.warn(e); }
+      return;
+    }
     var _d = _resolveDeps(deps);
     var _fetch = _d.fetch;
     var _caches = _d.caches || (typeof caches !== 'undefined' ? caches : undefined);
@@ -289,12 +310,36 @@
     var leafFileMap = new Map();
     async function fetchLeafFiles(lp){
       throwIfAborted();
-      var res = await _fetch(globalThis.BookqApi.imagesUrl(lp), {signal});
-      if(!res.ok) throw new Error("list failed "+res.status+" for "+lp);
-      var files = globalThis.BookqApi.imagesOf(await res.json());
-      if(!files) throw new Error("malformed images response for "+lp);
-      throwIfAborted();
-      return files;
+      // 正規ルートは /api/images — listing フェーズとして観測される
+      // (is-listing)。flatten 葉は /api/images?folder=<leaf> がディスク
+      // 直下しか列挙しないため常に [] を返す; オフラインでは fetch 自体が
+      // 失敗する。両ケースのフォールバックとして、画像のみの葉では
+      // node.children のファイル名 ("only/leaf/1.png" 形式) を使う —
+      // viewer のオフライン fast path と同じ経路。
+      var inMem = [];
+      try {
+        var node = _nodeAt(lp);
+        if (node && folderHasOnlyImages(node)){
+          inMem = (node.children || []).filter(function(c){ return c && c.type === "image"; })
+            .map(function(c){ return c.name; });
+        }
+      } catch(e) {}
+      var files = null;
+      try {
+        var res = await _fetch(globalThis.BookqApi.imagesUrl(lp), {signal});
+        if(res.ok){
+          files = globalThis.BookqApi.imagesOf(await res.json());
+          if(!files) throw new Error("malformed images response for "+lp);
+        } else if(!inMem.length) {
+          throw new Error("list failed "+res.status+" for "+lp);
+        }
+      } catch(e) {
+        if(e && e.name==='AbortError') throw e;
+        if(!inMem.length) throw e;
+      }
+      if(files && files.length) return files;
+      if(inMem.length) return inMem;
+      return files || [];
     }
     async function cacheLeaf(lp, files, cache, onFile){
       var bytes = 0;

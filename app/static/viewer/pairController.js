@@ -283,7 +283,8 @@
   function _resolveInitialPageRef(folder, done) {
     var names = _treeNames(folder);
     if (names) { done(_pickRef(folder, names)); return; }
-    fetch(globalThis.BookqApi.imagesUrl(folder))
+    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+    _cf(globalThis.BookqApi.imagesUrl(folder))
       .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
       .then(function (list) {
         done(globalThis.BookqApi.imagesOf(list) ? _pickRef(folder, globalThis.BookqApi.imagesOf(list)) : null);

@@ -161,7 +161,8 @@
           try { var hit = await caches.match(url); if (hit) continue; } catch(e) { console.warn(e); }
           if (!alive()) return;
           try {
-            var r = await fetch(url, { credentials: 'same-origin', signal: signal || undefined });
+            var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+            var r = await _cf(url, { credentials: 'same-origin', signal: signal || undefined });
             if (!r.ok) continue;
             var cacheClone = r.clone();
             var sizeClone = r.clone();

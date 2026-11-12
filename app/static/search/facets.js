@@ -109,7 +109,7 @@
 
   function _resolveDeps(deps){
     deps = deps || {};
-    return { fetch: deps.fetch || (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch) };
+    return { fetch: deps.fetch || (typeof window !== 'undefined' && window.Connectivity && window.Connectivity.fetch ? window.Connectivity.fetch : (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch)) };
   }
   // 202 = the server metadata index is still building: retry on a short
   // backoff clock instead of parsing the status body as a payload. Returns

@@ -336,7 +336,9 @@
     // navigateToFolder が _pendingNav に積み、復旧後の drain が潜り直す。
     var _FV = window.FolderVisibility;
     if (_FV && !_FV.showAll){
-      var _g = _FV.guardPath(path);
+      // app.js の fvGuardPath はオフライン+snapshot無し fail-open (spec §9) を
+      // 含む — ここも同じ判定に揃える (未定義なら素の guardPath)。
+      var _g = (window.fvGuardPath || _FV.guardPath.bind(_FV))(path);
       if (_g === "pending"){
         if (typeof window.navigateToFolder === "function") window.navigateToFolder(path);
         return;
@@ -455,7 +457,7 @@
     var _FV = window.FolderVisibility;
     if (_FV){
       var _vTarget = st ? st.folder : (bs ? bs.path : null);
-      var _vGuard = _FV.guardPath(_vTarget);
+      var _vGuard = (window.fvGuardPath || _FV.guardPath.bind(_FV))(_vTarget);
       if (_vGuard === "pending"){
         try {
           if (st && st.folder){

@@ -6,7 +6,7 @@
 const SHELL_CACHE = "bookq-shell-v2";
 const API_CACHE = "bookq-api-v1";
 const FALLBACK_CACHE = "bookq-images-fallback";
-const SHELL_ASSETS = ["/", "/static/offline.html", "/static/manifest.json", "/static/style.css", "/static/app.js", "/static/offline-core.js", "/static/api/v1.js", "/static/browse/visibility.js", "/static/browse/hash.js", "/static/browse/render.js", "/static/browse/scroll.js", "/static/search/facets.js", "/static/offline/storeAdapter.js", "/static/offline/tree-writer.js", "/static/thumbs/resolveCover.js", "/static/thumbs/prefetch.js", "/static/viewer/spread.js", "/static/viewer/navigation.js", "/static/viewer/gesture.js", "/static/viewer/zoom.js", "/static/viewer/overview.js", "/static/vendor/qrcode.min.js", "/static/vendor/jsQR.min.js", "/static/viewer/pairUI.js", "/static/viewer/pairModel.js", "/static/viewer/pairedView.js", "/static/viewer/pairTransport.js", "/static/viewer/pairClient.js", "/static/viewer/pairController.js", "/static/browse/pairSync.js", "/static/progress/sync.js", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/icons/icon-512-maskable.png"];
+const SHELL_ASSETS = ["/", "/static/offline.html", "/static/manifest.json", "/static/style.css", "/static/app.js", "/static/offline-core.js", "/static/api/v1.js", "/static/offline/connectivity.js", "/static/browse/visibility.js", "/static/browse/hash.js", "/static/browse/render.js", "/static/browse/scroll.js", "/static/search/facets.js", "/static/offline/storeAdapter.js", "/static/offline/tree-writer.js", "/static/thumbs/resolveCover.js", "/static/thumbs/prefetch.js", "/static/viewer/spread.js", "/static/viewer/navigation.js", "/static/viewer/gesture.js", "/static/viewer/zoom.js", "/static/viewer/overview.js", "/static/vendor/qrcode.min.js", "/static/vendor/jsQR.min.js", "/static/viewer/pairUI.js", "/static/viewer/pairModel.js", "/static/viewer/pairedView.js", "/static/viewer/pairTransport.js", "/static/viewer/pairClient.js", "/static/viewer/pairController.js", "/static/browse/pairSync.js", "/static/progress/sync.js", "/static/icons/icon-192.png", "/static/icons/icon-512.png", "/static/icons/icon-512-maskable.png"];
 
 // Per-work cache naming comes from offline-core.js, the same file the page
 // loads: a second copy here would rename every work's cache the moment either
@@ -133,6 +133,20 @@ async function cacheFirst(req) {
   return hit;
 }
 
+// A cache-fallback response means the network leg itself failed — mark it so
+// the page's Connectivity state machine can tell "served from SW cache" apart
+// from a real 200 (docs/offline-spec.md §5). Headers on a cached Response are
+// immutable, so it is re-wrapped rather than mutated.
+function withSwCacheMark(hit) {
+  try {
+    const headers = new Headers(hit.headers);
+    headers.set("X-Bookq-SWCache", "1");
+    return new Response(hit.body, { status: hit.status, statusText: hit.statusText, headers });
+  } catch {
+    return hit;
+  }
+}
+
 async function networkFirst(req, cacheName) {
   try {
     const res = await fetch(req);
@@ -160,7 +174,7 @@ async function networkFirst(req, cacheName) {
       hit = await caches.match('/api/v1/tree');
     }
     if (!hit && !req.url.includes('/api/v1/thumb-sprite')) hit = await caches.match(req, { ignoreSearch: true });
-    return hit || Response.error();
+    return hit ? withSwCacheMark(hit) : Response.error();
   }
 }
 

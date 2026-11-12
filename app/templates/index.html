@@ -152,6 +152,7 @@
 
 <script src="/static/offline-core.js" defer></script>
 <script src="/static/api/v1.js" defer></script>
+<script src="/static/offline/connectivity.js" defer></script>
 <script src="/static/browse/visibility.js" defer></script>
 <script src="/static/thumbs/resolveCover.js" defer></script>
 <script src="/static/browse/hash.js" defer></script>
@@ -199,6 +200,7 @@
         window.BOOKQ_BROWSE_SYNC === true &&
         window.BOOKQ_UI_SYNC_V2 === true &&
         window.FolderVisibility && window.FolderVisibility.apiVersion === 1 &&
+        window.Connectivity && window.Connectivity.apiVersion === 1 &&
         window.__BOOKQ_VISIBILITY === true);
   }
   try { window.__shellStale = stale; } catch (e) {}

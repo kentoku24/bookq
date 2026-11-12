@@ -45,6 +45,10 @@ body{position:fixed;inset:0}
 		#offline-status.offline{color:#c9a24f}
 		#offline-status.offline:visited{color:#c9a24f}
 		#offline-status.offline:hover{color:#dabb6a}
+	#offline-status.connecting{color:#8f9aa8}
+	#offline-status.connecting:visited{color:#8f9aa8}
+	#search input:disabled{opacity:.45;cursor:not-allowed}
+	#pair-btn:disabled{opacity:.45;cursor:not-allowed}
 		#search{min-width:0;padding:0 16px}
 		#search input{width:100%;padding:6px 10px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#ccc;font-size:13px;outline:none;min-height:44px}
 	#search input:focus{border-color:#555}
@@ -61,6 +65,11 @@ body{position:fixed;inset:0}
 	.tile{cursor:pointer;border-radius:6px;overflow:hidden;background:#1a1a1a;border:1px solid #2a2a2a;transition:border-color .15s,transform .1s}
 	@media (hover:hover){.tile:hover{border-color:#555;transform:scale(1.03)}}
 	.tile.active{border-color:#4a7ac4;box-shadow:0 0 0 1px #4a7ac4}
+	/* オフライン未ダウンロードのリーフ (docs/offline-spec.md §6): グレー化。
+	   中間フォルダは絞り込みで非表示なのでこのクラスは付かない。 */
+	.tile.off-unavail,.card.off-unavail,.item.off-unavail{opacity:.55;position:relative}
+	.tile.off-unavail .tile-img,.tile.off-unavail .tile-multi,.card.off-unavail .card-img,.item.off-unavail .thumb{filter:grayscale(1) brightness(.7)}
+	.off-unavail-badge{position:absolute;top:4px;left:4px;z-index:2;background:rgba(0,0,0,.72);color:#c9c9c9;font-size:10px;line-height:1.4;padding:2px 6px;border-radius:4px;pointer-events:none}
 	.tile-img{width:100%;aspect-ratio:2/3;object-fit:cover;object-position:center;display:block;background:#0d0d0d}
 	.tile-placeholder{width:100%;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;background:#111;color:#8f8f8f;font-size:28px}
 	/* multi-thumbnail grid for folders with sub-folders */

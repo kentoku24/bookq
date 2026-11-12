@@ -79,7 +79,8 @@
     var gen = _epoch;
     var ac = typeof AbortController !== "undefined" ? new AbortController() : null;
     _inFlightAbort = ac;
-    fetch((globalThis.BookqApi && globalThis.BookqApi.putPositionUrl ? globalThis.BookqApi.putPositionUrl(rec.folder) : URL + "?folder=" + encodeURIComponent(rec.folder)), {
+    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+    _cf((globalThis.BookqApi && globalThis.BookqApi.putPositionUrl ? globalThis.BookqApi.putPositionUrl(rec.folder) : URL + "?folder=" + encodeURIComponent(rec.folder)), {
       method: "PUT",
       credentials: "same-origin",
       keepalive: true,
@@ -130,7 +131,8 @@
 
   async function pull() {
     try {
-      var res = await fetch(URL, { credentials: "same-origin", cache: "no-store" });
+      var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+      var res = await _cf(URL, { credentials: "same-origin", cache: "no-store" });
       if (!res || !res.ok) return { ok: false };
       var data = await res.json();
       var pos = (globalThis.BookqApi && globalThis.BookqApi.latestPositionOf) ? globalThis.BookqApi.latestPositionOf(data) : (data && (data.positions ? data.positions[0] : data.position)) || null;
@@ -152,7 +154,8 @@
     if (_timer) { clearTimeout(_timer); _timer = null; }
     try { if (_inFlightAbort) _inFlightAbort.abort(); } catch (e) {}
     try {
-      return fetch(URL, { method: "DELETE", credentials: "same-origin", keepalive: true })
+      var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+      return _cf(URL, { method: "DELETE", credentials: "same-origin", keepalive: true })
         .then(function (res) { return !!(res && res.ok); })
         .catch(function () { return false; });
     } catch (e) { return Promise.resolve(false); }

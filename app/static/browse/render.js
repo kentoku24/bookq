@@ -36,7 +36,10 @@
   // unfiltered list: loading → 読込中, error → 取得失敗+再試行. The gate sits
   // inside each renderer so renderView / renderBrowse / direct calls all
   // pass through it (a snapshot — cached or live — renders normally).
+  // spec §9 fail-open: オフライン + スナップショット無しでは DL 絞り込み側
+  // (getBrowseChildrenAt) が唯一のフィルタなので、ここは開放する。
   function _visBlocked(){
+    if (window.Connectivity && !window.Connectivity.isOnline()) return null;
     var FV = window.FolderVisibility;
     return (FV && typeof FV.blockedGridHtml === "function") ? FV.blockedGridHtml() : null;
   }
@@ -114,12 +117,24 @@
       try {
         leafMap[p] = (window.getLeafPathsFor) ? window.getLeafPathsFor(p) : [p];
       } catch(e){ leafMap[p] = [p]; }
-      try { hasOnlyMap[p] = !!_folderHasOnlyImages(n); } catch(e){ hasOnlyMap[p] = false; }
+      // 合成葉 (works レコード復元, children:[]) もエピソードとして開く。
+      try { hasOnlyMap[p] = !!_folderHasOnlyImages(n) || n._syntheticLeaf === true; } catch(e){ hasOnlyMap[p] = false; }
     }
-    var ctx = { progressAll: progressAll, offlineMap: om, offlineRecordMap: orm, leafMap: leafMap };
+    // connOffline + readable: spec §6 のグレー化判定をレンダ単位で持つ。
+    // リーフ(エピソード)でレコード無し → .off-unavail + aria-disabled。
+    var connOffline = !!(window.Connectivity && !window.Connectivity.isOnline());
+    var ctx = { progressAll: progressAll, offlineMap: om, offlineRecordMap: orm, leafMap: leafMap, hasOnlyMap: hasOnlyMap, connOffline: connOffline };
     try { window.__cc_renderCtx = ctx; window.__cc_hasOnlyMap = hasOnlyMap; } catch(e) { console.warn(e); }
     return ctx;
   }
+  // spec §6: グレー化の条件 — オフライン/接続中 && エピソード的タイル &&
+  // 読めるレコード無し (works record は cachedCount>0 でしか書かれない)。
+  function _offUnavail(ctx, path, episodeLike){
+    if (!ctx || !ctx.connOffline || !episodeLike) return false;
+    var rec = ctx.offlineRecordMap && ctx.offlineRecordMap.get ? ctx.offlineRecordMap.get(path) : null;
+    return !(rec && (rec.cachedCount || 0) > 0);
+  }
+  function _offBadge(unavail){ return unavail ? '<span class="off-unavail-badge">オフライン</span>' : ""; }
   function _progressFor(ctx, path){
     var saved = (ctx.progressAll && ctx.progressAll[path]) || null;
     return _progressBarHtml(saved);
@@ -497,9 +512,13 @@
   function _fillPollTick(){
     if (!_fillPoll.onTree) return;
     if (typeof document !== "undefined" && document.hidden){ _fillPollSchedule(); return; }
+    // オフライン/接続中はサーバをポーリングしない (spec §3: 自動リトライ無し)。
+    // 復帰は loadFolders → noteFullLoad がポーラを張り直す。
+    if (window.Connectivity && !window.Connectivity.isOnline()){ _fillPollSchedule(); return; }
     var epoch = _fillPollEpoch;
     var url = globalThis.BookqApi.treeUrl({since: _fillPoll.gen});
-    fetch(url, {credentials: "same-origin"}).then(function(res){
+    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+    _cf(url, {credentials: "same-origin"}).then(function(res){
       if (res.status === 304 || !res.ok){ _fillPollBackoff(); return null; }
       var etag = null;
       try { etag = res.headers ? res.headers.get("ETag") : null; } catch(e){}
@@ -592,7 +611,9 @@
       var progress = _progressFor(ctx, f._fullPath);
       var imgHtml = renderTileImg(f, folderEnc);
       var offlineHtml = _offlineHtmlFor(ctx, f._fullPath);
-      html += '<div class="' + cls + '" data-path="' + _escapeHtml(f._fullPath) + '" data-type="folder" tabindex="0" role="button">' + (vis?vis.buttonHtml:"") + imgHtml + '<div class="tile-name">' + (vis?vis.badgeHtml:"") + progress.barHtml + nameHtml(f.name) + '</div>' + offlineHtml + '</div>';
+      var unavail = _offUnavail(ctx, f._fullPath, ctx.hasOnlyMap[f._fullPath]);
+      if (unavail) cls += " off-unavail";
+      html += '<div class="' + cls + '" data-path="' + _escapeHtml(f._fullPath) + '" data-type="folder" tabindex="0" role="button"' + (unavail ? ' aria-disabled="true"' : '') + '>' + _offBadge(unavail) + (vis?vis.buttonHtml:"") + imgHtml + '<div class="tile-name">' + (vis?vis.badgeHtml:"") + progress.barHtml + nameHtml(f.name) + '</div>' + offlineHtml + '</div>';
     }
     // Parent-level images-tiles come AFTER the folder tiles (folders first,
     // then images-tiles). Cover is the child itself; progress/offline reuse
@@ -605,14 +626,18 @@
       var cVis=_vis(rc._fullPath, false);
       var cCls=rc._fullPath===_getCurrentFolder()?"tile active":"tile";
       if (cVis && cVis.className) cCls += " " + cVis.className;
-      html+='<div class="'+cCls+'" data-path="'+_escapeHtml(rc._fullPath)+'" data-read-child="1" data-type="folder" tabindex="0" role="button">'+cImg+'<div class="tile-name">'+(cVis?cVis.badgeHtml:"")+cProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+cOffline+'</div>';
+      var cUnavail=_offUnavail(ctx, rc._fullPath, true);
+      if (cUnavail) cCls += " off-unavail";
+      html+='<div class="'+cCls+'" data-path="'+_escapeHtml(rc._fullPath)+'" data-read-child="1" data-type="folder" tabindex="0" role="button"'+(cUnavail?' aria-disabled="true"':'')+'>'+_offBadge(cUnavail)+cImg+'<div class="tile-name">'+(cVis?cVis.badgeHtml:"")+cProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+cOffline+'</div>';
     }
     // Root exception: ONE self tile for root-level loose images (no parent
     // level exists). Cover falls back to the placeholder; same label constant.
-    if(rootLoose){
+    // オフライン絞り込み: ルートに DL が無ければ出さない (spec §6)。
+    if(rootLoose && (!ctx.connOffline || (ctx.offlineRecordMap && ctx.offlineRecordMap.size>0))){
       var sProgress=_progressFor(ctx, "");
       var sOffline=_offlineHtmlFor(ctx, "");
-      html+='<div class="tile" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button">'+_tilePlaceholder()+'<div class="tile-name">'+sProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+sOffline+'</div>';
+      var sUnavail=_offUnavail(ctx, "", true);
+      html+='<div class="tile'+(sUnavail?' off-unavail':'')+'" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button"'+(sUnavail?' aria-disabled="true"':'')+'>'+_offBadge(sUnavail)+_tilePlaceholder()+'<div class="tile-name">'+sProgress.barHtml+nameHtml(_readChildLabel)+'</div>'+sOffline+'</div>';
     }
     return html;
   }
@@ -634,11 +659,13 @@
       var cls=["item","folder"]; if(isActive) cls.push("active");
       var lvis=_vis(path);
       if (lvis && lvis.className) cls.push(lvis.className);
+      var unavail=_offUnavail(ctx, path, ctx.hasOnlyMap[path]);
+      if (unavail) cls.push("off-unavail");
       var url=_coverUrl(node, _coverW());
       var thumbHtml=url?'<img class="thumb" src="'+_escapeHtml(url)+'" loading="lazy" decoding="async">':"";
       var progress=_progressFor(ctx, path);
       var badge=progress.inlineBarHtml;
-      html+='<div class="'+cls.join(" ")+'" data-path="'+_escapeHtml(path)+'" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span>'+(lvis?lvis.buttonHtml:"")+'<span class="name">'+_escapeHtml(node.name)+badge+(lvis?lvis.badgeHtml:"")+'</span>'+thumbHtml+_offlineHtmlFor(ctx, path)+'</div>';
+      html+='<div class="'+cls.join(" ")+'" data-path="'+_escapeHtml(path)+'" data-type="folder" tabindex="0" role="button"'+(unavail?' aria-disabled="true"':'')+'><span class="icon">\uD83D\uDCC1</span>'+(lvis?lvis.buttonHtml:"")+'<span class="name">'+_escapeHtml(node.name)+badge+(lvis?lvis.badgeHtml:"")+(unavail?' <span class="off-note" style="color:#8f9aa8;font-size:11px">オフライン</span>':'')+'</span>'+thumbHtml+_offlineHtmlFor(ctx, path)+'</div>';
     }
     // Parent-level images-tiles come AFTER the folder tiles (folders first,
     // then images-tiles) — list-mode mirror of the tile grid above.
@@ -650,12 +677,15 @@
       var rcUrl=_coverUrl(rcn, _coverW());
       var rcThumb=rcUrl?'<img class="thumb" src="'+_escapeHtml(rcUrl)+'" loading="lazy" decoding="async">':"";
       var rcProgress=_progressFor(ctx, rcp);
-      html+='<div class="'+rcCls.join(" ")+'" data-path="'+_escapeHtml(rcp)+'" data-read-child="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+rcProgress.inlineBarHtml+(rcVis?rcVis.badgeHtml:"")+'</span>'+rcThumb+_offlineHtmlFor(ctx, rcp)+'</div>';
+      var rcUnavail=_offUnavail(ctx, rcp, true);
+      if (rcUnavail) rcCls.push("off-unavail");
+      html+='<div class="'+rcCls.join(" ")+'" data-path="'+_escapeHtml(rcp)+'" data-read-child="1" data-type="folder" tabindex="0" role="button"'+(rcUnavail?' aria-disabled="true"':'')+'><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+rcProgress.inlineBarHtml+(rcVis?rcVis.badgeHtml:"")+(rcUnavail?' <span class="off-note" style="color:#8f9aa8;font-size:11px">オフライン</span>':'')+'</span>'+rcThumb+_offlineHtmlFor(ctx, rcp)+'</div>';
     }
     // Root exception: ONE self tile for root-level loose images.
-    if(rootLoose){
+    if(rootLoose && (!ctx.connOffline || (ctx.offlineRecordMap && ctx.offlineRecordMap.size>0))){
       var lsProgress=_progressFor(ctx, "");
-      html+='<div class="item folder" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button"><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+lsProgress.inlineBarHtml+'</span>'+_offlineHtmlFor(ctx, "")+'</div>';
+      var lsUnavail=_offUnavail(ctx, "", true);
+      html+='<div class="item folder'+(lsUnavail?' off-unavail':'')+'" data-path="" data-read-self="1" data-type="folder" tabindex="0" role="button"'+(lsUnavail?' aria-disabled="true"':'')+'><span class="icon">\uD83D\uDCC1</span><span class="name">'+_escapeHtml(_readChildLabel)+lsProgress.inlineBarHtml+(lsUnavail?' <span class="off-note" style="color:#8f9aa8;font-size:11px">オフライン</span>':'')+'</span>'+_offlineHtmlFor(ctx, "")+'</div>';
     }
     return html;
   }
@@ -686,7 +716,8 @@
       }
       var progress=_progressFor(ctx, f._fullPath);
       var offlineHtml=_offlineHtmlFor(ctx, f._fullPath);
-      html+='<div class="card '+(isActive?'active':'')+((cvis&&cvis.className)?" "+cvis.className:"")+'" data-path="'+_escapeHtml(f._fullPath)+'" tabindex="0" role="button">'+(cvis?cvis.buttonHtml:"")+imgHtml+'<div class="card-content"><div class="card-title">'+(cvis?cvis.badgeHtml:"")+progress.barHtml+'<span class="card-title-text">'+_escapeHtml(f.name)+'</span></div><div class="card-meta">'+metaRows+'</div></div>'+offlineHtml+'</div>';
+      var cUnavail=_offUnavail(ctx, f._fullPath, ctx.hasOnlyMap[f._fullPath]);
+      html+='<div class="card '+(isActive?'active':'')+((cvis&&cvis.className)?" "+cvis.className:"")+(cUnavail?' off-unavail':'')+'" data-path="'+_escapeHtml(f._fullPath)+'" tabindex="0" role="button"'+(cUnavail?' aria-disabled="true"':'')+'>'+_offBadge(cUnavail)+(cvis?cvis.buttonHtml:"")+imgHtml+'<div class="card-content"><div class="card-title">'+(cvis?cvis.badgeHtml:"")+progress.barHtml+'<span class="card-title-text">'+_escapeHtml(f.name)+'</span></div><div class="card-meta">'+metaRows+'</div></div>'+offlineHtml+'</div>';
     }
     // Parent-level images-tiles come AFTER the folder tiles (folders first,
     // then images-tiles) — card-mode mirror of the tile grid above.
@@ -696,13 +727,15 @@
       var rccProgress=_progressFor(ctx, rcc._fullPath);
       var rccOffline=_offlineHtmlFor(ctx, rcc._fullPath);
       var rccVis=_vis(rcc._fullPath, false);
-      html+='<div class="card '+(rcc._fullPath===_getCurrentFolder()?'active':'')+((rccVis&&rccVis.className)?" "+rccVis.className:"")+'" data-path="'+_escapeHtml(rcc._fullPath)+'" data-read-child="1" tabindex="0" role="button">'+rccImg+'<div class="card-content"><div class="card-title">'+(rccVis?rccVis.badgeHtml:"")+rccProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+rccOffline+'</div>';
+      var rcUnavail=_offUnavail(ctx, rcc._fullPath, true);
+      html+='<div class="card '+(rcc._fullPath===_getCurrentFolder()?'active':'')+((rccVis&&rccVis.className)?" "+rccVis.className:"")+(rcUnavail?' off-unavail':'')+'" data-path="'+_escapeHtml(rcc._fullPath)+'" data-read-child="1" tabindex="0" role="button"'+(rcUnavail?' aria-disabled="true"':'')+'>'+_offBadge(rcUnavail)+rccImg+'<div class="card-content"><div class="card-title">'+(rccVis?rccVis.badgeHtml:"")+rccProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+rccOffline+'</div>';
     }
     // Root exception: ONE self tile for root-level loose images.
-    if(rootLoose){
+    if(rootLoose && (!ctx.connOffline || (ctx.offlineRecordMap && ctx.offlineRecordMap.size>0))){
       var csProgress=_progressFor(ctx, "");
       var csOffline=_offlineHtmlFor(ctx, "");
-      html+='<div class="card" data-path="" data-read-self="1" tabindex="0" role="button">'+_cardPlaceholder()+'<div class="card-content"><div class="card-title">'+csProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+csOffline+'</div>';
+      var csUnavail=_offUnavail(ctx, "", true);
+      html+='<div class="card'+(csUnavail?' off-unavail':'')+'" data-path="" data-read-self="1" tabindex="0" role="button"'+(csUnavail?' aria-disabled="true"':'')+'>'+_offBadge(csUnavail)+_cardPlaceholder()+'<div class="card-content"><div class="card-title">'+csProgress.barHtml+'<span class="card-title-text">'+_escapeHtml(_readChildLabel)+'</span></div><div class="card-meta"></div></div>'+csOffline+'</div>';
     }
     return html;
   }
