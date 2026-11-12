@@ -127,7 +127,7 @@ jobs:
         run: |
           START=$(date +%s)
           set +e
-          bash .github/scripts/ios-ui-test.sh http://localhost:8080
+          bash .github/scripts/ios-ui-test.sh http://127.0.0.1:8080
           RC=$?
           set -e
           ELAPSED=$(( $(date +%s) - START ))

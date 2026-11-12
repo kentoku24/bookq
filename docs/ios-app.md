@@ -19,7 +19,7 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 ## 開発用サーバーへの接続
 
 シミュレータは Mac のネットワークを共有するため、ローカルの TEST_MODE
-サーバーには `http://localhost:8080` で直接届く（ATS は localhost 対象外）:
+サーバーには `http://127.0.0.1:8080` で直接届く（ATS は loopback 対象外。`localhost` ではなく IPv4 固定にする — `localhost` が `::1` に解決される環境で別サービスが 8080 を掴んでいると別物に繋がる）:
 
 ```bash
 BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
@@ -31,7 +31,7 @@ BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
 （NSArgumentDomain → @AppStorage）:
 
 ```bash
-xcrun simctl launch <udid> dev.bookq.reader -serverURL http://localhost:8080
+xcrun simctl launch <udid> dev.bookq.reader -serverURL http://127.0.0.1:8080
 ```
 
 実機からの接続には Tailscale アプリが必要（サーバーは tailnet 限定）。

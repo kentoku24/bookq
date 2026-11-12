@@ -9,7 +9,7 @@
 # per test bundle.
 #
 # The simulator reaches the host-side TEST_MODE bookq at
-# http://localhost:8080 directly (simulator shares the host network —
+# http://127.0.0.1:8080 directly (simulator shares the host network —
 # the Android 10.0.2.2 alias does NOT apply here). The app is launched
 # by the test bundle with -serverURL/-testToken arguments; nothing in
 # this script touches app credentials.
@@ -22,7 +22,7 @@ set -u
 set -o pipefail
 cd "$(dirname "$0")/../.."
 
-SERVER_URL="${1:-http://localhost:8080}"
+SERVER_URL="${1:-http://127.0.0.1:8080}"
 PROJECT="ios/Bookq.xcodeproj"
 SCHEME="Bookq"
 DD="${DERIVED_DATA_PATH:-$HOME/Library/Developer/Xcode/DerivedData/Bookq-ci}"
@@ -31,7 +31,10 @@ mkdir -p "$RESULTS"
 
 # --- server gate -------------------------------------------------------
 # Host-side check is sufficient: the simulator shares the host network
-# namespace for localhost, so if the host can reach it the sim can too.
+# namespace for loopback, so if the host can reach it the sim can too.
+# 127.0.0.1 (not localhost) forces IPv4 — on hosts where another service
+# listens on [::1]:8080 (e.g. AirPlay Receiver), localhost may resolve to ::1
+# and the health gate would hit the wrong service.
 echo "== server gate: $SERVER_URL/api/v1/health"
 for i in $(seq 1 60); do
   if curl -sf "$SERVER_URL/api/v1/health" >/dev/null; then
@@ -55,6 +58,8 @@ DEVICE_NAME="${IOS_DEVICE_NAME:-bookq-ci-tests}"
 echo "== prepare simulator '$DEVICE_NAME' (erased each run)"
 
 # Locate our device by name across all runtimes.
+UDID=""
+DEVNAME="$DEVICE_NAME"
 UDID="$(xcrun simctl list devices -j | python3 - "$DEVICE_NAME" <<'PY'
 import json, subprocess, sys
 name = sys.argv[1]
