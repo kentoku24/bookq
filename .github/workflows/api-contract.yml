@@ -1,4 +1,4 @@
-# Contract test: run the FastAPI app in test mode and verify it conforms to
+# Contract test: run viewer-rs in test mode and verify it conforms to
 # api/openapi.v1.yaml via Schemathesis (property-based testing over the spec).
 #
 # `ignored_auth` is excluded because BOOKQ_TEST_MODE bypasses auth by design —
@@ -38,6 +38,8 @@ jobs:
             run:
               - "api/**"
               - "app/**"
+              - "rust/**"
+              - "Dockerfile.viewer-rs"
               - "requirements*.txt"
               - ".github/workflows/api-contract.yml"
               - "schemathesis.toml"
@@ -46,11 +48,22 @@ jobs:
     needs: changes-api-contract
     if: github.event_name == 'workflow_dispatch' || needs.changes-api-contract.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: System deps (zlib for flate2)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - uses: astral-sh/setup-uv@v7
 
@@ -63,16 +76,31 @@ jobs:
               Image.new("RGB", (80, 120), (i * 60, 0, 0)).save(f"/tmp/dl/Series/vol1/p{i:02d}.jpg")
           EOF
 
-      - name: Start bookq (test mode)
+      - name: Build viewer-rs
+        working-directory: rust
+        run: cargo build -p viewer-rs
+
+      # Same shape as production (#409): upstream-absent, every gate native,
+      # strict startup validation — a missing gate exits before serving.
+      - name: Start viewer-rs (no upstream, all native, strict)
         run: |
           BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            uv run --with-requirements requirements-dev.txt \
-            uvicorn app.main:app --host 127.0.0.1 --port 8080 \
-            > /tmp/bookq-server.log 2>&1 &
+            BOOKQ_BIND=127.0.0.1:8080 BOOKQ_RS_NATIVE=all BOOKQ_RS_NATIVE_STRICT=1 \
+            GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+            BASE_URL=http://127.0.0.1:8080 \
+            SECRET_KEY=ci-not-a-secret ALLOWED_EMAILS=test@example.com \
+            rust/target/debug/viewer-rs > /tmp/bookq-server.log 2>&1 &
           for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8080/api/health && exit 0 || sleep 1
+            curl -sf http://127.0.0.1:8080/api/v1/health && break || sleep 1
           done
-          echo "server did not become healthy" && exit 1
+          curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null \
+            || { cat /tmp/bookq-server.log; echo "viewer-rs did not become healthy"; exit 1; }
+          # Cold index answers 202 + Retry-After; poll until the build lands.
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/tree)
+            [ "$code" = "200" ] && break || sleep 1
+          done
+          [ "$code" = "200" ] || { cat /tmp/bookq-server.log; echo "tree never warmed"; exit 1; }
 
       # Seed stays random — the fuzz value of this job is that each run
       # explores different inputs (#326). Reproducibility comes from the
