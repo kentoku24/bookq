@@ -107,7 +107,19 @@ fi
 xcrun simctl shutdown "$UDID" 2>/dev/null || true
 xcrun simctl erase "$UDID" || { echo "ERROR: simctl erase failed"; exit 1; }
 xcrun simctl boot "$UDID" 2>/dev/null || true
-xcrun simctl bootstatus "$UDID" -b
+# bootstatus -b can wedge even after the device reports Booted (seen
+# locally on CoreSimulator after repeated erase/boot cycles) — bound it.
+xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 &
+BSPID=$!
+for _ in $(seq 1 48); do
+  kill -0 "$BSPID" 2>/dev/null || break
+  sleep 5
+done
+if kill -0 "$BSPID" 2>/dev/null; then
+  echo "WARN: bootstatus timed out after 240s — device reports Booted, continuing"
+  kill "$BSPID" 2>/dev/null || true
+fi
+wait "$BSPID" 2>/dev/null || true
 
 [ -z "$DEVNAME" ] && DEVNAME="$DEVICE_NAME"
 echo "simulator: $DEVNAME ($UDID)"
