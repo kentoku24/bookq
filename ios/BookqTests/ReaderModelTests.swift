@@ -85,8 +85,9 @@ final class ReaderModelTests: XCTestCase {
     }
 
     func testCrossChapterOffset1Chapter0GetsLeadingSpacer() {
-        // web quirk preserved: pad=(0-1+2)%2=1 → cover is NOT solo in
-        // cross-chapter mode; chapters start on pair boundaries instead.
+        // Padding contract (#441, web parity): pad=(0-1+2)%2=1 → cover is
+        // NOT solo in cross-chapter mode; chapters start on pair
+        // boundaries instead.
         let w = ReaderWork.assemble(clickedPath: "w/01",
                                     chapters: [chapter("01", "w/01", 3),
                                                chapter("02", "w/02", 2)],
@@ -98,6 +99,38 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertEqual(w.boundaries, [1, 5])
         // groups: [0]=spacer dropped, (1,2), (3,4)→4 spacer→[3], (5,6)
         XCTAssertEqual(w.spreads, [[1, 2], [3], [5, 6]])
+    }
+
+    func testCrossChapterThreeChaptersCumulativePadsOffset0() {
+        // #441: cumulative pads (3/3/2 pages, offset 0) — the old web
+        // double-count dropped the second spacer (boundaries [0,4,7]).
+        // Contract: spacers before c1 and c2 → boundaries [0,4,8].
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 3),
+                                               chapter("02", "w/02", 3),
+                                               chapter("03", "w/03", 2)],
+                                    pageMode: .spread, spreadOffset: 0)
+        XCTAssertEqual(w.boundaries, [0, 4, 8])
+        XCTAssertTrue(w.images[3].isSpacer)
+        XCTAssertTrue(w.images[7].isSpacer)
+        XCTAssertEqual(w.images.count, 10)
+        XCTAssertEqual(w.spreads, [[0, 1], [2], [4, 5], [6], [8, 9]])
+    }
+
+    func testCrossChapterThreeChaptersCumulativePadsOffset1() {
+        // #441: cumulative pads (3/3/2 pages, offset 1) — leading spacer
+        // plus spacers before c1 and c2 → boundaries [1,5,9].
+        let w = ReaderWork.assemble(clickedPath: "w/01",
+                                    chapters: [chapter("01", "w/01", 3),
+                                               chapter("02", "w/02", 3),
+                                               chapter("03", "w/03", 2)],
+                                    pageMode: .spread, spreadOffset: 1)
+        XCTAssertEqual(w.boundaries, [1, 5, 9])
+        XCTAssertTrue(w.images[0].isSpacer)
+        XCTAssertTrue(w.images[4].isSpacer)
+        XCTAssertTrue(w.images[8].isSpacer)
+        XCTAssertEqual(w.images.count, 11)
+        XCTAssertEqual(w.spreads, [[1, 2], [3], [5, 6], [7], [9, 10]])
     }
 
     func testChapterInfoLocalIndex() {

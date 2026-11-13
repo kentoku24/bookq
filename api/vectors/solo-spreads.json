@@ -1,7 +1,7 @@
 {
   "format": 1,
   "languages": ["js", "swift"],
-  "doc": "Solo spreads: from padded global images + chapter boundaries + pageMode + spreadOffset decide spreads and the spacer map. (The padding step itself — chapters -> padded images/boundaries — is pinned separately by chapter-padding.json.) Ports: app/static/viewer/spread.js (rebuildSpreads: offset leading singletons then pairs, spacers dropped, chapterStart when a spread's first page is a non-zero boundary) and ios ReaderWork.assemble/rebuildSpreads (same padding rule pad=(startIdx-spreadOff+2)%2 before each chapter boundary + same grouping). Images use {folder, name}; spacers are {folder:'', name:'__spacer__', isSpacer:true}. expectSpreads lists global indices per spread; expectChapterStart flags chapter-opening spreads; expectIdxToSpread maps every global index (-1 for spacers; JS keeps these slots as holes/undefined and normalizes to -1, Swift stores -1). Python pins the file's declaration only (no solo-spread port on the server).",
+  "doc": "Solo spreads: from padded global images + chapter boundaries + pageMode + spreadOffset decide spreads and the spacer map. (The padding step itself — chapters -> padded images/boundaries — is pinned separately by chapter-padding.json.) Ports: app/static/viewer/spread.js (rebuildSpreads: offset leading singletons then pairs, spacers dropped, chapterStart when a spread's first page is a non-zero boundary) and ios ReaderWork.assemble/rebuildSpreads (same padding rule pad=(startIdx-spreadOff+2)%2 before each chapter boundary + same grouping). Padding contract (#441): startIdx is the post-shift index (boundaries[c] already includes earlier pads) — earlier pads are NOT added again (app.js double-count fixed to mobile definition; the rule lives in spread.js padChapterSpacers). The three-chapters cases pin cumulative pads where the old double-count diverged. Images use {folder, name}; spacers are {folder:'', name:'__spacer__', isSpacer:true}. expectSpreads lists global indices per spread; expectChapterStart flags chapter-opening spreads; expectIdxToSpread maps every global index (-1 for spacers; JS keeps these slots as holes/undefined and normalizes to -1, Swift stores -1). Python pins the file's declaration only (no solo-spread port on the server).",
   "cases": [
     {
       "name": "single-mode-5",
@@ -104,6 +104,49 @@
       "expectSpreads": [[1, 2], [3], [5, 6]],
       "expectChapterStart": [false, false, true],
       "expectIdxToSpread": [-1, 0, 0, 1, -1, 2, 2]
+    },
+    {
+      "name": "three-chapters-offset0-cumulative",
+      "images": [
+        {"folder": "w/01", "name": "1"},
+        {"folder": "w/01", "name": "2"},
+        {"folder": "w/01", "name": "3"},
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/02", "name": "1"},
+        {"folder": "w/02", "name": "2"},
+        {"folder": "w/02", "name": "3"},
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/03", "name": "1"},
+        {"folder": "w/03", "name": "2"}
+      ],
+      "chapterBoundaries": [0, 4, 8],
+      "pageMode": "spread",
+      "spreadOffset": 0,
+      "expectSpreads": [[0, 1], [2], [4, 5], [6], [8, 9]],
+      "expectChapterStart": [false, false, true, false, true],
+      "expectIdxToSpread": [0, 0, 1, -1, 2, 2, 3, -1, 4, 4]
+    },
+    {
+      "name": "three-chapters-offset1-cumulative",
+      "images": [
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/01", "name": "1"},
+        {"folder": "w/01", "name": "2"},
+        {"folder": "w/01", "name": "3"},
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/02", "name": "1"},
+        {"folder": "w/02", "name": "2"},
+        {"folder": "w/02", "name": "3"},
+        {"folder": "", "name": "__spacer__", "isSpacer": true},
+        {"folder": "w/03", "name": "1"},
+        {"folder": "w/03", "name": "2"}
+      ],
+      "chapterBoundaries": [1, 5, 9],
+      "pageMode": "spread",
+      "spreadOffset": 1,
+      "expectSpreads": [[1, 2], [3], [5, 6], [7], [9, 10]],
+      "expectChapterStart": [false, false, true, false, true],
+      "expectIdxToSpread": [-1, 0, 0, 1, -1, 2, 2, 3, -1, 4, 4]
     },
     {
       "name": "spacer-only-group-dropped",

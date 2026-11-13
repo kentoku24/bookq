@@ -194,10 +194,10 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 1. Cloudflare にサイトを追加し、ドメインのネームサーバーを Cloudflare 指定の 2 台に変更（レジストラ側で操作）。**ドメインをメール等他用途で使っている場合は、既存の MX/TXT/A レコードを全て Cloudflare DNS に再現してから切り替えること** — NS 切替で既存レコードは全て無効になる。
 2. Zero Trust ダッシュボード → Networks → Tunnels → Create a tunnel → cloudflared。発行された token を `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定。
-3. 同じダッシュボードで Public Hostname を登録: `<host>.<domain>` → service `HTTP` `viewer:8080`（viewer-rs 運用時は `viewer-rs:8080`）。
+3. 同じダッシュボードで Public Hostname を登録: `<host>.<domain>` → service `HTTP` `viewer-rs:8080`（#409 以降 viewer-rs が本体）。
 4. `.env` の `BASE_URL` を `https://<host>.<domain>` に変更。
 5. Google Cloud Console で `https://<host>.<domain>/auth/callback` を承認済み redirect URI に追加。**OAuth consent screen が "Testing" の場合は `ALLOWED_EMAILS` の各アドレスを Test users に登録必須**（未登録だと本人もログインできない）。
-6. `./prd.sh up` — cloudflared も起動し、`verify_url` が独自ドメイン経由の `/api/health` を叩くのでトンネル疎通まで確認できる。`docker logs bookq-prd-cloudflared` で `Registered tunnel connection` ×4 が見えれば接続確立。
+6. `./prd.sh up` — cloudflared も起動し、`verify_url` が独自ドメイン経由の `/api/v1/health` を叩くのでトンネル疎通まで確認できる。`docker logs bookq-prd-cloudflared` で `Registered tunnel connection` ×4 が見えれば接続確立。
 
 #### 運用上の注意
 
@@ -217,7 +217,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
   ```json
   "nodeAttrs": [{"target": ["*"], "attr": ["funnel"]}]
   ```
-- 設定後は `./prd.sh up` で有効化。`verify_url` は deploy ホスト (tailnet メンバー) から `BASE_URL/api/health` を叩くため **tailnet 経路**の疎通確認になる。公開経路そのものの確認は tailnet 外端末で行う
+- 設定後は `./prd.sh up` で有効化。`verify_url` は deploy ホスト (tailnet メンバー) から `BASE_URL/api/v1/health` を叩くため **tailnet 経路**の疎通確認になる。公開経路そのものの確認は tailnet 外端末で行う
 - `BASE_URL`・Google OAuth redirect URI は変更不要（ホスト名が変わらないため）
 - 停止は `TS_FUNNEL` を外して `./prd.sh up` — entrypoint が `funnel --https=443 off` を明示して公開を確実に閉じる
 - funnel 未許可のままだと `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無くサイト全体 (tailnet 経路も) 停止するが、sidecar コンテナは healthcheck 無しで Up のまま — restart loop にはならず自動検知もされない (実測で承認待ち ~106 秒)。復旧は承認リンク (`login.tailscale.com/f/funnel?node=...`) を踏むか `TS_FUNNEL` を外して `prd.sh up`。`funnel` コマンド自体が非ゼロ終了した場合のみ restart loop になる
@@ -237,8 +237,8 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 切り分け:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://bookq.your-tailnet.ts.net/api/health
-docker inspect $(docker compose ps -q viewer) --format '{{json .NetworkSettings.Networks}}'
+curl -s -o /dev/null -w '%{http_code}\n' https://bookq.your-tailnet.ts.net/api/v1/health
+docker inspect $(docker compose ps -q viewer-rs) --format '{{json .NetworkSettings.Networks}}'
 ```
 
 viewer が `bookq_default` にいて `viewer` エイリアスを持っていれば正常。復旧は迷子のコンテナを消し、`./rebuild.sh prd build <sha>` でビルドしたイメージで `./rebuild.sh prd deploy`（または `./prd.sh up --ref <ref>`）から作り直す。素の `docker compose up -d --build viewer` は作業ツリーの dirty からビルドするため使わないこと:
@@ -273,122 +273,58 @@ docker rm -f <迷子のコンテナ名>
 
 無効化したい場合は workflow の `schedule` を消して merge、または Actions UI で workflow を disable する。
 
-### viewer-rs strangler 導入（#163/#211）
+### viewer-rs が本体（#409 cutover 完了形）
 
-本番への viewer-rs 導入は **compose profile `rs` + `TS_SERVE_TARGET` の 2 段**に分けてある。既定の `./prd.sh up` では viewer-rs コンテナは**起動しない**（profile 外なので `docker compose up` の対象にすらならない）ため、通常運用への影響はゼロ。
+`docker compose up` の既定で起動するバックエンドは **viewer-rs** であり、Python `viewer` は profile `py-rollback` 時のみ起動する rollback 用退避サービス。到達経路は `tailscale serve → viewer-rs:8080`（`TS_SERVE_TARGET` 既定）と opt-in cloudflared（ingress はダッシュボード管理、`http://viewer-rs:8080`）の 2 系統。
 
 構成:
 
-- `docker-compose.yml` の `viewer-rs` サービスは `profiles: ["rs"]` — opt-in 専用。`user-state` volume と downloads（ro）を viewer と共有し、`BOOKQ_UPSTREAM=http://viewer:8080` で未実装パスをフォールスルーする。
-- `tailscale` サービスの `TS_SERVE_TARGET`（未設定 = `http://viewer:8080`、空文字 = serve を外部管理、は entrypoint と同じ `${VAR-default}` セマンティクス）が唯一の traffic 切替点。
-- `./prd.sh up`（= `rebuild.sh prd build`）はその ref に `Dockerfile.viewer-rs` があれば `bookq-prd-viewer-rs:<sha12>` もビルドする — 無い ref への rollback を壊さないための条件付き。
+- `viewer-rs` は `BOOKQ_UPSTREAM` 未設定 = **upstream 不在モード**（#408）で動く（明示的に有効化する `BOOKQ_RS_NO_UPSTREAM=1` も同等）。従来の暗黙デフォルト `http://viewer:8080` は #408 で廃止 — 指定し忘れは fail-closed になる。native 化されていない経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエスト（`caller_or_proxy` の Delegate）は **401** をローカルで返す。v0 `/api/*` は全て 501。lenient（STRICT 無し）起動時は未対応 gate 一覧を WARN に出す。
+- `BOOKQ_RS_NATIVE` 既定は全 gate 列挙（`auth` 含む）。`BOOKQ_RS_NATIVE_STRICT=1` 既定で、gate 抜け・auth OAuth 設定欠落・部分グループは起動拒否。
+- `viewer` (Python) は `profiles: ["py-rollback"]` — `docker compose up` では起動しない。user-state/thumb-cache volume は viewer-rs と共有される。
+- `tailscale.depends_on` / `cloudflared.depends_on` は viewer-rs を指す（profile service への depends_on は profile を auto-enable してしまうため、viewer への依存は残さない）。
+- `./prd.sh up` は `bookq-prd-viewer`/`bookq-prd-viewer-rs`/`tailscale` 3 イメージをビルドし、deploy は `ps -q viewer-rs` の healthcheck + `viewer-rs` image タグの sha 照合で検証する（`/api/v1/version` は認証必須のため HTTP 照合は不可）。
 
-#### 有効化手順
+#### auth gate の cutover 注意
 
-前提: #199 の gateway-contract CI が対象 ref で green であること（全 endpoint の応答形状が契約検証済み）。
-
-```bash
-./prd.sh up --ref <ref>                      # 通常デプロイ（rs イメージも同時ビルド）
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml \
-    --profile rs up -d --no-build viewer-rs  # viewer-rs 起動（まだ traffic は来ない）
-# .env に TS_SERVE_TARGET=http://viewer-rs:8080 を設定
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-```
-
-serve の向き替えは tailscale コンテナの再作成を伴うため、数秒の断はある。切替後の確認:
-
-```bash
-curl -s https://bookq.<tailnet>.ts.net/api/health        # 200（viewer-rs 経由で proxy→viewer）
-docker compose --profile rs logs -f viewer-rs          # proxy/native の振分ログ
-docker compose ps -q tailscale | xargs docker exec tailscale serve status
-```
-
-#### endpoint 単位 rollout
-
-`.env` の `BOOKQ_RS_NATIVE` に native 化する endpoint 名をカンマ区切りで追加し、`docker compose --profile rs up -d viewer-rs` で再作成する。空 = 全 proxy（traffic-shape のみ検証する段階）。1 endpoint ずつ増やし、各段階で公開 URL + 実画面を確認する。native 側が契約外を返した場合は該当 endpoint だけリストから外して戻せる。
-
-既定値は検証済みの全 native 面を列挙 (#320 + #401): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync,shell,static`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
-
-`shell` は `GET /`（Jinja shell: 未認証はログイン、認証済みはビューア + visibility snapshot 埋込）、`static` は `GET|HEAD /sw.js` `/favicon.ico` `/static/*`（ETag/304/Range/no-cache + path-scoped gzip を starlette と同じ規則で再現）。配信元は image 同梱の `BOOKQ_APP_DIR`（既定 `/app`、Dockerfile.viewer-rs が `app/{static,templates,perf}` を COPY）。ファイル欠落や未移植の Jinja 構文を検出したときは fail-closed で proxy に落ちる。
-
-`auth` (#400) — `/auth/login|callback|logout` + `/api/v1/auth/token` を 1 つのゲートとして native 化する（callback が mint する認可コードを token endpoint が同プロセスで引き換えるため分割不可）。必要 env は `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`BASE_URL`/`SECRET_KEY`（compose 配線済み、`.env` 由来）。未設定のまま列挙に入れても surface 全体が proxy に留まり WARN が出る（`BOOKQ_RS_NATIVE_STRICT=1` では起動拒否）。Schemathesis では実 Google 往復を通せないため、**live OAuth 確認が済むまで既定リストには含めない**。
-
-**cutover 注意**: auth code (120s) と refresh token (30d) はプロセス内メモリのため、`auth` を有効化した時点で Python 側発行済みの refresh token は全て 401 になる — native クライアントは一度再ログインが必要（session cookie と access JWT は `SECRET_KEY` 共用のため影響しない）。深夜帯など再ログイン許容タイミングでの切替を推奨。
-
-#### endpoint cutover 条件
-
-endpoint を native にする前提は、次の 3 つを満たすこと:
-
-| 条件 | 確認方法 |
-|---|---|
-| Python 側にテストケースがある（挙動の正本が決まっている） | 対象 endpoint の `tests/test_*.py` と、共有ケースがあれば `api/*cases.json` |
-| `cargo test --workspace` が通る | `rust/` で実行（CI `rust.yml` の `test`） |
-| gateway-contract (#199) が該当 endpoint を native で通る | CI `rust.yml` の `gateway-contract` — `BOOKQ_RS_NATIVE=all` の gateway に Schemathesis（`api/openapi.v1.yaml` 全 op）+ native/proxy 判定 |
-
-加えて、**同じ in-process tree/index スナップショットを読む endpoint はまとめて切り替える**（#281）。viewer-rs は起動時に次のグループの部分有効を検出して WARN する:
-
-- `tree, search, facets, images` — 同一スナップショットの読み手。部分有効は browse と検索が別バックエンドの索引世代を返す状態になる（#261）。
-- `tree, reader-sync` — reader-sync の catalog resolver は tree から manifest を組むため、世代が揃っていないと `OPEN_WORK` が解決できない。
-
-`BOOKQ_RS_NATIVE_STRICT=1` を viewer-rs に渡すと、部分グループは ERROR + `exit 2` で起動そのものを拒否する（cutover 手順・CI 用）。既定は WARN のみ — 部分状態を通りながらのロールアウトを壊さないため。
-
-#### フルネイティブモード (#320): py の index/tree を持たない運用
-
-`BOOKQ_RS_NATIVE` が全 index 消費者をカバーする状態で、viewer 側に
-`BOOKQ_DISABLE_INDEX=1` を `.env` へ設定すると、py が起動時 warmup・
-`_background_fill`・`_warm_covers`・TTL refresh をすべて skip し、
-`metadata_index_cache` を一切構築しない。tree+index は実データ
-(152k images) で ~150-250MB のヒープ最大ブロックなので、常駐メモリが
-import 基盤 (~120MB) まで下がる。
-
-- index 必要 endpoint (`/api/folders`・`/api/v1/tree` 全量、`/api/v1/search`・
-  `/api/v1/facets`・`/api/v1/index/refresh`・`/ws/reader-sync`・visibility PUT)
-  への着弾は **503 fail-fast** — 誤設定時に lazy build でヒープが静かに
-  復活するのを防ぐ。shallow (`depth=1`)・`/api/images`・`/image`・`/thumb`・
-  `/view`・health など index 非依存の経路は従来どおり動く。
-- 設定は必ず **`BOOKQ_RS_NATIVE` (全 index 消費者) と対で**行うこと。
-  片方だけだと py に native 未処理の index 要求が届き 503 になる。
-- **Cloudflare Tunnel 経由も viewer-rs に向けること**。cloudflared は
-  remotely-managed tunnel で ingress は Cloudflare ダッシュボード側
-  （`http://viewer:8080`）が正本で、compose からは変えられない。py を
-  `BOOKQ_DISABLE_INDEX=1` にしたまま ingress が `viewer:8080` を向いていると、
-  公開ドメイン（iOS/Android の `BASE_URL`）経由の tree/search が 503 になる。
-- cutover 時の設定差分と反映順:
-
-| 場所 | キー | 切替後 |
-|---|---|---|
-| `.env` | `BOOKQ_RS_NATIVE` | 行を削除（compose 既定の全リストを継承） |
-| `.env` | `TS_SERVE_TARGET` | `http://viewer-rs:8080` |
-| `.env` | `BOOKQ_DISABLE_INDEX` | `1` |
-| Cloudflare ダッシュボード | tunnel ingress | `http://viewer-rs:8080` |
-
-```bash
-# 1) Cloudflare ダッシュボードの ingress を http://viewer-rs:8080 に変更
-#    （rs は未 native の endpoint を py に proxy するのでこの時点では無停止）
-# 2) viewer-rs を全 native で再作成（.env の BOOKQ_RS_NATIVE 行は削除）
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml --profile rs up -d --no-build viewer-rs
-# 3) tailscale serve の向き先を viewer-rs に（数秒の断）
-#    .env に TS_SERVE_TARGET=http://viewer-rs:8080 を追加してから
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-# 4) 最後に py を index 非保持で再作成（.env に BOOKQ_DISABLE_INDEX=1）
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build viewer
-```
-
-この順序なら各段階で「全経路が少なくとも 1 つの index 保持者に届く」ため、
-`BOOKQ_DISABLE_INDEX=1` の 503 窓が公開されない。
-
-- rollback: `BOOKQ_DISABLE_INDEX` を空に戻して viewer 再作成。コード差し戻し不要。
+`auth` が native 化された時点で、Python 側発行済みの **refresh token は全て 401** になる（code/refresh はプロセス内メモリ）。native クライアントは一度再ログインが必要（session cookie と access JWT は `SECRET_KEY` 共用のため影響しない）。切替は再ログイン許容タイミングで。
 
 #### rollback
 
-完全切り戻しは設定のみで完結する（コード・イメージの変更は不要）:
+障害時の復旧は 2 段階。いずれも `docker-compose.prd-image.yml` が `PRD_VIEWER_IMAGE`/`PRD_RS_IMAGE` を pin 済みであることが前提（`./prd.sh up` 経路なら常に成立）。
 
 ```bash
-# .env の TS_SERVE_TARGET を削除（または http://viewer:8080 に戻す）
+# 1) Python を rollback サービスとして起動（py-rollback profile）
+docker compose -f docker-compose.yml -f docker-compose.prd-image.yml \
+    --profile py-rollback up -d --no-build viewer
+# 2) tailscale serve の向きを py に戻す（数秒の断）
+#    .env に TS_SERVE_TARGET=http://viewer:8080 を設定してから
 docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-# 任意: viewer-rs 自体も止める場合
-docker compose --profile rs stop viewer-rs
+# 3) cloudflared 利用時は Cloudflare ダッシュボードの ingress を
+#    http://viewer:8080 に戻す
+# 4) viewer-rs は upstream 不在のまま残してよい（traffic は来ない）。
+#    完全停止する場合: docker compose stop viewer-rs
 ```
+
+戻った後の恒久化は `./prd.sh up --ref <cutover 前の ref>` — その ref の compose には viewer が既定 service として残る。
+
+#### 新規 native route の有効化
+
+`BOOKQ_RS_NATIVE` の列挙に新 gate 名を追加する（`all` は将来 route の自動有効化を防ぐため使わない）。追加の前提は従来どおり:
+
+| 条件 | 確認方法 |
+|---|---|
+| 契約テストが正本として存在 | `api/*cases.json` / schemathesis / 共有 vectors |
+| `cargo test --workspace` が通る | `rust/`（CI `rust.yml` の `test`） |
+| gateway-contract が該当 endpoint を native で通る | CI `rust.yml` の `gateway-contract` |
+
+部分グループ（`tree,search,facets,images` / `tree,reader-sync`）は STRICT 既定により起動時に拒否される。
+
+#### 検証済みの運用ポイント
+
+- `verify_url` は `/api/v1/health`（公開・native）を叩く。v0 `/api/health` は 501。
+- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health` — upstream 不在でも standalone で healthy になる。
+- proxy-hit の観測: no-upstream では fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。cutover 後に残るはずのない 501 が継続していたら contract 漏れの兆候。
 
 切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、py/rs どちらが書いても同じ DB を読むため、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 

@@ -79,9 +79,9 @@ cmd_up() {
     local subject
     subject="$(git log -1 --format='%s (%ci)' "$sha")"
 
-    # 切替後の復旧情報用に、現在動いている viewer の image を控える（読取のみ）。
+    # 切替後の復旧情報用に、現在動いているフロント (viewer-rs) の image を控える（読取のみ）。
     local prev_image
-    prev_image="$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q viewer 2>/dev/null)" 2>/dev/null || true)"
+    prev_image="$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q viewer-rs 2>/dev/null)" 2>/dev/null || true)"
 
     echo "🚀 本番に $ref ($sha12) をデプロイします（作業ツリーの dirty は含みません）"
     echo "   $subject"
