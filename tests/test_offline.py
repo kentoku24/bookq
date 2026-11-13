@@ -457,3 +457,35 @@ def test_offline_status_class_toggles_with_health(page, server):
         )
         assert "offline" not in (page.locator("#offline-status").get_attribute("class") or ""), \
             ".offline class must be removed after recovery"
+
+
+# ── archive inner names restore (spec §8) ────────────────────────────────
+
+
+def test_offline_restore_archive_inner_names(page, server):
+    """Archive entries keep '/' inside the work-cache key — the spec §8
+    page-name restore must decode per segment, not drop nested names."""
+    goto_offline(page, server)
+    wait_for_sw(page)
+    page.evaluate("""async () => {
+      const folder = 'arc_work';
+      const cn = window.OfflineCore.cacheNameFor(folder);
+      const c = await caches.open(cn);
+      const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+      for (const n of ['chapter/2.jpg', 'chapter/1.jpg'])
+        await c.put('/image/' + window.OfflineCore.encodePath(folder + '/' + n),
+                    new Response(png, {headers: {'Content-Type': 'image/png'}}));
+      await window.OfflineStore.put({folder, cacheName: cn, pageCount: 2,
+        cachedCount: 2, bytes: 16, thumb: 'chapter/1.jpg',
+        addedAt: Date.now(), lastReadAt: Date.now()});
+      await window.refreshOfflineMap();
+    }""")
+    page.context.set_offline(True)
+    try:
+        # connecting/offline both count as non-online for the readable gate —
+        # the open must reach the work-cache scan either way.
+        page.evaluate("() => window.loadImages('arc_work')")
+        expect(page.locator("#counter")).to_have_text(
+            re.compile(r"^1 / 2"), timeout=8000)
+    finally:
+        page.context.set_offline(False)

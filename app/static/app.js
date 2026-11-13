@@ -1374,7 +1374,10 @@
           for (var k = 0; k < prefixes.length; k++){
             if (u.pathname.startsWith(prefixes[k])){
               var nm = u.pathname.slice(prefixes[k].length);
-              if (nm && nm.indexOf("/") < 0) names.push(decodeURIComponent(nm));
+              // Archive inner entries legitimately keep "/" after the
+              // folder prefix (chapter/1.jpg) — decode per segment rather
+              // than dropping nested names (#413 review).
+              if (nm) names.push(nm.split("/").map(decodeURIComponent).join("/"));
               break;
             }
           }
