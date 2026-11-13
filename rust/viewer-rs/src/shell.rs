@@ -153,6 +153,12 @@ pub(crate) fn render_index(src: &str, ctx: &IndexCtx) -> Option<String> {
     let login = &rest[..else_at];
     let tail = &rest[else_at + ELSE_TAG.len()..];
     let end = tail.rfind(ENDIF_TAG)?;
+    // Content after the outer `{% endif %}` renders in BOTH branches
+    // upstream — dropping it silently would produce a shorter page than
+    // Jinja's. Only whitespace may follow; anything else proxies.
+    if !tail[end + ENDIF_TAG.len()..].trim().is_empty() {
+        return None;
+    }
     let viewer = &tail[..end];
 
     let _ = login;
@@ -441,7 +447,10 @@ pub(crate) fn named_file(
     let Ok(md) = std::fs::metadata(path) else {
         return Serve::Done(state::detail(StatusCode::NOT_FOUND, missing_detail));
     };
-    match file_response(path, &md, media_type, extra, &[], req, head) {
+    // `FileResponse.__call__` itself runs no is_not_modified check — the
+    // 304 path lives in `StaticFiles.file_response` — so sw.js/favicon
+    // always answer 200/206 upstream regardless of If-None-Match.
+    match file_response(path, &md, media_type, extra, &[], req, head, false) {
         Ok(res) => Serve::Done(res),
         Err(_) => Serve::Proxy,
     }
@@ -479,7 +488,7 @@ pub(crate) fn static_file(static_dir: &Path, rel: &str, req: &HeaderMap, head: b
             };
         }
     };
-    match file_response(&full, &md, mime_for(&full), &[], NO_CACHE, req, head) {
+    match file_response(&full, &md, mime_for(&full), &[], NO_CACHE, req, head, true) {
         Ok(res) => Serve::Done(res),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Serve::Done(state::detail(StatusCode::NOT_FOUND, "Not Found"))
@@ -508,6 +517,7 @@ fn file_response(
     post: &[(&str, &str)],
     req: &HeaderMap,
     head: bool,
+    conditional: bool,
 ) -> std::io::Result<Response> {
     let bytes = std::fs::read(path)?;
     let size = md.len();
@@ -517,8 +527,10 @@ fn file_response(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+    // formatdate → time.gmtime truncates the fractional part; rounding to
+    // the nearest nanosecond could carry into the next second.
     let last_modified = httpdate::fmt_http_date(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(mtime),
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(mtime.trunc()),
     );
     let etag_base = format!("{}-{}", py_float_str(mtime), size);
     let etag = format!("\"{:x}\"", <md5::Md5 as md5::Digest>::digest(etag_base.as_bytes()));
@@ -542,7 +554,7 @@ fn file_response(
         push(&mut h, k, v);
     }
 
-    if is_not_modified(req, &etag, &last_modified) {
+    if conditional && is_not_modified(req, &etag, &last_modified) {
         const KEEP: [&str; 6] =
             ["cache-control", "content-location", "date", "etag", "expires", "vary"];
         let mut res = Response::builder().status(StatusCode::NOT_MODIFIED).body(Body::empty()).unwrap();
@@ -660,7 +672,9 @@ fn parse_range(hdr: &str, size: u64) -> RangePlan {
         let parsed = (|| {
             if ss.is_empty() {
                 let e = py_int(es)?;
-                Some((std::cmp::max(size as i64 - e, 0), size as i64))
+                // Saturate: a suffix like `bytes=--<i64::MIN>` must land
+                // on py's "unsatisfiable" (416), not wrap to a valid 206.
+                Some((std::cmp::max((size as i64).saturating_sub(e), 0), size as i64))
             } else {
                 let s = py_int(ss)?;
                 let e = if es.is_empty() {
@@ -782,7 +796,19 @@ fn mime_for(path: &Path) -> &'static str {
 /// `GZipMiddleware.exclude_content_types` (starlette ≥1.6 defaults):
 /// exact names plus the `audio/*`/`video/*` wildcards.
 pub(crate) fn gzip_excluded(media_type: &str) -> bool {
-    let base = media_type.split(';').next().unwrap_or("").trim();
+    // GZipResponder normalizes before comparing: strip parameters,
+    // lowercase, and `application/grpc+<proto>` → `application/grpc`.
+    let base = media_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let base = if base.starts_with("application/grpc+") {
+        "application/grpc"
+    } else {
+        base.as_str()
+    };
     matches!(
         base,
         "application/grpc"
@@ -1060,7 +1086,7 @@ mod tests {
     async fn file_response_full_and_304() {
         let (p, md) = tmpfile("full.txt", b"hello world");
         let req = hdrs(&[]);
-        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &req, false).unwrap();
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &req, false, true).unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let hs = hdr_list(&res);
         assert_eq!(hs[0], ("content-type".to_string(), "text/plain; charset=utf-8".to_string()));
@@ -1073,7 +1099,7 @@ mod tests {
         assert!(etag.starts_with('"') && etag.ends_with('"') && etag.len() == 34);
 
         // if-none-match → 304 keeping only etag + cache-control, in order
-        let res2 = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("if-none-match", &etag)]), false).unwrap();
+        let res2 = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("if-none-match", &etag)]), false, true).unwrap();
         assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
         let h2 = hdr_list(&res2);
         assert_eq!(h2, vec![
@@ -1081,11 +1107,11 @@ mod tests {
             ("cache-control".to_string(), "no-cache".to_string()),
         ]);
         // weak etag compare
-        let res3 = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("if-none-match", &format!("W/{etag}"))]), false).unwrap();
+        let res3 = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("if-none-match", &format!("W/{etag}"))]), false, true).unwrap();
         assert_eq!(res3.status(), StatusCode::NOT_MODIFIED);
         // if-modified-since
         let lm = hs[3].1.clone();
-        let res4 = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("if-modified-since", &lm)]), false).unwrap();
+        let res4 = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("if-modified-since", &lm)]), false, true).unwrap();
         assert_eq!(res4.status(), StatusCode::NOT_MODIFIED);
     }
 
@@ -1093,7 +1119,7 @@ mod tests {
     async fn file_response_ranges() {
         let (p, md) = tmpfile("ranges.txt", b"0123456789");
         let req = hdrs(&[("range", "bytes=2-4")]);
-        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &req, false).unwrap();
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &req, false, true).unwrap();
         assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(res.headers()["content-range"], "bytes 2-4/10");
         assert_eq!(res.headers()["content-length"], "3");
@@ -1101,14 +1127,14 @@ mod tests {
         assert_eq!(&body[..], b"234");
 
         // HEAD: same headers, no body
-        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &req, true).unwrap();
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &req, true, true).unwrap();
         assert_eq!(res.headers()["content-range"], "bytes 2-4/10");
         assert_eq!(res.headers()["content-length"], "3");
         let body = http_body_util::BodyExt::collect(res.into_body()).await.unwrap().to_bytes();
         assert!(body.is_empty());
 
         // multipart
-        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("range", "bytes=0-1,4-5")]), false).unwrap();
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("range", "bytes=0-1,4-5")]), false, true).unwrap();
         assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
         let ct = res.headers()["content-type"].to_str().unwrap().to_string();
         let boundary = ct.strip_prefix("multipart/byteranges; boundary=").unwrap();
@@ -1123,12 +1149,41 @@ mod tests {
         assert_eq!(cl, expect.len().to_string());
 
         // malformed / unsatisfiable
-        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("range", "items=0-1")]), false).unwrap();
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("range", "items=0-1")]), false, true).unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         assert_eq!(res.headers()["content-type"], "text/plain; charset=utf-8");
-        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("range", "bytes=100-")]), false).unwrap();
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE, &hdrs(&[("range", "bytes=100-")]), false, true).unwrap();
         assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(res.headers()["content-range"], "bytes */10");
+
+        // i64::MIN-magnitude suffix: py bigint → unsatisfiable, not a wrap.
+        let res = file_response(&p, &md, "text/plain", &[], NO_CACHE,
+            &hdrs(&[("range", "bytes=--9223372036854775808")]), false, true).unwrap();
+        assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+
+    #[tokio::test]
+    async fn named_file_skips_304_like_py_fileresponse() {
+        // FileResponse.__call__ has no is_not_modified — sw.js/favicon
+        // answer 200 even on a matching If-None-Match.
+        let (p, md) = tmpfile("sw.js", b"self.__sw = 1;");
+        let res = file_response(&p, &md, "application/javascript", &[], &[], &hdrs(&[]), false, false).unwrap();
+        let etag = res.headers()["etag"].to_str().unwrap().to_string();
+        let res = file_response(&p, &md, "application/javascript", &[], &[],
+            &hdrs(&[("if-none-match", &etag)]), false, false).unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get("content-length").is_some());
+    }
+
+    #[test]
+    fn gzip_excluded_normalizes_like_responder() {
+        // lowercase + `application/grpc+<proto>` → `application/grpc`.
+        assert!(gzip_excluded("application/grpc+proto"));
+        assert!(gzip_excluded("IMAGE/PNG"));
+        assert!(gzip_excluded("image/png; charset=binary"));
+        assert!(gzip_excluded("video/mp2t"));
+        assert!(!gzip_excluded("application/javascript"));
+        assert!(!gzip_excluded("text/css"));
     }
 
     #[test]

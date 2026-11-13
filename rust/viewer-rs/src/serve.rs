@@ -794,13 +794,17 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
 /// compressed prefixes carry `vary: Accept-Encoding`; they are gzipped (level
 /// 6 = starlette's default) only when the client advertises gzip.
 pub async fn maybe_gzip(req_headers: &HeaderMap, res: Response, compressible: bool) -> Response {
-    if !compressible {
+    // GZipResponder partial_response: 206 passes through untouched —
+    // no compression AND no Vary (range semantics must stay intact).
+    if !compressible || res.status() == StatusCode::PARTIAL_CONTENT {
         return res;
     }
+    // Upstream tests `"gzip" in Accept-Encoding` — a substring check on
+    // the raw header value, not a token match.
     let wants_gzip = req_headers
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim().starts_with("gzip")));
+        .is_some_and(|v| v.contains("gzip"));
     if res.body().size_hint().exact().is_none_or(|l| l < 1024) {
         return res;
     }
@@ -912,6 +916,37 @@ mod tests {
         let h2 = hdrs(&[("if-modified-since", "Sat, 31 Oct 2026 02:00:00 GMT")]);
         assert!(archive_not_modified(&h2, "\"x\"", 1_700_000_000.9)); // int(mtime) <= ts
         assert!(!archive_not_modified(&h2, "\"x\"", 1_800_000_000.9)); // mtime after header
+    }
+
+    #[tokio::test]
+    async fn maybe_gzip_passes_206_untouched() {
+        // GZipResponder partial_response: 206 → no compression, no Vary.
+        let body = vec![b'x'; 2048];
+        let mut res = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .body(Body::from(body.clone()))
+            .unwrap();
+        res.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_static("bytes 0-2047/4096"),
+        );
+        let out = maybe_gzip(&hdrs(&[("accept-encoding", "gzip")]), res, true).await;
+        assert_eq!(out.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(out.headers().get(header::CONTENT_ENCODING).is_none());
+        assert!(out.headers().get(header::VARY).is_none());
+        assert_eq!(out.headers()["content-range"], "bytes 0-2047/4096");
+    }
+
+    #[tokio::test]
+    async fn maybe_gzip_substring_matches_upstream() {
+        // py tests `"gzip" in Accept-Encoding` — substring, not tokens.
+        let big = vec![b'x'; 2048];
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(big))
+            .unwrap();
+        let out = maybe_gzip(&hdrs(&[("accept-encoding", "br, xgzip")]), res, true).await;
+        assert_eq!(out.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
     }
 }
 

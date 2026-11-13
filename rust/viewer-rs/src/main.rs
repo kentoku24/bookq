@@ -171,8 +171,9 @@ pub(crate) struct AppState {
     /// M8: dual-reader session registry (`app.state.reader_sync`).
     pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
     /// #401: shell/static root (`BOOKQ_APP_DIR`) holding `static/`,
-    /// `templates/`, `perf/` — the image ships `/app`, dev mounts worktree's
-    /// `app/` read-only so asset edits apply without a rebuild.
+    /// `templates/`, `perf/` — the image ships `/app`; dev environments
+    /// read it from the image too (asset edits apply on the next
+    /// `dev.sh up` rebuild, not live).
     pub(crate) app_dir: PathBuf,
 }
 
@@ -299,8 +300,17 @@ async fn vary_session_cookie(
         auth::session_lookup(req.headers(), st.session_key.as_ref()),
         auth::SessionLookup::Absent
     );
+    // starlette only emits `Vary: Cookie` when the route touches
+    // `request.session`. The public static/shell assets never do, so a
+    // signed-in browser's static fetches carry no Vary upstream —
+    // mirror that or every such response would wrongly advertise one.
+    let path = req.uri().path();
+    let session_free = path == "/sw.js"
+        || path == "/favicon.ico"
+        || path == "/static"
+        || path.starts_with("/static/");
     let mut res = next.run(req).await;
-    if signed && !vary_lists_cookie(res.headers()) {
+    if signed && !session_free && !vary_lists_cookie(res.headers()) {
         res.headers_mut()
             .append(header::VARY, HeaderValue::from_static("Cookie"));
     }
