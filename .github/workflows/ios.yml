@@ -83,11 +83,38 @@ jobs:
           fi
           xcrun simctl list devices available | grep -i iphone | head -10
 
+      # The app compiles against iOS 27 SDK symbols
+      # (ExternalNonInteractiveAccessory / sceneAccessory in
+      # ios/Bookq/External/) — `if #available(iOS 27)` only guards
+      # runtime; the SDK itself must be 27+. macos-latest currently
+      # ships Xcode 26.x only, so we skip cleanly rather than fail:
+      # the job re-arms automatically the day a 27-capable image lands.
+      - name: Check iOS SDK >= 27
+        id: sdk
+        run: |
+          sdk="$(xcodebuild -showsdks | awk '/iphoneos/ {print $NF}' | sort -V | tail -1)"
+          ver="${sdk#iphoneos}"; major="${ver%%.*}"
+          echo "selected iPhoneOS SDK: $sdk"
+          if [ "${major:-0}" -ge 27 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::iOS SDK $sdk < 27 — macos-latest lacks Xcode 27; iOS tests skipped until runners ship it (#424)"
+            {
+              echo "### iOS test job"
+              echo ""
+              echo "- result: SKIPPED — runner iPhoneOS SDK is \`$sdk\`, app requires iOS 27 SDK (Xcode 27+)"
+              echo "- re-arms automatically when macos-latest ships a 27+ SDK"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - uses: astral-sh/setup-uv@v7
+        if: steps.sdk.outputs.ok == 'true'
 
       # Same synthetic tree as android.yml, plus Series/vol2 so the iOS
       # drill-down test sees two volumes under Series/.
       - name: Build synthetic downloads tree
+        if: steps.sdk.outputs.ok == 'true'
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Series/vol2 /tmp/dl/Other /tmp/bookq-state
           uv run --with pillow python - <<'PYEOF'
@@ -100,6 +127,7 @@ jobs:
           PYEOF
 
       - name: Start bookq (test mode)
+        if: steps.sdk.outputs.ok == 'true'
         run: |
           BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
             uv run --with-requirements requirements-dev.txt \
@@ -115,6 +143,7 @@ jobs:
       # DerivedData holds the whole build graph; keyed on Xcode version +
       # ios/** contents so app-only or server-only PRs still hit warm.
       - name: Cache Xcode DerivedData
+        if: steps.sdk.outputs.ok == 'true'
         uses: actions/cache@v6
         with:
           path: .dd/ios
@@ -124,6 +153,7 @@ jobs:
             ios-dd-${{ runner.os }}-
 
       - name: Run iOS tests
+        if: steps.sdk.outputs.ok == 'true'
         run: |
           START=$(date +%s)
           set +e
