@@ -285,6 +285,17 @@ def _kickoff(inner: str, key: str) -> str:
     )
 
 
+class _JSHandle:
+    """A real-realm object reference (element, etc.) kept in
+    ``window.__bqHandles[]`` — survives detachment like Playwright's
+    JSHandle, unlike WebDriver element refs which go stale."""
+
+    __slots__ = ("idx",)
+
+    def __init__(self, idx: int):
+        self.idx = idx
+
+
 def _has_element_arg(args) -> bool:
     for a in args:
         if isinstance(a, WebElement):
@@ -353,7 +364,16 @@ class SafariPage:
         # free. undefined stays undefined through stringify, mapping to
         # None; functions/symbols likewise.
         s = script.strip()
-        arglist = _json.dumps(list(args), default=lambda _x: None)
+        if any(isinstance(a, _JSHandle) for a in args):
+            parts = []
+            for a in args:
+                if isinstance(a, _JSHandle):
+                    parts.append(f"window.__bqHandles[{a.idx}]")
+                else:
+                    parts.append(_json.dumps(a, default=lambda _x: None))
+            arglist = "[" + ",".join(parts) + "]"
+        else:
+            arglist = _json.dumps(list(args), default=lambda _x: None)
         if _is_function(s):
             invoke = f"( {s} ).apply(null, {arglist})"
         elif _is_statements(s):
@@ -593,7 +613,29 @@ class SafariPage:
         return self._eval(script, arg)
 
     def evaluate_handle(self, script: str, arg=None):
-        # Element handles cannot cross BiDi — stay on classic execute_script.
+        # Playwright JSHandles keep a live JS reference — including detached
+        # nodes WebDriver can no longer resolve. Park the value in a real-realm
+        # registry; _bidi_eval revives it when passed back as an argument.
+        if self._ctx._bidi is not None:
+            s = script.strip()
+            arglist = _json.dumps([arg], default=lambda _x: None)
+            if _is_function(s):
+                invoke = f"( {s} ).apply(null, {arglist})"
+            elif _is_statements(s):
+                invoke = f"(function(){{ {s} }}).apply(null, {arglist})"
+            else:
+                invoke = f"( {s} )"
+            idx = self._ctx._bidi.evaluate(
+                self._handle,
+                "(async()=>{"
+                " const __v = await (" + invoke + ");"
+                " window.__bqHandles = window.__bqHandles || [];"
+                " window.__bqHandles.push(__v);"
+                " return window.__bqHandles.length - 1"
+                "})()",
+                await_promise=True,
+            )
+            return _JSHandle(idx)
         self._reqid = getattr(self, "_reqid", 0) + 1
         key = f"{id(self)}:{self._reqid}"
         out = self._sync_eval(_kickoff(_script_body(script), key), arg)

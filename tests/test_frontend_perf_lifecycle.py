@@ -5,6 +5,8 @@ from urllib.request import urlopen
 
 import pytest
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
 BASE = Path(__file__).resolve().parent.parent
 APP_JS = BASE / "app" / "static" / "app.js"
 CORE_JS = BASE / "app" / "static" / "offline-core.js"
@@ -760,6 +762,7 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
+        _ensure_sw_interception(page)
         page.wait_for_function(
             "() => navigator.serviceWorker && navigator.serviceWorker.controller",
             timeout=15000,
@@ -1160,6 +1163,7 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
+        _ensure_sw_interception(page)
         page.wait_for_function(
             "() => navigator.serviceWorker && navigator.serviceWorker.controller",
             timeout=15000,
