@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "languages": ["python", "js", "swift"],
+  "languages": ["python", "js", "swift", "rust"],
   "doc": "Work composition: from a library tree and an opened folder decide the chapter list. Ports: app/reader_sync/catalog.py (_sibling_leaf_folders + chapter assembly), app/static/app.js (getSiblingLeafFolders + loadImages), ios ReaderWork.siblingLeaves/chapters. Rules: (1) raw depth len(folder.split('/'))-1 < 2 -> single chapter; (2) structural parent found by composed parent/name walk (names containing '/' are never split); root-level nodes have no parent run; (3) parent children filtered to folder nodes whose children are all images must be >1, else single; (4) a mixed opened folder (own images + subfolders) reads its direct images only. Cross-chapter chapter names are the node names verbatim (flattened names kept); single-chapter names are the basename. Trees use {name, type, children} with type folder|image; image nodes carry no children.",
   "cases": [
     {

@@ -66,7 +66,7 @@ const CONTENT_KEYS: &[&str] = &[
 
 // ── tree predicates ────────────────────────────────────────────────────────
 
-fn has_only_images(node: &tree::FolderNode) -> bool {
+pub(crate) fn has_only_images(node: &tree::FolderNode) -> bool {
     !node.children.is_empty()
         && node
             .children
@@ -74,7 +74,7 @@ fn has_only_images(node: &tree::FolderNode) -> bool {
             .all(|c| matches!(c, tree::Node::Image { .. }))
 }
 
-fn has_images(node: &tree::FolderNode) -> bool {
+pub(crate) fn has_images(node: &tree::FolderNode) -> bool {
     node.children
         .iter()
         .any(|c| matches!(c, tree::Node::Image { .. }))
@@ -98,7 +98,7 @@ fn norm_path(path: &str) -> String {
 
 /// `(siblings_list, parent_path)` whose list holds `target` — structural
 /// parent lookup mirroring `findParentOf` (names are never split on "/").
-fn find_container<'a>(
+pub(crate) fn find_container<'a>(
     nodes: &'a [tree::Node],
     target: &str,
     path: &str,
@@ -121,7 +121,7 @@ fn find_container<'a>(
 
 /// Port of `getSiblingLeafFolders`: ordered chapter-folder full paths
 /// when the sibling run applies, else None (single chapter).
-fn sibling_leaf_folders(tree: &[tree::Node], folder: &str) -> Option<Vec<String>> {
+pub(crate) fn sibling_leaf_folders(tree: &[tree::Node], folder: &str) -> Option<Vec<String>> {
     if folder.matches('/').count() < SIBLING_MIN_DEPTH {
         return None;
     }

@@ -29,6 +29,8 @@ use std::path::PathBuf;
 // path containment, tree assembly, index cache) that M4–M7 wire onto the
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
+#[cfg(test)]
+mod conformance_vectors;
 mod folders;
 mod oauth;
 mod pair_report;
