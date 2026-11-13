@@ -130,11 +130,11 @@ echo "simulator: $DEVNAME ($UDID)"
 DEST="platform=iOS Simulator,id=$UDID"
 
 # Leave no running simulator behind (AGENTS.md iOS Simulator rule).
-# Scoped part always runs: our device shutdown, our clones, our
-# XCTestDevices data. The repo teardown helper additionally does
-# host-global kills (idb_companion, simctl diagnose, spindump) — run it
-# only when no other verification is detectably in flight, so a
-# parallel session's diagnostics are never interrupted.
+# Scoped part always runs: shutdown our device + clones (delete fails
+# on a Booted clone), prune our XCTestDevices data. Then the repo
+# teardown handles the rest with --skip-process-kills — its global
+# idb/diagnose kills would otherwise interrupt a parallel session's
+# verification, while its CPU audit (AGENTS.md-mandated) still runs.
 cleanup() {
   xcrun simctl shutdown "$UDID" 2>/dev/null || true
   clone_udids="$(xcrun simctl list devices -j 2>/dev/null | python3 -c '
@@ -147,6 +147,7 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
             print(d["udid"])
 ' "$DEVICE_NAME")"
   for cu in $clone_udids; do
+    xcrun simctl shutdown "$cu" 2>/dev/null || true
     xcrun simctl delete "$cu" 2>/dev/null || true
   done
   # XCTestDevices dirs are keyed by the (clone) device uuid.
@@ -157,9 +158,8 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
       rm -rf "$xctd/$cu" 2>/dev/null || true
     done
   done
-  if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ] \
-     && ! pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
-    scripts/sim-teardown.sh --udid "$UDID" || true
+  if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
+    scripts/sim-teardown.sh --udid "$UDID" --skip-process-kills || true
   fi
 }
 trap cleanup EXIT

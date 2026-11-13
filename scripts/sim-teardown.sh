@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Usage: ./scripts/sim-teardown.sh [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb]
+# Usage: ./scripts/sim-teardown.sh [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills]
 # sim を使った検証の終了時に必須実行する片付け+CPU監査 (冪等)。
 #   1. --dev-env 指定の dev 環境を down (user-state volume は保持)
 #   2. booted sim を shutdown (--udid 指定時はその1台のみ)
@@ -15,13 +15,15 @@ DEV_ENV=""
 TARGET_UDID=""
 KEEP_CLONES=0
 KEEP_IDB=0
+SKIP_PROC_KILLS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dev-env) DEV_ENV=$2; shift 2 ;;
     --udid) TARGET_UDID=$2; shift 2 ;;
     --keep-clones) KEEP_CLONES=1; shift ;;
     --keep-idb) KEEP_IDB=1; shift ;;
-    *) echo "Usage: $0 [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb]" >&2; exit 2 ;;
+    --skip-process-kills) SKIP_PROC_KILLS=1; shift ;;
+    *) echo "Usage: $0 [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills]" >&2; exit 2 ;;
   esac
 done
 
@@ -94,18 +96,25 @@ elif [ -d "$XCTD" ]; then
   echo "  pruned: ${mb} MB"
 fi
 
-if [ "$KEEP_IDB" = 0 ]; then
+# --skip-process-kills: 呼び出し元スクリプトの後片付け経路から呼ぶ場合、
+# 並走する他セッションの検証 (idb 接続や simctl diagnose ログ収集) を
+# 止めないよう global なプロセス kill を省略する。CPU 監査は常に行う。
+if [ "$SKIP_PROC_KILLS" = 0 ] && [ "$KEEP_IDB" = 0 ]; then
   pkill -f "idb_companion" 2>/dev/null && echo "== idb_companion 停止" || true
 fi
 
-echo "== 残留診断プロセス整理"
-# simctl diagnose はテスト完了後のログ収集。実行中 xcodebuild の子ではなく残留のみ対象。
-pkill -f "simctl diagnose" 2>/dev/null || true
-# 孤児化 spindump (diagnose の遺物)。root 所有だと kill できないので警告のみ。
-spin_pids=$(pgrep -f "^/usr/sbin/spindump$" || true)
-for p in $spin_pids; do
-  kill "$p" 2>/dev/null || echo "warn: spindump $p は root 所有で kill 不可 — 自己終了を待つか 'sudo kill $p'"
-done
+if [ "$SKIP_PROC_KILLS" = 0 ]; then
+  echo "== 残留診断プロセス整理"
+  # simctl diagnose はテスト完了後のログ収集。実行中 xcodebuild の子ではなく残留のみ対象。
+  pkill -f "simctl diagnose" 2>/dev/null || true
+  # 孤児化 spindump (diagnose の遺物)。root 所有だと kill できないので警告のみ。
+  spin_pids=$(pgrep -f "^/usr/sbin/spindump$" || true)
+  for p in $spin_pids; do
+    kill "$p" 2>/dev/null || echo "warn: spindump $p は root 所有で kill 不可 — 自己終了を待つか 'sudo kill $p'"
+  done
+else
+  echo "== 残留診断プロセス整理: --skip-process-kills のため省略"
+fi
 
 sleep 3
 
