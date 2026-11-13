@@ -1,6 +1,6 @@
 # Android native client — JVM unit tests + lint + debug APK, and an
-# emulator UI smoke test against a TEST_MODE server (api-contract.yml
-# builds the same synthetic tree).
+# emulator UI smoke test against a TEST_MODE server plus the :data
+# androidTest suite (api-contract.yml builds the same synthetic tree).
 name: android
 
 on:
@@ -30,13 +30,16 @@ jobs:
         if: github.event_name == 'pull_request'
         # The ui job boots the repo's FastAPI server and asserts on
         # /api/v1/* — server or dependency changes can break the client,
-        # hence app/** and requirements*.txt below.
+        # hence app/** and requirements*.txt below. The ui runner script
+        # itself must also gate, or script-only PRs skip the very job
+        # that exercises it.
         with:
           filters: |
             run:
               - "android/**"
               - "api/**"
               - ".github/workflows/android.yml"
+              - ".github/scripts/android-ui-test.sh"
               - "app/**"
               - "requirements*.txt"
               - "rust/viewer-rs/**"
@@ -214,4 +217,5 @@ jobs:
           path: |
             android/app/build/reports/androidTests/
             android/build/outputs/android-ui-test-results.txt
+            android/build/outputs/android-data-test-results.txt
           if-no-files-found: ignore

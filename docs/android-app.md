@@ -188,6 +188,9 @@ BOOKQ_KEY_PASSWORD` を読み、未設定なら unsigned のままビルドは�
 `.github/workflows/android.yml` — `unit`（JVM テスト + lint + APK artifact）と
 `ui`（reactivecircus/android-emulator-runner API 35 x86_64 + KVM。
 TEST_MODE uvicorn を job 内で起動し `10.0.2.2:8080` 経由で接続）。
+`ui` は `:app` の androidTest に加え `:data` の androidTest
+（`KeystoreTokenStoreTest`。self-instrumenting でサーバー不要のため
+同一エミュレータで先に1回実行）も `am instrument` で回す。
 
 ## 既知の制限
 
