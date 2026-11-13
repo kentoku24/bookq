@@ -28,6 +28,7 @@ the DOM; every collaborator is injected.
 """
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -43,6 +44,42 @@ from app.reader_sync import catalog, model, protocol  # noqa: E402
 
 PAIR_CLIENT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairClient.js"
 PAIR_TRANSPORT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairTransport.js"
+ASYNCAPI_YAML = REPO_ROOT / "api" / "asyncapi.yaml"
+
+
+def _uisync_contract():
+    """(required, declared properties) of UiSyncPayload in api/asyncapi.yaml.
+
+    Parsed line-wise — no yaml dependency in the test env. The block keeps a
+    fixed ``    Schema:`` / ``      properties:`` / ``        name:`` indent
+    shape; the empty-props assert fails loudly if that format ever drifts.
+    """
+    lines = ASYNCAPI_YAML.read_text(encoding="utf-8").splitlines()
+    try:
+        i = next(i for i, l in enumerate(lines)
+                 if l.strip() == "UiSyncPayload:")
+    except StopIteration:
+        raise AssertionError("UiSyncPayload schema missing from asyncapi.yaml")
+    required: list[str] = []
+    props: set[str] = set()
+    in_props = False
+    for l in lines[i + 1:]:
+        if l.strip() and len(l) - len(l.lstrip()) <= 4:
+            break                                # dedented out of the block
+        s = l.strip()
+        if s.startswith("required:"):
+            inner = s.split("[", 1)[1].rsplit("]", 1)[0]
+            required = [x.strip() for x in inner.split(",") if x.strip()]
+        elif s == "properties:":
+            in_props = True
+        elif in_props:
+            m = re.match(r" {8}(\w+):", l)
+            if m:
+                props.add(m.group(1))
+            elif s:
+                in_props = False                 # non-property line ends it
+    assert props, "UiSyncPayload.properties parsed empty — format drifted?"
+    return required, props
 
 
 @pytest.fixture
@@ -1225,6 +1262,12 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           const predDrop = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
                                          pred: -3});
           const predDropF = s.sent[s.sent.length - 1];
+          const predDropT = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                          pred: 'far'});
+          const predDropF2 = s.sent[s.sent.length - 1];
+          const predOk = c.sendUiSync({view: 'browse', top: 0, viewH: 1,
+                                       pred: 500});
+          const predOkF = s.sent[s.sent.length - 1];
           // minimal payload: path null, no mode
           const minOk = c.sendUiSync({view: 'browse', path: null, top: 0,
                                       viewH: 480});
@@ -1243,7 +1286,7 @@ def test_send_ui_sync_gating_and_shape(pc_page):
           return {idle, badView, badTop, badH, badHBig, noView, nan,
                   sentAfterBad,
                   badSh, shDropF, badShT, shDropF2, badShCap, shDropF3,
-                  predDrop, predDropF,
+                  predDrop, predDropF, predDropT, predDropF2, predOk, predOkF,
                   minOk, minF, unpaired, down, uiTypes};
         }"""
     )
@@ -1252,16 +1295,57 @@ def test_send_ui_sync_gating_and_shape(pc_page):
         assert res[k] is False, k
     assert res["sentAfterBad"] == 0
     # invalid optional fields are dropped, not frame-fatal
-    for k in ("badSh", "badShT", "badShCap", "predDrop"):
+    for k in ("badSh", "badShT", "badShCap", "predDrop", "predDropT"):
         assert res[k] is True, k
     for k in ("shDropF", "shDropF2", "shDropF3"):
         assert "scrollH" not in res[k]["payload"], k
-    assert "pred" not in res["predDropF"]["payload"]
+    for k in ("predDropF", "predDropF2"):
+        assert "pred" not in res[k]["payload"], k
+    # a valid pred rides the wire — the endpoint the follower steers toward
+    assert res["predOk"] is True
+    assert res["predOkF"]["payload"]["pred"] == 500
     assert res["minOk"] is True
     assert res["minF"]["payload"] == {"view": "browse", "path": None,
                                       "top": 0, "viewH": 480}
     assert res["unpaired"] is False and res["down"] is False
-    assert res["uiTypes"] == 5
+    assert res["uiTypes"] == 7
+
+
+def test_send_ui_sync_wire_keys_match_asyncapi(pc_page):
+    """#262 — the keys sendUiSync puts on the wire must be exactly the keys
+    asyncapi.yaml's UiSyncPayload declares. pred rode along in tests only
+    because stubs forwarded payloads verbatim while the production
+    whitelist dropped it; this pins the wire set to the contract."""
+    required, props = _uisync_contract()
+    res = pc_page.evaluate(
+        """async () => {
+          const rig = window.__mkRig();
+          const c = rig.mkClient();
+          const s = await rig.pairLeader(c);
+          const ok = c.sendUiSync({view: 'browse', path: 'group/ep',
+                                   top: 120, viewH: 600, scrollH: 2400,
+                                   mode: 'tile', pred: 900,
+                                   bogus: 'drop-me'});
+          const f = s.sent[s.sent.length - 1];
+          const bare = c.sendUiSync({view: 'browse', path: null, top: 0,
+                                     viewH: 480});
+          const f2 = s.sent[s.sent.length - 1];
+          return {ok,
+                  keys: f ? Object.keys(f.payload) : [],
+                  pred: f && f.payload.pred,
+                  bogus: f ? ('bogus' in f.payload) : true,
+                  bareKeys: f2 ? Object.keys(f2.payload) : []};
+        }"""
+    )
+    assert res["ok"] is True
+    # a full payload covers every declared property — nothing declared is
+    # silently dropped on the way out
+    assert set(res["keys"]) == props, \
+        f"wire keys {sorted(res['keys'])} != contract {sorted(props)}"
+    assert res["pred"] == 900
+    # ...and nothing undeclared leaks onto the wire either
+    assert res["bogus"] is False
+    assert set(required) <= set(res["bareKeys"]) <= props
 
 
 def test_inbound_ui_sync_fires_ui_sync_event(pc_page):

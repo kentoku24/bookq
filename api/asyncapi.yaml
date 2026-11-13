@@ -375,6 +375,7 @@ components:
         viewH: {type: number, exclusiveMinimum: 0, maximum: 100000}
         scrollH: {type: number, exclusiveMinimum: 0, maximum: 100000000}
         mode: {type: string, enum: [tile, list, card]}
+        pred: {type: number, minimum: 0, description: 送信側フリング終端予測の scrollTop px (top と同じ座標系・単位)}
 
     StateFrame:
       type: object

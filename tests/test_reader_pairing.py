@@ -703,7 +703,7 @@ def test_signal_requires_pair_and_live_peer():
 
 def _ui_payload(**kw):
     p = {"view": "browse", "path": "group/episodes", "top": 120.5,
-         "viewH": 600, "scrollH": 4200, "mode": "tile"}
+         "viewH": 600, "scrollH": 4200, "mode": "tile", "pred": 900}
     p.update(kw)
     return p
 
@@ -720,6 +720,9 @@ def test_ui_sync_relayed_between_paired_members():
     ui = _one(fframes, "UI_SYNC")
     assert ui["from"] == "leader"
     assert ui["payload"] == _ui_payload()
+    # pred reaches the peer verbatim — the predicted fling endpoint the
+    # follower steers toward (#262)
+    assert ui["payload"]["pred"] == 900
     assert ui["sessionId"] == sid
     # fire-and-forget: the sender never consumes an ACK, so none is sent
     assert _of_type(leader.frames(), "ACK") == []
@@ -776,6 +779,10 @@ def test_ui_sync_malformed_payloads_rejected():
         _ui_payload(scrollH=True),               # bool is not a number
         _ui_payload(scrollH=200_000_000),        # over the 1e8 cap
         _ui_payload(mode="grid"),                # unknown mode
+        _ui_payload(pred=-1),                    # negative endpoint
+        _ui_payload(pred="far"),                 # must be a number
+        _ui_payload(pred=float("nan")),          # non-finite
+        _ui_payload(pred=True),                  # bool is not a number
     )
     for i, payload in enumerate(bad):
         _send(reg, leader, _request(
