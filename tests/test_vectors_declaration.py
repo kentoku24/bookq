@@ -11,12 +11,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "api" / "vectors"
 
-# Vector file -> languages that must read it (issue #280's first set).
+# Vector file -> languages that must read it (issue #280's first set +
+# kotlin via #460).
 EXPECTED = {
-    "work-chapters.json": ["python", "js", "swift"],
-    "path-lookup.json": ["python", "js", "swift"],
-    "encode-path.json": ["python", "js", "swift"],
-    "solo-spreads.json": ["js", "swift"],
+    "work-chapters.json": ["python", "js", "swift", "kotlin"],
+    "path-lookup.json": ["python", "js", "swift", "kotlin"],
+    "encode-path.json": ["python", "js", "swift", "kotlin"],
+    "solo-spreads.json": ["js", "swift", "kotlin"],
 }
 
 # Language -> test file that consumes the vectors for that language.
@@ -24,6 +25,7 @@ READERS = {
     "python": "tests/test_conformance_vectors.py",
     "js": "tests/test_conformance_vectors_js.py",
     "swift": "ios/BookqTests/ConformanceVectorsTests.swift",
+    "kotlin": "android/core/src/test/kotlin/dev/bookq/core/ConformanceVectorsTest.kt",
 }
 
 
