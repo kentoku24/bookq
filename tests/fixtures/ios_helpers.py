@@ -57,6 +57,9 @@ def _spread_with(g, idx: int):
             return s
     raise AssertionError(f"page {idx} not in any spread")
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
+
 def wait_for_sw(page, timeout=15000):
     for _ in range(2):
         try:
@@ -65,6 +68,7 @@ def wait_for_sw(page, timeout=15000):
                     "() => navigator.serviceWorker && navigator.serviceWorker.controller !== null",
                     timeout=4000,
                 )
+                _ensure_sw_interception(page)
                 return True
             except Exception:
                 pass
@@ -77,6 +81,7 @@ def wait_for_sw(page, timeout=15000):
                 "async () => { try { const r = await navigator.serviceWorker.ready; return !!r; } catch { return !!navigator.serviceWorker.controller; } }"
             )
             if ok:
+                _ensure_sw_interception(page)
                 return True
         except Exception as e:
             if "Execution context was destroyed" in str(e):

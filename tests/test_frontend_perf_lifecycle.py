@@ -5,6 +5,8 @@ from urllib.request import urlopen
 
 import pytest
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
 BASE = Path(__file__).resolve().parent.parent
 APP_JS = BASE / "app" / "static" / "app.js"
 CORE_JS = BASE / "app" / "static" / "offline-core.js"
@@ -36,6 +38,36 @@ def _folder_entries(page):
 
 def _stop_fill_poll(page):
     page.evaluate("() => { try { window.FillPoll.stop(); } catch(e){} }")
+
+
+def _wait_dom_quiet(page, quiet_ms=400, timeout_ms=8000):
+    """Wait for #tile-grid mutation silence, then zero the spy counter —
+    slower environments (CI Safari) can still be filling tiles when the
+    revalidate spy is installed, and those background mutations are noise
+    against the 'no re-render' assertion."""
+    page.evaluate(
+        """() => {
+            window.__q = {last: Date.now()};
+            window.__qmo = new MutationObserver(() => { window.__q.last = Date.now(); });
+            window.__qmo.observe(document.getElementById('tile-grid'), {childList: true, subtree: true});
+        }"""
+    )
+    try:
+        page.wait_for_function(
+            f"() => Date.now() - window.__q.last >= {quiet_ms}",
+            timeout=timeout_ms,
+        )
+    finally:
+        # Zero the tallies, not the spy itself — reinstalling the spy would
+        # double-wrap window.fetch. Background activity during the quiet
+        # window (tile fill fetches calling .json(), stray tree requests)
+        # must not count against the revalidate under test.
+        page.evaluate(
+            "() => { try { window.__qmo.disconnect(); } catch(e){}"
+            " if (window.__perf) { window.__perf.domMuts = 0;"
+            " window.__perf.jsonCalls = 0; window.__perf.textCalls = 0;"
+            " window.__perf.foldersReqs.length = 0; } }"
+        )
 
 
 def _flush_frames(page):
@@ -110,6 +142,7 @@ def test_warm_revalidate_coalesced_conditional_304_no_render(browser, server):
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
         page.evaluate(CLOCK_ADVANCE_JS)
         page.evaluate(
             "() => Promise.all([window.revalidateFoldersForOnline(), "
@@ -135,6 +168,7 @@ def test_revalidate_without_etag_falls_back_to_tree_compare(browser, server):
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
         page.evaluate(CLOCK_ADVANCE_JS)
         page.evaluate("() => window.__BOOKQ_DEBUG.etagByKey.delete(':full')")
         page.evaluate("() => window.revalidateFoldersForOnline()")
@@ -760,6 +794,7 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
+        _ensure_sw_interception(page)
         page.wait_for_function(
             "() => navigator.serviceWorker && navigator.serviceWorker.controller",
             timeout=15000,
@@ -1160,6 +1195,7 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
+        _ensure_sw_interception(page)
         page.wait_for_function(
             "() => navigator.serviceWorker && navigator.serviceWorker.controller",
             timeout=15000,

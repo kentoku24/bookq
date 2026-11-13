@@ -8,6 +8,7 @@ Run:
 
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -34,7 +35,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 def pytest_addoption(parser):
     try:
-        parser.addoption("--browser", action="store", default=None, help="browser: chromium or webkit (alias for BROWSER env)")
+        parser.addoption("--browser", action="store", default=None, help="browser: chromium, webkit, or safari (alias for BROWSER env)")
+        parser.addoption("--num-shards", type=int, default=1, help="split the run into N deterministic shards")
+        parser.addoption("--shard-id", type=int, default=0, help="which shard to run (0-based)")
     except Exception:
         pass
 
@@ -42,10 +45,75 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     try:
         b = config.getoption("--browser", default=None)
-        if b == "webkit":
-            os.environ["BROWSER"] = "webkit"
+        if b in ("webkit", "safari"):
+            os.environ["BROWSER"] = b
+        if os.environ.get("BROWSER") == "safari":
+            # Tests do `from playwright.sync_api import expect` at module top;
+            # swap in the WebDriver-backed shim before collection imports them.
+            import playwright.sync_api as _pa
+
+            from tests.safari.expect import expect as _safari_expect
+
+            _pa.expect = _safari_expect
     except Exception:
         pass
+    config.addinivalue_line(
+        "markers", "browser: test drives a real browser session"
+    )
+
+
+# Any test that (transitively) requests a browser/page fixture gets the
+# `browser` marker — the Safari CI lane runs `-m browser` serially (real
+# Safari allows exactly one WebDriver session) while unit/API tests keep
+# their parallel lane.
+_BROWSER_FIXTURES = {
+    "page",
+    "browser",
+    "webkit_browser",
+    "safari_browser",
+    "landscape_page",
+    "ios_page",
+    "ipad_page",
+    "ipad_landscape_page",
+}
+
+
+def _fixture_uses_browser(item, fname) -> bool:
+    """Helper fixtures like ``any_browser``/``slow_page`` resolve the
+    browser lazily via ``request.getfixturevalue("browser")`` — the name
+    never appears in fixturenames, so inspect the fixture source."""
+    import inspect
+
+    fm = item.session._fixturemanager
+    for d in fm.getfixturedefs(fname, item) or ():
+        func = getattr(d, "func", None)
+        if func is None:
+            continue
+        try:
+            src = inspect.getsource(func)
+        except (OSError, TypeError):
+            continue
+        if "getfixturevalue" in src and re.search(
+            r'getfixturevalue\(\s*["\'](?:browser|webkit_browser|safari_browser)', src
+        ):
+            return True
+    return False
+
+
+def pytest_collection_modifyitems(config, items):
+    num_shards = config.getoption("--num-shards") or 1
+    shard_id = config.getoption("--shard-id") or 0
+    if num_shards > 1:
+        items[:] = [
+            i for i in items
+            if zlib.crc32(i.nodeid.encode()) % num_shards == shard_id
+        ]
+    for item in items:
+        fnames = set(getattr(item, "fixturenames", ()))
+        if _BROWSER_FIXTURES & fnames or any(
+            _fixture_uses_browser(item, f) for f in fnames
+        ):
+            item.add_marker(pytest.mark.browser)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -406,7 +474,27 @@ def _reset_reading_position(request):
 
 
 @pytest.fixture(scope="session")
-def browser():
+def safari_browser():
+    """Real Safari via safaridriver. Lazily started — object construction is
+    free on non-Safari runs (see `browser` below)."""
+    from tests.safari.driver import SafariDriverManager
+    from tests.safari.page import SafariBrowser
+
+    if os.environ.get("PYTEST_XDIST_WORKER") and os.environ.get("BROWSER") == "safari":
+        raise RuntimeError(
+            "BROWSER=safari cannot run under pytest-xdist: Safari.app pairs "
+            "with exactly one WebDriver session globally. Run without -n."
+        )
+    mgr = SafariDriverManager()
+    yield SafariBrowser(mgr)
+    mgr.stop()
+
+
+@pytest.fixture(scope="session")
+def browser(safari_browser):
+    if os.environ.get("BROWSER") == "safari":
+        yield safari_browser
+        return
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         yield browser
@@ -457,9 +545,15 @@ def _new_page(
         context_kwargs["record_video_dir"] = video_dir
         context_kwargs["record_video_size"] = {"width": width, "height": height}
     context = browser.new_context(**context_kwargs)
-    page = context.new_page()
-    page.goto(server)
-    page.wait_for_selector(".tile")  # folder tree fetched and rendered
+    try:
+        page = context.new_page()
+        page.goto(server)
+        page.wait_for_selector(".tile")  # folder tree fetched and rendered
+    except Exception:
+        # A half-open Safari session would block every later test — Safari
+        # pairs exactly one WebDriver session globally.
+        context.close()
+        raise
     return context, page
 
 
@@ -482,21 +576,27 @@ def landscape_page(request, server):
 
 
 def _is_webkit_request(request):
+    return _browser_kind(request) == "webkit"
+
+
+def _browser_kind(request) -> str:
     env = os.environ.get("BROWSER")
-    if env == "webkit":
-        return True
+    if env in ("webkit", "safari"):
+        return env
     try:
         opt = request.config.getoption("--browser", default=None)
-        if opt == "webkit":
-            return True
+        if opt in ("webkit", "safari"):
+            return opt
     except Exception:
         pass
-    return False
+    return "chromium"
 
 
 @pytest.fixture
 def ios_page(request, server):
     """iPhone 390x844 with isMobile/hasTouch, deviceScale 3, iPhone UA. BROWSER env or --browser webkit switches browser/webkit_browser."""
+    if _browser_kind(request) == "safari":
+        pytest.skip("desktop Safari cannot emulate mobile Safari (isMobile/UA/touch)")
     b = request.getfixturevalue("webkit_browser") if _is_webkit_request(request) else request.getfixturevalue("browser")
     context, page = _new_page(
         b,
@@ -515,6 +615,8 @@ def ios_page(request, server):
 @pytest.fixture
 def ipad_page(request, server):
     """iPad portrait 820x1180 with isMobile/hasTouch, deviceScale 2, iPad UA."""
+    if _browser_kind(request) == "safari":
+        pytest.skip("desktop Safari cannot emulate iPad Safari (isMobile/UA/touch)")
     b = request.getfixturevalue("webkit_browser") if _is_webkit_request(request) else request.getfixturevalue("browser")
     context, page = _new_page(
         b,
@@ -533,6 +635,8 @@ def ipad_page(request, server):
 @pytest.fixture
 def ipad_landscape_page(request, server):
     """iPad landscape 1180x820 with isMobile/hasTouch, deviceScale 2, iPad UA."""
+    if _browser_kind(request) == "safari":
+        pytest.skip("desktop Safari cannot emulate iPad Safari (isMobile/UA/touch)")
     b = request.getfixturevalue("webkit_browser") if _is_webkit_request(request) else request.getfixturevalue("browser")
     context, page = _new_page(
         b,
