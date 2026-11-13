@@ -63,6 +63,10 @@ issue タイトルからスラッグを生成する:
 
 ## 7. bookq 固有の注意
 
+### Python 実装の frozen 化 (#410 Phase 1)
+
+- **本番バックエンドは viewer-rs (Rust) のみ** (#409)。Python `viewer` は `py-rollback` compose profile 専用の退避。`app/`・`tests/`・`Dockerfile`・`requirements*.txt` は **frozen read-only reference** であり #410 で段階削除される — **これらへの新規変更・バグ修正は禁止**。修正は `rust/` 側に行う。以下の `app/` 参照記述は削除までの過渡期に残るリファレンス。
+
 ### フォルダツリー / scanner
 
 - `app/scanner.py:92` `scan_tree` — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`app/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `app/static/app.js:1308` で構築)。prefix を付与しないこと。
