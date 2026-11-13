@@ -8,6 +8,7 @@ Run:
 
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -77,6 +78,28 @@ _BROWSER_FIXTURES = {
 }
 
 
+def _fixture_uses_browser(item, fname) -> bool:
+    """Helper fixtures like ``any_browser``/``slow_page`` resolve the
+    browser lazily via ``request.getfixturevalue("browser")`` — the name
+    never appears in fixturenames, so inspect the fixture source."""
+    import inspect
+
+    fm = item.session._fixturemanager
+    for d in fm.getfixturedefs(fname, item) or ():
+        func = getattr(d, "func", None)
+        if func is None:
+            continue
+        try:
+            src = inspect.getsource(func)
+        except (OSError, TypeError):
+            continue
+        if "getfixturevalue" in src and re.search(
+            r'getfixturevalue\(\s*["\'](?:browser|webkit_browser|safari_browser)', src
+        ):
+            return True
+    return False
+
+
 def pytest_collection_modifyitems(config, items):
     num_shards = config.getoption("--num-shards") or 1
     shard_id = config.getoption("--shard-id") or 0
@@ -86,7 +109,10 @@ def pytest_collection_modifyitems(config, items):
             if zlib.crc32(i.nodeid.encode()) % num_shards == shard_id
         ]
     for item in items:
-        if _BROWSER_FIXTURES & set(getattr(item, "fixturenames", ())):
+        fnames = set(getattr(item, "fixturenames", ()))
+        if _BROWSER_FIXTURES & fnames or any(
+            _fixture_uses_browser(item, f) for f in fnames
+        ):
             item.add_marker(pytest.mark.browser)
 
 

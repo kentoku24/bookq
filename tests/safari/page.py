@@ -186,18 +186,52 @@ if (!window.__bookqVisEmu) {
 # TouchEvent objects so the app's gesture handlers see real `touches` lists.
 _TOUCH_JS = """
 window.__bookqTouch = {
+  _active: {},
+  _touch(id, x, y, target) {
+    return new Touch({
+      identifier: id, target,
+      clientX: x, clientY: y,
+      screenX: x, screenY: y,
+      pageX: x, pageY: y,
+    });
+  },
+  _all() {
+    return Object.entries(this._active).map(([id, a]) =>
+      this._touch(+id, a.x, a.y, a.target));
+  },
   _mk(type, pts) {
-    const target = pts.length
-      ? document.elementFromPoint(pts[0].x, pts[0].y) || document.body
-      : document.body;
-    const touches = pts.map(p => new Touch({
-      identifier: p.id || 1, target,
-      clientX: p.x, clientY: p.y,
-      screenX: p.x, screenY: p.y,
-      pageX: p.x, pageY: p.y,
-    }));
+    // Touch targets are captured at touchstart per spec — touchend on an
+    // empty point list must still reach the start target (viewer gestures
+    // listen on #img-container, not body) with released fingers in
+    // changedTouches.
+    let changed = [], target = null;
+    if (type === 'touchstart' || type === 'touchmove') {
+      for (const p of pts) {
+        const id = p.id || 1;
+        const a = this._active[id] = this._active[id] || {x: 0, y: 0, target: null};
+        if (type === 'touchstart') {
+          a.target = document.elementFromPoint(p.x, p.y) || document.body;
+        }
+        a.x = p.x; a.y = p.y;
+        changed.push(this._touch(id, a.x, a.y, a.target));
+      }
+    } else {
+      // touchend / touchcancel — release the given ids, or all when empty
+      const ids = pts.length
+        ? pts.map(p => p.id || 1)
+        : Object.keys(this._active).map(Number);
+      for (const id of ids) {
+        const a = this._active[id] || {x: 0, y: 0, target: document.body};
+        changed.push(this._touch(id, a.x, a.y, a.target));
+        delete this._active[id];
+      }
+    }
+    target = (changed[0] && changed[0].target) || document.body;
+    const remaining = this._all();
     const ev = new TouchEvent(type, {
-      touches, targetTouches: touches, changedTouches: touches,
+      touches: remaining,
+      targetTouches: remaining,
+      changedTouches: changed,
       bubbles: true, cancelable: true,
     });
     target.dispatchEvent(ev);
@@ -968,6 +1002,8 @@ class _Keyboard:
 class _Mouse:
     def __init__(self, page: SafariPage):
         self._page = page
+        self._x = 0
+        self._y = 0
 
     # W3C pointer actions do not synthesize real DOM mouse events under
     # safaridriver (same reason element.click() is a no-op) — dispatch the
@@ -982,33 +1018,49 @@ class _Mouse:
         "}"
     )
 
+    def _at(self, x=None, y=None):
+        # Playwright's mouse.down()/up() fire at the current position —
+        # callers like swipe_root_icon move to the release point then call
+        # up() bare, so a fixed (0,0) would never satisfy release-position
+        # handlers.
+        if x is not None:
+            self._x = x
+        if y is not None:
+            self._y = y
+        return int(self._x), int(self._y)
+
     def click(self, x: float, y: float, **kw):
         self._page._eval(
-            self._SEQ_JS, int(x), int(y),
+            self._SEQ_JS, *self._at(x, y),
             ["pointerdown", "mousedown", "pointerup", "mouseup", "click"],
         )
 
     def dblclick(self, x: float, y: float, **kw):
         self._page._eval(
-            self._SEQ_JS, int(x), int(y),
+            self._SEQ_JS, *self._at(x, y),
             ["pointerdown", "mousedown", "pointerup", "mouseup", "click",
              "pointerdown", "mousedown", "pointerup", "mouseup", "click",
              "dblclick"],
         )
 
-    def move(self, x: float, y: float, **kw):
+    def move(self, x: float, y: float, steps: int = 1, **kw):
+        x0, y0 = self._x, self._y
+        n = max(int(steps or 1), 1)
+        for i in range(1, n + 1):
+            xi = x0 + (x - x0) * i / n
+            yi = y0 + (y - y0) * i / n
+            self._page._eval(
+                self._SEQ_JS, *self._at(xi, yi), ["pointermove", "mousemove"]
+            )
+
+    def down(self, x: float = None, y: float = None, **kw):
         self._page._eval(
-            self._SEQ_JS, int(x), int(y), ["pointermove", "mousemove"]
+            self._SEQ_JS, *self._at(x, y), ["pointerdown", "mousedown"]
         )
 
-    def down(self, x: float = 0, y: float = 0, **kw):
+    def up(self, x: float = None, y: float = None, **kw):
         self._page._eval(
-            self._SEQ_JS, int(x), int(y), ["pointerdown", "mousedown"]
-        )
-
-    def up(self, x: float = 0, y: float = 0, **kw):
-        self._page._eval(
-            self._SEQ_JS, int(x), int(y), ["pointerup", "mouseup"]
+            self._SEQ_JS, *self._at(x, y), ["pointerup", "mouseup"]
         )
 
     def wheel(self, delta_x: float, delta_y: float, **kw):
