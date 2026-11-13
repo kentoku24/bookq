@@ -189,6 +189,12 @@ class SafariLocator:
         def go(el):
             el.clear()
             el.send_keys(value)
+            # safaridriver's clear()/send_keys("") don't reliably emit 'input'
+            # — Playwright's fill does, and debounced app handlers depend on it.
+            self._eval(
+                "arguments[0].dispatchEvent(new Event('input', {bubbles: true}))",
+                el,
+            )
 
         self._act(go, timeout)
 
@@ -196,7 +202,18 @@ class SafariLocator:
         self._act(lambda el: el.send_keys(text), timeout)
 
     def press(self, key: str, timeout=None, **kw):
-        self._act(lambda el: el.send_keys(_KEY_MAP.get(key, key)), timeout)
+        def go(el):
+            tag = el.tag_name.lower()
+            if tag in ("input", "textarea") or el.get_attribute("contenteditable"):
+                el.send_keys(_KEY_MAP.get(key, key))
+            else:
+                # element.send_keys drops keydown on non-editable targets —
+                # focus, then use the actions input pipeline instead.
+                self._eval("arguments[0].focus()", el)
+                from selenium.webdriver.common.action_chains import ActionChains
+                ActionChains(self._page._driver).send_keys(_KEY_MAP.get(key, key)).perform()
+
+        self._act(go, timeout)
 
     def hover(self, timeout=None, **kw):
         from selenium.webdriver.common.action_chains import ActionChains

@@ -82,6 +82,105 @@ _SCRUB_JS = """
 })()
 """
 
+# safaridriver's automation window is permanently occluded from WebKit's view:
+# document.hidden stays true, requestAnimationFrame never fires, and CSS
+# animations/transitions freeze at currentTime 0 (transitionend never fires).
+# A real user's Safari tab is visible — emulate that: rAF via setTimeout,
+# frozen animations reported finished, foreground visibility getters.
+_VISIBILITY_JS = r"""
+if (!window.__bookqVisEmu) {
+  window.__bookqVisEmu = true;
+  window.requestAnimationFrame = function (cb) {
+    return setTimeout(function () { cb(performance.now()); }, 16);
+  };
+  window.cancelAnimationFrame = function (id) { clearTimeout(id); };
+  var wrapAnims = function (list) {
+    return Array.from(list).map(function (a) {
+      if (a.playState === 'running' && a.currentTime === 0) {
+        return new Proxy(a, { get: function (t, p) {
+          return p === 'playState' ? 'finished' : t[p];
+        }});
+      }
+      return a;
+    });
+  };
+  var dga = Document.prototype.getAnimations;
+  var ega = Element.prototype.getAnimations;
+  Document.prototype.getAnimations = function (o) { return wrapAnims(dga.call(this, o)); };
+  Element.prototype.getAnimations = function (o) { return wrapAnims(ega.call(this, o)); };
+  // Frozen transitions otherwise pin elements at their start value (an
+  // opacity fade-in leaves the element at 0 forever — which safaridriver
+  // also reports as not-displayed), and they arrive BORN finished so
+  // transitionend never fires. Two complementary fixes: (a) poll-finish
+  // every animation so computed styles reach their end value; (b) a
+  // MutationObserver on `style`/`class` that synthesizes transitionend
+  // with the real property name + duration for inline transitions.
+  setInterval(function () {
+    try {
+      dga.call(document).forEach(function (a) {
+        try { if (a.playState !== 'finished') a.finish(); } catch (e) {}
+      });
+    } catch (e) {}
+  }, 50);
+  var propsOf = function (s) {
+    var o = {};
+    s.split(';').forEach(function (d) {
+      var i = d.indexOf(':');
+      if (i > 0) o[d.slice(0, i).trim()] = d.slice(i + 1).trim();
+    });
+    return o;
+  };
+  var mo = new MutationObserver(function (muts) {
+    muts.forEach(function (m) {
+      var el = m.target;
+      try {
+        if (m.attributeName === 'class') {
+          // class-triggered transitions: un-pin this element's anims now
+          ega.call(el).forEach(function (a) {
+            try { if (a.playState !== 'finished') a.finish(); } catch (e) {}
+          });
+          return;
+        }
+        if (m.attributeName !== 'style') return;
+        var tr = (el.style && el.style.transition) || '';
+        if (!tr || tr === 'none') return;
+        var A = propsOf(m.oldValue || ''), B = propsOf(el.getAttribute('style') || '');
+        var changed = [];
+        for (var k in B) if (!(k in A) || A[k] !== B[k]) changed.push(k);
+        for (var k2 in A) if (!(k2 in B)) changed.push(k2);
+        tr.split(',').forEach(function (decl) {
+          var parts = decl.trim().split(/\s+/);
+          var prop = parts[0], dur = 0, delay = 0;
+          for (var i = 1; i < parts.length; i++) {
+            if (/^[0-9.]+m?s$/.test(parts[i])) {
+              var v = parseFloat(parts[i]) * (parts[i].slice(-2) === 'ms' ? 1 : 1000);
+              if (!dur) dur = v; else delay = v;
+            }
+          }
+          if (!prop || prop === 'none') return;
+          (prop === 'all' ? changed : [prop]).forEach(function (p) {
+            if (changed.indexOf(p) < 0) return;
+            setTimeout(function () {
+              el.dispatchEvent(new TransitionEvent('transitionend',
+                { propertyName: p, elapsedTime: dur / 1000, bubbles: true }));
+            }, dur + delay);
+          });
+        });
+      } catch (e) {}
+    });
+  });
+  mo.observe(document.documentElement, {
+    attributes: true, attributeOldValue: true,
+    attributeFilter: ['style', 'class'], subtree: true,
+  });
+  try {
+    Object.defineProperty(document, 'hidden', { get: function () { return false; }, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: function () { return 'visible'; }, configurable: true });
+    document.hasFocus = function () { return true; };
+  } catch (e) {}
+}
+"""
+
 # Synthetic-touch helpers for touchscreen.tap and the CDP-touch shim. Real
 # TouchEvent objects so the app's gesture handlers see real `touches` lists.
 _TOUCH_JS = """
@@ -531,6 +630,13 @@ class SafariPage:
                 cb(Exception(err))
 
     def _install_error_hook(self):
+        self._install_shims()
+
+    def _install_shims(self):
+        try:
+            self._sync_eval(_VISIBILITY_JS)
+        except WebDriverException:
+            pass
         try:
             self._sync_eval(
                 "if (!window.__pageErrHook) { window.__pageErrHook = 1;"
@@ -633,24 +739,25 @@ class _Keyboard:
         self._page = page
 
     def press(self, key: str, **kw):
+        # The actions API synthesizes real key events; element.send_keys on a
+        # non-editable active element (BODY) can silently drop the keydown.
         page = self._page
+        page._activate()
+        chains = ActionChains(page._driver)
+        send = key
         if "+" in key:
-            *mods, k = key.split("+")
-            chains = ActionChains(page._driver)
+            *mods, send = key.split("+")
             for m in mods:
                 chains.key_down(_KEY_MAP.get(m.strip(), m.strip()))
-            chains.send_keys(_KEY_MAP.get(k, k))
+        chains.send_keys(_KEY_MAP.get(send, send))
+        if "+" in key:
             for m in reversed(mods):
                 chains.key_up(_KEY_MAP.get(m.strip(), m.strip()))
-            page._activate()
-            chains.perform()
-        else:
-            page._activate()
-            page._driver.switch_to.active_element.send_keys(_KEY_MAP.get(key, key))
+        chains.perform()
 
     def type(self, text: str, **kw):
         self._page._activate()
-        self._page._driver.switch_to.active_element.send_keys(text)
+        ActionChains(self._page._driver).send_keys(text).perform()
 
     def insert_text(self, text: str):
         self.type(text)
@@ -729,8 +836,19 @@ class SafariContext:
         d = self._driver
         rect = d.get_window_rect()
         d.set_window_rect(width=w, height=h)
-        time.sleep(0.1)
-        inner = d.execute_script("return [innerWidth, innerHeight]")
+        # The fresh session's browsing context can take a moment before it
+        # accepts execute_script — retry the inner-size read briefly.
+        inner = None
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            try:
+                inner = d.execute_script("return [innerWidth, innerHeight]")
+                break
+            except WebDriverException:
+                time.sleep(0.1)
+        if inner is None:
+            self._viewport = {"width": w, "height": h}
+            return
         d.set_window_rect(
             x=rect["x"], y=rect["y"],
             width=w + (w - inner[0]), height=h + (h - inner[1]),
@@ -830,7 +948,18 @@ class SafariBrowser:
             # whether the semantics hold.
             pass
         driver = self._manager.new_session()
-        return SafariContext(self, driver, viewport)
+        try:
+            return SafariContext(self, driver, viewport)
+        except Exception:
+            # Context init failed (e.g. session browsing-context race) —
+            # release the session so the next test isn't locked out; Safari
+            # pairs exactly one WebDriver session globally.
+            try:
+                driver.quit()
+            except WebDriverException:
+                pass
+            self._manager.session_released()
+            raise
 
     def close(self):
         pass

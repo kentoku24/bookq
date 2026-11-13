@@ -3,3 +3,4 @@ uvicorn[standard]>=0.54.0
 pytest-xdist>=3.8.0
 pytest-rerunfailures>=16.7
 pyyaml>=6.0  # tests/test_api_breaking_check.py + scripts/api_breaking_check.py (#232)
+selenium>=4.26,<5

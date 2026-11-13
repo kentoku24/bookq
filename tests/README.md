@@ -40,6 +40,13 @@ BROWSER=webkit uv run --with pytest --with playwright --with-requirements requir
 # 失敗時の video/trace（external_directory deny のため .omo/evidence 固定）
 RECORD_VIDEO=1 RECORD_VIDEO_DIR=.omo/evidence BROWSER=webkit uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q
 # WebKit narrow check: Cache と storage estimate を pass（persist toast assert は削除済み）
+
+# 実機 Safari (safaridriver)。macOS のみ・必ず直列（-n 不可 — Safari.app は
+# WebDriver セッションをグローバルに 1 つだけ許可する）。selenium は
+# requirements-dev.txt 同梱。初回のみ `sudo safaridriver --enable`
+BROWSER=safari uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ui.py -q
+# ブラウザを使うテストだけ選ぶなら -m browser（fixture 要求で自動付与）
+BROWSER=safari uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser
 ```
 
 ## Simulator 手動QA（iOS 実機 Safari）
@@ -61,6 +68,15 @@ RECORD_VIDEO=1 RECORD_VIDEO_DIR=.omo/evidence BROWSER=webkit uv run --with pytes
 | Tier1 | Playwright WebKit エミュレーション | ubuntu CI 自動 | `BROWSER=webkit uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_ios.py -q` | **一般的なブラウザ互換**は CI で自動（PR 毎） |
 | Tier2 | Simulator 本物 Safari（`xcrun simctl openurl booted <url>`） | macOS ローカル手動 | `bash scripts/open-simulator.sh $(./dev.sh url demo)` + `xcrun simctl io booted screenshot .omo/evidence/sim.png` | **Safari/iOS 固有の事象**はローカル Mac で解消 — SW / 容量バー 0/0 / 回転・spread / PWA offline |
 | Tier3 | Appium + WebDriverAgent | 将来 | `appium` + `xcuitest` driver + 署名（手順のみ `references/tier-strategy.md` の `<details>`、実装しない） | 完全自動化が必要になった時のみ |
+
+## BROWSER=safari（実機 Safari / safaridriver）
+
+`tests/safari/` の WebDriver アダプタが Playwright API サブセットを safaridriver に橋渡しし、既存のブラウザテストを**実機デスクトップ Safari** でそのまま実行する。WebKit エミュレーション（`BROWSER=webkit`）ではなく本物の Safari。
+
+- 実行は必ず直列: Safari.app は WebDriver セッションを 1 つしか持てない。`pytest -n` は使わないこと（fixture が `PYTEST_XDIST_WORKER` 検出で即 raise する）。CI では `--num-shards N --shard-id i` で macOS ランナー間に分割する（`workflow-smoke.yml` の `safari-gate`）。
+- 環境差のエミュレーション: safaridriver の自動化ウィンドウは occluded 扱いで `document.hidden === true` になり、rAF・CSS transition/animation が永久に tick しない。`_VISIBILITY_JS` が前景タブ相当を再現する（rAF→setTimeout、frozen animation の finish、`document.hidden`→false、style mutation 監視で transitionend を合成）。
+- 未対応（`SafariUnsupported` → skip として扱われる）: `page.route`/`context.set_offline`（ネットワーク傍受は WebDriver 非対応）、`context.new_cdp_session`（CDP は Chromium 専用 — `viewer_touch.py` の `touch_session` が JS TouchEvent shim に自動切替）、複数 context/newContext 並行、`ios_page`/`ipad_page`/`ipad_landscape_page`（デスクトップ Safari はモバイル UA/touch をエミュレートできない — iOS 実機相当は Tier2 Simulator が正本）。
+- `expect` は `pytest_configure` で `playwright.sync_api.expect` を `tests.safari.expect` に差し替えるのでテスト本体の import は無変更。
 
 ### 到達性（host network share）
 

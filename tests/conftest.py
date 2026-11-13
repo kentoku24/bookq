@@ -35,6 +35,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 def pytest_addoption(parser):
     try:
         parser.addoption("--browser", action="store", default=None, help="browser: chromium, webkit, or safari (alias for BROWSER env)")
+        parser.addoption("--num-shards", type=int, default=1, help="split the run into N deterministic shards")
+        parser.addoption("--shard-id", type=int, default=0, help="which shard to run (0-based)")
     except Exception:
         pass
 
@@ -54,6 +56,38 @@ def pytest_configure(config):
             _pa.expect = _safari_expect
     except Exception:
         pass
+    config.addinivalue_line(
+        "markers", "browser: test drives a real browser session"
+    )
+
+
+# Any test that (transitively) requests a browser/page fixture gets the
+# `browser` marker — the Safari CI lane runs `-m browser` serially (real
+# Safari allows exactly one WebDriver session) while unit/API tests keep
+# their parallel lane.
+_BROWSER_FIXTURES = {
+    "page",
+    "browser",
+    "webkit_browser",
+    "safari_browser",
+    "landscape_page",
+    "ios_page",
+    "ipad_page",
+    "ipad_landscape_page",
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    num_shards = config.getoption("--num-shards") or 1
+    shard_id = config.getoption("--shard-id") or 0
+    if num_shards > 1:
+        items[:] = [
+            i for i in items
+            if zlib.crc32(i.nodeid.encode()) % num_shards == shard_id
+        ]
+    for item in items:
+        if _BROWSER_FIXTURES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(pytest.mark.browser)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -485,9 +519,15 @@ def _new_page(
         context_kwargs["record_video_dir"] = video_dir
         context_kwargs["record_video_size"] = {"width": width, "height": height}
     context = browser.new_context(**context_kwargs)
-    page = context.new_page()
-    page.goto(server)
-    page.wait_for_selector(".tile")  # folder tree fetched and rendered
+    try:
+        page = context.new_page()
+        page.goto(server)
+        page.wait_for_selector(".tile")  # folder tree fetched and rendered
+    except Exception:
+        # A half-open Safari session would block every later test — Safari
+        # pairs exactly one WebDriver session globally.
+        context.close()
+        raise
     return context, page
 
 

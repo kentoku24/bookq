@@ -102,3 +102,30 @@ jobs:
 
       - name: Run bookq test gate (full suite)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
+
+  # Real-Safari lane: runs every browser-marked test under safaridriver on an
+  # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
+  # session globally, so a shard can never parallelize — the suite is split
+  # across runners with --num-shards/--shard-id instead of pytest -n.
+  safari-gate:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Enable safaridriver
+        run: sudo safaridriver --enable
+
+      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/4)
+        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 4 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
