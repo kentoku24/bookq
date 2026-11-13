@@ -1403,6 +1403,7 @@ mod native_gate_tests {
             visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
             session_key: None,
             secret_key: "test-secret".into(),
+            auth_flow: None,
             registry,
             thumb_cache: dir.join("thumbs"),
             git_sha: "test".into(),
