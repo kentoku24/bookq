@@ -1,0 +1,1022 @@
+{
+  "asyncapi": "3.0.0",
+  "channels": {
+    "readerSync": {
+      "address": "/ws/reader-sync",
+      "messages": {
+        "ack": {
+          "$ref": "#/components/messages/Ack"
+        },
+        "applied": {
+          "$ref": "#/components/messages/Applied"
+        },
+        "end": {
+          "$ref": "#/components/messages/End"
+        },
+        "error": {
+          "$ref": "#/components/messages/Error"
+        },
+        "hello": {
+          "$ref": "#/components/messages/Hello"
+        },
+        "joinCancel": {
+          "$ref": "#/components/messages/JoinCancel"
+        },
+        "joinRequest": {
+          "$ref": "#/components/messages/JoinRequest"
+        },
+        "manifest": {
+          "$ref": "#/components/messages/Manifest"
+        },
+        "ping": {
+          "$ref": "#/components/messages/Ping"
+        },
+        "pong": {
+          "$ref": "#/components/messages/Pong"
+        },
+        "reject": {
+          "$ref": "#/components/messages/Reject"
+        },
+        "request": {
+          "$ref": "#/components/messages/Request"
+        },
+        "signal": {
+          "$ref": "#/components/messages/Signal"
+        },
+        "state": {
+          "$ref": "#/components/messages/State"
+        },
+        "transportState": {
+          "$ref": "#/components/messages/TransportState"
+        },
+        "uiSync": {
+          "$ref": "#/components/messages/UiSync"
+        }
+      },
+      "title": "Dual-reader sync"
+    }
+  },
+  "components": {
+    "messages": {
+      "Ack": {
+        "payload": {
+          "properties": {
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "ACK",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "Applied": {
+        "payload": {
+          "properties": {
+            "by": {
+              "description": "適用要求者のロール",
+              "enum": [
+                "leader",
+                "follower"
+              ],
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "revision": {
+              "description": "適用後の STATE リビジョン",
+              "type": "integer"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "APPLIED",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "sessionId",
+            "requestId",
+            "revision",
+            "by"
+          ],
+          "type": "object"
+        },
+        "title": "リクエストが逐次適用された通知"
+      },
+      "End": {
+        "payload": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "const": "END",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "Error": {
+        "payload": {
+          "properties": {
+            "code": {
+              "enum": [
+                "ERR_VERSION",
+                "ERR_MALFORMED",
+                "ERR_TYPE",
+                "ERR_RANGE",
+                "ERR_SIZE"
+              ],
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "const": "ERROR",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "code"
+          ],
+          "type": "object"
+        }
+      },
+      "Hello": {
+        "payload": {
+          "properties": {
+            "link": {
+              "description": "link id",
+              "type": "string"
+            },
+            "type": {
+              "const": "HELLO",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "link"
+          ],
+          "type": "object"
+        },
+        "title": "接続直後の greeting"
+      },
+      "JoinCancel": {
+        "payload": {
+          "properties": {
+            "type": {
+              "const": "JOIN_CANCEL",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "JoinRequest": {
+        "payload": {
+          "properties": {
+            "link": {
+              "type": "string"
+            },
+            "type": {
+              "const": "JOIN_REQUEST",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        },
+        "title": "ピアからの join 要求通知"
+      },
+      "Manifest": {
+        "description": "1 manifest = 1+ chunk フレーム。`kind:manifest-chunk` の\n`{digest,index,count,data}` を index 順に連結すると canonical JSON が\n復元され、`digest` (sha256) と照合できる。送信後に STATE フレームが\n続く（コミット通知は STATE が担い、MANIFEST_COMMIT という wire メッセージは存在しない）。\n",
+        "payload": {
+          "properties": {
+            "count": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "data": {
+              "description": "chunk 分割された canonical JSON 片",
+              "type": "string"
+            },
+            "digest": {
+              "description": "sha256:<hex> 全チャンク共通",
+              "type": "string"
+            },
+            "index": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "manifest-chunk",
+              "type": "string"
+            },
+            "manifestVersion": {
+              "type": "integer"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "MANIFEST",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            },
+            "workEpoch": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "sessionId",
+            "workEpoch",
+            "manifestVersion",
+            "kind",
+            "digest",
+            "index",
+            "count",
+            "data"
+          ],
+          "type": "object"
+        },
+        "title": "セッションマニフェスト（chunked 転送可）"
+      },
+      "Ping": {
+        "payload": {
+          "properties": {
+            "type": {
+              "const": "PING",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "Pong": {
+        "payload": {
+          "properties": {
+            "type": {
+              "const": "PONG",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "Reject": {
+        "payload": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "requestId": {
+              "type": "string"
+            },
+            "sessionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "REJECT",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "Request": {
+        "payload": {
+          "$ref": "#/components/schemas/RequestFrame"
+        },
+        "title": "クライアントリクエストフレーム"
+      },
+      "Signal": {
+        "payload": {
+          "properties": {
+            "data": {},
+            "kind": {
+              "enum": [
+                "offer",
+                "answer",
+                "ice"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "const": "SIGNAL",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "title": "WebRTC signaling 中継（非シーケンス）"
+      },
+      "State": {
+        "payload": {
+          "$ref": "#/components/schemas/StateFrame"
+        },
+        "title": "完全状態スナップショット"
+      },
+      "TransportState": {
+        "payload": {
+          "properties": {
+            "dataPlane": {
+              "enum": [
+                "server-ws",
+                "webrtc-dc"
+              ],
+              "type": "string"
+            },
+            "revision": {
+              "description": "切替が確定した STATE リビジョン",
+              "type": "integer"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "TRANSPORT_STATE",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "UiSync": {
+        "payload": {
+          "properties": {
+            "from": {
+              "description": "送信元ロール",
+              "enum": [
+                "leader",
+                "follower"
+              ],
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/components/schemas/UiSyncPayload"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "type": {
+              "const": "UI_SYNC",
+              "type": "string"
+            },
+            "v": {
+              "const": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "v",
+            "type",
+            "sessionId",
+            "from",
+            "payload"
+          ],
+          "type": "object"
+        },
+        "title": "ephemeral UI ミラー（非シーケンス・reader state 混入禁止）"
+      }
+    },
+    "schemas": {
+      "PageRef": {
+        "properties": {
+          "folder": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "folder",
+          "name"
+        ],
+        "type": "object"
+      },
+      "RequestFrame": {
+        "discriminator": "type",
+        "oneOf": [
+          {
+            "properties": {
+              "payload": {
+                "type": "object"
+              },
+              "type": {
+                "const": "CREATE"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "code": {
+                    "pattern": "^\\d{6}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "JOIN"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "pick": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": {
+                "const": "MATCH"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "crossChapter": {
+                    "type": "boolean"
+                  },
+                  "delta": {
+                    "enum": [
+                      1,
+                      -1
+                    ],
+                    "type": "integer"
+                  },
+                  "fromChapter": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "delta",
+                  "crossChapter"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "TURN"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "page": {
+                    "$ref": "#/components/schemas/PageRef"
+                  }
+                },
+                "required": [
+                  "page"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "GOTO"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "offset": {
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "offset"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "SET_OFFSET"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "leaderSide": {
+                    "enum": [
+                      "right",
+                      "left"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "leaderSide"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "SWAP_SIDES"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "folder": {
+                    "type": "string"
+                  },
+                  "page": {
+                    "$ref": "#/components/schemas/PageRef"
+                  }
+                },
+                "required": [
+                  "folder"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "OPEN_WORK"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "offer",
+                      "answer",
+                      "ice"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "SIGNAL"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "requestId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requestId"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "APPLIED"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "$ref": "#/components/schemas/UiSyncPayload"
+              },
+              "type": {
+                "const": "UI_SYNC"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "type": "object"
+              },
+              "type": {
+                "enum": [
+                  "APPROVE",
+                  "REJECT",
+                  "RESUME",
+                  "LEAVE",
+                  "SET_ACTIVITY",
+                  "READY",
+                  "PING",
+                  "TRANSPORT_STATE"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        ],
+        "properties": {
+          "baseRevision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "payload": {
+            "description": "type ごとのペイロード（下記 oneOf 参照）",
+            "type": "object"
+          },
+          "requestId": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "enum": [
+              "CREATE",
+              "JOIN",
+              "APPROVE",
+              "REJECT",
+              "RESUME",
+              "LEAVE",
+              "MATCH",
+              "TURN",
+              "GOTO",
+              "SET_OFFSET",
+              "SWAP_SIDES",
+              "OPEN_WORK",
+              "SET_ACTIVITY",
+              "READY",
+              "PING",
+              "APPLIED",
+              "SIGNAL",
+              "TRANSPORT_STATE",
+              "UI_SYNC"
+            ],
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "type": "integer"
+          },
+          "workEpoch": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "v",
+          "requestId",
+          "sessionId",
+          "workEpoch",
+          "baseRevision",
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "StateFrame": {
+        "properties": {
+          "leaderSide": {
+            "enum": [
+              "right",
+              "left"
+            ],
+            "type": "string"
+          },
+          "manifestVersion": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "enum": [
+              0,
+              1
+            ],
+            "type": "integer"
+          },
+          "phase": {
+            "enum": [
+              "waiting",
+              "loading",
+              "reading",
+              "selecting",
+              "paused",
+              "ended"
+            ],
+            "type": "string"
+          },
+          "presence": {
+            "description": "link id → {role: leader|follower, ...}",
+            "type": "object"
+          },
+          "revision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "spreadId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "STATE",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "type": "integer"
+          },
+          "workEpoch": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "v",
+          "type",
+          "sessionId",
+          "revision",
+          "workEpoch",
+          "manifestVersion",
+          "phase",
+          "spreadId",
+          "offset",
+          "leaderSide",
+          "presence"
+        ],
+        "type": "object"
+      },
+      "UiSyncPayload": {
+        "properties": {
+          "mode": {
+            "enum": [
+              "tile",
+              "list",
+              "card"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 4096,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scrollH": {
+            "exclusiveMinimum": 0,
+            "maximum": 100000000,
+            "type": "number"
+          },
+          "top": {
+            "description": "sender scroller の px",
+            "minimum": 0,
+            "type": "number"
+          },
+          "view": {
+            "enum": [
+              "browse"
+            ],
+            "type": "string"
+          },
+          "viewH": {
+            "exclusiveMinimum": 0,
+            "maximum": 100000,
+            "type": "number"
+          }
+        },
+        "required": [
+          "view",
+          "top",
+          "viewH"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "`/ws/reader-sync` の dual-reader 同期プロトコル。\n\n全フレームは JSON。`v` = プロトコルバージョン（現行 1）。\n1 フレーム最大 64KiB（MANIFEST チャンク合計 32MiB まで）。\n画像/バイナリはデータプレーンを通らない（必ず `/image/*` HTTP 経由）。\n\n## 意味論\n\n- クライアント→サーバは「リクエストフレーム」:\n  `{v, requestId, sessionId, workEpoch, baseRevision, type, payload}`\n  サーバが受信順に逐次化（sequenced）して適用し、\n  ACK/REJECT/APPLIED で応答する。\n- STATE フレームは `revision` 単調増加の完全スナップショット。\n- PING/PONG は keepalive（シーケンス対象外）。\n- SIGNAL / UI_SYNC は peer-to-peer 中継でシーケンスされない\n  （UI_SYNC は ephemeral のみ、reader state を含んではならない）。\n- エラー応答の `code` は `ERR_VERSION | ERR_MALFORMED | ERR_TYPE |\n  ERR_RANGE | ERR_SIZE`。\n",
+    "title": "bookq Reader Sync Protocol",
+    "version": "1.0.0"
+  },
+  "operations": {
+    "receive": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/readerSync"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/readerSync/messages/hello"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/ack"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/reject"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/applied"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/state"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/manifest"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/end"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/ping"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/pong"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/signal"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/uiSync"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/transportState"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/joinRequest"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/joinCancel"
+        },
+        {
+          "$ref": "#/channels/readerSync/messages/error"
+        }
+      ]
+    },
+    "sendRequest": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/readerSync"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/readerSync/messages/request"
+        }
+      ]
+    }
+  },
+  "servers": {
+    "bookq": {
+      "description": "tailscale serve 経由（認証は cookieAuth or Bearer）",
+      "host": "bookq.{tailnet}.ts.net:443",
+      "protocol": "wss"
+    }
+  }
+}

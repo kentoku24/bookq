@@ -6,9 +6,12 @@ info:
     bookq サーバ/クライアント間の単一の正 (single source of truth)。
 
     この spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。
-    FastAPI (`app/`) と Rust (`server-rs/`) の両実装はこの spec に対して
-    Schemathesis 契約テストで検証される。iOS / Web クライアントはこの spec
-    からコード生成する。
+    FastAPI (`app/`) と Rust (`rust/viewer-rs`) の両実装はこの spec に対して
+    Schemathesis 契約テストで検証される。Web クライアントの型
+    (`app/static/api/api-types.d.ts`) と JSON バンドル (`api/dist/*.json`)
+    は `scripts/api/codegen.sh` でこの spec から生成し、iOS クライアントは
+    適合テスト (`ios/BookqTests/SpecConformanceTests.swift`) で契約遵守を
+    検証する。
 
     ## 認証
 

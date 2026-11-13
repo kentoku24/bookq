@@ -233,7 +233,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 呼び出しユーザーの隠しルート一覧 */
+        /** ライブラリ共有の隠しルート一覧（全ユーザー共通） */
         get: operations["getFolderVisibility"];
         /** 隠しルートの単項目トグル（v0 と同一契約） */
         put: operations["putFolderVisibility"];
@@ -612,6 +612,15 @@ export interface components {
                 "application/json": {
                     detail?: Record<string, never>[];
                 };
+            };
+        };
+        /** @description user-state ストアの読み書き失敗（fail-closed。ディスク/DB 障害時） */
+        ServiceUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
             };
         };
     };
@@ -1004,6 +1013,8 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     putReadingPosition: {
@@ -1039,7 +1050,9 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             422: components["responses"]["ValidationError"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     deleteReadingPosition: {
@@ -1067,6 +1080,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     getFolderVisibility: {
@@ -1425,6 +1440,8 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     legacyPutReadingPosition: {
@@ -1459,6 +1476,8 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     legacyDeleteReadingPosition: {
@@ -1483,6 +1502,8 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     legacyGetFolderVisibility: {
