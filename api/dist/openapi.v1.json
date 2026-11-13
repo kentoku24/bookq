@@ -340,7 +340,7 @@
     "contact": {
       "name": "bookq"
     },
-    "description": "bookq サーバ/クライアント間の単一の正 (single source of truth)。\n\nこの spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。\nFastAPI (`app/`) と Rust (`rust/viewer-rs`) の両実装はこの spec に対して\nSchemathesis 契約テストで検証される。Web クライアントの型\n(`app/static/api/api-types.d.ts`) と JSON バンドル (`api/dist/*.json`)\nは `scripts/api/codegen.sh` でこの spec から生成し、iOS クライアントは\n適合テスト (`ios/BookqTests/SpecConformanceTests.swift`) で契約遵守を\n検証する。\n\n## 認証\n\n全 `/api/**`・`/image/**`・`/thumb/**`・`/view/**`・`/ws/**` は認証必須。\n\n- `cookieAuth`: Google OAuth → 署名 session cookie（ブラウザ向け、現行）\n- `bearerAuth`: `POST /api/v1/auth/token` で発行する Bearer token\n  （ネイティブ向け、RFC 8252 PKCE フロー）\n\n## 共通セマンティクス\n\n### パス文字列\n`folder` / `{path}` 系パラメータはすべてダウンロードルート相対の\nPOSIX パス。先頭・末尾 `/` 不可、`..` 不可。URL 埋め込み時は\n**セグメント単位で percent-encode** する（`/` → `%2F` にしない。\n全体 encode は別 URL になりキャッシュ不一致を起こす）。\n\n### 書庫の仮想フォルダ\n`.zip .cbz .rar .cbr .epub` は `type: \"folder\", archive: true` の\nノードとして現れる。書庫内部のパスは longest-prefix 解決:\n`<…>/work.cbz/vol01/page.png` は書庫 `work.cbz` のエントリ\n`vol01/page.png` を指す。`.pdf` は `archive: true, pdf: true`。\n\n### ツリーの flatten\n「画像を持たず子フォルダが1つだけ」のフォルダは親に潰し込まれ、\n子ノードの `name` が `\"parent/child\"` になる。`name` が `/` を\n含むのはこの規約による正常形であり、クライアントはそのまま\nパス連結に使ってよい。\n\n### サムネイル解決\nノードの `thumb` / `thumbs[]` は**フォルダ相対のファイル名**。\nクライアントは `/image/<fullPath>/<thumb>` に解決する\n（`fullPath` = 親パス + `name` の連結）。\n\n### インデックス構築中\nメタデータインデックス構築中は `202 + Retry-After` を返す。\nクライアントは Retry-After 後に同一リクエストを再送する。\n\n### 排他・鮮度\n`generation` はライブラリ世代番号。`since=<generation>` で\n既知世代と一致する場合 304 を返す。メディア endpoint は\n`ETag` / `If-None-Match` と `Range: bytes=` をサポートする。\n\n### 隠しルート（セキュリティ契約）\nhidden roots は**ライブラリ全体で共有**（全認証ユーザーに同一の\nセットが効く）。hidden roots 配下のコンテンツは\n**サーバ側で除外**する。クライアント側フィルタはレスポンス本体に\n該当データを含めてしまうため認めない。`include_hidden=true` は\nこの共有 hidden セットの除外をスキップする（閲覧者個人の\n全表示モード用。一時的・非永続）。\n\n## 振る舞いの正本\n\nwire shape に表れない意味論（ETag 世代・positions LWW・\nvisibility owner HMAC・PKCE ライフサイクル・gzip 対象）は\n**`api/v1-semantics.md`** が正本。spec と併せて読むこと。\n",
+    "description": "bookq サーバ/クライアント間の単一の正 (single source of truth)。\n\nこの spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。\nFastAPI (`app/`) と Rust (`rust/viewer-rs`) の両実装はこの spec に対して\nSchemathesis 契約テストで検証される。Web クライアントの型\n(`app/static/api/api-types.d.ts`) と JSON バンドル (`api/dist/*.json`)\nは `scripts/api/codegen.sh` でこの spec から生成し、iOS クライアントは\n適合テスト (`ios/BookqTests/SpecConformanceTests.swift`) で契約遵守を\n検証する。\n\n## 認証\n\n全 `/api/**`・`/image/**`・`/thumb/**`・`/view/**`・`/ws/**` は認証必須。\n\n- `cookieAuth`: Google OAuth → 署名 session cookie（ブラウザ向け、現行）\n- `bearerAuth`: `POST /api/v1/auth/token` で発行する Bearer token\n  （ネイティブ向け、RFC 8252 PKCE フロー）\n\n## 共通セマンティクス\n\n### パス文字列\n`folder` / `{path}` 系パラメータはすべてダウンロードルート相対の\nPOSIX パス。先頭・末尾 `/` 不可、`..` 不可。URL 埋め込み時は\n**セグメント単位で percent-encode** する（`/` → `%2F` にしない。\n全体 encode は別 URL になりキャッシュ不一致を起こす）。\n\n### 書庫の仮想フォルダ\n`.zip .cbz .rar .cbr .epub` は `type: \"folder\", archive: true` の\nノードとして現れる。書庫内部のパスは longest-prefix 解決:\n`<…>/work.cbz/vol01/page.png` は書庫 `work.cbz` のエントリ\n`vol01/page.png` を指す。`.pdf` は `archive: true, pdf: true`。\n\n### ツリーの flatten\n「画像を持たず子フォルダが1つだけ」のフォルダは親に潰し込まれ、\n子ノードの `name` が `\"parent/child\"` になる。`name` が `/` を\n含むのはこの規約による正常形であり、クライアントはそのまま\nパス連結に使ってよい。\n\n### サムネイル解決\nノードの `thumb` / `thumbs[]` は**フォルダ相対のファイル名**。\nクライアントは `/image/<fullPath>/<thumb>` に解決する\n（`fullPath` = 親パス + `name` の連結）。\n\n### インデックス構築中\nメタデータインデックス構築中は `202 + Retry-After` を返す。\nクライアントは Retry-After 後に同一リクエストを再送する。\n\n### 排他・鮮度\n`generation` はライブラリ世代番号。`since=<generation>` で\n既知世代と一致する場合 304 を返す。メディア endpoint は\n`ETag` / `If-None-Match` と `Range: bytes=` をサポートする。\n\n### 隠しルート（セキュリティ契約）\nhidden roots は**ライブラリ全体で共有**（全認証ユーザーに同一の\nセットが効く）。hidden roots 配下のコンテンツは\n**サーバ側で除外**する。クライアント側フィルタはレスポンス本体に\n該当データを含めてしまうため認めない。`include_hidden=true` は\nこの共有 hidden セットの除外をスキップする（閲覧者個人の\n全表示モード用。一時的・非永続）。\n\n## v0 退役方針（#212 / #407）\n\n`deprecated: true` の v0 互換面（`/api/folders` 等 10 path）は\nviewer (Python) 停止と同時に廃止する（#410 の Python 撤去で\n自然に消える）。viewer-rs は v0 を native 実装しない\n（upstream proxy のまま → v0 停止時に upstream は不要）。\nPWA / iOS / Android と `scripts/prod_monitor.py` は v1 移行済み。\n\n`Deprecation` / `Sunset` 応答ヘッダは送らない。\nPython バックエンドは凍結中（`app/` untouched）のため二重実装の\nコストに見合わず、具体的な退役日の確定は #212 に委ねる。\nそれまでは本 spec の `deprecated: true` + 各 v0 operation の\nSunset 記載を正とする。\n\n## 振る舞いの正本\n\nwire shape に表れない意味論（ETag 世代・positions LWW・\nvisibility owner HMAC・PKCE ライフサイクル・gzip 対象）は\n**`api/v1-semantics.md`** が正本。spec と併せて読むこと。\n",
     "title": "bookq API",
     "version": "1.0.0"
   },
@@ -349,6 +349,7 @@
     "/api/folder-visibility": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyGetFolderVisibility",
         "responses": {
           "200": {
@@ -369,6 +370,7 @@
       },
       "put": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyPutFolderVisibility",
         "parameters": [
           {
@@ -436,6 +438,7 @@
     "/api/folders": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyGetFolders",
         "parameters": [
           {
@@ -526,6 +529,7 @@
     "/api/health": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyHealth",
         "responses": {
           "200": {
@@ -554,6 +558,7 @@
     "/api/images": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyListImages",
         "parameters": [
           {
@@ -598,6 +603,7 @@
     "/api/metadata/facets": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyFacets",
         "parameters": [
           {
@@ -644,6 +650,7 @@
     "/api/reading-position": {
       "delete": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyDeleteReadingPosition",
         "parameters": [
           {
@@ -684,6 +691,7 @@
       },
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyGetReadingPosition",
         "responses": {
           "200": {
@@ -725,6 +733,7 @@
       },
       "put": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyPutReadingPosition",
         "requestBody": {
           "content": {
@@ -802,6 +811,7 @@
     "/api/refresh": {
       "post": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyRefresh",
         "responses": {
           "200": {
@@ -832,6 +842,7 @@
     "/api/search": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacySearch",
         "parameters": [
           {
@@ -908,6 +919,7 @@
     "/api/thumb-sprite": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyThumbSprite",
         "parameters": [
           {
@@ -1813,6 +1825,7 @@
     "/api/version": {
       "get": {
         "deprecated": true,
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
         "operationId": "legacyVersion",
         "responses": {
           "200": {
