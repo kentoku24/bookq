@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-# Usage: ./scripts/sim-teardown.sh [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills]
+# Usage: ./scripts/sim-teardown.sh [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills] [--audit-only]
+#   --audit-only: 停止・削除・kill を一切行わず診断レポート + CPU 監査のみ
 # sim を使った検証の終了時に必須実行する片付け+CPU監査 (冪等)。
 #   1. --dev-env 指定の dev 環境を down (user-state volume は保持)
 #   2. booted sim を shutdown (--udid 指定時はその1台のみ)
@@ -16,6 +17,7 @@ TARGET_UDID=""
 KEEP_CLONES=0
 KEEP_IDB=0
 SKIP_PROC_KILLS=0
+AUDIT_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dev-env) DEV_ENV=$2; shift 2 ;;
@@ -23,7 +25,8 @@ while [ $# -gt 0 ]; do
     --keep-clones) KEEP_CLONES=1; shift ;;
     --keep-idb) KEEP_IDB=1; shift ;;
     --skip-process-kills) SKIP_PROC_KILLS=1; shift ;;
-    *) echo "Usage: $0 [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills]" >&2; exit 2 ;;
+    --audit-only) AUDIT_ONLY=1; shift ;;
+    *) echo "Usage: $0 [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills] [--audit-only]" >&2; exit 2 ;;
   esac
 done
 
@@ -39,7 +42,9 @@ fi
 
 # 実行中 xcodebuild test があるか — ある間は Clone デバイスを他セッションの
 # テスト資産として shutdown/delete 対象から外す (殺すと他セッションのテストが死ぬ)
-live_xcodebuild=$(pgrep -f "xcodebuild test" | head -1 || true)
+live_xcodebuild=$(pgrep -f "xcodebuild.*test" | head -1 || true)
+
+if [ "$AUDIT_ONLY" = 0 ]; then
 
 echo "== sim shutdown"
 if [ -n "$TARGET_UDID" ]; then
@@ -116,6 +121,8 @@ else
   echo "== 残留診断プロセス整理: --skip-process-kills のため省略"
 fi
 
+fi # AUDIT_ONLY
+
 sleep 3
 
 echo "== CPU 監査"
@@ -138,7 +145,7 @@ fi
 # 実行中 xcodebuild は別セッション所有の可能性 — kill せず報告のみ
 while read -r pid ppid cmd; do
   echo "  info: xcodebuild 実行中 pid $pid (他セッション所有なら放置; 自物で停滞なら手動 kill)" >&2
-done < <(pgrep -fl "xcodebuild test" || true)
+done < <(pgrep -fl "xcodebuild.*test" || true)
 
 load=$(sysctl -n vm.loadavg 2>/dev/null || uptime | sed 's/.*load averages*: //')
 echo "  loadavg: $load"

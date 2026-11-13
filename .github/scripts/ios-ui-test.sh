@@ -131,11 +131,13 @@ DEST="platform=iOS Simulator,id=$UDID"
 
 # Leave no running simulator behind (AGENTS.md iOS Simulator rule).
 # Scoped part always runs: shutdown our device + clones (delete fails
-# on a Booted clone), prune our XCTestDevices data. Then the repo
-# teardown handles the rest with --skip-process-kills — its global
-# idb/diagnose kills would otherwise interrupt a parallel session's
-# verification, while its CPU audit (AGENTS.md-mandated) still runs.
+# on a Booted clone), prune our XCTestDevices data — never another
+# session's. Then the repo teardown: --audit-only while other
+# verification is in flight (its global kills would interrupt them),
+# full cleanup otherwise. CPU-audit failure propagates as an error on
+# a quiet host, warning under contention — never silently dropped.
 cleanup() {
+  rc=$?
   xcrun simctl shutdown "$UDID" 2>/dev/null || true
   clone_udids="$(xcrun simctl list devices -j 2>/dev/null | python3 -c '
 import json,sys
@@ -159,8 +161,15 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
     done
   done
   if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
-    scripts/sim-teardown.sh --udid "$UDID" --skip-process-kills || true
+    if pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
+      scripts/sim-teardown.sh --udid "$UDID" --audit-only \
+        || echo "WARN: sim teardown audit flagged leftovers (並走検証の所有の可能性あり)"
+    else
+      scripts/sim-teardown.sh --udid "$UDID" \
+        || { echo "ERROR: sim teardown / CPU audit failed"; rc=1; }
+    fi
   fi
+  exit "$rc"
 }
 trap cleanup EXIT
 
