@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "languages": ["js", "swift"],
+  "languages": ["js", "swift", "kotlin"],
   "doc": "Solo spreads: from padded global images + chapter boundaries + pageMode + spreadOffset decide spreads and the spacer map. Ports: app/static/viewer/spread.js (rebuildSpreads: offset leading singletons then pairs, spacers dropped, chapterStart when a spread's first page is a non-zero boundary) and ios ReaderWork.assemble/rebuildSpreads (same padding rule pad=(startIdx-spreadOff+2)%2 before each chapter boundary + same grouping). Padding contract (#441): startIdx is the post-shift index (boundaries[c] already includes earlier pads) — earlier pads are NOT added again (app.js double-count fixed to mobile definition). The three-chapters cases pin cumulative pads where the old double-count diverged. Images use {folder, name}; spacers are {folder:'', name:'__spacer__', isSpacer:true}. expectSpreads lists global indices per spread; expectChapterStart flags chapter-opening spreads; expectIdxToSpread maps every global index (-1 for spacers; JS keeps these slots as holes/undefined and normalizes to -1, Swift stores -1). Python pins the file's declaration only (no solo-spread port on the server).",
   "cases": [
     {

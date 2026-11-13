@@ -142,7 +142,18 @@ data class ReaderWork(
     fun withMode(mode: ReaderPageMode, offset: Int): ReaderWork =
         copy(pageMode = mode, spreadOffset = offset).rebuildSpreads(offset)
 
-    private fun rebuildSpreads(offset: Int): ReaderWork {
+    /** Chapter-opening spread — `chapterStart` (spread.js `rebuildSpreads`):
+     *  a spread whose first page is a non-zero chapter boundary. */
+    fun chapterStartSpread(s: Int): Boolean {
+        val first = spreads.getOrNull(s)?.firstOrNull() ?: return false
+        return boundaries.indexOf(first) > 0
+    }
+
+    /** `rebuildSpreads` (spread.js) — groups pages into spreads, filters
+     *  spacers, marks chapter-start spreads. Public for the
+     *  `api/vectors/solo-spreads.json` conformance test, which supplies
+     *  pre-padded images + boundaries (no `assemble` re-pad). */
+    fun rebuildSpreads(offset: Int): ReaderWork {
         val groups = mutableListOf<List<Int>>()
         val n = images.size
         if (pageMode == ReaderPageMode.SPREAD) {

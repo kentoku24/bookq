@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "languages": ["python", "js", "swift", "rust"],
+  "languages": ["python", "js", "swift", "rust", "kotlin"],
   "doc": "Path lookup: from a composed path (which may contain '/' inside flattened node names) resolve the node and its structural parent. Ports: app/routes.py (_find_tree_node) + app/reader_sync/catalog.py (_find_container), app/static/app.js (findNodeByPath/getParentPath via findParentPath prefix walk), ios BrowseModel.node(at:) (+ parent verified structurally). Node names are NEVER split on '/': matching is always on the composed parent/name path. A root-level match has parent null. Trees use {name, type, children} with type folder|image.",
   "cases": [
     {
