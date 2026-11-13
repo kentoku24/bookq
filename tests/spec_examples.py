@@ -87,6 +87,11 @@ def install_spec_routes(page, scenario=None, status_overrides=None):
         req = route.request
         u = urlparse(req.url)
         path, method = u.path, req.method
+        # `**/api/**` also matches static assets under /static/api/ (the
+        # generated endpoints + typed client). Those are shell assets, not
+        # data — pass them through to the real server.
+        if path.startswith("/static/"):
+            return route.continue_()
         hits[path] = hits.get(path, 0) + 1
         qs = parse_qs(u.query)
 

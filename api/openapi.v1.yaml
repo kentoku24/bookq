@@ -586,6 +586,9 @@ paths:
                 properties:
                   status: {type: string, enum: [ok, stale]}
               examples:
+                default:
+                  summary: 正常系（受理）
+                  value: {status: ok}
                 ok:
                   summary: 受理
                   value: {status: ok}

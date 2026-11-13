@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "spec": "/home/runner/work/bookq/bookq/.worktrees/ai-237-spec-examples-mock-server/api/openapi.v1.yaml",
+  "spec": "/Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/421-spec-mock/api/openapi.v1.yaml",
   "examples": [
     {
       "operationId": "getHealth",
@@ -777,6 +777,19 @@
       "summary": "ストア障害（fail-closed）",
       "value": {
         "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（受理）",
+      "value": {
+        "status": "ok"
       }
     },
     {
