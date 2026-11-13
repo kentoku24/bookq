@@ -69,6 +69,8 @@ export interface ApiErrorShape extends Error {
 
 export interface BookqApiShape {
   endpoints: { [key: string]: string };
+  /** "" = same-origin; `?api_base=` mock-server base URL (#237). */
+  base: string;
   ApiError: new (status: number, code: string | null, detail: string) => ApiErrorShape;
 
   treeUrl(opts?: { path?: string; depth?: number; since?: number | null }): string;

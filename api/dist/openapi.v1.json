@@ -4,6 +4,14 @@
       "BadRequest": {
         "content": {
           "application/json": {
+            "examples": {
+              "default": {
+                "summary": "パラメータ不正",
+                "value": {
+                  "detail": "invalid folder parameter"
+                }
+              }
+            },
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
@@ -14,6 +22,15 @@
       "Conflict": {
         "content": {
           "application/json": {
+            "examples": {
+              "owner_mismatch": {
+                "summary": "visibility owner 不一致（stale タブ）",
+                "value": {
+                  "code": "owner_mismatch",
+                  "detail": "visibility owner mismatch"
+                }
+              }
+            },
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
@@ -24,6 +41,20 @@
       "Forbidden": {
         "content": {
           "application/json": {
+            "examples": {
+              "default": {
+                "summary": "経路外アクセス",
+                "value": {
+                  "detail": "path escapes downloads root"
+                }
+              },
+              "hidden": {
+                "summary": "hidden 配下（サーバ側除外）",
+                "value": {
+                  "detail": "path is hidden"
+                }
+              }
+            },
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
@@ -34,6 +65,14 @@
       "IndexBuilding": {
         "content": {
           "application/json": {
+            "examples": {
+              "index_building": {
+                "summary": "構築中（Retry-After で再送）",
+                "value": {
+                  "detail": "metadata index building"
+                }
+              }
+            },
             "schema": {
               "properties": {
                 "detail": {
@@ -61,6 +100,14 @@
       "NotFound": {
         "content": {
           "application/json": {
+            "examples": {
+              "default": {
+                "summary": "対象なし",
+                "value": {
+                  "detail": "not found: Series/vol1"
+                }
+              }
+            },
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
@@ -71,6 +118,14 @@
       "ServiceUnavailable": {
         "content": {
           "application/json": {
+            "examples": {
+              "default": {
+                "summary": "ストア障害（fail-closed）",
+                "value": {
+                  "detail": "user-state store unavailable"
+                }
+              }
+            },
             "schema": {
               "$ref": "#/components/schemas/Error"
             }
@@ -81,6 +136,23 @@
       "ValidationError": {
         "content": {
           "application/json": {
+            "examples": {
+              "default": {
+                "summary": "バリデーション失敗",
+                "value": {
+                  "detail": [
+                    {
+                      "loc": [
+                        "query",
+                        "folder"
+                      ],
+                      "msg": "field required",
+                      "type": "missing"
+                    }
+                  ]
+                }
+              }
+            },
             "schema": {
               "properties": {
                 "detail": {
@@ -994,6 +1066,23 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "examples": {
+                "authorization_code": {
+                  "summary": "認可コード交換",
+                  "value": {
+                    "code": "authcode-123",
+                    "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+                    "grant_type": "authorization_code"
+                  }
+                },
+                "refresh_token": {
+                  "summary": "リフレッシュ",
+                  "value": {
+                    "grant_type": "refresh_token",
+                    "refresh_token": "refresh-abc"
+                  }
+                }
+              },
               "schema": {
                 "oneOf": [
                   {
@@ -1045,6 +1134,17 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "access_token": "eyJhbGciOiJIUzI1NiJ9.spec-example",
+                      "expires_in": 3600,
+                      "refresh_token": "refresh-abc123",
+                      "token_type": "Bearer"
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "access_token": {
@@ -1113,6 +1213,20 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "artists": [
+                        "sample-artist"
+                      ],
+                      "tags": [
+                        "tag1",
+                        "tag2"
+                      ]
+                    }
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/Facets"
                 }
@@ -1140,6 +1254,26 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系（1件 hidden）",
+                    "value": {
+                      "hiddenRoots": [
+                        "Secret"
+                      ],
+                      "owner": "owner-abc123",
+                      "revision": 4
+                    }
+                  },
+                  "empty": {
+                    "summary": "hidden なし",
+                    "value": {
+                      "hiddenRoots": [],
+                      "owner": "owner-abc123",
+                      "revision": 4
+                    }
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/FolderVisibility"
                 }
@@ -1179,6 +1313,22 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "examples": {
+                "hide": {
+                  "summary": "隠す",
+                  "value": {
+                    "hidden": true,
+                    "root": "Secret"
+                  }
+                },
+                "unhide": {
+                  "summary": "戻す",
+                  "value": {
+                    "hidden": false,
+                    "root": "Secret"
+                  }
+                }
+              },
               "schema": {
                 "additionalProperties": false,
                 "properties": {
@@ -1205,6 +1355,18 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "更新後",
+                    "value": {
+                      "hiddenRoots": [
+                        "Secret"
+                      ],
+                      "owner": "owner-def456",
+                      "revision": 5
+                    }
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/FolderVisibility"
                 }
@@ -1238,6 +1400,14 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "status": "ok"
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "status": {
@@ -1282,6 +1452,26 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系（natural sort 済み）",
+                    "value": {
+                      "folder": "Series/vol1",
+                      "images": [
+                        "p00.jpg",
+                        "p01.jpg",
+                        "p02.jpg"
+                      ]
+                    }
+                  },
+                  "empty": {
+                    "summary": "画像なしフォルダ",
+                    "value": {
+                      "folder": "Series/empty",
+                      "images": []
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "folder": {
@@ -1338,6 +1528,15 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "folders": 3,
+                      "status": "ok"
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "folders": {
@@ -1386,6 +1585,14 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "status": "ok"
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "status": {
@@ -1435,6 +1642,46 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系（2件）",
+                    "value": {
+                      "positions": [
+                        {
+                          "folder": "Series/vol1",
+                          "page": 2,
+                          "total": 10,
+                          "ts": 1716000000000
+                        },
+                        {
+                          "folder": "work.cbz",
+                          "page": 0,
+                          "total": 5,
+                          "ts": 1715900000000
+                        }
+                      ]
+                    }
+                  },
+                  "empty": {
+                    "summary": "記録なし",
+                    "value": {
+                      "positions": []
+                    }
+                  },
+                  "single": {
+                    "summary": "folder 絞り込み（1件）",
+                    "value": {
+                      "positions": [
+                        {
+                          "folder": "Series/vol1",
+                          "page": 2,
+                          "total": 10,
+                          "ts": 1716000000000
+                        }
+                      ]
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "positions": {
@@ -1481,6 +1728,16 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "examples": {
+                "default": {
+                  "summary": "正常系リクエスト",
+                  "value": {
+                    "page": 2,
+                    "total": 10,
+                    "ts": 1716000000000
+                  }
+                }
+              },
               "schema": {
                 "properties": {
                   "page": {
@@ -1512,6 +1769,26 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系（受理）",
+                    "value": {
+                      "status": "ok"
+                    }
+                  },
+                  "ok": {
+                    "summary": "受理",
+                    "value": {
+                      "status": "ok"
+                    }
+                  },
+                  "stale": {
+                    "summary": "古い ts で棄却（newest-wins）",
+                    "value": {
+                      "status": "stale"
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "status": {
@@ -1603,6 +1880,41 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系（1件ヒット）",
+                    "value": {
+                      "query": "vol1",
+                      "results": [
+                        {
+                          "artist": [
+                            "sample-artist"
+                          ],
+                          "folder_name": "vol1",
+                          "folder_path": "Series/vol1",
+                          "has_metadata": true,
+                          "source": "test",
+                          "tags": [
+                            "tag1",
+                            "tag2"
+                          ],
+                          "title_en": "Sample Work",
+                          "title_jp": "サンプル作品",
+                          "total_pages": 3
+                        }
+                      ],
+                      "total": 1
+                    }
+                  },
+                  "empty": {
+                    "summary": "ヒットなし",
+                    "value": {
+                      "query": "no-such-work",
+                      "results": [],
+                      "total": 0
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "query": {
@@ -1753,6 +2065,65 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "children": {
+                    "summary": "depth=1 の浅い一覧",
+                    "value": {
+                      "generation": 7,
+                      "kind": "children",
+                      "nodes": [
+                        {
+                          "children": [],
+                          "name": "Series",
+                          "type": "folder"
+                        },
+                        {
+                          "archive": true,
+                          "children": [],
+                          "name": "work.cbz",
+                          "type": "folder"
+                        }
+                      ]
+                    }
+                  },
+                  "default": {
+                    "summary": "全木（flatten・サムネ解決込み）",
+                    "value": {
+                      "generation": 7,
+                      "kind": "tree",
+                      "nodes": [
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "name": "p00.jpg",
+                                  "type": "image"
+                                },
+                                {
+                                  "name": "p01.jpg",
+                                  "type": "image"
+                                }
+                              ],
+                              "name": "vol1",
+                              "thumb": "p00.jpg",
+                              "type": "folder"
+                            }
+                          ],
+                          "name": "Series",
+                          "type": "folder"
+                        },
+                        {
+                          "archive": true,
+                          "children": [],
+                          "name": "work.cbz",
+                          "thumb": "cover.jpg",
+                          "type": "folder"
+                        }
+                      ]
+                    }
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/TreeResponse"
                 }
@@ -1792,6 +2163,16 @@
           "200": {
             "content": {
               "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "build_date": "2026-05-01T00:00:00Z",
+                      "sha": "abc1234",
+                      "version": "1.0.0"
+                    }
+                  }
+                },
                 "schema": {
                   "properties": {
                     "build_date": {

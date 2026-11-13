@@ -14,6 +14,12 @@
  * viewer + downloads stay on /image/ (window.OfflineCore.imageUrl, untouched).
  */
 (function () {
+  // OfflineCore-less fallback base (#237 ?api_base= mock dev).
+  function _mb() {
+    try {
+      return (typeof globalThis !== "undefined" && globalThis.BookqApi && globalThis.BookqApi.base) || "";
+    } catch (e) { return ""; }
+  }
   function resolveCover(node, w) {
     if (!node) return null;
     var folder = node._fullPath;
@@ -21,11 +27,11 @@
     var OC = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
     var width = (w === 200 || w === 800) ? w : 400;
     if (node.thumb) {
-      return OC && OC.thumbUrl ? OC.thumbUrl(folder, node.thumb, width) : "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + node.thumb.split("/").map(encodeURIComponent).join("/") + "?w=" + width;
+      return OC && OC.thumbUrl ? OC.thumbUrl(folder, node.thumb, width) : _mb() + "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + node.thumb.split("/").map(encodeURIComponent).join("/") + "?w=" + width;
     }
     if (node.thumbs && Array.isArray(node.thumbs) && node.thumbs.length > 0 && node.thumbs[0]) {
       var t = node.thumbs[0];
-      return OC && OC.thumbUrl ? OC.thumbUrl(folder, t, width) : "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + t.split("/").map(encodeURIComponent).join("/") + "?w=" + width;
+      return OC && OC.thumbUrl ? OC.thumbUrl(folder, t, width) : _mb() + "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + t.split("/").map(encodeURIComponent).join("/") + "?w=" + width;
     }
     return null;
   }
@@ -40,7 +46,7 @@
     var OC = (typeof window !== "undefined" && window.OfflineCore) ? window.OfflineCore : null;
     var w = (OC && OC.coverWidth) ? OC.coverWidth() : 200;
     if (OC && OC.thumbUrl) return OC.thumbUrl(folder, node.thumb, w);
-    return "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + node.thumb.split("/").map(encodeURIComponent).join("/") + "?w=" + w;
+    return _mb() + "/thumb/" + folder.split("/").map(encodeURIComponent).join("/") + "/" + node.thumb.split("/").map(encodeURIComponent).join("/") + "?w=" + w;
   }
   // Returns <img> HTML or placeholder div; cssClass is tile-img/card-img/thumb
   function resolveCoverHtml(node, cssClass) {

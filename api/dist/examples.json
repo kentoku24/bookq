@@ -1,0 +1,1704 @@
+{
+  "version": 1,
+  "spec": "api/openapi.v1.yaml",
+  "examples": [
+    {
+      "operationId": "getHealth",
+      "method": "get",
+      "path": "/api/v1/health",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "status": "ok"
+      }
+    },
+    {
+      "operationId": "getVersion",
+      "method": "get",
+      "path": "/api/v1/version",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "version": "1.0.0",
+        "sha": "abc1234",
+        "build_date": "2026-05-01T00:00:00Z"
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "全木（flatten・サムネ解決込み）",
+      "value": {
+        "kind": "tree",
+        "generation": 7,
+        "nodes": [
+          {
+            "name": "Series",
+            "type": "folder",
+            "children": [
+              {
+                "name": "vol1",
+                "type": "folder",
+                "thumb": "p00.jpg",
+                "children": [
+                  {
+                    "name": "p00.jpg",
+                    "type": "image"
+                  },
+                  {
+                    "name": "p01.jpg",
+                    "type": "image"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "work.cbz",
+            "type": "folder",
+            "archive": true,
+            "thumb": "cover.jpg",
+            "children": []
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "children",
+      "summary": "depth=1 の浅い一覧",
+      "value": {
+        "kind": "children",
+        "generation": 7,
+        "nodes": [
+          {
+            "name": "Series",
+            "type": "folder",
+            "children": []
+          },
+          {
+            "name": "work.cbz",
+            "type": "folder",
+            "archive": true,
+            "children": []
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "202",
+      "section": "response",
+      "sharedResponse": "IndexBuilding",
+      "media": "application/json",
+      "name": "index_building",
+      "summary": "構築中（Retry-After で再送）",
+      "value": {
+        "detail": "metadata index building"
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "getTree",
+      "method": "get",
+      "path": "/api/v1/tree",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "listImages",
+      "method": "get",
+      "path": "/api/v1/images",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（natural sort 済み）",
+      "value": {
+        "folder": "Series/vol1",
+        "images": [
+          "p00.jpg",
+          "p01.jpg",
+          "p02.jpg"
+        ]
+      }
+    },
+    {
+      "operationId": "listImages",
+      "method": "get",
+      "path": "/api/v1/images",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "empty",
+      "summary": "画像なしフォルダ",
+      "value": {
+        "folder": "Series/empty",
+        "images": []
+      }
+    },
+    {
+      "operationId": "listImages",
+      "method": "get",
+      "path": "/api/v1/images",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "listImages",
+      "method": "get",
+      "path": "/api/v1/images",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "listImages",
+      "method": "get",
+      "path": "/api/v1/images",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "listImages",
+      "method": "get",
+      "path": "/api/v1/images",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "search",
+      "method": "get",
+      "path": "/api/v1/search",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（1件ヒット）",
+      "value": {
+        "query": "vol1",
+        "total": 1,
+        "results": [
+          {
+            "folder_path": "Series/vol1",
+            "folder_name": "vol1",
+            "title_jp": "サンプル作品",
+            "title_en": "Sample Work",
+            "artist": [
+              "sample-artist"
+            ],
+            "tags": [
+              "tag1",
+              "tag2"
+            ],
+            "source": "test",
+            "has_metadata": true,
+            "total_pages": 3
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "search",
+      "method": "get",
+      "path": "/api/v1/search",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "empty",
+      "summary": "ヒットなし",
+      "value": {
+        "query": "no-such-work",
+        "total": 0,
+        "results": []
+      }
+    },
+    {
+      "operationId": "search",
+      "method": "get",
+      "path": "/api/v1/search",
+      "status": "202",
+      "section": "response",
+      "sharedResponse": "IndexBuilding",
+      "media": "application/json",
+      "name": "index_building",
+      "summary": "構築中（Retry-After で再送）",
+      "value": {
+        "detail": "metadata index building"
+      }
+    },
+    {
+      "operationId": "search",
+      "method": "get",
+      "path": "/api/v1/search",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "getFacets",
+      "method": "get",
+      "path": "/api/v1/facets",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "artists": [
+          "sample-artist"
+        ],
+        "tags": [
+          "tag1",
+          "tag2"
+        ]
+      }
+    },
+    {
+      "operationId": "getFacets",
+      "method": "get",
+      "path": "/api/v1/facets",
+      "status": "202",
+      "section": "response",
+      "sharedResponse": "IndexBuilding",
+      "media": "application/json",
+      "name": "index_building",
+      "summary": "構築中（Retry-After で再送）",
+      "value": {
+        "detail": "metadata index building"
+      }
+    },
+    {
+      "operationId": "getFacets",
+      "method": "get",
+      "path": "/api/v1/facets",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "refreshIndex",
+      "method": "post",
+      "path": "/api/v1/index/refresh",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "status": "ok",
+        "folders": 3
+      }
+    },
+    {
+      "operationId": "getThumbSprite",
+      "method": "get",
+      "path": "/api/v1/thumb-sprite",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "getThumbSprite",
+      "method": "get",
+      "path": "/api/v1/thumb-sprite",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "getThumbSprite",
+      "method": "get",
+      "path": "/api/v1/thumb-sprite",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "getThumbSprite",
+      "method": "get",
+      "path": "/api/v1/thumb-sprite",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "getThumbSprite",
+      "method": "get",
+      "path": "/api/v1/thumb-sprite",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "getImage",
+      "method": "get",
+      "path": "/image/{path}",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "getImage",
+      "method": "get",
+      "path": "/image/{path}",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "getImage",
+      "method": "get",
+      "path": "/image/{path}",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "getThumb",
+      "method": "get",
+      "path": "/thumb/{path}",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "getThumb",
+      "method": "get",
+      "path": "/thumb/{path}",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "getThumb",
+      "method": "get",
+      "path": "/thumb/{path}",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "getThumb",
+      "method": "get",
+      "path": "/thumb/{path}",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "getView",
+      "method": "get",
+      "path": "/view/{path}",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "getView",
+      "method": "get",
+      "path": "/view/{path}",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "getView",
+      "method": "get",
+      "path": "/view/{path}",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "getView",
+      "method": "get",
+      "path": "/view/{path}",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "listReadingPositions",
+      "method": "get",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（2件）",
+      "value": {
+        "positions": [
+          {
+            "folder": "Series/vol1",
+            "page": 2,
+            "total": 10,
+            "ts": 1716000000000
+          },
+          {
+            "folder": "work.cbz",
+            "page": 0,
+            "total": 5,
+            "ts": 1715900000000
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "listReadingPositions",
+      "method": "get",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "single",
+      "summary": "folder 絞り込み（1件）",
+      "value": {
+        "positions": [
+          {
+            "folder": "Series/vol1",
+            "page": 2,
+            "total": 10,
+            "ts": 1716000000000
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "listReadingPositions",
+      "method": "get",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "empty",
+      "summary": "記録なし",
+      "value": {
+        "positions": []
+      }
+    },
+    {
+      "operationId": "listReadingPositions",
+      "method": "get",
+      "path": "/api/v1/reading-positions",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "listReadingPositions",
+      "method": "get",
+      "path": "/api/v1/reading-positions",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "listReadingPositions",
+      "method": "get",
+      "path": "/api/v1/reading-positions",
+      "status": "503",
+      "section": "response",
+      "sharedResponse": "ServiceUnavailable",
+      "media": "application/json",
+      "name": "default",
+      "summary": "ストア障害（fail-closed）",
+      "value": {
+        "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（受理）",
+      "value": {
+        "status": "ok"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "ok",
+      "summary": "受理",
+      "value": {
+        "status": "ok"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "stale",
+      "summary": "古い ts で棄却（newest-wins）",
+      "value": {
+        "status": "stale"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "503",
+      "section": "response",
+      "sharedResponse": "ServiceUnavailable",
+      "media": "application/json",
+      "name": "default",
+      "summary": "ストア障害（fail-closed）",
+      "value": {
+        "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "putReadingPosition",
+      "method": "put",
+      "path": "/api/v1/reading-positions",
+      "status": "request",
+      "section": "request",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系リクエスト",
+      "value": {
+        "page": 2,
+        "total": 10,
+        "ts": 1716000000000
+      }
+    },
+    {
+      "operationId": "deleteReadingPosition",
+      "method": "delete",
+      "path": "/api/v1/reading-positions",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "status": "ok"
+      }
+    },
+    {
+      "operationId": "deleteReadingPosition",
+      "method": "delete",
+      "path": "/api/v1/reading-positions",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "deleteReadingPosition",
+      "method": "delete",
+      "path": "/api/v1/reading-positions",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "deleteReadingPosition",
+      "method": "delete",
+      "path": "/api/v1/reading-positions",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "deleteReadingPosition",
+      "method": "delete",
+      "path": "/api/v1/reading-positions",
+      "status": "503",
+      "section": "response",
+      "sharedResponse": "ServiceUnavailable",
+      "media": "application/json",
+      "name": "default",
+      "summary": "ストア障害（fail-closed）",
+      "value": {
+        "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "getFolderVisibility",
+      "method": "get",
+      "path": "/api/v1/folder-visibility",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（1件 hidden）",
+      "value": {
+        "owner": "owner-abc123",
+        "revision": 4,
+        "hiddenRoots": [
+          "Secret"
+        ]
+      }
+    },
+    {
+      "operationId": "getFolderVisibility",
+      "method": "get",
+      "path": "/api/v1/folder-visibility",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "empty",
+      "summary": "hidden なし",
+      "value": {
+        "owner": "owner-abc123",
+        "revision": 4,
+        "hiddenRoots": []
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "更新後",
+      "value": {
+        "owner": "owner-def456",
+        "revision": 5,
+        "hiddenRoots": [
+          "Secret"
+        ]
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "409",
+      "section": "response",
+      "sharedResponse": "Conflict",
+      "media": "application/json",
+      "name": "owner_mismatch",
+      "summary": "visibility owner 不一致（stale タブ）",
+      "value": {
+        "detail": "visibility owner mismatch",
+        "code": "owner_mismatch"
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "request",
+      "section": "request",
+      "media": "application/json",
+      "name": "hide",
+      "summary": "隠す",
+      "value": {
+        "root": "Secret",
+        "hidden": true
+      }
+    },
+    {
+      "operationId": "putFolderVisibility",
+      "method": "put",
+      "path": "/api/v1/folder-visibility",
+      "status": "request",
+      "section": "request",
+      "media": "application/json",
+      "name": "unhide",
+      "summary": "戻す",
+      "value": {
+        "root": "Secret",
+        "hidden": false
+      }
+    },
+    {
+      "operationId": "exchangeToken",
+      "method": "post",
+      "path": "/api/v1/auth/token",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "access_token": "eyJhbGciOiJIUzI1NiJ9.spec-example",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "refresh_token": "refresh-abc123"
+      }
+    },
+    {
+      "operationId": "exchangeToken",
+      "method": "post",
+      "path": "/api/v1/auth/token",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "exchangeToken",
+      "method": "post",
+      "path": "/api/v1/auth/token",
+      "status": "request",
+      "section": "request",
+      "media": "application/json",
+      "name": "authorization_code",
+      "summary": "認可コード交換",
+      "value": {
+        "grant_type": "authorization_code",
+        "code": "authcode-123",
+        "code_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+      }
+    },
+    {
+      "operationId": "exchangeToken",
+      "method": "post",
+      "path": "/api/v1/auth/token",
+      "status": "request",
+      "section": "request",
+      "media": "application/json",
+      "name": "refresh_token",
+      "summary": "リフレッシュ",
+      "value": {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-abc"
+      }
+    },
+    {
+      "operationId": "legacyGetFolders",
+      "method": "get",
+      "path": "/api/folders",
+      "status": "202",
+      "section": "response",
+      "sharedResponse": "IndexBuilding",
+      "media": "application/json",
+      "name": "index_building",
+      "summary": "構築中（Retry-After で再送）",
+      "value": {
+        "detail": "metadata index building"
+      }
+    },
+    {
+      "operationId": "legacyGetFolders",
+      "method": "get",
+      "path": "/api/folders",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "legacyGetFolders",
+      "method": "get",
+      "path": "/api/folders",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "legacyGetFolders",
+      "method": "get",
+      "path": "/api/folders",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "legacyGetFolders",
+      "method": "get",
+      "path": "/api/folders",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "legacyGetFolders",
+      "method": "get",
+      "path": "/api/folders",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "legacyListImages",
+      "method": "get",
+      "path": "/api/images",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "legacyListImages",
+      "method": "get",
+      "path": "/api/images",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "legacyListImages",
+      "method": "get",
+      "path": "/api/images",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "legacyListImages",
+      "method": "get",
+      "path": "/api/images",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "legacySearch",
+      "method": "get",
+      "path": "/api/search",
+      "status": "202",
+      "section": "response",
+      "sharedResponse": "IndexBuilding",
+      "media": "application/json",
+      "name": "index_building",
+      "summary": "構築中（Retry-After で再送）",
+      "value": {
+        "detail": "metadata index building"
+      }
+    },
+    {
+      "operationId": "legacySearch",
+      "method": "get",
+      "path": "/api/search",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "legacyFacets",
+      "method": "get",
+      "path": "/api/metadata/facets",
+      "status": "202",
+      "section": "response",
+      "sharedResponse": "IndexBuilding",
+      "media": "application/json",
+      "name": "index_building",
+      "summary": "構築中（Retry-After で再送）",
+      "value": {
+        "detail": "metadata index building"
+      }
+    },
+    {
+      "operationId": "legacyFacets",
+      "method": "get",
+      "path": "/api/metadata/facets",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "legacyThumbSprite",
+      "method": "get",
+      "path": "/api/thumb-sprite",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "legacyThumbSprite",
+      "method": "get",
+      "path": "/api/thumb-sprite",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "legacyThumbSprite",
+      "method": "get",
+      "path": "/api/thumb-sprite",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "legacyGetReadingPosition",
+      "method": "get",
+      "path": "/api/reading-position",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "legacyGetReadingPosition",
+      "method": "get",
+      "path": "/api/reading-position",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "legacyGetReadingPosition",
+      "method": "get",
+      "path": "/api/reading-position",
+      "status": "503",
+      "section": "response",
+      "sharedResponse": "ServiceUnavailable",
+      "media": "application/json",
+      "name": "default",
+      "summary": "ストア障害（fail-closed）",
+      "value": {
+        "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "legacyPutReadingPosition",
+      "method": "put",
+      "path": "/api/reading-position",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "legacyPutReadingPosition",
+      "method": "put",
+      "path": "/api/reading-position",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "legacyPutReadingPosition",
+      "method": "put",
+      "path": "/api/reading-position",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "legacyPutReadingPosition",
+      "method": "put",
+      "path": "/api/reading-position",
+      "status": "503",
+      "section": "response",
+      "sharedResponse": "ServiceUnavailable",
+      "media": "application/json",
+      "name": "default",
+      "summary": "ストア障害（fail-closed）",
+      "value": {
+        "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "legacyDeleteReadingPosition",
+      "method": "delete",
+      "path": "/api/reading-position",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "legacyDeleteReadingPosition",
+      "method": "delete",
+      "path": "/api/reading-position",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "legacyDeleteReadingPosition",
+      "method": "delete",
+      "path": "/api/reading-position",
+      "status": "503",
+      "section": "response",
+      "sharedResponse": "ServiceUnavailable",
+      "media": "application/json",
+      "name": "default",
+      "summary": "ストア障害（fail-closed）",
+      "value": {
+        "detail": "user-state store unavailable"
+      }
+    },
+    {
+      "operationId": "legacyPutFolderVisibility",
+      "method": "put",
+      "path": "/api/folder-visibility",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "legacyPutFolderVisibility",
+      "method": "put",
+      "path": "/api/folder-visibility",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes downloads root"
+      }
+    },
+    {
+      "operationId": "legacyPutFolderVisibility",
+      "method": "put",
+      "path": "/api/folder-visibility",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "legacyPutFolderVisibility",
+      "method": "put",
+      "path": "/api/folder-visibility",
+      "status": "409",
+      "section": "response",
+      "sharedResponse": "Conflict",
+      "media": "application/json",
+      "name": "owner_mismatch",
+      "summary": "visibility owner 不一致（stale タブ）",
+      "value": {
+        "detail": "visibility owner mismatch",
+        "code": "owner_mismatch"
+      }
+    },
+    {
+      "operationId": "legacyPutFolderVisibility",
+      "method": "put",
+      "path": "/api/folder-visibility",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    }
+  ]
+}

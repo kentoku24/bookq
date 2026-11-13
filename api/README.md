@@ -5,18 +5,19 @@
 
 | ファイル | 内容 |
 |---|---|
-| `openapi.v1.yaml` | REST API (OpenAPI 3.1)。`/api/v1/*` 正規形 + deprecated v0 併記 |
+| `openapi.v1.yaml` | REST API (OpenAPI 3.1)。`/api/v1/*` 正規形 + deprecated v0 併記。各レスポンスの `examples:` が唯一の fixture 源 (#237) |
 | `v1-semantics.md` | v1 REST の意味論正本 (ETag 世代・positions LWW・owner HMAC・PKCE ライフサイクル・gzip)。openapi.v1.yaml とセットで読む |
 | `asyncapi.yaml` | `/ws/reader-sync` のワイヤ形式 (AsyncAPI 3.0) |
 | `reader-sync-protocol.md` | reader-sync の振る舞い契約 (フェーズ機械・逐次化・拒否理由・MANIFEST)。asyncapi.yaml とセットで読む |
-| `dist/` | 生成物 (codegen のみが書く。手編集禁止): `openapi.v1.json` / `asyncapi.json` + Web 型 `app/static/api/api-types.d.ts` |
+| `dist/` | 生成物 (codegen のみが書く。手編集禁止): `openapi.v1.json` / `asyncapi.json` / `examples.json` + Web 型 `app/static/api/api-types.d.ts` |
+| `dist/examples.json` | spec `examples:` の抽出バンドル (生成物・commit する)。PWA `tests/spec_examples.py` / iOS `SpecExamples.swift` / `scripts/api/mock_server.py` が読む |
 | `vectors/` | 言語共通 conformance vectors (#280) — Python/JS/iOS/Android が同じ入力から同じ出力を出すことを pin する (path-lookup / solo-spreads / work-chapters) |
 | (`tests/fixtures/reader_sync_cases.json`) | reader-sync ワイヤの共通ケース (digest golden / reject reasons) — api/ 外だが同じく契約の一部として各言語テストが参照 |
 
 ## 生成物の再生成
 
 spec を編集したら必ず `./scripts/api/codegen.sh` を実行する
-(ツール版固定のためローカルと CI は同一出力)。
+(ツール版固定のためローカルと CI は同一出力。`examples.json` も含む)。
 CI (`api-spec-lint.yml` の codegen-drift job) が再生成後の
 `git diff --exit-code` で drift を fail させる。
 
@@ -32,11 +33,17 @@ CI (`api-spec-lint.yml` の codegen-drift job) が再生成後の
 - **CI**: Spectral lint が PR で両 spec を検査し、Schemathesis が
   `openapi.v1.yaml` の実装適合を property-based で検証する
   (`.github/workflows/api-contract.yml`、意味的拒否は `schemathesis.toml` で許容)。
+  `scripts/api/validate-examples.py` が全 `examples:` の schema 適合を検証し、
+  bundle 鮮度 (`extract-examples.py` 再生成差分なし) は codegen-drift job が
+  検査する (`.github/workflows/api-spec-lint.yml`)。
   さらに `api-breaking` ワークフローが PR の base リビジョンとの差分を
   `scripts/api_breaking_check.py` で検査し、後方互換を壊す変更
   (required 追加・プロパティ削除・enum 値削除・型変更・path/operation 削除等)
   を fail させる。ローカル確認:
   `npx @stoplight/spectral-cli lint api/openapi.v1.yaml api/asyncapi.yaml`
+- **spec 先行の手順**: 新規 endpoint は spec + `examples:` から書き、
+  `docs/client-standalone-dev.md` の「新規 endpoint を spec 先行で追加する」に従う。
+  クライアント単独開発用モックは `./scripts/api/mock.sh` (+ `ws` サブコマンド)。
 
 ## 破壊的変更の検出 (CI)
 

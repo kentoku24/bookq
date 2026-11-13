@@ -4,6 +4,7 @@
 #   - app/static/api/api-types.d.ts  (openapi-typescript, version pinned)
 #   - api/dist/openapi.v1.json       (YAML->JSON bundle of openapi.v1.yaml)
 #   - api/dist/asyncapi.json         (YAML->JSON bundle of asyncapi.yaml)
+#   - api/dist/examples.json         (named `examples:` bundle, #237)
 #
 # Tool versions are pinned here so local runs and CI produce identical
 # output. CI (`api-spec-lint.yml` codegen-drift job) runs this script and
@@ -27,3 +28,6 @@ npx --yes "openapi-typescript@${OPENAPI_TS_VERSION}" \
 mkdir -p "${ROOT}/api/dist"
 uv run --with "pyyaml==${PYYAML_VERSION}" \
   python3 "${ROOT}/scripts/api/bundle.py"
+
+uv run --with "pyyaml==${PYYAML_VERSION}" \
+  python3 "${ROOT}/scripts/api/extract-examples.py"

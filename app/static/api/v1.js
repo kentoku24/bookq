@@ -21,6 +21,9 @@
  *   npx openapi-typescript@7 api/openapi.v1.yaml -o app/static/api/api-types.d.ts
  * Regenerate paths with:
  *   python3 scripts/gen-api-endpoints.py
+ *
+ * `?api_base=<url>` re-bases all endpoints for client-only dev against
+ * `./scripts/api/mock.sh` (#237). See docs/client-standalone-dev.md.
  */
 (function () {
   "use strict";
@@ -61,7 +64,24 @@
     authToken: "/api/v1/auth/token",
     pairReport: "/api/v1/pair-report",
   };
-  var E = (typeof BookqApiEndpoints !== "undefined") ? BookqApiEndpoints : _FALLBACK_ENDPOINTS;
+
+  // Client-only dev against the spec mock (#237): `?api_base=<mock>` re-bases
+  // every endpoint (e.g. `?api_base=http://127.0.0.1:4010` with
+  // `./scripts/api/mock.sh`). Same-origin default: empty string.
+  var _base = "";
+  try {
+    var _ab = new URLSearchParams(location.search).get("api_base");
+    if (_ab) _base = String(_ab).replace(/\/+$/, "");
+  } catch (e) { /* non-browser (SW importScripts w/o query): stay same-origin */ }
+
+  var _E0 = (typeof BookqApiEndpoints !== "undefined") ? BookqApiEndpoints : _FALLBACK_ENDPOINTS;
+  /** @type {Record<string, string>} */
+  var _prefixed = {};
+  for (var _k in _E0) {
+    if (Object.prototype.hasOwnProperty.call(_E0, _k)) _prefixed[_k] = _base + _E0[_k];
+  }
+  /** @type {typeof _FALLBACK_ENDPOINTS} */
+  var E = /** @type {any} */ (_prefixed);
 
   /**
    * Typed HTTP failure: status + machine-readable spec `code` (Error.code,
@@ -540,6 +560,7 @@
   /** @type {import('./bookq-api').BookqApiShape} */
   var api = {
     endpoints: E,
+    base: _base,   // "" = same-origin; set via ?api_base= for mock dev (#237)
     ApiError: ApiError,
     treeUrl: treeUrl,
     imagesUrl: imagesUrl,
