@@ -788,7 +788,7 @@ fn raw_query_value(query_string: &str, key: &str) -> Option<String> {
 }
 
 /// Python `urllib.parse.unquote(..., errors="replace")`.
-fn unquote(s: &str) -> String {
+pub(crate) fn unquote(s: &str) -> String {
     percent_encoding::percent_decode_str(s)
         .decode_utf8()
         .map(|c| c.into_owned())

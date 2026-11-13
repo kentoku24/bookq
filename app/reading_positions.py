@@ -5,7 +5,7 @@ Two layers:
 * ``PositionBook`` — the pure slot rules, extracted verbatim from the old
   ``app.routes`` private helpers so v0/v1 handlers are thin adapters and
   the same semantics can be ported to viewer-rs (conformance vectors in
-  ``tests/fixtures/positions_cases.json`` pin the behaviour in both
+  ``api/vectors/positions-cases.json`` pin the behaviour in both
   languages). Slot shape is unchanged:
   ``{"folders": {folder: rec|tombstone}, "tombstone_ts": int,
   "updated_at": float}``.

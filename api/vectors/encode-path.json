@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "languages": ["python", "js", "swift"],
+  "languages": ["python", "js", "swift", "rust"],
   "doc": "Path encoding: per-segment percent-encoding that mirrors JS encodeURIComponent (app/static/offline-core.js encodePath). '/' stays a separator (flattened names like parent/child become two segments); every other char outside A-Z a-z 0-9 - _ . ! ~ * ' ( ) is %XX UTF-8 upper-hex. imageUrl is '/image/' + encodePath(folder + '/' + name), with the empty-folder rule (root file -> '/image/<name>', never '//'). Ports: python urllib.parse.quote per segment, OfflineCore.encodePath/imageUrl, ios ImageURL.encodePath (+ '/image/' join). Each case gives the composed path and its encoding; image cases additionally give folder/file and the full /image/ URL.",
   "cases": [
     {

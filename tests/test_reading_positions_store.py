@@ -2,7 +2,7 @@
 
 Three layers of coverage:
 
-* ``positions_cases.json`` — language-neutral PositionBook conformance
+* ``positions-cases.json`` — language-neutral PositionBook conformance
   vectors, also consumed by viewer-rs's Rust tests so py/rs cannot drift.
 * ``ReadingPositionStore`` — SQLite persistence: restart survival,
   per-user isolation, tombstones, and the user/folder bounds.
@@ -29,7 +29,7 @@ from app.reading_positions import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CASES_PATH = REPO_ROOT / "tests" / "fixtures" / "positions_cases.json"
+CASES_PATH = REPO_ROOT / "api" / "vectors" / "positions-cases.json"
 
 
 # ── conformance vectors ────────────────────────────────────────────────
