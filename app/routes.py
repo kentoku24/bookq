@@ -2,9 +2,9 @@
 
 import asyncio
 import datetime
+import gzip
 import hashlib
 import inspect
-import json
 import logging
 import math
 import mimetypes
@@ -15,6 +15,7 @@ from email import utils
 from pathlib import Path
 from typing import Annotated
 
+import orjson
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -1036,8 +1037,16 @@ def _folders_response(
     avoids a stale hit if a freed tree's list address gets reused by a later
     allocation once ``metadata_index_cache`` has been cleared (e.g. test
     teardown setting it to ``None``). A generation change discards the whole
-    cache so it never grows unbounded. Within a generation, ``json.dumps`` +
+    cache so it never grows unbounded. Within a generation, ``orjson.dumps`` +
     sha1 run at most once per (path, depth) — a 304 never re-serializes either.
+
+    Each entry also holds a lazily-built gzip variant (``gz``): a request
+    advertising ``Accept-Encoding: gzip`` is routed through
+    ApiGZipMiddleware's GZipResponder, which passes a response already
+    carrying ``Content-Encoding`` through untouched — so serving the cached
+    compressed bytes skips the per-request re-compress that used to run for
+    every client. ``Vary: Accept-Encoding`` is set by hand here because the
+    responder's pass-through path never reaches its own ``add_vary_header``.
 
     ETag input = stable payload hash + path + depth only (no cache
     timestamp), so it stays the same across an index-cache TTL refresh that
@@ -1057,21 +1066,39 @@ def _folders_response(
     cache_key = (key_ns, path, depth)
     entry = body_cache["entries"].get(cache_key)
     if entry is None:
-        body_str = json.dumps(
-            payload, ensure_ascii=False, allow_nan=False, indent=None,
-            separators=(",", ":"), default=str,
-        )
-        body = body_str.encode("utf-8")
-        digest = hashlib.sha1(f"{key_ns}:{path}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+        # orjson.dumps emits the same bytes the old stdlib call did (raw
+        # UTF-8, compact separators, default= callable for unknown types).
+        body = orjson.dumps(payload, default=str)
+        digest = hashlib.sha1(
+            f"{key_ns}:{path}:{depth}:".encode("utf-8") + body
+        ).hexdigest()
         etag = f'"{digest[:24]}-g{gen_int}"'
-        entry = (body, etag)
+        entry = {"body": body, "gz": None, "etag": etag}
         body_cache["entries"][cache_key] = entry
-    body, etag = entry
+    etag = entry["etag"]
 
-    headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
-    if getattr(request, "headers", None) is not None and request.headers.get(
-        "if-none-match"
-    ) == etag:
+    req_headers = getattr(request, "headers", None)
+    accepts_gzip = (
+        req_headers is not None and "gzip" in req_headers.get("accept-encoding", "")
+    )
+    if accepts_gzip:
+        if entry["gz"] is None:
+            # Same compresslevel as ApiGZipMiddleware (main.py: 6).
+            entry["gz"] = gzip.compress(entry["body"], compresslevel=6)
+        body = entry["gz"]
+        headers = {
+            "ETag": etag,
+            "Cache-Control": _FOLDERS_CACHE_CONTROL,
+            "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding",
+        }
+    else:
+        body = entry["body"]
+        headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
+
+    if req_headers is not None and req_headers.get("if-none-match") == etag:
+        # 304 has no body; Content-Encoding/Vary still describe the stored
+        # representation a revalidating cache holds.
         return Response(status_code=304, headers=headers)
     return Response(content=body, media_type="application/json", headers=headers)
 
@@ -1157,9 +1184,27 @@ async def _folder_tree(
         subtree = index.subtree_facets()
         _attach_subtree_facets(tree, subtree, "")
         if since is not None:
-            if v1:
-                return JSONResponse({"kind": "tree", "nodes": tree, "generation": gen_int})
-            return JSONResponse({"tree": tree, "generation": gen_int})
+            # Stale-generation poll: the mismatch body is the whole tree plus
+            # the generation — identical for every poll within a generation,
+            # so serialize+ETag it once through the shared body cache instead
+            # of paying a multi-MB orjson.dumps per request per poller. The
+            # "-since" key namespace keeps this dict envelope from aliasing
+            # the bare-list full-tree body cached under (key_ns, "", None);
+            # no other _folders_response caller uses a suffixed namespace.
+            # (gen, gen_int) coordinates come from the same cache_data read
+            # as *tree* with no intervening await, so a fill/rebuild's
+            # generation bump discards this entry wholesale before any stale
+            # body can be served under new coordinates. The newly attached
+            # ETag/Cache-Control is safe for the fill-poller: _fillPollTick
+            # only needs body.generation and treats any 304 as unchanged.
+            since_payload = (
+                _wrap(tree, "tree", gen_int)
+                if v1
+                else {"tree": tree, "generation": gen_int}
+            )
+            return _folders_response(
+                request, since_payload, "", None, gen, gen_int, key_ns + "-since"
+            )
         return _folders_response(request, _wrap(tree, "tree", gen_int), "", None, gen, gen_int, key_ns)
     norm = path.rstrip("/")
     downloads_path = request.app.state.settings.downloads_path
@@ -1246,12 +1291,8 @@ async def _folder_tree(
     fallback_gen = (
         int(cache_data.get("generation", 1) or 1) if isinstance(cache_data, dict) else 0
     )
-    body_str = json.dumps(
-        _wrap(shallow, "children", fallback_gen), ensure_ascii=False, allow_nan=False, indent=None,
-        separators=(",", ":"), default=str,
-    )
-    body = body_str.encode("utf-8")
-    digest = hashlib.sha1(f"{key_ns}:{norm}:{depth}:{body_str}".encode("utf-8")).hexdigest()
+    body = orjson.dumps(_wrap(shallow, "children", fallback_gen), default=str)
+    digest = hashlib.sha1(f"{key_ns}:{norm}:{depth}:".encode("utf-8") + body).hexdigest()
     etag = f'"{digest[:24]}"'
     headers = {"ETag": etag, "Cache-Control": _FOLDERS_CACHE_CONTROL}
     if getattr(request, "headers", None) is not None and request.headers.get(
