@@ -136,6 +136,22 @@ def _bookq_state_dir_sandbox(tmp_path_factory):
             os.environ["BOOKQ_STATE_DIR"] = prev
 
 
+@pytest.fixture(autouse=True)
+def _clear_metadata_parse_cache():
+    """Per-test isolation for the process-global metadata.toml parse cache (#245).
+
+    The cache in app.metadata.models survives across tests in this process;
+    clearing around each test keeps parse-count assertions deterministic.
+    """
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from app.metadata.models import _clear_parse_cache
+
+    _clear_parse_cache()
+    yield
+    _clear_parse_cache()
+
+
 def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -> None:
     """Write a minimal solid-color RGB PNG without external deps."""
 
