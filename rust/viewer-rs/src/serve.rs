@@ -46,13 +46,29 @@ pub enum Serve {
 /// to fall through to `Serve::Proxy` so upstream answered FastAPI's exact
 /// 422. With no upstream configured the proxy is dead — answer the status
 /// locally instead of 501 (#465). `has_upstream` keeps the strangler-era
-/// body parity whenever Python is still reachable.
-pub fn reject_or_proxy(has_upstream: bool, status: StatusCode, msg: &'static str) -> Serve {
+/// body parity whenever Python is still reachable. The body keeps FastAPI's
+/// issue-array `detail` shape that the spec's `ValidationError` declares.
+pub fn unprocessable_or_proxy(
+    has_upstream: bool,
+    param: &'static str,
+    ty: &'static str,
+    msg: &'static str,
+) -> Serve {
     if has_upstream {
         Serve::Proxy
     } else {
-        Serve::Done(detail(status, msg))
+        Serve::Done(unprocessable(param, ty, msg))
     }
+}
+
+fn unprocessable(param: &str, ty: &str, msg: &str) -> Response {
+    let body = serde_json::json!({
+        "detail": [{"loc": ["query", param], "msg": msg, "type": ty}]
+    })
+    .to_string();
+    let mut r = response(StatusCode::UNPROCESSABLE_ENTITY, Body::from(body));
+    set_header(&mut r, header::CONTENT_TYPE, "application/json");
+    r
 }
 
 // ── Suffix/extension tables (mirror app/scanner.py + app/archive.py) ──────────
@@ -1114,6 +1130,26 @@ mod tests {
             use http_body_util::BodyExt;
             r.into_body().collect().await.unwrap().to_bytes().to_vec()
         })
+    }
+
+    /// #465 follow-up: a local 422 keeps FastAPI's issue-array `detail`
+    /// the spec's `ValidationError` declares — not a bare string (ST108).
+    #[test]
+    fn unprocessable_or_proxy_issue_array() {
+        assert!(matches!(
+            unprocessable_or_proxy(true, "depth", "value_error", "invalid depth"),
+            Serve::Proxy
+        ));
+        let Serve::Done(r) =
+            unprocessable_or_proxy(false, "depth", "value_error", "invalid depth")
+        else {
+            panic!("no upstream must answer locally");
+        };
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes(r)).unwrap();
+        let detail = v["detail"].as_array().expect("detail must be an array");
+        assert_eq!(detail[0]["loc"], serde_json::json!(["query", "depth"]));
+        assert_eq!(detail[0]["type"], "value_error");
     }
 
     #[test]
