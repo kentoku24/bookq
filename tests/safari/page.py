@@ -23,6 +23,7 @@ from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webelement import WebElement
 
+from tests.safari.bidi import BidiChannel, BidiTransportError
 from tests.safari.exceptions import SafariUnsupported
 from tests.safari.locator import SafariLocator, _KEY_MAP, _split_steps
 
@@ -284,6 +285,17 @@ def _kickoff(inner: str, key: str) -> str:
     )
 
 
+def _has_element_arg(args) -> bool:
+    for a in args:
+        if isinstance(a, WebElement):
+            return True
+        if isinstance(a, (list, tuple)) and _has_element_arg(a):
+            return True
+        if isinstance(a, dict) and _has_element_arg(tuple(a.values())):
+            return True
+    return False
+
+
 class SafariPage:
     def __init__(self, context: "SafariContext", handle: str):
         self._ctx = context
@@ -307,8 +319,17 @@ class SafariPage:
             raise SafariUnsupported("page window was closed")
 
     def _eval(self, script: str, *args):
-        """Playwright-semantic evaluate: returns the resolved value, awaiting
-        thenables by polling a window-side slot (see ``_kickoff``)."""
+        """Playwright-semantic evaluate: returns the resolved value.
+
+        Real-realm BiDi ``script.evaluate`` for element-free calls (storage
+        persists, injected globals are app-visible, awaitPromise native);
+        the classic isolated-world path only for WebElement args, which
+        BiDi cannot serialize."""
+        if self._ctx._bidi is not None and not _has_element_arg(args):
+            try:
+                return self._bidi_eval(script, *args)
+            except BidiTransportError:
+                self._ctx._bidi = None  # socket dead — classic-only from here
         self._reqid = getattr(self, "_reqid", 0) + 1
         key = f"{id(self)}:{self._reqid}"
         out = self._sync_eval(_kickoff(_script_body(script), key), *args)
@@ -317,6 +338,52 @@ class SafariPage:
         if isinstance(out, dict) and "e" in out:
             raise WebDriverException(out["e"])
         return out.get("v") if isinstance(out, dict) else out
+
+    def _bidi_eval(self, script: str, *args):
+        # BiDi script.evaluate cannot serialize a returned function object,
+        # so the function must be invoked in the expression itself. Args are
+        # primitive-only here (WebElement args stay on classic eval), so
+        # inlining them as a JSON literal is safe and cheaper than
+        # script.callFunction's argument channel.
+        #
+        # safaridriver's RemoteValue serialization is shallow and
+        # non-standard (objects arrive as {key: RemoteValue} maps, arrays as
+        # undefined, nested objects lose contents) — so the result is
+        # JSON.stringify'd in-page and decoded here, giving deep values for
+        # free. undefined stays undefined through stringify, mapping to
+        # None; functions/symbols likewise.
+        s = script.strip()
+        arglist = _json.dumps(list(args), default=lambda _x: None)
+        if _is_function(s):
+            invoke = f"( {s} ).apply(null, {arglist})"
+        elif _is_statements(s):
+            invoke = f"(function(){{ {s} }}).apply(null, {arglist})"
+        else:
+            invoke = f"( {s} )"
+        expr = (
+            "(async()=>{"
+            f" const __v = await ({invoke});"
+            " return JSON.stringify(__v)"
+            "})()"
+        )
+        raw = self._ctx._bidi.evaluate(self._handle, expr, await_promise=True)
+        return None if raw is None else _json.loads(raw)
+
+    def _inject(self, script: str):
+        """Install a shim/init script in the page's real realm (classic
+        fallback so a dead BiDi socket degrades rather than fails)."""
+        if self._ctx._bidi is not None:
+            try:
+                self._bidi_eval(script)
+                return
+            except BidiTransportError:
+                self._ctx._bidi = None
+            except WebDriverException:
+                return  # in-page failure — classic realm is no better
+        try:
+            self._sync_eval(script)
+        except WebDriverException:
+            pass
 
     def _await_result(self, key: str, timeout: float = 30.0):
         deadline = time.time() + timeout
@@ -340,7 +407,7 @@ class SafariPage:
         return self._driver.execute_script(script, *args)
 
     def _install_touch(self):
-        self._sync_eval(_TOUCH_JS)
+        self._inject(_TOUCH_JS)
         self._touch_installed = True
 
     def _poll(self, pred, timeout: float, what: str):
@@ -517,7 +584,15 @@ class SafariPage:
         return self._eval(script, arg)
 
     def evaluate_handle(self, script: str, arg=None):
-        return self._eval(script, arg)
+        # Element handles cannot cross BiDi — stay on classic execute_script.
+        self._reqid = getattr(self, "_reqid", 0) + 1
+        key = f"{id(self)}:{self._reqid}"
+        out = self._sync_eval(_kickoff(_script_body(script), key), arg)
+        if out == "__async":
+            return self._await_result(key)
+        if isinstance(out, dict) and "e" in out:
+            raise WebDriverException(out["e"])
+        return out.get("v") if isinstance(out, dict) else out
 
     def eval_on_selector(self, selector: str, expression: str, arg=None, **kw):
         els = self._find_css(selector)
@@ -704,33 +779,21 @@ class SafariPage:
 
     def _install_shims(self):
         for js in (*self._ctx._init_scripts, *self._init_scripts):
-            try:
-                self._sync_eval(js)
-            except WebDriverException:
-                pass
+            self._inject(js)
         # add_init_script lands post-load on WebDriver — too late for
         # consumers that bound a controller at DOMContentLoaded. The app's
         # PairUI exposes attach() exactly for late binding; nudge it when a
         # script-provided controller appeared.
-        try:
-            self._sync_eval(
-                "if (window.PairUI && window.PairUI.attach && window.PairController)"
-                " window.PairUI.attach(window.PairController)"
-            )
-        except WebDriverException:
-            pass
-        try:
-            self._sync_eval(_VISIBILITY_JS)
-        except WebDriverException:
-            pass
-        try:
-            self._sync_eval(
-                "if (!window.__pageErrHook) { window.__pageErrHook = 1;"
-                " window.addEventListener('error', e => (window.__pageErrors = window.__pageErrors || []).push(String(e.message)));"
-                " window.addEventListener('unhandledrejection', e => (window.__pageErrors = window.__pageErrors || []).push('rejection: ' + String(e.reason))); }"
-            )
-        except WebDriverException:
-            pass
+        self._inject(
+            "if (window.PairUI && window.PairUI.attach && window.PairController)"
+            " window.PairUI.attach(window.PairController)"
+        )
+        self._inject(_VISIBILITY_JS)
+        self._inject(
+            "if (!window.__pageErrHook) { window.__pageErrHook = 1;"
+            " window.addEventListener('error', e => (window.__pageErrors = window.__pageErrors || []).push(String(e.message)));"
+            " window.addEventListener('unhandledrejection', e => (window.__pageErrors = window.__pageErrors || []).push('rejection: ' + String(e.reason))); }"
+        )
 
     # ── unsupported (raise → test skips) ──────────────────────────────────────
 
@@ -915,6 +978,7 @@ class SafariContext:
         self._pages: list[SafariPage] = []
         self._closed = False
         self._init_scripts: list[str] = []
+        self._bidi = BidiChannel.connect(driver.capabilities)
         if viewport:
             self._set_viewport(viewport["width"], viewport["height"])
         self._driver.timeouts.script = 30.0
@@ -1010,6 +1074,8 @@ class SafariContext:
         self._closed = True
         if getattr(self, "_drain_stop", None):
             self._drain_stop.set()
+        if self._bidi:
+            self._bidi.close()  # before quit — an open WS can keep Safari paired
         try:
             self._driver.quit()
         except WebDriverException:
@@ -1037,15 +1103,21 @@ class SafariBrowser:
             # whether the semantics hold.
             pass
         last_exc = None
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 driver = self._manager.new_session()
             except WebDriverException as exc:
                 # Safari.app can still hold the previous session's pairing for
-                # a beat after quit() — retry instead of erroring the test.
+                # a beat after quit() — or a prior quit() silently failed,
+                # leaving a live session paired forever — or the driver has
+                # hit its ~20-session pairing limit. Escalate: force-quit the
+                # stale handle first, then recycle the driver process.
                 last_exc = exc
-                if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))
+                if attempt < 3:
+                    if attempt >= 1:
+                        self._manager.recycle()
+                    else:
+                        self._manager.force_quit_stale()
                     continue
                 raise
             try:

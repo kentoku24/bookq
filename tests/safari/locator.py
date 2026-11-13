@@ -357,6 +357,10 @@ class SafariLocator:
             "const e=arguments[0]; return !e.readOnly && !e.disabled", self._first()
         )
 
+    def evaluate_all(self, script: str, arg=None, timeout=None):
+        # Playwright passes the full match list as the first arg.
+        return self._eval(script, self._resolve(), arg)
+
     def evaluate(self, script: str, arg=None, timeout=None):
         return self._eval(script, self._first(timeout), arg)
 

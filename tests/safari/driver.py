@@ -24,11 +24,32 @@ def _free_port() -> int:
 class SafariDriverManager:
     """Owns the safaridriver process for the pytest session."""
 
+    # Safari leaks one pairing slot per WebDriver session (~20 lifetime) —
+    # recycle the driver process before the well runs dry.
+    _RECYCLE_AFTER = 15
+
     def __init__(self):
         self._port = _free_port()
         self.executor = f"http://127.0.0.1:{self._port}"
         self._proc: subprocess.Popen | None = None
         self._live_sessions = 0
+        self._served = 0
+        self._last_driver = None
+
+    def recycle(self) -> None:
+        """Restart safaridriver (and Safari.app, which holds leaked
+        pairings) — recovers from the ~20-session pairing exhaustion."""
+        self.stop()
+        self._proc = None
+        self._live_sessions = 0
+        self._served = 0
+        subprocess.run(
+            ["osascript", "-e", 'tell application "Safari" to quit'],
+            capture_output=True, timeout=10,
+        )
+        time.sleep(1.0)
+        subprocess.run(["pkill", "-x", "Safari"], capture_output=True)
+        time.sleep(0.5)
 
     def start(self) -> None:
         self._proc = subprocess.Popen(
@@ -51,13 +72,34 @@ class SafariDriverManager:
 
     def new_session(self):
         """Create a WebDriver session (spawns a Safari window)."""
+        if self._served >= self._RECYCLE_AFTER:
+            self.recycle()
         if self._proc is None:
             self.start()
         opts = ArgOptions()
         opts.browser_name = "safari"
+        # BiDi gives script.evaluate in the page's REAL realm — classic
+        # execute_script runs in an isolated automation world where
+        # localStorage writes roll back and globals stay invisible to the app.
+        opts.set_capability("webSocketUrl", True)
+        opts.set_capability("safari:experimentalWebSocketUrl", True)
         driver = webdriver.Remote(command_executor=self.executor, options=opts)
         self._live_sessions += 1
+        self._served += 1
+        self._last_driver = driver
         return driver
+
+    def force_quit_stale(self) -> None:
+        """Safari kept pairing a session whose quit() silently failed —
+        the driver handle is still valid, so retry quitting it."""
+        drv = self._last_driver
+        if drv is not None:
+            try:
+                drv.quit()
+            except Exception:
+                pass
+        # Safari.app can also just be slow to un-pair; give it a beat.
+        time.sleep(0.8)
 
     def session_released(self) -> None:
         self._live_sessions = max(0, self._live_sessions - 1)
@@ -73,4 +115,5 @@ class SafariDriverManager:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+            self._proc = None
             self._proc = None
