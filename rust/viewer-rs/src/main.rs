@@ -30,6 +30,7 @@ use std::path::PathBuf;
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
 mod folders;
+mod oauth;
 mod reader_sync;
 mod search;
 mod serve;
@@ -152,6 +153,10 @@ pub(crate) struct AppState {
     pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
+    /// #400: the whole auth surface (`/auth/*` + `/api/v1/auth/token`)
+    /// under one atomic gate — `Some` iff `auth` is enabled AND the
+    /// OAuth config is complete (missing config keeps it all proxied).
+    pub(crate) auth_flow: Option<std::sync::Arc<oauth::AuthFlow>>,
     /// `SECRET_KEY` — Bearer JWT verify + visibility owner HMAC.
     pub(crate) secret_key: String,
     /// Session-cookie signing key derived once from `secret_key` (`None`
@@ -678,6 +683,92 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
     }
 }
 
+// ── #400: /auth/* + /api/v1/auth/token (single "auth" gate) ─────────────────
+//
+// The whole surface crosses backends together: the callback mints the
+// one-time codes the token endpoint redeems, so splitting them across
+// processes 401s every login. `auth_flow` is `Some` only when the gate
+// is enabled AND OAuth config is complete — anything else proxies the
+// surface whole. A signed session cookie whose payload won't parse gets
+// starlette's middleware-level 500 upstream, so it proxies too.
+
+async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return proxy(&st.upstream, req).await;
+    };
+    if matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    ) {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    oauth::login(&flow, &q)
+}
+
+async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return proxy(&st.upstream, req).await;
+    };
+    let lookup = auth::session_lookup(req.headers(), st.session_key.as_ref());
+    if matches!(lookup, auth::SessionLookup::Corrupt) {
+        return proxy(&st.upstream, req).await;
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await
+}
+
+async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return proxy(&st.upstream, req).await;
+    };
+    let lookup = auth::session_lookup(req.headers(), st.session_key.as_ref());
+    if matches!(lookup, auth::SessionLookup::Corrupt) {
+        return proxy(&st.upstream, req).await;
+    }
+    oauth::logout(&flow, &lookup)
+}
+
+async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if *req.method() != axum::http::Method::POST {
+        return proxy(&st.upstream, req).await;
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return proxy(&st.upstream, req).await;
+    };
+    // starlette loads the session cookie before routing — a corrupt one
+    // 500s there, so it proxies here too.
+    if matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    ) {
+        return proxy(&st.upstream, req).await;
+    }
+    let headers = req.headers().clone();
+    let (parts, body) = req.into_parts();
+    let body = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return proxy(&st.upstream, Request::from_parts(parts, Body::empty())).await;
+        }
+    };
+    let res = oauth::token(&flow, &body);
+    serve::maybe_gzip(&headers, res, true).await
+}
+
 // ── M8: /ws/reader-sync ────────────────────────────────────────────────────
 
 /// Native `/ws/reader-sync` — gated by "reader-sync"; a non-upgrade or
@@ -904,12 +995,35 @@ async fn main() {
         );
         std::process::exit(2);
     }
-    let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|e| e.trim().to_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect();
+    let allowed_emails: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(
+            std::env::var("ALLOWED_EMAILS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect(),
+        );
+    // #400: the auth gate is atomic — enabled but missing OAuth config
+    // proxies the whole surface (warned; STRICT refuses to boot).
+    let auth_flow = match oauth::AuthFlow::from_env(&native, allowed_emails.clone()) {
+        oauth::Configured::Disabled => None,
+        oauth::Configured::Ready(flow) => Some(std::sync::Arc::new(flow)),
+        oauth::Configured::Missing(missing) => {
+            if native_strict() {
+                tracing::error!(
+                    missing = ?missing,
+                    "BOOKQ_RS_NATIVE_STRICT: auth gate enabled without OAuth config"
+                );
+                std::process::exit(2);
+            }
+            tracing::warn!(
+                missing = ?missing,
+                "auth gate enabled but OAuth config missing — /auth/* and /api/v1/auth/token stay proxied"
+            );
+            None
+        }
+    };
 
     let index = std::sync::Arc::new(folders::IndexState::new());
     let registry = reader_sync::Registry::new(index.clone(), downloads.clone());
@@ -927,7 +1041,8 @@ async fn main() {
         },
         downloads: downloads.clone(),
         native: std::sync::Arc::new(native),
-        allowed_emails: std::sync::Arc::new(allowed_emails),
+        allowed_emails,
+        auth_flow,
         index: index.clone(),
         position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
@@ -971,13 +1086,16 @@ async fn main() {
         .route("/api/v1/health", any(api_health))
         .route("/api/v1/version", any(api_version))
         .route("/api/v1/index/refresh", any(api_refresh))
+        // #400: the auth surface moves as one unit — the callback's
+        // one-time codes are redeemed by the token endpoint in the same
+        // process. `auth_flow.is_none()` keeps every route proxied.
+        .route("/auth/login", any(auth_login))
+        .route("/auth/callback", any(auth_callback))
+        .route("/auth/logout", any(auth_logout))
+        .route("/api/v1/auth/token", any(auth_token))
         // M8: dual-reader sync socket — native under "reader-sync" gate;
         // otherwise the upgrade is spliced to Python unchanged.
         .route("/ws/reader-sync", any(reader_sync_ws))
-        // /api/v1/auth/token is proxy-only by design: its auth-code and
-        // refresh stores are written by the OAuth callback in app/auth.py
-        // (app.state); sharing them natively would require touching the
-        // Python backend, which is out of bounds.
         .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
             proxy(&st.upstream, req).await
         }))
