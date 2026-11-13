@@ -11,11 +11,14 @@
 //! multipart RAR sets — `rar_needs_upstream`, since bundled unrar cannot
 //! chain volumes), formats the `image` crate can't decode that Pillow
 //! might (`.avif`, `.tiff`, archive files used as sources — gated by
-//! `NATIVE_DECODE` before the payload read), archive entries we fail to
-//! extract (unsupported compression/CRC — upstream decides), and the
-//! sprite compose path (misses proxy). Single-volume RAR members read
-//! in-process via `bookq_core` (bundled unrar), so `/view` on a rar/cbr
-//! entry is native end to end.
+//! `NATIVE_DECODE` before the payload read) and archive entries we fail to
+//! extract (unsupported compression/CRC — upstream decides). Sprite misses
+//! compose in-process (9-cell strip + `rows` grid, same `sprites/<w>/`
+//! namespace as `thumbs.py`); a sheet needing an upstream-only source
+//! (PDF page, multipart RAR member, `.avif`/`.tiff` cell Pillow could
+//! decode) proxies whole so Python renders it instead of a gray cell.
+//! Single-volume RAR members read in-process via `bookq_core` (bundled
+//! unrar), so `/view` on a rar/cbr entry is native end to end.
 //!
 //! Known output deviation: the `image` JpegEncoder emits 4:4:4 (no chroma
 //! subsampling), so generated files run somewhat larger than Pillow's
@@ -739,7 +742,192 @@ fn dir_sprite_name_bad(name: &str) -> bool {
         || name.contains('\x00')
 }
 
-/// `handle_thumb_sprite` — validation + key → hit serve; miss proxies.
+const SPRITE_GRAY: [u8; 3] = [128, 128, 128];
+
+/// `make_thumbnail` without the JPEG round-trip: shrink inside (w, w*4).
+fn thumb_resized(data: &[u8], width: i64) -> Option<image::DynamicImage> {
+    let w = (width as u32).max(1);
+    let im = load_oriented(data)?;
+    Some(thumbnail_box(im, w, w.saturating_mul(4)))
+}
+
+/// `compose_sprite` — horizontal 9-cell strip (`sprites/<cell>/`).
+/// Each slot is `cell` px wide; height is the tallest thumb (aspect kept
+/// per cell, never stretched). Failed cells stay `SPRITE_GRAY`.
+fn compose_strip(thumbs: &[Option<image::DynamicImage>], cell: i64) -> Option<Vec<u8>> {
+    let cell_u = (cell as u32).max(1);
+    let mut decoded: Vec<Option<image::RgbImage>> = Vec::with_capacity(thumbs.len());
+    let mut max_h: u32 = 0;
+    for t in thumbs {
+        match t {
+            Some(im) => {
+                let rgb = im.to_rgb8();
+                max_h = max_h.max(rgb.height());
+                decoded.push(Some(rgb));
+            }
+            None => decoded.push(None),
+        }
+    }
+    let sheet_h = if max_h > 0 { max_h } else { cell_u };
+    let sheet_w = (thumbs.len() as u32).saturating_mul(cell_u);
+    if sheet_w == 0 {
+        return None;
+    }
+    let mut sheet = image::RgbImage::from_pixel(sheet_w, sheet_h, image::Rgb(SPRITE_GRAY));
+    for (i, thumb) in decoded.into_iter().enumerate() {
+        if let Some(rgb) = thumb {
+            let x = (i as u32).saturating_mul(cell_u);
+            for (dx, dy, px) in rgb.enumerate_pixels() {
+                if dy < sheet_h && x + dx < sheet_w {
+                    sheet.put_pixel(x + dx, dy, *px);
+                }
+            }
+        }
+    }
+    jpeg_encode(&image::DynamicImage::ImageRgb8(sheet), JPEG_QUALITY)
+}
+
+/// CSS `object-fit: cover` — fill the (tw, th) box, then center-crop.
+/// Pillow's `ImageOps.fit(..., LANCZOS)` equivalent for the `rows` grid.
+fn cover_fit(im: &image::DynamicImage, tw: u32, th: u32) -> Option<image::RgbImage> {
+    let (w, h) = (im.width().max(1), im.height().max(1));
+    let scale = (tw as f32 / w as f32).max(th as f32 / h as f32);
+    let nw = ((w as f32 * scale).ceil() as u32).max(tw);
+    let nh = ((h as f32 * scale).ceil() as u32).max(th);
+    let resized = im.resize(nw, nh, image::imageops::FilterType::Lanczos3);
+    let rgb = resized.to_rgb8();
+    let x = (nw.saturating_sub(tw)) / 2;
+    let y = (nh.saturating_sub(th)) / 2;
+    let mut out = image::RgbImage::new(tw, th);
+    for (dx, dy, px) in out.enumerate_pixels_mut() {
+        *px = *rgb.get_pixel(x + dx, y + dy);
+    }
+    Some(out)
+}
+
+/// `compose_sprite_grid` — 2D sheet matching the DOM multi-thumb grid.
+/// `size` is the `w`-class sheet dims (`SPRITE_GRID_DIMS`); each row shares
+/// its height equally and each cell in a row shares the row width equally.
+/// Returns (jpeg, ok-count); all-fail maps to 404 like the strip path.
+fn compose_grid(
+    cells: &[Option<Vec<u8>>],
+    rows: &[i64],
+    size: (i64, i64),
+) -> Option<(Vec<u8>, usize)> {
+    if rows.is_empty() {
+        return None;
+    }
+    let (sheet_w, sheet_h) = ((size.0.max(1)) as u32, (size.1.max(1)) as u32);
+    let mut sheet = image::RgbImage::from_pixel(sheet_w, sheet_h, image::Rgb(SPRITE_GRAY));
+    let row_h = sheet_h / (rows.len() as u32).max(1);
+    let mut idx = 0usize;
+    let mut ok = 0usize;
+    for (r, items) in rows.iter().enumerate() {
+        let items_u = (*items).max(1) as u32;
+        let cw = sheet_w / items_u.max(1);
+        for c in 0..*items {
+            if idx >= cells.len() {
+                break;
+            }
+            let raw = cells[idx].as_ref();
+            idx += 1;
+            let Some(raw) = raw else { continue };
+            let Some(im) = load_oriented(raw) else { continue };
+            let Some(fitted) = cover_fit(&im, cw.max(1), row_h.max(1)) else { continue };
+            let (ox, oy) = (c.max(0) as u32 * cw, r as u32 * row_h);
+            for (dx, dy, px) in fitted.enumerate_pixels() {
+                if ox + dx < sheet_w && oy + dy < sheet_h {
+                    sheet.put_pixel(ox + dx, oy + dy, *px);
+                }
+            }
+            ok += 1;
+        }
+    }
+    let bytes = jpeg_encode(&image::DynamicImage::ImageRgb8(sheet), JPEG_QUALITY)?;
+    Some((bytes, ok))
+}
+
+/// Sprite archive raw reads with ONE memoized open (Python opens once).
+/// `None` per cell = gray (bad name, absent member, corrupt bytes).
+/// Returns `None` (→ proxy whole sheet) when a present member cannot be
+/// proven identical natively (unsupported compression/CRC) or the set
+/// itself needs upstream (multipart RAR), so Python decides instead of a
+/// wrong gray cell. `.avif`/`.tiff` cells Pillow might decode also proxy.
+fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Option<Vec<u8>>>> {
+    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
+        return None;
+    }
+    // Raw membership like Python's `set(zf.namelist())`: epub uses the raw
+    // names (spine order would drop valid non-spine images).
+    let suffix = suffix_lower(archive);
+    let available: std::collections::HashSet<String> = if suffix == ".epub" {
+        match bookq_core::open_archive(archive).and_then(|oa| oa.epub_raw()) {
+            Some((raw, _)) => raw.into_iter().collect(),
+            None => bookq_core::zip_names(archive).unwrap_or_default().into_iter().collect(),
+        }
+    } else {
+        crate::serve::list_archive_entries(archive).into_iter().collect()
+    };
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        if !is_image_entry(name) || !available.contains(name) {
+            out.push(None);
+            continue;
+        }
+        // Formats Pillow may decode that `image` cannot → whole-sheet proxy.
+        if !native_decodable(name) && suffix_lower(Path::new(name)) != ".svg" {
+            return None;
+        }
+        match crate::serve::archive_read_entry(archive, name) {
+            Some(b) => out.push(Some(b)),
+            // Present in the listing but unreadable (unsupported
+            // compression, CRC, solid-RAR walk failure): Python's
+            // zipfile/7z may still read it — proxy, don't paint gray.
+            None => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Dir-sprite raw reads (fail-open per cell like Python).
+/// Returns `None` (→ proxy whole sheet) when any cell needs upstream-only
+/// tooling (PDF page render, multipart RAR member, undecodable archive
+/// member) or decodes Pillow might handle (`.avif`/`.tiff`).
+fn load_dir_sprite_cells(
+    downloads: &Path,
+    folder: &str,
+    names: &[String],
+) -> Option<Vec<Option<Vec<u8>>>> {
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        if dir_sprite_name_bad(name) {
+            out.push(None);
+            continue;
+        }
+        // Same conservative gate as the archive path: a present `.avif` /
+        // `.tiff` cell Pillow might decode must proxy, not gray.
+        if !native_decodable(name) && suffix_lower(Path::new(name)) != ".svg" {
+            // SVG grays in Python too (Pillow has no SVG decoder), so only
+            // non-SVG undecodables force the proxy.
+            if is_image_entry(name) {
+                return None;
+            }
+            out.push(None);
+            continue;
+        }
+        match load_source_bytes(downloads, &format!("{folder}/{name}")) {
+            Ok(Some((data, _, _, _))) => out.push(Some(data)),
+            // `Ok(None)` = needs upstream (PDF page, multipart RAR,
+            // unsupported extraction): proxy whole sheet so Python renders.
+            Ok(None) => return None,
+            // `Err` = per-entry guard failure (400/403/404) → gray cell.
+            Err(_) => out.push(None),
+        }
+    }
+    Some(out)
+}
+
+/// `handle_thumb_sprite` — validation + key → hit serve; miss renders native.
 pub fn thumb_sprite(
     downloads: &Path,
     cache: &Path,
@@ -863,13 +1051,77 @@ pub fn thumb_sprite(
         .join("sprites")
         .join(cell.to_string())
         .join(format!("{digest}.jpg"));
-    if !dest.is_file() {
-        return Serve::Proxy;
+    if dest.is_file() {
+        let body = match std::fs::read(&dest) {
+            Ok(b) => b,
+            Err(_) => return Serve::Proxy,
+        };
+        return Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false));
     }
-    let body = match std::fs::read(&dest) {
-        Ok(b) => b,
-        Err(_) => return Serve::Proxy,
+    // ── miss: render in-process, same namespace/key as `thumbs.py` ──────
+    let cells: Vec<Option<Vec<u8>>> = if is_archive {
+        match read_archive_sprite_cells(&folder_path, &names) {
+            Some(c) => c,
+            None => return Serve::Proxy,
+        }
+    } else {
+        match load_dir_sprite_cells(downloads, folder, &names) {
+            Some(c) => c,
+            None => return Serve::Proxy,
+        }
     };
+    if cells.iter().all(|c| c.is_none()) {
+        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+    }
+    // A racing writer may have landed the sheet while sources loaded.
+    if dest.is_file() {
+        let body = match std::fs::read(&dest) {
+            Ok(b) => b,
+            Err(_) => return Serve::Proxy,
+        };
+        return Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false));
+    }
+    let Ok(_permit) = GEN_PERMITS.blocking_acquire() else {
+        return Serve::Proxy;
+    };
+    let body: Vec<u8> = if let Some(r) = rows.as_ref() {
+        match compose_grid(&cells, r, grid_size) {
+            Some((sheet, 0)) => {
+                let _ = sheet;
+                return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+            }
+            Some((sheet, _)) => sheet,
+            None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
+        }
+    } else {
+        let mut thumbs: Vec<Option<image::DynamicImage>> = Vec::with_capacity(cells.len());
+        let mut failed = 0usize;
+        for raw in &cells {
+            match raw {
+                Some(b) => match thumb_resized(b, cell) {
+                    Some(im) => thumbs.push(Some(im)),
+                    None => {
+                        thumbs.push(None);
+                        failed += 1;
+                    }
+                },
+                None => {
+                    thumbs.push(None);
+                    failed += 1;
+                }
+            }
+        }
+        if failed == cells.len() {
+            return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+        }
+        match compose_strip(&thumbs, cell) {
+            Some(sheet) => sheet,
+            None => return Serve::Proxy,
+        }
+    };
+    store_cached(&dest, &body);
+    // A racing writer may have replaced dest mid-render; serve our bytes
+    // (same key → same sheet geometry, pixel-approx contract).
     Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false))
 }
 
@@ -1165,6 +1417,196 @@ mod tests {
         }
         let mean_r = sum / ((x1 - x0) as u64 * h as u64);
         assert!(mean_r > 215, "boundary mean R {mean_r} — not premultiplied");
+    }
+
+    // ── sprite regressions (#404: 9-cell strip + rows grid, native miss) ──
+
+    fn sprite_q(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn sprite_body(s: Serve) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        match s {
+            Serve::Done(r) => {
+                assert_eq!(r.status(), StatusCode::OK);
+                let bytes = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(r.into_body().collect())
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec();
+                assert_eq!(&bytes[..2], b"\xff\xd8");
+                bytes
+            }
+            Serve::Proxy => panic!("expected Done, got Proxy"),
+        }
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, Vec<u8>)]) {
+        // Minimal stored (no compression) ZIP — enough for the ported
+        // central-directory reader; avoids a `zip` dev-dependency.
+        use std::io::Write;
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        let mut offsets: Vec<u64> = Vec::new();
+        for (name, data) in entries {
+            offsets.push(out.len() as u64);
+            let crc = crc32fast::hash(data);
+            let nlen = name.len() as u16;
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags (UTF-8 off → cp437 names)
+            out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+            out.extend_from_slice(&0u16.to_le_bytes()); // time
+            out.extend_from_slice(&0u16.to_le_bytes()); // date
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&nlen.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+        }
+        let cd_start = out.len() as u64;
+        let mut cd_len = 0u64;
+        for ((name, data), off) in entries.iter().zip(offsets.iter()) {
+            let crc = crc32fast::hash(&data);
+            let nlen = name.len() as u16;
+            let before = central.len();
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&0u16.to_le_bytes()); // flags
+            central.extend_from_slice(&0u16.to_le_bytes()); // method
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&nlen.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes());
+            central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            central.extend_from_slice(&(*off as u32).to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+            cd_len += (central.len() - before) as u64;
+        }
+        out.extend_from_slice(&central);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk no
+        out.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(cd_len as u32).to_le_bytes());
+        out.extend_from_slice(&(cd_start as u32).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&out).unwrap();
+    }
+
+    /// 9-cell strip: 3× 400x300 PNG → 600x150 JPEG (same as Python).
+    #[test]
+    fn sprite_strip_dims_match_python() {
+        let (dl, cache) = tmp_dirs("s1");
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), png_rgb(400, 300, [0, 255, 0])).unwrap();
+        std::fs::write(dl.join("b.png"), png_rgb(400, 300, [0, 0, 255])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,g.png,b.png")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=r.png,g.png,b.png", &HeaderMap::new());
+        let body = sprite_body(out);
+        assert_eq!(jpeg_dims(&body), (600, 150));
+        // `sprites/200/` namespace shared with `thumbs.py`.
+        assert_eq!(std::fs::read_dir(cache.join("sprites/200")).unwrap().count(), 1);
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `rows=2,2` grid at w=400 → 480x720; w=200 → 240x360.
+    #[test]
+    fn sprite_grid_dims_follow_w_class() {
+        for (w, expect) in [("400", (480, 720)), ("200", (240, 360))] {
+            let (dl, cache) = tmp_dirs(&format!("sg{w}"));
+            for (n, px) in [
+                ("r.png", [255, 0, 0]),
+                ("g.png", [0, 255, 0]),
+                ("b.png", [0, 0, 255]),
+                ("p.png", [255, 0, 255]),
+            ] {
+                std::fs::write(dl.join(n), png_rgb(400, 300, px)).unwrap();
+            }
+            let qs = format!("folder=.&names=r.png,g.png,b.png,p.png&rows=2,2&w={w}");
+            let q = sprite_q(&[
+                ("folder", "."),
+                ("names", "r.png,g.png,b.png,p.png"),
+                ("rows", "2,2"),
+                ("w", w),
+            ]);
+            let out = thumb_sprite(&dl, &cache, &q, &qs, &HeaderMap::new());
+            let body = sprite_body(out);
+            assert_eq!(jpeg_dims(&body), expect, "w={w}");
+            std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+        }
+    }
+
+    /// Archive folder composes natively; one bad entry grays, all-bad 404s.
+    #[test]
+    fn sprite_archive_native_and_fail_open() {
+        let (dl, cache) = tmp_dirs("s2");
+        let entries = [
+            ("r.png", png_rgb(400, 300, [255, 0, 0])),
+            ("g.png", png_rgb(400, 300, [0, 255, 0])),
+        ];
+        let refs: Vec<(&str, Vec<u8>)> =
+            entries.iter().map(|(n, b)| (*n, b.clone())).collect();
+        write_zip(&dl.join("work.zip"), &refs);
+        let q = sprite_q(&[("folder", "work.zip"), ("names", "r.png,nope.png")]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q,
+            "names=r.png,nope.png",
+            &HeaderMap::new(),
+        ));
+        assert_eq!(jpeg_dims(&body), (400, 150));
+        // Gray cell: right slot center is ~(128,128,128) ± JPEG tolerance.
+        let dec = image::load_from_memory(&body).unwrap().to_rgb8();
+        let px = dec.get_pixel(300, 75);
+        assert!(
+            px.0.iter().all(|v| (110..=146).contains(v)),
+            "gray cell {px:?}"
+        );
+        let qbad = sprite_q(&[("folder", "work.zip"), ("names", "nope.png,nada.png")]);
+        assert_eq!(
+            status(&thumb_sprite(&dl, &cache, &qbad, "names=nope.png,nada.png", &HeaderMap::new())),
+            StatusCode::NOT_FOUND
+        );
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Grid with only bad cells 404s; invalid `rows` falls back to strip.
+    #[test]
+    fn sprite_grid_all_bad_404s_and_bad_rows_falls_back() {
+        let (dl, cache) = tmp_dirs("s3");
+        std::fs::create_dir_all(dl.join("plain")).unwrap();
+        std::fs::write(dl.join("plain/big.png"), png_rgb(400, 300, [9, 9, 9])).unwrap();
+        let qbad = sprite_q(&[("folder", "plain"), ("names", "nope.png"), ("rows", "1")]);
+        assert_eq!(
+            status(&thumb_sprite(&dl, &cache, &qbad, "names=nope.png&rows=1", &HeaderMap::new())),
+            StatusCode::NOT_FOUND
+        );
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), png_rgb(400, 300, [0, 255, 0])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,g.png"), ("rows", "x")]);
+        let body = sprite_body(thumb_sprite(&dl, &cache, &q, "names=r.png,g.png&rows=x", &HeaderMap::new()));
+        assert_eq!(jpeg_dims(&body), (400, 150));
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
 

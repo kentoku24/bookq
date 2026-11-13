@@ -648,7 +648,8 @@ async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response 
 }
 
 /// `/api/v1/thumb-sprite` — v1 contract (v0 `/api/thumb-sprite` proxies).
-/// Native answers validation, 304s and shared-cache hits; misses proxy.
+/// Native answers validation, 304s and shared-cache hits; misses compose
+/// in-process (9-cell strip + `rows` grid) into the shared `sprites/` cache.
 async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("thumb-sprite") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;

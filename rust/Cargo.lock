@@ -2334,6 +2334,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bookq-core",
+ "crc32fast",
  "flate2",
  "futures-util",
  "hmac",
