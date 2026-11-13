@@ -5,7 +5,9 @@
 //! module cannot serve with *proven* identical semantics returns
 //! `Serve::Proxy` and falls through to the Python upstream:
 //!
-//!   - PDFs (pypdfium2 rendering has no Rust equivalent here)
+//!   - PDF pages whose render needs a missing `libpdfium` (fail-open proxy;
+//!     with the library present they render in-process via `pdfium-render`,
+//!     the same PDFium engine as pypdfium2 — issue #402)
 //!   - RAR/CBR multipart sets beyond store-concat (compressed members,
 //!     missing volumes proxy so upstream 7z decides, #403 — the bundled
 //!     unrar aborts on some compressed multipart, never chained there)
@@ -456,8 +458,9 @@ fn archive_bytes_response(
 
 /// `_list_folder_images` + the v1 route's response shaping.
 /// Success = `{"folder": <raw query>, "images": [...]}`; errors keep the
-/// shared `{detail}` shape unwrapped. Returns `Serve::Proxy` whenever a PDF
-/// is involved — pypdfium2 semantics cannot be reproduced natively yet.
+/// shared `{detail}` shape unwrapped. PDF folders list natively via
+/// `bookq_core::pdf_page_count` (#402); a missing libpdfium only affects
+/// page *rendering* (proxied), never the listing.
 pub fn api_images(downloads: &Path, folder: &str) -> Serve {
     let folder_path = downloads.join(folder);
     if !is_within(downloads, &folder_path) {
@@ -472,15 +475,17 @@ pub fn api_images(downloads: &Path, folder: &str) -> Serve {
         return Serve::Done(json_list(folder, names));
     }
     if is_pdf_file(&resolved) {
-        return Serve::Proxy; // pdf_page_count needs pypdfium2
+        let count = bookq_core::pdf_page_count(&resolved);
+        let names = (0..count).map(bookq_core::pdf_page_name).collect();
+        return Serve::Done(json_list(folder, names));
     }
     if let Some((archive, inner)) = resolve_archive(downloads, folder) {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
-        if is_pdf_file(&archive) {
-            return Serve::Proxy;
-        }
+        // PDFs have no inner prefixes: their virtual children are the flat
+        // `pNNN.png` page list, so any `pdf/inner` path 404s exactly like
+        // Python's empty `_list_archive_prefix` (no proxy needed).
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
             Err(_) => return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden")),
@@ -570,21 +575,23 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 
 /// `serve_image` — archive-entry reads and plain-file serving.
 /// RAR/CBR store entries (incl. multipart store-concat) extract
-/// in-process; compressed multipart proxies (unrar abort risk); only PDF
-/// pages always proxy upstream. Multi-range is a contract
-/// shrink (200 full) on both plain and archive paths — see `serve_plain_file`.
+/// in-process; compressed multipart proxies (unrar abort risk). PDF pages
+/// render in-process via pdfium-render (#402, same PDFium engine as
+/// pypdfium2) and proxy upstream only when `libpdfium` is unavailable.
+/// Multi-range is a contract shrink (200 full) on both plain and archive
+/// paths — see `serve_plain_file`.
 pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     if let Some((archive, inner)) = resolve_archive(downloads, path) {
         if !is_within(downloads, &archive) {
             return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
-        if is_pdf_file(&archive) {
-            return Serve::Proxy; // pdf render → upstream pypdfium2
-        }
         let archive_resolved = match realpath(&archive) {
             Ok(p) => p,
             Err(_) => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
         };
+        if is_pdf_file(&archive_resolved) {
+            return serve_pdf_page(&archive_resolved, &inner, headers);
+        }
         return serve_archive_entry(&archive_resolved, &inner, headers);
     }
 
@@ -619,7 +626,51 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Serve {
     serve_plain_file(&file_path, size, &etag, &last_modified, headers)
 }
 
-/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR (pdf proxies upstream).
+/// `_serve_archive_entry` for a rendered PDF page (#402).
+///
+/// Port of the `is_pdf_file(archive)` branch of `_serve_archive_entry`:
+/// `pNNN.png` names map through the page count, the ETag is
+/// `"{mtime:.0f}-{size}-pdf{idx}"` (0-based `idx`), and the body is the
+/// `render(scale=2.0)` PNG. A render failure (missing `libpdfium`, corrupt
+/// page) proxies so upstream owns the 501 path — never a native 500.
+fn serve_pdf_page(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
+    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
+    }
+    let stat = match archive.metadata() {
+        Ok(m) => m,
+        Err(_) => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
+    };
+    let mtime = stat
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let last_modified = http_date(mtime);
+    let count = bookq_core::pdf_page_count(archive);
+    let Some(idx) = bookq_core::parse_pdf_page_name(inner, count) else {
+        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+    };
+    let etag = format!("\"{}-{}-pdf{idx}\"", fmt_mtime(mtime), stat.len());
+    if archive_not_modified(headers, &etag, mtime) {
+        return Serve::Done(not_modified());
+    }
+    let data = match bookq_core::render_pdf_page(archive, idx, 2.0) {
+        Some(d) => d,
+        None => return Serve::Proxy,
+    };
+    Serve::Done(archive_bytes_response(
+        headers,
+        data,
+        "image/png",
+        &etag,
+        &last_modified,
+        mtime,
+    ))
+}
+
+/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR.
 fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Serve {
     if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
         return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
@@ -991,6 +1042,154 @@ mod tests {
             .unwrap();
         let out = maybe_gzip(&hdrs(&[("accept-encoding", "br, xgzip")]), res, true).await;
         assert_eq!(out.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
+    }
+
+    // ── native PDF read-path (#402) ──────────────────────────────────────────
+
+    /// Minimal 2-page PDF with a valid xref (lopdf-parseable, like real files).
+    fn write_test_pdf(path: &std::path::Path) {
+        let mut objs = vec![
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 5 0 R >>\nendobj\n".to_string(),
+            "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 6 0 R >>\nendobj\n".to_string(),
+            "5 0 obj\n<< /Length 17 >>\nstream\nBT 10 90 Td (P1) Tj ET\nendstream\nendobj\n".to_string(),
+            "6 0 obj\n<< /Length 17 >>\nstream\nBT 10 90 Td (P2) Tj ET\nendstream\nendobj\n".to_string(),
+        ];
+        let _ = objs.len();
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for obj in &objs {
+            offsets.push(out.len());
+            out.extend(obj.as_bytes());
+        }
+        let xref_at = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+        for off in &offsets {
+            out.extend(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF",
+                offsets.len() + 1
+            )
+            .as_bytes(),
+        );
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn pdf_downloads(tag: &str) -> std::path::PathBuf {
+        let dl = std::env::temp_dir().join(format!(
+            "bq-serve-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dl).unwrap();
+        write_test_pdf(&dl.join("doc.pdf"));
+        dl.canonicalize().unwrap()
+    }
+
+    fn body_bytes(r: Response) -> Vec<u8> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+            r.into_body().collect().await.unwrap().to_bytes().to_vec()
+        })
+    }
+
+    #[test]
+    fn pdf_api_images_lists_pages_natively() {
+        let dl = pdf_downloads("ai");
+        let out = api_images(&dl, "doc.pdf");
+        let Serve::Done(res) = out else {
+            panic!("pdf listing must be native, not proxied");
+        };
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_bytes(res);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["folder"], "doc.pdf");
+        assert_eq!(v["images"], serde_json::json!(["p001.png", "p002.png"]));
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    #[test]
+    fn pdf_inner_prefix_is_404_like_python() {
+        // PDFs have no inner prefixes — Python's empty `_list_archive_prefix`
+        // answers 404, never a listing.
+        let dl = pdf_downloads("aip");
+        let out = api_images(&dl, "doc.pdf/sub");
+        let Serve::Done(res) = out else {
+            panic!("expected native 404, got proxy");
+        };
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    #[test]
+    fn pdf_image_page_contract() {
+        let dl = pdf_downloads("ip");
+        // Out-of-range and misshapen names 404 natively (count-gated).
+        for bad in ["doc.pdf/p009.png", "doc.pdf/x.png", "doc.pdf/p000.png"] {
+            let out = image(&dl, bad, &HeaderMap::new());
+            let Serve::Done(res) = out else {
+                panic!("{bad}: expected native 404, got proxy");
+            };
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{bad}");
+        }
+        // A valid page is native when libpdfium is present (Done image/png
+        // with the Python ETag shape) and fail-open proxies otherwise.
+        let rendered = bookq_core::render_pdf_page(&dl.join("doc.pdf"), 0, 2.0).is_some();
+        let out = image(&dl, "doc.pdf/p001.png", &HeaderMap::new());
+        if rendered {
+            let Serve::Done(res) = out else {
+                panic!("expected native render, got proxy");
+            };
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()["content-type"], "image/png");
+            let st = std::fs::metadata(dl.join("doc.pdf")).unwrap();
+            let mtime = st
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
+            let expected = format!("\"{}-{}-pdf0\"", fmt_mtime(mtime), st.len());
+            assert_eq!(res.headers()["etag"], expected.as_str());
+        } else {
+            assert!(
+                matches!(out, Serve::Proxy),
+                "without libpdfium the page must proxy, not 500"
+            );
+        }
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    #[test]
+    fn pdf_image_page_304() {
+        // Conditional revalidation matches Python's int(mtime) semantics.
+        let dl = pdf_downloads("i304");
+        if bookq_core::render_pdf_page(&dl.join("doc.pdf"), 0, 2.0).is_none() {
+            std::fs::remove_dir_all(&dl).ok();
+            return; // no libpdfium here — covered by pdf_image_page_contract
+        }
+        let first = image(&dl, "doc.pdf/p001.png", &HeaderMap::new());
+        let Serve::Done(res) = first else {
+            panic!("expected native render");
+        };
+        let etag = res.headers()["etag"].to_str().unwrap().to_string();
+        let h = hdrs(&[("if-none-match", etag.as_str())]);
+        let out = image(&dl, "doc.pdf/p001.png", &h);
+        let Serve::Done(res2) = out else {
+            panic!("expected native 304");
+        };
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+        std::fs::remove_dir_all(&dl).ok();
     }
 }
 

@@ -742,8 +742,9 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
 }
 
 /// `/image/{*path}` — a v1 contract path (media is not versioned): native
-/// for plain files and ZIP/CBZ/EPUB/RAR/CBR entries.
-/// PDF pages proxy upstream; multi-range is a 200-full contract shrink.
+/// for plain files, ZIP/CBZ/EPUB/RAR/CBR entries, and PDF pages (#402 —
+/// pdfium-render; only a missing `libpdfium` still proxies page renders).
+/// Multi-range is a 200-full contract shrink.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;

@@ -40,7 +40,19 @@ RUN find rust api -type f -not -path '*/target/*' -exec touch {} + \
 
 FROM debian:bookworm-slim
 # libstdc++6 carries the unrar C++ runtime the binary links against.
-RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 && rm -rf /var/lib/apt/lists/*
+# libpdfium carries the native PDF pipeline (#402): pdfium-render binds it
+# at runtime (dlopen — no build-time link), the same PDFium engine as
+# pypdfium2. Prebuilt: bblanchon/pdfium-binaries, pinned to the
+# pdfium-render `pdfium_latest` release (8125). Size: tarball ~3.8MB,
+# installed libpdfium.so ~7.7MB.
+ARG PDFIUM_VERSION=8125
+RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 ca-certificates curl \
+    && curl -sSL -o /tmp/pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/${PDFIUM_VERSION}/pdfium-linux-x64.tgz" \
+    && mkdir -p /tmp/pdfium && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium \
+    && cp /tmp/pdfium/lib/libpdfium.so /usr/local/lib/ && ldconfig \
+    && rm -rf /tmp/pdfium.tgz /tmp/pdfium \
+    && apt-get purge -y curl && apt-get autoremove -y --purge \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=rsbuilder /viewer-rs-bin /usr/local/bin/viewer-rs
 
 # #401 native shell/static: only the three payload trees the Rust server

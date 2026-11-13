@@ -16,12 +16,17 @@
 
 mod archive;
 mod meta;
+mod pdf;
 mod scans;
 
 pub use archive::{
     epub_raw, open_archive, rar_names, rar_needs_upstream, rar_read_entry, zip_names,
     zip_read_entry, OpenArchive,
     ZipEntry,
+};
+pub use pdf::{
+    clear_pdf_page_count_memo, parse_pdf_page_name, pdf_memo_stats, pdf_page_count,
+    pdf_page_name, render_pdf_page,
 };
 pub use meta::{meta_walk, parse_metadata_batch, ComicRec};
 pub use scans::{
@@ -206,15 +211,5 @@ mod tests {
         assert_eq!(sort_file_cmp("cover.png", "001.png"), Ordering::Less);
         assert_eq!(sort_file_cmp("01.png", "2.png"), Ordering::Less);
         assert_eq!(sort_file_cmp("10.jpg", "9.jpg"), Ordering::Greater);
-    }
-}
-
-/// `pdf_page_count(path)` — pypdfium2's `len(PdfDocument)` equivalent:
-/// parsed pages-tree count, `0` on any open/parse failure (matching the
-/// Python contract of never raising for a bad PDF).
-pub fn pdf_page_count(path: &std::path::Path) -> usize {
-    match lopdf::Document::load(path) {
-        Ok(doc) => doc.get_pages().len(),
-        Err(_) => 0,
     }
 }

@@ -7,8 +7,11 @@
 //! thumbnail, JPEG encode) and stored into the same cache dir with the
 //! same atomic tmp+rename + oldest-mtime prune as `_store_thumb`.
 //!
-//! Still proxied: sources only upstream can reach (PDF pages — pypdfium2),
-//! formats the `image` crate can't decode that Pillow
+//! Still proxied: sources only upstream can reach (PDF pages when
+//! `libpdfium` is unavailable — with the library present they render
+//! in-process via `pdfium-render`, issue #402; multipart RAR sets beyond
+//! store-concat — compressed members/missing volumes let upstream 7z
+//! decide), formats the `image` crate can't decode that Pillow
 //! might (`.avif`, `.tiff`, archive files used as sources — gated by
 //! `NATIVE_DECODE` before the payload read) and archive entries we fail to
 //! extract (unsupported compression/CRC/missing volumes — upstream decides).
@@ -166,11 +169,13 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
 /// `load_source_bytes` — source payload + (mtime, size, cache-key) for the
 /// `/view` passthrough branch and the thumb/view generate paths. Returns
 /// `Err` for the guard failures (400/403/404) and `Ok(None)` for "needs
-/// upstream tooling" (pdf pages — pypdfium2; multipart RAR — bundled
-/// unrar can't chain volumes; archive entries we can't extract —
-/// unsupported compression or CRC failure included) so callers proxy
-/// instead of reproducing 501/404 semantics Python owns. Single-volume
-/// RAR/CBR members read natively via `archive_read_entry`.
+/// upstream tooling" (PDF pages when `libpdfium` is unavailable — #402;
+/// multipart RAR — bundled unrar can't chain volumes; archive entries we
+/// can't extract — unsupported compression or CRC failure included) so
+/// callers proxy instead of reproducing 501/404 semantics Python owns.
+/// Single-volume RAR/CBR members read natively via `archive_read_entry`;
+/// PDF pages render natively via `pdfium-render` (same PDFium engine as
+/// pypdfium2) when the library is present.
 fn load_source_bytes(
     downloads: &Path,
     path: &str,
@@ -187,12 +192,28 @@ fn load_source_bytes(
         let Some((mtime, size)) = stat_mtime_size(&archive) else {
             return Err(detail(StatusCode::NOT_FOUND, "File not found"));
         };
-        // PDF pages stay upstream (pypdfium2); rar/cbr entries read
-        // natively via `archive_read_entry` (bundled unrar + #403
-        // multipart store-concat). A native miss (`None`) proxies so
-        // upstream 7z decides — same contract as the /image path.
+        // PDF pages render in-process via pdfium-render (#402) — except
+        // when `libpdfium` is unavailable. rar/cbr entries read natively
+        // via `archive_read_entry` (bundled unrar + #403 multipart
+        // store-concat). A native miss (`None`) proxies so upstream 7z
+        // decides — same contract as the /image path.
         if is_pdf_file(&archive) {
-            return Ok(None);
+            let count = bookq_core::pdf_page_count(&archive);
+            let Some(idx) = bookq_core::parse_pdf_page_name(&inner, count) else {
+                return Err(detail(StatusCode::NOT_FOUND, "File not found"));
+            };
+            let key = format!(
+                "{}|{inner}|{}|{}",
+                archive.display(),
+                py_float(mtime),
+                size as u64
+            );
+            return match bookq_core::render_pdf_page(&archive, idx, 2.0) {
+                Some(data) => Ok(Some((data, mtime, size, key))),
+                // Missing libpdfium or a corrupt page — upstream decides
+                // (renders or 501s) exactly like the pre-native posture.
+                None => Ok(None),
+            };
         }
         if !is_image_entry(&inner) {
             return Err(detail(StatusCode::NOT_FOUND, "File not found"));
