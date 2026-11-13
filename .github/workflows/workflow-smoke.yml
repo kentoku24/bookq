@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       run: ${{ steps.filter.outputs.run }}
+      run-rs: ${{ steps.filter.outputs.run-rs }}
     steps:
       - uses: dorny/paths-filter@v4
         id: filter
@@ -50,6 +51,17 @@ jobs:
               - "Dockerfile"
               - "docker-compose*.yml"
               - "api/reader-sync-cases.json"
+            # #469: the retargeted suite oracles viewer-rs — Rust source,
+            # the spec/vectors it is checked against, the shell assets it
+            # serves, and the harness itself all matter.
+            run-rs:
+              - ".github/workflows/*.yml"
+              - "rust/**"
+              - "tests/**"
+              - "app/static/**"
+              - "app/templates/**"
+              - "api/openapi.v1.yaml"
+              - "api/vectors/**"
 
   validate:
     needs: changes-workflow-smoke
@@ -102,6 +114,47 @@ jobs:
 
       - name: Run bookq test gate (full suite)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
+
+  # #469: the same suite oracles viewer-rs — `BOOKQ_TEST_SERVER=rs` swaps
+  # the conftest server fixture's spawn to the Rust binary (no-upstream,
+  # BOOKQ_RS_NATIVE=all + STRICT), quarantining files that import `app.*`
+  # or hardcode the v0 compat surface.
+  pytest-rs:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      - name: Run test suite against viewer-rs
+        run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
   # Real-Safari lane: runs every browser-marked test under safaridriver on an
   # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
