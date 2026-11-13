@@ -63,6 +63,20 @@ info:
     この共有 hidden セットの除外をスキップする（閲覧者個人の
     全表示モード用。一時的・非永続）。
 
+    ## v0 退役方針（#212 / #407）
+
+    `deprecated: true` の v0 互換面（`/api/folders` 等 10 path）は
+    viewer (Python) 停止と同時に廃止する（#410 の Python 撤去で
+    自然に消える）。viewer-rs は v0 を native 実装しない
+    （upstream proxy のまま → v0 停止時に upstream は不要）。
+    PWA / iOS / Android と `scripts/prod_monitor.py` は v1 移行済み。
+
+    `Deprecation` / `Sunset` 応答ヘッダは送らない。
+    Python バックエンドは凍結中（`app/` untouched）のため二重実装の
+    コストに見合わず、具体的な退役日の確定は #212 に委ねる。
+    それまでは本 spec の `deprecated: true` + 各 v0 operation の
+    Sunset 記載を正とする。
+
     ## 振る舞いの正本
 
     wire shape に表れない意味論（ETag 世代・positions LWW・
@@ -578,6 +592,7 @@ paths:
       deprecated: true
       operationId: legacyGetFolders
       summary: "[v0] GET /api/v1/tree を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: path
           in: query
@@ -619,6 +634,7 @@ paths:
       deprecated: true
       operationId: legacyListImages
       summary: "[v0] 素配列を返す旧版。GET /api/v1/images を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -642,6 +658,7 @@ paths:
       deprecated: true
       operationId: legacySearch
       summary: "[v0] GET /api/v1/search を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: q
           in: query
@@ -677,6 +694,7 @@ paths:
       deprecated: true
       operationId: legacyFacets
       summary: "[v0] GET /api/v1/facets を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: path
           in: query
@@ -699,6 +717,7 @@ paths:
       deprecated: true
       operationId: legacyRefresh
       summary: "[v0] POST /api/v1/index/refresh を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: 再構築完了
@@ -716,6 +735,7 @@ paths:
       deprecated: true
       operationId: legacyHealth
       summary: "[v0] GET /api/v1/health を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       security: []
       responses:
         "200":
@@ -733,6 +753,7 @@ paths:
       deprecated: true
       operationId: legacyVersion
       summary: "[v0] GET /api/v1/version を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "バージョン情報。`Cache-Control: no-store`"
@@ -751,6 +772,7 @@ paths:
       deprecated: true
       operationId: legacyThumbSprite
       summary: "[v0] GET /api/v1/thumb-sprite を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -785,6 +807,7 @@ paths:
       deprecated: true
       operationId: legacyGetReadingPosition
       summary: "[v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "`{position: レコードまたは null}` — 常にオブジェクト envelope"
@@ -805,6 +828,7 @@ paths:
       deprecated: true
       operationId: legacyPutReadingPosition
       summary: "[v0] newest-ts-wins 単一レコード"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       requestBody:
         required: true
         content:
@@ -837,6 +861,7 @@ paths:
       deprecated: true
       operationId: legacyDeleteReadingPosition
       summary: "[v0] 最新レコードの消去"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -859,6 +884,7 @@ paths:
       deprecated: true
       operationId: legacyGetFolderVisibility
       summary: "[v0] GET /api/v1/folder-visibility を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "可視性スナップショット。`Cache-Control: private, no-store`"
@@ -870,6 +896,7 @@ paths:
       deprecated: true
       operationId: legacyPutFolderVisibility
       summary: "[v0] PUT /api/v1/folder-visibility を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。"
       parameters:
         - name: x-bookq-visibility-owner
           in: header
