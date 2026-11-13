@@ -1,0 +1,184 @@
+# iOS native client — unit tests (incl. SpecConformanceTests contract
+# suite) + XCUITest UX suite on an iOS simulator, against the same
+# TEST_MODE synthetic tree android.yml uses. macOS runner minutes cost
+# ~10x ubuntu, so path gating keeps this off unrelated PRs and the
+# script pays the Xcode build cost once for both test bundles.
+name: ios
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
+
+jobs:
+  # Job-level path gating (not on.pull_request.paths) so required checks
+  # still report on unrelated PRs — see android.yml / #382.
+  changes-ios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        # workflow_dispatch keeps running everything, as before.
+        if: github.event_name == 'pull_request'
+        # The UI tests boot the repo's FastAPI server and drive the real
+        # client — server or dependency changes can break iOS the same
+        # way they break Android, hence app/** and requirements*.txt.
+        with:
+          filters: |
+            run:
+              - "ios/**"
+              - "api/**"
+              - ".github/workflows/ios.yml"
+              - ".github/scripts/ios-ui-test.sh"
+              - "app/**"
+              - "requirements*.txt"
+              - "rust/viewer-rs/**"
+
+  test:
+    needs: changes-ios
+    if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Workspace-local DerivedData so actions/cache can persist it —
+      # the default ~/Library path is outside the checkout.
+      DERIVED_DATA_PATH: ${{ github.workspace }}/.dd/ios
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Select latest Xcode
+        id: xcode
+        run: |
+          # macos images ship several Xcode versions side by side; the
+          # app tracks the newest iOS SDK, so pick the highest installed.
+          best=""; best_v=""
+          for app in /Applications/Xcode*.app; do
+            [ -d "$app" ] || continue
+            v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+              "$app/Contents/Info.plist" 2>/dev/null || echo 0)"
+            if [ "$(printf '%s\n%s\n' "$best_v" "$v" | sort -V | tail -1)" = "$v" ]; then
+              best="$app"; best_v="$v"
+            fi
+          done
+          echo "selected Xcode: $best ($best_v)"
+          [ -n "$best" ] || { echo "no Xcode.app found"; exit 1; }
+          sudo xcode-select -s "$best/Contents/Developer"
+          xcodebuild -version
+          echo "version=$best_v" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure iOS simulator runtime
+        run: |
+          if ! xcrun simctl list runtimes | grep -q "iOS"; then
+            echo "no iOS runtime — downloading platform"
+            xcodebuild -downloadPlatform iOS
+          fi
+          xcrun simctl list devices available | grep -i iphone | head -10
+
+      # The app compiles against iOS 27 SDK symbols
+      # (ExternalNonInteractiveAccessory / sceneAccessory in
+      # ios/Bookq/External/) — `if #available(iOS 27)` only guards
+      # runtime; the SDK itself must be 27+. macos-latest currently
+      # ships Xcode 26.x only, so we skip cleanly rather than fail:
+      # the job re-arms automatically the day a 27-capable image lands.
+      - name: Check iOS SDK >= 27
+        id: sdk
+        run: |
+          sdk="$(xcodebuild -showsdks | awk '/iphoneos/ {print $NF}' | sort -V | tail -1)"
+          ver="${sdk#iphoneos}"; major="${ver%%.*}"
+          echo "selected iPhoneOS SDK: $sdk"
+          if [ "${major:-0}" -ge 27 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::iOS SDK $sdk < 27 — macos-latest lacks Xcode 27; iOS tests skipped until runners ship it (#424)"
+            {
+              echo "### iOS test job"
+              echo ""
+              echo "- result: SKIPPED — runner iPhoneOS SDK is \`$sdk\`, app requires iOS 27 SDK (Xcode 27+)"
+              echo "- re-arms automatically when macos-latest ships a 27+ SDK"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: astral-sh/setup-uv@v7
+        if: steps.sdk.outputs.ok == 'true'
+
+      # Same synthetic tree as android.yml, plus Series/vol2 so the iOS
+      # drill-down test sees two volumes under Series/.
+      - name: Build synthetic downloads tree
+        if: steps.sdk.outputs.ok == 'true'
+        run: |
+          mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Series/vol2 /tmp/dl/Other /tmp/bookq-state
+          uv run --with pillow python - <<'PYEOF'
+          from PIL import Image
+          for i in range(3):
+              Image.new("RGB", (80, 120), (i * 60, 0, 0)).save(f"/tmp/dl/Series/vol1/p{i:02d}.jpg")
+          for i in range(2):
+              Image.new("RGB", (80, 120), (0, i * 60, 0)).save(f"/tmp/dl/Series/vol2/p{i:02d}.jpg")
+          Image.new("RGB", (80, 120), (0, 0, 120)).save("/tmp/dl/Other/p00.jpg")
+          PYEOF
+
+      - name: Start bookq (test mode)
+        if: steps.sdk.outputs.ok == 'true'
+        run: |
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
+            uv run --with-requirements requirements-dev.txt \
+            uvicorn app.main:app --host 127.0.0.1 --port 8080 \
+            > /tmp/bookq-ios-ci-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
+          done
+          echo "server did not become healthy"
+          cat /tmp/bookq-ios-ci-server.log
+          exit 1
+
+      # DerivedData holds the whole build graph; keyed on Xcode version +
+      # ios/** contents so app-only or server-only PRs still hit warm.
+      - name: Cache Xcode DerivedData
+        if: steps.sdk.outputs.ok == 'true'
+        uses: actions/cache@v6
+        with:
+          path: .dd/ios
+          key: ios-dd-${{ runner.os }}-xcode${{ steps.xcode.outputs.version }}-${{ hashFiles('ios/**') }}
+          restore-keys: |
+            ios-dd-${{ runner.os }}-xcode${{ steps.xcode.outputs.version }}-
+            ios-dd-${{ runner.os }}-
+
+      - name: Run iOS tests
+        if: steps.sdk.outputs.ok == 'true'
+        run: |
+          START=$(date +%s)
+          set +e
+          bash .github/scripts/ios-ui-test.sh http://127.0.0.1:8080
+          RC=$?
+          set -e
+          ELAPSED=$(( $(date +%s) - START ))
+          {
+            echo "### iOS test job"
+            echo ""
+            echo "- result: $([ "$RC" -eq 0 ] && echo PASS || echo FAIL)"
+            echo "- wall time: ${ELAPSED}s"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$RC"
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p ios/build/ios-test-results
+          cp /tmp/bookq-ios-ci-server.log ios/build/ios-test-results/server.log 2>/dev/null || true
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ios-test-results
+          path: ios/build/ios-test-results/
+          if-no-files-found: ignore

@@ -32,6 +32,7 @@ struct FacetSheet: View {
                         search.resetFilters()
                         search.filtersChanged()
                     }
+                    .accessibilityIdentifier("facetReset")
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("適用") {
@@ -39,6 +40,7 @@ struct FacetSheet: View {
                         dismiss()
                     }
                     .fontWeight(.semibold)
+                    .accessibilityIdentifier("facetApply")
                 }
             }
         }

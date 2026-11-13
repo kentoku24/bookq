@@ -19,7 +19,7 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 ## 開発用サーバーへの接続
 
 シミュレータは Mac のネットワークを共有するため、ローカルの TEST_MODE
-サーバーには `http://localhost:8080` で直接届く（ATS は localhost 対象外）:
+サーバーには `http://127.0.0.1:8080` で直接届く（ATS は loopback 対象外。`localhost` ではなく IPv4 固定にする — `localhost` が `::1` に解決される環境で別サービスが 8080 を掴んでいると別物に繋がる）:
 
 ```bash
 BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
@@ -31,7 +31,7 @@ BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
 （NSArgumentDomain → @AppStorage）:
 
 ```bash
-xcrun simctl launch <udid> dev.bookq.reader -serverURL http://localhost:8080
+xcrun simctl launch <udid> dev.bookq.reader -serverURL http://127.0.0.1:8080
 ```
 
 実機からの接続には Tailscale アプリが必要（サーバーは tailnet 限定）。
@@ -208,4 +208,31 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
 - 外部ディスプレイはシミュレータで生成できないため投影経路は実機 QA のみ
   （単体テストは state machine/レイアウト helper のみカバー）
-- UI 自動テストなし（単体テストのみ）
+
+## テスト
+
+- `BookqTests`（単体 + `SpecConformanceTests` 契約スイート）と
+  `BookqUITests`（XCUITest UX スイート）の 2 ターゲット。`Bookq.xcscheme`
+  の Testables に両方登録済みで `xcodebuild test` が両方走る。
+- UI テストは `BookqUITests/UITestSupport.swift` が `-serverURL` /
+  `-testToken` 起動引数で TEST_MODE サーバーへ直接接続する（fixture は
+  android.yml と同じ合成木: Series/vol1+vol2, Other）。タップ対象は
+  `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
+  `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
+  （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。
+- CI: `.github/workflows/ios.yml`（`macos-latest`、pull_request +
+  workflow_dispatch）。paths-filter で `ios/**` `api/**` `app/**`
+  `requirements*.txt` `rust/viewer-rs/**` に限定し、非対象 PR では
+  skipped になる（required check 互換）。`.github/scripts/ios-ui-test.sh`
+  がシミュレータ選択（iPhone 13 優先・最新 runtime へフォールバック）→
+  DerivedData キャッシュ → `build-for-testing` → `BookqTests` →
+  `BookqUITests` を一括実行し、xcresult + サーバーログを artifact 化する。
+  実行時間はジョブサマリに記録される（macOS 分は ubuntu の約10倍のため、
+  required 化の判断材料とする）。
+  **SDK ゲート**: アプリは iOS 27 SDK のシンボル
+  （`ExternalNonInteractiveAccessory` / `sceneAccessory`、
+  `ios/Bookq/External/`）を使うため、runner の iPhoneOS SDK が 27 未満
+  ならテストはスキップされる（`#available` は実行時ガードのみで
+  コンパイルには SDK 自体が必要）。macos-latest が Xcode 27 を
+  搭載すれば自動で有効化される。それまではローカル
+  `ios-ui-test.sh` での検証が実効パス。

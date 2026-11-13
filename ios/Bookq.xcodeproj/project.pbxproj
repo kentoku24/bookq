@@ -30,11 +30,17 @@
 			path = BookqTests;
 			sourceTree = "<group>";
 		};
+		A00000000000000000000096 /* BookqUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = BookqUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFileReference section */
 		A00000000000000000000020 /* Bookq.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bookq.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000021 /* BookqTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BookqTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000097 /* BookqUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BookqUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +58,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A00000000000000000000099 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -60,6 +73,7 @@
 			children = (
 				A00000000000000000000010 /* Bookq */,
 				A00000000000000000000011 /* BookqTests */,
+				A00000000000000000000096 /* BookqUITests */,
 				A00000000000000000000041 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -69,6 +83,7 @@
 			children = (
 				A00000000000000000000020 /* Bookq.app */,
 				A00000000000000000000021 /* BookqTests.xctest */,
+				A00000000000000000000097 /* BookqUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -121,6 +136,29 @@
 			productReference = A00000000000000000000021 /* BookqTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		A0000000000000000000009B /* BookqUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A000000000000000000000A0 /* Build configuration list for PBXNativeTarget "BookqUITests" */;
+			buildPhases = (
+				A00000000000000000000098 /* Sources */,
+				A00000000000000000000099 /* Frameworks */,
+				A0000000000000000000009A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A0000000000000000000009D /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A00000000000000000000096 /* BookqUITests */,
+			);
+			name = BookqUITests;
+			packageProductDependencies = (
+			);
+			productName = BookqUITests;
+			productReference = A00000000000000000000097 /* BookqUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -135,6 +173,10 @@
 						CreatedOnToolsVersion = 16.0;
 					};
 					A00000000000000000000051 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = A00000000000000000000050;
+					};
+					A0000000000000000000009B = {
 						CreatedOnToolsVersion = 16.0;
 						TestTargetID = A00000000000000000000050;
 					};
@@ -157,6 +199,7 @@
 			targets = (
 				A00000000000000000000050 /* Bookq */,
 				A00000000000000000000051 /* BookqTests */,
+				A0000000000000000000009B /* BookqUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -170,6 +213,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A00000000000000000000093 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A0000000000000000000009A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -193,6 +243,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A00000000000000000000098 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -201,10 +258,22 @@
 			target = A00000000000000000000050 /* Bookq */;
 			targetProxy = A00000000000000000000081 /* PBXContainerItemProxy */;
 		};
+		A0000000000000000000009D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A00000000000000000000050 /* Bookq */;
+			targetProxy = A0000000000000000000009C /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXContainerItemProxy section */
 		A00000000000000000000081 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000060 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A00000000000000000000050;
+			remoteInfo = Bookq;
+		};
+		A0000000000000000000009C /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = A00000000000000000000060 /* Project object */;
 			proxyType = 1;
@@ -425,6 +494,52 @@
 			};
 			name = Release;
 		};
+		A0000000000000000000009E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = H3643W6HXA;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.bookq.reader.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Bookq;
+			};
+			name = Debug;
+		};
+		A0000000000000000000009F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = H3643W6HXA;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.bookq.reader.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Bookq;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -451,6 +566,15 @@
 			buildConfigurations = (
 				A00000000000000000000074 /* Debug */,
 				A00000000000000000000075 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A000000000000000000000A0 /* Build configuration list for PBXNativeTarget "BookqUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A0000000000000000000009E /* Debug */,
+				A0000000000000000000009F /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
