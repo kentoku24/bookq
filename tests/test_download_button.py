@@ -966,7 +966,8 @@ def test_08_visual_layer_computed_styles(page, server):
                     iconContent: getComputedStyle(icon, '::before').content,
                     transitionProperty: getComputedStyle(btnEl).transitionProperty,
                     animationName: rs.animationName,
-                    backgroundImage: rs.backgroundImage
+                    backgroundImage: rs.backgroundImage,
+                    reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches
                 };
             }"""
         )
@@ -976,8 +977,15 @@ def test_08_visual_layer_computed_styles(page, server):
         # DOWNLOADING (the old opaque ring hid its absence; the donut exposes it)
         assert styles["iconContent"] == '"↓"', \
             f"downloading icon ::before content must be the ↓ glyph got {styles['iconContent']!r}"
-        assert "background-color" in styles["transitionProperty"], f"btn transition-property {styles['transitionProperty']!r}"
-        assert styles["animationName"] == "spinArc", f"listing spinner animationName {styles['animationName']!r}"
+        if styles["reducedMotion"]:
+            # CI Safari reports prefers-reduced-motion — style.css then
+            # intentionally kills the button transition and the listing
+            # spinner animation; assert the reduced-motion contract instead.
+            assert styles["transitionProperty"] == "none", f"reduced-motion btn transition {styles['transitionProperty']!r}"
+            assert styles["animationName"] == "none", f"reduced-motion spinner animation {styles['animationName']!r}"
+        else:
+            assert "background-color" in styles["transitionProperty"], f"btn transition-property {styles['transitionProperty']!r}"
+            assert styles["animationName"] == "spinArc", f"listing spinner animationName {styles['animationName']!r}"
         assert "conic-gradient" in styles["backgroundImage"], f"spinner arc bg {styles['backgroundImage']!r}"
 
         try:

@@ -454,7 +454,7 @@ def safari_browser():
     from tests.safari.driver import SafariDriverManager
     from tests.safari.page import SafariBrowser
 
-    if os.environ.get("PYTEST_XDIST_WORKER"):
+    if os.environ.get("PYTEST_XDIST_WORKER") and os.environ.get("BROWSER") == "safari":
         raise RuntimeError(
             "BROWSER=safari cannot run under pytest-xdist: Safari.app pairs "
             "with exactly one WebDriver session globally. Run without -n."

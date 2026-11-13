@@ -40,6 +40,30 @@ def _stop_fill_poll(page):
     page.evaluate("() => { try { window.FillPoll.stop(); } catch(e){} }")
 
 
+def _wait_dom_quiet(page, quiet_ms=400, timeout_ms=8000):
+    """Wait for #tile-grid mutation silence, then zero the spy counter —
+    slower environments (CI Safari) can still be filling tiles when the
+    revalidate spy is installed, and those background mutations are noise
+    against the 'no re-render' assertion."""
+    page.evaluate(
+        """() => {
+            window.__q = {last: Date.now()};
+            window.__qmo = new MutationObserver(() => { window.__q.last = Date.now(); });
+            window.__qmo.observe(document.getElementById('tile-grid'), {childList: true, subtree: true});
+        }"""
+    )
+    try:
+        page.wait_for_function(
+            f"() => Date.now() - window.__q.last >= {quiet_ms}",
+            timeout=timeout_ms,
+        )
+    finally:
+        page.evaluate(
+            "() => { try { window.__qmo.disconnect(); } catch(e){}"
+            " if (window.__perf) window.__perf.domMuts = 0; }"
+        )
+
+
 def _flush_frames(page):
     page.evaluate(
         """() => new Promise(resolve => {
@@ -112,6 +136,7 @@ def test_warm_revalidate_coalesced_conditional_304_no_render(browser, server):
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
         page.evaluate(CLOCK_ADVANCE_JS)
         page.evaluate(
             "() => Promise.all([window.revalidateFoldersForOnline(), "
@@ -137,6 +162,7 @@ def test_revalidate_without_etag_falls_back_to_tree_compare(browser, server):
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
         page.evaluate(CLOCK_ADVANCE_JS)
         page.evaluate("() => window.__BOOKQ_DEBUG.etagByKey.delete(':full')")
         page.evaluate("() => window.revalidateFoldersForOnline()")
