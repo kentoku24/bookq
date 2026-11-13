@@ -45,9 +45,6 @@ services:
       - BOOKQ_CACHE_DIR=/var/cache/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       - BOOKQ_STATE_DIR=/var/lib/bookq
-      # #320: rs フルネイティブ時に index/tree を構築しない opt-in。
-      # dev-rs overlay 側では既定 1（全 native との対で py heap を空ける）。
-      - BOOKQ_DISABLE_INDEX=${BOOKQ_DISABLE_INDEX:-}
       - SECRET_KEY=dev-not-a-secret
 
     # dev.sh はこのラベルだけを情報源にする（状態ファイルを持たない）。

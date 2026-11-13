@@ -1721,7 +1721,7 @@ async def serve_thumb_sprite(
 #
 # Slot rules (LWW, tombstones, future-ts guard, bounds) live in
 # app.reading_positions.PositionBook — the same rules viewer-rs ports,
-# pinned by tests/fixtures/positions_cases.json. Handlers below only do
+# pinned by api/vectors/positions-cases.json. Handlers below only do
 # HTTP validation and adapt store results to status codes.
 
 

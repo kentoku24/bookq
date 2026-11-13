@@ -6,7 +6,7 @@
 //!   the same DB the Python viewer writes (#375), so a position PUT that
 //!   lands on either backend is visible to the other and survives restarts.
 //!   Slot rules are ported verbatim from `app/reading_positions.py`
-//!   (`PositionBook`) and pinned by `tests/fixtures/positions_cases.json`,
+//!   (`PositionBook`) and pinned by `api/vectors/positions-cases.json`,
 //!   which the Python tests consume too.
 //! * folder visibility persists in the same shared DB — the hidden set is
 //!   library-global (every row lives under `GLOBAL_USER_KEY`, matching
@@ -1016,10 +1016,10 @@ mod tests {
 
     // ── PositionBook conformance (#375) ─────────────────────────────────
     // Same vectors the Python suite runs — py/rs cannot drift on slot
-    // rules. `tests/fixtures/positions_cases.json` is the single source.
+    // rules. `api/vectors/positions-cases.json` is the single source.
 
     const POSITION_CASES: &str =
-        include_str!("../../../tests/fixtures/positions_cases.json");
+        include_str!("../../../api/vectors/positions-cases.json");
 
     fn subset_match(expected: &Value, actual: &Rec) -> bool {
         let folder = expected.get("folder").and_then(|v| v.as_str());

@@ -1,4 +1,7 @@
 {
+  "format": 1,
+  "languages": ["python", "rust"],
+  "doc": "PositionBook conformance (#375): each case runs ops against a fresh empty book; put_v0/put_v1 expect stored|stale|rejected, list expects records newest-ts-first as subset matches on {folder,page,total,ts} (updated_at ignored), latest expects one record or null.",
   "version": 1,
   "description": "Language-neutral PositionBook conformance cases (#375). Each case runs ops against a fresh empty book; put_v0/put_v1 expect one of stored|stale|rejected, list expects records newest-ts-first as subset matches on {folder,page,total,ts} (updated_at ignored), latest expects a subset record or null, check asserts list length /first/absent. 'now' is seconds (float), 'ts' is client ms.",
   "cases": [
