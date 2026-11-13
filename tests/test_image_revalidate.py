@@ -54,6 +54,9 @@ def goto_offline(page, server):
     page.wait_for_selector(".tile", timeout=10000)
 
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
+
 def wait_for_sw(page, timeout=15000):
     for _ in range(2):
         try:
@@ -61,6 +64,7 @@ def wait_for_sw(page, timeout=15000):
                 "() => navigator.serviceWorker && navigator.serviceWorker.controller !== null",
                 timeout=4000,
             )
+            _ensure_sw_interception(page)
             return True
         except Exception:
             pass
@@ -70,6 +74,7 @@ def wait_for_sw(page, timeout=15000):
                 timeout=timeout,
             )
             page.wait_for_timeout(500)
+            _ensure_sw_interception(page)
             return True
         except Exception:
             continue
