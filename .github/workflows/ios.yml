@@ -44,7 +44,9 @@ jobs:
   test:
     needs: changes-ios
     if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
-    runs-on: macos-latest
+    # xcode-27 image (public preview): the only hosted arm64 image that
+    # ships Xcode 27 / iOS 27 SDK — macos-latest (macos-26) is 26.x-only.
+    runs-on: xcode-27
     timeout-minutes: 60
     env:
       # Workspace-local DerivedData so actions/cache can persist it —
@@ -86,9 +88,9 @@ jobs:
       # The app compiles against iOS 27 SDK symbols
       # (ExternalNonInteractiveAccessory / sceneAccessory in
       # ios/Bookq/External/) — `if #available(iOS 27)` only guards
-      # runtime; the SDK itself must be 27+. macos-latest currently
-      # ships Xcode 26.x only, so we skip cleanly rather than fail:
-      # the job re-arms automatically the day a 27-capable image lands.
+      # runtime; the SDK itself must be 27+. The xcode-27 image ships
+      # it, but it is a public preview so the gate stays as a safety
+      # net: skip cleanly rather than fail if the image ever regresses.
       - name: Check iOS SDK >= 27
         id: sdk
         run: |
@@ -99,12 +101,12 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::iOS SDK $sdk < 27 — macos-latest lacks Xcode 27; iOS tests skipped until runners ship it (#424)"
+            echo "::warning::iOS SDK $sdk < 27 — xcode-27 runner image regressed or was re-pointed; iOS tests skipped (#424)"
             {
               echo "### iOS test job"
               echo ""
               echo "- result: SKIPPED — runner iPhoneOS SDK is \`$sdk\`, app requires iOS 27 SDK (Xcode 27+)"
-              echo "- re-arms automatically when macos-latest ships a 27+ SDK"
+              echo "- expected on the \`xcode-27\` image; investigate the runner image if this fires"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 

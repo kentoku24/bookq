@@ -220,7 +220,8 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
   `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
   （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。
-- CI: `.github/workflows/ios.yml`（`macos-latest`、pull_request +
+- CI: `.github/workflows/ios.yml`（`xcode-27` イメージ = Xcode 27 /
+  iOS 27 SDK 搭載の arm64 preview runner。pull_request +
   workflow_dispatch）。paths-filter で `ios/**` `api/**` `app/**`
   `requirements*.txt` `rust/viewer-rs/**` に限定し、非対象 PR では
   skipped になる（required check 互換）。`.github/scripts/ios-ui-test.sh`
@@ -233,6 +234,6 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   （`ExternalNonInteractiveAccessory` / `sceneAccessory`、
   `ios/Bookq/External/`）を使うため、runner の iPhoneOS SDK が 27 未満
   ならテストはスキップされる（`#available` は実行時ガードのみで
-  コンパイルには SDK 自体が必要）。macos-latest が Xcode 27 を
-  搭載すれば自動で有効化される。それまではローカル
-  `ios-ui-test.sh` での検証が実効パス。
+  コンパイルには SDK 自体が必要）。`xcode-27` は public preview の
+  ため、イメージ内容が変わった場合の安全網としてゲートは残してある。
+  ローカル再現は `.github/scripts/ios-ui-test.sh`。
