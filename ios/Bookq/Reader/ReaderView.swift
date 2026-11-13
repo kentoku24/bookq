@@ -31,6 +31,9 @@ struct ReaderView: View {
     /// measured, so an unmeasured spread doesn't fall back to a fixed 0.7.
     @State private var lastAR: CGFloat = 0.7
     @State private var viewportSize: CGSize = .zero
+    /// Physical screen size (safe-area insets ignored) — the strip peek
+    /// targets the screen edge, not the safe-area viewport edge.
+    @State private var screenSize: CGSize = .zero
     @State private var saveTask: Task<Void, Never>?
     @State private var showOverview = false
     /// tapForward equivalent — session-only like the web. true = left zone
@@ -80,6 +83,18 @@ struct ReaderView: View {
                 viewportSize = size
                 if wasLandscape != isLandscape { onOrientationChange() }
             }
+            // Physical screen size for the strip peek — `geo.size` is
+            // safe-area inset, but the 1pt mate sliver must hug the
+            // physical screen edge (landscape insets would otherwise
+            // leave a wide strip of the mate page showing in the margin).
+            .background(
+                GeometryReader { g in
+                    Color.clear
+                        .onAppear { screenSize = g.size }
+                        .onChange(of: g.size) { _, s in screenSize = s }
+                }
+                .ignoresSafeArea()
+            )
             .task { await load(viewport: geo.size) }
         }
         // Full-screen geometry: geo.size spans the unsafe regions too, so
@@ -145,11 +160,16 @@ struct ReaderView: View {
     /// on the destination at turn start (web parity: counter/slider move
     /// with the gesture while `pos` catches up visually).
     private func pager(work: ReaderWork, in size: CGSize) -> some View {
+        let pitches = intraIntervalPitches(work: work, in: size)
         return ZStack {
             ForEach(pagerSpreadIndices(work: work), id: \.self) { s in
                 PagerLayer(pos: pos, index: s, width: size.width,
                            count: work.spreads.count,
-                           fullRes: pagerSettled) { tier in
+                           posTarget: posTarget,
+                           fullRes: pagerSettled,
+                           intraIntervals: work.intraIntervals,
+                           peekSpread: restPeekSpread(in: work),
+                           stripPitches: pitches) { tier in
                     spreadCell(work: work, spread: s, pages: work.spreads[s],
                                tier: tier, in: size)
                 }
@@ -210,6 +230,51 @@ struct ReaderView: View {
     /// scroll) is suspended while `pos` is mid-turn or being dragged.
     private var pagerSettled: Bool {
         dragBase == nil && !posAnimating && pos == CGFloat(posTarget)
+    }
+
+    /// Rest-state 1px peek target: at an integral `pos` the settled
+    /// spread's pair mate hangs one strip pitch off its physical edge
+    /// (left for a pair's first page, right for its second). nil
+    /// mid-turn or for unpaired pages — PagerLayer turns it into a
+    /// ±pitch offset + opacity + top zIndex.
+    private func restPeekSpread(in work: ReaderWork) -> Int? {
+        // posTarget gate: a multi-spread chase can sit on an intermediate
+        // integer for a tick — don't flash that spread's mate sliver.
+        guard pos >= 0, pos == CGFloat(Int(floor(pos))),
+              pos == CGFloat(posTarget) else { return nil }
+        let s = Int(floor(pos))
+        guard work.pairRoles.indices.contains(s) else { return nil }
+        return work.pairRoles[s].mateSpread
+    }
+
+    /// Strip pitch per intra-spread interval: the pair's mean displayed
+    /// page width feeds `PageTurnMath.stripPitch`, which lands the
+    /// mate's image edge 1pt inside the *screen* edge. Portrait pages
+    /// are width-capped so this is ~viewport-1; landscape-single
+    /// letterboxed pages pitch by less, keeping a real 1pt content
+    /// sliver at the screen edge instead of an invisible cell-edge
+    /// sliver or a fully-visible mate page.
+    private func intraIntervalPitches(work: ReaderWork,
+                                      in size: CGSize) -> [Int: CGFloat] {
+        var out: [Int: CGFloat] = [:]
+        for j in work.intraIntervals {
+            guard let g1 = work.spreads[safe: j]?.first,
+                  let g2 = work.spreads[safe: j + 1]?.first else { continue }
+            let w1 = singlePageWidth(ar: pageAR[g1] ?? 0.7, in: size)
+            let w2 = singlePageWidth(ar: pageAR[g2] ?? 0.7, in: size)
+            // The peek hugs the physical screen edge; `size` is the
+            // safe-area viewport the pager lays out in.
+            let vw = screenSize.width > 0 ? screenSize.width : size.width
+            out[j] = PageTurnMath.stripPitch(
+                viewWidth: vw, pageWidth: (w1 + w2) / 2)
+        }
+        return out
+    }
+
+    /// Displayed width of a one-page spread — `spreadFit` reduces to
+    /// `min(viewportW, ar * viewportH)` for a single page.
+    private func singlePageWidth(ar: CGFloat, in size: CGSize) -> CGFloat {
+        min(size.width, ar * size.height)
     }
 
     /// Spread indices the pager renders: a window around `pos`. At rest
@@ -374,18 +439,20 @@ struct ReaderView: View {
 
     private var modeButtons: some View {
         HStack(spacing: 8) {
-            if pageMode == .spread {
-                Button {
-                    spreadOffset = spreadOffset == 0 ? 1 : 0
-                    rebuild()
-                } label: {
-                    Image(systemName: spreadOffset == 1 ? "book" : "book.pages")
-                        .padding(10)
-                        .background(spreadOffset == 1 ? Color.accentColor : .black.opacity(0.5),
-                                    in: Circle())
-                }
-                .accessibilityLabel("spread offset")
+            // 見開きずらし — spread モードでは表示ペアを、single モード
+            // ではページペア (peek/めくり方向) を切り替える。iOS は
+            // single モードにもペアリングがあるため常時表示する
+            // (web は spread 時のみ — 意図的差異)。
+            Button {
+                spreadOffset = spreadOffset == 0 ? 1 : 0
+                rebuild()
+            } label: {
+                Image(systemName: spreadOffset == 1 ? "book" : "book.pages")
+                    .padding(10)
+                    .background(spreadOffset == 1 ? Color.accentColor : .black.opacity(0.5),
+                                in: Circle())
             }
+            .accessibilityLabel("spread offset")
             // web: #spread-controls is only shown in landscape — a visible
             // but inert toggle in portrait reads as a dead button.
             if viewportSize.width >= viewportSize.height {
@@ -691,8 +758,10 @@ struct ReaderView: View {
     /// Rebuild spreads on mode/offset/orientation change (no re-pad).
     private func rebuild() {
         guard var w = work else { return }
-        // web: spreadOffset resets to 0 when leaving spread mode
-        if pageMode != .spread { spreadOffset = 0 }
+        // iOS divergence from web: spreadOffset is NOT reset when
+        // leaving spread mode — single-page mode pairs pages with the
+        // same offset for the peek/intra-turn behaviour (web has no
+        // single-mode pairing, so it resets).
         // web: on switch to spread, current page snaps down to pair start
         if pageMode == .spread && w.pageMode != .spread {
             currentIdx = (currentIdx / 2) * 2
@@ -841,6 +910,9 @@ private struct PagerLayer<Content: View>: View {
     var index: Int
     var width: CGFloat
     var count: Int
+    /// Chase destination — inside a strip interval the layer nearer to
+    /// it is the incoming side and wins the ~1px seam.
+    var posTarget: Int = 0
     /// |index - pos| beyond this renders the placeholder. The visible
     /// pair (floor/ceil) is always < 1 away, so ~3 spreads of lead keep
     /// image warm-up without mounting real cells for a whole burst
@@ -853,6 +925,16 @@ private struct PagerLayer<Content: View>: View {
     /// images; while a turn is in flight everything stays fast-tier so
     /// decode/render cost never scales with flip speed.
     var fullRes: Bool = false
+    /// Single-mode pair adjacency: interval [j, j+1] is "intra-spread"
+    /// when j is in this set — the two pages of one spread pair.
+    var intraIntervals: Set<Int> = []
+    /// Rest-state peek: the display spread that hangs 1px off the
+    /// settled spread's physical edge (its pair mate). nil mid-turn.
+    var peekSpread: Int? = nil
+    /// Strip pitch per intra-spread interval — display-spread index j
+    /// ([j, j+1] is one pair) → PageTurnMath.stripPitch of the pair's
+    /// mean displayed page width.
+    var stripPitches: [Int: CGFloat] = [:]
     var content: (PagerCellTier) -> Content
 
     var animatableData: CGFloat {
@@ -866,6 +948,11 @@ private struct PagerLayer<Content: View>: View {
             .opacity(opacity)
             .offset(x: offset)
             .zIndex(z)
+            // The peek layer is decorative — its frame is a full
+            // viewport cell shifted off-screen, so without this the
+            // transparent container claims touches (pinch/pan) over a
+            // vw−pitch dead band on the settled page's edge.
+            .allowsHitTesting(index != peekSpread)
     }
 
     /// Depth scrim on the static (`ceil`) spread — the covered page
@@ -873,10 +960,19 @@ private struct PagerLayer<Content: View>: View {
     /// it (iBooks / Android `stackTurnScrim` parity). Only the ceil
     /// layer is ever the covered one; the floor mover stays lit, and
     /// at rest or edge overshoot the fraction is 0 so nothing dims.
+    /// Strip intervals have no covered page — both pair pages slide.
     private var scrim: CGFloat {
-        guard index == Int(ceil(pos)) else { return 0 }
+        guard index == Int(ceil(pos)), !stripActive else { return 0 }
         return PageTurnMath.coveredFraction(pos, count: count)
             * PageTurnMath.stackScrimMax
+    }
+
+    /// Strip layout active — pos sits strictly inside an intra-spread
+    /// interval, so the pair's two pages translate past each other:
+    /// the current page exits toward its physical outer edge while the
+    /// mate enters from its own side (a transient two-page spread).
+    private var stripActive: Bool {
+        PageTurnMath.inStripInterval(pos, intraIntervals: intraIntervals)
     }
 
     private var tier: PagerCellTier {
@@ -889,15 +985,26 @@ private struct PagerLayer<Content: View>: View {
 
     /// Only the two spreads adjacent to `pos` are opaque — hidden
     /// neighbours must never peek out from behind a narrower spread.
+    /// The rest-state pair mate (`peekSpread`) is the single exception:
+    /// it shows its 1px edge sliver at the screen's physical side.
     /// Edge overshoot (pos < 0 or > count-1) shows only the edge spread.
     private var opacity: Double {
         if pos < 0 { return index == 0 ? 1 : 0 }
         if pos > CGFloat(count - 1) { return index == count - 1 ? 1 : 0 }
-        return index == Int(floor(pos)) || index == Int(ceil(pos)) ? 1 : 0
+        if index == Int(floor(pos)) || index == Int(ceil(pos)) { return 1 }
+        return index == peekSpread ? 1 : 0
     }
 
-    /// Spreads at or behind `floor(pos)` keep sliding right by
-    /// `(pos - index) * width` — spreads ahead of it (the revealed
+    /// Stack offsets (see below) apply everywhere except inside an
+    /// intra-spread interval and for the rest peek layer, which use the
+    /// interval's strip pitch instead. The pitch puts the mate's image
+    /// edge exactly 1pt inside the screen edge — a true content sliver
+    /// at any aspect ratio — and a finished turn leaves the departed
+    /// page on the offset the next rest state peeks at: peek → turn →
+    /// peek stays seamless.
+    ///
+    /// Stack rule: spreads at or behind `floor(pos)` keep sliding right
+    /// by `(pos - index) * width` — spreads ahead of it (the revealed
     /// `ceil` layer) stay at 0. Departed spreads trail off to +width and
     /// farther, off-screen, which is what gives `.offset` real endpoint
     /// deltas for the animation to interpolate.
@@ -906,12 +1013,39 @@ private struct PagerLayer<Content: View>: View {
         if pos > CGFloat(count - 1) {
             return index == count - 1 ? (pos - CGFloat(count - 1)) * width : 0
         }
+        if stripActive {
+            return (pos - CGFloat(index))
+                * stripPitch(forInterval: Int(floor(pos)))
+        }
+        if index == peekSpread {
+            // Rest peek: pos is integral here, so min(pos, index) is the
+            // pair's intra interval ([first, second] either way).
+            return (pos - CGFloat(index))
+                * stripPitch(forInterval: min(Int(pos), index))
+        }
         return index <= Int(floor(pos)) ? (pos - CGFloat(index)) * width : 0
+    }
+
+    /// Pitch for an intra-spread interval — falls back to the
+    /// full-width pitch if the interval has no entry (defensive;
+    /// `intraIntervals` and `stripPitches` are built together).
+    private func stripPitch(forInterval j: Int) -> CGFloat {
+        stripPitches[j]
+            ?? PageTurnMath.stripPitch(viewWidth: width, pageWidth: width)
     }
 
     private var z: Double {
         if pos < 0 { return index == 0 ? 1 : 0 }
         if pos > CGFloat(count - 1) { return index == count - 1 ? 1 : 0 }
+        // The peek sliver must sit above the settled page's opaque cell.
+        if index == peekSpread { return 2 }
+        if stripActive {
+            guard index == Int(floor(pos)) || index == Int(ceil(pos)) else { return 0 }
+            // Both pair pages translate; the side nearer the chase
+            // target is incoming and wins the ~1px seam overlap.
+            let f = Int(floor(pos))
+            return abs(index - posTarget) <= abs(f - posTarget) ? 1.5 : 1
+        }
         return index == Int(floor(pos)) ? 1 : 0
     }
 }
