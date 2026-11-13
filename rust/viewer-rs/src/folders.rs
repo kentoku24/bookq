@@ -596,10 +596,27 @@ fn live_fs_response(
 use crate::serve::{is_within, Serve};
 use crate::AppState;
 
+/// `_require_int_literal` parity: only `-?[0-9]+` is an integer literal —
+/// `+5`, ` 5`, `1.5` are 422 upstream (#326 ST201). Integer syntax that
+/// overflows i64 saturates, because Python ints are arbitrary precision
+/// and FastAPI accepts them (#465 — schemathesis ST202 flagged
+/// `since=2**63` as a 422 when the spec's `integer` is unbounded).
 fn parse_i64(v: Option<&String>) -> Result<Option<i64>, ()> {
     match v {
         None => Ok(None),
-        Some(s) => s.parse::<i64>().map(Some).map_err(|_| ()),
+        Some(s) => {
+            let neg = s.starts_with('-');
+            let digits = if neg { &s[1..] } else { s.as_str() };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            Ok(Some(match digits.parse::<i64>() {
+                Ok(n) if neg => -n,
+                Ok(n) => n,
+                Err(_) if neg => i64::MIN,
+                Err(_) => i64::MAX,
+            }))
+        }
     }
 }
 
@@ -814,6 +831,29 @@ mod tests {
 
     async fn body_bytes(res: Response) -> Vec<u8> {
         res.into_body().collect().await.unwrap().to_bytes().to_vec()
+    }
+
+    /// #465 ST202: the spec's `integer` is unbounded — values beyond i64
+    /// must saturate like Python's arbitrary-precision ints, not 422.
+    #[test]
+    fn parse_i64_saturates_overflow() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(parse_i64(None).unwrap(), None);
+        assert_eq!(parse_i64(s("5").as_ref()).unwrap(), Some(5));
+        assert_eq!(parse_i64(s("-7").as_ref()).unwrap(), Some(-7));
+        assert_eq!(parse_i64(s("9223372036854775808").as_ref()).unwrap(), Some(i64::MAX));
+        assert_eq!(parse_i64(s("-99999999999999999999").as_ref()).unwrap(), Some(i64::MIN));
+        assert_eq!(parse_i64(s("-9223372036854775808").as_ref()).unwrap(), Some(i64::MIN));
+        // #326 literal parity: `+5`/whitespace are 422 upstream.
+        assert!(parse_i64(s("+5").as_ref()).is_err());
+        assert!(parse_i64(s(" 5").as_ref()).is_err());
+        assert!(parse_i64(s("5 ").as_ref()).is_err());
+        assert!(parse_i64(s("abc").as_ref()).is_err());
+        assert!(parse_i64(s("1.5").as_ref()).is_err());
+        assert!(parse_i64(s("").as_ref()).is_err());
+        assert!(parse_i64(s("-").as_ref()).is_err());
+        assert!(parse_i64(s("+").as_ref()).is_err());
+        assert!(parse_i64(s("--5").as_ref()).is_err());
     }
 
     fn test_folder(name: &str) -> tree::Node {
