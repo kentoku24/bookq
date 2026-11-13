@@ -7,7 +7,11 @@
 # 2 つ目の tailnet ノードが立ち上がって本番と名前を争う。
 # 開発には ./dev.sh（docker-compose.dev.yml）を使う。
 services:
+  # viewer (Python) — #409 で legacy。profile `py-rollback` 時のみ起動する
+  # rollback 用の退避サービスであり、既定の `docker compose up` では
+  # 起動しない。全 traffic は viewer-rs が処理する。
   viewer:
+    profiles: ["py-rollback"]
     build:
       context: .
       args:
@@ -66,13 +70,12 @@ services:
     init: true
     restart: unless-stopped
 
-  # viewer-rs (#163/#211 strangler): profile `rs` で opt-in — 既定の
-  # `prd.sh up` ではコンテナ自体が起動しない。有効化すると全 traffic が
-  # これを通り（tailscale serve → viewer-rs）、BOOKQ_RS_NATIVE に列挙した
-  # endpoint のみ native 処理、残りは viewer へフォールスルーする。
-  # 詳細は docs/deployment.md「viewer-rs strangler 導入」。
+  # viewer-rs (#409): 唯一の本番バックエンド — 全 traffic がここを通る
+  # （tailscale serve → viewer-rs）。upstream は設定しない (#408 の
+  # upstream 不在モード): native 化されていない経路は 501、認証不能は
+  # 401 をローカルで返す。rollback は profile `py-rollback` の viewer +
+  # TS_SERVE_TARGET 戻し（docs/deployment.md「rollback」参照）。
   viewer-rs:
-    profiles: ["rs"]
     build:
       context: .
       dockerfile: Dockerfile.viewer-rs
@@ -86,19 +89,19 @@ services:
       # (#206 gateway-contract CI と同じ構成)。
       - thumb-cache:/var/cache/bookq-thumbs
     environment:
-      - BOOKQ_UPSTREAM=http://viewer:8080
+      # upstream 不在モード (#408): BOOKQ_UPSTREAM を渡さない。fallback
+      # 着弾は 501 + path WARN、認証不能は 401 で fail-fast する。
       - DOWNLOADS_DIR=/app/downloads
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
-      # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
-      # 既定は検証済みの全 native 面 (#320 + #401 shell/static): gateway-contract
-      # CI が BOOKQ_RS_NATIVE=all で全件を叩いて等価性を確認済み。
-      # `all` ではなく列挙に留める — 将来追加される native route が
-      # 未検証のまま自動有効化されるのを防ぐため。新規 native route は
-      # この既定リストへの追加で有効化する。
-      # `auth` (#400) は実 Google OAuth 検証が済むまで既定に含めない
-      # （下の GOOGLE_*/BASE_URL が揃っていれば列挙に足せる）。
-      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync,shell,static}
+      # 全 native 面を列挙（`all` ではなく列挙 — 将来追加される native
+      # route が未検証のまま自動有効化されるのを防ぐ）。`auth` も含む:
+      # Python 不在では login/token を proxy する先が存在しないため、
+      # cutover と同時に必須になる。OAuth 一式は下で配線済み。
+      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync,shell,static,auth}
+      # 全 native + upstream 不在の起動時検証 (#408): 何か gate が抜けて
+      # いたら起動を拒否する（501 を出すだけの半壊起動を防ぐ）。
+      - BOOKQ_RS_NATIVE_STRICT=${BOOKQ_RS_NATIVE_STRICT:-1}
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC —
       # viewer と同じ値が必須。ずれるとブラウザ利用が全て proxy に落ちる。
       - SECRET_KEY=${SECRET_KEY}
@@ -111,8 +114,8 @@ services:
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - BASE_URL=${BASE_URL}
     # イメージは debian-slim + バイナリのみ (curl/wget/python なし) —
-    # bash の /dev/tcp で /api/v1/health を叩く。BOOKQ_RS_NATIVE 空の全
-    # proxy 時も py 側が同パスを応答するのでどちらでも 200 が返る。
+    # bash の /dev/tcp で /api/v1/health を叩く。upstream 不在でも health
+    # gate は native 応答する（no-upstream でも standalone で healthy）。
     healthcheck:
       test:
         - CMD
@@ -124,9 +127,6 @@ services:
       retries: 15
       start_period: 2s
     restart: unless-stopped
-    depends_on:
-      viewer:
-        condition: service_healthy
 
   tailscale:
     build: ./tailscale
@@ -138,9 +138,9 @@ services:
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_HOSTNAME=bookq
-      # 未設定 → viewer 直結（従来どおり）。http://viewer-rs:8080 で gateway
-      # 経由に切替。空文字 = serve を外部管理（entrypoint の escape hatch）。
-      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer:8080}
+      # 既定 → viewer-rs（#409 で本体）。rollback は http://viewer:8080 に
+      # 戻す。空文字 = serve を外部管理（entrypoint の escape hatch）。
+      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer-rs:8080}
       # 1 で serve を funnel (public internet 公開) に切替 (#353)。
       # tailnet policy の nodeAttrs `funnel` 許可が前提。未設定 = tailnet 内
       # のみ（従来どおり）。
@@ -149,14 +149,14 @@ services:
       - tailscale-state:/var/lib/tailscale
     restart: unless-stopped
     depends_on:
-      - viewer
+      - viewer-rs
 
   # Cloudflare Tunnel (#349): 独自ドメイン公開用の opt-in ingress。
   # profile `public` でのみ起動 — CLOUDFLARE_TUNNEL_TOKEN が .env にある
   # とき rebuild.sh prd deploy が profile を有効化する。cloudflared が
   # 外向きに Cloudflare edge へ接続を張るだけなので、受信ポート開放も
   # グローバル IP も不要 (CGNAT でも動く)。公開 hostname → service
-  # (http://viewer:8080) の対応は Cloudflare ダッシュボード側で管理する。
+  # (http://viewer-rs:8080) の対応は Cloudflare ダッシュボード側で管理する。
   cloudflared:
     profiles: ["public"]
     image: cloudflare/cloudflared:2026.10.4
@@ -166,7 +166,7 @@ services:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     restart: unless-stopped
     depends_on:
-      viewer:
+      viewer-rs:
         condition: service_healthy
 
 volumes:

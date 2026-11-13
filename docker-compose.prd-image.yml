@@ -8,6 +8,5 @@ services:
   tailscale:
     image: ${PRD_TAILSCALE_IMAGE:?}
   viewer-rs:
-    # profile rs は opt-in — pin が無くても非 rs デプロイの parse を壊さない。
-    # 有効化前に `./rebuild.sh prd build` が rs イメージを作っておくこと。
-    image: ${PRD_RS_IMAGE:-bookq-prd-viewer-rs:unbuilt}
+    # #409 で本体サービス — pin 必須（欠落 deploy は parse 時点で失敗させる）。
+    image: ${PRD_RS_IMAGE:?}
