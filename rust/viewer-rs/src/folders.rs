@@ -609,11 +609,23 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     let path = q.get("path").cloned().unwrap_or_default();
     let depth = match parse_i64(q.get("depth")) {
         Ok(d) => d,
-        Err(()) => return Serve::Proxy,
+        Err(()) => {
+            return crate::serve::reject_or_proxy(
+                st.has_upstream(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid depth",
+            )
+        }
     };
     let since = match parse_i64(q.get("since")) {
         Ok(s) => s,
-        Err(()) => return Serve::Proxy,
+        Err(()) => {
+            return crate::serve::reject_or_proxy(
+                st.has_upstream(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid since",
+            )
+        }
     };
     if let Some(d) = depth {
         if d < 1 {

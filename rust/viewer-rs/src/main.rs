@@ -259,6 +259,16 @@ fn is_upgrade(req: &Request) -> bool {
     wants && req.headers().contains_key(header::UPGRADE)
 }
 
+impl AppState {
+    /// Whether a Python upstream is configured — when `false`, requests the
+    /// native layer positively rejects must answer locally (spec 4xx),
+    /// never through the dead proxy (#465). Kept as a method because
+    /// `upstream` is private to this module.
+    pub(crate) fn has_upstream(&self) -> bool {
+        self.upstream.authority.is_some()
+    }
+}
+
 fn bad_gateway(err: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_GATEWAY, format!("upstream error: {err}\n")).into_response()
 }
@@ -326,6 +336,24 @@ async fn delegate_or_proxy(st: &AppState, req: Request<Body>) -> Response {
     } else {
         tracing::info!(path = %req.uri().path(), "no upstream: unverifiable caller answered 401");
         state::detail(StatusCode::UNAUTHORIZED, "authentication required")
+    }
+}
+
+/// Strangler-era shortcut, same shape as `delegate_or_proxy`: requests the
+/// native layer can positively reject (undeclared method, contract-invalid
+/// params) inherited FastAPI's exact 4xx through the proxy. With no
+/// upstream configured the status must come out locally — a dead proxy
+/// would 501 a request the spec says is a 4xx (#465).
+async fn reject_or_proxy(
+    st: &AppState,
+    req: Request<Body>,
+    status: StatusCode,
+    msg: &'static str,
+) -> Response {
+    if st.upstream.authority.is_some() {
+        proxy(&st.upstream, req).await
+    } else {
+        state::detail(status, msg)
     }
 }
 
@@ -426,7 +454,13 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
         axum::http::Method::PUT => {
             // `folder` is required → missing keeps FastAPI's 422 upstream.
             let Some(folder) = q.get("folder").cloned() else {
-                return proxy(&st.upstream, req).await;
+                return reject_or_proxy(
+                    &st,
+                    req,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "missing folder",
+                )
+                .await;
             };
             let (parts, body) = req.into_parts();
             let body = match http_body_util::BodyExt::collect(body).await {
@@ -446,7 +480,10 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
             )
             .await
         }
-        _ => return proxy(&st.upstream, req).await,
+        _ => {
+            return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+                .await
+        }
     }
 }
 
@@ -476,15 +513,22 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
             };
             state::put_folder_visibility(&st, &key, &headers, &body).await
         }
-        _ => return proxy(&st.upstream, req).await,
+        _ => {
+            return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+                .await
+        }
     }
 }
 
 /// `/api/v1/tree` — the v1 envelope `{kind, nodes, generation}` over the
 /// shared index cache (`_folder_tree(v1=True)`).
 async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("tree") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("tree") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -501,8 +545,12 @@ async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
 
 /// `/api/v1/images` — `{folder, images[]}` over `_list_folder_images`.
 async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("images") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("images") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -512,7 +560,8 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
         .unwrap_or_default();
     // `folder` is a required Query param upstream → missing keeps the 422.
     let Some(folder) = q.get("folder").cloned() else {
-        return proxy(&st.upstream, req).await;
+        return reject_or_proxy(&st, req, StatusCode::UNPROCESSABLE_ENTITY, "missing folder")
+            .await;
     };
     let headers = req.headers().clone();
     let downloads = st.downloads.clone();
@@ -528,8 +577,12 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// `/api/v1/search` — relevance + filters over the shared index; hidden
 /// roots applied server-side (fail-closed).
 async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("search") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("search") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     // `_user` still gates auth upstream; hidden roots are library-global.
     let Some(_user) = caller_or_proxy(&st, req.headers()) else {
@@ -548,8 +601,12 @@ async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// `/api/v1/facets` — `{artists, tags}` scoped to `path`'s subtree; hidden
 /// roots applied server-side (fail-closed).
 async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("facets") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("facets") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     // `_user` still gates auth upstream; hidden roots are library-global.
     let Some(_user) = caller_or_proxy(&st, req.headers()) else {
@@ -582,12 +639,16 @@ fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
 /// native answer is local, not a delegate).
 async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("shell")
-        || !matches!(
+    {
+        return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
             *req.method(),
             axum::http::Method::GET | axum::http::Method::HEAD
         )
     {
-        return proxy(&st.upstream, req).await;
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
@@ -629,13 +690,17 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
 /// `GET|HEAD /sw.js` — public FileResponse with `Service-Worker-Allowed: /`.
 async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("static")
-        || !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
         || corrupt_session(&st, req.headers())
     {
         return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
@@ -663,13 +728,17 @@ async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
 /// `GET|HEAD /favicon.ico` — public FileResponse, day-long cache.
 async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("static")
-        || !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
         || corrupt_session(&st, req.headers())
     {
         return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
@@ -697,13 +766,17 @@ async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Respon
 /// NoCacheStaticFiles: realpath containment, no-cache, 304 + range.
 async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("static")
-        || !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
         || corrupt_session(&st, req.headers())
     {
         return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let rel = match req.uri().path() {
@@ -741,8 +814,12 @@ async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Respons
 
 /// `/api/v1/health` — public (`security: []`); `{status:"ok"}`.
 async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("health") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("health") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let headers = req.headers().clone();
     let mut res = Response::builder()
@@ -758,8 +835,12 @@ async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response 
 
 /// `/api/v1/version` — authed; `{version,sha,build_date}` + `no-store`.
 async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("version") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("version") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -789,8 +870,12 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
 /// same swap semantics as the background gate, `{status,folders}`.
 async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("refresh") || req.method() != axum::http::Method::POST {
+    if !st.native.enabled("refresh") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::POST {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -818,8 +903,12 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
 /// pdfium-render; only a missing `libpdfium` still proxies page renders).
 /// Multi-range is a 200-full contract shrink.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("image") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     // /image requires auth upstream too — only positively identified
     // callers may be served natively.
@@ -851,8 +940,12 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
 /// 304 fast path and shared-cache hits; misses render in-process (image
 /// crate) with upstream fallback for sources/decodes it can't reach.
 async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("thumb") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("thumb") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -885,8 +978,12 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
 /// undecodable/unreachable sources still proxy. `?w=<px>` opts into the
 /// normalized fast-tier branch at that width (#440).
 async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("view") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -919,8 +1016,12 @@ async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// Native answers validation, 304s and shared-cache hits; misses compose
 /// in-process (9-cell strip + `rows` grid) into the shared `sprites/` cache.
 async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("thumb-sprite") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("thumb-sprite") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -963,7 +1064,8 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
 
 async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        return proxy(&st.upstream, req).await;
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -982,7 +1084,8 @@ async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response 
 
 async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        return proxy(&st.upstream, req).await;
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -999,7 +1102,8 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
 
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        return proxy(&st.upstream, req).await;
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -1013,7 +1117,8 @@ async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response
 
 async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response {
     if *req.method() != axum::http::Method::POST {
-        return proxy(&st.upstream, req).await;
+        return reject_or_proxy(&st, req, StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
