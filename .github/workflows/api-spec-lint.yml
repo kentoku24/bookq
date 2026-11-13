@@ -51,8 +51,19 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: astral-sh/setup-uv@v7
+
       - name: Lint API specs
         run: npx --yes @stoplight/spectral-cli lint --ruleset .spectral.yaml --fail-severity error api/openapi.v1.yaml api/asyncapi.yaml
+
+      # Every `examples:` body must satisfy its response schema — the
+      # bundle is the single fixture source for client-only tests (#237).
+      # Bundle freshness itself is covered by the codegen-drift job
+      # (codegen.sh now includes extract-examples.py).
+      - name: Validate spec examples against schemas (#237)
+        run: |
+          uv run --with pyyaml --with jsonschema \
+            python scripts/api/validate-examples.py --spec api/openapi.v1.yaml
 
   # Regenerate every derived artifact (api-types.d.ts + api/dist/*.json)
   # and fail if the working tree differs — editing a spec without

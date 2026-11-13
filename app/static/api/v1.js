@@ -75,10 +75,13 @@
   } catch (e) { /* non-browser (SW importScripts w/o query): stay same-origin */ }
 
   var _E0 = (typeof BookqApiEndpoints !== "undefined") ? BookqApiEndpoints : _FALLBACK_ENDPOINTS;
-  var E = {};
+  /** @type {Record<string, string>} */
+  var _prefixed = {};
   for (var _k in _E0) {
-    if (Object.prototype.hasOwnProperty.call(_E0, _k)) E[_k] = _base + _E0[_k];
+    if (Object.prototype.hasOwnProperty.call(_E0, _k)) _prefixed[_k] = _base + _E0[_k];
   }
+  /** @type {typeof _FALLBACK_ENDPOINTS} */
+  var E = /** @type {any} */ (_prefixed);
 
   /**
    * Typed HTTP failure: status + machine-readable spec `code` (Error.code,
