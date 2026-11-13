@@ -17,16 +17,21 @@ final class CanonicalJSONTests: XCTestCase {
             .deletingLastPathComponent()   // worktree root
     }
 
-    /// (manifest content + initial, expected digest) from the shared fixture.
-    static func digestCase() -> (manifest: [String: Any], digest: String) {
+    /// (manifest content + initial, expected digest) cases from the shared
+    /// fixture — every entry, matching the Python side's full iteration.
+    static func digestCases() -> [(manifest: [String: Any], digest: String)] {
         let url = repoRoot()
             .appendingPathComponent("tests/fixtures/reader_sync_cases.json")
         let data = try! Data(contentsOf: url)
         let fixture = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let cases = fixture["manifestDigestCases"] as! [[String: Any]]
-        let first = cases[0]
-        return (first["manifest"] as! [String: Any],
-                first["expectDigest"] as! String)
+        return (fixture["manifestDigestCases"] as! [[String: Any]]).map {
+            ($0["manifest"] as! [String: Any], $0["expectDigest"] as! String)
+        }
+    }
+
+    /// First case — used by tests that need any single fixture pair.
+    static func digestCase() -> (manifest: [String: Any], digest: String) {
+        digestCases()[0]
     }
 
     /// Python: {"b": 1, "a": true, "u": "作品"}
@@ -48,8 +53,9 @@ final class CanonicalJSONTests: XCTestCase {
     /// Golden vector from the shared fixture — content keys only
     /// (v/folder/offset/chapters/pageRefs/spreadTable).
     func testManifestDigestGolden() {
-        let (manifest, digest) = Self.digestCase()
-        XCTAssertEqual(CanonicalJSON.manifestDigest(manifest), digest)
+        for (manifest, digest) in Self.digestCases() {
+            XCTAssertEqual(CanonicalJSON.manifestDigest(manifest), digest)
+        }
     }
 
     /// The digest must change when content changes (typo/classification).
