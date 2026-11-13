@@ -132,3 +132,4 @@ def test_decode_sets_match_rust():
     # 集合は互いに素でなければならない (status 分岐が一意であるため)
     assert not (set(thumbs_mod.COMMON_NATIVE_SUFFIXES) & set(thumbs_mod.PYTHON_ONLY_SUFFIXES))
     assert not (set(thumbs_mod.COMMON_NATIVE_SUFFIXES) & set(thumbs_mod.DECODE_UNSUPPORTED_EXAMPLES))
+    assert not (set(thumbs_mod.PYTHON_ONLY_SUFFIXES) & set(thumbs_mod.DECODE_UNSUPPORTED_EXAMPLES))

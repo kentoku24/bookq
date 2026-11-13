@@ -290,8 +290,12 @@ fn media_response(
 /// Python 404 == Rust Proxy → upstream 404 で同じ 404。
 const NATIVE_DECODE: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
 /// Pillow-only (Pillow ≥13 libavif 同梱): Rust は Proxy → upstream 200.
+/// 代表例列挙 — Pillow は content-sniff のため decode 可能形式は他にもある
+/// (tga/pcx/…) が、tree に載るのは IMAGE_EXTENSIONS のみ (spec §7 参照)。
+#[cfg(test)]
 const DECODE_PYTHON_ONLY: &[&str] = &[".avif", ".tif", ".tiff"];
 /// Neither backend decodes (representative examples): 404 on both.
+#[cfg(test)]
 const DECODE_UNSUPPORTED_EXAMPLES: &[&str] = &[".heic", ".heif", ".jxl"];
 
 fn native_decodable(path: &str) -> bool {

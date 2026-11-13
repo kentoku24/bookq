@@ -161,11 +161,18 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
 - **`.svg` は decode しない**: 両 backend とも元バイトを `image/svg+xml`
   で pass-through (Pillow/`image` ともに SVG decoder を持たない)。
   CSP `default-src 'none'; sandbox` を付与。
-- **Python のみ decode**: `.avif` `.tif`/`.tiff` — Pillow ≥13 (libavif
-  同梱 wheel) が decode するため Python 直撃は **200 + `image/jpeg`**。
-  Rust (`image` crate は bmp/gif/jpeg/png/webp のみ有効) は
-  `Serve::Proxy` で upstream に流すため、gateway 経由の client 可視は
-  同じ **200** (成功パリティは proxy が保証する)。
+- **Python のみ decode (代表: `.avif` `.tif`/`.tiff`)**: Pillow ≥13
+  (libavif 同梱 wheel) が decode するため Python 直撃は
+  **200 + `image/jpeg`**。Rust (`image` crate は bmp/gif/jpeg/png/webp
+  のみ有効) は `Serve::Proxy` で upstream に流すため、gateway 経由の
+  client 可視は同じ **200** (成功パリティは proxy が保証する)。
+  なお Pillow の `Image.open` は拡張子ではなく内容を sniff するため、
+  ここに列挙しない形式 (`.tga` `.pcx` `.dds` `.qoi` `.ico` `.sgi`
+  `.sun` `.xbm` `.xpm` `.ppm` `.psd` 等) も decode され得る — これらは
+  上と同じく Rust Proxy → upstream 200 でパリティが保たれる。ただし
+  tree に載るのは `app/scanner.py::IMAGE_EXTENSIONS` の 8 形式だけなので、
+  `.tiff`/`.heic`/`.tga` 等は tree 経由では見えず direct URL でのみ
+  到達する点に注意。
 - **両 backend とも decode 不可**: `.heic`/`.heif` `.jxl`、
   破損バイト等 — Pillow `Image.open` が失敗し Python は **404**
   (`make_thumbnail`/`make_view_bytes` は全 decode 失敗を 404 に写像 —
