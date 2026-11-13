@@ -36,7 +36,8 @@ use sha1::{Digest, Sha1};
 
 use crate::serve::{
     archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file,
-    is_within, not_modified, realpath, resolve_archive, suffix_lower, Serve,
+    is_rar_path, is_within, not_modified, realpath, resolve_archive,
+    suffix_lower, Serve,
 };
 
 const CACHE_MAX_AGE: i64 = 86400;
