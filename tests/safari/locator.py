@@ -211,34 +211,50 @@ class SafariLocator:
         )
 
     def fill(self, value: str, timeout=None, **kw):
-        def go(el):
-            el.clear()
-            el.send_keys(value)
-            # safaridriver's clear()/send_keys("") don't reliably emit 'input'
-            # — Playwright's fill does, and debounced app handlers depend on it.
-            self._eval(
-                "arguments[0].dispatchEvent(new Event('input', {bubbles: true}))",
-                el,
-            )
-
-        self._act(go, timeout)
+        # el.clear()/send_keys() trip safaridriver's interactability gate
+        # (off-viewport inputs are "not interactable"). Playwright's fill is
+        # a DOM-level operation anyway: set value, fire 'input' — debounced
+        # app handlers depend on that event.
+        self._act(
+            lambda el: self._eval(
+                "const e=arguments[0]; e.focus(); e.value=arguments[1];"
+                "e.dispatchEvent(new Event('input', {bubbles: true}))",
+                el, value,
+            ),
+            timeout,
+        )
 
     def type(self, text: str, timeout=None, **kw):
-        self._act(lambda el: el.send_keys(text), timeout)
+        self._act(
+            lambda el: self._eval(
+                "const e=arguments[0]; e.focus();"
+                "for (const ch of arguments[1]) {"
+                "e.dispatchEvent(new KeyboardEvent('keydown', {key: ch, bubbles: true}));"
+                "e.value += ch;"
+                "e.dispatchEvent(new Event('input', {bubbles: true}));"
+                "e.dispatchEvent(new KeyboardEvent('keyup', {key: ch, bubbles: true}));"
+                "}",
+                el, text,
+            ),
+            timeout,
+        )
 
     def press(self, key: str, timeout=None, **kw):
-        def go(el):
-            tag = el.tag_name.lower()
-            if tag in ("input", "textarea") or el.get_attribute("contenteditable"):
-                el.send_keys(_KEY_MAP.get(key, key))
-            else:
-                # element.send_keys drops keydown on non-editable targets —
-                # focus, then use the actions input pipeline instead.
-                self._eval("arguments[0].focus()", el)
-                from selenium.webdriver.common.action_chains import ActionChains
-                ActionChains(self._page._driver).send_keys(_KEY_MAP.get(key, key)).perform()
-
-        self._act(go, timeout)
+        self._act(
+            lambda el: self._eval(
+                "const e=arguments[0], k=arguments[1]; e.focus();"
+                "const opts={key: k, code: k===' ' ? 'Space' : k, bubbles: true,"
+                " keyCode: ({Enter:13,Escape:27,Space:32,' ':32,End:35,Home:36,"
+                "ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Backspace:8,"
+                "Delete:46,Tab:9})[k] || 0};"
+                "e.dispatchEvent(new KeyboardEvent('keydown', opts));"
+                "if ((e.tagName==='INPUT'||e.tagName==='TEXTAREA') && k.length===1)"
+                "{ e.value += k; e.dispatchEvent(new Event('input', {bubbles: true})); }"
+                "e.dispatchEvent(new KeyboardEvent('keyup', opts));",
+                el, key,
+            ),
+            timeout,
+        )
 
     def hover(self, timeout=None, **kw):
         from selenium.webdriver.common.action_chains import ActionChains
@@ -311,6 +327,18 @@ class SafariLocator:
 
     def inner_text(self, timeout=None):
         return self._eval("return arguments[0].innerText", self._first(timeout))
+
+    def all_inner_texts(self) -> list:
+        # Array result crosses classic eval fine (list of strings); the
+        # element args are what force the classic channel anyway.
+        return self._eval(
+            "return Array.from(arguments).map(e => e.innerText)", *self._resolve()
+        )
+
+    def all_text_contents(self) -> list:
+        return self._eval(
+            "return Array.from(arguments).map(e => e.textContent)", *self._resolve()
+        )
 
     def inner_html(self, timeout=None):
         return self._eval("return arguments[0].innerHTML", self._first(timeout))

@@ -58,9 +58,15 @@ def _wait_dom_quiet(page, quiet_ms=400, timeout_ms=8000):
             timeout=timeout_ms,
         )
     finally:
+        # Zero the tallies, not the spy itself — reinstalling the spy would
+        # double-wrap window.fetch. Background activity during the quiet
+        # window (tile fill fetches calling .json(), stray tree requests)
+        # must not count against the revalidate under test.
         page.evaluate(
             "() => { try { window.__qmo.disconnect(); } catch(e){}"
-            " if (window.__perf) window.__perf.domMuts = 0; }"
+            " if (window.__perf) { window.__perf.domMuts = 0;"
+            " window.__perf.jsonCalls = 0; window.__perf.textCalls = 0;"
+            " window.__perf.foldersReqs.length = 0; } }"
         )
 
 
