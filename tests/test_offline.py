@@ -489,3 +489,35 @@ def test_offline_restore_archive_inner_names(page, server):
             re.compile(r"^1 / 2"), timeout=8000)
     finally:
         page.context.set_offline(False)
+
+
+def test_offline_restore_uses_record_listing_order(page, server):
+    """rec.names = server listing order captured at download (EPUB spine
+    order). Restore must follow it, not filename sort — z.jpg before a.jpg
+    only proves out when the record order wins."""
+    goto_offline(page, server)
+    wait_for_sw(page)
+    page.evaluate("""async () => {
+      const folder = 'epub_work';
+      const cn = window.OfflineCore.cacheNameFor(folder);
+      const c = await caches.open(cn);
+      const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+      for (const n of ['z.jpg', 'a.jpg'])
+        await c.put('/image/' + window.OfflineCore.encodePath(folder + '/' + n),
+                    new Response(png, {headers: {'Content-Type': 'image/png'}}));
+      await window.OfflineStore.put({folder, cacheName: cn, pageCount: 2,
+        cachedCount: 2, bytes: 16, thumb: 'z.jpg', names: ['z.jpg', 'a.jpg'],
+        addedAt: Date.now(), lastReadAt: Date.now()});
+      await window.refreshOfflineMap();
+    }""")
+    page.context.set_offline(True)
+    try:
+        page.evaluate("() => window.loadImages('epub_work')")
+        expect(page.locator("#counter")).to_have_text(
+            re.compile(r"^1 / 2"), timeout=8000)
+        src = page.evaluate(
+            "() => (window.stripImgs && window.stripImgs[0] && window.stripImgs[0].src) || ''")
+        assert "z.jpg" in src, \
+            f"first restored page must follow record order (z.jpg), got {src!r}"
+    finally:
+        page.context.set_offline(False)

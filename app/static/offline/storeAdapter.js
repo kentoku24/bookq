@@ -422,13 +422,13 @@
             if(lp2!==folder) _updateProgress(lp2, (i+1)/files2.length);
           });
           var existing = await _Store.get(lp2);
-          await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: result.cachedCount, bytes: result.bytes, thumb: files2[0]||null, addedAt: existing ? existing.addedAt : Date.now(), lastReadAt: Date.now()});
+          await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: result.cachedCount, bytes: result.bytes, thumb: files2[0]||null, names: files2, addedAt: existing ? existing.addedAt : Date.now(), lastReadAt: Date.now()});
         }catch(leafErr){
           if((leafErr && leafErr.name==='AbortError') || signal.aborted){
             if(leafCachedPartial>0){
               var existing2 = await _Store.get(lp2);
               var thumb = files2[0]||null;
-              await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: leafCachedPartial, bytes: leafBytesPartial, thumb, addedAt: existing2 ? existing2.addedAt : Date.now(), lastReadAt: Date.now()});
+              await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: leafCachedPartial, bytes: leafBytesPartial, thumb, names: files2, addedAt: existing2 ? existing2.addedAt : Date.now(), lastReadAt: Date.now()});
             }
             throw leafErr;
           }
@@ -458,7 +458,7 @@
               var cache3 = await _caches.open(_Store.cacheNameFor(lp3));
               var retryResult = await cacheLeaf(lp3, files3, cache3, null);
               var existing3 = await _Store.get(lp3);
-              await _Store.put({folder: lp3, cacheName: _Store.cacheNameFor(lp3), pageCount: files3.length, cachedCount: retryResult.cachedCount, bytes: retryResult.bytes, thumb: files3[0]||null, addedAt: existing3 ? existing3.addedAt : Date.now(), lastReadAt: Date.now()});
+              await _Store.put({folder: lp3, cacheName: _Store.cacheNameFor(lp3), pageCount: files3.length, cachedCount: retryResult.cachedCount, bytes: retryResult.bytes, thumb: files3[0]||null, names: files3, addedAt: existing3 ? existing3.addedAt : Date.now(), lastReadAt: Date.now()});
             }
             if(window.updateStorageBar) await window.updateStorageBar(_d);
             if(window.refreshOfflineMap) await window.refreshOfflineMap();

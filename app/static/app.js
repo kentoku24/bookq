@@ -1367,7 +1367,7 @@
       // else /image/<enc> (offline-core.js:621). Scan both shapes.
       var enc = window.OfflineCore.encodePath(folder) + "/";
       var prefixes = ["/image/" + enc, "/view/" + enc];
-      var names = [];
+      var present = new Set();
       for (var i = 0; i < reqs.length; i++){
         try {
           var u = new URL(reqs[i].url);
@@ -1377,12 +1377,20 @@
               // Archive inner entries legitimately keep "/" after the
               // folder prefix (chapter/1.jpg) — decode per segment rather
               // than dropping nested names (#413 review).
-              if (nm) names.push(nm.split("/").map(decodeURIComponent).join("/"));
+              if (nm) present.add(nm.split("/").map(decodeURIComponent).join("/"));
               break;
             }
           }
         } catch(e) { console.warn(e); }
       }
+      // rec.names = the server listing captured at download — EPUB spine
+      // order etc. Intersect with landed pages (iOS downloadedNames
+      // parity); filename sort would scramble non-natural orders.
+      if (Array.isArray(rec.names) && rec.names.length){
+        var out = rec.names.filter(function(n){ return present.has(n); });
+        return out.length ? out : null;
+      }
+      var names = Array.from(present);
       if (!names.length) return null;
       names.sort(new Intl.Collator(undefined, {numeric: true}).compare);
       return names;
