@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyGridPrefetchStrategy
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -71,8 +70,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.AlertDialog
@@ -349,10 +348,14 @@ private fun BrowseBody(
     val listState = rememberLazyListState()
     // Prefetch off-screen tiles during scroll slack — at the panel's
     // 90 Hz the 11 ms frame budget leaves no room for mid-fling
-    // subcomposition (issue #302).
-    val gridState = rememberLazyGridState(
-        prefetchStrategy = LazyGridPrefetchStrategy(nestedPrefetchItemCount = 6))
+    // subcomposition (issue #302). Default strategy is enough:
+    // `nestedPrefetchItemCount` only applies to lazy layouts nested
+    // INSIDE an item — a no-op on this flat grid.
+    val gridState = rememberLazyGridState()
     val renderedItems by rememberUpdatedState(items)
+    // Read in composition: LocalActivity is a composable getter and
+    // must not be dereferenced inside the LaunchedEffect coroutine.
+    val act = LocalActivity.current
     LaunchedEffect(Unit) {
         val anchor = entry.savedStateHandle.get<String>(RETURN_ANCHOR_KEY)
         if (anchor != null) {
@@ -371,7 +374,6 @@ private fun BrowseBody(
         // it. withFrameNanos resumes during the next frame's callback;
         // if the pipeline already went idle, a manual invalidate
         // schedules one more doFrame so the marker still gets bounded.
-        val act = context as? ComponentActivity
         if (withTimeoutOrNull(1_500) { withFrameNanos {}; true } == null) {
             // Pipeline already idle — schedule a doFrame so the marker
             // still lands inside one (metric needs a slice ending
@@ -381,7 +383,7 @@ private fun BrowseBody(
         }
         act?.reportFullyDrawn()
         PerfTunables.fullyDrawnReported = true
-        PerfTunables.mark("fullyDrawn")
+        PerfTunables.mark { "fullyDrawn" }
         val restored = listState.firstVisibleItemIndex > 0 ||
             listState.firstVisibleItemScrollOffset > 0 ||
             gridState.firstVisibleItemIndex > 0 ||

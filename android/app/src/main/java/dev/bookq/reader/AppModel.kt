@@ -60,9 +60,9 @@ class AppModel<T : VersionProbe>(
         }
         scope.launch {
             auth.restore()
-            PerfTunables.mark("auth.restored")
+            PerfTunables.mark { "auth.restored" }
             settings.awaitLoaded()
-            PerfTunables.mark("settings.loaded")
+            PerfTunables.mark { "settings.loaded" }
             configureApi()
             if (api != null) boot() else _phase.value = AppPhase.Onboarding
         }
@@ -87,7 +87,7 @@ class AppModel<T : VersionProbe>(
             return
         }
         val gen = ++bootGen
-        PerfTunables.mark("boot snap=${hasOfflineSnapshot()}")
+        PerfTunables.mark { "boot snap=${hasOfflineSnapshot()}" }
         // Snapshot-first (SW NetworkFirst parity): a host-scoped tree
         // snapshot paints the library instantly; the version probe then
         // revalidates in the background — 401 still flips to Login.
