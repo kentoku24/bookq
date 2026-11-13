@@ -1405,6 +1405,7 @@ mod native_gate_tests {
             secret_key: "test-secret".into(),
             auth_flow: None,
             registry,
+            app_dir: dir.join("app"),
             thumb_cache: dir.join("thumbs"),
             git_sha: "test".into(),
             build_date: "test".into(),
