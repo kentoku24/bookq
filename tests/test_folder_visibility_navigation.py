@@ -204,11 +204,18 @@ def _drop_vis_snapshot(vpage):
     """Remove the owner-scoped visibility snapshot so the next document
     loads cold — the vpage fixture's first successful load caches one, and
     with a snapshot the grid correctly renders it while refreshing (the
-    loading/error gates only apply when NO snapshot exists at all)."""
+    loading/error gates only apply when NO snapshot exists at all).
+
+    Also stubs setItem for the current document's remaining lifetime: a
+    connectivity-change/scheduled refresh on the still-loaded page races
+    the drop→navigation gap on slow CI and would re-seed the cache (the
+    next load then takes the readonly branch instead of erroring). The
+    stub dies with the document."""
     vpage.evaluate(
         "Object.keys(localStorage)"
         ".filter(k=>k.startsWith('bookq.folderVisibility.'))"
-        ".forEach(k=>localStorage.removeItem(k))")
+        ".forEach(k=>localStorage.removeItem(k));"
+        "localStorage.setItem = function(){}")
 
 
 def _suppress_embed(vpage):
@@ -233,8 +240,12 @@ def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     _suppress_embed(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
-    vpage.wait_for_timeout(300)
-    assert vpage.locator("#tile-grid .tile").count() == 0
+    # The loading gate can fail-open while Connectivity is still offline
+    # (spec §9 — DL filter is the only one): under slow CI the fixed 300ms
+    # samples the open window. Converge on online + empty grid instead.
+    vpage.wait_for_function(
+        "window.Connectivity && window.Connectivity.state === 'online' && "
+        "document.querySelectorAll('#tile-grid .tile').length === 0")
     for r in list(held):
         r.fallback()
     vpage.wait_for_selector("#tile-grid .tile")
@@ -253,10 +264,13 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series")
     assert _wait_held(held), "visibility GET was never issued"
-    vpage.wait_for_timeout(300)
+    # Same offline fail-open window as the loading gate: wait for
+    # connectivity + empty grid to converge instead of a fixed timeout.
+    vpage.wait_for_function(
+        "window.Connectivity && window.Connectivity.state === 'online' && "
+        "document.querySelectorAll('#tile-grid .tile').length === 0")
     # pending ≠ deny: the hash is left intact for the post-ready drain.
     assert vpage.evaluate("location.hash") == "#/browse/hide_series"
-    assert vpage.locator("#tile-grid .tile").count() == 0
     for r in list(held):
         r.fallback()
     vpage.wait_for_function("window.currentBrowsePath === 'hide_series'")
@@ -294,9 +308,12 @@ def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
     _suppress_embed(vpage)
     vpage.reload()
     vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
-    vpage.wait_for_timeout(300)
+    # readyState alone doesn't imply the gate: while Connectivity is still
+    # offline the grid fail-opens (spec §9 — the DL filter is the only one)
+    # and the retry gate lands on the connectivity-change re-render. Wait
+    # for the gate DOM itself rather than sampling after a fixed timeout.
+    vpage.wait_for_selector("#tile-grid .fv-grid-retry")
     assert vpage.locator("#tile-grid .tile").count() == 0
-    assert vpage.locator("#tile-grid .fv-grid-retry").count() == 1
     vpage.click("#tile-grid .fv-grid-retry")
     vpage.wait_for_selector("#tile-grid .tile")
     assert "keep_a" in vpage.locator("#tile-grid .tile").evaluate_all(
