@@ -216,13 +216,18 @@ window.__bookqTouch = {
         changed.push(this._touch(id, a.x, a.y, a.target));
       }
     } else {
-      // touchend / touchcancel — release the given ids, or all when empty
-      const ids = pts.length
-        ? pts.map(p => p.id || 1)
-        : Object.keys(this._active).map(Number);
-      for (const id of ids) {
+      // touchend / touchcancel — release the given pts, or all when empty.
+      // A released touch reports its RELEASE position: the caller's pt
+      // coordinates when provided, else the last tracked move position.
+      const releases = pts.length
+        ? pts
+        : Object.keys(this._active).map(id => ({id: Number(id)}));
+      for (const p of releases) {
+        const id = p.id || 1;
         const a = this._active[id] || {x: 0, y: 0, target: document.body};
-        changed.push(this._touch(id, a.x, a.y, a.target));
+        const x = (p.x != null) ? p.x : a.x;
+        const y = (p.y != null) ? p.y : a.y;
+        changed.push(this._touch(id, x, y, a.target));
         delete this._active[id];
       }
     }

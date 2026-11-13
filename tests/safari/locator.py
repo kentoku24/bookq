@@ -12,6 +12,7 @@ import time
 from typing import TYPE_CHECKING
 
 from selenium.common.exceptions import (
+    ElementNotInteractableException,
     StaleElementReferenceException,
     WebDriverException,
 )
@@ -225,36 +226,67 @@ class SafariLocator:
         )
 
     def type(self, text: str, timeout=None, **kw):
-        self._act(
-            lambda el: self._eval(
+        def go(el):
+            try:
+                el.send_keys(text)
+                return
+            except ElementNotInteractableException:
+                pass
+            # Off-viewport fallback: per-char keydown/insert/input/keyup at
+            # the cursor, matching what a real keystroke does to the value.
+            self._eval(
                 "const e=arguments[0]; e.focus();"
                 "for (const ch of arguments[1]) {"
                 "e.dispatchEvent(new KeyboardEvent('keydown', {key: ch, bubbles: true}));"
-                "e.value += ch;"
+                "const s=e.selectionStart ?? e.value.length, t=e.selectionEnd ?? s;"
+                "e.value = e.value.slice(0,s) + ch + e.value.slice(t);"
+                "e.selectionStart = e.selectionEnd = s + 1;"
                 "e.dispatchEvent(new Event('input', {bubbles: true}));"
                 "e.dispatchEvent(new KeyboardEvent('keyup', {key: ch, bubbles: true}));"
                 "}",
                 el, text,
-            ),
-            timeout,
-        )
+            )
+
+        self._act(go, timeout)
 
     def press(self, key: str, timeout=None, **kw):
-        self._act(
-            lambda el: self._eval(
+        def go(el):
+            try:
+                el.send_keys(_KEY_MAP.get(key, key))
+                return
+            except ElementNotInteractableException:
+                pass
+            # Synthetic key events carry no default action — emulate the
+            # common ones (editable deletion/insertion, Enter/Space click)
+            # so key-driven assertions still behave like real keystrokes.
+            self._eval(
                 "const e=arguments[0], k=arguments[1]; e.focus();"
-                "const opts={key: k, code: k===' ' ? 'Space' : k, bubbles: true,"
-                " keyCode: ({Enter:13,Escape:27,Space:32,' ':32,End:35,Home:36,"
+                "const KC={Enter:13,Escape:27,Space:32,' ':32,End:35,Home:36,"
                 "ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Backspace:8,"
-                "Delete:46,Tab:9})[k] || 0};"
-                "e.dispatchEvent(new KeyboardEvent('keydown', opts));"
-                "if ((e.tagName==='INPUT'||e.tagName==='TEXTAREA') && k.length===1)"
-                "{ e.value += k; e.dispatchEvent(new Event('input', {bubbles: true})); }"
+                "Delete:46,Tab:9};"
+                "const opts={key: k, code: k===' ' ? 'Space' : k, bubbles: true,"
+                " cancelable: true, keyCode: KC[k] || 0};"
+                "const kd=new KeyboardEvent('keydown', opts);"
+                "e.dispatchEvent(kd);"
+                "const ed=e.tagName==='TEXTAREA' || (e.tagName==='INPUT' &&"
+                " !/^(button|submit|checkbox|radio|file|image|reset|range|color)$/i.test(e.type||''));"
+                "if (!kd.defaultPrevented) {"
+                " if (ed) {"
+                "  const s=e.selectionStart ?? e.value.length, t=e.selectionEnd ?? s;"
+                "  let v=e.value, ns=s;"
+                "  if (k==='Backspace') { if (s===t) { if (s>0) { v=v.slice(0,s-1)+v.slice(t); ns=s-1; } }"
+                "   else { v=v.slice(0,s)+v.slice(t); } }"
+                "  else if (k==='Delete') { v=(s===t) ? v.slice(0,s)+v.slice(t+1) : v.slice(0,s)+v.slice(t); }"
+                "  else if (k.length===1) { v=v.slice(0,s)+k+v.slice(t); ns=s+1; }"
+                "  if (v!==e.value) { e.value=v; e.selectionStart=e.selectionEnd=ns;"
+                "   e.dispatchEvent(new Event('input', {bubbles: true})); }"
+                " } else if (k==='Enter' || k===' ' || k==='Space') { e.click(); }"
+                "}"
                 "e.dispatchEvent(new KeyboardEvent('keyup', opts));",
                 el, key,
-            ),
-            timeout,
-        )
+            )
+
+        self._act(go, timeout)
 
     def hover(self, timeout=None, **kw):
         from selenium.webdriver.common.action_chains import ActionChains
