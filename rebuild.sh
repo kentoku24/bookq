@@ -28,20 +28,20 @@ usage() {
 # ============================================================ 共通: healthcheck
 # viewer はホストにポートを公開していないので localhost は叩けない。
 # docker-compose.yml / docker-compose.dev.yml の healthcheck（コンテナ内から
-# /api/health）をコンテナ側から待つ。
+# health endpoint）をコンテナ側から待つ。
 wait_healthy() {
     local cid="$1" status=""
     echo ""
-    echo "⏳ viewer コンテナの healthcheck を待っています..."
+    echo "⏳ コンテナの healthcheck を待っています..."
     for _ in $(seq 1 60); do
         status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || true)"
         case "$status" in
-            healthy) echo "✅ viewer は healthy です"; return 0 ;;
+            healthy) echo "✅ healthy です"; return 0 ;;
             none)    echo "⚠️  healthcheck が定義されていません。待機をスキップします"; return 0 ;;
             *)       sleep 1 ;;
         esac
     done
-    die "viewer が healthy になりませんでした (status=${status:-なし})"
+    die "コンテナが healthy になりませんでした (status=${status:-なし})"
 }
 
 # ============================================================ 共通: URL 検証
@@ -55,7 +55,8 @@ verify_url() {
     # （成功すればすぐ抜ける。dev 環境の初回は tailnet 参加と証明書発行で
     # ここに時間がかかることがある。本番は従来どおり早い）。
     for _ in $(seq 1 30); do
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/api/health" || true)"
+        # v1 health — #409 以降 v0 /api/health は upstream 不在で 501。
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/api/v1/health" || true)"
         [ "$code" = "200" ] && break
         sleep 2
     done
@@ -324,10 +325,9 @@ prd_build_image() {
         docker build -q -t "$sidecar_tag" "$tmp/tailscale" >/dev/null \
             || die "sidecar のビルドに失敗しました (sha=$sha)"
     fi
-    # viewer-rs (#211): Dockerfile.viewer-rs がその ref に存在するときのみ
-    # ビルドする — 存在しない旧 ref への rollback を壊さないため。タグが
-    # 無い場合の compose 側は docker-compose.prd-image.yml の :- 既定値で
-    # parse-safe（profile rs は opt-in で既定起動しない）。
+    # viewer-rs (#211/#409 以降は本体): Dockerfile.viewer-rs がその ref に
+    # 存在するときのみビルドする — 存在しない旧 ref への rollback を
+    # 壊さないため。prd-image.yml 側は ${PRD_RS_IMAGE:?} で pin 必須。
     local rs_tag=""
     if [ -f "$tmp/Dockerfile.viewer-rs" ]; then
         rs_tag="bookq-prd-viewer-rs:${sha12}"
@@ -342,28 +342,21 @@ prd_build_image() {
     printf '%s %s %s' "$viewer_tag" "$sidecar_tag" "$rs_tag"
 }
 
-# prd deploy の事後検証: /api/version の sha が期待 sha と一致すること。
-# version 側の sha 桁数が不明なため双方向 prefix 比較。空文字に対する
-# startswith は常に True になるため、先に空値 die する。
+# prd deploy の事後検証: デプロイした viewer-rs コンテナの image タグ
+# (bookq-prd-viewer-rs:<sha12>) が期待 sha と一致すること。#409 以降
+# /api/version は upstream 不在で 501、/api/v1/version は認証必須で
+# 未認証照合が使えない — image タグ自体が sha なのでこれで等価検証。
 verify_prd_version() {
     local expected="${1:?verify_prd_version には期待 sha が必要です}"
-    local base_url actual
-    base_url="${BASE_URL:-$(grep -E '^BASE_URL=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'\''' | tr -d '[:space:]' || true)}"
-    [ -n "$base_url" ] || die "BASE_URL が分からないため version 照合ができません。"
-    actual="$(curl -s --max-time 10 "$base_url/api/version" 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha") or "")' 2>/dev/null || true)"
-    [ -n "$actual" ] && [ -n "$expected" ] \
-        || die "version の sha が空です (expected=${expected:-空} actual=${actual:-空})。空文字に対する startswith は常に True になるため検証できません。"
-    case "$expected" in
-        "$actual"*) ;;
-        *)
-            case "$actual" in
-                "$expected"*) ;;
-                *) die "デプロイされた version の sha が一致しません (expected=$expected actual=$actual)。" ;;
-            esac
-            ;;
+    [ -n "$expected" ] || die "expected sha が空です。"
+    local actual
+    actual="$(docker inspect --format '{{.Config.Image}}' \
+        "$(docker compose ps -q viewer-rs 2>/dev/null)" 2>/dev/null || true)"
+    case "$actual" in
+        *:"$expected") ;;
+        *) die "デプロイされた viewer-rs の image sha が一致しません (expected=$expected actual=${actual:-取得失敗})。" ;;
     esac
-    echo "✅ version の sha が一致しています ($actual)"
+    echo "✅ viewer-rs image の sha が一致しています ($actual)"
 }
 
 deploy_prd() {
@@ -382,8 +375,8 @@ deploy_prd() {
     docker compose "${profiles[@]}" -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build
 
     local cid
-    cid="$(docker compose ps -q viewer)"
-    [ -n "$cid" ] || die "viewer コンテナが見つかりません。"
+    cid="$(docker compose ps -q viewer-rs)"
+    [ -n "$cid" ] || die "viewer-rs コンテナが見つかりません。"
     wait_healthy "$cid"
 
     # クォート付きの値（compose の補間では有効）でも curl できるよう剥がす
