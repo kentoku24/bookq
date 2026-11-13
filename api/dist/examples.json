@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "spec": "/Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/421-spec-mock/api/openapi.v1.yaml",
+  "spec": "api/openapi.v1.yaml",
   "examples": [
     {
       "operationId": "getHealth",

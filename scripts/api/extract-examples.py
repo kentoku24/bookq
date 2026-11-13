@@ -133,6 +133,9 @@ def main() -> int:
     if not out_path.is_absolute():
         out_path = repo / out_path
     bundle = extract(spec_path)
+    # The recorded source must be machine-independent — an absolute path makes
+    # every regeneration differ and trips the codegen-drift gate on CI.
+    bundle["spec"] = args.spec
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n",
                         encoding="utf-8")
