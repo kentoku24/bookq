@@ -60,6 +60,26 @@ SPRITE_GRAY = (128, 128, 128)
 # document; the range check stays on the miss path in ``_load_archive_source``.
 _PDF_PAGE_SHAPE = re.compile(r"p\d+\.png")
 
+# ── media decode 契約 (#406。正本は api/v1-semantics.md §7) ─────────────────
+# Rust 側の対応物: rust/viewer-rs/src/thumbs.rs::NATIVE_DECODE /
+# DECODE_PYTHON_ONLY / DECODE_UNSUPPORTED_EXAMPLES。両定数は手動同期 —
+# tests/test_media_decode_contract.py::test_decode_sets_match_rust が
+# Rust ソースを parse して一致を検証する (片側だけ形式を増やすと status が
+# 割れるため)。
+# - COMMON_NATIVE_SUFFIXES: 両 backend がネイティブ decode (Rust image crate
+#   の有効 feature と Pillow の共通部分)。正常時は両側とも 200 + image/jpeg。
+# - PYTHON_ONLY_SUFFIXES: Pillow ≥13 (libavif 同梱 wheel) が decode するが
+#   Rust image crate (bmp/gif/jpeg/png/webp のみ) はしない。Rust は Proxy で
+#   upstream に流すため client 可視は同じ 200。
+# - DECODE_UNSUPPORTED_EXAMPLES: 両 backend とも decode 不可の代表例
+#   (Pillow plugin なし・image crate feature なし)。Python は 404
+#   (make_thumbnail/make_view_bytes は全 decode 失敗を 404 に写像 — 500 では
+#   ない)、Rust は Proxy → upstream 404 で同じ 404。
+# - .svg は decode 対象外: 両側とも元バイト pass-through (別分岐)。
+COMMON_NATIVE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+PYTHON_ONLY_SUFFIXES = frozenset({".avif", ".tif", ".tiff"})
+DECODE_UNSUPPORTED_EXAMPLES = frozenset({".heic", ".heif", ".jxl"})
+
 
 def normalize_width(raw: str | int | None) -> int:
     """Map *raw* to 200|400|800, defaulting to 400 for anything else."""

@@ -13,6 +13,7 @@
 4. [認証 — PKCE フローと token のライフサイクル](#4-認証)
 5. [gzip / 圧縮対象](#5-gzip)
 6. [エラー応答の形](#6-エラー応答)
+7. [media decode — thumb/view/sprite の対応形式契約](#7-media-decode)
 
 ## 1. tree
 
@@ -145,3 +146,47 @@ spec の `security` は cookie OR Bearer のどちらか。
 - **意味的拒否は schema で表現不可**: 未来 ts ガード (§2)、visibility owner
   (§3)、traversal 403 等は schema-valid でも拒否される —
   `schemathesis.toml` で expected-statuses を op 単位で許容している。
+
+## 7. media decode
+
+decode を要する endpoint (`GET /thumb/{path}`、`GET /view/{path}` の
+normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
+(#406。参照: `app/thumbs.py::COMMON_NATIVE_SUFFIXES`、
+`rust/viewer-rs/src/thumbs.rs::NATIVE_DECODE`)。
+
+- **両 backend がネイティブ decode する共通集合**: `.jpg` `.jpeg` `.png`
+  `.gif` `.webp` `.bmp`。両側とも正常時は **200 + `image/jpeg`**
+  (寸法・品質は同一、バイトは非同一 — `image` JpegEncoder は 4:4:4、
+  Pillow/libjpeg-turbo は 4:2:0 のため)。
+- **`.svg` は decode しない**: 両 backend とも元バイトを `image/svg+xml`
+  で pass-through (Pillow/`image` ともに SVG decoder を持たない)。
+  CSP `default-src 'none'; sandbox` を付与。
+- **Python のみ decode (代表: `.avif` `.tif`/`.tiff`)**: Pillow ≥13
+  (libavif 同梱 wheel) が decode するため Python 直撃は
+  **200 + `image/jpeg`**。Rust (`image` crate は bmp/gif/jpeg/png/webp
+  のみ有効) は `Serve::Proxy` で upstream に流すため、gateway 経由の
+  client 可視は同じ **200** (成功パリティは proxy が保証する)。
+  なお Pillow の `Image.open` は拡張子ではなく内容を sniff するため、
+  ここに列挙しない形式 (`.tga` `.pcx` `.dds` `.qoi` `.ico` `.sgi`
+  `.sun` `.xbm` `.xpm` `.ppm` `.psd` 等) も decode され得る — これらは
+  上と同じく Rust Proxy → upstream 200 でパリティが保たれる。ただし
+  tree に載るのは `app/scanner.py::IMAGE_EXTENSIONS` の 8 形式だけなので、
+  `.tiff`/`.heic`/`.tga` 等は tree 経由では見えず direct URL でのみ
+  到達する点に注意。
+- **両 backend とも decode 不可**: `.heic`/`.heif` `.jxl`、
+  破損バイト等 — Pillow `Image.open` が失敗し Python は **404**
+  (`make_thumbnail`/`make_view_bytes` は全 decode 失敗を 404 に写像 —
+  500 ではない)。Rust は拡張子ゲート (`NATIVE_DECODE` 外 → `Proxy`)
+  または decode 失敗 (`make_thumb`/`make_view` が `None` → `Proxy`)
+  で upstream に流すため、gateway 経由の client 可視も同じ **404**
+  (error パリティは proxy が保証する)。
+- **`/image/{path}` は対象外**: 生バイト配布で decode しないため、
+  上記いずれの形式も **200** (存在すれば)。
+- **将来の対応形式追加時の規則**: `image` crate に feature を足す
+  (例: `tiff`、`avif-encoder` 系) 場合、または Pillow に plugin を足す
+  (例: `pillow-heif`、`pillow-avif-plugin`) 場合は、必ず本節の集合と
+  `app/thumbs.py` / `rust/viewer-rs/src/thumbs.rs` の両定数と
+  `tests/test_media_decode_contract.py` + `thumbs.rs::tests` を同時更新
+  すること。片側だけ増やすと native 直撃と proxy 経由で status が割れる
+  (例: Rust が `.heic` を decode 可能にしても Python が 404 のままなら、
+  native 経路は 200・proxy 経路は 404 になる)。
