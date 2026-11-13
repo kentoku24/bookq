@@ -169,7 +169,7 @@ if (!window.__bookqVisEmu) {
       } catch (e) {}
     });
   });
-  mo.observe(document.documentElement, {
+  mo.observe(document, {
     attributes: true, attributeOldValue: true,
     attributeFilter: ['style', 'class'], subtree: true,
   });
@@ -295,6 +295,7 @@ class SafariPage:
         self.touchscreen = _Touchscreen(self)
         self._listeners: dict[str, list] = {}
         self._touch_installed = False
+        self._init_scripts: list[str] = []
 
     # ── plumbing ──────────────────────────────────────────────────────────────
 
@@ -387,6 +388,39 @@ class SafariPage:
 
     # ── navigation ────────────────────────────────────────────────────────────
 
+    def _set_nav_token(self) -> str:
+        tok = f"t{time.time_ns()}"
+        try:
+            self._sync_eval("window.__bqNavTok = arguments[0]", tok)
+        except WebDriverException:
+            pass
+        return tok
+
+    def _doc_changed(self, tok: str) -> bool:
+        try:
+            return (
+                self._driver.execute_script(
+                    "return window.__bqNavTok !== arguments[0]", tok
+                )
+                is True
+            )
+        except WebDriverException:
+            return False
+
+    def _await_new_doc(self, tok: str, quick: bool = False) -> bool:
+        # pageLoadStrategy 'none' returns at commit; the JS realm can still
+        # be the previous document for a moment — the token stamped on the
+        # old window disappearing marks the new document's existence (and
+        # injects early enough to precede the page's deferred scripts).
+        deadline = time.time() + (1.5 if quick else 10.0)
+        while time.time() < deadline:
+            if self._doc_changed(tok):
+                return True
+            time.sleep(0.01 if quick else 0.02)
+        if quick:
+            return False
+        raise WebDriverException("navigation did not commit a new document")
+
     def goto(self, url: str, wait_until=None, timeout=None, **kw):
         self._activate()
         self._driver.get(url)
@@ -396,26 +430,60 @@ class SafariPage:
             self._driver.delete_all_cookies()
             self._driver.get(url)
         self._touch_installed = False
-        self._install_error_hook()
+        self._install_shims()
+        if "#" in url and (self._init_scripts or self._ctx._init_scripts):
+            # One-shot hash deep links (e.g. #/join/<code>) are consumed
+            # during page load — before WebDriver lets us inject
+            # add_init_script mocks. Re-asserting the fragment replays the
+            # hashchange with the mock-bound controller now in place.
+            frag = url[url.index("#"):]
+            try:
+                cur = self._sync_eval("return location.hash")
+                if cur != frag:
+                    self._sync_eval("location.hash = arguments[0]", frag)
+            except WebDriverException:
+                pass
         return None
 
     def reload(self, **kw):
         self._activate()
         self._driver.refresh()
         self._touch_installed = False
-        self._install_error_hook()
+        self._install_shims()
+
+    def _traverse_history(self, which: str):
+        # driver.back()/forward() in safaridriver jumps to the previous FULL
+        # navigation — it skips same-document entries entirely. history.go()
+        # does the spec-correct single-entry traversal, which is what the
+        # app's pushState/hash browse stack needs.
+        try:
+            before = self._sync_eval("return location.href")
+        except WebDriverException:
+            before = None
+        tok = self._set_nav_token()
+        self._sync_eval(f"history.{which}()")
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if self._doc_changed(tok):
+                # Cross-document traversal — full load on the new document.
+                self._touch_installed = False
+                self._install_shims()
+                self.wait_for_load_state("load")
+                return
+            try:
+                if before is not None and self._sync_eval("return location.href") != before:
+                    return  # same-document traversal (pushState/hash)
+            except WebDriverException:
+                pass
+            time.sleep(0.02)
 
     def go_back(self, **kw):
         self._activate()
-        self._driver.back()
-        self._touch_installed = False
-        self._install_error_hook()
+        self._traverse_history("back")
 
     def go_forward(self, **kw):
         self._activate()
-        self._driver.forward()
-        self._touch_installed = False
-        self._install_error_hook()
+        self._traverse_history("forward")
 
     def wait_for_load_state(self, state: str = "load", timeout=None, **kw):
         ready = {"load": "complete", "domcontentloaded": "complete", "commit": "loading"}.get(state, "complete")
@@ -587,6 +655,8 @@ class SafariPage:
         self._sync_eval(
             "document.open(); document.write(arguments[0]); document.close()", html
         )
+        self._touch_installed = False
+        self._install_shims()
 
     def content(self) -> str:
         self._activate()
@@ -633,6 +703,22 @@ class SafariPage:
         self._install_shims()
 
     def _install_shims(self):
+        for js in (*self._ctx._init_scripts, *self._init_scripts):
+            try:
+                self._sync_eval(js)
+            except WebDriverException:
+                pass
+        # add_init_script lands post-load on WebDriver — too late for
+        # consumers that bound a controller at DOMContentLoaded. The app's
+        # PairUI exposes attach() exactly for late binding; nudge it when a
+        # script-provided controller appeared.
+        try:
+            self._sync_eval(
+                "if (window.PairUI && window.PairUI.attach && window.PairController)"
+                " window.PairUI.attach(window.PairController)"
+            )
+        except WebDriverException:
+            pass
         try:
             self._sync_eval(_VISIBILITY_JS)
         except WebDriverException:
@@ -654,8 +740,10 @@ class SafariPage:
     def unroute(self, *a, **kw):
         raise SafariUnsupported("page.unroute is not supported on Safari")
 
-    def add_init_script(self, *a, **kw):
-        raise SafariUnsupported("add_init_script has no WebDriver equivalent")
+    def add_init_script(self, script: str, *a, **kw):
+        # No true pre-parse hook exists over WebDriver — the script is
+        # re-injected right after every navigation (see _install_shims).
+        self._init_scripts.append(script)
 
     def emulate_media(self, *a, **kw):
         raise SafariUnsupported("emulate_media is not supported on Safari")
@@ -826,6 +914,7 @@ class SafariContext:
         self._needs_scrub = True
         self._pages: list[SafariPage] = []
         self._closed = False
+        self._init_scripts: list[str] = []
         if viewport:
             self._set_viewport(viewport["width"], viewport["height"])
         self._driver.timeouts.script = 30.0
@@ -903,8 +992,8 @@ class SafariContext:
         t = self._drain_thread = threading.Thread(target=loop, daemon=True)
         t.start()
 
-    def add_init_script(self, *a, **kw):
-        raise SafariUnsupported("context.add_init_script has no WebDriver equivalent")
+    def add_init_script(self, script: str, *a, **kw):
+        self._init_scripts.append(script)
 
     def set_offline(self, *a, **kw):
         raise SafariUnsupported("context.set_offline needs the proxy — unsupported")
@@ -947,19 +1036,35 @@ class SafariBrowser:
             # create the session (viewport sizing works) — the caller decides
             # whether the semantics hold.
             pass
-        driver = self._manager.new_session()
-        try:
-            return SafariContext(self, driver, viewport)
-        except Exception:
-            # Context init failed (e.g. session browsing-context race) —
-            # release the session so the next test isn't locked out; Safari
-            # pairs exactly one WebDriver session globally.
+        last_exc = None
+        for attempt in range(3):
             try:
-                driver.quit()
-            except WebDriverException:
-                pass
-            self._manager.session_released()
-            raise
+                driver = self._manager.new_session()
+            except WebDriverException as exc:
+                # Safari.app can still hold the previous session's pairing for
+                # a beat after quit() — retry instead of erroring the test.
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+            try:
+                return SafariContext(self, driver, viewport)
+            except Exception as exc:
+                # Context init failed (e.g. session browsing-context race,
+                # or a session Safari dropped while a prior window was still
+                # tearing down) — release the session so the next attempt /
+                # test isn't locked out; Safari pairs exactly one WebDriver
+                # session globally.
+                last_exc = exc
+                try:
+                    driver.quit()
+                except WebDriverException:
+                    pass
+                self._manager.session_released()
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+        raise last_exc
 
     def close(self):
         pass

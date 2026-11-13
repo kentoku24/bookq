@@ -90,6 +90,22 @@ class _Expectation:
             lambda: bool(loc._resolve()) and _contains(expected, loc.text_content()),
             f"to_contain_text({expected!r})", self._timeout({"timeout": timeout}), False)
 
+    def not_to_have_text(self, expected, timeout=None, **kw):
+        loc = self._loc()
+
+        def check():
+            if isinstance(expected, (list, tuple)):
+                return [e.text_content() or "" for e in loc.all()] == list(expected)
+            return bool(loc._resolve()) and _matches(expected, loc.text_content())
+
+        self._retry(check, f"to_have_text({expected!r})", self._timeout({"timeout": timeout}), True)
+
+    def not_to_contain_text(self, expected, timeout=None, **kw):
+        loc = self._loc()
+        self._retry(
+            lambda: bool(loc._resolve()) and _contains(expected, loc.text_content()),
+            f"to_contain_text({expected!r})", self._timeout({"timeout": timeout}), True)
+
     def to_have_class(self, expected, timeout=None, **kw):
         loc = self._loc()
         self._retry(

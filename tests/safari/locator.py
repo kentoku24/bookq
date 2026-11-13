@@ -39,6 +39,24 @@ _KEY_MAP = {
     " ": " ",
 }
 
+_DISPLAYED_JS = (
+    "const el=arguments[0],cs=getComputedStyle(el);"
+    "if(cs.display==='none'||cs.visibility==='hidden'||cs.visibility==='collapse')"
+    "return false;const r=el.getBoundingClientRect();return r.width>0&&r.height>0"
+)
+
+
+def _disp(page, el) -> bool:
+    """Playwright-semantic displayedness: non-empty box + not display:none /
+    visibility:hidden. safaridriver's is_displayed additionally requires the
+    element to be inside the viewport, which fails off-canvas UI (closed
+    sidebar) and anything overlapped by the occluded automation window."""
+    try:
+        return bool(page._sync_eval(_DISPLAYED_JS, el))
+    except WebDriverException:
+        return False
+
+
 
 def _split_steps(selector: str) -> list[str]:
     return [s.strip() for s in selector.split(">>")]
@@ -109,7 +127,7 @@ class SafariLocator:
         while True:
             try:
                 els = self._resolve()
-                if els and els[0].is_displayed():
+                if els and _disp(self._page, els[0]):
                     return els[0]
             except StaleElementReferenceException:
                 pass
@@ -163,7 +181,14 @@ class SafariLocator:
     def click(self, timeout=None, force=None, **kw):
         # safaridriver's synthesized click is unreliable (observed no-op on
         # tiles); a JS .click() fires the same handlers and never misses.
-        self._act(lambda el: self._eval("arguments[0].click()", el), timeout)
+        # Playwright clicks also focus the target — synthetic .click() does
+        # not, so keyboard input would still go to <body>.
+        self._act(
+            lambda el: self._eval(
+                "arguments[0].focus && arguments[0].focus(); arguments[0].click()", el
+            ),
+            timeout,
+        )
 
     def dblclick(self, timeout=None, **kw):
         from selenium.webdriver.common.action_chains import ActionChains
@@ -303,7 +328,7 @@ class SafariLocator:
     def is_visible(self) -> bool:
         try:
             els = self._resolve()
-            return bool(els) and els[0].is_displayed()
+            return bool(els) and _disp(self._page, els[0])
         except WebDriverException:
             return False
 
@@ -355,7 +380,7 @@ class SafariLocator:
             while time.time() < deadline:
                 try:
                     els = self._resolve()
-                    if not els or (state == "hidden" and not els[0].is_displayed()):
+                    if not els or (state == "hidden" and not _disp(self._page, els[0])):
                         return
                 except WebDriverException:
                     if state == "detached":
