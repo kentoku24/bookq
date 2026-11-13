@@ -765,6 +765,10 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
             timeout=15000,
         )
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        # spec §8: offline browse only surfaces download-bearing folders —
+        # give the restored tree a downloaded leaf so the grid and the
+        # viewer deep link have content under the new contract.
+        page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
         n = page.evaluate(
             """async () => {
                 for (let i = 0; i < 100; i++) {
@@ -781,23 +785,7 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
             page.reload()
             page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
             page.wait_for_selector("#tile-grid .tile", timeout=8000)
-            leaf = page.evaluate(
-                """() => {
-                    let found = null;
-                    (function walk(list, pp){
-                        for (const node of list || []) {
-                            const fp = pp ? pp + '/' + node.name : node.name;
-                            if (!found && node.type === 'folder' && node.children &&
-                                node.children.length &&
-                                node.children.every(c => c.type === 'image'))
-                                found = fp;
-                            if (node.children) walk(node.children, fp);
-                        }
-                    })(window.__BOOKQ_DEBUG.getTree(), '');
-                    return found;
-                }"""
-            )
-            assert leaf, "no leaf folder found in restored tree"
+            leaf = "simple_manga"
             page.evaluate(
                 "(fp) => { location.hash = window.viewerHash(fp, 0); }", leaf
             )
@@ -1177,16 +1165,30 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
             timeout=15000,
         )
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
-        # Warm the SW API cache snapshot (full tree) before going offline.
-        page.wait_for_function(
+        # Warm the SW API cache snapshot (full tree) before going offline —
+        # the reconnect revalidation's If-None-Match is seeded from this
+        # entry's ETag (restoreOfflineFirst reads it into etagByKey).
+        # page.evaluate awaits the promise, so the assert below is real —
+        # a wait_for_function async predicate would resolve immediately on
+        # the promise object's truthiness and never actually check.
+        page.evaluate(
+            """async () => {
+                const r = await fetch('/api/v1/tree', {credentials: 'same-origin'});
+                await r.text();   // consume the body so the SW put() settles
+                return r.ok;
+            }"""
+        )
+        assert page.evaluate(
             """async () => {
                 try {
                     const c = await caches.open('bookq-api-v1');
                     return !!(await c.match('/api/v1/tree'));
                 } catch (e) { return false; }
-            }""",
-            timeout=10000,
-        )
+            }"""
+        ), "SW api cache never captured /api/v1/tree"
+        # spec §8: offline browse only surfaces download-bearing folders —
+        # record a download so the reloaded grid has a tile to find.
+        page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
         context.set_offline(True)
         try:
             page.reload()

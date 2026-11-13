@@ -176,11 +176,18 @@
   function _resolveDeps(deps){
     deps = deps || {};
     return {
-      fetch: deps.fetch || (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch),
+      fetch: deps.fetch || _connFetch(),
       caches: deps.caches || (typeof window !== 'undefined' ? window.caches : (typeof caches !== 'undefined' ? caches : undefined)),
       storage: deps.storage || (typeof navigator !== 'undefined' ? navigator.storage : undefined),
       OfflineStore: deps.OfflineStore || (typeof window !== 'undefined' ? window.OfflineStore : OfflineStore)
     };
+  }
+  // All app-level requests ride Connectivity.fetch so their verdicts feed the
+  // offline/connecting/online state machine (docs/offline-spec.md §5).
+  function _connFetch(){
+    var C = (typeof window !== 'undefined') ? window.Connectivity : null;
+    return (C && C.fetch) ? C.fetch
+      : (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch);
   }
   async function updateStorageBar(deps){
     const _d = _resolveDeps(deps);
@@ -210,12 +217,15 @@
       }
     } catch(e) { console.warn(e); }
   }
+  // Compat alias — the chip and the state machine live in
+  // offline/connectivity.js now; this only survives for tests/harness that
+  // still call updateOnlineStatus().
   function updateOnlineStatus(deps){
-    const _d = _resolveDeps(deps);
-    const _fetch = _d.fetch;
-    const el=document.getElementById('offline-status'); if(!el) return; _fetch(globalThis.BookqApi.endpoints.health+'?online_check=1&_t='+Date.now(),{method:'GET',cache:'no-store',headers:{'X-Online-Check':'1'}}).then(r=>{ const online=!!r.ok; el.textContent=online?'●オンライン':'○オフライン'; el.classList.toggle('offline', !online); }).catch(()=>{ el.textContent='○オフライン'; el.classList.add('offline'); }); }
+    var C = window.Connectivity;
+    if (C) return C.revalidate(deps);
+    return Promise.resolve(false);
+  }
   let _onlineRevalidateLast = 0;
-  let _onlineRevalidateTimer = null;
   // Todo 5: warm-only conditional fetch. Keys mirror the server
   // _folders_response cache keys (path,depth): root full vs shallow1.
   // Cold first fetch (loadFolders stages) stays unconditional — ETag never
@@ -294,7 +304,10 @@
   async function _revalidateFoldersForOnlineInner(deps){
     const _d = _resolveDeps(deps);
     try{
-      if(typeof navigator!=='undefined' && !navigator.onLine) return;
+      // offline では自動リトライしない (spec §3)。connecting 中は通す —
+      // 失敗した再検証の直後リトライが connecting ウィンドウで死なない
+      // ように (test_failed_revalidate_stays_retryable)。
+      if(window.Connectivity.isOffline()) return;
       const now=Date.now();
       if(now - _onlineRevalidateLast < 5*60*1000) return;
       const loadGen = _loadFoldersGen;
@@ -345,15 +358,13 @@
     }
     return _revalidateInFlight;
   }
-  function scheduleOnlineRevalidation(){
-    if(_onlineRevalidateTimer) clearTimeout(_onlineRevalidateTimer);
-    _onlineRevalidateTimer = setTimeout(()=>{ _onlineRevalidateTimer=null; revalidateFoldersForOnline(); }, 500);
-  }
-  window.addEventListener('online',()=>{ updateOnlineStatus(); updateStorageBar(); scheduleOnlineRevalidation(); });
+  // Connectivity state transitions (bookq:connectivity-change) own reconnect
+  // and revalidation now; the raw OS events only update the local meter.
+  window.addEventListener('online',()=>{ updateStorageBar(); });
   // Going offline must invalidate the freshness stamp: an online→offline→online
   // flip inside the 5-minute window has to revalidate immediately, since the
   // tree could not be revalidated while offline.
-  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; if(_onlineRevalidateTimer){ clearTimeout(_onlineRevalidateTimer); _onlineRevalidateTimer = null; } updateOnlineStatus(); updateStorageBar(); });
+  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; updateStorageBar(); });
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   function ensurePersist(deps){
     if(persistRequested) return;
@@ -380,7 +391,7 @@
   window.updateOnlineStatus = updateOnlineStatus;
   window.hasPersistedSupport = hasPersistedSupport;
   window._resolveDeps = _resolveDeps;
-  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',()=>{ updateStorageBar(); updateOnlineStatus(); }); } else { updateStorageBar(); updateOnlineStatus(); }
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',()=>{ updateStorageBar(); }); } else { updateStorageBar(); }
 
   // offline/storeAdapter.js owns the offline state machine. These are
   // delegations only: a missing module throws here at startup (wrong defer
@@ -1309,8 +1320,89 @@
   function filtersActive(){
     return activeFilters.artist.length > 0 || activeFilters.tag.length > 0;
   }
+  // ── offline browse availability (docs/offline-spec.md §6) ──
+  // "ダウンロード済み" = works レコードが存在する (records are only written
+  // with cachedCount>0 — PARTIAL included, 読めるページがあるものは読める)。
+  function _connOffline(){
+    return !!(window.Connectivity && !window.Connectivity.isOnline());
+  }
+  function _hasAnyDownload(){ return offlineRecordMap.size > 0; }
+  function _isReadablePath(path){
+    var rec = offlineRecordMap.get(path);
+    return !!(rec && (rec.cachedCount || 0) > 0);
+  }
+  // subtreeHasDownload(c): c 配下に DL レコードが 1 つ以上。c 自身の
+  // mixed フォルダ直置き画像レコードも数える (offlineMap)。offlineParentPaths
+  // は全レコードの全祖先パスを持つ (refreshOfflineMap 構築済み)。
+  function _subtreeHasDownload(path){
+    return !!path && (offlineMap[path] === true || offlineParentPaths.has(path));
+  }
+  // リーフ=エピソード: 画像のみフォルダ、または works レコードからの合成葉。
+  function _isEpisodeNode(n){
+    return !!n && (n._syntheticLeaf === true || folderHasOnlyImages(n));
+  }
+  // オフラインで開けるか: work の全リーフに使用可能レコードがあるか。
+  function _offlineWorkReadable(path){
+    var leaves = null;
+    try { leaves = window.getLeafPathsFor ? window.getLeafPathsFor(path) : null; } catch(e){ leaves = null; }
+    if (!leaves || !leaves.length) leaves = [path];
+    for (var i = 0; i < leaves.length; i++){
+      if (!_isReadablePath(leaves[i])) return false;
+    }
+    return true;
+  }
+  // spec §8: /api/images が使えないオフライン時、DL 済みリーフのページ名を
+  // work キャッシュのキーから復元する。キーは OfflineCore.imageUrl が作る
+  // /image/<encodePath(folder)>/<encodeURIComponent(name)> で、caches.match
+  // が exact-URL なので同一エンコードで逆引きできる。
+  async function _offlineImagesForLeaf(folder){
+    var rec = offlineRecordMap.get(folder);
+    if (!rec) return null;
+    try {
+      var cn = rec.cacheName || (window.OfflineCore ? window.OfflineCore.cacheNameFor(folder) : null);
+      if (!cn) return null;
+      var c = await caches.open(cn);
+      var reqs = await c.keys();
+      // downloadWork caches readerUrl() — /view/<enc> when readerUseView,
+      // else /image/<enc> (offline-core.js:621). Scan both shapes.
+      var enc = window.OfflineCore.encodePath(folder) + "/";
+      var prefixes = ["/image/" + enc, "/view/" + enc];
+      var present = new Set();
+      for (var i = 0; i < reqs.length; i++){
+        try {
+          var u = new URL(reqs[i].url);
+          for (var k = 0; k < prefixes.length; k++){
+            if (u.pathname.startsWith(prefixes[k])){
+              var nm = u.pathname.slice(prefixes[k].length);
+              // Archive inner entries legitimately keep "/" after the
+              // folder prefix (chapter/1.jpg) — decode per segment rather
+              // than dropping nested names (#413 review).
+              if (nm) present.add(nm.split("/").map(decodeURIComponent).join("/"));
+              break;
+            }
+          }
+        } catch(e) { console.warn(e); }
+      }
+      // rec.names = the server listing captured at download — EPUB spine
+      // order etc. Intersect with landed pages (iOS downloadedNames
+      // parity); filename sort would scramble non-natural orders.
+      if (Array.isArray(rec.names) && rec.names.length){
+        var out = rec.names.filter(function(n){ return present.has(n); });
+        return out.length ? out : null;
+      }
+      var names = Array.from(present);
+      if (!names.length) return null;
+      names.sort(new Intl.Collator(undefined, {numeric: true}).compare);
+      return names;
+    } catch(e) { console.warn(e); return null; }
+  }
   function emptyBrowseMessage(){
     if (_shallowMode) return "読込中…";
+    if (_connOffline()){
+      return currentBrowsePath
+        ? "このフォルダにダウンロード済みの作品がありません"
+        : "ダウンロード済みの作品がありません";
+    }
     return filtersActive()
       ? "絞り込みに一致するフォルダがありません"
       : "フォルダが見つかりません";
@@ -1340,7 +1432,20 @@
     // isVisible の fail-closed だけ見ればよい。FV 無しの stale shell では
     // 絞らない（watchdog が修復する）。
     var FV = window.FolderVisibility;
-    if (FV && !FV.showAll) children = children.filter(n => FV.isVisible(n._fullPath));
+    // spec §9 fail-open: オフライン + スナップショット無しでは非表示判定が
+    // 不可能なため、DL 絞り込みのみを適用する (DL はユーザ自身がデバイスに
+    // 置いたデータ)。スナップショット有りの通常経路は従来通り fail-closed。
+    var fvFailOpen = _connOffline() && FV && !FV.hasSnapshot;
+    if (FV && !FV.showAll && !fvFailOpen) children = children.filter(n => FV.isVisible(n._fullPath));
+    // オフライン/接続中: DL 済みのみの絞り込み (spec §6 uniform rule)。
+    // 中間フォルダは配下に DL が無ければ非表示、リーフ (エピソード) は
+    // 「レベル自体が DL を含む」とき全表示 (未 DL は render 側でグレー化)。
+    if (_connOffline()){
+      var levelHasDl = path ? _subtreeHasDownload(path) : _hasAnyDownload();
+      children = children.filter(function(n){
+        return _isEpisodeNode(n) ? levelHasDl : _subtreeHasDownload(n._fullPath);
+      });
+    }
     if (filtersActive()){
       // Shallow window: nodes carry no subtree_facets, so nodeMatchesFilters
       // would false out everything — never filter, show all + 読込中 badge.
@@ -1400,14 +1505,30 @@
     } catch(e) { console.warn(e); }
   }
 
+  // FV guardPath + spec §9 fail-open: オフラインかつスナップショット無し
+  // では判定不能を allow とし、DL 絞り込み側だけで制御する (nav も同じ)。
+  // hash.js の applyUrlState も window.fvGuardPath 経由でこれを使う。
+  function _fvGuard(path){
+    var FV = window.FolderVisibility;
+    if (!FV) return "allow";
+    if (_connOffline() && !FV.hasSnapshot) return "allow";
+    return FV.guardPath(path);
+  }
+  try { window.fvGuardPath = _fvGuard; } catch(e) { console.warn(e); }
   function navigateToFolder(path){
     var FV = window.FolderVisibility;
     if (FV){
       // guardPath: 判定不能（idle/loading / error 無snapshot）はキューだけ、
       // hidden はトップへ、それ以外は通常通り潜る。
-      var _g = FV.guardPath(path);
+      var _g = _fvGuard(path);
       if (_g === "pending"){ _pendingNav = {kind: "browse", path: path}; return; }
       if (_g === "hidden"){ redirectHiddenToTop(); return; }
+    }
+    // spec §6: オフライン/接続中は DL を含まない中間フォルダへ潜れない
+    // (ディープリンク・パンくず経路を含む単一関門)。ルートは常に許可。
+    if (_connOffline() && path && !_subtreeHasDownload(path)){
+      try { showErrorToast("オフラインのためこのフォルダは表示できません"); } catch(e){ console.warn(e); }
+      return;
     }
     if (_shallowMode){
       // Shallow window: target children==[] — queue the drill-down in the URL
@@ -1516,7 +1637,11 @@
   // ── thumb prefetch: per-work cache via OfflineCore.imageUrl (per-segment encodePath) ──
   const PREFETCH_CONCURRENCY = 3;
   async function prefetchThumbs(){ return window.ThumbPrefetch.prefetchThumbs(); }
-  function scheduleThumbPrefetch(){ return window.ThumbPrefetch.scheduleThumbPrefetch(); }
+  function scheduleThumbPrefetch(){
+    // サーバ取得なので接続後のみ (spec §6 機能ゲート)。
+    if (window.Connectivity && !window.Connectivity.isOnline()) return;
+    return window.ThumbPrefetch.scheduleThumbPrefetch();
+  }
   // Tree is usable — flip the url-state gate and kick thumb prefetch together
   // so no loadFolders path can enable one without the other.
   function markTreeReady(){
@@ -1538,6 +1663,118 @@
     } catch(e) { console.warn(e); }
   }
 
+  // Shared tree-apply core — loadFolders' restoreTree and the offline-first
+  // boot restore both run through here. opts.genOk() lets loadFolders'
+  // generation guard supersede mid-flight applies; the offline boot restore
+  // owns the pipeline and passes a trivially-true guard.
+  async function _applyTreeData(data, opts){
+    opts = opts || {};
+    const shallow = !!opts.shallow;
+    const genOk = (typeof opts.genOk === "function") ? opts.genOk : function(){ return true; };
+    const wantedPath = (opts.wantedPath !== undefined) ? opts.wantedPath : null;
+    if (!genOk()) return false;
+    if (shallow){
+      tree = data;
+      setFullPathsAndIndex(tree, true);
+      treeLoaded = false;
+    } else {
+      const map = await setFullPathsAndIndexAsync(data);
+      if (!map || !genOk()) return false;
+      tree = data;
+    }
+    _shallowMode = shallow;
+    try { window.__cc_singleCoverFirst = shallow; } catch(e) { console.warn(e); }
+    invalidateLeafPaths();
+    let nextPath = wantedPath;
+    if (wantedPath && !getNodeAt(wantedPath)) nextPath = null;
+    currentBrowsePath = nextPath;
+    updateBrowseHeader();
+    renderView();
+    updateShallowBadge();
+    try { refreshOfflineMap().then(()=>{ if (genOk()){ renderView(); updateShallowBadge(); } }); } catch(e) { console.warn(e); }
+    if (shallow) return true;
+    if (!genOk()) return false;
+    markTreeReady();
+    // Drain the shallow-window queue (same contract as restoreTree had).
+    const queuedNav = _pendingNav; _pendingNav = null;
+    if (queuedNav && queuedNav.kind === "view") { loadImages(queuedNav.path); }
+    else if (typeof location !== "undefined" && location.hash) { applyUrlState(); }
+    if (queuedNav && queuedNav.kind === "browse" && _pendingNav === null &&
+        !(typeof location !== "undefined" && location.hash)){
+      _pendingNav = queuedNav;
+    }
+    return true;
+  }
+
+  // オフラインファースト起動 (spec §7): サーバを待たず IDB スナップショット
+  // + works レコードからツリーを復元して即描画する。復元優先順位 (§8) の
+  // 第3段 — レコードの folder パスからツリー鎖を合成し、スナップショットに
+  // 含まれない分だけ union 追加する (初回特別扱いなし・汎用復元)。
+  async function restoreOfflineFirst(){
+    try { await refreshOfflineMap(); } catch(e) { console.warn(e); }
+    // SW api-cache の /api/v1/tree ETag を warm etag として seed —
+    // オフラインリロード後の再接続再検証を条件付き (304) に保つ。
+    try {
+      var _apiCache = await caches.open("bookq-api-v1");
+      var _cachedTree = _apiCache ? await _apiCache.match(globalThis.BookqApi.endpoints.tree) : null;
+      var _seedEtag = _cachedTree && _cachedTree.headers ? _cachedTree.headers.get("ETag") : null;
+      if (_seedEtag) etagByKey.set(_foldersEtagKey(null), _seedEtag);
+    } catch(e) { console.warn(e); }
+    var snap = null;
+    try { snap = await window.OfflineTree.getTree(); } catch(e) { console.warn(e); }
+    var data = _mergeOfflineTree(Array.isArray(snap) ? snap : []);
+    if (!data || !data.length) return false;
+    return _applyTreeData(data, {shallow: false});
+  }
+  // スナップショット + works レコードの union。base が空ならレコードだけで
+  // 全ツリーを合成する (初回オフライン起動もここで復元できる)。
+  function _mergeOfflineTree(base){
+    if (!base.length && !offlineRecordMap.size) return null;
+    // _fullPath が無い世代のスナップショット向けに先に付与してから解決する
+    // (後段の _applyTreeData が正式に再構築するのでここでは暫定でよい)。
+    if (base.length) setFullPathsAndIndex(base, true);
+    var missing = [];
+    offlineRecordMap.forEach(function(rec, folder){
+      if (!folder) return;
+      if (!findNodeByPath(base, folder)) missing.push(rec);
+    });
+    for (var i = 0; i < missing.length; i++) _ensureSynthPath(base, missing[i]);
+    return base;
+  }
+  // レコードの folder パスから疑似ノード鎖を生成する。_fullPath 一致のみで
+  // 解決する (flatten された name "b/c" でも _fullPath は物理パス全体なので
+  // 衝突しない)。葉には _syntheticLeaf を立て、サムネは 1 ページ目の
+  // キャッシュで表示できるよう rec.thumb を継ぐ。
+  function _ensureSynthPath(rootList, rec){
+    var segs = String(rec.folder || "").split("/").filter(function(s){ return s !== ""; });
+    if (!segs.length) return;
+    var nodes = rootList;
+    var acc = "";
+    for (var i = 0; i < segs.length; i++){
+      var seg = segs[i];
+      acc = acc ? acc + "/" + seg : seg;
+      var found = null;
+      for (var j = 0; j < nodes.length; j++){
+        var n = nodes[j];
+        if (n && n.type === "folder" && n._fullPath === acc){ found = n; break; }
+      }
+      if (!found){
+        found = { name: seg, type: "folder", children: [], _fullPath: acc };
+        if (i === segs.length - 1){
+          found._syntheticLeaf = true;
+          if (rec && rec.thumb) found.thumb = rec.thumb;
+        }
+        nodes.push(found);
+      }
+      if (!found.children) found.children = [];
+      // 既存の祖先が葉 (flatten 済み/画像のみ) なら疑似子を差し込まない —
+      // ディスクパス由来のレコードが葉ノードを mixed 化して
+      // 「フォルダ行 + このフォルダを読む行」の重複表示を生むのを防ぐ。
+      if (found._syntheticLeaf || (found.children.length && folderHasOnlyImages(found))) return;
+      nodes = found.children;
+    }
+  }
+
   let _loadFoldersGen = 0;
   async function loadFolders(opts, deps){
     const _d = _resolveDeps(deps);
@@ -1550,55 +1787,13 @@
     // isSameTree compare (none here) and OfflineTree.putTree (full-only per
     // routes.py:287-290), keeps treeLoaded=false with no markTreeReady /
     // prefetch / applyUrlState, and never calls nodeMatchesFilters
-    // (getBrowseChildren guard + 読込中 badge instead).
+    // (getBrowseChildren guard + 読込中 badge instead). The body lives in
+    // _applyTreeData — the offline-first boot restore shares it.
     async function restoreTree(data, opts){
-      const shallow = !!(opts && opts.shallow);
-      if (_loadGen !== _loadFoldersGen) return false;
-      if (shallow){
-        tree = data;
-        setFullPathsAndIndex(tree, true);
-        treeLoaded = false;
-      } else {
-        const map = await setFullPathsAndIndexAsync(data);
-        if (!map || _loadGen !== _loadFoldersGen) return false;
-        tree = data;
-      }
-      _shallowMode = shallow;
-      try { window.__cc_singleCoverFirst = shallow; } catch(e) { console.warn(e); }
-      invalidateLeafPaths();
-      // Todo 5: first paint before IndexedDB — folder names/counts must not
-      // wait on refreshOfflineMap (OfflineStore.getAll). The offline map
-      // lands afterwards and the second renderView converges the buttons
-      // (transient un-stored state is acceptable; final state identical).
-      let nextPath = _wantedPath;
-      if (_wantedPath && !getNodeAt(_wantedPath)) nextPath = null;
-      currentBrowsePath = nextPath;
-      updateBrowseHeader();
-      renderView();
-      updateShallowBadge();
-      // The map refresh can sit behind a settle wait (~12s worst) while the
-      // user is mid-gesture — loadFolders' stage-2 fetch must not queue
-      // behind it, so don't await: converge the badges when the map lands.
-      try { refreshOfflineMap().then(()=>{ if (_loadGen === _loadFoldersGen){ renderView(); updateShallowBadge(); } }); } catch(e) { console.warn(e); }
-      if (shallow) return true;
-      if (_loadGen !== _loadFoldersGen) return false;
-      markTreeReady();
-      // Drain the shallow-window queue: clicks stashed the single latest
-      // nav (kind view|browse — last write wins); URL deep-links (#/browse
-      // drill-down, #/view open) stayed pending because applyUrlState
-      // early-returns while !treeLoaded — one re-run now that the full
-      // tree resolves them.
-      const queuedNav = _pendingNav; _pendingNav = null;
-      if (queuedNav && queuedNav.kind === "view") { loadImages(queuedNav.path); }
-      else if (typeof location !== "undefined" && location.hash) { applyUrlState(); }
-      if (queuedNav && queuedNav.kind === "browse" && _pendingNav === null &&
-          !(typeof location !== "undefined" && location.hash)){
-        // visibility-pending browse queue (no URL written for it) — keep it
-        // stashed for the ready-edge drain instead of dropping it; a hash
-        // always wins (URL is the canonical queue for deep-links).
-        _pendingNav = queuedNav;
-      }
-      return true;
+      return _applyTreeData(data, Object.assign({}, opts, {
+        genOk: function(){ return _loadGen === _loadFoldersGen; },
+        wantedPath: _wantedPath,
+      }));
     }
     // Stage 1: shallow first paint (direct children only, no facets).
     let shallowOk = false;
@@ -1625,7 +1820,7 @@
       // Stamp only a genuinely-online load: an offline cold start must keep
       // _onlineRevalidateLast=0 so the reconnect revalidation fires instead
       // of being eaten by the freshness gate.
-      if (typeof navigator === 'undefined' || navigator.onLine) _onlineRevalidateLast = Date.now();
+      if (!window.Connectivity || window.Connectivity.isOnline()) _onlineRevalidateLast = Date.now();
       _persistTreeSnapshot(data, {defer:true});
       // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
@@ -2113,7 +2308,7 @@
       // 判定不能（loading / error 無snapshot）は open をキュー — ready/
       // readonly 遷移時に drain される。error も同じく保留する（隠れて
       // いるかもしれない本を開かない）。hidden だけ静かにトップへ。
-      var _g = FV.guardPath(fullPath);
+      var _g = _fvGuard(fullPath);
       if (_g === "pending"){
         _pendingNav = {kind: "view", path: fullPath};
         const _emp = document.getElementById("empty");
@@ -2124,6 +2319,18 @@
         return;
       }
       if (_g === "hidden"){ redirectHiddenToTop(); return; }
+    }
+    // spec §6: 接続中は open を結果待ちにキューし、オフライン確定で正式に
+    // 拒否する (グレータイルと同じ理由をトーストで明示)。接続中に即座に
+    // トーストすると URL 復元が「エラー表示→復帰後に開く」になり二重挙動
+    // になる — 全オープン経路の単一関門としてキューに統一する。
+    if (_connOffline() && !_offlineWorkReadable(fullPath)){
+      if (window.Connectivity.state === "connecting"){
+        _pendingNav = {kind: "view", path: fullPath};
+        return;
+      }
+      showErrorToast("オフラインのため読めません");
+      return;
     }
     if (_shallowMode){
       // Contract: never run on a children==[] shallow node — queue until the
@@ -2240,17 +2447,28 @@
             .filter(c => c.type === "image")
             .map(c => ({name: c.name, folder: fullPath}));
         } else {
-          const res = await fetch(globalThis.BookqApi.imagesUrl(fullPath));
-          if (!res.ok) {
-            const err = new Error("Failed to load folder (HTTP " + res.status + ")");
-            err.status = res.status;
-            throw err;
-          }
-          const filenames = globalThis.BookqApi.imagesOf(await res.json());
-          if (!filenames) {
-            const err = new Error("Malformed folder response");
-            err.status = 0;
-            throw err;
+          let filenames = null;
+          try {
+            const res = await _connFetch()(globalThis.BookqApi.imagesUrl(fullPath));
+            if (!res.ok) {
+              const err = new Error("Failed to load folder (HTTP " + res.status + ")");
+              err.status = res.status;
+              throw err;
+            }
+            filenames = globalThis.BookqApi.imagesOf(await res.json());
+            if (!filenames) {
+              const err = new Error("Malformed folder response");
+              err.status = 0;
+              throw err;
+            }
+          } catch(e) {
+            // spec §6/§8: オフライン + DL レコードあり → work キャッシュの
+            // キー (= /image/<enc-folder>/<enc-name>) からページ名を復元する。
+            // /api/images が SW api-cache に無くても DL 済みなら読める。
+            if (_connOffline()){
+              filenames = await _offlineImagesForLeaf(fullPath);
+            }
+            if (!filenames) throw e;
           }
           if (myGen !== urlRestoreGen) return; // superseded by a newer load — touch nothing
           images = filenames.map(name => ({name, folder: fullPath}));
@@ -3211,6 +3429,13 @@
         var FV = window.FolderVisibility;
         // positive hidden のみ拒否 — 判定不能時は loadImages 自身がキューする
         if (FV && FV.readyState !== "loading" && !FV.showAll && folder && FV.isHidden(folder)){ redirectHiddenToTop(); return; }
+        // spec §6: 接続中/オフラインで未 DL の work はそもそも開かない —
+        // closeSidebar する前に拒否し、グレータイルの意味を UI で守る。
+        // (loadImages 内の同名ガードは deep-link 系の backstop として残す)
+        if (_connOffline() && !_offlineWorkReadable(folder)){
+          showErrorToast("オフラインのため読めません");
+          return;
+        }
         if (intent.via === "resume") {
           // Continue-reading: a saved folder that is no longer a leaf steps
           // out to its browse parent first, then opens on a beat (unchanged
@@ -4764,7 +4989,7 @@
 
   function shouldAutoSync(){
     if(!treeLoaded) return false;
-    if(typeof navigator!=='undefined' && !navigator.onLine) return false;
+    if(window.Connectivity && !window.Connectivity.isOnline()) return false;
     try{ if(sessionStorage.getItem('bookq_auto_sync_done')) return false; } catch(e) { console.warn(e); }
     try{ sessionStorage.setItem('bookq_auto_sync_done','1'); } catch(e) { console.warn(e); }
     return true;
@@ -4784,6 +5009,8 @@
     getParentPath, findNodeByPath, folderHasOnlyImages, getSiblingLeafFolders,
     SIBLING_AUTOLOAD_MIN_DEPTH, truncateMiddle,
     setFullPathsAndIndex,
+    restoreOfflineFirst, _mergeOfflineTree, _offlineWorkReadable, _subtreeHasDownload,
+    _isEpisodeNode, _hasAnyDownload, getBrowseChildrenAt,
     get etagByKey(){ return etagByKey; },
     setTree(v){ tree=v; setFullPathsAndIndex(tree); invalidateLeafPaths(); updateBrowseHeader(); renderView(); },
     getTree(){ return tree; },
@@ -4798,7 +5025,7 @@
     if(_appVersionLoaded) return;
     _appVersionLoaded = true;
     try{
-      const r = await fetch(globalThis.BookqApi.endpoints.version, {cache:'no-store'});
+      const r = await _connFetch()(globalThis.BookqApi.endpoints.version, {cache:'no-store'});
       if(!r.ok) return;
       const j = await r.json();
       const version = j.version || "";
@@ -4843,7 +5070,11 @@
       var FV = window.FolderVisibility;
       if (FV){
         var _st = FV.readyState;
-        if (_st === "ready" || _st === "readonly"){
+        // spec §9 fail-open: オフライン + スナップショット無しの error も
+        // drain する — 各ガードは _fvGuard で allow に倒れる。
+        var _drainable = (_st === "ready" || _st === "readonly") ||
+          (_connOffline() && !FV.hasSnapshot && _st === "error");
+        if (_drainable){
           var qn = _pendingNav; _pendingNav = null;
           if (qn){
             if (qn.kind === "view"){ loadImages(qn.path); }
@@ -4875,6 +5106,86 @@
       renderView();
     } catch(e){ console.warn(e); }
   }
+  // ── connectivity wiring (docs/offline-spec.md §3/§7) ──
+  // 状態遷移でグリッドの絞り込み・機能ゲートを更新し、online 到達で従来の
+  // 起動同期 (tree/facets/progress/FV) を一括で走らせる。
+  function _syncChrome(){
+    var online = !window.Connectivity || window.Connectivity.isOnline();
+    try {
+      if (searchInput){
+        searchInput.disabled = !online;
+        searchInput.placeholder = online ? "検索…" : "オフラインのため検索できません";
+      }
+      var pb = document.getElementById("pair-btn");
+      if (pb){
+        pb.disabled = !online;
+        pb.title = online ? "2台で見開き" : "オフラインのため利用できません";
+      }
+    } catch(e) { console.warn(e); }
+  }
+  // pendingNav の drain — applyUrlState が同じ open を済ませた後の二重
+  // ロードを避けるため view kind は currentFolder 一致で skip する。
+  function _drainPendingNav(){
+    var qn = _pendingNav; _pendingNav = null;
+    if (!qn) return;
+    if (qn.kind === "view"){ if (currentFolder !== qn.path) loadImages(qn.path); }
+    else navigateToFolder(qn.path);
+  }
+  // フラップ抑止: 調停の走らせた要求自体が失敗→connecting→probe 成功で
+  // online に戻ると、調停再走が同じ失敗エンドポイントを永久に殴る
+  // livelock になる。通常の再接続は毎回调停すべき (spec §7) なので、
+  // 60 秒窓で 4 回目以降の online 遷移だけ調停を抑止する。
+  var _recentOnlineTransitions = [];
+  function _onOnline(){
+    _onlineRevalidateLast = 0;
+    var _now = Date.now();
+    _recentOnlineTransitions = _recentOnlineTransitions.filter(function(t){ return _now - t < 60000; });
+    _recentOnlineTransitions.push(_now);
+    if (_recentOnlineTransitions.length > 3){
+      _drainPendingNav();
+      return;
+    }
+    // ツリー調停 (spec §7): スナップショット復元済みなら条件付き再検証で
+    // 十分 (inm で 304→描画不変、200 で新ツリー適用)。未取得なら初回
+    // loadFolders (depth=1 先描画→full) が必要。
+    var _treeSync = treeLoaded ? revalidateFoldersForOnline() : loadFolders();
+    Promise.resolve(_treeSync).then(function(){
+      (window.FolderVisibility ? window.FolderVisibility.ready() : Promise.resolve()).then(function(){
+        applyUrlState();  // #/view・#/browse deep-link をオンラインで再処理
+        tryAutoSync();
+        _drainPendingNav();
+      });
+    });
+    loadFacets();
+    // Server-held resume point: pull + merge — a deep-linked viewer already
+    // open is untouched (the merge only writes localStorage).
+    _syncRemoteProgress();
+    try { if (window.FolderVisibility) window.FolderVisibility.refresh(); } catch(e) { console.warn(e); }
+  }
+  function _onConnectivity(state){
+    _syncChrome();
+    updateStorageBar();
+    try { renderView(); } catch(e) { console.warn(e); }
+    if (state === "online") _onOnline();
+    else if (state === "offline"){
+      // 接続中にキューした open/移動を正式判定へ drain — 各ガードが
+      // オフラインの拒否 (トースト/トップ戻し) を実行する。
+      _drainPendingNav();
+    }
+  }
+  window.addEventListener("bookq:connectivity-change", function(e){
+    try { _onConnectivity(e && e.detail && e.detail.state); } catch(err){ console.warn(err); }
+  });
+
+  // オフラインファースト起動 (spec §7): 接続サイクルを FV.init より先に
+  // 開始する。init の初回 refresh は Connectivity がまだ初期値 offline
+  // のうちに走ると _get がローカル失敗に倒れ ready() が早期解決する —
+  // connecting 先行なら GET は通常リクエストとして発行され、判定は実際
+  // の応答待ち (pending nav / pair resume 待機の契約) になる。
+  if (window.Connectivity){
+    _syncChrome();
+    window.Connectivity.connect().then(()=>{ _syncChrome(); try { renderView(); } catch(e) { console.warn(e); } });
+  }
   if (window.FolderVisibility){
     window.FolderVisibility.init({ owner: window.__BOOKQ_VISIBILITY_OWNER__, snapshot: window.__BOOKQ_VISIBILITY_SNAPSHOT__, onChange: _visibilityOnChange });
     window.FolderVisibility.ready().then(function(){
@@ -4889,11 +5200,13 @@
     // wiring 完了の結合マーカー（watchdog の混在検査対象）
     window.__BOOKQ_VISIBILITY = true;
   }
-
-  loadFolders().then(()=>{ (window.FolderVisibility ? window.FolderVisibility.ready() : Promise.resolve()).then(()=>{ applyUrlState(); tryAutoSync(); }); });
-  loadFacets();
-  // Server-held resume point: pull + merge in parallel with the tree load —
-  // a deep-linked viewer already open is untouched (the merge only writes
-  // localStorage), and the pill/tile refresh is guarded by merged.
-  _syncRemoteProgress();
+  if (window.Connectivity){
+    restoreOfflineFirst().then(()=>{ applyUrlState(); });
+  } else {
+    // 旧シェル (connectivity.js 欠落) — watchdog が修復するまでの間は
+    // 従来経路で起動する。
+    loadFolders().then(()=>{ (window.FolderVisibility ? window.FolderVisibility.ready() : Promise.resolve()).then(()=>{ applyUrlState(); tryAutoSync(); }); });
+    loadFacets();
+    _syncRemoteProgress();
+  }
 })();

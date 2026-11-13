@@ -129,11 +129,20 @@
   }
 
   function _get(){
+    // offline は GET せず netErr 相当に倒す (spec §3: 自動リトライ無し) —
+    // refresh() 側が読んだ owner ローカル snapshot が readonly フォール
+    // バックとしてそのまま適用される。connecting 中は通常通り発行する —
+    // 成功応答は到達証拠 (spec §5) として状態機械を online に引き上げる。
+    if (window.Connectivity && window.Connectivity.isOffline()){
+      return Promise.resolve({ netErr: true });
+    }
     var ctl = (typeof AbortController === "function") ? new AbortController() : null;
     var timer = ctl ? setTimeout(function(){ try { ctl.abort(); } catch(e){} }, GET_TIMEOUT_MS) : null;
     var opts = { credentials: "same-origin", cache: "no-store" };
     if (ctl) opts.signal = ctl.signal;
-    return fetch(URL, opts).then(function(res){
+    // Connectivity.fetch で判定を状態機械に流す (docs/offline-spec.md §5)。
+    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+    return _cf(URL, opts).then(function(res){
       if (timer) clearTimeout(timer);
       if (res.status === 401 || res.status === 403) return { authFail: true };
       if (!res.ok) return { httpErr: res.status };
@@ -401,13 +410,15 @@
     if (_validRootPath(root) === null)
       return Promise.resolve({ ok: false, invalid: true });
     if (_saving) return Promise.resolve({ ok: false, busy: true });
-    if (_readOnly || _offline || (typeof navigator !== "undefined" && navigator.onLine === false)){
+    if (_readOnly || _offline || (typeof navigator !== "undefined" && navigator.onLine === false)
+        || (window.Connectivity && window.Connectivity.isOffline())){
       _updateStatusDom();
       return Promise.resolve({ ok: false, offline: true });
     }
     _saving = true; _setGridBusy(true); _updateStatusDom();
     var issueGen = ++_reqGen;
-    return fetch(URL, {
+    var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
+    return _cf(URL, {
       method: "PUT", credentials: "same-origin", cache: "no-store",
       headers: { "Content-Type": "application/json", [OWNER_HEADER]: _owner },
       body: JSON.stringify({ root: root, hidden: !!hidden })

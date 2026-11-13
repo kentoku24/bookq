@@ -4,6 +4,7 @@ import SwiftUI
 struct LibraryView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var offline: OfflineStore
+    @EnvironmentObject private var online: OnlineStatusStore
     @EnvironmentObject private var search: SearchModel
     @EnvironmentObject private var visibility: VisibilityStore
     @EnvironmentObject private var pair: PairStore
@@ -22,23 +23,14 @@ struct LibraryView: View {
     @State private var swipeWidth: CGFloat = 0
 
     var body: some View {
-        NavigationStack(path: $model.navPath) {
-            levelStack
-                .navigationTitle("bookq")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { toolbar }
-                .navigationDestination(for: BrowseRoute.self) { route in
-                    switch route {
-                    case .level(let path):
-                        if let library = model.library {
-                            FolderLevelView(path: path, library: library, onOpen: openWork)
-                                .navigationTitle(title(for: path))
-                                .navigationBarTitleDisplayMode(.inline)
-                        }
-                    case .reader:
-                        EmptyView() // readers open as a fullScreenCover
-                    }
-                }
+        // spec §6: global search is an online-only action — the field is
+        // not even offered while offline/connecting.
+        Group {
+            if online.isOnline {
+                navStack.searchable(text: $search.query, prompt: "作品を検索")
+            } else {
+                navStack
+            }
         }
         .fullScreenCover(item: $model.openReader) { route in
             ReaderView(path: route.path)
@@ -57,7 +49,6 @@ struct LibraryView: View {
         .sheet(isPresented: $showPair) {
             PairSheet()
         }
-        .searchable(text: $search.query, prompt: "作品を検索")
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
             swipeWidth = $0
         }
@@ -76,12 +67,21 @@ struct LibraryView: View {
             }
         }
         .task {
-            // Non-blocking — fire the first probe before load() so a dead
-            // server flips the badge to offline instead of waiting out
-            // the (potentially long) tree load first.
-            model.online.start()
-            await model.library?.load()
-            model.library?.startPolling()
+            // spec §7: the tree already renders from its snapshot — start
+            // ONE connection cycle and let the state machine own every
+            // subsequent online transition (onChange below). A dead
+            // server never blocks this first paint.
+            online.start()
+            // Already online (view remount): onChange only fires on
+            // transitions, so prime the same reconciliation directly.
+            if online.isOnline { onlineRecovered() }
+        }
+        .onChange(of: online.state) { _, st in
+            // spec §3/§7: online recovery re-syncs and resumes polling;
+            // leaving online suspends the fill poll (no offline
+            // auto-retry — the next cycle is explicit/foreground only).
+            if st == .online { onlineRecovered() }
+            else { model.library?.stopPolling() }
         }
         .overlay {
             // Error overlay only when there is nothing to show — a failed
@@ -109,13 +109,36 @@ struct LibraryView: View {
         .animation(.easeInOut, value: offline.toast)
     }
 
+    /// The browse stack proper — `.searchable` attaches conditionally in
+    /// `body` so an offline transition can withdraw the field entirely.
+    private var navStack: some View {
+        NavigationStack(path: $model.navPath) {
+            levelStack
+                .navigationTitle("bookq")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { toolbar }
+                .navigationDestination(for: BrowseRoute.self) { route in
+                    switch route {
+                    case .level(let path):
+                        if let library = model.library {
+                            FolderLevelView(path: path, library: library, onOpen: openWork)
+                                .navigationTitle(title(for: path))
+                                .navigationBarTitleDisplayMode(.inline)
+                        }
+                    case .reader:
+                        EmptyView() // readers open as a fullScreenCover
+                    }
+                }
+        }
+    }
+
     private var levelStack: some View {
         VStack(spacing: 0) {
             resumePill
             pairBanner
             filterChipsRow
             if let library = model.library {
-                if search.active {
+                if search.active && online.isOnline {
                     SearchResultsView(search: search, library: library,
                                       onOpen: openWork)
                 } else {
@@ -238,6 +261,8 @@ struct LibraryView: View {
                       ? "person.2.fill" : "person.2")
             }
             .accessibilityLabel("ペアリング")
+            // spec §6: pairing initiation is disabled offline/connecting.
+            .disabled(!online.isOnline)
         }
     }
 
@@ -286,6 +311,21 @@ struct LibraryView: View {
         BrowseModel.splitDisplayName(path).leaf
     }
 
+    /// spec §7 online reconciliation — everything the web's
+    /// `connectivity → online` handler re-runs after a recovery: tree
+    /// reload + fill poll, visibility/facets re-fetch, a re-search when
+    /// a query is live, and reading-position sync.
+    private func onlineRecovered() {
+        Task {
+            await model.library?.load()
+            model.library?.startPolling()
+            await visibility.refresh()
+            await search.loadFacets()
+            if search.active { await search.search() }
+            await model.progress.syncWithServer()
+        }
+    }
+
     /// `guardPath` — pending judgments queue behind a refresh; positive-
     /// hidden paths never open the reader in normal mode.
     private func openWork(_ path: String) {
@@ -296,7 +336,19 @@ struct LibraryView: View {
             Task { _ = await pair.pickWork(folder: path) }
             return
         }
-        switch visibility.guardPath(path) {
+        // spec §6: an unreadable work never opens while offline/connecting
+        // — the web openWork-intent guard (greyed tiles' promise kept).
+        if !online.isOnline,
+           model.library?.workReadable(path) != true {
+            visNotice = "オフラインのため読めません"
+            return
+        }
+        // spec §9 fail-open: offline with no snapshot, pending can never
+        // resolve — open directly (the download filter already gated).
+        let verdict: VisibilityStore.GuardResult =
+            visibility.failOpen(isOnline: online.isOnline)
+                ? .allow : visibility.guardPath(path)
+        switch verdict {
         case .pending:
             Task {
                 await visibility.refresh()

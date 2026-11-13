@@ -12,9 +12,13 @@ final class ProgressSyncTests: XCTestCase {
 
     override func setUp() async throws {
         StubURLProtocol.reset()
-        UserDefaults.standard.removeObject(forKey: "bookq_progress_v1")
-        // Scoped key used by the default "anon|anon" scopeProvider.
-        UserDefaults.standard.removeObject(forKey: "bookq_progress_v1:anon|anon")
+        // Scoped keys survive across runs inside the simulator's
+        // UserDefaults db — sweep the whole prefix or stale
+        // `bookq_progress_v1:h|*` entries leak into scope tests.
+        for key in UserDefaults.standard.dictionaryRepresentation().keys
+            where key.hasPrefix("bookq_progress_v1") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
         api = StubURLProtocol.api()
         sync = ProgressSync(api: api)
         sync.sleep = { _ in }            // timers fire immediately

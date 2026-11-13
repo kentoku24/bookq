@@ -14,7 +14,7 @@
   function _resolveDeps(deps){
     deps = deps || {};
     return {
-      fetch: deps.fetch || (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch),
+      fetch: deps.fetch || (typeof window !== 'undefined' && window.Connectivity && window.Connectivity.fetch ? window.Connectivity.fetch : (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch)),
       caches: deps.caches || (typeof window !== 'undefined' ? window.caches : (typeof caches !== 'undefined' ? caches : undefined)),
       storage: deps.storage || (typeof navigator !== 'undefined' ? navigator.storage : undefined),
       OfflineStore: deps.OfflineStore || window.OfflineStore
@@ -68,6 +68,20 @@
     })(tree);
     if(leaves.length) return [...new Set(leaves)];
     return [folder];
+  }
+  // window.getNodeAt が無いコンテキスト (harness 等) 向けのツリー走査。
+  function _nodeAt(p){
+    if (window.getNodeAt) { try { return window.getNodeAt(p); } catch(e) {} }
+    var tree = window.tree || [];
+    var found = null;
+    (function walk(nodes){
+      for (var n of nodes){
+        if (found) return;
+        if (n._fullPath === p){ found = n; return; }
+        if (n.children && p.indexOf((n._fullPath || "") + "/") === 0) walk(n.children);
+      }
+    })(tree);
+    return found;
   }
   function getLeafPathsFor(folder, deps){
     if(deps && deps.tree !== undefined) return computeLeafPathsFor(folder, deps);
@@ -270,6 +284,13 @@
   }
 
   async function downloadWork(folder, deps){
+    // spec §6 機能ゲート: オフライン/接続中はダウンロードを開始しない
+    // (全入口 — IDLE タップ・popover 続き・else 分岐 — の単一関門)。
+    // 削除はローカル操作なので deleteWork 側は許可のまま。
+    if (typeof window !== 'undefined' && window.Connectivity && !window.Connectivity.isOnline()){
+      try { if (window.showErrorToast) window.showErrorToast("オフラインのためダウンロードできません"); } catch(e){ console.warn(e); }
+      return;
+    }
     var _d = _resolveDeps(deps);
     var _fetch = _d.fetch;
     var _caches = _d.caches || (typeof caches !== 'undefined' ? caches : undefined);
@@ -289,12 +310,36 @@
     var leafFileMap = new Map();
     async function fetchLeafFiles(lp){
       throwIfAborted();
-      var res = await _fetch(globalThis.BookqApi.imagesUrl(lp), {signal});
-      if(!res.ok) throw new Error("list failed "+res.status+" for "+lp);
-      var files = globalThis.BookqApi.imagesOf(await res.json());
-      if(!files) throw new Error("malformed images response for "+lp);
-      throwIfAborted();
-      return files;
+      // 正規ルートは /api/images — listing フェーズとして観測される
+      // (is-listing)。flatten 葉は /api/images?folder=<leaf> がディスク
+      // 直下しか列挙しないため常に [] を返す; オフラインでは fetch 自体が
+      // 失敗する。両ケースのフォールバックとして、画像のみの葉では
+      // node.children のファイル名 ("only/leaf/1.png" 形式) を使う —
+      // viewer のオフライン fast path と同じ経路。
+      var inMem = [];
+      try {
+        var node = _nodeAt(lp);
+        if (node && folderHasOnlyImages(node)){
+          inMem = (node.children || []).filter(function(c){ return c && c.type === "image"; })
+            .map(function(c){ return c.name; });
+        }
+      } catch(e) {}
+      var files = null;
+      try {
+        var res = await _fetch(globalThis.BookqApi.imagesUrl(lp), {signal});
+        if(res.ok){
+          files = globalThis.BookqApi.imagesOf(await res.json());
+          if(!files) throw new Error("malformed images response for "+lp);
+        } else if(!inMem.length) {
+          throw new Error("list failed "+res.status+" for "+lp);
+        }
+      } catch(e) {
+        if(e && e.name==='AbortError') throw e;
+        if(!inMem.length) throw e;
+      }
+      if(files && files.length) return files;
+      if(inMem.length) return inMem;
+      return files || [];
     }
     async function cacheLeaf(lp, files, cache, onFile){
       var bytes = 0;
@@ -377,13 +422,13 @@
             if(lp2!==folder) _updateProgress(lp2, (i+1)/files2.length);
           });
           var existing = await _Store.get(lp2);
-          await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: result.cachedCount, bytes: result.bytes, thumb: files2[0]||null, addedAt: existing ? existing.addedAt : Date.now(), lastReadAt: Date.now()});
+          await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: result.cachedCount, bytes: result.bytes, thumb: files2[0]||null, names: files2, addedAt: existing ? existing.addedAt : Date.now(), lastReadAt: Date.now()});
         }catch(leafErr){
           if((leafErr && leafErr.name==='AbortError') || signal.aborted){
             if(leafCachedPartial>0){
               var existing2 = await _Store.get(lp2);
               var thumb = files2[0]||null;
-              await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: leafCachedPartial, bytes: leafBytesPartial, thumb, addedAt: existing2 ? existing2.addedAt : Date.now(), lastReadAt: Date.now()});
+              await _Store.put({folder: lp2, cacheName, pageCount: files2.length, cachedCount: leafCachedPartial, bytes: leafBytesPartial, thumb, names: files2, addedAt: existing2 ? existing2.addedAt : Date.now(), lastReadAt: Date.now()});
             }
             throw leafErr;
           }
@@ -413,7 +458,7 @@
               var cache3 = await _caches.open(_Store.cacheNameFor(lp3));
               var retryResult = await cacheLeaf(lp3, files3, cache3, null);
               var existing3 = await _Store.get(lp3);
-              await _Store.put({folder: lp3, cacheName: _Store.cacheNameFor(lp3), pageCount: files3.length, cachedCount: retryResult.cachedCount, bytes: retryResult.bytes, thumb: files3[0]||null, addedAt: existing3 ? existing3.addedAt : Date.now(), lastReadAt: Date.now()});
+              await _Store.put({folder: lp3, cacheName: _Store.cacheNameFor(lp3), pageCount: files3.length, cachedCount: retryResult.cachedCount, bytes: retryResult.bytes, thumb: files3[0]||null, names: files3, addedAt: existing3 ? existing3.addedAt : Date.now(), lastReadAt: Date.now()});
             }
             if(window.updateStorageBar) await window.updateStorageBar(_d);
             if(window.refreshOfflineMap) await window.refreshOfflineMap();

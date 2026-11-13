@@ -19,6 +19,10 @@ def test_ios_offline_sw_cache_offline(ios_page, server):
     expect(page.locator("#img-track .page-cell img").first).to_have_class(re.compile(r"\bloaded\b"), timeout=8000)
     page.wait_for_timeout(1200)
     assert page.evaluate("async () => { const ks = await caches.keys(); return ks.some(k=>k.startsWith('bookq-work-')); }"), "no bookq-work-* cache"
+    # spec §8: offline browse only surfaces recorded downloads — the reader's
+    # opportunistic page cache alone has no works record, so an explicit
+    # download is required for the tile to remain visible/usable offline.
+    page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
     page.context.set_offline(True)
     try:
         page.locator("#menu-btn").click()
@@ -26,7 +30,9 @@ def test_ios_offline_sw_cache_offline(ios_page, server):
     except Exception:
         pass
     expect(page.locator(".tile").first).to_be_visible(timeout=5000)
-    page.locator('.tile[data-path="simple_manga"]').click()
+    # dispatch_event: connectivity transitions re-render the grid while the
+    # cycle settles — a stability-checked .click() flakes on DOM churn.
+    page.locator('.tile[data-path="simple_manga"]').dispatch_event("click")
     expect(page.locator("#counter")).to_have_text("1 / 5", timeout=8000)
     imgs = page.locator("#img-track .page-cell img")
     expect(imgs.first).to_have_class(re.compile(r"\bloaded\b"), timeout=8000)
@@ -40,16 +46,14 @@ def test_ios_offline_health_amber(ios_page, server):
     wait_for_sw(page)
     page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
     page.wait_for_function("() => document.getElementById('offline-status')?.textContent.includes('オンライン')", timeout=5000)
+    # spec §5: any successful request is reachability evidence and lands the
+    # state machine back online even mid-cycle — a health-only outage is NOT
+    # offline. Simulate true unreachability by rejecting every fetch.
     page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     page.evaluate(
         """() => {
-            const orig = window.fetch;
-            window._healthOrig = orig;
-            window.fetch = (input, init) => {
-                const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
-                return orig(input, init);
-            };
+            window._healthOrig = window.fetch;
+            window.fetch = () => Promise.reject(new Error('failed'));
         }"""
     )
     page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")

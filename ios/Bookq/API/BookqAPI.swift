@@ -2,6 +2,15 @@ import Foundation
 
 /// HTTP client for the bookq API. Attaches `Authorization: Bearer` when a
 /// token is present and handles the `/api/v1/tree` 202 rebuild handshake.
+/// Connectivity verdict hook (docs/offline-spec.md §5 iOS): `send`
+/// classifies every request outcome and reports it here. 2xx → success;
+/// unreachable URLErrors and 502/503/504 → fail; anything else (4xx,
+/// 500, decode errors, cancellations) is neutral — the server answered.
+struct ConnectivityReporter: Sendable {
+    var success: @Sendable () -> Void
+    var unreachable: @Sendable () -> Void
+}
+
 final class BookqAPI: Sendable {
     let baseURL: URL
     private let session: URLSession
@@ -9,14 +18,18 @@ final class BookqAPI: Sendable {
     /// 401 recovery: refresh the access token and return the new Bearer.
     /// Nil return = refresh failed → the 401 propagates (→ re-login).
     private let tokenRefresher: (@Sendable () async -> String?)?
+    /// Verdict sink — nil in tests/harnesses that don't own a state machine.
+    private let reporter: ConnectivityReporter?
 
     init(baseURL: URL, session: URLSession = .shared,
          tokenProvider: @escaping @Sendable () -> String?,
-         tokenRefresher: (@Sendable () async -> String?)? = nil) {
+         tokenRefresher: (@Sendable () async -> String?)? = nil,
+         reporter: ConnectivityReporter? = nil) {
         self.baseURL = baseURL
         self.session = session
         self.tokenProvider = tokenProvider
         self.tokenRefresher = tokenRefresher
+        self.reporter = reporter
     }
 
     /// `ws(s)://<host>/ws/reader-sync` — the dual-reader sync endpoint.
@@ -59,7 +72,7 @@ final class BookqAPI: Sendable {
     }
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        var (data, resp) = try await session.data(for: req)
+        var (data, resp) = try await sendOnce(req)
         guard var http = resp as? HTTPURLResponse else {
             throw APIError.protocolError
         }
@@ -70,13 +83,47 @@ final class BookqAPI: Sendable {
            let fresh = await tokenRefresher() {
             var retry = req
             retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
-            (data, resp) = try await session.data(for: retry)
+            (data, resp) = try await sendOnce(retry)
             guard let h2 = resp as? HTTPURLResponse else {
                 throw APIError.protocolError
             }
             http = h2
         }
         return (data, http)
+    }
+
+    /// One network leg + spec §5 verdict reporting. The classification is
+    /// per *outcome*: an unreachable URLError or a proxy-band 5xx means
+    /// the server did not answer; any other status is a real response
+    /// (neutral), and 2xx proves reachability.
+    private func sendOnce(_ req: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            let (data, resp) = try await session.data(for: req)
+            if let http = resp as? HTTPURLResponse {
+                if (200..<300).contains(http.statusCode) {
+                    reporter?.success()
+                } else if [502, 503, 504].contains(http.statusCode) {
+                    reporter?.unreachable()
+                }
+            }
+            return (data, resp)
+        } catch let e as URLError {
+            if Self.isUnreachable(e) { reporter?.unreachable() }
+            throw e
+        }
+    }
+
+    /// spec §5 iOS: the no-response error set (parity with web TypeError /
+    /// SW `Response.error()`). `.cancelled` is intentionally absent —
+    /// aborts are caller-driven, never connectivity evidence.
+    static func isUnreachable(_ e: URLError) -> Bool {
+        switch e.code {
+        case .notConnectedToInternet, .timedOut, .cannotConnectToHost,
+             .networkConnectionLost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Decode JSON or map a non-2xx status to APIError.

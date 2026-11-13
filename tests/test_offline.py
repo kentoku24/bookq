@@ -99,6 +99,11 @@ def test_sw_registration(page, server):
 
 
 def test_auto_cache_offline(page, server):
+    """CacheFirst auto-cache keeps filling Cache storage, but under the
+    docs/offline-spec.md state machine a merely-VIEWED work is NOT readable
+    offline — only works with a download (works record) are. The grid drops
+    every tile (empty message) and the viewer open is guarded.
+    """
     goto_offline(page, server)
     wait_for_sw(page)
     # open a folder to trigger CacheFirst auto-cache via <img> loads
@@ -117,32 +122,31 @@ def test_auto_cache_offline(page, server):
     # go offline at browser context level — do NOT reload (offline.html has no .tile)
     page.context.set_offline(True)
     try:
-        # Return to browse grid (in-memory, no network) and re-display same folder while offline
-        # Viewer is open; toggle sidebar to return to browse via returnToBrowse()
+        # state machine lands offline once the finite probe budget is spent
+        page.wait_for_function(
+            "() => window.Connectivity && window.Connectivity.state === 'offline'",
+            timeout=20000,
+        )
+        # Return to browse grid — spec §6: with zero downloads the grid is
+        # empty (auto-cached pages are not "downloaded"), not greyed tiles.
         page.locator("#menu-btn").click()
         expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
-        expect(page.locator(".tile").first).to_be_visible(timeout=5000)
-        page.locator('.tile[data-path="simple_manga"]').click()
-        # Counter may carry the transient offline-failure badge (⚠) if the
-        # current page errored before its cache entry was readable; the strict
-        # load proofs below (loaded class + naturalWidth) still gate success.
-        expect(page.locator("#counter")).to_have_text(re.compile(r"1\s*/\s*5"), timeout=8000)
-        if _is_webkit():
-            # Playwright-WebKit bypasses SW fetch interception while the
-            # context is offline (fetch throws "Load failed" even for cached
-            # entries), so bitmap decode is unobservable here. The auto-cache
-            # contract is Cache storage: the rendered page URL must be cached.
-            src = page.evaluate("() => { const el = document.querySelector('#img-track .page-cell img'); return el ? el.src : ''; }")
-            assert src, "viewer must render an img element offline"
-            hit = page.evaluate("async (s) => { try { return !!(await caches.match(s)); } catch { return false; } }", src)
-            assert hit, f"auto-cached first page must be in Cache offline: {src}"
-            assert page.locator("#img-track .page-cell").count() >= 1
-            return
-        # images should still be visible from cache
-        imgs = page.locator("#img-track .page-cell img")
-        expect(imgs.first).to_have_class(re.compile(r"\bloaded\b"), timeout=8000)
-        assert imgs.first.evaluate("e => e.naturalWidth") > 0
-        assert page.locator("#img-track .page-cell").count() >= 1
+        page.wait_for_function(
+            "() => document.getElementById('tile-grid') && document.getElementById('tile-grid').textContent.includes('ダウンロード済みの作品がありません')",
+            timeout=8000,
+        )
+        assert page.locator('.tile[data-path="simple_manga"]').count() == 0, \
+            "viewed-but-not-downloaded work must be hidden from the offline grid"
+        # The open path is guarded too: a direct loadImages call must not
+        # produce a viewer — the same gate the greyed tile's tap hits.
+        readable = page.evaluate(
+            "() => window.__BOOKQ_DEBUG && window.__BOOKQ_DEBUG._offlineWorkReadable ? window.__BOOKQ_DEBUG._offlineWorkReadable('simple_manga') : null"
+        )
+        assert readable is False, f"auto-cached work must not be offline-readable: {readable}"
+        page.evaluate("() => window.loadImages('simple_manga')")
+        page.wait_for_timeout(700)
+        counter = page.locator("#counter").text_content() or ""
+        assert " / " not in counter, f"offline open of a non-downloaded work must be blocked, counter={counter!r}"
         try:
             page.screenshot(path=str(EVIDENCE_DIR / "task-9-offline-cache-download-auto.png"))
         except Exception:
@@ -414,17 +418,15 @@ def test_offline_status_class_toggles_with_health(page, server):
 
     page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
-        # mirror the harness test: SW can bypass route interception, so also
-        # reject health fetches at the app level before calling updateOnlineStatus
+        # True unreachability = EVERY request fails (docs/offline-spec.md §5:
+        # health-only failure with a still-answering API stays online — any
+        # real response is success evidence). Reject all fetches so no
+        # reportSuccess can land mid-cycle.
         page.evaluate(
             """() => {
                 const orig = window.fetch;
                 window._origFetchHealthT7 = orig;
-                window.fetch = (input, init) => {
-                    const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
-                    return orig(input, init);
-                };
+                window.fetch = (input, init) => Promise.reject(new Error('failed'));
             }"""
         )
         page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
@@ -455,3 +457,67 @@ def test_offline_status_class_toggles_with_health(page, server):
         )
         assert "offline" not in (page.locator("#offline-status").get_attribute("class") or ""), \
             ".offline class must be removed after recovery"
+
+
+# ── archive inner names restore (spec §8) ────────────────────────────────
+
+
+def test_offline_restore_archive_inner_names(page, server):
+    """Archive entries keep '/' inside the work-cache key — the spec §8
+    page-name restore must decode per segment, not drop nested names."""
+    goto_offline(page, server)
+    wait_for_sw(page)
+    page.evaluate("""async () => {
+      const folder = 'arc_work';
+      const cn = window.OfflineCore.cacheNameFor(folder);
+      const c = await caches.open(cn);
+      const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+      for (const n of ['chapter/2.jpg', 'chapter/1.jpg'])
+        await c.put('/image/' + window.OfflineCore.encodePath(folder + '/' + n),
+                    new Response(png, {headers: {'Content-Type': 'image/png'}}));
+      await window.OfflineStore.put({folder, cacheName: cn, pageCount: 2,
+        cachedCount: 2, bytes: 16, thumb: 'chapter/1.jpg',
+        addedAt: Date.now(), lastReadAt: Date.now()});
+      await window.refreshOfflineMap();
+    }""")
+    page.context.set_offline(True)
+    try:
+        # connecting/offline both count as non-online for the readable gate —
+        # the open must reach the work-cache scan either way.
+        page.evaluate("() => window.loadImages('arc_work')")
+        expect(page.locator("#counter")).to_have_text(
+            re.compile(r"^1 / 2"), timeout=8000)
+    finally:
+        page.context.set_offline(False)
+
+
+def test_offline_restore_uses_record_listing_order(page, server):
+    """rec.names = server listing order captured at download (EPUB spine
+    order). Restore must follow it, not filename sort — z.jpg before a.jpg
+    only proves out when the record order wins."""
+    goto_offline(page, server)
+    wait_for_sw(page)
+    page.evaluate("""async () => {
+      const folder = 'epub_work';
+      const cn = window.OfflineCore.cacheNameFor(folder);
+      const c = await caches.open(cn);
+      const png = new Uint8Array([137,80,78,71,13,10,26,10]);
+      for (const n of ['z.jpg', 'a.jpg'])
+        await c.put('/image/' + window.OfflineCore.encodePath(folder + '/' + n),
+                    new Response(png, {headers: {'Content-Type': 'image/png'}}));
+      await window.OfflineStore.put({folder, cacheName: cn, pageCount: 2,
+        cachedCount: 2, bytes: 16, thumb: 'z.jpg', names: ['z.jpg', 'a.jpg'],
+        addedAt: Date.now(), lastReadAt: Date.now()});
+      await window.refreshOfflineMap();
+    }""")
+    page.context.set_offline(True)
+    try:
+        page.evaluate("() => window.loadImages('epub_work')")
+        expect(page.locator("#counter")).to_have_text(
+            re.compile(r"^1 / 2"), timeout=8000)
+        src = page.evaluate(
+            "() => (window.stripImgs && window.stripImgs[0] && window.stripImgs[0].src) || ''")
+        assert "z.jpg" in src, \
+            f"first restored page must follow record order (z.jpg), got {src!r}"
+    finally:
+        page.context.set_offline(False)

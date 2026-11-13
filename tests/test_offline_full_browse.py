@@ -181,6 +181,10 @@ def test_api_folders_offline_recovery(page, server):
     # Offline relaunch: must recover via IDB even with Cache absent.
     # Chromium proves the full navigation; WebKit re-runs the same restore
     # in-page (helper comment explains why) and asserts just as strictly.
+    # spec §6: the offline grid shows only download-bearing branches —
+    # download one work first so the relaunched grid has any tiles at all.
+    page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
+    expect(page.locator('.tile[data-path="simple_manga"] .offline-btn.state-complete').first).to_be_visible(timeout=15000)
     page.context.set_offline(True)
     try:
         offline_relaunch(page)
@@ -192,48 +196,53 @@ def test_api_folders_offline_recovery(page, server):
         idb_offline = page.evaluate("async () => { try { const t = await window.OfflineTree.getTree(); return Array.isArray(t) ? t.length : 0; } catch { return 0; } }")
         assert idb_offline > 0, "OfflineTree.getTree must still hit after offline reload"
         assert idb_offline == online_len, f"offline IDB len {idb_offline} != online {online_len}"
-        # tiles visible
+        # tiles visible — spec §6 filter: the downloaded work's level shows
+        # all its episodes (non-downloaded ones greyed) while branches with
+        # no download (e.g. group, series) drop out of navigation entirely.
         assert page.locator(".tile").count() > 0, "tiles should be visible after offline reload"
-        expect(page.locator(".tile").first).to_be_visible(timeout=5000)
+        expect(page.locator('.tile[data-path="simple_manga"]')).to_be_visible(timeout=5000)
+        assert page.locator('.tile[data-path="group"]').count() == 0, \
+            "group has no downloads — must be hidden from offline navigation (spec §6)"
         page.locator("#browse-header").evaluate("el => el.textContent")
     finally:
         page.context.set_offline(False)
         page.wait_for_selector(".tile", timeout=2300)
 
-    # ── health abort does not affect browsing (separate online-check probe is network-only) ──
+    # ── unreachability does not break downloaded browsing (docs/offline-spec.md §6) ──
     # First ensure back online and SW settled
     page.goto(server + "/?offline=1")
     page.wait_for_selector(".tile", timeout=10000)
     wait_for_sw(page)
-    # abort health probe at both route and fetch level (mirrors test_offline harness #9)
+    # abort health probe at route level (belt) and reject ALL fetches at the
+    # app level — spec §5 counts any real response as success evidence, so a
+    # health-only failure is not offline (that is the new model's correctness).
     page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
         page.evaluate(
             """() => {
                 const orig = window.fetch;
                 window._origFetchHealthT2 = orig;
-                window.fetch = (input, init) => {
-                    const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
-                    return orig(input, init);
-                };
+                window.fetch = (input, init) => Promise.reject(new Error('failed'));
             }"""
         )
-        # trigger offline detection — status should go offline amber but browsing stays functional
+        # trigger offline detection — status should go offline amber but downloaded browsing stays functional
         page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
         page.wait_for_function(
             "() => document.getElementById('offline-status') && document.getElementById('offline-status').textContent.includes('オフライン')",
-            timeout=5000,
+            timeout=8000,
         )
-        # browsing must still work — tiles visible, folder count not zero, fetch still serves cached tree
-        expect(page.locator(".tile").first).to_be_visible(timeout=5000)
+        # spec §6: offline browsing = downloaded works only — the downloaded
+        # tile stays visible, folder count not zero.
+        expect(page.locator('.tile[data-path="simple_manga"]')).to_be_visible(timeout=5000)
         count_text = page.locator("#folder-count").text_content() or ""
-        assert "0 folders" not in count_text, f"health abort should not empty browsing: {count_text}"
-        # verify cached tree still fetchable despite health failure
+        assert "0 folders" not in count_text, f"offline must not empty downloaded browsing: {count_text}"
+        # restore fetch first: the cached tree check exercises the SW's
+        # NetworkFirst fallback, not the app's connectivity verdicts.
+        page.evaluate("() => { try { if(window._origFetchHealthT2) window.fetch = window._origFetchHealthT2; } catch {} }")
         still_ok = page.evaluate(
             "async () => { try { const r = await fetch('/api/v1/tree'); const j = await r.json(); return Array.isArray(j.nodes||j) && (j.nodes||j).length > 0; } catch { return false; } }"
         )
-        assert still_ok, "browsing tree must remain available when health probe fails"
+        assert still_ok, "browsing tree must remain available when connectivity reports offline"
         try:
             page.screenshot(path=str(EVIDENCE_DIR / "task-2-api-tree-recovery.png"))
         except Exception:
@@ -317,6 +326,12 @@ def test_browse_hierarchy_offline(page, server):
     expect(page.locator("#browse-header")).to_contain_text("フォルダ", timeout=5000)
     expect(page.locator('.tile[data-path="group"]')).to_be_visible(timeout=5000)
 
+    # spec §6: offline browsing is download-scoped — download one root work
+    # and ONE nested chapter so the relaunched grid has a filtered shape to
+    # verify (visible branch + greyed siblings + hidden no-download branches).
+    page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
+    page.evaluate("async () => { await window.downloadWork('group/episodes/ch-2'); }")
+    expect(page.locator('.tile[data-path="simple_manga"] .offline-btn.state-complete').first).to_be_visible(timeout=15000)
     page.context.set_offline(True)
     try:
         offline_relaunch(page)
@@ -327,49 +342,73 @@ def test_browse_hierarchy_offline(page, server):
         tl = page.evaluate("() => { try { return !!window.treeLoaded; } catch { return null; } }")
         if tl is not None:
             assert tl is True
-        # root tiles still same
+        # spec §6 uniform rule: root level has downloads → every root EPISODE
+        # stays (greyed when not downloaded); intermediates without a
+        # downloaded descendant drop out of navigation entirely.
         top_offline = page.evaluate(
             """() => Array.from(document.querySelectorAll('.tile[data-path]')).map(el => el.getAttribute('data-path'))"""
         )
-        assert set(top_offline) == set(top_paths), f"offline root tiles mismatch online {top_paths} vs offline {top_offline}"
-        # drill into group offline (no network, cached tree only)
+        assert "simple_manga" in top_offline, f"downloaded work must stay visible offline: {top_offline}"
+        assert "group" in top_offline, f"branch containing a download must stay navigable: {top_offline}"
+        for hidden in ("series", "wrap/inner", "kanji", "nest"):
+            assert hidden not in top_offline, f"{hidden} has no download — must be hidden offline: {top_offline}"
+        # root episodes without a record render greyed + aria-disabled
+        chain_path = next((p for p in top_offline if p.startswith("chain")), None)
+        assert chain_path, "flattened chain leaf should still render (level has downloads)"
+        chain_cls = page.locator(f'.tile[data-path="{chain_path}"]').get_attribute("class") or ""
+        assert "off-unavail" in chain_cls, f"non-downloaded episode must be greyed: {chain_cls!r}"
+
+        # drill into the download-bearing branch
         page.locator('.tile[data-path="group"]').click()
         expect(page.locator("#browse-header")).to_contain_text("group", timeout=5000)
+        group_off = page.evaluate(
+            """() => Array.from(document.querySelectorAll('.tile[data-path]')).map(el => el.getAttribute('data-path'))"""
+        )
+        assert "group/episodes" in group_off, f"episodes (has download) must stay: {group_off}"
+        assert "group/deep_series" not in group_off, f"deep_series (no download) must hide: {group_off}"
+        assert "group/fullwidth_episodes" not in group_off, f"fullwidth (no download) must hide: {group_off}"
+        # other_work is an episode leaf at this level — shown but greyed
+        ow = page.locator('.tile[data-path="group/other_work"]')
+        if ow.count():
+            assert "off-unavail" in (ow.get_attribute("class") or ""), "greyed leaf expected"
         page.locator('.tile[data-path="group/episodes"]').click()
         expect(page.locator("#browse-header")).to_contain_text("episodes", timeout=5000)
         ep_offline = page.evaluate(
             """() => Array.from(document.querySelectorAll('.tile[data-path]')).map(el => el.getAttribute('data-path'))"""
         )
-        assert "group/episodes/ch-10" in ep_offline, f"offline episodes missing ch-10: {ep_offline}"
+        # all 4 episodes stay visible; downloaded ones are normal, the rest greyed
+        for ch in ("ch-1", "ch-2", "ch-10", "ch-11"):
+            assert f"group/episodes/{ch}" in ep_offline, f"offline episodes must keep {ch}: {ep_offline}"
+
+        # non-downloaded episode: greyed + tap blocked (no viewer opens).
+        # dispatch_event bypasses Playwright's aria-disabled refusal so the
+        # app's own tap guard is what gets tested.
+        page.locator('.tile[data-path="group/episodes/ch-1"]').dispatch_event("click")
+        page.wait_for_timeout(700)
+        counter_text = page.locator("#counter").text_content() or ""
+        assert " / " not in counter_text, f"non-downloaded episode must not open offline, counter={counter_text!r}"
+        # downloaded episode: opens from the same in-memory tree
+        page.locator('.tile[data-path="group/episodes/ch-2"]').click()
+        page.wait_for_selector("#counter", timeout=5000)
+        expect(page.locator("#counter")).to_have_text(re.compile(r"\d+\s*/\s*\d+"), timeout=5000)
+        # close viewer via sidebar toggle to return to browse
+        page.locator("#menu-btn").click()
+        expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
+        expect(page.locator(".tile").first).to_be_visible(timeout=5000)
+
         # breadcrumb back still works offline (tree-walk parent resolution)
         page.locator("#browse-header").click()
         expect(page.locator("#browse-header")).to_contain_text("group", timeout=5000)
         page.locator("#browse-header").click()
         expect(page.locator("#browse-header")).to_contain_text("フォルダ", timeout=5000)
 
-        # flattened leaf: clicking chain tile should open viewer (folderHasOnlyImages) even offline?
-        # chain/only/leaf has images only, so tile click opens viewer directly — verify it does not navigate to dead level
-        # Find the chain tile path dynamically
-        chain_path = next((p for p in top_offline if p.startswith("chain")), None)
-        assert chain_path, "chain offline path not found"
-        # Check that this folder is leaf (only images) by evaluating folderHasOnlyImages via DOM helper or just click and check viewer
-        # We click and see if counter appears (viewer) rather than browse-header drill
-        page.locator(f'.tile[data-path="{chain_path}"]').click()
-        # either browse-header stays Folders (viewer open) or counter shows pages
-        # Wait a bit for viewer to open if it is leaf
-        page.wait_for_selector("#counter", timeout=2800)
+        # flattened chain leaf: greyed (not downloaded) → tap is blocked
+        page.locator(f'.tile[data-path="{chain_path}"]').dispatch_event("click")
+        page.wait_for_timeout(700)
         counter_text = page.locator("#counter").text_content() or ""
-        # leaf chain has 2 images → expect "1 / 2" if viewer opened
-        if " / " in counter_text:
-            expect(page.locator("#counter")).to_have_text(re.compile(r"1\s*/\s*2"), timeout=5000)
-            # close viewer via sidebar toggle to return to browse
-            page.locator("#menu-btn").click()
-            expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
-            # ensure back to browse grid
-            expect(page.locator(".tile").first).to_be_visible(timeout=5000)
-        else:
-            # if chain is not leaf (e.g., intermediate), it would have drilled — still valid, just ensure no Failed tile
-            assert "Failed" not in (page.locator("#tile-grid").text_content() or "")
+        assert " / " not in counter_text, \
+            f"non-downloaded leaf must not open offline (spec §6), counter={counter_text!r}"
+        assert "Failed" not in (page.locator("#tile-grid").text_content() or "")
 
         try:
             page.screenshot(path=str(EVIDENCE_DIR / "task-2-api-tree-hierarchy.png"))
@@ -451,6 +490,15 @@ def test_viewer_hash_relaunch_offline_restores_tiles(page, server):
         leaf_path,
     )
     assert leaf_ok, f"discovered leafPath is not image-only leaf: {leaf_path!r}"
+
+    # spec §6: only downloaded works open offline — download the leaf so the
+    # offline viewer-hash relaunch has a readable target (and so the post-
+    # returnToBrowse grid has any tiles at all).
+    page.evaluate("async (p) => { await window.downloadWork(p); }", leaf_path)
+    page.wait_for_function(
+        "async (p) => { try { const r = await window.OfflineStore.get(p); return !!(r && r.cachedCount > 0); } catch { return false; } }",
+        arg=leaf_path, timeout=15000,
+    )
 
     # 3. Open viewer for that leaf: navigate to #/view/<encode leafPath>?p=0, wait viewer visible
     viewer_hash = page.evaluate(
@@ -741,10 +789,12 @@ def test_auto_sync_on_first_online_visit(page, server):
     # (modal retained in canonical offline store; prefetch path stays silent)
     assert "showQuotaConfirm" in store_text, "downloadWork modal retained in canonical offline store"
     assert "showQuotaConfirm" not in prefetch_text, "prefetch must not reference the quota modal"
-    # health probe preserved
-    assert "X-Online-Check" in app_text, "updateOnlineStatus must keep X-Online-Check header"
-    assert "online_check" in app_text, "must keep health online_check probe"
-    assert "cache:\"no-store\"" in app_text or "cache:'no-store'" in app_text or 'cache:"no-store"' in app_text or "'no-store'" in app_text or '"no-store"' in app_text, "online revalidation must use cache no-store"
+    # health probe preserved — it now lives in offline/connectivity.js (the
+    # 3-state machine; spec §5) rather than app.js's updateOnlineStatus.
+    conn_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline" / "connectivity.js").read_text(encoding="utf-8")
+    assert "X-Online-Check" in conn_text, "Connectivity probe must keep X-Online-Check header"
+    assert "online_check" in conn_text, "must keep health online_check probe"
+    assert "cache:\"no-store\"" in conn_text or "cache: \"no-store\"" in conn_text or "'no-store'" in conn_text or '"no-store"' in conn_text, "online probe must use cache no-store"
     # networkFirst revalidation with diff → setFullPaths → OfflineTree.putTree → prefetch (IDB-only)
     assert "setFullPaths" in app_text
     assert "OfflineTree.putTree" in app_text
@@ -868,7 +918,9 @@ def test_auto_sync_on_first_online_visit(page, server):
         # even though the initial load stamped the 5-minute freshness gate.
         # Ensure we are online, then simulate offline→online flip
         page.context.set_offline(True)
-        page.wait_for_selector(".tile", timeout=2300)
+        # spec §6: with no downloads the offline grid is empty — a settle
+        # wait is all this step needs, not a .tile selector.
+        page.wait_for_timeout(2300)
         # Flip back online — this should trigger window online event and debounced revalidation
         page.context.set_offline(False)
         # Also dispatch explicit online event (page.context flip may not fire window online in all browsers)
@@ -916,8 +968,10 @@ def test_auto_sync_on_first_online_visit(page, server):
         )
         # trigger another prefetch attempt via manual call if exposed, else just ensure no modal appears
         page.evaluate("() => { try { sessionStorage.removeItem('bookq_auto_sync_done'); } catch {} }")
-        # Try to trigger auto-sync again - should silently handle quota
-        page.evaluate("() => { try { window.dispatchEvent(new Event('online')); } catch {} }")
+        # Drive the prefetch path directly — the 'online' OS event now only
+        # feeds Connectivity.revalidate (no state change → no re-sync), so
+        # this exercises the same quota-silent path deterministically.
+        page.evaluate("async () => { try { if (window.ThumbPrefetch && window.ThumbPrefetch.prefetchThumbs) await window.ThumbPrefetch.prefetchThumbs(); } catch {} }")
         page.wait_for_selector(".tile", timeout=3000)
         modal_visible = page.evaluate("() => !!document.querySelector('.quota-modal')")
         assert not modal_visible, "QuotaExceededError in background auto-sync must NOT show showQuotaConfirm modal (silent skip)"
@@ -1038,6 +1092,17 @@ def test_browse_to_view_offline_transition(page, server):
     # Put a fetch spy that counts /api/images hits (fast path should produce 0)
     page.evaluate("() => { window.__imgHits=[]; if(!window.__origFetchImg){ window.__origFetchImg=window.fetch.bind(window); window.fetch=(input,init)=>{ try{ const u=typeof input==='string'?input:(input&&input.url)||''; if(u.includes('/api/v1/images')) window.__imgHits.push(u); }catch{} return window.__origFetchImg(input,init); } } window.__imgHits=[]; }")
     # Navigate to a browse level that contains leaves (group deep) then back to root for chain test
+    # spec §6: only downloaded works are visible/readable offline — download
+    # the two targets first (ch-2 only so sibling greying is also exercised).
+    # NB: the flattened chain leaf's _fullPath is "chain" — its images are
+    # named only/leaf/*.png, so "chain/only/leaf" is a disk path, NOT a
+    # tree path; downloadWork must be given the real leaf path.
+    page.evaluate("async () => { await window.downloadWork('chain'); }")
+    page.evaluate("async () => { await window.downloadWork('group/episodes/ch-2'); }")
+    page.wait_for_function(
+        "async () => { try { const r = await window.OfflineStore.get('chain'); return !!(r && r.cachedCount > 0); } catch { return false; } }",
+        timeout=15000,
+    )
     # Directly test leaf open: find chain tile (flattened leaf) and click it while offline
     page.context.set_offline(True)
     try:
@@ -1066,8 +1131,12 @@ def test_browse_to_view_offline_transition(page, server):
         page.locator('.tile[data-path="group/episodes"]').click()
         expect(page.locator("#browse-header")).to_contain_text("episodes", timeout=5000)
         page.evaluate("() => { window.__imgHits=[]; }")
-        # Click ch-1 leaf (depth 2, SIBLING should concatenate 4 chapters = 4 images cross-chapter)
-        page.locator('.tile[data-path="group/episodes/ch-1"]').click()
+        # spec §6: non-downloaded siblings render greyed; the downloaded one
+        # (ch-2) opens. Click ch-2 leaf (depth 2, SIBLING concatenates all
+        # chapter nodes in-memory — no fetch).
+        ch1_cls = page.locator('.tile[data-path="group/episodes/ch-1"]').get_attribute("class") or ""
+        assert "off-unavail" in ch1_cls, f"non-downloaded ch-1 must be greyed offline: {ch1_cls!r}"
+        page.locator('.tile[data-path="group/episodes/ch-2"]').click()
         page.wait_for_selector("#counter", timeout=2900)
         # While offline, sibling fast path must still work (all siblings are leaves, so no fetch)
         img_hits2 = page.evaluate("() => window.__imgHits.length")

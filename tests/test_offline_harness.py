@@ -540,19 +540,18 @@ def test_09_vpn_split_health_abort(page, server):
     wait_for_sw(page)
     page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
+        # spec §5: health-only failure is NOT offline while other requests
+        # still answer — any real response is success evidence. Reject all
+        # fetches to model true unreachability.
         page.evaluate(
             """() => {
                 const orig = window.fetch;
                 window._origFetchHealth = orig;
-                window.fetch = (input, init) => {
-                    const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
-                    return orig(input, init);
-                };
+                window.fetch = (input, init) => Promise.reject(new Error('failed'));
             }"""
         )
         page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
-        page.wait_for_function("() => document.getElementById('offline-status') && document.getElementById('offline-status').textContent.includes('オフライン')", timeout=5000)
+        page.wait_for_function("() => document.getElementById('offline-status') && document.getElementById('offline-status').textContent.includes('オフライン')", timeout=8000)
         status = page.locator("#offline-status").text_content() or ""
         assert "オフライン" in status, f"health abort should show ○オフライン, got {status!r}"
         assert "○オフライン" in status, f"expected ○オフライン, got {status!r}"

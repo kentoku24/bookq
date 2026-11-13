@@ -102,4 +102,61 @@ final class BookqAPITests: XCTestCase {
         XCTAssertEqual(hits, 2)
         XCTAssertEqual(r?.total, 0)
     }
+
+    // MARK: - Connectivity reporter (docs/offline-spec.md §5)
+
+    private final class Verdicts: @unchecked Sendable {
+        var ok = 0, fail = 0
+    }
+
+    private func apiWithReporter(_ v: Verdicts) -> BookqAPI {
+        BookqAPI(baseURL: URL(string: "http://unit.test")!,
+                 session: StubURLProtocol.session(),
+                 tokenProvider: { nil },
+                 reporter: ConnectivityReporter(
+                    success: { v.ok += 1 },
+                    unreachable: { v.fail += 1 }))
+    }
+
+    /// A 2xx body is the only "online" proof — the server answered.
+    func testReporter2xxIsSuccess() async throws {
+        let v = Verdicts()
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
+        try await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 1); XCTAssertEqual(v.fail, 0)
+    }
+
+    /// No response at all (unreachable URLError) → fail verdict.
+    func testReporterUnreachableErrorIsFail() async {
+        let v = Verdicts()
+        StubURLProtocol.failWith = .notConnectedToInternet
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 1)
+    }
+
+    /// Proxy-band 5xx means the server did not answer → fail verdict.
+    func testReporter503IsFail() async {
+        let v = Verdicts()
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:], status: 503) }
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 1)
+    }
+
+    /// A real 4xx/5xx response is neutral — the server answered, the
+    /// machine must not demote over an application-level error.
+    func testReporter404IsNeutral() async {
+        let v = Verdicts()
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:], status: 404) }
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 0)
+    }
+
+    /// Cancellations are caller-driven (intentional aborts) — never
+    /// connectivity evidence (spec §5 note).
+    func testReporterCancelledIsNeutral() async {
+        let v = Verdicts()
+        StubURLProtocol.failWith = .cancelled
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 0)
+    }
 }
