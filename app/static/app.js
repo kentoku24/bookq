@@ -855,6 +855,8 @@
 
   function spreadLeft(s){ return window.SpreadView.spreadLeft(s); }
 
+  function padChapterSpacers(images, boundaries, pageMode, spreadOffset){ return window.SpreadView.padChapterSpacers(images, boundaries, pageMode, spreadOffset); }
+
   // The global page indices THIS device renders for spread s: the paired
   // projection ([] on a blank side) or the plain spread pages solo.
   // spread.js's spreadMetrics reads this through the window export.
@@ -2409,19 +2411,10 @@
           }
         }
 
-        // Offset-aware spacer padding for spread mode (mobile parity #441:
-        // pad on the post-shift index — boundaries[c] already includes
-        // earlier pads via the shift below, so do NOT add them again).
-        const spreadOff = pageMode === 'spread' ? spreadOffset : 0;
-        for (let c = 0; c < chapters.length; c++) {
-          const startIdx = boundaries[c];
-          const pad = (startIdx - spreadOff + 2) % 2;
-          for (let p = 0; p < pad; p++) {
-            allImages.splice(boundaries[c], 0, {name: "__spacer__", folder: "", isSpacer: true});
-            for (let j = c + 1; j < boundaries.length; j++) boundaries[j]++;
-          }
-          boundaries[c] += pad;
-        }
+        // Offset-aware spacer padding for spread mode — padChapterSpacers
+        // (viewer/spread.js) owns the rule; api/vectors/chapter-padding.json
+        // pins it against the iOS/Android ports.
+        padChapterSpacers(allImages, boundaries, pageMode, spreadOffset);
 
         images = allImages;
         chapterList = chapters;

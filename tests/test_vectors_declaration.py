@@ -17,6 +17,7 @@ EXPECTED = {
     "path-lookup.json": ["python", "js", "swift"],
     "encode-path.json": ["python", "js", "swift"],
     "solo-spreads.json": ["js", "swift"],
+    "chapter-padding.json": ["js", "swift", "kotlin"],
 }
 
 # Language -> test file that consumes the vectors for that language.
@@ -24,6 +25,7 @@ READERS = {
     "python": "tests/test_conformance_vectors.py",
     "js": "tests/test_conformance_vectors_js.py",
     "swift": "ios/BookqTests/ConformanceVectorsTests.swift",
+    "kotlin": "android/core/src/test/kotlin/dev/bookq/core/ChapterPaddingVectorsTest.kt",
 }
 
 

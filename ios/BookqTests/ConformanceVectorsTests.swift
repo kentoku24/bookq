@@ -148,4 +148,47 @@ final class ConformanceVectorsTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - chapter-padding
+
+    /// `ReaderWork.assemble` (spacer padding + rebuildSpreads) against
+    /// chapter-padding.json — pins the post-shift pad rule shared with
+    /// app.js `padChapterSpacers` and Android `ReaderWork.assemble` (#441).
+    func testChapterPadding() throws {
+        let vec = Self.loadVector("chapter-padding.json")
+        XCTAssertTrue((vec["languages"] as! [String]).contains("swift"))
+        for raw in vec["cases"] as! [[String: Any]] {
+            let name = raw["name"] as! String
+            let chapters = (raw["chapters"] as! [[String: Any]]).map { ch -> ReaderChapter in
+                let folder = ch["folder"] as! String
+                return ReaderChapter(
+                    name: folder, fullPath: folder,
+                    images: (ch["pages"] as! [String]).map {
+                        PageRef(name: $0, folder: folder)
+                    })
+            }
+            let mode: ReaderPageMode = (raw["pageMode"] as! String) == "spread" ? .spread : .single
+            let offset = (raw["spreadOffset"] as! NSNumber).intValue
+            let work = ReaderWork.assemble(
+                clickedPath: chapters.first?.fullPath ?? "",
+                chapters: chapters, pageMode: mode, spreadOffset: offset)
+
+            let gotImages = work.images.map {
+                [$0.folder, $0.name, $0.isSpacer ? "1" : "0"]
+            }
+            let expectImages = (raw["expectImages"] as! [[String: Any]]).map {
+                [$0["folder"] as! String, $0["name"] as! String,
+                 ($0["isSpacer"] as? Bool) == true ? "1" : "0"]
+            }
+            XCTAssertEqual(gotImages, expectImages, name)
+            XCTAssertEqual(work.boundaries, Self.ints(raw["expectBoundaries"]!), name)
+            XCTAssertEqual(work.spreads, Self.intMatrix(raw["expectSpreads"]!), name)
+            XCTAssertEqual(work.idxToSpread, Self.ints(raw["expectIdxToSpread"]!), name)
+            let expectStarts = raw["expectChapterStart"] as! [Bool]
+            XCTAssertEqual(expectStarts.count, work.spreads.count, name)
+            for s in expectStarts.indices {
+                XCTAssertEqual(work.chapterStartSpread(s), expectStarts[s], "\(name) spread \(s)")
+            }
+        }
+    }
 }
