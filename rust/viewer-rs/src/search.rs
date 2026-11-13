@@ -252,16 +252,18 @@ async fn index_and_hidden(
 /// upstream: any other value falls through to keep FastAPI's 422.
 pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
     if q.get("sort").map(|s| s.as_str()).unwrap_or("relevance") != "relevance" {
-        return crate::serve::reject_or_proxy(
+        return crate::serve::unprocessable_or_proxy(
             st.has_upstream(),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            "sort",
+            "value_error",
             "invalid sort",
         );
     }
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
-        return crate::serve::reject_or_proxy(
+        return crate::serve::unprocessable_or_proxy(
             st.has_upstream(),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            "include_hidden",
+            "value_error",
             "invalid include_hidden",
         );
     };
@@ -303,9 +305,10 @@ pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
 /// (no traversal check upstream — a non-matching value just empties the set).
 pub async fn api_facets(st: &AppState, q: &HashMap<String, String>) -> Serve {
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
-        return crate::serve::reject_or_proxy(
+        return crate::serve::unprocessable_or_proxy(
             st.has_upstream(),
-            StatusCode::UNPROCESSABLE_ENTITY,
+            "include_hidden",
+            "value_error",
             "invalid include_hidden",
         );
     };

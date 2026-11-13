@@ -18,6 +18,7 @@ use axum::{
     response::Response,
 };
 use serde::Serialize;
+#[cfg(test)]
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 use tokio::sync::{Mutex, Notify};
@@ -610,9 +611,10 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     let depth = match parse_i64(q.get("depth")) {
         Ok(d) => d,
         Err(()) => {
-            return crate::serve::reject_or_proxy(
+            return crate::serve::unprocessable_or_proxy(
                 st.has_upstream(),
-                StatusCode::UNPROCESSABLE_ENTITY,
+                "depth",
+                "value_error",
                 "invalid depth",
             )
         }
@@ -620,9 +622,10 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     let since = match parse_i64(q.get("since")) {
         Ok(s) => s,
         Err(()) => {
-            return crate::serve::reject_or_proxy(
+            return crate::serve::unprocessable_or_proxy(
                 st.has_upstream(),
-                StatusCode::UNPROCESSABLE_ENTITY,
+                "since",
+                "value_error",
                 "invalid since",
             )
         }

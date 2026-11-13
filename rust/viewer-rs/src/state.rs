@@ -64,6 +64,17 @@ pub fn detail(status: StatusCode, msg: &str) -> Response {
     json_response(status, &serde_json::json!({"detail": msg}))
 }
 
+/// FastAPI's 422 issue-array shape — the spec's `ValidationError` schema
+/// declares `detail` as an array of issue objects, not a string (#465).
+pub fn unprocessable(param: &str, ty: &str, msg: &str) -> Response {
+    json_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &serde_json::json!({
+            "detail": [{"loc": ["query", param], "msg": msg, "type": ty}]
+        }),
+    )
+}
+
 // ── reading positions ───────────────────────────────────────────────────────
 //
 // `PositionBook` rules are a verbatim port of `app/reading_positions.py`:
