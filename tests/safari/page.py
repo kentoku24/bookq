@@ -927,35 +927,47 @@ class _Mouse:
     def __init__(self, page: SafariPage):
         self._page = page
 
-    def _actions(self):
-        self._page._activate()
-        pointer = PointerInput(PointerInput.Kind.MOUSE, "mouse")
-        return ActionBuilder(self._page._driver, mouse=pointer), pointer
+    # W3C pointer actions do not synthesize real DOM mouse events under
+    # safaridriver (same reason element.click() is a no-op) — dispatch the
+    # standard event sequence at the hit point in-page instead.
+    _SEQ_JS = (
+        "const [x, y, types] = arguments;"
+        "const el = document.elementFromPoint(x, y);"
+        "if (!el) return;"
+        "for (const t of types) {"
+        "  el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true,"
+        "    clientX: x, clientY: y, view: window, button: 0}));"
+        "}"
+    )
 
     def click(self, x: float, y: float, **kw):
-        ab, p = self._actions()
-        ab.pointer_action.move_to_location(int(x), int(y)).click()
-        ab.perform()
+        self._page._eval(
+            self._SEQ_JS, int(x), int(y),
+            ["pointerdown", "mousedown", "pointerup", "mouseup", "click"],
+        )
 
     def dblclick(self, x: float, y: float, **kw):
-        ab, p = self._actions()
-        ab.pointer_action.move_to_location(int(x), int(y)).double_click()
-        ab.perform()
+        self._page._eval(
+            self._SEQ_JS, int(x), int(y),
+            ["pointerdown", "mousedown", "pointerup", "mouseup", "click",
+             "pointerdown", "mousedown", "pointerup", "mouseup", "click",
+             "dblclick"],
+        )
 
     def move(self, x: float, y: float, **kw):
-        ab, p = self._actions()
-        ab.pointer_action.move_to_location(int(x), int(y))
-        ab.perform()
+        self._page._eval(
+            self._SEQ_JS, int(x), int(y), ["pointermove", "mousemove"]
+        )
 
-    def down(self, **kw):
-        ab, p = self._actions()
-        ab.pointer_action.pointer_down()
-        ab.perform()
+    def down(self, x: float = 0, y: float = 0, **kw):
+        self._page._eval(
+            self._SEQ_JS, int(x), int(y), ["pointerdown", "mousedown"]
+        )
 
-    def up(self, **kw):
-        ab, p = self._actions()
-        ab.pointer_action.pointer_up()
-        ab.perform()
+    def up(self, x: float = 0, y: float = 0, **kw):
+        self._page._eval(
+            self._SEQ_JS, int(x), int(y), ["pointerup", "mouseup"]
+        )
 
     def wheel(self, delta_x: float, delta_y: float, **kw):
         self._page._eval(
