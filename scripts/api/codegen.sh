@@ -7,13 +7,14 @@
 #
 # Tool versions are pinned here so local runs and CI produce identical
 # output. CI (`api-spec-lint.yml` codegen-drift job) runs this script and
-# fails on `git diff --exit-code` — editing a spec without regenerating
+# fails on `git status --porcelain` — editing a spec without regenerating
 # breaks the PR.
 #
 # Usage: ./scripts/api/codegen.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
 
 # Pinned generator versions — bump deliberately, then commit the regenerated
 # artifacts in the same PR so the drift gate stays green.

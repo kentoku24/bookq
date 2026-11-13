@@ -157,9 +157,14 @@ final class SpecConformanceTests: XCTestCase {
         }
         if depth > 20 { throw SpecError(msg: "ref depth exceeded") }
         if let ref = map["$ref"] as? String {
-            guard let name = ref.split(separator: "/").last.map(String.init) else {
-                throw SpecError(msg: "bad $ref \(ref)")
+            // Loud failure on non-schema refs — last-segment lookup would
+            // silently misresolve `#/components/responses/X` to a same-named
+            // schema if one ever appears.
+            let prefix = "#/components/schemas/"
+            guard ref.hasPrefix(prefix) else {
+                throw SpecError(msg: "non-schema $ref \(ref)")
             }
+            let name = String(ref.dropFirst(prefix.count))
             if resolving.contains(name) { return .cyclic }
             guard let schemas = (try specRoot() as? [String: Any])?["components"] as? [String: Any],
                   let target = (schemas["schemas"] as? [String: Any])?[name] else {
@@ -189,6 +194,11 @@ final class SpecConformanceTests: XCTestCase {
             guard nonNull.count == 1 else {
                 return .nullable(.prim("any", literal: nil))
             }
+            // Known limitation (same as the old YAML-path parser): the
+            // rebuild keeps only items/properties/required — an `enum`,
+            // `const`, `oneOf` or `allOf` sibling of a nullable type would
+            // be dropped. The current spec's three nullable sites have no
+            // such sibling; add keys here if that changes.
             var rebuilt: [String: Any] = ["type": nonNull[0]]
             for key in ["items", "properties", "required"] {
                 if let v = map[key], !(v is NSNull) { rebuilt[key] = v }
