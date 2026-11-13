@@ -2409,19 +2409,10 @@
           }
         }
 
-        // Offset-aware spacer padding for spread mode
-        const spreadOff = pageMode === 'spread' ? spreadOffset : 0;
-        const spacersNeeded = [];
-        for (let c = 0; c < chapters.length; c++) {
-          const startIdx = boundaries[c] + spacersNeeded.reduce((a, b) => a + b, 0);
-          const pad = (startIdx - spreadOff + 2) % 2;
-          spacersNeeded.push(pad);
-          for (let p = 0; p < pad; p++) {
-            allImages.splice(boundaries[c], 0, {name: "__spacer__", folder: "", isSpacer: true});
-            for (let j = c + 1; j < boundaries.length; j++) boundaries[j]++;
-          }
-          boundaries[c] += pad;
-        }
+        // Offset-aware spacer padding for spread mode — padChapterSpacers
+        // (viewer/spread.js) owns the rule; api/vectors/chapter-padding.json
+        // pins it against the iOS/Android ports.
+        padChapterSpacers(allImages, boundaries, pageMode, spreadOffset);
 
         images = allImages;
         chapterList = chapters;

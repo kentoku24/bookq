@@ -39,6 +39,28 @@
   function invalidateSpreadSizes(){ window.spreadSizeCache = {}; }
   window.invalidateSpreadSizes = invalidateSpreadSizes;
 
+  // Cross-chapter spacer padding — the assembly step loadImages runs before
+  // rebuildSpreads (pinned against the iOS/Android ports by
+  // api/vectors/chapter-padding.json). boundaries[] already carries earlier
+  // pads (each pad shifts every later boundary), so the pad parity reads
+  // boundaries[c] directly; adding the accumulated pad count on top
+  // double-counts — the pre-#441 web bug that could park a chapter on an
+  // odd boundary and merge it into the previous chapter's spread.
+  function padChapterSpacers(images, boundaries, pageMode, spreadOffset){
+    if (boundaries.length < 2) return;
+    var spreadOff = pageMode === 'spread' ? (spreadOffset || 0) : 0;
+    for (var c = 0; c < boundaries.length; c++) {
+      var startIdx = boundaries[c];
+      var pad = (startIdx - spreadOff + 2) % 2;
+      for (var p = 0; p < pad; p++) {
+        images.splice(boundaries[c], 0, {name: "__spacer__", folder: "", isSpacer: true});
+        for (var j = c + 1; j < boundaries.length; j++) boundaries[j]++;
+      }
+      boundaries[c] += pad;
+    }
+  }
+  window.padChapterSpacers = padChapterSpacers;
+
   function rebuildSpreads(){
     var images = _getImages();
     var pageMode = window.pageMode || 'single';
