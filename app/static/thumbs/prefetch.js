@@ -55,11 +55,16 @@
     if (r.top >= vp.bottom && r.top <= vp.bottom + h) return 2;
     return -1;
   }
+  // #236: the sprite path is the api/endpoints.js constant (loaded before
+  // this file) — never a hard-coded string.
+  function _spritePath(){
+    return window.BookqApi.endpoints.thumbSprite;
+  }
   function _isThumbUrl(u){
-    return u && (u.indexOf('/thumb/') === 0 || u.indexOf('/api/v1/thumb-sprite') === 0);
+    return u && (u.indexOf('/thumb/') === 0 || u.indexOf(_spritePath()) === 0);
   }
   function _dirForUrl(url, tileFolder){
-    if (url.indexOf('/api/v1/thumb-sprite') === 0){
+    if (url.indexOf(_spritePath()) === 0){
       var m = /[?&]folder=([^&]*)/.exec(url);
       if (m){ try { return decodeURIComponent(m[1]) || null; } catch(e) { return null; } }
       return tileFolder || null;

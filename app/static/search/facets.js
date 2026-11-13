@@ -2,7 +2,12 @@
  * Plain global script: defines window.doSearch, loadFacets, renderFacetOptions,
  * updateFilterChips etc. Depends on window.tree, window.activeFilters etc
  * exposed by app.js composition root.
+ *
+ * Wire (#236): search/facets transport goes through the typed window.BookqApi
+ * client (app/static/api/v1.js) — 202 (index-building) retries live in
+ * BookqApi.fetchWithBuildingRetry only, and response shapes are spec-typed.
  */
+// @ts-check
 (function () {
   // State lives in app.js; access via window at call-time.
   function _getActiveFilters() { return window.activeFilters; }
@@ -111,44 +116,42 @@
     deps = deps || {};
     return { fetch: deps.fetch || (typeof window !== 'undefined' && window.Connectivity && window.Connectivity.fetch ? window.Connectivity.fetch : (typeof window !== 'undefined' && window.fetch ? window.fetch.bind(window) : fetch)) };
   }
-  // 202 = the server metadata index is still building: retry on a short
-  // backoff clock instead of parsing the status body as a payload. Returns
-  // null when the caller was superseded; returns the (non-202 or last-202)
-  // Response otherwise, so giving up leaves prior state untouched.
-  async function _fetchBuilding(url, fetchFn, stillCurrent){
-    var res = null;
-    for (var attempt = 0; ; attempt++){
-      res = await fetchFn(url);
-      if (!stillCurrent()) return null;
-      if (res.status !== 202) return res;
-      if (attempt >= 9) return res;
-      await new Promise(function(r){ setTimeout(r, Math.min(1500 * (attempt + 1), 5000)); });
-    }
+  // EventTarget has no .closest in lib.dom — guarded any cast, null-safe.
+  function _closestEl(target, selector){
+    var t = /** @type {any} */ (target);
+    return (t && t.closest) ? t.closest(selector) : null;
   }
   async function loadFacets(path, deps) {
     if(path && typeof path === 'object' && path.fetch){ deps = path; path = deps.path || ""; }
     var _d = _resolveDeps(deps);
     var myGen = _incFacetGen();
-    var qp = new URLSearchParams();
-    if (path) qp.set("path", path);
-    // 全表示: ask the server for the owner's full facet set — hidden works'
-    // artists/tags must be selectable while browsing everything.
+    // All-display: ask the server for the owner's full facet set — hidden
+    // works' artists/tags must be selectable while browsing everything.
     var _FVf = window.FolderVisibility;
-    if (_FVf && _FVf.showAll) qp.set("include_hidden", "1");
-    var qs = qp.toString();
+    /** @type {import('../api/bookq-api').FacetsQuery} */
+    var fquery = {};
+    if (path) fquery.path = path;
+    if (_FVf && _FVf.showAll) fquery.include_hidden = true;
     try {
-      var res = await _fetchBuilding(globalThis.BookqApi.endpoints.facets + (qs ? "?" + qs : ""), _d.fetch, function(){ return myGen === _getFacetGenVal(); });
-      if (!res || res.status === 202) return;
-      if (!res.ok) throw new Error("facets HTTP " + res.status);
-      _setFacets(await res.json());
+      var fdata = await window.BookqApi.getFacets(fquery, {
+        fetch: _d.fetch,
+        isCurrent: function(){ return myGen === _getFacetGenVal(); },
+      });
+      // The body parse is itself an await — a newer load may have bumped
+      // the generation while it resolved; re-check before committing.
+      if (myGen !== _getFacetGenVal()) return;
+      _setFacets(fdata);
       renderFacetOptions();
-    } catch(e) { console.warn(e); }
+    } catch(e) {
+      if (myGen !== _getFacetGenVal()) return;   // superseded 202 loop — silent
+      console.warn(e);
+    }
   }
 
   async function doSearch(deps) {
     var _d = _resolveDeps(deps);
     var myGen = ++_searchGen;
-    var searchInput = document.getElementById("search-input");
+    var searchInput = /** @type {any} */ (document.getElementById("search-input"));
     var q = searchInput ? searchInput.value.trim() : "";
     if (!q) {
       _setSearchMode(false);
@@ -159,43 +162,48 @@
       return;
     }
     var activeFilters = _getActiveFilters() || {artist:[],tag:[],sort:'relevance'};
-    var params = new URLSearchParams({ q });
-    if (activeFilters.artist && activeFilters.artist.length) params.set('artist', activeFilters.artist.join(','));
-    if (activeFilters.tag && activeFilters.tag.length) params.set('tag', activeFilters.tag.join(','));
-    params.set('sort', activeFilters.sort || 'relevance');
+    /** @type {import('../api/bookq-api').SearchQuery} */
+    var sparams = { q: q };
+    if (activeFilters.artist && activeFilters.artist.length) sparams.artist = activeFilters.artist.join(',');
+    if (activeFilters.tag && activeFilters.tag.length) sparams.tag = activeFilters.tag.join(',');
+    sparams.sort = activeFilters.sort || 'relevance';
     // 全表示: the server's hidden-root exclusion is the owner's own set —
     // opt out so hidden works come back (with badges) in show-all mode.
     var _FVs = window.FolderVisibility;
-    if (_FVs && _FVs.showAll) params.set('include_hidden', '1');
+    if (_FVs && _FVs.showAll) sparams.include_hidden = true;
     try {
-      var res = await _fetchBuilding(globalThis.BookqApi.endpoints.search + '?' + params.toString(), _d.fetch, function(){ return myGen === _searchGen; });
-      if (!res || res.status === 202) return;
-      if (!res.ok) throw new Error("search HTTP " + res.status);
-      var data = await res.json();
+      var sdata = await window.BookqApi.search(sparams, {
+        fetch: _d.fetch,
+        isCurrent: function(){ return myGen === _searchGen; },
+      });
       // The body parse is itself an await — a newer search may have bumped
       // the generation while it resolved; re-check before committing.
       if (myGen !== _searchGen) return;
-      _setSearchResults(data.results || []);
+      _setSearchResults(sdata.results || []);
       _setSearchMode(true);
       try { if (window.refreshOfflineMap) await window.refreshOfflineMap(); } catch(e) { console.warn(e); }
       if (window.renderView) window.renderView();
-    } catch(e) { console.warn(e); }
+    } catch(e) {
+      if (myGen !== _searchGen) return;   // superseded 202 loop — silent
+      console.warn(e);
+    }
   }
 
   function _bindSearchClicks(selector) {
     var tileGrid = document.getElementById("tile-grid");
-    var searchInput = document.getElementById("search-input");
+    var _tg = /** @type {any} */ (tileGrid);
+    var searchInput = /** @type {any} */ (document.getElementById("search-input"));
     if (!tileGrid) return;
     if (typeof window._bindSearchClicks === 'function') {
       try { window._bindSearchClicks(selector); return; } catch(e){ console.warn(e); }
     }
-    if (tileGrid.__ccSearchDelegated) return;
-    tileGrid.__ccSearchDelegated = true;
+    if (_tg.__ccSearchDelegated) return;
+    _tg.__ccSearchDelegated = true;
     tileGrid.addEventListener("click", function(e){
       if (!window.searchMode) return;
-      var el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
+      var el = /** @type {any} */ (_closestEl(e.target, '.tile,.item[data-path],.card'));
       if (!el || !tileGrid.contains(el)) return;
-      if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
+      if(_closestEl(e.target, '.offline-btn') || _closestEl(e.target, '.ux-pop') || _closestEl(e.target, '.visibility-toggle')) return;
       var path = el.dataset.path;
       if (!path) return;
       window.currentFolder = path;
@@ -317,8 +325,9 @@
       filterChips.querySelectorAll(".chip-remove").forEach(function(btn){
         btn.addEventListener("click", function(e){
           e.stopPropagation();
-          var filter = btn.dataset.filter;
-          var value = btn.dataset.value;
+          var b = /** @type {any} */ (btn);
+          var filter = b.dataset.filter;
+          var value = b.dataset.value;
           if (filter && value) {
             var af = _getActiveFilters();
             af[filter] = af[filter].filter(function(v){ return v !== value; });
@@ -345,13 +354,14 @@
       }).join('') || '<span style="color:#555;font-size:12px">No artists</span>';
       artistsContainer.querySelectorAll('.chip').forEach(function(el){
         el.addEventListener('click', function(){
-          var val = el.dataset.value; var facet = el.dataset.facet;
+          var c = /** @type {any} */ (el);
+          var val = c.dataset.value; var facet = c.dataset.facet;
           if (!val || !facet) return;
           var idx = activeFilters[facet].indexOf(val);
           if (idx >= 0) activeFilters[facet].splice(idx, 1);
           else activeFilters[facet].push(val);
           el.classList.toggle('active');
-          el.setAttribute('aria-pressed', el.classList.contains('active'));
+          el.setAttribute('aria-pressed', String(el.classList.contains('active')));
         });
       });
     }
@@ -363,18 +373,22 @@
       }).join('') || '<span style="color:#555;font-size:12px">No tags</span>';
       tagsContainer.querySelectorAll('.chip').forEach(function(el){
         el.addEventListener('click', function(){
-          var val = el.dataset.value; var facet = el.dataset.facet;
+          var c = /** @type {any} */ (el);
+          var val = c.dataset.value; var facet = c.dataset.facet;
           if (!val || !facet) return;
           var idx = activeFilters[facet].indexOf(val);
           if (idx >= 0) activeFilters[facet].splice(idx, 1);
           else activeFilters[facet].push(val);
           el.classList.toggle('active');
-          el.setAttribute('aria-pressed', el.classList.contains('active'));
+          el.setAttribute('aria-pressed', String(el.classList.contains('active')));
         });
       });
     }
     var sortRadios = document.querySelectorAll('input[name="sort"]');
-    sortRadios.forEach(function(radio){ radio.checked = (radio.value === activeFilters.sort); });
+    sortRadios.forEach(function(radio){
+      var r = /** @type {any} */ (radio);
+      r.checked = (r.value === activeFilters.sort);
+    });
     if (filterBtn) filterBtn.classList.toggle('active', activeFilters.artist.length > 0 || activeFilters.tag.length > 0);
   }
 
