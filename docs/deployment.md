@@ -332,6 +332,18 @@ endpoint を native にする前提は、次の 3 つを満たすこと:
 
 `BOOKQ_RS_NATIVE_STRICT=1` を viewer-rs に渡すと、部分グループは ERROR + `exit 2` で起動そのものを拒否する（cutover 手順・CI 用）。既定は WARN のみ — 部分状態を通りながらのロールアウトを壊さないため。
 
+#### upstream 不在モード (#408): Python 停止後の fail-fast
+
+`BOOKQ_RS_NO_UPSTREAM=1`、または `BOOKQ_UPSTREAM` 未設定・空で、viewer-rs は **upstream 不在モード** で起動する（従来の暗黙デフォルト `http://viewer:8080` は廃止 — 指定し忘れは fail-closed になる）。compose / Dockerfile の既定では `BOOKQ_UPSTREAM=http://viewer:8080` が明示配線されているため、従来通りの proxy 動作は変わらない。
+
+このモードでは:
+
+- fallback（native 化されていない経路・router fallback）への着弾は **501 + path を WARN ログ**に記録。proxy 先が存在しない 502 にはならない。
+- `caller_or_proxy` の Delegate（署名 cookie だが解釈不能 / 認証情報なし）は **401** に降格する（委譲先がいないため自分で認証エラーを返す）。
+- `BOOKQ_RS_NATIVE_STRICT=1` との組合せで「全 native 起動」を起動時検証できる: いずれかの gate が無効なまま no-upstream で起動しようとすると ERROR + `exit 2`。lenient 時は未対応 gate 一覧を WARN に出す。
+
+Python コンテナ停止 (#409) 後はこのモードが前提になる — fallback 着弾が観測でき、誤って残った proxy 依存が静かに 502 化しない。
+
 #### フルネイティブモード (#320): py の index/tree を持たない運用
 
 `BOOKQ_RS_NATIVE` が全 index 消費者をカバーする状態で、viewer 側に
