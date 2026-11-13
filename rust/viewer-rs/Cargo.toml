@@ -16,6 +16,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
+md-5 = "0.10"
 percent-encoding = "2"
 rand = "0.9"
 # Google OAuth round-trip (token exchange + userinfo) — webpki roots so

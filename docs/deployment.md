@@ -307,7 +307,9 @@ docker compose ps -q tailscale | xargs docker exec tailscale serve status
 
 `.env` の `BOOKQ_RS_NATIVE` に native 化する endpoint 名をカンマ区切りで追加し、`docker compose --profile rs up -d viewer-rs` で再作成する。空 = 全 proxy（traffic-shape のみ検証する段階）。1 endpoint ずつ増やし、各段階で公開 URL + 実画面を確認する。native 側が契約外を返した場合は該当 endpoint だけリストから外して戻せる。
 
-既定値は検証済みの全 native 面を列挙 (#320): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
+既定値は検証済みの全 native 面を列挙 (#320 + #401): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync,shell,static`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
+
+`shell` は `GET /`（Jinja shell: 未認証はログイン、認証済みはビューア + visibility snapshot 埋込）、`static` は `GET|HEAD /sw.js` `/favicon.ico` `/static/*`（ETag/304/Range/no-cache + path-scoped gzip を starlette と同じ規則で再現）。配信元は image 同梱の `BOOKQ_APP_DIR`（既定 `/app`、Dockerfile.viewer-rs が `app/{static,templates,perf}` を COPY）。ファイル欠落や未移植の Jinja 構文を検出したときは fail-closed で proxy に落ちる。
 
 `auth` (#400) — `/auth/login|callback|logout` + `/api/v1/auth/token` を 1 つのゲートとして native 化する（callback が mint する認可コードを token endpoint が同プロセスで引き換えるため分割不可）。必要 env は `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`BASE_URL`/`SECRET_KEY`（compose 配線済み、`.env` 由来）。未設定のまま列挙に入れても surface 全体が proxy に留まり WARN が出る（`BOOKQ_RS_NATIVE_STRICT=1` では起動拒否）。Schemathesis では実 Google 往復を通せないため、**live OAuth 確認が済むまで既定リストには含めない**。
 

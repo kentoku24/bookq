@@ -91,15 +91,14 @@ services:
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
-      # 既定は検証済みの全 native 面 (#320): gateway-contract CI が
-      # BOOKQ_RS_NATIVE=all で全件を叩いて等価性を確認済み。py へ残るのは
-      # OAuth 実往復/template/static + native 対象外の v0 系のみ。
+      # 既定は検証済みの全 native 面 (#320 + #401 shell/static): gateway-contract
+      # CI が BOOKQ_RS_NATIVE=all で全件を叩いて等価性を確認済み。
       # `all` ではなく列挙に留める — 将来追加される native route が
       # 未検証のまま自動有効化されるのを防ぐため。新規 native route は
       # この既定リストへの追加で有効化する。
       # `auth` (#400) は実 Google OAuth 検証が済むまで既定に含めない
       # （下の GOOGLE_*/BASE_URL が揃っていれば列挙に足せる）。
-      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync}
+      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync,shell,static}
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC —
       # viewer と同じ値が必須。ずれるとブラウザ利用が全て proxy に落ちる。
       - SECRET_KEY=${SECRET_KEY}

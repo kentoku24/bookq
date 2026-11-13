@@ -203,7 +203,7 @@ pub fn resolve(
 
 /// The `Bearer` token portion of `Authorization`, if well-formed —
 /// `partition(" ")` semantics: the scheme ends at the first space.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = auth.split_once(' ').unwrap_or((auth, ""));
     if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {

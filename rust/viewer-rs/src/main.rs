@@ -34,6 +34,7 @@ mod oauth;
 mod reader_sync;
 mod search;
 mod serve;
+mod shell;
 mod state;
 mod thumbs;
 mod tree;
@@ -169,6 +170,11 @@ pub(crate) struct AppState {
     pub(crate) build_date: String,
     /// M8: dual-reader session registry (`app.state.reader_sync`).
     pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
+    /// #401: shell/static root (`BOOKQ_APP_DIR`) holding `static/`,
+    /// `templates/`, `perf/` — the image ships `/app`; dev environments
+    /// read it from the image too (asset edits apply on the next
+    /// `dev.sh up` rebuild, not live).
+    pub(crate) app_dir: PathBuf,
 }
 
 /// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
@@ -294,8 +300,17 @@ async fn vary_session_cookie(
         auth::session_lookup(req.headers(), st.session_key.as_ref()),
         auth::SessionLookup::Absent
     );
+    // starlette only emits `Vary: Cookie` when the route touches
+    // `request.session`. The public static/shell assets never do, so a
+    // signed-in browser's static fetches carry no Vary upstream —
+    // mirror that or every such response would wrongly advertise one.
+    let path = req.uri().path();
+    let session_free = path == "/sw.js"
+        || path == "/favicon.ico"
+        || path == "/static"
+        || path.starts_with("/static/");
     let mut res = next.run(req).await;
-    if signed && !vary_lists_cookie(res.headers()) {
+    if signed && !session_free && !vary_lists_cookie(res.headers()) {
         res.headers_mut()
             .append(header::VARY, HeaderValue::from_static("Cookie"));
     }
@@ -475,6 +490,180 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
     match search::api_facets(&st, &q).await {
         serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
         serve::Serve::Proxy => proxy(&st.upstream, req).await,
+    }
+}
+
+// ── #401: shell + static ───────────────────────────────────────────────────
+
+/// A signed session cookie whose payload is not a session dict — Python's
+/// SessionMiddleware raises on `json.loads` (500) before any route runs,
+/// so every native route delegates to reproduce the error surface.
+fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    matches!(
+        auth::session_lookup(headers, st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    )
+}
+
+/// `GET /` — the Jinja shell: viewer page for identified callers, the
+/// login page for everyone else (200 upstream, not a redirect — so the
+/// native answer is local, not a delegate).
+async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("shell")
+        || !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return proxy(&st.upstream, req).await;
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    let thumb_perf = st.native.test_mode
+        && shell::first_query_param(req.uri(), "thumb_perf").as_deref() == Some("1");
+    match shell::index_caller(
+        st.native.test_mode,
+        &st.secret_key,
+        st.session_key.as_ref(),
+        &st.allowed_emails,
+        &headers,
+    ) {
+        shell::ShellUser::Proxy => proxy(&st.upstream, req).await,
+        user => {
+            let st2 = st.clone();
+            match tokio::task::spawn_blocking(move || {
+                shell::index(
+                    &st2.app_dir,
+                    st2.native.test_mode,
+                    &st2.secret_key,
+                    &st2.visibility,
+                    &user,
+                    &headers,
+                    thumb_perf,
+                    head,
+                )
+            })
+            .await
+            .unwrap_or(serve::Serve::Proxy)
+            {
+                // '/' is outside the gzip prefixes.
+                serve::Serve::Done(res) => res,
+                serve::Serve::Proxy => proxy(&st.upstream, req).await,
+            }
+        }
+    }
+}
+
+/// `GET|HEAD /sw.js` — public FileResponse with `Service-Worker-Allowed: /`.
+async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("static")
+        || !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+        || corrupt_session(&st, req.headers())
+    {
+        return proxy(&st.upstream, req).await;
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    let req_headers = headers.clone();
+    let st2 = st.clone();
+    match tokio::task::spawn_blocking(move || {
+        shell::named_file(
+            &st2.app_dir.join("static").join("sw.js"),
+            "application/javascript",
+            shell::SW_HEADERS,
+            "sw.js not found",
+            &headers,
+            head,
+        )
+    })
+    .await
+    .unwrap_or(serve::Serve::Proxy)
+    {
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+        // '/sw.js' is a gzip prefix; application/javascript is not excluded.
+        serve::Serve::Done(res) => serve::maybe_gzip(&req_headers, res, true).await,
+    }
+}
+
+/// `GET|HEAD /favicon.ico` — public FileResponse, day-long cache.
+async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("static")
+        || !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+        || corrupt_session(&st, req.headers())
+    {
+        return proxy(&st.upstream, req).await;
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    let st2 = st.clone();
+    match tokio::task::spawn_blocking(move || {
+        shell::named_file(
+            &st2.app_dir.join("static").join("favicon.ico"),
+            "image/x-icon",
+            shell::FAVICON_HEADERS,
+            "favicon.ico not found",
+            &headers,
+            head,
+        )
+    })
+    .await
+    .unwrap_or(serve::Serve::Proxy)
+    {
+        // '/favicon.ico' is outside the gzip prefixes.
+        serve::Serve::Done(res) => res,
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+    }
+}
+
+/// `GET|HEAD /static/{*path}` (and bare `/static`) — public
+/// NoCacheStaticFiles: realpath containment, no-cache, 304 + range.
+async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.enabled("static")
+        || !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+        || corrupt_session(&st, req.headers())
+    {
+        return proxy(&st.upstream, req).await;
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let rel = match req.uri().path() {
+        "/static" => String::new(),
+        p => match p.strip_prefix("/static/") {
+            Some(raw) => match percent_decode_str(raw).decode_utf8() {
+                Ok(d) => d.into_owned(),
+                Err(_) => return proxy(&st.upstream, req).await,
+            },
+            None => return proxy(&st.upstream, req).await,
+        },
+    };
+    let headers = req.headers().clone();
+    let req_headers = headers.clone();
+    let st2 = st.clone();
+    match tokio::task::spawn_blocking(move || {
+        shell::static_file(&st2.app_dir.join("static"), &rel, &headers, head)
+    })
+    .await
+    .unwrap_or(serve::Serve::Proxy)
+    {
+        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+        // '/static/' is a gzip prefix; compression still skips the
+        // excluded content types (image/png, font/woff2, video/*, …).
+        serve::Serve::Done(res) => {
+            let compressible = !res
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(shell::gzip_excluded);
+            serve::maybe_gzip(&req_headers, res, compressible).await
+        }
     }
 }
 
@@ -1057,6 +1246,11 @@ async fn main() {
         // ARG ""→ENV path yields "" — same two-state contract.
         git_sha: std::env::var("BOOKQ_GIT_SHA").unwrap_or_else(|_| "unknown".into()),
         build_date: std::env::var("BOOKQ_BUILD_DATE").unwrap_or_else(|_| "unknown".into()),
+        // #401: the image ships `app/{static,templates,perf}` at /app; dev
+        // points this at the worktree's `app/` for live asset edits.
+        app_dir: PathBuf::from(
+            std::env::var("BOOKQ_APP_DIR").unwrap_or_else(|_| "/app".into()),
+        ),
     };
     if st.native.enabled("visibility") || st.native.enabled("tree") {
         // warmup_metadata_index — lifespan kicks the same cold-miss path.
@@ -1072,6 +1266,12 @@ async fn main() {
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        // #401: shell + static surfaces — public; `shell`/`static` gates.
+        .route("/", any(shell_index))
+        .route("/sw.js", any(serve_sw))
+        .route("/favicon.ico", any(serve_favicon))
+        .route("/static", any(serve_static))
+        .route("/static/{*path}", any(serve_static))
         // M3 skeleton: no v1 native handlers yet — everything proxies.
         // /image/{*path} is a v1 contract path (media, not versioned).
         .route("/image/{*path}", any(serve_image))
