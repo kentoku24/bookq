@@ -20,20 +20,12 @@ Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_viewer_slider_per_book.py -q
 """
 
-import os
-import socket
 import struct
-import subprocess
-import sys
-import time
-import urllib.request
 import zlib
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -> None:
@@ -71,40 +63,24 @@ def slider_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def slider_server(slider_tree: Path) -> str:
-    """Live FastAPI server in test mode against the slider tree (mirrors conftest.server)."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """Test-mode server against the slider tree (mirrors conftest.server).
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(slider_tree)
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    Respects BOOKQ_TEST_SERVER=rs via tests.helpers.spawn_test_server.
+    """
+    from tests.helpers import (
+        ViewerRsUnavailable,
+        spawn_test_server,
+        terminate_test_server,
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("Server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server did not become healthy within 10s")
+
+    try:
+        proc, base_url = spawn_test_server(slider_tree)
+    except ViewerRsUnavailable as exc:
+        pytest.skip(f"viewer-rs unavailable: {exc}")
 
     yield base_url
 
-    proc.terminate()
-    proc.wait(timeout=5)
+    terminate_test_server(proc)
 
 
 @pytest.fixture

@@ -28,12 +28,7 @@ Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_mixed_folder.py -q
 """
 
-import os
-import socket
 import struct
-import subprocess
-import sys
-import time
 import json
 import urllib.parse
 import urllib.request
@@ -44,8 +39,6 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.fixtures.rar5 import make_rar5_store
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 MIXED = "mgroup/mseries/v02"
 MIXED_PARENT = "mgroup/mseries"
@@ -122,40 +115,24 @@ def mixed_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def mixed_server(mixed_tree: Path) -> str:
-    """Live FastAPI server in test mode against mixed_tree (conftest.py idiom)."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """Test-mode server against mixed_tree (conftest.py idiom).
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(mixed_tree)
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    Respects BOOKQ_TEST_SERVER=rs via tests.helpers.spawn_test_server.
+    """
+    from tests.helpers import (
+        ViewerRsUnavailable,
+        spawn_test_server,
+        terminate_test_server,
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("mixed server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("mixed server did not become healthy within 10s")
+
+    try:
+        proc, base_url = spawn_test_server(mixed_tree)
+    except ViewerRsUnavailable as exc:
+        pytest.skip(f"viewer-rs unavailable: {exc}")
 
     yield base_url
 
-    proc.terminate()
-    proc.wait(timeout=5)
+    terminate_test_server(proc)
 
 
 @pytest.fixture
@@ -382,40 +359,24 @@ def reach_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def reach_server(reach_tree: Path) -> str:
-    """Live FastAPI server in test mode against reach_tree (conftest idiom)."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """Test-mode server against reach_tree (conftest idiom).
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(reach_tree)
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    Respects BOOKQ_TEST_SERVER=rs via tests.helpers.spawn_test_server.
+    """
+    from tests.helpers import (
+        ViewerRsUnavailable,
+        spawn_test_server,
+        terminate_test_server,
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("reach server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("reach server did not become healthy within 10s")
+
+    try:
+        proc, base_url = spawn_test_server(reach_tree)
+    except ViewerRsUnavailable as exc:
+        pytest.skip(f"viewer-rs unavailable: {exc}")
 
     yield base_url
 
-    proc.terminate()
-    proc.wait(timeout=5)
+    terminate_test_server(proc)
 
 
 @pytest.fixture
