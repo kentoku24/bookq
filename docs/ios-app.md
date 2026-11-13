@@ -229,3 +229,10 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   `BookqUITests` を一括実行し、xcresult + サーバーログを artifact 化する。
   実行時間はジョブサマリに記録される（macOS 分は ubuntu の約10倍のため、
   required 化の判断材料とする）。
+  **SDK ゲート**: アプリは iOS 27 SDK のシンボル
+  （`ExternalNonInteractiveAccessory` / `sceneAccessory`、
+  `ios/Bookq/External/`）を使うため、runner の iPhoneOS SDK が 27 未満
+  ならテストはスキップされる（`#available` は実行時ガードのみで
+  コンパイルには SDK 自体が必要）。macos-latest が Xcode 27 を
+  搭載すれば自動で有効化される。それまではローカル
+  `ios-ui-test.sh` での検証が実効パス。
