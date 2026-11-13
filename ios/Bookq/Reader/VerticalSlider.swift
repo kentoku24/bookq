@@ -13,6 +13,10 @@ struct VerticalSlider: View {
 
     private let thumbDiameter: CGFloat = 26
     private let trackWidth: CGFloat = 4
+    /// Hit-strip width centered on the track. The rail column is wider
+    /// than the control; without this the whole rect would swallow
+    /// edge-zone page-turn taps and scrub-jump on any tap inside it.
+    private let hitWidth: CGFloat = 52
 
     var body: some View {
         GeometryReader { geo in
@@ -30,13 +34,14 @@ struct VerticalSlider: View {
                     .shadow(color: .black.opacity(0.4), radius: 2)
                     .offset(y: frac * travel)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(width: hitWidth, height: geo.size.height)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { v in update(v.location.y, height: geo.size.height) }
                     .onEnded { v in update(v.location.y, height: geo.size.height) }
             )
+            .frame(maxWidth: .infinity)
         }
         .opacity(enabled ? 1 : 0.35)
         .accessibilityElement()
