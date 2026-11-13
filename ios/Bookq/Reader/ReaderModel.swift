@@ -154,7 +154,10 @@ struct ReaderWork: Equatable {
     /// Returns the parent node's children that are leaf folders
     /// (type==folder && hasOnlyImages), with their composed paths.
     /// `nil` when `path` is a top-level node (no parent → single chapter).
+    /// Depth guard parity with `SIBLING_AUTOLOAD_MIN_DEPTH = 2`: a folder at
+    /// raw depth < 2 never concatenates siblings (web/server parity, #274).
     static func siblingLeaves(of path: String, in roots: [TreeNode]) -> [(node: TreeNode, path: String)]? {
+        guard path.split(separator: "/").count - 1 >= 2 else { return nil }
         func walk(_ nodes: [TreeNode], _ parent: String) -> [(node: TreeNode, path: String)]? {
             for n in nodes where n.isFolder {
                 let full = parent.isEmpty ? n.name : parent + "/" + n.name
@@ -366,6 +369,14 @@ struct ReaderWork: Equatable {
     func spreadOf(_ idx: Int) -> Int {
         guard idx >= 0 && idx < idxToSpread.count else { return 0 }
         return max(0, idxToSpread[idx])
+    }
+
+    /// Chapter-opening spread — `chapterStart` (spread.js `rebuildSpreads`):
+    /// a spread whose first page is a non-zero chapter boundary.
+    func chapterStartSpread(_ s: Int) -> Bool {
+        guard spreads.indices.contains(s), let first = spreads[s].first else { return false }
+        guard let at = boundaries.firstIndex(of: first) else { return false }
+        return at > 0
     }
 
     // MARK: - chapter-local slider (web syncChapterSlider family)

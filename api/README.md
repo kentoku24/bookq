@@ -10,6 +10,8 @@
 | `asyncapi.yaml` | `/ws/reader-sync` のワイヤ形式 (AsyncAPI 3.0) |
 | `reader-sync-protocol.md` | reader-sync の振る舞い契約 (フェーズ機械・逐次化・拒否理由・MANIFEST)。asyncapi.yaml とセットで読む |
 | `dist/` | 生成物 (codegen のみが書く。手編集禁止): `openapi.v1.json` / `asyncapi.json` + Web 型 `app/static/api/api-types.d.ts` |
+| `vectors/` | 言語共通 conformance vectors (#280) — Python/JS/iOS/Android が同じ入力から同じ出力を出すことを pin する (path-lookup / solo-spreads / work-chapters) |
+| (`tests/fixtures/reader_sync_cases.json`) | reader-sync ワイヤの共通ケース (digest golden / reject reasons) — api/ 外だが同じく契約の一部として各言語テストが参照 |
 
 ## 生成物の再生成
 

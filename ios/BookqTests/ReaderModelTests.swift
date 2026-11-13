@@ -129,17 +129,36 @@ final class ReaderModelTests: XCTestCase {
     // MARK: - siblingLeaves + chapters
 
     func testSiblingLeavesFindsParentChildren() {
-        // parent "w" holds leaf folders 01/02 plus a subfolder
+        // parent "g/w" holds leaf folders 01/02 plus a subfolder.
+        // Depth >= 2 required (SIBLING_AUTOLOAD_MIN_DEPTH parity, #274):
+        // the same shape at depth 1 ("w/01") returns nil — see
+        // testShallowDepthHasNoSiblings.
+        let tree = [node("g", [
+            node("w", [
+                node("01", [img("p1.png"), img("p2.png")]),
+                node("02", [img("p1.png")]),
+                node("sub", [node("x", [img("a.png")])]),
+            ]),
+        ])]
+        let sibs = ReaderWork.siblingLeaves(of: "g/w/01", in: tree)
+        XCTAssertEqual(sibs?.map(\.path), ["g/w/01", "g/w/02", "g/w/sub"])
+        let (list, cross) = ReaderWork.chapters(for: "g/w/01", in: tree)
+        XCTAssertTrue(cross)
+        XCTAssertEqual(list.map(\.fullPath), ["g/w/01", "g/w/02"])
+        XCTAssertEqual(list[0].images.count, 2)
+    }
+
+    func testShallowDepthHasNoSiblings() {
+        // Raw depth < 2 never concatenates (web/server parity, #274) even
+        // when leaf siblings exist side by side.
         let tree = [node("w", [
             node("01", [img("p1.png"), img("p2.png")]),
             node("02", [img("p1.png")]),
-            node("sub", [node("x", [img("a.png")])]),
         ])]
-        let sibs = ReaderWork.siblingLeaves(of: "w/01", in: tree)
-        XCTAssertEqual(sibs?.map(\.path), ["w/01", "w/02", "w/sub"])
+        XCTAssertNil(ReaderWork.siblingLeaves(of: "w/01", in: tree))
         let (list, cross) = ReaderWork.chapters(for: "w/01", in: tree)
-        XCTAssertTrue(cross)
-        XCTAssertEqual(list.map(\.fullPath), ["w/01", "w/02"])
+        XCTAssertFalse(cross)
+        XCTAssertEqual(list.map(\.fullPath), ["w/01"])
         XCTAssertEqual(list[0].images.count, 2)
     }
 
