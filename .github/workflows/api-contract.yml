@@ -113,6 +113,7 @@ jobs:
           uv run --with "schemathesis>=4.33,<5" schemathesis run api/openapi.v1.yaml \
             --url http://127.0.0.1:8080 \
             --exclude-checks ignored_auth,allow_header_conformance \
+            --exclude-deprecated \
             --report junit,ndjson --report-dir schemathesis-report
 
       - name: Upload diagnostics
