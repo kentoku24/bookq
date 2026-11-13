@@ -70,6 +70,33 @@ def _restore_fetch(page):
     )
 
 
+def _record_conn(page):
+    """Attach a connectivity-change recorder BEFORE triggering a demotion.
+
+    'connecting' is transient: with fetch stubbed to reject instantly the
+    3-attempt budget is ~3s of wall time, so a post-hoc wait_for_function
+    can miss the state entirely under CI load (the wait starts only after
+    the triggering evaluate returns). Record every transition — and the
+    chip text at dispatch time — so the test asserts what happened, not
+    what a poll managed to sample."""
+    page.evaluate(
+        """() => {
+            window.__connSeq = [];
+            window.addEventListener('bookq:connectivity-change', e => {
+                const el = document.getElementById('offline-status');
+                window.__connSeq.push({
+                    state: (e && e.detail && e.detail.state) || null,
+                    chip: el ? el.textContent : '',
+                });
+            });
+        }"""
+    )
+
+
+def _conn_seq(page):
+    return page.evaluate("() => (window.__connSeq || [])")
+
+
 # ── state machine ─────────────────────────────────────────────────────────────
 
 def test_boot_lands_online(page, server):
@@ -88,15 +115,22 @@ def test_report_fail_demotes_and_budget_lands_offline(page, server):
     goto_offline(page, server)
     wait_for_sw(page)
     _wait_state(page, "online")
+    # Attach the recorder BEFORE the fetch stub: an in-flight app request
+    # can demote via rejected fetches ahead of our trigger — every
+    # transition after 'online' must be captured.
+    _record_conn(page)
     _reject_all_fetch(page)
     try:
+        # revalidate() resolves after the probe fails and the machine has
+        # demoted, so all transitions are already recorded on return.
         page.evaluate("() => window.updateOnlineStatus()")
-        # connecting shows 接続中 before the budget is spent
-        _wait_state(page, "connecting", timeout=3000)
-        chip = page.locator("#offline-status").text_content() or ""
-        assert "接続中" in chip, f"connecting chip must show 接続中: {chip!r}"
         # finite budget (3 attempts + backoff) then lands offline
         _wait_state(page, "offline", timeout=20000)
+        seq = _conn_seq(page)
+        states = [s["state"] for s in seq]
+        assert "connecting" in states, f"must demote online→connecting first: {states}"
+        conn_chip = seq[states.index("connecting")]["chip"]
+        assert "接続中" in conn_chip, f"connecting chip must show 接続中: {conn_chip!r}"
         assert "offline" in (page.locator("#offline-status").get_attribute("class") or "")
     finally:
         _restore_fetch(page)
@@ -173,10 +207,16 @@ def test_report_success_lands_online_mid_cycle(page, server):
     goto_offline(page, server)
     wait_for_sw(page)
     _wait_state(page, "online")
+    _record_conn(page)
     _reject_all_fetch(page)
     try:
         page.evaluate("() => window.updateOnlineStatus()")
-        _wait_state(page, "connecting", timeout=3000)
+        # Same transient-state race as the demote test: assert the recorded
+        # 'connecting' transition rather than racing a live poll. (A
+        # background request can drive the same demote — either way the
+        # machine must have passed through connecting.)
+        assert "connecting" in [s["state"] for s in _conn_seq(page)], \
+            "must pass through connecting after the rejected probe"
         # a real (non-SW-marked) response landing mid-cycle proves
         # reachability — the running cycle must short-circuit to online.
         _restore_fetch(page)
@@ -214,11 +254,21 @@ def test_swcache_marked_response_is_not_online_evidence(page, server):
             };
         }"""
     )
+    _record_conn(page)
     try:
         page.evaluate("() => window.Connectivity.fetch('/api/v1/tree').catch(()=>{})")
-        _wait_state(page, "connecting", timeout=5000)
+        # An in-flight app request can demote via the same stub before our
+        # fetch lands, absorbing the transition — the observable contract
+        # is that a marked response demotes (never confirms online), so
+        # wait for non-online rather than asserting who drove the demote.
+        # (Service-worker network legs can still land real 200s → legal
+        # mid-cycle online; only the marked response itself is tainted.)
+        page.wait_for_function(
+            "() => window.Connectivity.state !== 'online'", timeout=10000)
         # probes keep failing → the finite budget lands it in offline
         _wait_state(page, "offline", timeout=20000)
+        assert "connecting" in [s["state"] for s in _conn_seq(page)], \
+            "marked response must demote online→connecting"
     finally:
         page.evaluate("() => { if(window.__origMarked) window.fetch = window.__origMarked; }")
         page.evaluate("() => window.Connectivity && window.Connectivity.connect()")
