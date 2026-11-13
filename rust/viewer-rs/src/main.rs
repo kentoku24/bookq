@@ -725,7 +725,7 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
-    oauth::callback(&flow, req.headers(), &q, &lookup).await
+    oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await
 }
 
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {

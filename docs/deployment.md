@@ -311,6 +311,8 @@ docker compose ps -q tailscale | xargs docker exec tailscale serve status
 
 `auth` (#400) — `/auth/login|callback|logout` + `/api/v1/auth/token` を 1 つのゲートとして native 化する（callback が mint する認可コードを token endpoint が同プロセスで引き換えるため分割不可）。必要 env は `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`BASE_URL`/`SECRET_KEY`（compose 配線済み、`.env` 由来）。未設定のまま列挙に入れても surface 全体が proxy に留まり WARN が出る（`BOOKQ_RS_NATIVE_STRICT=1` では起動拒否）。Schemathesis では実 Google 往復を通せないため、**live OAuth 確認が済むまで既定リストには含めない**。
 
+**cutover 注意**: auth code (120s) と refresh token (30d) はプロセス内メモリのため、`auth` を有効化した時点で Python 側発行済みの refresh token は全て 401 になる — native クライアントは一度再ログインが必要（session cookie と access JWT は `SECRET_KEY` 共用のため影響しない）。深夜帯など再ログイン許容タイミングでの切替を推奨。
+
 #### endpoint cutover 条件
 
 endpoint を native にする前提は、次の 3 つを満たすこと:

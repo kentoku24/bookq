@@ -23,7 +23,18 @@
 //!   map would drop the browser binding (login CSRF).
 //! * Code/refresh stores are in-process `Mutex<HashMap>`s — verbatim
 //!   port of `app.state.auth_codes`/`refresh_tokens` (single worker,
-//!   restart invalidates everything).
+//!   restart invalidates everything). Cutover consequence: enabling
+//!   the `auth` gate invalidates every Python-issued refresh token —
+//!   native clients must log in once more (session cookies and access
+//!   JWTs survive via the shared `SECRET_KEY`).
+//! * The tx cookie is deliberately tighter than authlib's: one
+//!   `bookq_oauth` slot per browser (a second login supersedes the
+//!   first) and a 600 s TTL (authlib's `_state_*` rides the 7-day
+//!   session). Both shrink the attack surface; a stalled or
+//!   superseded flow just retries.
+//! * `nonce` is not sent on the authorize URL — authlib includes it to
+//!   bind the `id_token` it verifies; this port never reads `id_token`
+//!   (userinfo path above), so a nonce would bind nothing.
 //!
 //! Cookie attributes mirror `SessionMiddleware`: login emits
 //! `bookq_oauth=<signed>; path=/; Max-Age=600; httponly; samesite=lax;
@@ -50,7 +61,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::Response,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -449,8 +460,17 @@ fn oauth_tx_set_value(key: &SessionKey, payload: &[u8]) -> String {
 /// param, token-exchange failure all land here upstream). The tx cookie
 /// is cleared so a rejected attempt can't be replayed.
 fn access_denied() -> Response {
+    access_denied_with(true)
+}
+
+/// `clear_tx=false` mirrors upstream's non-GET path: authlib rejects
+/// before touching the session, so the pending tx survives and a GET
+/// retry still completes.
+fn access_denied_with(clear_tx: bool) -> Response {
     let mut res = redirect("/?error=access_denied", StatusCode::SEE_OTHER);
-    append_set_cookie(&mut res, cookie_clear_value(OAUTH_COOKIE));
+    if clear_tx {
+        append_set_cookie(&mut res, cookie_clear_value(OAUTH_COOKIE));
+    }
     append_vary_cookie(&mut res);
     res
 }
@@ -538,10 +558,18 @@ pub fn login(flow: &AuthFlow, query: &HashMap<String, String>) -> Response {
 /// semantics emit the null cookie (403 path).
 pub async fn callback(
     flow: &AuthFlow,
+    method: &Method,
     headers: &HeaderMap,
     query: &HashMap<String, String>,
     session_lookup: &SessionLookup,
 ) -> Response {
+    // authlib only processes GET — every other method falls into its
+    // form branch and answers access_denied *without* consuming the tx
+    // cookie or the code. HEAD reaching this route must not mint a
+    // session.
+    if *method != Method::GET {
+        return access_denied_with(false);
+    }
     // `error` param, missing `code`/`state`, or a tx mismatch all raise
     // OAuthError upstream → the same denial redirect.
     if query.contains_key("error") {
@@ -994,5 +1022,31 @@ mod tests {
             res.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
+    }
+
+    #[tokio::test]
+    async fn callback_non_get_denies_without_touching_tx() {
+        let f = flow();
+        // A HEAD callback upstream is authlib's form branch: 303
+        // access_denied, tx cookie survives, nothing is minted.
+        let query = HashMap::from([
+            ("code".to_string(), "any".to_string()),
+            ("state".to_string(), "any".to_string()),
+        ]);
+        let res = callback(
+            &f,
+            &Method::HEAD,
+            &HeaderMap::new(),
+            &query,
+            &SessionLookup::Absent,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            res.headers().get(header::LOCATION).unwrap(),
+            "/?error=access_denied"
+        );
+        // No bookq_oauth clear — the in-flight GET flow stays retriable.
+        assert!(res.headers().get_all(header::SET_COOKIE).iter().next().is_none());
     }
 }
