@@ -349,7 +349,7 @@
     "/api/folder-visibility": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyGetFolderVisibility",
         "responses": {
           "200": {
@@ -370,7 +370,7 @@
       },
       "put": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyPutFolderVisibility",
         "parameters": [
           {
@@ -438,7 +438,7 @@
     "/api/folders": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyGetFolders",
         "parameters": [
           {
@@ -529,7 +529,7 @@
     "/api/health": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyHealth",
         "responses": {
           "200": {
@@ -558,7 +558,7 @@
     "/api/images": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyListImages",
         "parameters": [
           {
@@ -603,7 +603,7 @@
     "/api/metadata/facets": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyFacets",
         "parameters": [
           {
@@ -650,7 +650,7 @@
     "/api/reading-position": {
       "delete": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyDeleteReadingPosition",
         "parameters": [
           {
@@ -691,7 +691,7 @@
       },
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyGetReadingPosition",
         "responses": {
           "200": {
@@ -733,7 +733,7 @@
       },
       "put": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyPutReadingPosition",
         "requestBody": {
           "content": {
@@ -811,7 +811,7 @@
     "/api/refresh": {
       "post": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyRefresh",
         "responses": {
           "200": {
@@ -842,7 +842,7 @@
     "/api/search": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacySearch",
         "parameters": [
           {
@@ -919,7 +919,7 @@
     "/api/thumb-sprite": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyThumbSprite",
         "parameters": [
           {
@@ -1825,7 +1825,7 @@
     "/api/version": {
       "get": {
         "deprecated": true,
-        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。",
+        "description": "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。",
         "operationId": "legacyVersion",
         "responses": {
           "200": {

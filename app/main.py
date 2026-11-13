@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.compression import ApiGZipMiddleware
@@ -191,6 +192,28 @@ async def lifespan(app: FastAPI):
             logger.warning("reader-sync shutdown error=%s pid=%s", exc, pid)
 
 
+class _V0DeprecationMiddleware:
+    """Stamp `Deprecation: true` on legacy `/api/*` (non-v1) responses.
+
+    Pure ASGI (no BaseHTTPMiddleware task-hop/buffering per request).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if not (path.startswith("/api/") and not path.startswith("/api/v1/")):
+            return await self.app(scope, receive, send)
+
+        async def send_with_deprecation(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Deprecation"] = "true"
+            await send(message)
+
+        return await self.app(scope, receive, send_with_deprecation)
+
+
 def create_app() -> FastAPI:
     _configure_logging()
     settings = load_settings()
@@ -243,6 +266,15 @@ def create_app() -> FastAPI:
             content={"error": "Not authenticated"},
             headers={"Cache-Control": "private, no-store", "Vary": "Cookie"},
         )
+
+    # v0 deprecation (#212/#407): legacy /api/* (non-v1) responses carry
+    # `Deprecation: true` (RFC 8594). No `Sunset` header — shutdown rides
+    # with the viewer stop (#410), date TBD, so a calendar Sunset would be
+    # fiction. viewer-rs proxies v0 upstream, so the header flows through.
+    # Pure-ASGI middleware: @app.middleware("http") wraps the app in
+    # BaseHTTPMiddleware, which adds a task hop + response re-wrap per
+    # request — measurable latency on every API call under load.
+    app.add_middleware(_V0DeprecationMiddleware)
 
     return app
 
