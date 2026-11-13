@@ -235,6 +235,11 @@ def test_offline_first_boot_renders_before_connect(page, server):
     expect(page.locator('.tile[data-path="simple_manga"] .offline-btn.state-complete').first).to_be_visible(timeout=15000)
     if _is_webkit():
         pytest.skip("WebKit Playwright cannot navigate while context is offline")
+    if os.environ.get("BROWSER") == "safari":
+        pytest.skip(
+            "safaridriver has no pre-boot script hook — the add_init_script "
+            "fetch stub lands after the app's boot fetch already ran"
+        )
     # Simulate a dead server at the app layer on the next load: an init
     # script (re-runs on the reload, dies with the test context) hangs
     # every /api fetch so the connect cycle keeps probing while the UI

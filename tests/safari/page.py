@@ -346,7 +346,8 @@ class SafariPage:
         self._ctx = context
         self._driver = context._driver
         self._handle = handle
-        self._default_timeout = 5000.0
+        self._default_timeout = 30000.0  # Playwright wait_for default; CI Safari decodes slowly
+        self._expect_timeout = 5000.0  # Playwright expect() default is shorter
         self.keyboard = _Keyboard(self)
         self.mouse = _Mouse(self)
         self.touchscreen = _Touchscreen(self)

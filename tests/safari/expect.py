@@ -44,9 +44,9 @@ class _Expectation:
     def _default_timeout(self) -> float:
         a = self._actual
         if isinstance(a, SafariLocator):
-            return a._page._default_timeout
+            return getattr(a._page, "_expect_timeout", a._page._default_timeout)
         if isinstance(a, SafariPage):
-            return a._default_timeout
+            return getattr(a, "_expect_timeout", a._default_timeout)
         return 5000.0
 
     def _retry(self, check, describe: str, timeout_ms: float, negate: bool):
