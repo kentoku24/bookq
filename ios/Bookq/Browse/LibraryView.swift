@@ -343,7 +343,12 @@ struct LibraryView: View {
             visNotice = "オフラインのため読めません"
             return
         }
-        switch visibility.guardPath(path) {
+        // spec §9 fail-open: offline with no snapshot, pending can never
+        // resolve — open directly (the download filter already gated).
+        let verdict: VisibilityStore.GuardResult =
+            visibility.failOpen(isOnline: online.isOnline)
+                ? .allow : visibility.guardPath(path)
+        switch verdict {
         case .pending:
             Task {
                 await visibility.refresh()

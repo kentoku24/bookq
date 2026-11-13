@@ -156,9 +156,29 @@ final class OnlineStatusTests: XCTestCase {
         XCTAssertEqual(s.state, .online)
 
         let hits = healthHits()
-        s.foregrounded()   // already online → no probe
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(healthHits(), hits)
+        // online → single silent probe (web revalidate parity)
+        let ok2 = await s.foregrounded()?.value
+        XCTAssertEqual(ok2, true)
+        XCTAssertEqual(s.state, .online)
+        XCTAssertEqual(healthHits(), hits + 1)
+    }
+
+    /// spec §3 / web revalidate parity: foreground while online still
+    /// probes once — a server that died while backgrounded demotes into
+    /// the finite cycle instead of staying stale-online.
+    func testForegroundedDeadServerDemotes() async {
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
+        let s = makeStore(api: StubURLProtocol.api())
+        _ = await s.connect().value
+        XCTAssertEqual(s.state, .online)
+        let hits0 = healthHits()
+
+        StubURLProtocol.failWith = .notConnectedToInternet
+        let ok = await s.foregrounded()?.value
+        XCTAssertEqual(ok, false)
+        XCTAssertEqual(s.state, .offline)
+        XCTAssertEqual(healthHits(), hits0 + 1 + 3,
+                       "fg probe + the demoted cycle's 3 attempts")
     }
 
     // MARK: - Wire shape

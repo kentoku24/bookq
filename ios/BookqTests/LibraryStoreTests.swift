@@ -252,6 +252,48 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertEqual(root, ["series", "作品A", "作品B"].sorted())
         XCTAssertFalse(s.tileUnavailable(path: "作品B", episodeLike: true))
     }
+
+    /// spec §9 fail-open — offline boot with NO visibility snapshot still
+    /// lists downloaded works (fail-closed `isVisible` would hide all).
+    /// The download filter stays the stricter gate: `series` (no
+    /// downloads) stays hidden.
+    func testOfflineFailOpenWithoutVisibilitySnapshot() async {
+        let s = await loadedOfflineStore(offlineTreeJSON)
+        s.offline?.testPut(leafRec("作品A"))
+        s.visibility = VisibilityStore(apiProvider: { nil }, cacheDir:
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("vis-\(UUID().uuidString)",
+                                        isDirectory: true))
+        let root = s.levelFolders(path: "").map(\.path)
+        XCTAssertTrue(root.contains("作品A"),
+                      "no-snapshot offline must fail-open for downloads")
+        XCTAssertTrue(root.contains("作品B"),
+                      "same level: all episodes listed when any is downloaded")
+        XCTAssertFalse(root.contains("series"),
+                       "download filter still applies under fail-open")
+    }
+
+    /// spec §9: fail-open is ONLY for the no-snapshot case — with a cached
+    /// snapshot, hidden roots still apply offline (fail-closed).
+    func testOfflineSnapshotStillAppliesHiddenRoots() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vis-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [
+            "v": 1, "owner": "o", "revision": 1, "hiddenRoots": ["作品B"],
+        ]).write(to: dir.appendingPathComponent("o.json"))
+        try "o".write(to: dir.appendingPathComponent("last-owner.txt"),
+                      atomically: true, encoding: .utf8)
+        let s = await loadedOfflineStore(offlineTreeJSON)
+        s.offline?.testPut(leafRec("作品A"))
+        s.offline?.testPut(leafRec("作品B"))
+        s.visibility = VisibilityStore(apiProvider: { nil }, cacheDir: dir)
+        XCTAssertEqual(s.levelFolders(path: "").map(\.path), ["作品A"],
+                       "snapshot hidden roots stay fail-closed offline")
+    }
+
 }
 
 /// AppModel.initialPageRef — web `_resolveInitialPageRef`/`_pickRef`
@@ -319,4 +361,6 @@ final class InitialPageRefTests: XCTestCase {
             folder: "ghost", tree: [], images: { [] }, savedPage: nil)
         XCTAssertNil(ref)
     }
+
 }
+

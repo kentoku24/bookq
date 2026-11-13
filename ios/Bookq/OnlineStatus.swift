@@ -47,12 +47,20 @@ final class OnlineStatusStore: ObservableObject {
         _ = connect()
     }
 
-    /// Foreground trigger — spec §3: returning to the app starts a cycle
-    /// (Web `visibilitychange`/OS `online` parity). While online it is a
-    /// no-op; a dead request demotes via `reportFail` instead.
+    /// Foreground trigger — spec §3: returning to the app re-verifies
+    /// (Web `revalidate`/visibilitychange parity). While online it runs a
+    /// single silent probe — a dead server demotes via `reportFail` into
+    /// the finite cycle; otherwise a fresh cycle starts.
     @discardableResult
     func foregrounded() -> Task<Bool, Never>? {
-        guard state != .online else { return nil }
+        if state == .online {
+            return Task { [weak self] in
+                guard let self else { return true }
+                if await self.probe() { return true }
+                if let cycle = self.reportFail() { return await cycle.value }
+                return self.state == .online
+            }
+        }
         return connect()
     }
 

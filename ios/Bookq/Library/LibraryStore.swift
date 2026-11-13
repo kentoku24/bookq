@@ -256,7 +256,11 @@ final class LibraryStore: ObservableObject {
     /// their subtree holds downloads, episodes only when this level does.
     func levelFolders(path: String) -> [(path: String, node: TreeNode)] {
         var entries = BrowseModel.folders(at: path, in: displayTree)
-        if let vis = visibility, !vis.showAll {
+        // spec §9 fail-open: offline with no visibility snapshot, the
+        // fail-closed isVisible would hide even downloaded works — the
+        // download filter below is already the stricter gate.
+        if let vis = visibility, !vis.showAll,
+           !vis.failOpen(isOnline: !offlineMode) {
             entries = entries.filter { vis.isVisible($0.path) }
         }
         guard offlineMode else { return entries }
@@ -273,7 +277,8 @@ final class LibraryStore: ObservableObject {
     /// even when the snapshot lost the loose images.
     func selfTiles(path: String) -> [(path: String, node: TreeNode)] {
         var tiles = BrowseModel.selfTiles(at: path, in: displayTree)
-        if let vis = visibility, !vis.showAll {
+        if let vis = visibility, !vis.showAll,
+           !vis.failOpen(isOnline: !offlineMode) {
             tiles = tiles.filter { $0.path.isEmpty || vis.isVisible($0.path) }
         }
         guard offlineMode else { return tiles }

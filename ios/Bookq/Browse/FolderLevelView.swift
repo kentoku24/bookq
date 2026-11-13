@@ -232,9 +232,14 @@ struct FolderLevelView: View {
 
     /// `guardPath` gate — pending judgments queue behind a refresh rather
     /// than opening a path whose visibility is unknown; positive-hidden
-    /// paths never open in normal mode.
+    /// paths never open in normal mode. spec §9 fail-open: offline with
+    /// no snapshot the refresh can't complete — open and let the
+    /// download filter (levelFolders) be the gate.
     private func onFolderTap(_ entry: (path: String, node: TreeNode)) {
-        switch visibility.guardPath(entry.path) {
+        let verdict: VisibilityStore.GuardResult =
+            visibility.failOpen(isOnline: online.isOnline)
+                ? .allow : visibility.guardPath(entry.path)
+        switch verdict {
         case .pending:
             Task {
                 await visibility.refresh()
