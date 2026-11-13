@@ -129,13 +129,36 @@ wait "$BSPID" 2>/dev/null || true
 echo "simulator: $DEVNAME ($UDID)"
 DEST="platform=iOS Simulator,id=$UDID"
 
-# Leave no running simulator behind (AGENTS.md iOS Simulator rule):
-# shut our device down on any exit path; on a dev machine also run the
-# repo teardown helper (bounded to this UDID) to prune test clones and
-# XCTestDevices remnants. CI runners are ephemeral — shutdown only.
+# Leave no running simulator behind (AGENTS.md iOS Simulator rule).
+# Scoped part always runs: our device shutdown, our clones, our
+# XCTestDevices data. The repo teardown helper additionally does
+# host-global kills (idb_companion, simctl diagnose, spindump) — run it
+# only when no other verification is detectably in flight, so a
+# parallel session's diagnostics are never interrupted.
 cleanup() {
   xcrun simctl shutdown "$UDID" 2>/dev/null || true
-  if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
+  clone_udids="$(xcrun simctl list devices -j 2>/dev/null | python3 -c '
+import json,sys
+suffix = " of " + sys.argv[1]
+for devs in json.load(sys.stdin).get("devices", {}).values():
+    for d in devs:
+        n = d.get("name", "")
+        if n.startswith("Clone") and n.endswith(suffix):
+            print(d["udid"])
+' "$DEVICE_NAME")"
+  for cu in $clone_udids; do
+    xcrun simctl delete "$cu" 2>/dev/null || true
+  done
+  # XCTestDevices dirs are keyed by the (clone) device uuid.
+  for xctd in "$HOME"/Library/Developer*/XCTestDevices \
+              "$HOME"/Library/Developer*/Xcode/XCTestDevices; do
+    [ -d "$xctd" ] || continue
+    for cu in $UDID $clone_udids; do
+      rm -rf "$xctd/$cu" 2>/dev/null || true
+    done
+  done
+  if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ] \
+     && ! pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
     scripts/sim-teardown.sh --udid "$UDID" || true
   fi
 }
@@ -165,16 +188,31 @@ echo "xctestrun: $XCTESTRUN"
 # health-gated so the gate and the UI tests always agree. xctestrun
 # files carry per-target EnvironmentVariables; patch BookqUITests'.
 PB=/usr/libexec/PlistBuddy
+INJECTED=0
 for cfg in 0 1 2 3; do
   $PB -c "Print :TestConfigurations:$cfg" "$XCTESTRUN" >/dev/null 2>&1 || break
   for t in 0 1 2 3 4; do
     bn=$($PB -c "Print :TestConfigurations:$cfg:TestTargets:$t:BlueprintName" "$XCTESTRUN" 2>/dev/null) || break
     [ "$bn" = "BookqUITests" ] || continue
-    $PB -c "Add :TestConfigurations:$cfg:TestTargets:$t:EnvironmentVariables:BOOKQ_UI_TEST_SERVER_URL string $SERVER_URL" "$XCTESTRUN" 2>/dev/null \
-      || $PB -c "Set :TestConfigurations:$cfg:TestTargets:$t:EnvironmentVariables:BOOKQ_UI_TEST_SERVER_URL $SERVER_URL" "$XCTESTRUN"
-    echo "injected BOOKQ_UI_TEST_SERVER_URL=$SERVER_URL -> $bn"
+    envp=":TestConfigurations:$cfg:TestTargets:$t:EnvironmentVariables"
+    # The dict itself is absent when the scheme defines no env vars —
+    # create it first (the Add errors harmlessly when it exists).
+    $PB -c "Add $envp dict" "$XCTESTRUN" 2>/dev/null || true
+    if $PB -c "Add $envp:BOOKQ_UI_TEST_SERVER_URL string $SERVER_URL" "$XCTESTRUN" 2>/dev/null \
+       || $PB -c "Set $envp:BOOKQ_UI_TEST_SERVER_URL $SERVER_URL" "$XCTESTRUN" 2>/dev/null; then
+      INJECTED=1
+      echo "injected BOOKQ_UI_TEST_SERVER_URL=$SERVER_URL -> $bn"
+    fi
   done
 done
+if [ "$INJECTED" != 1 ]; then
+  if [ "$SERVER_URL" != "http://127.0.0.1:8080" ]; then
+    echo "ERROR: BOOKQ_UI_TEST_SERVER_URL injection failed — UI tests"
+    echo "  would hit the default, not $SERVER_URL"
+    exit 1
+  fi
+  echo "WARN: env injection failed; UI tests use default $SERVER_URL"
+fi
 
 # One test-without-building invocation runs BOTH bundles from the
 # xctestrun (BookqTests + BookqUITests) in a single clone session —
