@@ -251,8 +251,9 @@ struct ReaderWork: Equatable {
                 boundaries.append(images.count)
                 images.append(contentsOf: ch.images)
             }
-            // app.js: pad = (startIdx - spreadOff + 2) % 2, spacer before each
-            // chapter boundary; later boundaries shift too.
+            // Padding contract (#441, web parity): pad = (startIdx -
+            // spreadOff + 2) % 2 on the post-shift index, spacer before
+            // each chapter boundary; later boundaries shift too.
             let spreadOff = pageMode == .spread ? spreadOffset : 0
             for c in 0..<chapters.count {
                 let startIdx = boundaries[c]
