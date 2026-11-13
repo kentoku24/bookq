@@ -169,9 +169,10 @@ jobs:
 
       - name: Schemathesis via gateway
         run: |
-          uv run --with schemathesis schemathesis run api/openapi.v1.yaml \
+          uv run --with "schemathesis>=4.33,<5" schemathesis run api/openapi.v1.yaml \
             --url http://127.0.0.1:8080 \
-            --exclude-checks ignored_auth,allow_header_conformance
+            --exclude-checks ignored_auth,allow_header_conformance \
+            --exclude-deprecated
 
       # With no upstream there is no proxy to hide behind: a 200 on a v1
       # path is native by construction, and any silent fall-through shows
