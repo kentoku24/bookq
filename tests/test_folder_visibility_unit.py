@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from folder_visibility_helpers import request_browser  # noqa: E402
 
 CORE_SRC = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+ENDPOINTS_SRC = (REPO_ROOT / "app" / "static" / "api" / "endpoints.js").read_text(encoding="utf-8")
+API_SRC = (REPO_ROOT / "app" / "static" / "api" / "v1.js").read_text(encoding="utf-8")
 VIS_SRC = (REPO_ROOT / "app" / "static" / "browse" / "visibility.js").read_text(encoding="utf-8")
 
 _STUB_HTML = """<!DOCTYPE html><html><body>
@@ -60,6 +62,11 @@ def _boot(page, fetch_impl: str, storage_seed: dict | None = None):
     # function itself, which Playwright evaluate would invoke as a callback.
     page.evaluate("(()=>{window.__calls=[]; window.fetch=" + fetch_impl + ";})()")
     page.evaluate(CORE_SRC)
+    # #236: visibility.js goes through the typed window.BookqApi client —
+    # load the real endpoints + v1.js so the stubbed fetch below is the
+    # only seam (calls still record {u,o} on window.__calls).
+    page.evaluate(ENDPOINTS_SRC)
+    page.evaluate(API_SRC)
     page.evaluate(VIS_SRC)
 
 
