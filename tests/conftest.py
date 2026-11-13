@@ -32,6 +32,48 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# #469 Phase 2a: files referencing the Python backend are quarantined from
+# viewer-rs runs. Repo-root-relative paths, one per line (see the file header
+# for the mechanical rule). Loaded lazily so plain collection never touches it.
+_RS_QUARANTINE_FILE = Path(__file__).resolve().parent / "quarantine_rs.txt"
+_rs_quarantine: set | None = None
+
+
+def _rs_quarantine_set() -> set:
+    global _rs_quarantine
+    if _rs_quarantine is None:
+        names: set = set()
+        try:
+            for line in _RS_QUARANTINE_FILE.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    names.add(line)
+        except OSError:
+            pass
+        _rs_quarantine = names
+    return _rs_quarantine
+
+
+def _test_backend_is_rs() -> bool:
+    return os.environ.get("BOOKQ_TEST_SERVER") == "rs"
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Exclude Python-backend tests from viewer-rs runs (#469).
+
+    Opt-in via BOOKQ_TEST_SERVER=rs only; the default backend collects
+    everything as before.
+    """
+    if not _test_backend_is_rs():
+        return None
+    try:
+        rel = collection_path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return None
+    if rel in _rs_quarantine_set():
+        return True
+    return None
+
 
 def pytest_addoption(parser):
     try:
@@ -357,20 +399,46 @@ def downloads_tree(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def folder_count_text(downloads_tree: Path) -> str:
+def folder_count_text(downloads_tree: Path, request) -> str:
     # Expected "#folder-count" text at the browse root, derived from the same
     # fixture tree the server serves (not a hardcoded count), so extending the
     # fixture updates every assertion automatically.
+    if _test_backend_is_rs():
+        # No app.* imports on the rs path — read the served tree instead.
+        nodes = _rs_tree_nodes(request.getfixturevalue("server"))
+        return f"{len(nodes)} 件"
     from app.scanner import scan_tree
 
     return f"{len(scan_tree(downloads_tree))} 件"
 
 
+def _rs_tree_nodes(base_url: str) -> list:
+    """Fetch the served v1 tree, tolerating the cold-index 202 window."""
+    import json as _json
+
+    last = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(base_url + "/api/v1/tree", timeout=5) as resp:
+                body = _json.loads(resp.read() or b"{}")
+                if resp.status == 200:
+                    return body.get("nodes", [])
+                last = body
+        except OSError:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(f"tree did not warm: {last!r}")
+
+
 @pytest.fixture(scope="session")
-def root_folder_names(downloads_tree: Path) -> list[str]:
+def root_folder_names(downloads_tree: Path, request) -> list[str]:
     # Expected root-level tile order/names, derived from the same fixture tree
     # and the same natural-sort scan_tree uses server-side (not a hardcoded
     # list), so extending the fixture updates every assertion automatically.
+    if _test_backend_is_rs():
+        # No app.* imports on the rs path — read the served tree instead.
+        return [node["name"] for node in _rs_tree_nodes(request.getfixturevalue("server"))]
     from app.scanner import scan_tree
 
     return [node["name"] for node in scan_tree(downloads_tree)]
@@ -378,7 +446,30 @@ def root_folder_names(downloads_tree: Path) -> list[str]:
 
 @pytest.fixture(scope="session")
 def server(downloads_tree: Path) -> str:
-    """Start FastAPI app in test mode against the fixture tree; yield its base URL."""
+    """Start the test backend against the fixture tree; yield its base URL.
+
+    Default: FastAPI via uvicorn (historical behaviour). With
+    BOOKQ_TEST_SERVER=rs: the viewer-rs debug binary with the env parity
+    from the issue (bind/test-mode/all-native-strict/dummy OAuth/
+    downloads/state/thumb/app-dir), probed at /api/v1/health (#469).
+    """
+    if _test_backend_is_rs():
+        from tests.helpers import (
+            ViewerRsUnavailable,
+            spawn_test_server,
+            terminate_test_server,
+        )
+
+        try:
+            proc, base_url = spawn_test_server(
+                downloads_tree,
+                state_dir=os.environ.get("BOOKQ_STATE_DIR"),
+            )
+        except ViewerRsUnavailable as exc:
+            pytest.skip(f"viewer-rs unavailable: {exc}")
+        yield base_url
+        terminate_test_server(proc)
+        return
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -440,6 +531,41 @@ def _reset_reading_position(request):
         return
     try:
         base_url = request.getfixturevalue("server")
+
+        if _test_backend_is_rs():
+            # v1 shape (per-folder store); v0 is 501 with no upstream.
+            # Best-effort like the v0 path below — a dead server fails
+            # the test properly later. No ?hard=1 wipe exists on the
+            # native side yet (Phase 2b); the tombstone only rejects
+            # at-or-older PUTs, so a newer test write still lands.
+            def _delete():
+                req = urllib.request.Request(
+                    base_url + "/api/v1/reading-positions", method="DELETE"
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+
+            def _empty():
+                with urllib.request.urlopen(
+                    base_url + "/api/v1/reading-positions", timeout=5
+                ) as resp:
+                    body = json.loads(resp.read() or b"{}")
+                positions = body.get("positions") if isinstance(body, dict) else body
+                return not positions
+
+            _delete()
+            deadline = time.time() + 3.0
+            empty_since = None
+            while time.time() < deadline:
+                if _empty():
+                    if empty_since is not None and time.time() - empty_since >= 0.3:
+                        break
+                    if empty_since is None:
+                        empty_since = time.time()
+                else:
+                    empty_since = None
+                    _delete()
+                time.sleep(0.05)
+            return
 
         def _delete():
             req = urllib.request.Request(

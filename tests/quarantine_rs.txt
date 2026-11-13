@@ -1,0 +1,65 @@
+# pytest-rs quarantine list (#469 Phase 2a, parent #410).
+#
+# Files that reference the Python backend (`app.*`) and therefore cannot run
+# against viewer-rs. While BOOKQ_TEST_MODE's Python suite is alive these stay
+# green on the default (uvicorn) backend; with BOOKQ_TEST_SERVER=rs they are
+# excluded from collection (see tests/conftest.py::pytest_ignore_collect).
+# Triage of each entry (archive vs port to Rust/HTTP tests) is Phase 2b scope.
+#
+# Mechanical rule: `grep -rIlE "from app\.|import app\.|from app import" tests/test_*.py`
+# (module-level imports AND the single subprocess-string reference in
+# test_test_mode_fail_closed.py, which asserts Python fail-closed behaviour).
+# Repo-root-relative, one per line, sorted.
+tests/test_api_v1.py
+tests/test_archive.py
+tests/test_archive_nested.py
+tests/test_archive_split.py
+tests/test_auth_token.py
+tests/test_background_fill.py
+tests/test_bearer_auth.py
+tests/test_conformance_vectors.py
+tests/test_cover_warmup.py
+tests/test_disable_index.py
+tests/test_ensure_index.py
+tests/test_filetype_matrix.py
+tests/test_folder_visibility_api.py
+tests/test_folder_visibility_store.py
+tests/test_folders_shallow.py
+tests/test_index_building_202.py
+tests/test_index_gate.py
+tests/test_media_decode_contract.py
+tests/test_metadata.py
+tests/test_offline_core_unit.py
+tests/test_offline_thumb_prefetch.py
+tests/test_paired_view.py
+tests/test_reader_manifest.py
+tests/test_reader_pairing.py
+tests/test_reader_state.py
+tests/test_reader_sync_client.py
+tests/test_reader_sync_golden.py
+tests/test_reader_sync_model.py
+tests/test_reader_transport.py
+tests/test_reader_ws.py
+tests/test_reader_ws_state.py
+tests/test_reading_positions_store.py
+tests/test_refresh_endpoint.py
+tests/test_scan_phase_timings.py
+tests/test_scanner.py
+tests/test_scanner_perf_todo6.py
+tests/test_shallow_warmup.py
+tests/test_stale_serve.py
+tests/test_sw_offline_contract.py
+tests/test_test_mode_fail_closed.py
+tests/test_thumb_cache_hit_no_open.py
+tests/test_thumb_sprite.py
+tests/test_thumbnail_simulator_mode.py
+tests/test_thumbs.py
+tests/test_traversal.py
+tests/test_tree_signature.py
+tests/test_view_endpoint.py
+tests/test_warmup_baseline.py
+tests/test_warmup_breakdown.py
+tests/test_warmup_cache_mirror.py
+tests/test_warmup_cache_race.py
+tests/test_warmup_lifespan.py
+tests/test_warmup_persistent_cache.py

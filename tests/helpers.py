@@ -9,8 +9,13 @@ builder copies in test_thumbs and test_cover_warmup. Import via
 """
 
 import asyncio
+import os
+import socket
+import subprocess
+import sys
 import threading
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -82,3 +87,183 @@ def get_folders_ready(client, *, params=None, timeout: float = 30):
         f"body {res.text[:500]!r}"
     )
     return res.json()
+
+
+# ── backend spawn (#469 Phase 2a) ────────────────────────────────────────────
+# Single home for the "boot a test server" shape duplicated across
+# conftest.py, folder_visibility_helpers.py and the module-local spawners
+# (test_filters_e2e, test_mixed_folder, test_ui_logic,
+# test_viewer_slider_per_book). BOOKQ_TEST_SERVER=rs boots the viewer-rs
+# binary instead of uvicorn; anything else keeps the historical behaviour.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+class ViewerRsUnavailable(RuntimeError):
+    """viewer-rs binary could not be provided (build failed / cargo absent)."""
+
+
+def test_backend_is_rs() -> bool:
+    """True when the suite is retargeted at the viewer-rs binary (#469)."""
+    return os.environ.get("BOOKQ_TEST_SERVER") == "rs"
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_http_ok(base_url: str, paths: list, proc, timeout: float) -> None:
+    """Poll *paths* in order until each answers 2xx (cold index may 202)."""
+    deadline = time.time() + timeout
+    for path in paths:
+        while True:
+            if proc.poll() is not None:
+                raise RuntimeError(f"test server exited early while probing {path}")
+            try:
+                with urllib.request.urlopen(base_url + path, timeout=1):
+                    break
+            except OSError:
+                pass
+            if time.time() >= deadline:
+                raise RuntimeError(f"test server did not serve {path} within {timeout}s")
+            time.sleep(0.1)
+
+
+def _wait_tree_ready(base_url: str, tree_path: str, proc, timeout: float) -> None:
+    """Poll the tree endpoint until the cold index build lands (200)."""
+    import json as _json
+
+    deadline = time.time() + timeout
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError("test server exited early while warming the tree")
+        try:
+            with urllib.request.urlopen(base_url + tree_path, timeout=5) as resp:
+                if resp.status == 200:
+                    _json.loads(resp.read() or b"{}")
+                    return
+        except OSError:
+            pass
+        if time.time() >= deadline:
+            raise RuntimeError(f"tree {tree_path} did not warm within {timeout}s")
+        time.sleep(0.5)
+
+
+def _ensure_viewer_rs_binary() -> Path:
+    """Return the debug viewer-rs binary, building it on demand.
+
+    Raises ViewerRsUnavailable when the binary is absent and cannot be
+    built (callers translate to pytest.skip).
+    """
+    binary = _REPO_ROOT / "rust" / "target" / "debug" / "viewer-rs"
+    if binary.is_file():
+        return binary
+    try:
+        build = subprocess.run(
+            ["cargo", "build", "-p", "viewer-rs"],
+            cwd=str(_REPO_ROOT / "rust"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ViewerRsUnavailable(f"cargo build -p viewer-rs failed: {exc}") from exc
+    if build.returncode != 0 or not binary.is_file():
+        raise ViewerRsUnavailable("cargo build -p viewer-rs did not produce the binary")
+    return binary
+
+
+def _rs_env(port: int, downloads: Path, state_dir: str | None, thumb_cache_dir: str | None) -> dict:
+    """Env parity for the viewer-rs backend (#469 scope): bind, test mode,
+    all-native strict, dummy OAuth, downloads/state/thumb roots, app shell."""
+    env = os.environ.copy()
+    # No-upstream mode is the deterministic posture: never inherit a
+    # developer's proxy target into the test rig.
+    env.pop("BOOKQ_UPSTREAM", None)
+    env["BOOKQ_TEST_MODE"] = "true"
+    env["BOOKQ_BIND"] = f"127.0.0.1:{port}"
+    env["BOOKQ_RS_NATIVE"] = "all"
+    env["BOOKQ_RS_NATIVE_STRICT"] = "1"
+    env["DOWNLOADS_DIR"] = str(downloads)
+    if state_dir is not None:
+        env["BOOKQ_STATE_DIR"] = str(state_dir)
+    if thumb_cache_dir is not None:
+        env["BOOKQ_THUMB_CACHE_DIR"] = str(thumb_cache_dir)
+    else:
+        env.setdefault("BOOKQ_THUMB_CACHE_DIR", str(Path(downloads).parent / f"thumbcache-{port}"))
+    env.setdefault("BOOKQ_APP_DIR", str(_REPO_ROOT / "app"))
+    # Dummy OAuth / signing config (mirrors .github/workflows/api-contract.yml).
+    env.setdefault("GOOGLE_CLIENT_ID", "ci-dummy")
+    env.setdefault("GOOGLE_CLIENT_SECRET", "ci-dummy")
+    env.setdefault("BASE_URL", f"http://127.0.0.1:{port}")
+    env.setdefault("SECRET_KEY", "ci-not-a-secret")
+    env.setdefault("ALLOWED_EMAILS", "test@example.com")
+    return env
+
+
+def spawn_test_server(
+    downloads: Path,
+    *,
+    state_dir: str | Path | None = None,
+    thumb_cache_dir: str | Path | None = None,
+    timeout: float = 30,
+) -> tuple:
+    """Boot a test server against *downloads*; return (proc, base_url).
+
+    Respects BOOKQ_TEST_SERVER=rs (viewer-rs binary, /api/v1/health probe +
+    tree warmup) and otherwise preserves the historical uvicorn behaviour
+    (/api/health probe). Raises ViewerRsUnavailable when the rs backend is
+    requested but the binary cannot be provided.
+    """
+    port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    if test_backend_is_rs():
+        binary = _ensure_viewer_rs_binary()
+        env = _rs_env(port, downloads, state_dir, thumb_cache_dir)
+        proc = subprocess.Popen(
+            [str(binary)],
+            env=env,
+            cwd=str(_REPO_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            _wait_http_ok(base_url, ["/api/v1/health"], proc, timeout)
+            _wait_tree_ready(base_url, "/api/v1/tree", proc, timeout)
+        except Exception:
+            proc.terminate()
+            raise
+        return proc, base_url
+    env = os.environ.copy()
+    env["BOOKQ_TEST_MODE"] = "true"
+    env["DOWNLOADS_DIR"] = str(downloads)
+    if state_dir is not None:
+        env["BOOKQ_STATE_DIR"] = str(state_dir)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app.main:app",
+         "--host", "127.0.0.1", "--port", str(port)],
+        env=env,
+        cwd=str(_REPO_ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_http_ok(base_url, ["/api/health"], proc, timeout)
+    except Exception:
+        proc.terminate()
+        raise
+    return proc, base_url
+
+
+def terminate_test_server(proc) -> None:
+    """Best-effort shutdown for a server from spawn_test_server."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
