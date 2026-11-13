@@ -12,25 +12,43 @@ this check closes that gap (#232).
 Breaking (exit 1):
 
 - removed path / operation / channel / message / response status
-- added required query/header/path parameter, or ``required: false -> true``
+- added required query/header/path parameter, or ``required: false -> true``,
+  removed required parameter, removed parameter schema
 - newly required requestBody
-- removed request/response content media type
+- removed request/response content media type, removed request/response schema
+- removed response header, response header ``required`` flip or schema change
 - changed operationId (generated clients bind to it)
+- AsyncAPI: channel ``address``/``bindings`` change or removed ``servers``
+  entry, operation ``action``/``channel``/message-ref change, message
+  ``contentType`` change, removed message ``headers`` or payload
 - schema: added ``required`` entry, removed property, removed enum value,
   added/removed/changed ``const``, changed ``type``,
   ``additionalProperties`` tightened to ``false``, removed oneOf/anyOf
   variant, changed ``discriminator``
 
 Additive changes pass: optional property, new enum value, new path /
-operation / response status, relaxed ``required``.
+operation / response status, new oneOf/anyOf variant, new operation
+message, relaxed ``required``.
 
-Local ``$ref`` chains are resolved before comparison, so moving a schema
-between ``components`` entries without changing its shape is clean. The
-walk is direction-agnostic on purpose: it may flag a request-side
-relaxation a server owner would call safe (e.g. dropping a ``required``
-entry still passes; tightening request enums fails). Constraint tweaks
-(``minLength``, ``pattern``, numeric bounds) are out of scope — shape
-lint (Spectral) and contract tests (Schemathesis) own those.
+Local ``$ref`` chains are resolved before comparison — siblings next to
+``$ref`` (legal in 3.1) are merged over the target, so moving a schema
+between ``components`` entries or adding a sibling without changing its
+shape is clean. Unkeyed oneOf/anyOf/allOf members align by canonical JSON
+order, not position. The walk is direction-agnostic on purpose: it may
+flag a request-side relaxation a server owner would call safe (e.g.
+dropping a ``required`` entry still passes; tightening request enums
+fails). Constraint tweaks (``minLength``, ``pattern``, numeric bounds)
+are out of scope — shape lint (Spectral) and contract tests
+(Schemathesis) own those.
+
+Known gaps (deliberate scope, revisit if they bite): AsyncAPI
+``servers``/``bindings`` are compared shallowly (removed server or any
+bindings change) — deeper protocol-field diffs would just echo the raw
+change; message ``traits``/``correlationId`` are unchecked; parameter
+diffs run at both path scope and the merged operation scope, so one
+path-level change can report at two locations; unkeyed-variant ``loc``
+indexes label by first-equal index when duplicate shapes exist
+(cosmetic only).
 
 Usage (CI diffs the PR base revision against the working tree)::
 
@@ -68,28 +86,48 @@ HTTP_METHODS = {"get", "put", "post", "delete", "patch", "head", "options", "tra
 # --------------------------------------------------------------------------
 
 def resolve(node, root):
-    """Follow internal ``$ref: '#/...'`` chains; return the target node."""
+    """Follow internal ``$ref: '#/...'`` chains; return the target node.
+
+    OpenAPI 3.1 permits siblings next to ``$ref`` — they constrain the
+    referenced object, so they are merged over a copy of the target
+    rather than compared raw. Without this, ``{$ref: T, description: d}``
+    reads as an opaque dict and produces both false positives (added
+    sibling looks like a shape change) and false negatives (the $ref
+    itself swapping targets goes unnoticed). External refs stay opaque.
+    """
     seen = set()
-    while isinstance(node, dict) and set(node.keys()) == {"$ref"}:
+    while (
+        isinstance(node, dict)
+        and isinstance(node.get("$ref"), str)
+        and node["$ref"].startswith("#/")
+    ):
         ref = node["$ref"]
-        if not isinstance(ref, str) or not ref.startswith("#/"):
-            return node  # external ref: opaque, compare raw below
         if ref in seen:
-            return node
+            # Cyclic ref: drop the link, compare whatever siblings remain.
+            return {k: v for k, v in node.items() if k != "$ref"}
         seen.add(ref)
         target = root
         for part in ref[2:].split("/"):
             part = part.replace("~1", "/").replace("~0", "~")
             if not isinstance(target, dict) or part not in target:
-                return node
+                return node  # unresolvable: opaque, compare raw below
             target = target[part]
-        node = target
+        if len(node) > 1:
+            siblings = {k: v for k, v in node.items() if k != "$ref"}
+            node = {**target, **siblings} if isinstance(target, dict) else siblings
+        else:
+            node = target
     return node
 
 
 # --------------------------------------------------------------------------
 # schema comparison
 # --------------------------------------------------------------------------
+
+def _canon_key(node):
+    """Canonical sort key for unkeyed combinator members."""
+    return json.dumps(node, sort_keys=True, default=str)
+
 
 def _norm_type(value):
     if value is None:
@@ -230,7 +268,11 @@ class Differ:
                 self._diff_options(base.get(key) or [], head.get(key) or [],
                                    loc, key)
         if isinstance(base.get("allOf"), list) or isinstance(head.get("allOf"), list):
-            bl, hl = base.get("allOf") or [], head.get("allOf") or []
+            # Canonical order: allOf members carry no stable key, so an
+            # insertion mid-list would otherwise shift-align every tail
+            # member and report phantom changes.
+            bl = sorted(base.get("allOf") or [], key=_canon_key)
+            hl = sorted(head.get("allOf") or [], key=_canon_key)
             if len(bl) > len(hl):
                 self.breaking(loc, f"allOf shortened ({len(bl)} -> {len(hl)} entries)")
             for i, (b, h) in enumerate(zip(bl, hl)):
@@ -246,33 +288,42 @@ class Differ:
                 )
 
     def _diff_options(self, base_opts, head_opts, loc, key):
-        """Align oneOf/anyOf variants by discriminator key, then by index."""
-        remaining_head = list(enumerate(head_opts))
+        """Align oneOf/anyOf variants by discriminator key, then canonically.
+
+        Unkeyed variants (no discriminator) are aligned by canonical JSON
+        order on both sides — index alignment mis-pairs every variant past
+        a mid-list insertion, reporting phantom `type changed`/`property
+        removed` findings on an additive change (issue #232 review).
+        """
         pairs = []
         orphan_base = []
 
         head_by_key = {}
         head_unkeyed = []
-        for i, h in enumerate(head_opts):
+        for h in head_opts:
             k = _branch_key(resolve(h, self.head_root))
             if k is None:
-                head_unkeyed.append((i, h))
+                head_unkeyed.append(h)
             else:
-                head_by_key.setdefault(k, []).append((i, h))
+                head_by_key.setdefault(k, []).append(h)
+        head_unkeyed.sort(key=_canon_key)
 
         leftover_base = []
         for b in base_opts:
             k = _branch_key(resolve(b, self.base_root))
             if k is not None and k in head_by_key and head_by_key[k]:
-                pairs.append((b, head_by_key[k].pop(0)[1], k))
+                pairs.append((b, head_by_key[k].pop(0), k))
             else:
                 leftover_base.append((b, k))
 
-        for b, k in leftover_base:
-            if k is None and head_unkeyed:
-                pairs.append((b, head_unkeyed.pop(0)[1], None))
+        orphan_base = [(b, k) for b, k in leftover_base if k is not None]
+        for b in sorted(
+            (b for b, k in leftover_base if k is None), key=_canon_key
+        ):
+            if head_unkeyed:
+                pairs.append((b, head_unkeyed.pop(0), None))
             else:
-                orphan_base.append((b, k))
+                orphan_base.append((b, None))
 
         for b, k in orphan_base:
             label = f" ({k[0]}={json.loads(k[1])})" if k else ""
@@ -289,8 +340,8 @@ class Differ:
     # -- parameters -----------------------------------------------------
 
     def diff_parameters(self, base_params, head_params, loc):
-        base_by_key = _params_by_key(base_params)
-        head_by_key = _params_by_key(head_params)
+        base_by_key = _params_by_key(base_params, self.base_root)
+        head_by_key = _params_by_key(head_params, self.head_root)
         for key, b in base_by_key.items():
             if key not in head_by_key:
                 if isinstance(b, dict) and b.get("required") is True:
@@ -312,10 +363,15 @@ class Differ:
                     self.breaking(loc, f"required parameter added: {key}")
 
 
-def _params_by_key(params):
+def _params_by_key(params, root=None):
+    """Key parameters by ``in:name``; ``$ref``-ed entries (which carry no
+    ``name`` of their own, e.g. ``#/components/parameters/*``) are resolved
+    first so a required flip inside a shared parameter is still caught."""
     out = {}
     if isinstance(params, list):
         for p in params:
+            if isinstance(p, dict) and "name" not in p and root is not None:
+                p = resolve(p, root)
             if isinstance(p, dict) and "name" in p:
                 out[f"{p.get('in', 'query')}:{p['name']}"] = p
     return out
@@ -366,10 +422,10 @@ def _diff_operation(d, b_item, b_op, h_item, h_op, loc, base_root, head_root):
                 f"to {h_op.get('operationId')!r}",
             )
     # path-level + operation-level parameters merged (operation wins per key)
-    b_params = _params_by_key(b_item.get("parameters")) if isinstance(b_item, dict) else {}
-    b_params.update(_params_by_key(b_op.get("parameters")))
-    h_params = _params_by_key(h_item.get("parameters")) if isinstance(h_item, dict) else {}
-    h_params.update(_params_by_key(h_op.get("parameters")))
+    b_params = _params_by_key(b_item.get("parameters"), base_root) if isinstance(b_item, dict) else {}
+    b_params.update(_params_by_key(b_op.get("parameters"), base_root))
+    h_params = _params_by_key(h_item.get("parameters"), head_root) if isinstance(h_item, dict) else {}
+    h_params.update(_params_by_key(h_op.get("parameters"), head_root))
     d.diff_parameters(list(b_params.values()), list(h_params.values()), f"{loc}.parameters")
 
     # requestBody
@@ -386,8 +442,11 @@ def _diff_operation(d, b_item, b_op, h_item, h_op, loc, base_root, head_root):
                 d.breaking(loc, f"request media type removed: {media}")
                 continue
             b_schema = (b_media or {}).get("schema")
-            h_schema = (h_content[media] or {}).get("schema")
-            if b_schema is not None and h_schema is not None:
+            h_media = h_content[media] or {}
+            h_schema = h_media.get("schema")
+            if b_schema is not None and h_schema is None:
+                d.breaking(loc, f"request schema removed: {media}")
+            elif b_schema is not None:
                 d.diff_schema(b_schema, h_schema, f"{loc}.requestBody.{media}")
 
     # responses: removals break, additions pass
@@ -410,9 +469,39 @@ def _diff_operation(d, b_item, b_op, h_item, h_op, loc, base_root, head_root):
                 d.breaking(r_loc, f"response media type removed: {media}")
                 continue
             b_schema = (b_media or {}).get("schema")
-            h_schema = (h_content[media] or {}).get("schema")
-            if b_schema is not None and h_schema is not None:
+            h_media = h_content[media] or {}
+            h_schema = h_media.get("schema")
+            if b_schema is not None and h_schema is None:
+                d.breaking(r_loc, f"response schema removed: {media}")
+            elif b_schema is not None:
                 d.diff_schema(b_schema, h_schema, f"{r_loc}.{media}")
+        _diff_response_headers(d, b_r, h_r, r_loc, base_root, head_root)
+
+
+def _diff_response_headers(d, b_r, h_r, loc, base_root, head_root):
+    """Response headers are wire contract too — `Retry-After` on the 202s
+    is how clients learn to poll. A removed header or `required` flip is
+    breaking; additions pass."""
+    b_headers = b_r.get("headers") or {}
+    h_headers = h_r.get("headers") or {}
+    if not isinstance(b_headers, dict) or not isinstance(h_headers, dict):
+        return
+    for name, b_h in b_headers.items():
+        h_loc = f"{loc}.headers.{name}"
+        h_h = h_headers.get(name)
+        if h_h is None:
+            d.breaking(h_loc, "response header removed")
+            continue
+        b_h = resolve(b_h, base_root)
+        h_h = resolve(h_h, head_root)
+        if not isinstance(b_h, dict) or not isinstance(h_h, dict):
+            continue
+        if b_h.get("required") is not True and h_h.get("required") is True:
+            d.breaking(h_loc, "response header became required")
+        if b_h.get("schema") is not None and h_h.get("schema") is not None:
+            d.diff_schema(b_h["schema"], h_h["schema"], f"{h_loc}.schema")
+        elif b_h.get("schema") is not None:
+            d.breaking(h_loc, "response header schema removed")
 
 
 # --------------------------------------------------------------------------
@@ -434,6 +523,22 @@ def diff_asyncapi(base, head):
         h_ch = resolve(h_ch, d.head_root)
         if not isinstance(b_ch, dict) or not isinstance(h_ch, dict):
             continue
+        # Wire identity: the address IS the WebSocket path clients dial,
+        # and bindings pin the protocol shape — changing either breaks
+        # already-shipped clients even when the channel key survives.
+        if b_ch.get("address") != h_ch.get("address"):
+            d.breaking(
+                loc,
+                f"channel address changed from {b_ch.get('address')!r} "
+                f"to {h_ch.get('address')!r}",
+            )
+        if b_ch.get("bindings") != h_ch.get("bindings"):
+            d.breaking(loc, "channel bindings changed")
+        b_servers = b_ch.get("servers") or []
+        h_servers = h_ch.get("servers") or []
+        for s in b_servers:
+            if s not in h_servers:
+                d.breaking(loc, f"channel server removed: {s!r}")
         b_msgs = b_ch.get("messages") or {}
         h_msgs = h_ch.get("messages") or {}
         if isinstance(b_msgs, dict) and isinstance(h_msgs, dict):
@@ -464,10 +569,47 @@ def diff_asyncapi(base, head):
 
     base_ops = base.get("operations") or {}
     head_ops = head.get("operations") or {}
-    for op_id in base_ops:
-        if op_id not in head_ops:
-            d.breaking(f"asyncapi.operations.{op_id}", "operation removed")
+    for op_id, b_op in base_ops.items():
+        loc = f"asyncapi.operations.{op_id}"
+        h_op = head_ops.get(op_id)
+        if h_op is None:
+            d.breaking(loc, "operation removed")
+            continue
+        if not isinstance(b_op, dict) or not isinstance(h_op, dict):
+            continue
+        # `action` flips the wire direction — send<->receive is breaking.
+        if b_op.get("action") != h_op.get("action"):
+            d.breaking(
+                loc,
+                f"operation action changed from {b_op.get('action')!r} "
+                f"to {h_op.get('action')!r}",
+            )
+        # The operation→channel link is how clients learn where a
+        # message flows; re-pointing it silently rehomes the traffic.
+        b_chan = _ref_id(b_op.get("channel"))
+        h_chan = _ref_id(h_op.get("channel"))
+        if b_chan != h_chan:
+            d.breaking(
+                loc, f"operation channel changed from {b_chan!r} to {h_chan!r}"
+            )
+        # operation→message set: dropping a message id unsubscribes
+        # clients that dispatch on it (reader-sync `error`/`state`/...).
+        b_mrefs = {_ref_id(m) for m in b_op.get("messages") or []}
+        h_mrefs = {_ref_id(m) for m in h_op.get("messages") or []}
+        for mref in sorted(b_mrefs - h_mrefs):
+            d.breaking(loc, f"operation message removed: {mref}")
     return sorted(set(d.findings))
+
+
+def _ref_id(node):
+    """Stable identity for an operation channel/message link — the spec
+    writes these as `{$ref: '#/channels/...'}`; inline objects fall back
+    to canonical JSON."""
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            return ref
+    return _canon_key(node)
 
 
 def _message_name(msg, root):
@@ -480,13 +622,30 @@ def _message_name(msg, root):
 
 
 def _diff_message_payload(d, base_msg, head_msg, loc, name):
+    mloc = f"{loc}.messages.{name}"
     if "payload" in base_msg or "payload" in head_msg:
         if "payload" in base_msg and "payload" in head_msg:
-            d.diff_schema(
-                base_msg["payload"], head_msg["payload"], f"{loc}.messages.{name}"
-            )
+            d.diff_schema(base_msg["payload"], head_msg["payload"], mloc)
         elif "payload" not in head_msg:
             d.breaking(loc, f"message payload removed: {name}")
+    # Envelope contract: a contentType flip reparses the frame, and the
+    # headers schema is part of what clients send/read.
+    b_ct = base_msg.get("contentType")
+    h_ct = head_msg.get("contentType")
+    if (b_ct is not None or h_ct is not None) and b_ct != h_ct:
+        d.breaking(
+            mloc,
+            f"message contentType changed from {b_ct!r} to {h_ct!r}",
+        )
+    if "headers" in base_msg or "headers" in head_msg:
+        if "headers" in base_msg and "headers" in head_msg:
+            d.diff_schema(
+                resolve(base_msg["headers"], d.base_root),
+                resolve(head_msg["headers"], d.head_root),
+                f"{mloc}.headers",
+            )
+        elif "headers" not in head_msg:
+            d.breaking(mloc, "message headers removed")
 
 
 # --------------------------------------------------------------------------
