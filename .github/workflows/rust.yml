@@ -26,8 +26,7 @@ jobs:
         id: filter
         if: github.event_name == 'pull_request'
         # gateway-contract inputs (#199): the OpenAPI spec +
-        # expected-statuses overrides drive the suite, and the job builds
-        # the Python Dockerfile. api/** also covers
+        # expected-statuses overrides drive the suite. api/** also covers
         # api/reader-sync-cases.json — the cargo golden harness input
         # (#210), so a case-file-only edit still triggers this.
         with:
@@ -39,7 +38,6 @@ jobs:
               - ".github/workflows/rust.yml"
               - "api/**"
               - "schemathesis.toml"
-              - "Dockerfile"
 
   test:
     needs: changes-rust
@@ -131,74 +129,71 @@ jobs:
 
       # --load puts the images in the daemon for the compose-free `docker run`
       # below; per-image scopes keep the Python and Rust caches independent.
-      - name: Build images
+      - name: Build image
         run: |
-          docker buildx build --load \
-            --cache-from type=gha,scope=viewer \
-            --cache-to type=gha,mode=max,scope=viewer \
-            -t bookq-ci:viewer -f Dockerfile .
           docker buildx build --load \
             --cache-from type=gha,scope=viewer-rs \
             --cache-to type=gha,mode=max,scope=viewer-rs \
             -t bookq-ci:viewer-rs -f Dockerfile.viewer-rs .
 
-      - name: Start viewer + viewer-rs
+      # Production mode since #409: viewer-rs runs upstream-absent with
+      # strict native validation. A silent fallback can no longer hide
+      # behind a Python proxy — an unimplemented path answers 501 (#456).
+      - name: Start viewer-rs (no upstream, all native, strict)
         run: |
-          docker network create bookq-ci
           docker volume create bookq-ci-thumbs
           docker volume create bookq-ci-state
-          docker run -d --name viewer --network bookq-ci \
-            -e BOOKQ_TEST_MODE=true -e DOWNLOADS_DIR=/app/downloads \
-            -e BOOKQ_STATE_DIR=/var/lib/bookq \
-            -e BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs \
-            -e SECRET_KEY=ci-not-a-secret -e ALLOWED_EMAILS=test@example.com \
-            -v "$PWD/.ci-dl:/app/downloads:ro" \
-            -v bookq-ci-state:/var/lib/bookq -v bookq-ci-thumbs:/var/cache/bookq-thumbs \
-            bookq-ci:viewer
-          docker run -d --name viewer-rs --network bookq-ci -p 127.0.0.1:8080:8080 \
-            -e BOOKQ_UPSTREAM=http://viewer:8080 -e BOOKQ_BIND=0.0.0.0:8080 \
+          docker run -d --name viewer-rs -p 127.0.0.1:8080:8080 \
+            -e BOOKQ_BIND=0.0.0.0:8080 \
             -e BOOKQ_TEST_MODE=true -e BOOKQ_RS_NATIVE=all \
+            -e BOOKQ_RS_NATIVE_STRICT=1 \
+            -e GOOGLE_CLIENT_ID=ci-dummy -e GOOGLE_CLIENT_SECRET=ci-dummy \
+            -e BASE_URL=http://127.0.0.1:8080 \
             -e ALLOWED_EMAILS=test@example.com -e SECRET_KEY=ci-not-a-secret \
             -e DOWNLOADS_DIR=/app/downloads -e BOOKQ_STATE_DIR=/var/lib/bookq \
             -e BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs \
             -v "$PWD/.ci-dl:/app/downloads:ro" \
             -v bookq-ci-state:/var/lib/bookq -v bookq-ci-thumbs:/var/cache/bookq-thumbs \
             bookq-ci:viewer-rs
-          # /api/folders is v0 → always proxied — a 200 proves the whole
-          # chain (viewer-rs up AND upstream reachable).
           for i in $(seq 1 90); do
-            curl -sf http://127.0.0.1:8080/api/folders && break || sleep 1
+            curl -sf http://127.0.0.1:8080/api/v1/health && break || sleep 1
           done
           curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null \
-            || { docker logs viewer-rs || true; docker logs viewer || true; echo "gateway never healthy"; exit 1; }
+            || { docker logs viewer-rs || true; echo "viewer-rs never healthy"; exit 1; }
           # Cold index answers 202 + Retry-After; poll until the build lands.
           for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/tree)
             [ "$code" = "200" ] && break || sleep 1
           done
-          [ "$code" = "200" ] || { docker logs viewer-rs || true; docker logs viewer || true; echo "tree never warmed"; exit 1; }
+          [ "$code" = "200" ] || { docker logs viewer-rs || true; echo "tree never warmed"; exit 1; }
 
       - name: Schemathesis via gateway
         run: |
-          uv run --with schemathesis schemathesis run api/openapi.v1.yaml \
+          uv run --with "schemathesis>=4.33,<5" schemathesis run api/openapi.v1.yaml \
             --url http://127.0.0.1:8080 \
-            --exclude-checks ignored_auth,allow_header_conformance
+            --exclude-checks ignored_auth,allow_header_conformance \
+            --exclude-deprecated
 
-      # thumb/sprite entries are rendered by upstream on the first request,
-      # so the hit path (what we assert natively serves) only exists after a
-      # warming pass — request everything twice and assert on the second.
-      - name: Native endpoints are answered by viewer-rs, not proxied
+      # With no upstream there is no proxy to hide behind: a 200 on a v1
+      # path is native by construction, and any silent fall-through shows
+      # up as a "fallback answered 501" WARN. Request each path twice —
+      # the first pass warms the shared thumb/sprite cache, the second
+      # exercises the hit path.
+      - name: All v1 endpoints answered 200 with zero fallbacks
         run: |
+          # Window the fallback check — schemathesis' earlier fuzz may have
+          # legitimately produced fallback WARNs on non-contract paths.
+          SINCE=$(date -u +%Y-%m-%dT%H:%M:%S)
           uv run python - <<'EOF'
           import urllib.request, urllib.error, sys
           B = "http://127.0.0.1:8080"
           def get(p):
               try:
                   r = urllib.request.urlopen(B + p)
-                  return r.status, r.headers
+                  return r.status
               except urllib.error.HTTPError as e:
-                  return e.code, e.headers
-          NATIVE = [
+                  return e.code
+          V1 = [
               "/api/v1/health", "/api/v1/version",
               "/api/v1/tree", "/api/v1/tree?depth=1",
               "/api/v1/images?folder=Series/vol1",
@@ -211,19 +206,38 @@ jobs:
               "/thumb/Series/vol1/p00.jpg?w=200",
               "/api/v1/thumb-sprite?folder=Manga%2Fpack.zip&names=01.jpg,02.jpg",
           ]
-          # Fall-through controls (v0 surface — never native).
-          PROXY = ["/api/folders", "/api/health"]
           failed = []
-          for p in NATIVE + PROXY:
-              for _ in range(2):  # 1st warms the shared cache; 2nd must be native
-                  st, h = get(p)
-              srv = h.get("server") or h.get("Server") or ""
-              native = "hypercorn" not in srv
-              ok = (st == 200) and (native if p in NATIVE else not native)
-              if not ok:
-                  failed.append((p, st, srv))
-              print(("native " if native else "proxied"), st, p)
-          for p, st, srv in failed:
-              print(f"FAIL {p}: status={st} server={srv!r}", file=sys.stderr)
+          for p in V1:
+              for _ in range(2):
+                  st = get(p)
+              if st != 200:
+                  failed.append((p, st))
+              print("v1", st, p)
+          for p, st in failed:
+              print(f"FAIL {p}: status={st}", file=sys.stderr)
+          sys.exit(1 if failed else 0)
+          EOF
+          # Any fallback among the v1 probes is a bug — upstream is absent.
+          if docker logs --since "$SINCE" viewer-rs 2>&1 | grep -q "fallback answered 501"; then
+            docker logs --since "$SINCE" viewer-rs 2>&1 | grep "fallback answered 501"
+            echo "v1 probe(s) fell through to the dead proxy path" >&2
+            exit 1
+          fi
+          # v0 surface correctly refuses with 501 in no-upstream mode (#408).
+          uv run python - <<'EOF'
+          import urllib.request, urllib.error, sys
+          B = "http://127.0.0.1:8080"
+          LEGACY = ["/api/folders", "/api/health"]
+          failed = []
+          for p in LEGACY:
+              try:
+                  st = urllib.request.urlopen(B + p).status
+              except urllib.error.HTTPError as e:
+                  st = e.code
+              if st != 501:
+                  failed.append((p, st))
+              print("legacy-501", st, p)
+          for p, st in failed:
+              print(f"FAIL {p}: status={st} (expected 501)", file=sys.stderr)
           sys.exit(1 if failed else 0)
           EOF
