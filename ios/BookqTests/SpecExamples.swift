@@ -10,7 +10,7 @@ enum SpecExamples {
         var description: String
     }
 
-    private static var bundle: [[String: Any]] = {
+    nonisolated(unsafe) private static let bundle: [[String: Any]] = {
         let thisFile = URL(fileURLWithPath: #filePath)
         let url = thisFile
             .deletingLastPathComponent()   // BookqTests/

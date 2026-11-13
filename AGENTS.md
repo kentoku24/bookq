@@ -96,7 +96,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - 既定 `iPhone 13`（`SIMULATOR_DEVICE` で変更可）、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。`simslim` (`brew install mobai-app/tap/simslim`) 導入時は open 時に自動 slim されメモリが ~4x 削減される（`SIMSLIM=0` で無効化）。
 - **検証終了時は必ず `./scripts/sim-teardown.sh` を実行して CPU 監査に合格させること**（sim shutdown + Clone 削除 + 残留 diagnose/idb 整理を一括。`--dev-env <name>` で検証用 dev 環境の down まで）。`simctl shutdown` だけでは孤児化した診断・runtime プロセスが残りホスト CPU を食い潰すことがある。xcodebuild test を使った検証は終了まで poll してから片付けること。詳細: `.claude/skills/ios-simulator/references/teardown.md`。
 - **ネイティブアプリの実機デプロイは `./scripts/ios-device-deploy.sh`**（paired iPhone へ build → install → launch を一括。`--udid`/`--release`/`--no-launch`/`DEVICE_UDID`）。詳細は `.claude/skills/ios-device-deploy/SKILL.md`。`DEVELOPMENT_TEAM` は pbxproj 記載済みで override 不要。
-- **iOS の単体+UI テストは `.github/workflows/ios.yml` が `macos-latest` で実行**（`BookqTests` + `BookqUITests`、TEST_MODE 合成サーバー + シミュレータ）。ローカル再現は `.github/scripts/ios-ui-test.sh`（サーバー起動は各自）。`CODE_SIGNING_ALLOWED=NO` は禁止 — 署名なしアプリは Keychain 書き込みが失敗し AuthManagerTests が落ちる。詳細は `docs/ios-app.md` テスト節。
+- **iOS の単体+UI テストは `.github/workflows/ios.yml` が `xcode-27` イメージ（iOS 27 SDK 搭載 preview runner）で実行**（`BookqTests` + `BookqUITests`、TEST_MODE 合成サーバー + シミュレータ）。ローカル再現は `.github/scripts/ios-ui-test.sh`（サーバー起動は各自）。`CODE_SIGNING_ALLOWED=NO` は禁止 — 署名なしアプリは Keychain 書き込みが失敗し AuthManagerTests が落ちる。詳細は `docs/ios-app.md` テスト節。
 
 ### Android (`android/`)
 

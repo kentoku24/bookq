@@ -82,29 +82,44 @@ if [ -z "$UDID" ]; then
   # iPhone type (iPhone 17 preferred — closest to the iPhone 13/18
   # class the suite was validated on; layout tests use identifiers and
   # proportional tap zones, so the exact model is not load-bearing).
-  read -r UDID DEVNAME < <(python3 - "$DEVICE_NAME" <<'PY'
+  # Command substitution (not `read < <(...)`): process-substitution +
+  # heredoc mis-parses `{` in the body as an unterminated substitution
+  # on bash — "bad substitution: no closing ')'" — and swallows the
+  # python exit status. $( ) propagates it instead.
+  SIMINFO="$(python3 - "$DEVICE_NAME" <<'PY'
 import json, re, subprocess, sys
 name = sys.argv[1]
 runtimes = json.loads(subprocess.check_output(
     ["xcrun", "simctl", "list", "runtimes", "-j"]))["runtimes"]
-ios = [r for r in runtimes if "iOS" in r.get("name", "")]
 def rt_key(r):
     m = re.search(r"(\d+)\.(\d+)", r.get("version", ""))
     return (int(m.group(1)), int(m.group(2))) if m else (-1, -1)
-runtime = sorted(ios, key=rt_key, reverse=True)[0]["identifier"]
+# Xcode 27 images also ship per-device runtime variants
+# (…SimRuntime.iOS-27-2-iPhone19-4) which only accept their paired
+# device model — prefer the generic iOS-N-N runtime; fall back to any.
+generic = [r for r in runtimes
+           if re.match(r".*SimRuntime\.iOS-\d+-\d+$",
+                       r.get("identifier", ""))]
+ios = generic or [r for r in runtimes if "iOS" in r.get("name", "")]
+runtime = sorted(ios, key=rt_key, reverse=True)[0]
 types = json.loads(subprocess.check_output(
     ["xcrun", "simctl", "list", "devicetypes", "-j"]))["devicetypes"]
-iphones = [t for t in types if t["name"].startswith("iPhone")]
+supported = {d["identifier"]
+             for d in runtime.get("supportedDeviceTypes", [])}
+iphones = [t for t in types if t["name"].startswith("iPhone")
+           and (not supported or t["identifier"] in supported)]
 iphones.sort(key=lambda t: t["name"], reverse=True)
 # Prefer a 15+ generation device for a modern screen; fall back to any.
 pick = next((t for t in iphones
              if re.match(r"iPhone (1[5-9]|2\d)", t["name"])), iphones[0])
 udid = subprocess.check_output(
-    ["xcrun", "simctl", "create", name, pick["identifier"], runtime],
+    ["xcrun", "simctl", "create", name, pick["identifier"],
+     runtime["identifier"]],
     text=True).strip()
 print(udid, pick["name"])
 PY
-) || { echo "ERROR: could not create simulator"; exit 1; }
+)" || { echo "ERROR: could not create simulator"; exit 1; }
+  read -r UDID DEVNAME <<<"$SIMINFO"
   DEVNAME="$DEVICE_NAME ($DEVNAME)"
 fi
 
