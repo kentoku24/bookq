@@ -228,6 +228,17 @@ def _suppress_embed(vpage):
         "{configurable:true,get(){return null;},set(v){}})")
 
 
+def _pin_online(vpage):
+    """Land Connectivity in 'online' deterministically. The real 4s×3
+    health-probe cycle can exhaust under CI load and park the state machine
+    at offline with no auto-retry — which fail-opens the visibility gates
+    (spec §9) and lets an 'offline' transition drain pending navs as
+    denied. The test server is reachable; reportSuccess is the same
+    verdict a real response produces (a no-op when already online)."""
+    vpage.evaluate(
+        "window.Connectivity && window.Connectivity.reportSuccess()")
+
+
 def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     """While the first visibility GET is outstanding the grid must never
     paint an unfiltered list — release converges to the filtered grid.
@@ -243,6 +254,7 @@ def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     # The loading gate can fail-open while Connectivity is still offline
     # (spec §9 — DL filter is the only one): under slow CI the fixed 300ms
     # samples the open window. Converge on online + empty grid instead.
+    _pin_online(vpage)
     vpage.wait_for_function(
         "window.Connectivity && window.Connectivity.state === 'online' && "
         "document.querySelectorAll('#tile-grid .tile').length === 0")
@@ -266,6 +278,7 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
     assert _wait_held(held), "visibility GET was never issued"
     # Same offline fail-open window as the loading gate: wait for
     # connectivity + empty grid to converge instead of a fixed timeout.
+    _pin_online(vpage)
     vpage.wait_for_function(
         "window.Connectivity && window.Connectivity.state === 'online' && "
         "document.querySelectorAll('#tile-grid .tile').length === 0")
@@ -283,7 +296,11 @@ def test_loading_queues_view_url_then_applies(vpage, vis_env):
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/view/keep_a?p=0")
     assert _wait_held(held), "visibility GET was never issued"
-    vpage.wait_for_timeout(300)
+    # An 'offline' connectivity transition drains the queued view open as
+    # denied (spec §2) — pin online so the nav stays queued until release.
+    _pin_online(vpage)
+    vpage.wait_for_function(
+        "window.Connectivity && window.Connectivity.state === 'online'")
     assert vpage.evaluate("location.hash").startswith("#/view/keep_a")
     assert vpage.evaluate("window.currentFolder || null") is None
     for r in list(held):
@@ -294,14 +311,16 @@ def test_loading_queues_view_url_then_applies(vpage, vis_env):
 def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
     """GET failure with no snapshot: the grid renders the error gate (never
     an unfiltered list) and its retry converges to the filtered grid."""
-    calls = {"n": 0}
+    allow = {"ok": False}
 
     def handler(route):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            route.fulfill(status=500, content_type="application/json", body="{}")
-        else:
+        # Keep failing until the retry click is armed: connectivity-driven
+        # background refreshes must not race a success in ahead of the gate
+        # assertion and replace it with a real grid.
+        if allow["ok"]:
             route.fallback()
+        else:
+            route.fulfill(status=500, content_type="application/json", body="{}")
 
     vpage.route("**/api/v1/folder-visibility", handler)
     _drop_vis_snapshot(vpage)
@@ -310,10 +329,13 @@ def test_error_state_gates_grid_and_retry_recovers(vpage, vis_env):
     vpage.wait_for_function("window.FolderVisibility.readyState === 'error'")
     # readyState alone doesn't imply the gate: while Connectivity is still
     # offline the grid fail-opens (spec §9 — the DL filter is the only one)
-    # and the retry gate lands on the connectivity-change re-render. Wait
-    # for the gate DOM itself rather than sampling after a fixed timeout.
+    # and the retry gate lands on the connectivity-change re-render. The
+    # health probe can exhaust its 4s×3 budget under CI load and park the
+    # state machine at offline permanently, so land it online explicitly.
+    _pin_online(vpage)
     vpage.wait_for_selector("#tile-grid .fv-grid-retry")
     assert vpage.locator("#tile-grid .tile").count() == 0
+    allow["ok"] = True
     vpage.click("#tile-grid .fv-grid-retry")
     vpage.wait_for_selector("#tile-grid .tile")
     assert "keep_a" in vpage.locator("#tile-grid .tile").evaluate_all(
@@ -356,6 +378,7 @@ def test_pending_browse_restore_keeps_list_mode(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series?v=list")
     assert _wait_held(held), "visibility GET was never issued"
+    _pin_online(vpage)
     for r in list(held):
         r.fallback()
     vpage.wait_for_function(
@@ -397,6 +420,7 @@ def test_pending_nav_last_write_wins(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
+    _pin_online(vpage)
     vpage.wait_for_function("() => window.FolderVisibility"
                             " && window.FolderVisibility.readyState === 'loading'")
     vpage.evaluate("window.loadImages('keep_a')")
@@ -415,6 +439,7 @@ def test_pending_nav_last_write_wins_view(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
+    _pin_online(vpage)
     vpage.wait_for_function("() => window.FolderVisibility"
                             " && window.FolderVisibility.readyState === 'loading'")
     vpage.evaluate("window.navigateToFolder('hide_series')")
