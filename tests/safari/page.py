@@ -497,6 +497,15 @@ class SafariPage:
             self._driver.delete_all_cookies()
             self._driver.get(url)
         self._touch_installed = False
+        if self._init_scripts or self._ctx._init_scripts:
+            # Init-script storage side-effects (stash bridges, seeds) must
+            # exist before the app's boot scripts read them — run them once
+            # on the just-loaded document, then re-navigate so the app
+            # boots against that state. window-global mocks die with the
+            # document but _install_shims re-injects + attaches post-load.
+            for js in (*self._ctx._init_scripts, *self._init_scripts):
+                self._inject(js)
+            self._driver.get(url)
         self._install_shims()
         if "#" in url and (self._init_scripts or self._ctx._init_scripts):
             # One-shot hash deep links (e.g. #/join/<code>) are consumed
