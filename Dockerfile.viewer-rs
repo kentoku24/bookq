@@ -46,8 +46,16 @@ FROM debian:bookworm-slim
 # pdfium-render `pdfium_latest` release (8125). Size: tarball ~3.8MB,
 # installed libpdfium.so ~7.7MB.
 ARG PDFIUM_VERSION=8125
+# TARGETARCH: buildx のビルドプラットフォーム（prod ホストは ARM64 — x64
+# 固定だと bind 不能で render が proxy 落ちする latent bug だった #456）。
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 ca-certificates curl \
-    && curl -sSL -o /tmp/pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/${PDFIUM_VERSION}/pdfium-linux-x64.tgz" \
+    && case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+         amd64) pdfium_arch=x64 ;; \
+         arm64) pdfium_arch=arm64 ;; \
+         *) echo "unsupported arch for pdfium: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+       esac \
+    && curl -sSL -o /tmp/pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/${PDFIUM_VERSION}/pdfium-linux-${pdfium_arch}.tgz" \
     && mkdir -p /tmp/pdfium && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium \
     && cp /tmp/pdfium/lib/libpdfium.so /usr/local/lib/ && ldconfig \
     && rm -rf /tmp/pdfium.tgz /tmp/pdfium \
