@@ -339,16 +339,17 @@ paths:
         - name: Range
           in: header
           schema: {type: string, pattern: '^bytes='}
+          description: 単一 Range のみ (`bytes=start-end` / `bytes=start-` / `bytes=-N`)。複数 Range (`bytes=0-99,200-299`) は契約外で 200 フルとして応答する (#403)。
         - name: If-None-Match
           in: header
           schema: {type: string}
       responses:
         "200":
-          description: 画像バイナリ
+          description: 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない #403)
           content:
             image/*:
               schema: {type: string, format: binary}
-        "206": {description: Range レスポンス}
+        "206": {description: 単一 Range レスポンス}
         "304": {description: ETag 一致}
         "400":
           description: |

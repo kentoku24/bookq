@@ -276,6 +276,7 @@ export interface paths {
         /**
          * [v0] GET /api/v1/tree を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyGetFolders"];
         put?: never;
@@ -296,6 +297,7 @@ export interface paths {
         /**
          * [v0] 素配列を返す旧版。GET /api/v1/images を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyListImages"];
         put?: never;
@@ -316,6 +318,7 @@ export interface paths {
         /**
          * [v0] GET /api/v1/search を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacySearch"];
         put?: never;
@@ -336,6 +339,7 @@ export interface paths {
         /**
          * [v0] GET /api/v1/facets を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyFacets"];
         put?: never;
@@ -358,6 +362,7 @@ export interface paths {
         /**
          * [v0] POST /api/v1/index/refresh を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         post: operations["legacyRefresh"];
         delete?: never;
@@ -376,6 +381,7 @@ export interface paths {
         /**
          * [v0] GET /api/v1/health を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyHealth"];
         put?: never;
@@ -396,6 +402,7 @@ export interface paths {
         /**
          * [v0] GET /api/v1/version を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyVersion"];
         put?: never;
@@ -416,6 +423,7 @@ export interface paths {
         /**
          * [v0] GET /api/v1/thumb-sprite を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyThumbSprite"];
         put?: never;
@@ -436,17 +444,20 @@ export interface paths {
         /**
          * [v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyGetReadingPosition"];
         /**
          * [v0] newest-ts-wins 単一レコード
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         put: operations["legacyPutReadingPosition"];
         post?: never;
         /**
          * [v0] 最新レコードの消去
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         delete: operations["legacyDeleteReadingPosition"];
         options?: never;
@@ -464,11 +475,13 @@ export interface paths {
         /**
          * [v0] GET /api/v1/folder-visibility を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         get: operations["legacyGetFolderVisibility"];
         /**
          * [v0] PUT /api/v1/folder-visibility を使う
          * @deprecated
+         * @description v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。方針は info.description「v0 退役方針」。
          */
         put: operations["legacyPutFolderVisibility"];
         post?: never;
@@ -881,6 +894,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: {
+                /** @description 単一 Range のみ (`bytes=start-end` / `bytes=start-` / `bytes=-N`)。複数 Range (`bytes=0-99,200-299`) は契約外で 200 フルとして応答する (#403)。 */
                 Range?: string;
                 "If-None-Match"?: string;
             };
@@ -895,7 +909,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 画像バイナリ */
+            /** @description 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -904,7 +918,7 @@ export interface operations {
                     "image/*": string;
                 };
             };
-            /** @description Range レスポンス */
+            /** @description 単一 Range レスポンス */
             206: {
                 headers: {
                     [name: string]: unknown;
