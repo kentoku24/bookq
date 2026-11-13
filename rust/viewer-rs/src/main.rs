@@ -813,7 +813,8 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
 
 /// `/view/{*path}` — passthrough formats serve natively; normalized
 /// formats answer shared-cache hits and render misses in-process;
-/// undecodable/unreachable sources still proxy.
+/// undecodable/unreachable sources still proxy. `?w=<px>` opts into the
+/// normalized fast-tier branch at that width (#440).
 async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
         return proxy(&st.upstream, req).await;
@@ -827,13 +828,18 @@ async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response 
     let Ok(path) = percent_decode_str(raw).decode_utf8() else {
         return proxy(&st.upstream, req).await;
     };
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
     let headers = req.headers().clone();
     let downloads = st.downloads.clone();
     let cache = st.thumb_cache.clone();
     let path = path.into_owned();
-    let out = tokio::task::spawn_blocking(move || thumbs::view(&downloads, &cache, &path, &headers))
-        .await
-        .unwrap_or(serve::Serve::Proxy);
+    let out = tokio::task::spawn_blocking(move || {
+        thumbs::view(&downloads, &cache, &path, q.get("w"), &headers)
+    })
+    .await
+    .unwrap_or(serve::Serve::Proxy);
     match out {
         serve::Serve::Proxy => proxy(&st.upstream, req).await,
         serve::Serve::Done(res) => res, // /view is outside the gzip prefixes

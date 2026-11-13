@@ -418,9 +418,10 @@ fn make_thumb(data: &[u8], width: i64) -> Option<Vec<u8>> {
     jpeg_encode(&im, JPEG_QUALITY)
 }
 
-/// `make_view_bytes`: ≤2560-wide JPEG q85; alpha flatten onto white, `L`
-/// kept grayscale (same mode rules as Pillow).
-fn make_view(data: &[u8]) -> Option<Vec<u8>> {
+/// `make_view_bytes`: ≤`max_width`-wide JPEG q85; alpha flatten onto
+/// white, `L` kept grayscale (same mode rules as Pillow). `?w=` fast-tier
+/// requests pass their clamped width; the default is `VIEW_MAX_WIDTH`.
+fn make_view(data: &[u8], max_width: u32) -> Option<Vec<u8>> {
     let im = load_oriented(data)?;
     // Pillow resizes RGBA premultiplied — compositing onto white FIRST is
     // the same linear operation (flat = premult + (1-a)·white), avoids the
@@ -431,7 +432,7 @@ fn make_view(data: &[u8]) -> Option<Vec<u8>> {
     } else {
         im
     };
-    let im = thumbnail_box(im, VIEW_MAX_WIDTH, VIEW_MAX_WIDTH.saturating_mul(4));
+    let im = thumbnail_box(im, max_width, max_width.saturating_mul(4));
     jpeg_encode(&im, VIEW_JPEG_QUALITY)
 }
 
@@ -632,17 +633,49 @@ const VIEW_PASSTHROUGH: [(&str, &str); 4] = [
     (".gif", "image/gif"),
 ];
 
+/// `VIEW_WIDTH_MIN`/`VIEW_WIDTH_MAX` — Python `normalize_view_width`'s
+/// clamps (`app/thumbs.py`): anything outside clamps rather than 422s so
+/// odd clients degrade gracefully.
+const VIEW_WIDTH_MIN: i64 = 240;
+const VIEW_WIDTH_MAX: i64 = 4096;
+
+/// `normalize_view_width` — `?w=` → clamped pixel width, or None when
+/// absent/invalid. None keeps the historical behaviour (passthrough /
+/// 2560 cap); a valid width forces the normalized branch so readers can
+/// fetch a small fast-tier rendition of any source format (#440).
+fn normalize_view_width(raw: Option<&String>) -> Option<u32> {
+    // Python `int(raw)`: leading/trailing whitespace and `+` accepted;
+    // floats/exponents rejected. Rust i64 parse matches that surface.
+    let w: i64 = raw?.trim().parse().ok()?;
+    Some(w.clamp(VIEW_WIDTH_MIN, VIEW_WIDTH_MAX) as u32)
+}
+
+fn view_etag_w(mtime: f64, size: f64, wtag: &str, digest: &str) -> String {
+    format!(
+        "\"{}-{}-view-{wtag}-{}\"",
+        fmt_mtime(mtime),
+        fmt_mtime(size),
+        &digest[..16]
+    )
+}
+
 /// `handle_view` — passthrough types serve original bytes natively;
 /// normalized types hit the shared `view/` cache; misses render
-/// in-process with upstream fallback.
-pub fn view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap) -> Serve {
+/// in-process with upstream fallback. `?w=<px>` opts into the normalized
+/// branch at that width — the fast-tier rendition mobile readers use
+/// while flip-through is in flight (iOS `BookqAPI.swift`; #440).
+pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Serve {
     let suffix = suffix_lower(Path::new(path));
+    let width = normalize_view_width(w);
     let passthrough = VIEW_PASSTHROUGH
         .iter()
         .find(|(s, _)| *s == suffix)
         .map(|(_, m)| *m);
     let is_svg = suffix == ".svg";
-    if passthrough.is_some() || is_svg {
+    // SVG scales natively in every client — never worth a re-encode, so
+    // it passes through even when ?w= asks for a size. Passthrough types
+    // also pass through ONLY with no valid w — ?w= is the fast-tier opt-in.
+    if is_svg || (width.is_none() && passthrough.is_some()) {
         let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
             Ok(x) => x,
             Err(res) => return Serve::Done(res),
@@ -670,14 +703,21 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap) -> 
         Ok(x) => x,
         Err(res) => return Serve::Done(res),
     };
-    let digest = sha1hex(&key);
-    let etag = view_etag(mtime, size, &digest);
+    // Width is part of the cache identity: the same source serves the
+    // 2560 default rendition and any ?w= fast-tier size side by side.
+    let cache_key = match width {
+        Some(w) => format!("{key}|w{w}"),
+        None => key,
+    };
+    let wtag = width.map_or("full".to_string(), |w| w.to_string());
+    let digest = sha1hex(&cache_key);
+    let etag = view_etag_w(mtime, size, &wtag, &digest);
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
     }
     let dest = cache.join("view").join(format!("{digest}.jpg"));
     if !dest.is_file() {
-        return generate_view(downloads, cache, path, headers);
+        return generate_view(downloads, cache, path, width, headers);
     }
     let body = match std::fs::read(&dest) {
         Ok(b) => b,
@@ -690,7 +730,7 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap) -> 
 /// re-derive etag/dest → recheck the cache → `make_view_bytes` →
 /// `_store_thumb`. Sources only upstream can reach (rar/pdf) and decodes
 /// the `image` crate can't handle still proxy.
-fn generate_view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap) -> Serve {
+fn generate_view(downloads: &Path, cache: &Path, path: &str, width: Option<u32>, headers: &HeaderMap) -> Serve {
     if !native_decodable(path) {
         return Serve::Proxy; // e.g. .avif — decode would fail after the read
     }
@@ -700,8 +740,13 @@ fn generate_view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap
     }) else {
         return Serve::Proxy;
     };
-    let digest = sha1hex(&key);
-    let etag = view_etag(mtime, size, &digest);
+    let cache_key = match width {
+        Some(w) => format!("{key}|w{w}"),
+        None => key,
+    };
+    let wtag = width.map_or("full".to_string(), |w| w.to_string());
+    let digest = sha1hex(&cache_key);
+    let etag = view_etag_w(mtime, size, &wtag, &digest);
     if archive_not_modified(headers, &etag, mtime) {
         return Serve::Done(not_modified());
     }
@@ -715,7 +760,7 @@ fn generate_view(downloads: &Path, cache: &Path, path: &str, headers: &HeaderMap
         let Ok(_permit) = GEN_PERMITS.blocking_acquire() else {
             return Serve::Proxy;
         };
-        let Some(body) = make_view(&data) else {
+        let Some(body) = make_view(&data, width.unwrap_or(VIEW_MAX_WIDTH)) else {
             return Serve::Proxy;
         };
         store_cached(&dest, &body);
@@ -1219,7 +1264,7 @@ mod tests {
         image::DynamicImage::ImageRgba8(im)
             .write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
             .unwrap();
-        let jpg = make_view(&src).unwrap();
+        let jpg = make_view(&src, VIEW_MAX_WIDTH).unwrap();
         let (w, h) = jpeg_dims(&jpg);
         assert_eq!((w, h), (2560, 1920));
         let decoded = image::load_from_memory(&jpg).unwrap().to_rgb8();
@@ -1426,7 +1471,7 @@ mod tests {
         let h = HeaderMap::new();
         for name in ["a.tiff", "b.heic", "c.jxl"] {
             assert!(matches!(thumb(&dl, &cache, name, None, &h), Serve::Proxy), "{name} thumb");
-            assert!(matches!(view(&dl, &cache, name, &h), Serve::Proxy), "{name} view");
+            assert!(matches!(view(&dl, &cache, name, None, &h), Serve::Proxy), "{name} view");
         }
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
@@ -1456,7 +1501,7 @@ mod tests {
             .unwrap();
         std::fs::write(dl.join("c.bmp"), src).unwrap();
         let h = HeaderMap::new();
-        let res = view(&dl, &cache, "c.bmp", &h);
+        let res = view(&dl, &cache, "c.bmp", None, &h);
         let Serve::Done(r) = res else { panic!("expected Done") };
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "image/jpeg");
@@ -1465,6 +1510,169 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    // ── #440: `/view?w=` fast-tier parity with `app/thumbs.py` ──────────
+
+    fn body_vec(s: Serve) -> (StatusCode, HeaderMap, Vec<u8>) {
+        use http_body_util::BodyExt;
+        match s {
+            Serve::Done(r) => {
+                let status = r.status();
+                let headers = r.headers().clone();
+                let bytes = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(r.into_body().collect())
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec();
+                (status, headers, bytes)
+            }
+            Serve::Proxy => panic!("expected Done, got Proxy"),
+        }
+    }
+
+    fn jpg_rgb(w: u32, h: u32, px: [u8; 3]) -> Vec<u8> {
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb(px)))
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Jpeg)
+            .unwrap();
+        out
+    }
+
+    /// `normalize_view_width` — Python's `int()`-then-clamp contract:
+    /// absent/invalid → None, valid ints clamp into [240, 4096].
+    #[test]
+    fn view_width_normalizes_like_python() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(normalize_view_width(None), None);
+        assert_eq!(normalize_view_width(s("400").as_ref()), Some(400));
+        assert_eq!(normalize_view_width(s(" 400 ").as_ref()), Some(400)); // int() strips ws
+        assert_eq!(normalize_view_width(s("+400").as_ref()), Some(400));
+        assert_eq!(normalize_view_width(s("100").as_ref()), Some(240));
+        assert_eq!(normalize_view_width(s("9999").as_ref()), Some(4096));
+        for bad in ["", "abc", "400.5", "4e2", "0x10", "1_0"] {
+            assert_eq!(normalize_view_width(s(bad).as_ref()), None, "{bad:?} invalid");
+        }
+    }
+
+    /// `?w=<valid>` forces the normalized branch even on passthrough
+    /// formats: a JPEG source comes back re-encoded at the requested
+    /// width with the width-tagged etag and a w-keyed cache file.
+    #[test]
+    fn view_w_forces_normalized_jpeg() {
+        let (dl, cache) = tmp_dirs("vw1");
+        std::fs::write(dl.join("p.jpg"), jpg_rgb(1200, 800, [30, 60, 90])).unwrap();
+        let h = HeaderMap::new();
+        let w400 = "400".to_string();
+        let (status, headers, body) =
+            body_vec(view(&dl, &cache, "p.jpg", Some(&w400), &h));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
+        let etag = headers[header::ETAG].to_str().unwrap();
+        assert!(etag.contains("-view-400-"), "etag {etag} carries the width tag");
+        assert_eq!(jpeg_dims(&body), (400, 267));
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Absent or invalid `?w=` keeps passthrough formats on the
+    /// original-bytes path — the untagged etag and byte-identical body.
+    #[test]
+    fn view_invalid_w_stays_passthrough() {
+        let (dl, cache) = tmp_dirs("vw2");
+        let src = jpg_rgb(1200, 800, [30, 60, 90]);
+        std::fs::write(dl.join("p.jpg"), &src).unwrap();
+        let (bad1, bad2) = ("abc".to_string(), "400.5".to_string());
+        for w in [None, Some(&bad1), Some(&bad2)] {
+            let (_status, headers, body) =
+                body_vec(view(&dl, &cache, "p.jpg", w, &HeaderMap::new()));
+            assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
+            let etag = headers[header::ETAG].to_str().unwrap();
+            assert!(!etag.contains("-view-400-") && etag.matches('-').count() == 3,
+                "passthrough etag {etag} has no width tag");
+            assert_eq!(body, src);
+            assert!(!cache.join("view").exists(), "no rendition cached for {w:?}");
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// SVG passes through even with a valid `?w=` — it scales client-side.
+    #[test]
+    fn view_svg_passes_through_with_w() {
+        let (dl, cache) = tmp_dirs("vw3");
+        let svg = b"<svg xmlns=\"x\"/>";
+        std::fs::write(dl.join("i.svg"), svg).unwrap();
+        let w800 = "800".to_string();
+        let (_status, headers, body) =
+            body_vec(view(&dl, &cache, "i.svg", Some(&w800), &HeaderMap::new()));
+        assert_eq!(headers[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(body, svg);
+        assert!(!cache.join("view").exists());
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Each width is its own cache identity + etag, and the w-tagged etag
+    /// answers If-None-Match with 304 — matching Python's `|w<width>`
+    /// cache-key suffix and `-view-<wtag>-` etag segment.
+    #[test]
+    fn view_w_keys_cache_and_etag() {
+        let (dl, cache) = tmp_dirs("vw4");
+        std::fs::write(dl.join("p.png"), png_rgb(900, 600, [7, 7, 7])).unwrap();
+        let (w400, w800) = ("400".to_string(), "800".to_string());
+        let mut etags = Vec::new();
+        for w in [&w400, &w800] {
+            let Serve::Done(r) = view(&dl, &cache, "p.png", Some(w), &HeaderMap::new())
+            else { panic!("expected Done") };
+            etags.push(r.headers()[header::ETAG].to_str().unwrap().to_string());
+        }
+        assert_ne!(etags[0], etags[1], "widths must not share an etag");
+        assert!(etags[0].contains("-view-400-") && etags[1].contains("-view-800-"));
+        assert_eq!(
+            std::fs::read_dir(cache.join("view")).unwrap().count(),
+            2,
+            "each width lands its own cache file"
+        );
+        // Conditional re-request on the w400 rendition → 304.
+        let mut h = HeaderMap::new();
+        h.insert(header::IF_NONE_MATCH, etags[0].parse().unwrap());
+        let Serve::Done(r) = view(&dl, &cache, "p.png", Some(&w400), &h)
+        else { panic!("expected Done") };
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Clamped widths tag the etag with the CLAMPED value (Python clamps
+    /// before keying, so `w=100` and `w=240` share one rendition).
+    #[test]
+    fn view_w_clamps_before_keying() {
+        let (dl, cache) = tmp_dirs("vw5");
+        std::fs::write(dl.join("p.png"), png_rgb(900, 600, [7, 7, 7])).unwrap();
+        let (w100, w240) = ("100".to_string(), "240".to_string());
+        let Serve::Done(r100) = view(&dl, &cache, "p.png", Some(&w100), &HeaderMap::new())
+        else { panic!("expected Done") };
+        let e100 = r100.headers()[header::ETAG].to_str().unwrap().to_string();
+        assert!(e100.contains("-view-240-"), "etag {e100} carries the clamped width");
+        let Serve::Done(r240) = view(&dl, &cache, "p.png", Some(&w240), &HeaderMap::new())
+        else { panic!("expected Done") };
+        assert_eq!(
+            r240.headers()[header::ETAG].to_str().unwrap(),
+            e100,
+            "clamped inputs share the rendition"
+        );
+        assert_eq!(std::fs::read_dir(cache.join("view")).unwrap().count(), 1);
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `make_view` honours a requested width: same 4x-height box, same
+    /// q85 jpeg — only the bounding width changes.
+    #[test]
+    fn make_view_renders_requested_width() {
+        let src = png_rgb(1200, 800, [11, 22, 33]);
+        assert_eq!(jpeg_dims(&make_view(&src, 400).unwrap()), (400, 267));
+        // Never upscale, same as Pillow `thumbnail`.
+        assert_eq!(jpeg_dims(&make_view(&src, 4096).unwrap()), (1200, 800));
     }
 
     /// Premultiplied resize: a transparent→opaque boundary must composite
@@ -1484,7 +1692,7 @@ mod tests {
         image::DynamicImage::ImageRgba8(im)
             .write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
             .unwrap();
-        let jpg = make_view(&src).unwrap();
+        let jpg = make_view(&src, VIEW_MAX_WIDTH).unwrap();
         let dec = image::load_from_memory(&jpg).unwrap().to_rgb8();
         // Lanczos ringing makes any single edge pixel unreliable — compare
         // the MEAN over the boundary band: flatten-first keeps red ~255,
