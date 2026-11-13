@@ -1042,6 +1042,8 @@ mod tests {
             .unwrap();
         let out = maybe_gzip(&hdrs(&[("accept-encoding", "br, xgzip")]), res, true).await;
         assert_eq!(out.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
+    }
+
     // ── native PDF read-path (#402) ──────────────────────────────────────────
 
     /// Minimal 2-page PDF with a valid xref (lopdf-parseable, like real files).
