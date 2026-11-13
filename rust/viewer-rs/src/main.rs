@@ -43,7 +43,44 @@ mod tree;
 #[derive(Clone)]
 struct Upstream {
     client: Client<HttpConnector, Body>,
-    authority: hyper::http::uri::Authority,
+    /// `None` = upstream-absent mode (#408): fall-through requests are
+    /// answered locally (501 / 401) instead of 502ing on a connection
+    /// that cannot exist. The old implicit `http://viewer:8080` default
+    /// was removed — an absent upstream is now an explicit posture, so a
+    /// cutover host that forgets the env fails closed, not silently.
+    authority: Option<hyper::http::uri::Authority>,
+}
+
+/// `BOOKQ_UPSTREAM` unset/empty, or `BOOKQ_RS_NO_UPSTREAM` truthy → no
+/// upstream. `NO_UPSTREAM` wins over a set `BOOKQ_UPSTREAM` so the
+/// baked-in `ENV` line in the image doesn't have to be rebuilt to
+/// disable the fallback.
+fn upstream_authority(
+    var: Option<String>,
+    no_upstream: bool,
+) -> Option<hyper::http::uri::Authority> {
+    if no_upstream {
+        return None;
+    }
+    let var = var.filter(|v| !v.trim().is_empty())?;
+    Some(
+        var.strip_prefix("http://")
+            .unwrap_or(&var)
+            .parse()
+            .expect("BOOKQ_UPSTREAM must be http://host[:port]"),
+    )
+}
+
+/// Shared "1/true/yes" env-flag parser (same surface as `native_strict`).
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    )
 }
 
 /// Which native surfaces are live. `BOOKQ_TEST_MODE=true` enables every
@@ -129,14 +166,27 @@ impl Native {
 /// failure, so a cutover runbook can gate on "the gateway refused a split
 /// configuration" instead of grepping logs.
 fn native_strict() -> bool {
-    matches!(
-        std::env::var("BOOKQ_RS_NATIVE_STRICT")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    )
+    env_flag("BOOKQ_RS_NATIVE_STRICT")
+}
+
+/// Every gate id the native surface recognizes. With no upstream, any
+/// disabled gate can only answer 501 — `BOOKQ_RS_NATIVE_STRICT` uses
+/// this list to refuse booting a no-upstream gateway that isn't fully
+/// native (#408).
+const ALL_NATIVE_GATES: [&str; 17] = [
+    "health", "version", "image", "images", "tree", "search", "facets",
+    "visibility", "positions", "thumb", "view", "thumb-sprite",
+    "refresh", "reader-sync", "shell", "static", "auth",
+];
+
+/// Gate ids not enabled in `native`. Non-empty + no upstream = requests
+/// on those routes can never be answered.
+fn missing_native_gates(native: &Native) -> Vec<&'static str> {
+    ALL_NATIVE_GATES
+        .iter()
+        .copied()
+        .filter(|g| !native.enabled(g))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -250,14 +300,33 @@ async fn forward(mut req: Request<Body>, st: &Upstream) -> Response {
 }
 
 async fn proxy(st: &Upstream, mut req: Request<Body>) -> Response {
+    let Some(authority) = st.authority.clone() else {
+        // #408: no upstream — the fallback must fail fast and observably,
+        // never hang or 502 on a connection that cannot exist.
+        tracing::warn!(path = %req.uri().path(), "no upstream configured: fallback answered 501");
+        return state::detail(StatusCode::NOT_IMPLEMENTED, "no upstream configured");
+    };
     let mut parts = req.uri().clone().into_parts();
     parts.scheme = Some("http".parse().expect("static scheme"));
-    parts.authority = Some(st.authority.clone());
+    parts.authority = Some(authority);
     match Uri::from_parts(parts) {
         Ok(uri) => *req.uri_mut() = uri,
         Err(e) => return bad_gateway(e),
     }
     forward(req, st).await
+}
+
+/// `caller_or_proxy`'s Delegate fallback: normally the request proxies so
+/// upstream can run its own cookie → Bearer → 401 chain. With no
+/// upstream there is nobody left to verify the caller — answer 401
+/// locally instead of the generic 501 (#408).
+async fn delegate_or_proxy(st: &AppState, req: Request<Body>) -> Response {
+    if st.upstream.authority.is_some() {
+        proxy(&st.upstream, req).await
+    } else {
+        tracing::info!(path = %req.uri().path(), "no upstream: unverifiable caller answered 401");
+        state::detail(StatusCode::UNAUTHORIZED, "authentication required")
+    }
 }
 
 /// Resolve the caller for a native route: unidentified requests (no
@@ -328,7 +397,7 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
         return proxy(&st.upstream, req).await;
     }
     let Some(user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     };
     // `user_key_for_email`: strip().lower() — an empty key is a 403, never
     // a shared bucket (same posture as the Python `_position_user_key`).
@@ -387,7 +456,7 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
         return proxy(&st.upstream, req).await;
     }
     let Some(user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     };
     // `user_key_for_email`: email.strip().lower()
     let key = user.email.trim().to_lowercase();
@@ -418,7 +487,7 @@ async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
@@ -436,7 +505,7 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
@@ -464,7 +533,7 @@ async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response 
     }
     // `_user` still gates auth upstream; hidden roots are library-global.
     let Some(_user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     };
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
@@ -484,7 +553,7 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
     }
     // `_user` still gates auth upstream; hidden roots are library-global.
     let Some(_user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     };
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
@@ -693,7 +762,7 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     // Key order is the wire contract: version, sha, build_date.
     let body = format!(
@@ -724,7 +793,7 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     let headers = req.headers().clone();
     match folders::force_rebuild(&st.index, &st.downloads).await {
@@ -755,7 +824,7 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
     // /image requires auth upstream too — only positively identified
     // callers may be served natively.
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     // The URI path is still percent-encoded; decode per-segment like
     // Starlette does (`%2F` inside a segment becomes "/" and is handled by
@@ -786,7 +855,7 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     let Some(raw) = req.uri().path().strip_prefix("/thumb/") else {
         return proxy(&st.upstream, req).await;
@@ -820,7 +889,7 @@ async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response 
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     let Some(raw) = req.uri().path().strip_prefix("/view/") else {
         return proxy(&st.upstream, req).await;
@@ -854,7 +923,7 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
         return proxy(&st.upstream, req).await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+        return delegate_or_proxy(&st, req).await;
     }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
@@ -1161,13 +1230,13 @@ async fn main() {
         )
         .init();
 
-    let upstream = std::env::var("BOOKQ_UPSTREAM").unwrap_or_else(|_| "http://viewer:8080".into());
+    // #408: `BOOKQ_UPSTREAM` unset/empty, or `BOOKQ_RS_NO_UPSTREAM` truthy
+    // → upstream-absent mode. The implicit `http://viewer:8080` default
+    // is gone — forgetting the env now fails closed instead of proxying
+    // to a backend that may not exist.
+    let no_upstream = env_flag("BOOKQ_RS_NO_UPSTREAM");
+    let authority = upstream_authority(std::env::var("BOOKQ_UPSTREAM").ok(), no_upstream);
     let bind = std::env::var("BOOKQ_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let authority: hyper::http::uri::Authority = upstream
-        .strip_prefix("http://")
-        .unwrap_or(&upstream)
-        .parse()
-        .expect("BOOKQ_UPSTREAM must be http://host[:port]");
     let downloads = PathBuf::from(std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/app/downloads".into()));
     // Canonicalize once — `is_within` treats this as the canonical base so
     // per-request checks canonicalize only the target path.
@@ -1195,6 +1264,26 @@ async fn main() {
         );
         std::process::exit(2);
     }
+    // #408: with no upstream, any gate left disabled can only answer 501.
+    // Warn in lenient mode; STRICT refuses to boot an incomplete surface —
+    // this is the "all-native startup" check a cutover runbook gates on.
+    if authority.is_none() {
+        let missing = missing_native_gates(&native);
+        if missing.is_empty() {
+            tracing::info!("no upstream configured — all gates native; fall-throughs answer 501/401 locally");
+        } else if native_strict() {
+            tracing::error!(
+                gates = ?missing,
+                "BOOKQ_RS_NATIVE_STRICT: no upstream but not all gates are native"
+            );
+            std::process::exit(2);
+        } else {
+            tracing::warn!(
+                gates = ?missing,
+                "no upstream configured — these gates will answer 501"
+            );
+        }
+    }
     let allowed_emails: std::sync::Arc<std::collections::HashSet<String>> =
         std::sync::Arc::new(
             std::env::var("ALLOWED_EMAILS")
@@ -1219,7 +1308,7 @@ async fn main() {
             }
             tracing::warn!(
                 missing = ?missing,
-                "auth gate enabled but OAuth config missing — /auth/* and /api/v1/auth/token stay proxied"
+                "auth gate enabled but OAuth config missing — /auth/* and /api/v1/auth/token stay proxied (501 with no upstream)"
             );
             None
         }
@@ -1234,6 +1323,7 @@ async fn main() {
     let state_dir = PathBuf::from(
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
+    let upstream_disp = authority.as_ref().map_or("none".to_string(), |a| a.to_string());
     let st = AppState {
         upstream: Upstream {
             client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
@@ -1324,7 +1414,7 @@ async fn main() {
         .with_state(st);
 
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");
-    tracing::info!(%addr, %upstream, "viewer-rs listening");
+    tracing::info!(%addr, upstream = %upstream_disp, "viewer-rs listening");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
     axum::serve(NoDelayListener(listener), app)
         .with_graceful_shutdown(async {
@@ -1383,6 +1473,64 @@ mod native_gate_tests {
         assert!(n.partial_groups().is_empty());
     }
 
+    // ── #408: upstream-absent mode ────────────────────────────────────
+
+    #[test]
+    fn upstream_authority_resolution_matrix() {
+        let some = |v: &str| Some(v.to_string());
+        // Unset or empty var → absent.
+        assert!(upstream_authority(None, false).is_none());
+        assert!(upstream_authority(some(""), false).is_none());
+        assert!(upstream_authority(some("   "), false).is_none());
+        // Set var (with or without the http:// prefix) → present.
+        assert!(upstream_authority(some("http://viewer:8080"), false).is_some());
+        assert!(upstream_authority(some("viewer:8080"), false).is_some());
+        // BOOKQ_RS_NO_UPSTREAM wins over a set var.
+        assert!(upstream_authority(some("http://viewer:8080"), true).is_none());
+        assert!(upstream_authority(None, true).is_none());
+    }
+
+    #[test]
+    fn missing_gates_lists_non_native_surface() {
+        // `all` covers every gate; an explicit list reports its holes.
+        assert!(missing_native_gates(&all_native()).is_empty());
+        let n = native(&["health", "view"]);
+        let missing = missing_native_gates(&n);
+        assert!(!missing.contains(&"health") && !missing.contains(&"view"));
+        assert!(missing.contains(&"tree") && missing.contains(&"auth"));
+        // Every compose-documented gate id must exist in the list — a
+        // route renamed without updating ALL_NATIVE_GATES fails here.
+        for g in ALL_NATIVE_GATES {
+            assert!(missing_native_gates(&native(&[])).contains(&g) || all_native().enabled(g));
+        }
+    }
+
+    /// Fallback with `authority: None` answers 501 — the observable,
+    /// logged substitute for a proxy hit that can never connect.
+    #[tokio::test]
+    async fn proxy_without_upstream_answers_501() {
+        let mut st = hook_state(false);
+        st.upstream.authority = None;
+        let res = proxy(&st.upstream, http_req("GET", "/api/folders", "")).await;
+        assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// An unverifiable caller gets 401 (not the generic 501) when there
+    /// is no upstream left to run its own auth chain — and still proxies
+    /// (→ 502 with nothing listening) when one is configured.
+    #[tokio::test]
+    async fn delegate_falls_back_to_401_without_upstream() {
+        let mut st = hook_state(false);
+        st.upstream.authority = None;
+        let res = delegate_or_proxy(&st, http_req("GET", "/api/v1/tree", "")).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        // With an upstream configured the same request takes the proxy
+        // path — 127.0.0.1:9 refuses the connection → 502, never 401.
+        st.upstream.authority = Some("127.0.0.1:9".parse().unwrap());
+        let res = delegate_or_proxy(&st, http_req("GET", "/api/v1/tree", "")).await;
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
     /// Minimal AppState for the test-hook handlers: nothing here touches
     /// the network (pair-report/reset are served from memory/the registry)
     /// or the filesystem (the SQLite stores are never consulted).
@@ -1400,7 +1548,7 @@ mod native_gate_tests {
         AppState {
             upstream: Upstream {
                 client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
-                authority: "127.0.0.1:9".parse().unwrap(),
+                authority: Some("127.0.0.1:9".parse().unwrap()),
             },
             downloads: dir.join("dl"),
             native: std::sync::Arc::new(Native::from_parts(test_mode, false, HashSet::new())),
