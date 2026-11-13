@@ -209,6 +209,9 @@ def swipe_root_icon(page) -> None:
     """The hidden entry/exit gesture: drag the root 📁 header icon to the
     right edge of the screen. Toggles full-display mode both ways."""
     icon = page.locator("#browse-root-icon")
+    # The icon renders after .tile does — under parallel CI load the
+    # bounding box can still be empty right after the grid paints.
+    icon.wait_for(state="visible", timeout=15000)
     box = icon.bounding_box()
     assert box, "#browse-root-icon has no box (not at browse root?)"
     vw = page.viewport_size["width"] if page.viewport_size else 1280

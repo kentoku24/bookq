@@ -115,12 +115,14 @@ def test_report_fail_demotes_and_budget_lands_offline(page, server):
     goto_offline(page, server)
     wait_for_sw(page)
     _wait_state(page, "online")
+    # Attach the recorder BEFORE the fetch stub: an in-flight app request
+    # can demote via rejected fetches ahead of our trigger — every
+    # transition after 'online' must be captured.
+    _record_conn(page)
     _reject_all_fetch(page)
     try:
-        _record_conn(page)
-        # revalidate() resolves after the probe fails and reportFail has
-        # demoted to connecting, so the transition is already recorded
-        # when the evaluate returns.
+        # revalidate() resolves after the probe fails and the machine has
+        # demoted, so all transitions are already recorded on return.
         page.evaluate("() => window.updateOnlineStatus()")
         # finite budget (3 attempts + backoff) then lands offline
         _wait_state(page, "offline", timeout=20000)
@@ -205,12 +207,14 @@ def test_report_success_lands_online_mid_cycle(page, server):
     goto_offline(page, server)
     wait_for_sw(page)
     _wait_state(page, "online")
+    _record_conn(page)
     _reject_all_fetch(page)
     try:
-        _record_conn(page)
         page.evaluate("() => window.updateOnlineStatus()")
         # Same transient-state race as the demote test: assert the recorded
-        # 'connecting' transition rather than racing a live poll.
+        # 'connecting' transition rather than racing a live poll. (A
+        # background request can drive the same demote — either way the
+        # machine must have passed through connecting.)
         assert "connecting" in [s["state"] for s in _conn_seq(page)], \
             "must pass through connecting after the rejected probe"
         # a real (non-SW-marked) response landing mid-cycle proves
@@ -250,16 +254,21 @@ def test_swcache_marked_response_is_not_online_evidence(page, server):
             };
         }"""
     )
+    _record_conn(page)
     try:
-        _record_conn(page)
         page.evaluate("() => window.Connectivity.fetch('/api/v1/tree').catch(()=>{})")
-        # Transient 'connecting' can outrun a live poll under CI load —
-        # assert the recorded transition (the marked ok demotes
-        # online→connecting inside the cfetch verdict).
-        assert "connecting" in [s["state"] for s in _conn_seq(page)], \
-            "SW-marked response must demote online→connecting"
+        # An in-flight app request can demote via the same stub before our
+        # fetch lands, absorbing the transition — the observable contract
+        # is that a marked response demotes (never confirms online), so
+        # wait for non-online rather than asserting who drove the demote.
+        # (Service-worker network legs can still land real 200s → legal
+        # mid-cycle online; only the marked response itself is tainted.)
+        page.wait_for_function(
+            "() => window.Connectivity.state !== 'online'", timeout=10000)
         # probes keep failing → the finite budget lands it in offline
         _wait_state(page, "offline", timeout=20000)
+        assert "connecting" in [s["state"] for s in _conn_seq(page)], \
+            "marked response must demote online→connecting"
     finally:
         page.evaluate("() => { if(window.__origMarked) window.fetch = window.__origMarked; }")
         page.evaluate("() => window.Connectivity && window.Connectivity.connect()")
