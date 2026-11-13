@@ -68,6 +68,9 @@ pub const END_REJECTED: &str = "rejected";
 pub const END_LEFT: &str = "left";
 pub const END_CODE_EXPIRED: &str = "code_expired";
 pub const END_RESUME_EXPIRED: &str = "resume_expired";
+/// `POST /api/v1/pair-reset` (#405) — the test hook ends every live session
+/// with this reason so a stale link-drop session can't hijack the next MATCH.
+pub const END_RESET: &str = "reset";
 #[allow(dead_code)]
 pub const END_SHUTDOWN: &str = "shutdown";
 
@@ -491,6 +494,32 @@ impl Registry {
     pub async fn detach_link(&self, link_id: &str) {
         let mut g = self.inner.lock().await;
         g.detach_link(link_id);
+    }
+
+    /// End every live session with `reason`, returning the count — the
+    /// native `POST /api/v1/pair-reset` (#405). A simulator client that went
+    /// idle by link-drop never LEAVEd, so its server-side session lingers in
+    /// the resume window and would hijack the next MATCH.
+    pub async fn end_all(&self, reason: &str) -> usize {
+        let sids: Vec<String> = {
+            self.inner
+                .lock()
+                .await
+                .sessions
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let n = sids.len();
+        for sid in sids {
+            self.inner.lock().await.end_session(&sid, reason);
+        }
+        n
+    }
+
+    /// Live session count (gateway tests assert reset empties the registry).
+    pub async fn session_count(&self) -> usize {
+        self.inner.lock().await.sessions.len()
     }
 
     /// Ticker task — runs every time-driven transition.
@@ -2454,6 +2483,27 @@ mod tests {
         let ack = next_json(&mut r2);
         assert_eq!(ack["type"], "ACK");
         assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn end_all_resets_every_live_session() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        assert_eq!(ack["type"], "ACK");
+        let _ = next_json(&mut r1); // STATE
+        drop(inner);
+        let n = reg.end_all(END_RESET).await;
+        assert_eq!(n, 1);
+        let end = next_json(&mut r1);
+        assert_eq!(end["type"], "END");
+        assert_eq!(end["reason"], END_RESET);
+        assert!(reg.inner.lock().await.sessions.is_empty());
+        // Nothing left to end.
+        assert_eq!(reg.end_all(END_RESET).await, 0);
     }
 }
 
