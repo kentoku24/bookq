@@ -83,6 +83,7 @@ import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -113,6 +114,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /** spread.js `GAP_INNER`. */
 private const val GAP_INNER_PX = 5f
+
+/** Programmatic turns animate with the web commitSwipeTurn curve —
+ *  .25s cubic-bezier(0.25,0.1,0.25,1). Beyond this many spreads the
+ *  turn snaps instead of peeling the whole distance. */
+private const val TURN_MS = 250
+private const val ANIMATE_TURN_MAX = 8
 
 /** Instrumentation hooks — the connected test reads zoom state
  *  directly from semantics instead of inferring it from page counters
@@ -287,6 +294,20 @@ private fun ReaderBody(
     var lastNavAt by remember { androidx.compose.runtime.mutableLongStateOf(0L) }
     var navJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
+    // User-initiated spread move — the stack-turn transition plays as a
+    // web-parity 250ms cubic-bezier(0.25,0.1,0.25,1) (commitSwipeTurn).
+    // Long jumps (overview pick / slider release) snap instead of
+    // peeling through the whole book for seconds.
+    suspend fun goToSpread(target: Int) {
+        if (abs(target - pager.currentPage) <= ANIMATE_TURN_MAX) {
+            pager.animateScrollToPage(
+                target,
+                animationSpec = tween(
+                    TURN_MS, easing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)),
+            )
+        } else pager.scrollToPage(target)
+    }
+
     fun turn(delta: Int, crossChapter: Boolean = true) {
         if (pager.pageCount == 0) return
         val base = pendingSpread ?: pager.settledPage
@@ -307,9 +328,8 @@ private fun ReaderBody(
         if (now - lastNavAt > 250) {
             lastNavAt = now
             pendingSpread = target
-            // Instant strip — plan: tap turns snap, no animation.
             navJob = compose.launch {
-                pager.scrollToPage(target)
+                goToSpread(target)
                 pendingSpread = null
                 PerfTrace.closePageTurnAfterFrame()
             }
@@ -320,7 +340,7 @@ private fun ReaderBody(
                 kotlinx.coroutines.delay(160)
                 pendingSpread?.let { t ->
                     lastNavAt = android.os.SystemClock.uptimeMillis()
-                    pager.scrollToPage(t)
+                    goToSpread(t)
                     pendingSpread = null
                     PerfTrace.closePageTurnAfterFrame()
                 }
@@ -422,7 +442,7 @@ private fun ReaderBody(
         // the settle-clamp would bounce it back to the old chapter edge.
         val target = work.spreadOf(globalIdx)
         pendingSpread = target
-        compose.launch { pager.scrollToPage(target) }
+        compose.launch { goToSpread(target) }
     }
 
     // measureBox — the centered spread's resting rect, refreshed per
@@ -701,20 +721,50 @@ private fun ReaderBody(
                         translationY = tyF
                     },
             ) { spreadIdx ->
-                SpreadCell(
-                    work = work,
-                    spreadIdx = spreadIdx,
-                    controller = controller,
-                    viewW = viewW,
-                    viewH = viewH,
-                    urlOf = ::pageData,
-                    imageLoader = sc.imageLoader,
-                    onError = { controller.recordError(it) },
-                    isSettled = {
-                        !pager.isScrollInProgress &&
-                            pager.settledPage == spreadIdx
-                    },
-                )
+                // Stack turn: only the page in flight moves — the side it
+                // uncovers/covers stays parked under the viewport center.
+                // Z is keyed on settledPage so the draw order flips once
+                // per turn (a per-frame composition read would recompose
+                // every page every frame); position/scrim are read in the
+                // draw pass instead — no recomposition during a drag.
+                // The covered page stays opaque: a black scrim rect, not
+                // alpha, or the pages parked beneath it would ghost
+                // through the revealed strip.
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .zIndex(stackTurnZ(spreadIdx - pager.settledPage + 0f))
+                        .graphicsLayer {
+                            val off = spreadIdx - pager.currentPage -
+                                pager.currentPageOffsetFraction
+                            translationX =
+                                stackTurnTranslateX(off) * size.width
+                        }
+                        .drawWithContent {
+                            drawContent()
+                            val off = spreadIdx - pager.currentPage -
+                                pager.currentPageOffsetFraction
+                            val scrim = stackTurnScrim(off)
+                            if (scrim > 0f) {
+                                drawRect(Color.Black.copy(alpha = scrim))
+                            }
+                        },
+                ) {
+                    SpreadCell(
+                        work = work,
+                        spreadIdx = spreadIdx,
+                        controller = controller,
+                        viewW = viewW,
+                        viewH = viewH,
+                        urlOf = ::pageData,
+                        imageLoader = sc.imageLoader,
+                        onError = { controller.recordError(it) },
+                        isSettled = {
+                            !pager.isScrollInProgress &&
+                                pager.settledPage == spreadIdx
+                        },
+                    )
+                }
             }
         }
 
@@ -869,6 +919,30 @@ private fun ReaderBody(
     }
 }
 
+/** Page-stack turn geometry. `off` is the page's forward-axis distance
+ * from the scroll position (i - currentPage - offsetFraction; + = next
+ * side parked left of center, − = prev side parked right). Only the
+ * moving (off<0) side travels — parked pages hold the viewport center. */
+private const val STACK_SCRIM = 0.35f
+
+/** Parked pages (off>0) are shifted from their natural left slot to the
+ * viewport center so the departing page uncovers them. The moving side
+ * keeps its natural position (arrive from / exit to the right). */
+internal fun stackTurnTranslateX(off: Float): Float = off.coerceAtLeast(0f)
+
+/** The moving side always draws above the stack; among parked pages the
+ * nearest-next sits topmost. */
+internal fun stackTurnZ(off: Float): Float = -off
+
+/** Depth scrim opacity for the covered page — the black overlay drawn
+ * on top of it. For the page under the mover `off` IS the covered
+ * fraction (forward: off=1−frac, reverse: off=−frac); deeper parked
+ * pages are fully covered → max scrim. Drawn opaque-under, so no
+ * see-through blending — a page alpha would let deeper parked pages
+ * ghost through the revealed strip. */
+internal fun stackTurnScrim(off: Float): Float =
+    STACK_SCRIM * off.coerceIn(0f, 1f)
+
 /** One pager page = one spread (1 or 2 cells, RTL order: pages[0]
  *  renders rightmost — the web's `row-reverse`). */
 @Composable
@@ -897,6 +971,10 @@ private fun SpreadCell(
     Box(
         Modifier
             .fillMaxSize()
+            // Opaque slot: the page-stack transition parks neighbours
+            // centered underneath — a narrow spread's side margins must
+            // occlude them or the parked page peeks through at rest.
+            .background(Color(0xFF101010))
             // Perf gate: the target spread's first drawn frame ends
             // bookq.pageTurn (and any open bookq.readerOpen). A start
             // that lands in the reader (task-resume nav restore) never
