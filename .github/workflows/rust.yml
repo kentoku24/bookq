@@ -206,6 +206,8 @@ jobs:
               "/api/v1/reading-positions", "/api/v1/folder-visibility",
               "/image/Series/vol1/p00.jpg", "/image/Manga/pack.zip/01.jpg",
               "/view/Series/vol1/p00.jpg",
+              # ?w= fast-tier must stay native too (#440).
+              "/view/Series/vol1/p00.jpg?w=400",
               "/thumb/Series/vol1/p00.jpg?w=200",
               "/api/v1/thumb-sprite?folder=Manga%2Fpack.zip&names=01.jpg,02.jpg",
           ]
