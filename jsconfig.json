@@ -12,7 +12,11 @@
     "checkJs": true,
     "noEmit": true,
     "target": "es2020",
-    "moduleResolution": "node",
+    // `bundler` replaces legacy `node` (node10), which TS 7.0 removes.
+    // These are plain global scripts (no imports/exports) — only JSDoc
+    // `import('./api-types')` type refs resolve, which bundler handles.
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "lib": ["es2020", "dom", "dom.iterable"],
     "strict": false
   },
