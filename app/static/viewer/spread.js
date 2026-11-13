@@ -437,7 +437,7 @@
     rebuildSpreads, spreadMetrics, spreadLeft, gapBefore, placeCell, regroupCells,
     ensureStripImage, ensureWindow, evictStrip, snapTo, pageOffsetPx,
     sliderMax, idxToSlider, sliderToIdx, syncSliderValue, updateStripPositions, rebaseAnchor,
-    invalidateSpreadSizes, spreadOf, arOf,
+    invalidateSpreadSizes, spreadOf, arOf, padChapterSpacers,
     imagePool
   };
 

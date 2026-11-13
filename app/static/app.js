@@ -855,6 +855,8 @@
 
   function spreadLeft(s){ return window.SpreadView.spreadLeft(s); }
 
+  function padChapterSpacers(images, boundaries, pageMode, spreadOffset){ return window.SpreadView.padChapterSpacers(images, boundaries, pageMode, spreadOffset); }
+
   // The global page indices THIS device renders for spread s: the paired
   // projection ([] on a blank side) or the plain spread pages solo.
   // spread.js's spreadMetrics reads this through the window export.
