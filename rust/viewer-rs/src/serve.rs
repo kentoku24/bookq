@@ -42,6 +42,19 @@ pub enum Serve {
     Proxy,
 }
 
+/// Contract-invalid inputs (bad param types, missing required params) used
+/// to fall through to `Serve::Proxy` so upstream answered FastAPI's exact
+/// 422. With no upstream configured the proxy is dead — answer the status
+/// locally instead of 501 (#465). `has_upstream` keeps the strangler-era
+/// body parity whenever Python is still reachable.
+pub fn reject_or_proxy(has_upstream: bool, status: StatusCode, msg: &'static str) -> Serve {
+    if has_upstream {
+        Serve::Proxy
+    } else {
+        Serve::Done(detail(status, msg))
+    }
+}
+
 // ── Suffix/extension tables (mirror app/scanner.py + app/archive.py) ──────────
 
 pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
