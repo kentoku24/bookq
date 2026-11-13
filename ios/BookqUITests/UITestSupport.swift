@@ -10,12 +10,14 @@ import XCTest
 /// decodable payload, never a valid signature.
 enum UITestSupport {
     /// TEST_MODE server base URL. Overridable through the test runner's
-    /// environment (e.g. an Xcode scheme environment variable); CI uses
-    /// the localhost default.
+    /// environment — ios-ui-test.sh injects BOOKQ_UI_TEST_SERVER_URL into
+    /// the xctestrun so the app always matches the URL it health-gated.
+    /// The default is IPv4 loopback, not localhost: on hosts where
+    /// localhost resolves to ::1 a foreign service can hold :8080.
     static let serverURL: String = {
         let env = ProcessInfo.processInfo.environment["BOOKQ_UI_TEST_SERVER_URL"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (env?.isEmpty == false) ? env! : "http://localhost:8080"
+        return (env?.isEmpty == false) ? env! : "http://127.0.0.1:8080"
     }()
 
     /// Unsigned JWT-shaped token (`header.payload.sig`): the payload

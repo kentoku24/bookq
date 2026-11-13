@@ -28,6 +28,10 @@ SCHEME="Bookq"
 DD="${DERIVED_DATA_PATH:-$HOME/Library/Developer/Xcode/DerivedData/Bookq-ci}"
 RESULTS="${IOS_TEST_RESULTS:-ios/build/ios-test-results}"
 mkdir -p "$RESULTS"
+# xcodebuild refuses to reuse an existing -resultBundlePath, and the
+# results dir survives between local runs — clean last run's bundles.
+rm -rf "$RESULTS/build.xcresult" "$RESULTS/tests.xcresult" \
+  "$RESULTS"/tests.attempt*.log
 
 # --- server gate -------------------------------------------------------
 # Host-side check is sufficient: the simulator shares the host network
@@ -125,6 +129,18 @@ wait "$BSPID" 2>/dev/null || true
 echo "simulator: $DEVNAME ($UDID)"
 DEST="platform=iOS Simulator,id=$UDID"
 
+# Leave no running simulator behind (AGENTS.md iOS Simulator rule):
+# shut our device down on any exit path; on a dev machine also run the
+# repo teardown helper (bounded to this UDID) to prune test clones and
+# XCTestDevices remnants. CI runners are ephemeral — shutdown only.
+cleanup() {
+  xcrun simctl shutdown "$UDID" 2>/dev/null || true
+  if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
+    scripts/sim-teardown.sh --udid "$UDID" || true
+  fi
+}
+trap cleanup EXIT
+
 # NOTE: no CODE_SIGNING_ALLOWED=NO — an unsigned app cannot write the
 # Keychain, which silently breaks AuthManagerTests' refresh-persist path
 # (SecItemAdd fails → refresh returns nil). Simulator builds ad-hoc sign
@@ -143,6 +159,22 @@ if [ -z "$XCTESTRUN" ]; then
   exit 1
 fi
 echo "xctestrun: $XCTESTRUN"
+
+# UITestSupport reads the TEST_MODE server URL from the test runner's
+# environment (BOOKQ_UI_TEST_SERVER_URL) — inject the URL this script
+# health-gated so the gate and the UI tests always agree. xctestrun
+# files carry per-target EnvironmentVariables; patch BookqUITests'.
+PB=/usr/libexec/PlistBuddy
+for cfg in 0 1 2 3; do
+  $PB -c "Print :TestConfigurations:$cfg" "$XCTESTRUN" >/dev/null 2>&1 || break
+  for t in 0 1 2 3 4; do
+    bn=$($PB -c "Print :TestConfigurations:$cfg:TestTargets:$t:BlueprintName" "$XCTESTRUN" 2>/dev/null) || break
+    [ "$bn" = "BookqUITests" ] || continue
+    $PB -c "Add :TestConfigurations:$cfg:TestTargets:$t:EnvironmentVariables:BOOKQ_UI_TEST_SERVER_URL string $SERVER_URL" "$XCTESTRUN" 2>/dev/null \
+      || $PB -c "Set :TestConfigurations:$cfg:TestTargets:$t:EnvironmentVariables:BOOKQ_UI_TEST_SERVER_URL $SERVER_URL" "$XCTESTRUN"
+    echo "injected BOOKQ_UI_TEST_SERVER_URL=$SERVER_URL -> $bn"
+  done
+done
 
 # One test-without-building invocation runs BOTH bundles from the
 # xctestrun (BookqTests + BookqUITests) in a single clone session —
@@ -164,7 +196,7 @@ for attempt in 1 2; do
       -resultBundlePath "$BUNDLE" 2>&1 | tee "$log"; then
     exit 0
   fi
-  if ! grep -qE "Failed to clone device|CoreSimulator|remained in Creating|Failed to install|Lost connection|timed out waiting" "$log"; then
+  if ! grep -qE "Failed to clone device|CoreSimulator|remained in Creating|Failed to install|Lost connection|timed out waiting|test runner crashed|encountered an error|died unexpectedly" "$log"; then
     echo "== test failures (not infra) — no retry"
     exit 1
   fi
