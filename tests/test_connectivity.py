@@ -235,6 +235,11 @@ def test_swcache_marked_response_is_not_online_evidence(page, server):
     goto_offline(page, server)
     wait_for_sw(page)
     _wait_state(page, "online")
+    # Attach the recorder BEFORE the fetch stub: an in-flight app request
+    # can demote via the stub ahead of our trigger — the whole
+    # online→connecting→offline arc can complete before a post-hoc
+    # recorder attaches (observed as seq == ['offline'] under CI load).
+    _record_conn(page)
     # Fabricate the real-world shape: app requests get a marked ok response
     # (SW cache fallback) while the network-only probe still fails — the
     # mark must read as failure evidence, never as being online. (Probes
@@ -254,7 +259,6 @@ def test_swcache_marked_response_is_not_online_evidence(page, server):
             };
         }"""
     )
-    _record_conn(page)
     try:
         page.evaluate("() => window.Connectivity.fetch('/api/v1/tree').catch(()=>{})")
         # An in-flight app request can demote via the same stub before our
