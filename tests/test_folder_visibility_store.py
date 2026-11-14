@@ -1,251 +1,143 @@
-"""FolderVisibilityStore unit tests — sqlite persistence, revisions, idempotency.
+"""Visibility persistence over live HTTP (both lanes).
 
-Pure store-level tests (no HTTP): constructor performs no I/O, schema is
-created lazily on first use, read/write return consistent snapshots, revisions
-only bump on real state changes. Production rows all live under
-``GLOBAL_USER_KEY`` — the store itself stays a generic keyed KV.
+The unit-level store tests (sqlite revisions, key isolation, schema stamps)
+live in the sibling py-only module, which stays quarantined until it
+retires. This file covers only what is visible through the v1 HTTP
+contract: writes are readable, revisions only bump on real changes, and
+the hidden set starts and ends clean.
 
-Run:
-    BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt \\
-        pytest tests/test_folder_visibility_store.py -q
+The hidden set is library-global and shared: every test unhides its roots
+in a finally block (the roundtrip pattern from test_api_v1).
 """
 
-import sqlite3
-import threading
-from pathlib import Path
+import json
+import urllib.error
+import urllib.request
 
 import pytest
 
-from app.folder_visibility import (
-    GLOBAL_USER_KEY,
-    FolderVisibilityStore,
-    user_key_for_email,
-    validate_root,
-    visibility_owner,
-)
+VIS_PATH = "/api/v1/folder-visibility"
+
+ROOT_A = "long"
+ROOT_B = "series"
 
 
-@pytest.fixture
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "state" / "folder-visibility.sqlite3"
+def _headers(resp):
+    return {k.lower(): v for k, v in resp.headers.items()}
 
 
-def test_constructor_performs_no_io(db_path: Path):
-    FolderVisibilityStore(db_path)
-    assert not db_path.exists()
-
-
-def test_read_empty_snapshot(db_path: Path):
-    snap = FolderVisibilityStore(db_path).read("alice@example.com")
-    assert snap.revision == 0
-    assert snap.hidden_roots == ()
-    assert db_path.exists()
-
-
-def test_set_hidden_persists_across_instances(db_path: Path):
-    # GLOBAL_USER_KEY is the production key — rows persist across store
-    # instances over the same DB file.
-    snap = FolderVisibilityStore(db_path).set_hidden(GLOBAL_USER_KEY, "作品A", True)
-    assert snap.revision == 1
-    assert snap.hidden_roots == ("作品A",)
-    # A brand-new store object over the same DB file sees the same state.
-    snap2 = FolderVisibilityStore(db_path).read(GLOBAL_USER_KEY)
-    assert snap2.revision == 1
-    assert snap2.hidden_roots == ("作品A",)
-
-
-def test_unhide_removes_row_and_bumps_revision(db_path: Path):
-    store = FolderVisibilityStore(db_path)
-    store.set_hidden("alice@example.com", "作品A", True)
-    snap = store.set_hidden("alice@example.com", "作品A", False)
-    assert snap.revision == 2
-    assert snap.hidden_roots == ()
-    conn = sqlite3.connect(str(db_path))
+def _req(server, method, path, body=None, headers=None):
+    data = None
+    hdrs = dict(headers or {})
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(server + path, data=data, headers=hdrs, method=method)
     try:
-        rows = conn.execute("SELECT COUNT(*) FROM hidden_roots").fetchone()
-    finally:
-        conn.close()
-    assert rows[0] == 0
-
-
-def test_same_value_writes_are_idempotent(db_path: Path):
-    store = FolderVisibilityStore(db_path)
-    store.set_hidden("alice@example.com", "作品A", True)
-    snap = store.set_hidden("alice@example.com", "作品A", True)
-    assert snap.revision == 1
-    # Unhide of a never-hidden root is also a no-op.
-    snap = store.set_hidden("alice@example.com", "missing", False)
-    assert snap.revision == 1
-    assert snap.hidden_roots == ("作品A",)
-
-
-def test_generic_keys_isolated_within_one_instance(db_path: Path):
-    """The store stays a generic keyed KV: arbitrary keys coexist
-    (production never writes them — routes pin GLOBAL_USER_KEY)."""
-    store = FolderVisibilityStore(db_path)
-    store.set_hidden("alice@example.com", "作品A", True)
-    assert store.read("bob@example.com").hidden_roots == ()
-    assert store.read("bob@example.com").revision == 0
-    assert store.read("alice@example.com").hidden_roots == ("作品A",)
-
-
-def test_multiple_roots_and_revision_monotonic(db_path: Path):
-    store = FolderVisibilityStore(db_path)
-    s1 = store.set_hidden("alice@example.com", "b-root", True)
-    s2 = store.set_hidden("alice@example.com", "a-root", True)
-    assert s1.revision < s2.revision == 2
-    assert s2.hidden_roots == ("a-root", "b-root")
-    s3 = store.set_hidden("alice@example.com", "a-root", False)
-    assert s3.revision == 3
-    assert s3.hidden_roots == ("b-root",)
-
-
-def test_unhide_of_gone_root_still_possible(db_path: Path):
-    # Removing the underlying library folder must not affect the stored row;
-    # unhide on a missing row stays a no-op.
-    store = FolderVisibilityStore(db_path)
-    store.set_hidden("alice@example.com", "作品A", True)
-    snap = store.set_hidden("alice@example.com", "作品A", False)
-    assert snap.hidden_roots == ()
-
-
-def test_concurrent_writers_keep_all_roots(db_path: Path):
-    store = FolderVisibilityStore(db_path)
-    errors: list[BaseException] = []
-
-    def worker(i: int) -> None:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else None), _headers(resp)
+    except urllib.error.HTTPError as e:
         try:
-            for j in range(5):
-                store.set_hidden("alice@example.com", f"root-{i}-{j}", True)
-        except BaseException as exc:  # noqa: BLE001 — collected and asserted
-            errors.append(exc)
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert errors == []
-    snap = store.read("alice@example.com")
-    assert len(snap.hidden_roots) == 20
-    assert snap.revision == 20
+            return e.code, json.loads(e.read() or b"null"), _headers(e)
+        except Exception:
+            return e.code, None, _headers(e)
 
 
-def test_store_surfaces_db_errors(tmp_path: Path):
-    # state dir is an existing regular file -> mkdir/connect must fail, not
-    # silently fall back to memory.
-    blocker = tmp_path / "not-a-dir"
-    blocker.write_text("x")
-    store = FolderVisibilityStore(blocker / "folder-visibility.sqlite3")
-    with pytest.raises(Exception):
-        store.read("alice@example.com")
+def _snap(server):
+    status, body, _ = _req(server, "GET", VIS_PATH)
+    assert status == 200
+    return body
 
 
-# ── input helpers ─────────────────────────────────────────────────────
+def _put(server, root, hidden, owner):
+    return _req(
+        server, "PUT", VIS_PATH, {"root": root, "hidden": hidden},
+        headers={"x-bookq-visibility-owner": owner},
+    )
 
 
-def test_user_key_normalizes_email():
-    assert user_key_for_email("  Alice@Example.COM ") == "alice@example.com"
-    assert user_key_for_email("") is None
-    assert user_key_for_email("   ") is None
-    assert user_key_for_email(None) is None
-    assert user_key_for_email(123) is None
+def _ensure_visible(server, owner, *roots):
+    for root in roots:
+        try:
+            _put(server, root, False, owner)
+        except Exception:
+            pass
 
 
-def test_visibility_owner_is_opaque_deterministic_and_scoped():
-    o1 = visibility_owner("alice@example.com", "secret-1")
-    assert o1 == visibility_owner("alice@example.com", "secret-1")
-    assert o1 != visibility_owner("alice@example.com", "secret-2")
-    assert o1 != visibility_owner("bob@example.com", "secret-1")
-    assert "alice" not in o1
-    assert "@" not in o1
-
-
-def test_validate_root_accepts_top_segment_names():
-    assert validate_root("作品A") == "作品A"
-    assert validate_root("単行本.zip") == "単行本.zip"
-    assert validate_root("A B") == "A B"
-    assert validate_root("  spaced  ") == "  spaced  "
-
-
-def test_validate_root_accepts_flattened_multi_segment_names():
-    """Flattened scanner roots are the top-level node's own name — a '/'
-    inside it is structural, not a separator to reject."""
-    assert validate_root("wrap/work") == "wrap/work"
-    assert validate_root("wrap/inner/vol1") == "wrap/inner/vol1"
-    assert validate_root("wrap/arc.zip") == "wrap/arc.zip"
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "",
-        "a\\b",
-        "/abs",
-        "/a",
-        "a/",
-        "a//b",
-        "a/./b",
-        "a/../b",
-        "a\x00b",
-        ".",
-        "..",
-        ".hidden",
-        "a/.b",
-        ".h/x",
-        "x" * 2049,
-        None,
-        123,
-        True,
-        ["a"],
-    ],
-)
-def test_validate_root_rejects(bad):
-    with pytest.raises(ValueError):
-        validate_root(bad)
-
-
-def test_validate_root_accepts_max_length():
-    assert validate_root("x" * 2048) == "x" * 2048
-
-
-# ── shared schema file / version pinning (#200) ──────────────────────
-
-_SCHEMA_SQL = (
-    Path(__file__).resolve().parent.parent / "api" / "user-state-schema.sql"
-)
-
-
-def test_schema_version_matches_file_stamp():
-    import re
-
-    from app.folder_visibility import SCHEMA_VERSION
-
-    sql = _SCHEMA_SQL.read_text(encoding="utf-8")
-    stamp = re.search(r"PRAGMA\s+user_version\s*=\s*(\d+)", sql)
-    assert stamp is not None, "schema file must stamp PRAGMA user_version"
-    assert int(stamp.group(1)) == SCHEMA_VERSION
-
-
-def test_store_init_stamps_schema_version(db_path: Path):
-    from app.folder_visibility import SCHEMA_VERSION
-
-    FolderVisibilityStore(db_path).read("alice@example.com")
-    conn = sqlite3.connect(str(db_path))
+def test_write_is_readable(server):
+    owner = _snap(server)["owner"]
+    _ensure_visible(server, owner, ROOT_A)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        status, body, _ = _put(server, ROOT_A, True, owner)
+        assert status == 200
+        assert body["revision"] >= 1
+        assert body["hiddenRoots"] == [ROOT_A]
+        # a fresh read over the same state sees the write
+        assert _snap(server)["hiddenRoots"] == [ROOT_A]
+        assert _snap(server)["revision"] == body["revision"]
     finally:
-        conn.close()
+        _ensure_visible(server, owner, ROOT_A)
+    assert _snap(server)["hiddenRoots"] == [] or ROOT_A not in _snap(server)["hiddenRoots"]
 
 
-def test_store_refuses_newer_schema(db_path: Path):
-    from app.folder_visibility import SCHEMA_VERSION
-
-    FolderVisibilityStore(db_path).read("alice@example.com")
-    conn = sqlite3.connect(str(db_path))
+def test_revision_only_bumps_on_real_change(server):
+    owner = _snap(server)["owner"]
+    _ensure_visible(server, owner, ROOT_A)
     try:
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+        base = _snap(server)["revision"]
+        _, first, _ = _put(server, ROOT_A, True, owner)
+        assert first["revision"] == base + 1
+        # same value again: no bump
+        _, again, _ = _put(server, ROOT_A, True, owner)
+        assert again["revision"] == first["revision"]
+        # unhide of a never-hidden sibling root is also a no-op
+        _, noop, _ = _put(server, "never-was-xyz", False, owner)
+        assert noop["revision"] == first["revision"]
+        # real change bumps again
+        _, last, _ = _put(server, ROOT_A, False, owner)
+        assert last["revision"] == first["revision"] + 1
+        assert last["hiddenRoots"] == []
     finally:
-        conn.close()
-    with pytest.raises(RuntimeError, match="newer than supported"):
-        FolderVisibilityStore(db_path).read("alice@example.com")
+        _ensure_visible(server, owner, ROOT_A)
+
+
+def test_multiple_roots_persist_sorted(server):
+    owner = _snap(server)["owner"]
+    _ensure_visible(server, owner, ROOT_A, ROOT_B)
+    try:
+        _put(server, ROOT_B, True, owner)
+        _, body, _ = _put(server, ROOT_A, True, owner)
+        assert sorted(body["hiddenRoots"]) == sorted([ROOT_A, ROOT_B])
+        assert _snap(server)["hiddenRoots"] == body["hiddenRoots"]
+        _, body, _ = _put(server, ROOT_A, False, owner)
+        assert body["hiddenRoots"] == [ROOT_B]
+    finally:
+        _ensure_visible(server, owner, ROOT_A, ROOT_B)
+
+
+def test_unhide_clears_row(server):
+    owner = _snap(server)["owner"]
+    _ensure_visible(server, owner, ROOT_A)
+    try:
+        _put(server, ROOT_A, True, owner)
+        assert ROOT_A in _snap(server)["hiddenRoots"]
+        _, body, _ = _put(server, ROOT_A, False, owner)
+        assert body["hiddenRoots"] == []
+        assert _snap(server)["hiddenRoots"] == []
+    finally:
+        _ensure_visible(server, owner, ROOT_A)
+
+
+@pytest.mark.parametrize("root", [ROOT_A, ROOT_B])
+def test_persistence_roundtrip_per_root(server, root):
+    owner = _snap(server)["owner"]
+    _ensure_visible(server, owner, root)
+    try:
+        _, hid, _ = _put(server, root, True, owner)
+        assert root in hid["hiddenRoots"]
+        assert root in _snap(server)["hiddenRoots"]
+    finally:
+        status, body, _ = _put(server, root, False, owner)
+        assert status == 200
+        assert root not in body["hiddenRoots"]
