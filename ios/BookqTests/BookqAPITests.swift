@@ -87,6 +87,20 @@ final class BookqAPITests: XCTestCase {
         } catch APIError.unauthorized { }
     }
 
+    /// `+` and other reserved chars in folder paths must be percent-encoded
+    /// on the wire — URLQueryItem leaves "+" literal and the server reads
+    /// it as a space, which broke downloads for "+" folders (#414).
+    func testImagesFolderQueryEncoding() async throws {
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.json(["folder": "a+b", "images": ["p1.jpg"]])
+        }
+        _ = try await StubURLProtocol.api().images(folder: "a+b/第1話 x")
+        let rec = StubURLProtocol.last(path: "api/v1/images")
+        XCTAssertEqual(
+            rec?.request.url?.absoluteString,
+            "http://unit.test/api/v1/images?folder=a%2Bb%2F%E7%AC%AC1%E8%A9%B1%20x")
+    }
+
     /// search() unwraps the 202 → 200 {query,total,results} envelope.
     func testSearch202Then200() async throws {
         var hits = 0
