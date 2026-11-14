@@ -114,17 +114,25 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
   （web・Android と同じ RTL 規約）。
 - chrome 配置は向きで分岐: **縦=従来の上部バー+下部スライダー**、
-  **横=画面右端（trailing）の全高バーティカルレール**。見開きは高さ
-  制約 fit で上下に余裕がなく左右に大きな余白ができるため、iPhone
-  Duo HIG の "vertical controls" 指針（側面レールでコンテンツ縦幅を
-  確保、上=プライマリナビ、低頻度操作は overflow へ）に倣い、画像と
-  重なりにくい側面へ寄せる。レールは上→下に 閉じる / カウンタ /
-  複数ページ / ⋯メニュー / 縦章スライダー（`VerticalSlider`、上=章
-  先頭・下=章末・下ドラッグで進む）。モード系操作（見開きずらし /
-  landscape 見開き切替 / タップ方向 / 外部ディスプレイ）は ⋯メニュー
-  へ集約。画像は `spreadFit`/`spreadCell` 無変更で最大サイズのまま
-  中央配置 — 広い AR の見開きでレールが画像端に重なり得るが、
-  レール背後のスクリムで可読性を担保する。`PairedReaderView` は対象外。
+  **横=左右分割レール+下部コーナーのタップ方向ボタン**。見開きは
+  高さ制約 fit で上下に余裕がなく左右に大きな余白ができるため、
+  iPhone Duo HIG の "vertical controls" 指針（側面レールで
+  コンテンツ縦幅を確保）に倣いつつ、Web クライアントの
+  `#tapmode-controls`（画面下部左右のタップ方向ボタン）にも準拠する。
+  - **左レール**（leading・上→下・上寄せ）: 閉じる / 見開き on/off /
+    見開きずらし（spread 時のみ）
+  - **右レール**（trailing）: カウンタ / 複数ページ / ⋯メニュー /
+    縦章スライダー（`VerticalSlider`、上=章先頭・下=章末・下ドラッグ
+    で進む）
+  - **下部コーナー**: ◀=左タップで次へ（`tapForwardLeft`）を
+    bottom-left、▶=右タップで次へを bottom-right に分割配置
+    （web `#tapmode-controls` と同じ左右分割。アクティブ方向は
+    accent 強調）
+  - ⋯メニューには外部ディスプレイ切替+診断のみ残る（表示条件を
+    満たさない時はボタン自体を非表示）
+  画像は `spreadFit`/`spreadCell` 無変更で最大サイズのまま中央配置
+  — 広い AR の見開きでレールが画像端に重なり得るが、レール背後の
+  スクリムで可読性を担保する。`PairedReaderView` は対象外。
   Android は上部バー+overflow の構成で、iOS の横置きレールとは意図的に
   異なる。
 
