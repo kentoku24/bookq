@@ -717,16 +717,13 @@ mod tests {
         }
     }
 
-    /// `SESSION_MAX_AGE` is hand-mirrored from `SessionMiddleware(max_age=)`
-    /// — a Python-side change must trip this test, not silently diverge
-    /// (Rust would accept cookies Python already revoked).
+    /// `SESSION_MAX_AGE` mirrors the Python-era `SessionMiddleware(max_age=86400 * 7)`
+    /// so cookies minted before the Rust cutover stay valid. Live sessions carry
+    /// this value — lowering it revokes them early, raising it extends a contract
+    /// already baked into signed cookies. The Python source this was pinned
+    /// against was deleted in #473; the constant is now owned here.
     #[test]
-    fn session_max_age_matches_python() {
-        let main_py = include_str!("../../../app/main.py");
-        assert!(
-            main_py.contains("max_age=86400 * 7"),
-            "app/main.py SessionMiddleware max_age changed — update SESSION_MAX_AGE"
-        );
+    fn session_max_age_matches_deployed_contract() {
         assert_eq!(SESSION_MAX_AGE, 86400 * 7);
     }
 
