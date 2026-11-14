@@ -331,11 +331,12 @@ struct ReaderView: View {
 
     // MARK: - Chrome
 
-    /// Wide viewport → landscape chrome (right-edge vertical rail, per
-    /// the iPhone Duo HIG "vertical controls" pattern: side placement
-    /// preserves the full-height spread's vertical space). Portrait keeps
-    /// the classic top bar + bottom slider. Same predicate as pageMode's
-    /// orientation term and the landscape-spread toggle's visibility.
+    /// Wide viewport → landscape chrome (split side rails + bottom
+    /// tap-direction corners, per the iPhone Duo HIG "vertical
+    /// controls" pattern: side placement preserves the full-height
+    /// spread's vertical space). Portrait keeps the classic top bar +
+    /// bottom slider. Same predicate as pageMode's orientation term and
+    /// the landscape-spread toggle's visibility.
     private var isLandscape: Bool {
         viewportSize.width >= viewportSize.height
     }
