@@ -155,8 +155,13 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
+      # --reruns 2: concentrating browser tests on one lane keeps all
+      # -n auto workers on browsers at once — higher contention than the
+      # old mixed suite, so timing-sensitive tests (offline/connectivity
+      # playwright timeouts) flake more. Extra rerun absorbs that without
+      # touching what is asserted.
       - name: Run browser test gate (chromium)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 1 --reruns-delay 2
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 2 --reruns-delay 2
 
   # Required-check anchor: branch protection names `uv-gate`, so the
   # aggregate keeps reporting that context — pass only when both lanes
@@ -264,8 +269,9 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
+      # Same --reruns 2 rationale as uv-gate-browser above.
       - name: Run browser test suite against viewer-rs
-        run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 1 --reruns-delay 2
+        run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 2 --reruns-delay 2
 
   # Keeps the `pytest-rs` check name stable for PRs — not a required
   # check, but the aggregate preserves the single pass/fail signal.
