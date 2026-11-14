@@ -88,6 +88,23 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   web touchend と同じ `min(10%幅, 70pt)` + flick 予測 50%。
   `currentIdx` はコミット開始時点で着地し、カウンタ/スライダー/外部
   ディスプレイはアニメーションと同時に動く（web の strip 追従と同じ）。
+- **landscape 1ページモードの隣ページプレビュー (#496)**: 横画面で
+  見開きOFF のとき、現在ページを中央に維持したまま左右の余白に
+  前ページ（右）・次ページ（左）を表示する。隣は自身が current の
+  時と同じ contain-fit サイズを保ち、現在ページとの間に固定 gap
+  （10pt）を空けて画面端方向へ置く — はみ出す分は画面端でクリップ
+  （web strip の overflow と同じ振る舞い）。選択は `pos` 駆動の
+  「アクティブペアの外側」ルール（`ReaderWork.neighborSpreads`）で、
+  めくり中にスライド面とマージンへ同じページが二重に出ない。
+  フレーム計算は `ReaderWork.neighborFrames`（`spreadFit` 再利用）。
+  プレビューは pager 最背面・hit-test/VoiceOver 無効の装飾レイヤで、
+  タップは `SpatialTapGesture` がプレビューフレームとの交差を先に
+  判定して `snapTo` で直接ジャンプ（「見えているページをタップ」）。
+  本の端では存在しない側は黒のまま。外部ディスプレイ投影も同じ
+  レイアウトを settled ±1 で適用（非対話なので視覚のみ）。
+  **web parity との差異**: web は `gapBefore()` が隣を覗かせない
+  仕様のまま — `app/` frozen (#410) のため Web 側は #473 の
+  frontend 移設後にフォローアップ予定。
 - ページスライダーは**現在エピソード (章) のみにスコープ**
   （web `syncChapterSlider`/`idxToChapterSlider`/`chapterSliderToIdx`
   相当の `chapterSliderMax`/`idxToChapterSlider`/`chapterSliderToIdx`

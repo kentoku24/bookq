@@ -342,6 +342,55 @@ struct ReaderWork: Equatable {
         return CGSize(width: w, height: h)
     }
 
+    /// Landscape 1-page mode side previews (#496) — which spreads sit in
+    /// the margins for a continuous pager position `pos`. The pager's
+    /// active pair is {floor(pos), ceil(pos)}; the margins always show
+    /// the spreads just OUTSIDE that pair, so a mid-turn never exposes
+    /// the same page twice (sliding cell + margin preview). At rest
+    /// pos == i this yields prev=i-1 (right side, RTL) and next=i+1
+    /// (left side); a rubber-banded pos clamps to the edge spread's real
+    /// neighbours. nil = no neighbour on that side (book edge).
+    static func neighborSpreads(pos: CGFloat, count: Int)
+        -> (prev: Int?, next: Int?) {
+        guard count > 0 else { return (nil, nil) }
+        let f = min(max(Int(floor(pos)), 0), count - 1)
+        let c = min(max(Int(ceil(pos)), 0), count - 1)
+        let prev = f - 1, next = c + 1
+        return (prev >= 0 ? prev : nil,
+                next < count ? next : nil)
+    }
+
+    /// Landscape 1-page mode neighbour frames (#496) — each neighbour
+    /// keeps its own single-page `spreadFit` size and sits `gap` pt
+    /// outside the centred current page toward the screen edge (the
+    /// layout the web strip shows once its gapBefore() widening is
+    /// lifted for landscape-single; web parity is deferred to the
+    /// frontend relocation). A neighbour wider than its margin bleeds
+    /// off-screen (the viewport clips it); leftover stays black at the
+    /// far edge. Vertical centre matches the pager cell's centre fit.
+    /// nil AR = no preview on that side.
+    static func neighborFrames(curAR: CGFloat, prevAR: CGFloat?,
+                               nextAR: CGFloat?, in size: CGSize,
+                               gap: CGFloat = 10)
+        -> (prev: CGRect?, next: CGRect?) {
+        let curFit = spreadFit(ars: [curAR], gap: 5, in: size)
+        let curFrame = CGRect(x: (size.width - curFit.width) / 2,
+                              y: (size.height - curFit.height) / 2,
+                              width: curFit.width, height: curFit.height)
+        func frame(_ ar: CGFloat?, onRight: Bool) -> CGRect? {
+            guard let ar, ar > 0 else { return nil }
+            let fit = spreadFit(ars: [ar], gap: 5, in: size)
+            let y = (size.height - fit.height) / 2
+            return onRight
+                ? CGRect(x: curFrame.maxX + gap, y: y,
+                         width: fit.width, height: fit.height)
+                : CGRect(x: curFrame.minX - gap - fit.width, y: y,
+                         width: fit.width, height: fit.height)
+        }
+        return (frame(prevAR, onRight: true),
+                frame(nextAR, onRight: false))
+    }
+
     /// `getChapterSpreadRange` (app.js) — spread index range [lo, hi]
     /// covering chapter `ci`'s real pages. Spreads never mix chapters
     /// (spacer padding aligns boundaries), so the range is contiguous.

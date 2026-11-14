@@ -90,17 +90,68 @@ private struct ScreenProbe: UIViewRepresentable {
 
 /// Fullscreen mirror of the current reader page/spread on the external
 /// screen. Same layout math as the device reader's spreadCell: pages share
-/// one height, width = ar*h, fit into the viewport, RTL order.
+/// one height, width = ar*h, fit into the viewport, RTL order. Landscape
+/// single-page mode also mirrors the device's side previews (#496) —
+/// settled neighbours only, since the projection has no pager position.
 struct ExternalReaderView: View {
     let p: ExternalDisplayStore.Presentation
 
     var body: some View {
         GeometryReader { geo in
             let ext = externalWork(in: geo.size)
-            let pages = ext.spreads[safe: ext.spreadOf(p.currentIdx)] ?? []
-            spreadCell(ext: ext, pages: pages, in: geo.size)
+            let s = ext.spreadOf(p.currentIdx)
+            ZStack {
+                if ext.pageMode == .single, geo.size.width >= geo.size.height {
+                    neighborCells(ext: ext, around: s, in: geo.size)
+                }
+                spreadCell(ext: ext, pages: ext.spreads[safe: s] ?? [],
+                           in: geo.size)
+            }
         }
         .ignoresSafeArea()
+    }
+
+    /// Prev/next page previews in the side margins — same
+    /// `ReaderWork.neighborFrames` math as the device reader, at the
+    /// settled spread's immediate neighbours (no mid-turn states on a
+    /// non-interactive display).
+    private func neighborCells(ext: ReaderWork, around s: Int,
+                               in size: CGSize) -> some View {
+        let n = ext.spreads.count
+        guard n > 0 else { return AnyView(EmptyView()) }
+        let curAR = ext.spreads[safe: s]?.first
+            .map { p.pageAR[$0] ?? p.lastAR } ?? p.lastAR
+        func ar(_ spread: Int?) -> CGFloat? {
+            guard let spread, let g = ext.spreads[safe: spread]?.first
+            else { return nil }
+            return p.pageAR[g] ?? p.lastAR
+        }
+        let frames = ReaderWork.neighborFrames(
+            curAR: curAR,
+            prevAR: s > 0 ? ar(s - 1) : nil,
+            nextAR: s + 1 < n ? ar(s + 1) : nil,
+            in: size)
+        @ViewBuilder
+        func cell(_ spread: Int, _ frame: CGRect?) -> some View {
+            if spread >= 0 && spread < n, let frame,
+               let g = ext.spreads[safe: spread]?.first {
+                RemoteImageView(url: p.urlFor(ext.images[g]),
+                                contentMode: .fit)
+                    .frame(width: frame.width, height: frame.height)
+                    // Before .position — after it the background would
+                    // fill the whole proposed (viewport-sized) area.
+                    .background(Color.black)
+                    .position(x: frame.midX, y: frame.midY)
+            }
+        }
+        return AnyView(ZStack {
+            cell(s - 1, frames.prev)
+            cell(s + 1, frames.next)
+        }
+        // Fill the viewport so `.position` coordinates (viewport space)
+        // line up — same fix as the device reader's neighborLayer.
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false))
     }
 
     /// Spreads re-grouped under the external viewport's orientation with the
