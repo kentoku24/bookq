@@ -27,9 +27,9 @@ jobs:
         id: filter
         # workflow_dispatch keeps running everything, as before.
         if: github.event_name == 'pull_request'
-        # The UI tests boot the repo's FastAPI server and drive the real
-        # client — server or dependency changes can break iOS the same
-        # way they break Android, hence app/** and requirements*.txt.
+        # The UI tests boot the repo's viewer-rs binary and drive the
+        # real client — server or shell-asset changes can break iOS the
+        # same way they break Android, hence app/** (served payload).
         with:
           filters: |
             run:
@@ -38,7 +38,6 @@ jobs:
               - ".github/workflows/ios.yml"
               - ".github/scripts/ios-ui-test.sh"
               - "app/**"
-              - "requirements*.txt"
               - "rust/viewer-rs/**"
 
   test:
@@ -113,6 +112,18 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         if: steps.sdk.outputs.ok == 'true'
 
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.sdk.outputs.ok == 'true'
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.sdk.outputs.ok == 'true'
+
+      - name: Build viewer-rs
+        if: steps.sdk.outputs.ok == 'true'
+        run: cargo build --manifest-path rust/Cargo.toml -p viewer-rs
+
       # Same synthetic tree as android.yml, plus Series/vol2 so the iOS
       # drill-down test sees two volumes under Series/.
       - name: Build synthetic downloads tree
@@ -132,9 +143,9 @@ jobs:
         if: steps.sdk.outputs.ok == 'true'
         run: |
           BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            uv run --with-requirements requirements-dev.txt \
-            uvicorn app.main:app --host 127.0.0.1 --port 8080 \
-            > /tmp/bookq-ios-ci-server.log 2>&1 &
+            BOOKQ_APP_DIR="$GITHUB_WORKSPACE/app" BOOKQ_RS_NO_UPSTREAM=true \
+            BOOKQ_BIND=127.0.0.1:8080 \
+            ./rust/target/debug/viewer-rs > /tmp/bookq-ios-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
           done
