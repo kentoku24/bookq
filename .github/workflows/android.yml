@@ -28,9 +28,9 @@ jobs:
         id: filter
         # workflow_dispatch keeps running everything, as before.
         if: github.event_name == 'pull_request'
-        # The ui job boots the repo's FastAPI server and asserts on
-        # /api/v1/* — server or dependency changes can break the client,
-        # hence app/** and requirements*.txt below.
+        # The ui job boots the repo's viewer-rs binary and asserts on
+        # /api/v1/* — server or shell-asset changes can break the client,
+        # hence app/** (served payload) below.
         with:
           filters: |
             run:
@@ -38,7 +38,6 @@ jobs:
               - "api/**"
               - ".github/workflows/android.yml"
               - "app/**"
-              - "requirements*.txt"
               - "rust/viewer-rs/**"
 
   unit:
@@ -128,6 +127,12 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -173,15 +178,21 @@ jobs:
           Image.new("RGB", (80, 120), (0, 120, 0)).save("/tmp/dl/Other/p00.jpg")
           PYEOF
 
+      - name: Build viewer-rs
+        run: cargo build --manifest-path rust/Cargo.toml -p viewer-rs
+
       - name: Start bookq (test mode)
         run: |
           BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            uv run --with-requirements requirements-dev.txt \
-            uvicorn app.main:app --host 127.0.0.1 --port 8080 &
+            BOOKQ_APP_DIR="$GITHUB_WORKSPACE/app" BOOKQ_RS_NO_UPSTREAM=true \
+            BOOKQ_BIND=127.0.0.1:8080 \
+            ./rust/target/debug/viewer-rs > /tmp/bookq-android-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
           done
-          echo "server did not become healthy" && exit 1
+          echo "server did not become healthy"
+          cat /tmp/bookq-android-ci-server.log
+          exit 1
 
       - name: Enable KVM
         run: |
@@ -189,7 +200,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # Emulator reaches the host uvicorn via 10.0.2.2 (cleartext allowed
+      # Emulator reaches the host viewer-rs via 10.0.2.2 (cleartext allowed
       # for that host in the debug network security config). The script
       # gates on emulator->server reachability first and retries once in the
       # same booted session — the whole class used to fail when the NAT
@@ -206,6 +217,12 @@ jobs:
           working-directory: android
           script: bash "$GITHUB_WORKSPACE/.github/scripts/android-ui-test.sh"
 
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p android/build/outputs
+          cp /tmp/bookq-android-ci-server.log android/build/outputs/server.log 2>/dev/null || true
+
       - name: Upload connected test report
         uses: actions/upload-artifact@v7
         if: always()
@@ -214,4 +231,5 @@ jobs:
           path: |
             android/app/build/reports/androidTests/
             android/build/outputs/android-ui-test-results.txt
+            android/build/outputs/server.log
           if-no-files-found: ignore
