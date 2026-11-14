@@ -62,8 +62,9 @@ done
 
 # --- dedicated test device ---------------------------------------------
 # A script-owned simulator guarantees clean app/Keychain/UserDefaults
-# state: app/test-bundle containers are uninstalled before every run
-# (full `simctl erase` remains available via IOS_SIM_ERASE=1). Reusing a
+# state: app/test-bundle containers are uninstalled and the device
+# keychain is reset before every run (full `simctl erase` remains
+# available via IOS_SIM_ERASE=1). Reusing a
 # daily-driver sim lets leftovers fail stateful unit tests —
 # ProgressSyncTests read UserDefaults.standard and break on progress
 # entries the UI tests wrote on an earlier run (clones inherit device
@@ -136,8 +137,9 @@ fi
 xcrun simctl shutdown "$UDID" 2>/dev/null || true
 # Isolation without a full erase: `simctl erase` pays a cold first boot
 # (~3min) every run. Uninstalling the app + test bundles below removes
-# their data containers — the UserDefaults/Keychain state the suites
-# must not inherit — while the device keeps a warm boot. IOS_SIM_ERASE=1
+# their data containers — the UserDefaults state the suites must not
+# inherit — while the device keeps a warm boot; `simctl keychain reset`
+# covers the Keychain half (uninstall does not touch it). IOS_SIM_ERASE=1
 # restores the old full-erase path.
 if [ "${IOS_SIM_ERASE:-0}" = "1" ]; then
   xcrun simctl erase "$UDID" || { echo "ERROR: simctl erase failed"; exit 1; }
@@ -221,6 +223,16 @@ if kill -0 "$BSPID" 2>/dev/null; then
   kill "$BSPID" 2>/dev/null || true
 fi
 wait "$BSPID" 2>/dev/null || true
+
+# `simctl uninstall` drops app containers but NOT Keychain items — they
+# live in the device keychain db outside the container, and AuthManager's
+# persist() writes there on every refresh. Reset it explicitly so the
+# warm-boot path keeps erase's isolation; the verb needs a Booted device,
+# which the bootstatus wait above provides. Redundant after
+# IOS_SIM_ERASE=1 but harmless (~0.3s), so it runs unconditionally.
+if ! out="$(xcrun simctl keychain "$UDID" reset 2>&1)"; then
+  echo "WARN: simctl keychain reset failed: $out"
+fi
 
 # Drop the app + test-bundle containers so clones inherit clean state —
 # replaces the old full-device erase (a no-op when IOS_SIM_ERASE=1 ran).
