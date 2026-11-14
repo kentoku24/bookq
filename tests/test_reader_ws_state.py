@@ -1,29 +1,75 @@
 """S05 — sequencer/state over real WebSocket clients (#80).
 
-Two independent websockets.sync clients against a live uvicorn test-mode
-server: the fixed operation sequences from the issue's 完了条件 exercised on
-the real transport — pairing, OPEN_WORK manifest delivery, READY gating,
-page ops from both members, duplicate/stale/foreign rejections carrying the
-latest snapshot, disconnect-resume without replay, and data-plane flips.
-"""
-import json
-import os
-import sys
-import time
-from pathlib import Path
+Two independent websockets.sync clients against the live session `server`
+fixture (BOOKQ_TEST_MODE mock auth): the fixed operation sequences from the
+issue's 完了条件 exercised on the real transport — pairing, OPEN_WORK
+manifest delivery, READY gating, page ops from both members,
+duplicate/stale/foreign rejections carrying the latest snapshot,
+disconnect-resume without replay, and data-plane flips.
 
-import pytest
+Runs in both lanes (default uvicorn + BOOKQ_TEST_SERVER=rs): wire constants
+are inlined from the asyncapi contract (v=1) and the manifest reassembly
+below mirrors catalog.join_manifest without importing app.* (#486 Phase 2c).
+"""
+import hashlib
+import json
+import time
+
 from websockets.sync.client import connect as ws_connect
 
-os.environ["BOOKQ_TEST_MODE"] = "true"
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from app.reader_sync import catalog, protocol  # noqa: E402
+# Wire constants inlined from api/asyncapi.yaml (RequestFrame.v const 1) —
+# importing app.reader_sync here would quarantine this file under
+# BOOKQ_TEST_SERVER=rs, where the whole suite oracles the viewer-rs backend.
+PROTOCOL_VERSION = 1
 
 _WS_PATH = "/ws/reader-sync"
+
+_CONTENT_KEYS = ("v", "folder", "offset", "chapters", "pageRefs", "spreadTable")
+
+
+def _canonical(obj) -> str:
+    """Deterministic JSON: sorted keys, compact separators, ASCII-only."""
+    return json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _join_manifest(chunks) -> dict:
+    """Reassemble split_manifest chunk dicts; mirrors
+    app/reader_sync/catalog.join_manifest (count/index/digest checks plus
+    digest re-verification) without importing app.* so both lanes use it."""
+    if not isinstance(chunks, (list, tuple)) or not chunks:
+        raise ValueError("no manifest chunks")
+    count = None
+    digest = None
+    parts: dict[int, str] = {}
+    for ch in chunks:
+        if (not isinstance(ch, dict)
+                or ch.get("v") != PROTOCOL_VERSION
+                or ch.get("kind") != "manifest-chunk"
+                or not isinstance(ch.get("index"), int)
+                or isinstance(ch.get("index"), bool)
+                or not isinstance(ch.get("count"), int)
+                or isinstance(ch.get("count"), bool)
+                or not isinstance(ch.get("digest"), str)
+                or not isinstance(ch.get("data"), str)):
+            raise ValueError("malformed manifest chunk")
+        if count is None:
+            count, digest = ch["count"], ch["digest"]
+        elif (ch["count"], ch["digest"]) != (count, digest):
+            raise ValueError("inconsistent manifest chunk set")
+        if ch["index"] in parts:
+            raise ValueError("duplicate manifest chunk index")
+        parts[ch["index"]] = ch["data"]
+    if count != len(chunks) or sorted(parts) != list(range(count)):
+        raise ValueError("manifest chunk set incomplete")
+    manifest = json.loads("".join(parts[i] for i in range(count)))
+    if not isinstance(manifest, dict) or manifest.get("digest") != digest:
+        raise ValueError("manifest digest field mismatch")
+    content = {k: manifest[k] for k in _CONTENT_KEYS}
+    recomputed = "sha256:" + hashlib.sha256(
+        _canonical(content).encode("ascii")).hexdigest()
+    if recomputed != digest:
+        raise ValueError("manifest digest verification failed")
+    return manifest
 
 # conftest downloads_tree fixture: 1/2/3/10/11.png — offset0 spreads
 # c0:s0=(1,2) c0:s1=(3,10) c0:s2=(11,–)
@@ -44,7 +90,7 @@ def _recv(ws, timeout: float = 5.0) -> dict:
 
 def _req(rtype, payload=None, *, sid=None, rid="r1", epoch=0, base=0) -> str:
     return json.dumps({
-        "v": protocol.PROTOCOL_VERSION,
+        "v": PROTOCOL_VERSION,
         "requestId": rid,
         "sessionId": sid,
         "workEpoch": epoch,
@@ -101,7 +147,7 @@ def _open_and_ready(ws_a, ws_b, sid, rev):
         ws_a, lambda f: f.get("type") == "STATE" and f.get("workEpoch") == 1)
     manifest_chunks = [f for f in seen_a if f["type"] == "MANIFEST"]
     assert manifest_chunks, "manifest must be chunked-delivered before/at commit"
-    manifest = catalog.join_manifest(manifest_chunks)
+    manifest = _join_manifest(manifest_chunks)
     assert manifest["folder"] == WORK
     assert manifest["digest"].startswith("sha256:")
     # follower receives the same manifest + STATE
@@ -317,7 +363,7 @@ def test_disconnect_resume_full_over_ws(server):
                 f = _recv(ws_c)
                 if f["type"] == "MANIFEST":
                     chunks.append(f)
-            manifest = catalog.join_manifest(chunks)
+            manifest = _join_manifest(chunks)
             assert manifest["folder"] == WORK
             # READY -> reading resumes
             ws_c.send(_req("READY", {"manifestVersion": 1}, sid=sid,
