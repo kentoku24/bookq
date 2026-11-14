@@ -225,10 +225,14 @@ wait "$BSPID" 2>/dev/null || true
 # Drop the app + test-bundle containers so clones inherit clean state —
 # replaces the old full-device erase (a no-op when IOS_SIM_ERASE=1 ran).
 # The .xctrunner id covers the auto-generated UI-test runner for the
-# non-parallel edge case; unknown ids are harmless no-ops.
+# non-parallel edge case. On a Booted device uninstall is a silent no-op
+# when the bundle is absent; the only realistic failure is the device
+# not being Booted — surface that instead of swallowing it silently.
 for bid in dev.bookq.reader dev.bookq.reader.tests dev.bookq.reader.uitests \
            dev.bookq.reader.uitests.xctrunner; do
-  xcrun simctl uninstall "$UDID" "$bid" 2>/dev/null || true
+  if ! out="$(xcrun simctl uninstall "$UDID" "$bid" 2>&1)"; then
+    echo "WARN: simctl uninstall $bid failed: $out"
+  fi
 done
 
 XCTESTRUN="$(ls "$DD"/Build/Products/*.xctestrun 2>/dev/null | head -1)"
