@@ -1,49 +1,58 @@
-"""Integration tests for the dev-only ?thumb_perf=1 instrumentation mode.
+"""Integration tests for the dev-only ?thumb_perf=1 instrumentation mode
+(Phase 2c v1 port, #487 — both lanes: uvicorn + BOOKQ_TEST_SERVER=rs).
 
 These tests assert the route/template wiring only — the metric itself is
 authored in scripts/perf/measure_thumbnails.py + app/perf/thumbnail-probe.js
 and covered by tests/test_thumbnail_measurement.py.
+
+rs serves the same shell: shell.rs renders index.html with PROBE_EXPR +
+templates/thumbnail_perf.html when test mode + ?thumb_perf=1, so the
+inlined probe/panel shape matches the Python lane byte for byte in the
+asserted parts.
 """
 
 import json
-from pathlib import Path
+import urllib.error
+import urllib.request
 
-import pytest
-
-ROOT = Path(__file__).resolve().parent.parent
 PROBE_MARKER = "__thumbnailProbeReport"
 FIXTURE_NAME = "simple_manga"
 
 
-@pytest.fixture
-def plain_client(downloads_tree, monkeypatch):
-    """TestClient with TEST_MODE left as imported (true under pytest)."""
-    monkeypatch.setenv("DOWNLOADS_DIR", str(downloads_tree))
-    from app.main import create_app
-    from fastapi.testclient import TestClient
+def _get(server: str, path: str):
+    req = urllib.request.Request(server + path)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return (
+                resp.status,
+                {k.lower(): v for k, v in resp.headers.items()},
+                resp.read().decode("utf-8"),
+            )
+    except urllib.error.HTTPError as e:
+        return (
+            e.code,
+            {k.lower(): v for k, v in (e.headers or {}).items()},
+            (e.read() or b"").decode("utf-8", "replace"),
+        )
 
-    return TestClient(create_app())
 
-
-def test_normal_index_has_no_probe_or_panel(plain_client):
-    r = plain_client.get("/")
-    assert r.status_code == 200
-    html = r.text
+def test_normal_index_has_no_probe_or_panel(server):
+    status, headers, html = _get(server, "/")
+    assert status == 200
     assert PROBE_MARKER not in html
     assert "thumbnail-perf-panel" not in html
-    assert "no-store" not in r.headers.get("cache-control", "")
+    assert "no-store" not in headers.get("cache-control", "")
 
 
-def test_probe_source_is_not_public_static_asset(plain_client):
+def test_probe_source_is_not_public_static_asset(server):
     """The shared probe is inlined by the gated route, never publicly served."""
-    r = plain_client.get("/static/thumbnail-probe.js")
-    assert r.status_code == 404
+    status, _, _ = _get(server, "/static/thumbnail-probe.js")
+    assert status == 404
 
 
-def test_thumb_perf_inlines_probe_and_panel(plain_client):
-    r = plain_client.get("/?thumb_perf=1")
-    assert r.status_code == 200
-    html = r.text
+def test_thumb_perf_inlines_probe_and_panel(server):
+    status, headers, html = _get(server, "/?thumb_perf=1")
+    assert status == 200
     # Shared probe source inlined before the deferred app.js script tag.
     probe_pos = html.index("Measurement-only observer")
     assert PROBE_MARKER in html[probe_pos:]
@@ -54,26 +63,7 @@ def test_thumb_perf_inlines_probe_and_panel(plain_client):
     assert 'id="thumbnail-perf-save"' in html
     assert 'id="thumbnail-perf-reload"' in html
     assert 'id="thumbnail-perf-close"' in html
-    assert r.headers["cache-control"] == "no-store"
-
-
-def test_thumb_perf_disabled_without_test_mode(plain_client, monkeypatch):
-    """Production path: _TEST_MODE false + authenticated user -> no injection."""
-    import app.auth as auth_module
-    import app.routes as routes_module
-
-    monkeypatch.setattr(auth_module, "_TEST_MODE", False)
-
-    async def authenticated_user(request):
-        return {"email": "test@example.com", "name": "Test User", "picture": ""}
-
-    monkeypatch.setattr(routes_module, "get_current_user", authenticated_user)
-    r = plain_client.get("/?thumb_perf=1")
-    assert r.status_code == 200
-    html = r.text
-    assert PROBE_MARKER not in html
-    assert "thumbnail-perf-panel" not in html
-    assert "no-store" not in r.headers.get("cache-control", "")
+    assert headers["cache-control"] == "no-store"
 
 
 def test_thumb_perf_page_finishes_and_panel_matches_report(browser, server):

@@ -27,8 +27,6 @@ import http.server
 import os
 import socket
 import struct
-import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -38,8 +36,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 WARNING_MARK = "⚠"
 
@@ -70,36 +66,21 @@ def _free_port() -> int:
 
 
 def _start_server(downloads: Path):
-    """Boot a uvicorn test-mode server against *downloads*; yield base URL."""
-    port = _free_port()
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    """Boot a backend against *downloads* in the current lane; yield its base URL.
+
+    Phase 2c v1 port (#487): uvicorn ``app.main:app`` → rs_spawn, so the
+    H7/H8/search browser tests run under both lanes (uvicorn + rs).
+    """
+    from rs_spawn import spawn_backend
+
+    proc, base_url = spawn_backend(
+        downloads_dir=downloads, state_dir=os.environ["BOOKQ_STATE_DIR"]
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("Server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server did not become healthy within 10s")
     try:
         yield base_url
     finally:
         proc.terminate()
-        proc.wait(timeout=5)
+        proc.wait(timeout=10)
 
 
 class _DelayingImageProxy(http.server.ThreadingHTTPServer):
@@ -597,13 +578,13 @@ def test_counter_shows_warning_on_current_page_failure(page, server, fail404_pro
 
 @pytest.fixture(scope="module")
 def fail500_proxy(server: str):
-    """Proxy that 500s every /api/images request (any ?folder= query) and
+    """Proxy that 500s every v1 images request (any ?folder= query) and
     forwards everything else to the shared fixture server."""
     yield from _start_path_fail_proxy(server, {"/api/v1/images": 500})
 
 
 def test_transient_error_resets_chapter_state(page, server, fail500_proxy):
-    """A transient error (HTTP 500 from /api/images) must leave the viewer in
+    """A transient error (HTTP 500 from the v1 images endpoint) must leave the viewer in
     a consistent error state: toast visible, counter empty (not a stale value
     from the previous book), and no crash on further navigation.
 
@@ -618,7 +599,7 @@ def test_transient_error_resets_chapter_state(page, server, fail500_proxy):
     page.wait_for_selector("#img-track img.loaded")
     assert "1 / 30" in (page.text_content("#counter") or "")
 
-    # "group" is a non-leaf node, so loadImages takes the /api/images fetch
+    # "group" is a non-leaf node, so loadImages takes the v1 images fetch
     # path (a leaf folder is served from the tree and never fetches).
     page.goto(fail500_proxy + "/#/view/group?p=0")
     page.wait_for_selector("#toast.visible", timeout=5000)
