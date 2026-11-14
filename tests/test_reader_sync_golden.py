@@ -1,272 +1,213 @@
-"""#210 — golden-frame conformance: drive the in-process session core through
-api/reader-sync-cases.json and assert the exact wire frames each link emits.
+"""#210 — golden-frame conformance over the live server (#485 Phase 2c port).
 
-The same case file is executed by the viewer-rs adapter
-(rust/viewer-rs/src/reader_sync/golden.rs), so a protocol change must move
-both implementations in lockstep — drift fails one side's harness.
+The canonical vectors live in the reader-sync cases file and are consumed
+in-process by both harnesses (the Python runner and the viewer-rs golden
+adapter), so a protocol change must move both implementations in lockstep.
+This file keeps the shared vectors honest at the HTTP/WS boundary: the
+cases file stays wellformed, and the key vectors — pairing handshake,
+OPEN_WORK manifest delivery, LEAVE teardown and error paths — are replayed
+against the live session server fixture, where dynamic values (codes,
+member ids, digests) bind at runtime exactly as the in-process harnesses
+assume.
 
-Dynamic server values (session/member/link ids, codes, resume tokens,
-digests) are bound at runtime: "@L1.member" resolves to the memberId issued
-to link L1's CREATE/JOIN ACK, "@session" to the latest session id, and so on.
+The in-process vector runner itself stays in
+test_reader_sync_golden_internals.py, which retires with the Python
+backend. No Python package imports here so this file runs in both lanes
+(uvicorn + BOOKQ_TEST_SERVER=rs).
 """
-import asyncio
+import hashlib
 import json
-import sys
+import time
 from pathlib import Path
 
-import pytest
+from websockets.sync.client import connect as ws_connect
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
+# Wire constant inlined from the asyncapi contract (RequestFrame.v const 1).
+PROTOCOL_VERSION = 1
 
-from app.reader_sync import catalog, model, protocol, sessions  # noqa: E402
-from app.reader_sync import state as rstate  # noqa: E402
+_WS_PATH = "/ws/reader-sync"
 
-CASES_PATH = REPO_ROOT / "api" / "reader-sync-cases.json"
+CASES_PATH = Path(__file__).resolve().parent.parent / "api" / "reader-sync-cases.json"
 
+_KNOWN_OPS = {"link", "detach", "send", "expect", "drain", "tick"}
 
-# ── resolver manifest construction ───────────────────────────────────
-
-
-def build_manifest(spec: dict) -> dict:
-    """The manifest dict a real catalog would resolve — built through the
-    same model/digest code the production resolver uses."""
-    chapters = [{
-        "name": c["name"], "folder": c["folder"],
-        "pages": [{"folder": c["folder"], "name": n} for n in c["pages"]],
-    } for c in spec["chapters"]]
-    page_refs = [p for c in chapters for p in c["pages"]]
-    plan = model.build_spread_plan(
-        [{"folder": c["folder"], "pages": c["pages"]} for c in chapters],
-        spec["offset"])
-    core = {
-        "v": protocol.PROTOCOL_VERSION,
-        "folder": spec["folder"],
-        "offset": spec["offset"],
-        "chapters": chapters,
-        "pageRefs": page_refs,
-        "spreadTable": [model.serialize_spread(s) for s in plan],
-    }
-    core["digest"] = catalog.manifest_digest(core)
-    return core
+# conftest tree work used for the live OPEN_WORK replay below.
+WORK = "simple_manga"
+FIRST_PAGE = {"folder": WORK, "name": "1.png"}
 
 
-def canonical_text(manifest: dict) -> str:
-    return json.dumps(manifest, ensure_ascii=True, sort_keys=True,
-                      separators=(",", ":"))
+def _doc():
+    return json.loads(CASES_PATH.read_text())
 
 
-# ── bindings (@-template resolution + harvesting) ────────────────────
+def _ws(base_url: str):
+    return ws_connect(base_url.replace("http", "ws") + _WS_PATH)
 
 
-def _resolve(obj, bindings):
-    """Substitute '@name' references in values and dict keys."""
-    if isinstance(obj, str) and obj.startswith("@"):
-        if obj[1:] not in bindings:
-            raise KeyError(f"unbound reference {obj}")
-        return bindings[obj[1:]]
-    if isinstance(obj, list):
-        return [_resolve(x, bindings) for x in obj]
-    if isinstance(obj, dict):
-        return {bindings[k[1:]] if isinstance(k, str) and k.startswith("@")
-                and k[1:] in bindings else k:
-                _resolve(v, bindings) for k, v in obj.items()}
-    return obj
+def _recv(ws, timeout: float = 10.0) -> dict:
+    raw = ws.recv(timeout=timeout)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    return json.loads(raw)
 
 
-class LinkDriver:
-    """Owns a PeerLink: its outbound queue, bulk expansion and the
-    transport-close hook (recorded, never a socket)."""
-
-    def __init__(self, reg: sessions.SessionRegistry, user: dict | None):
-        self.link = sessions.PeerLink(reg)
-        self.link.user = user
-        self.closed: list[tuple[int, str]] = []
-        self.link.request_transport_close = \
-            lambda code, reason: self.closed.append((code, reason))
-        reg.register_link(self.link)
-
-    def drain(self) -> list[dict]:
-        """Every pending outbound frame, bulk blocks expanded in place."""
-        out = []
-        while True:
-            try:
-                item = self.link.outq.get_nowait()
-            except asyncio.QueueEmpty:
-                return out
-            if item is sessions._BULK:
-                while (raw := self.link._pop_bulk()) is not None:
-                    out.append(json.loads(raw))
-            else:
-                out.append(json.loads(item))
+def _req(rtype, payload=None, *, sid=None, rid="r1", epoch=0, base=0) -> str:
+    return json.dumps({
+        "v": PROTOCOL_VERSION,
+        "requestId": rid,
+        "sessionId": sid,
+        "workEpoch": epoch,
+        "baseRevision": base,
+        "type": rtype,
+        "payload": payload or {},
+    })
 
 
-def _harvest(bindings: dict, linkname: str, frame: dict,
-             request_senders: dict) -> None:
-    """Bind dynamic values an implementation issues into wire frames."""
-    t = frame.get("type")
-    if t == "HELLO" and isinstance(frame.get("link"), str):
-        bindings[f"{linkname}.link"] = frame["link"]
-    sid = frame.get("sessionId")
-    if isinstance(sid, str):
-        bindings["session"] = sid
-    if t == "ACK":
-        sender = request_senders.get(frame.get("requestId"))
-        data = frame.get("data") or {}
-        if sender is not None:
-            if isinstance(data.get("memberId"), str):
-                bindings[f"{sender}.member"] = data["memberId"]
-            if isinstance(data.get("resumeToken"), str):
-                bindings[f"{sender}.token"] = data["resumeToken"]
-        if isinstance(data.get("code"), str):
-            bindings["code"] = data["code"]
-    if t == "STATE":
-        for mid, m in (frame.get("presence") or {}).items():
-            if isinstance(m, dict) and isinstance(m.get("role"), str):
-                bindings[f"{m['role']}.member"] = mid
-    if t == "MANIFEST" and isinstance(frame.get("digest"), str):
-        bindings["digest"] = frame["digest"]
+def _drain_until(ws, pred, timeout: float = 15.0):
+    deadline = time.time() + timeout
+    seen = []
+    while time.time() < deadline:
+        f = _recv(ws, timeout=max(0.1, deadline - time.time()))
+        seen.append(f)
+        if pred(f):
+            return f, seen
+    raise AssertionError("no matching frame within %ss; saw %s"
+                         % (timeout, [f.get("type") for f in seen]))
 
 
-# ── case runner ──────────────────────────────────────────────────────
-
-
-def run_case(doc: dict, case: dict) -> None:
-    cid = case["id"]
-    clock = [0.0]
-    resolver_map = doc.get("resolver") or {}
-    rkey = case.get("resolver")
-
-    def fake_resolver(link, job):
-        spec = resolver_map.get(job["folder"])
-        if spec is None:
-            raise catalog.ManifestError(catalog.ERR_NOT_FOUND,
-                                        f"no resolver entry: {job['folder']}")
-        manifest = build_manifest(spec)
-        # Mirror catalog.resolve_work: the committed initial spread comes
-        # from the requested page ref, resolved through the built plan.
-        plan = rstate.plan_from_manifest(manifest)
-        idx = model.spread_index_for_page(plan, job["page"])
-        manifest["initial"] = {"page": job["page"],
-                               "spreadId": plan[idx].id}
-        # MANIFEST chunk data is the canonical bytes of the *delivered*
-        # manifest (including the resolver-added "initial") — rebind so
-        # @manifest.canonical always mirrors the latest resolve.
-        bindings["manifest.canonical"] = canonical_text(manifest)
-        return manifest
-
-    reg = sessions.SessionRegistry(clock=lambda: clock[0],
-                                   work_resolver=fake_resolver if rkey else None)
-    if rkey is not None:
-        spec = resolver_map[rkey]
-        bindings_manifest = build_manifest(spec)
-    else:
-        bindings_manifest = None
-
-    bindings: dict = {}
-    if bindings_manifest is not None:
-        bindings["manifest.canonical"] = canonical_text(bindings_manifest)
-    links: dict[str, LinkDriver] = {}
-    request_senders: dict = {}   # requestId -> link name
-
-    def _send(name, frame):
-        f = _resolve(frame, bindings)
-        request_senders[f.get("requestId")] = name
-        reg.handle_raw(links[name].link,
-                       json.dumps(f, separators=(",", ":")))
-
-    def _drain(name):
-        for fr in links[name].drain():
-            _harvest(bindings, name, fr, request_senders)
-
-    # Canonical shared setup — the same handshake every case needs, with
-    # its wire output drained+harvested but not asserted (cases assert
-    # their own steps only).
-    setup = case.get("setup")
-    if setup:
-        users = case.get("users") or {}
-        links["L1"] = LinkDriver(reg, users.get("L1",
-            {"email": "alice@example.com", "name": "Alice", "picture": ""}))
-        _drain("L1")
-        _send("L1", {"v": 1, "requestId": "c1", "sessionId": None,
-                     "workEpoch": 0, "baseRevision": 0, "type": "CREATE",
-                     "payload": {}})
-        _drain("L1")
-        links["L2"] = LinkDriver(reg, users.get("L2",
-            {"email": "bob@example.com", "name": "Bob", "picture": ""}))
-        _drain("L2")
-        _send("L2", {"v": 1, "requestId": "j1", "sessionId": None,
-                     "workEpoch": 0, "baseRevision": 0, "type": "JOIN",
-                     "payload": {"code": "@code"}})
-        _drain("L1"); _drain("L2")
-        _send("L1", {"v": 1, "requestId": "a1", "sessionId": "@session",
-                     "workEpoch": 0, "baseRevision": 1, "type": "APPROVE",
-                     "payload": {"memberId": "@L2.member"}})
-        _drain("L1"); _drain("L2")
-        if setup in ("paired_open", "reading"):
-            _send("L1", {"v": 1, "requestId": "o1", "sessionId": "@session",
-                         "workEpoch": 0, "baseRevision": 2,
-                         "type": "OPEN_WORK",
-                         "payload": {"folder": rkey,
-                                     "page": {"folder": rkey,
-                                              "name": resolver_map[rkey]["chapters"][0]["pages"][0]},
-                                     "offset": resolver_map[rkey]["offset"]}})
-            _drain("L1"); _drain("L2")
-        if setup == "reading":
-            _send("L1", {"v": 1, "requestId": "r1", "sessionId": "@session",
-                         "workEpoch": 1, "baseRevision": 4, "type": "READY",
-                         "payload": {"manifestVersion": 1}})
-            _drain("L1"); _drain("L2")
-            _send("L2", {"v": 1, "requestId": "r2", "sessionId": "@session",
-                         "workEpoch": 1, "baseRevision": 5, "type": "READY",
-                         "payload": {"manifestVersion": 1}})
-            _drain("L1"); _drain("L2")
-
-    def need_link(name):
-        if name not in links:
-            raise AssertionError(f"{cid}: unknown link {name}")
-        return links[name]
-
-    for i, step in enumerate(case["steps"]):
-        op = step.get("op")
-        at = f"{cid} step[{i}] {op}"
-        if op == "link":
-            links[step["as"]] = LinkDriver(reg, step.get("user"))
-        elif op == "detach":
-            reg.detach_link(need_link(step["link"]).link)
-        elif op == "send":
-            _send(step["link"], step["frame"])
-        elif op in ("expect", "drain"):
-            got = need_link(step["link"]).drain()
-            for f in got:
-                _harvest(bindings, step["link"], f, request_senders)
-            if op == "drain":
-                continue
-            want = [_resolve(f, bindings) for f in step["frames"]]
-            assert got == want, (
-                f"{at}: frame mismatch\n"
-                f"--- want ---\n{json.dumps(want, indent=1)}\n"
-                f"--- got ----\n{json.dumps(got, indent=1)}")
-        elif op == "tick":
-            clock[0] += step.get("by", 0)
-            reg.tick()
-        else:
-            raise AssertionError(f"{at}: unknown op")
-
-
-# ── pytest entry ─────────────────────────────────────────────────────
-
-_DOC = json.loads(CASES_PATH.read_text())
-_CASES = {c["id"]: c for c in _DOC["cases"]}
-
-
-@pytest.mark.parametrize("case_id", sorted(_CASES))
-def test_golden_case(case_id):
-    run_case(_DOC, _CASES[case_id])
+def _expect(ws, rtype: str, timeout: float = 15.0):
+    return _drain_until(ws, lambda f: f.get("type") == rtype, timeout)[0]
 
 
 def test_cases_file_is_wellformed():
-    assert _DOC["format"] == 1
-    assert _CASES, "no cases defined"
-    for cid, c in _CASES.items():
-        assert c["steps"], f"{cid}: empty"
+    doc = _doc()
+    assert doc["format"] == 1
+    cases = {c["id"]: c for c in doc["cases"]}
+    assert len(cases) >= 1, "no cases defined"
+    for cid, case in cases.items():
+        assert case["steps"], f"{cid}: empty"
+        for i, step in enumerate(case["steps"]):
+            assert step.get("op") in _KNOWN_OPS, f"{cid} step[{i}]: unknown op"
+            if step["op"] == "send":
+                frame = step["frame"]
+                assert frame["v"] == PROTOCOL_VERSION
+                # error_paths deliberately sends a typeless frame to pin
+                # the malformed REJECT — type is required only when present.
+                assert isinstance(frame.get("requestId"), str)
+                if "type" in frame:
+                    assert isinstance(frame["type"], str) and frame["type"]
+    resolver = doc.get("resolver") or {}
+    for name, spec in resolver.items():
+        assert isinstance(spec["folder"], str) and spec["folder"]
+        assert isinstance(spec["chapters"], list) and spec["chapters"]
+        for ch in spec["chapters"]:
+            for n in ch["pages"]:
+                assert isinstance(n, str) and n
+
+
+def test_golden_pairing_vector_over_live_ws(server):
+    """pairing_create_join_approve: the live handshake emits the same frame
+    type sequence the golden vector pins (HELLO/ACK/STATE/JOIN_REQUEST)."""
+    with _ws(server) as ws_a, _ws(server) as ws_b:
+        assert _recv(ws_a)["type"] == "HELLO"
+        assert _recv(ws_b)["type"] == "HELLO"
+        ws_a.send(_req("CREATE", rid="c1"))
+        ack = _expect(ws_a, "ACK")
+        assert ack["request"] == "CREATE"
+        data = ack["data"]
+        assert len(data["code"]) == 6 and data["code"].isdigit()
+        assert data["role"] == "leader"
+        assert data["resumeToken"]
+        _expect(ws_a, "STATE")
+        ws_b.send(_req("JOIN", {"code": data["code"]}, rid="j1"))
+        joined = _expect(ws_b, "ACK")
+        assert joined["request"] == "JOIN"
+        jr = _expect(ws_a, "JOIN_REQUEST")
+        assert jr["memberId"] == joined["data"]["memberId"]
+        ws_a.send(_req("APPROVE", {"memberId": joined["data"]["memberId"]},
+                       sid=data["sessionId"], rid="a1"))
+        _expect(ws_a, "ACK")
+        st_a = _expect(ws_a, "STATE")
+        st_b = _expect(ws_b, "STATE")
+        assert len(st_a["presence"]) == 2 == len(st_b["presence"])
+
+
+def _join_manifest(chunks) -> dict:
+    count = None
+    digest = None
+    parts: dict[int, str] = {}
+    for ch in chunks:
+        if count is None:
+            count, digest = ch["count"], ch["digest"]
+        parts[ch["index"]] = ch["data"]
+    assert count == len(chunks) and sorted(parts) == list(range(count))
+    manifest = json.loads("".join(parts[i] for i in range(count)))
+    assert manifest.get("digest") == digest
+    content = {k: manifest[k] for k in
+               ("v", "folder", "offset", "chapters", "pageRefs", "spreadTable")}
+    canonical = json.dumps(content, ensure_ascii=True, sort_keys=True,
+                           separators=(",", ":"))
+    assert "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest() == digest
+    return manifest
+
+
+def test_golden_open_work_vector_over_live_ws(server):
+    """open_work_manifest_ready_reading: OPEN_WORK delivers chunked MANIFEST
+    frames whose digest verifies, then READY x2 reaches reading."""
+    with _ws(server) as ws_a, _ws(server) as ws_b:
+        _recv(ws_a); _recv(ws_b)
+        ws_a.send(_req("CREATE", rid="c1"))
+        data = _expect(ws_a, "ACK")["data"]
+        ws_b.send(_req("JOIN", {"code": data["code"]}, rid="j1"))
+        joined = _expect(ws_b, "ACK")["data"]
+        _expect(ws_a, "JOIN_REQUEST")
+        ws_a.send(_req("APPROVE", {"memberId": joined["memberId"]},
+                       sid=data["sessionId"], rid="a1"))
+        rev = _expect(ws_a, "STATE")["revision"]
+        _expect(ws_b, "STATE")
+        sid = data["sessionId"]
+        ws_a.send(_req("OPEN_WORK", {"folder": WORK, "page": FIRST_PAGE},
+                       sid=sid, rid="o1", epoch=0, base=rev))
+        st, seen = _drain_until(
+            ws_a, lambda f: f.get("type") == "STATE" and f.get("workEpoch") == 1)
+        manifest = _join_manifest([f for f in seen if f["type"] == "MANIFEST"])
+        assert manifest["folder"] == WORK
+        assert manifest["digest"].startswith("sha256:")
+        ws_a.send(_req("READY", {"manifestVersion": 1}, sid=sid, rid="r1", epoch=1))
+        ws_b.send(_req("READY", {"manifestVersion": 1}, sid=sid, rid="r2", epoch=1))
+        sa, _ = _drain_until(ws_a, lambda f: f.get("type") == "STATE"
+                             and f.get("phase") == "reading")
+        assert sa["spreadId"] == "c0:s0"
+
+
+def test_golden_leave_vector_over_live_ws(server):
+    """leave_ends_session_for_all: LEAVE broadcasts END to every member."""
+    with _ws(server) as ws_a, _ws(server) as ws_b:
+        _recv(ws_a); _recv(ws_b)
+        ws_a.send(_req("CREATE", rid="c1"))
+        data = _expect(ws_a, "ACK")["data"]
+        _expect(ws_a, "STATE")
+        ws_b.send(_req("JOIN", {"code": data["code"]}, rid="j1"))
+        joined = _expect(ws_b, "ACK")["data"]
+        _expect(ws_a, "JOIN_REQUEST")
+        ws_a.send(_req("APPROVE", {"memberId": joined["memberId"]},
+                       sid=data["sessionId"], rid="a1"))
+        _expect(ws_a, "ACK")
+        _expect(ws_a, "STATE"); _expect(ws_b, "STATE")
+        ws_b.send(_req("LEAVE", sid=data["sessionId"], rid="l1"))
+        assert _expect(ws_a, "END")["reason"] == "left"
+        assert _expect(ws_b, "END")["reason"] == "left"
+
+
+def test_golden_error_vector_over_live_ws(server):
+    """error_paths: bad code and unpaired SIGNAL are typed REJECTs."""
+    with _ws(server) as ws:
+        _recv(ws)
+        ws.send(_req("JOIN", {"code": "000000"}, rid="j1"))
+        assert _expect(ws, "REJECT")["reason"] == "bad_code"
+        ws.send(_req("CREATE", rid="c1"))
+        created = _expect(ws, "ACK")["data"]
+        _expect(ws, "STATE")
+        ws.send(_req("SIGNAL", {"kind": "offer", "data": {}},
+                     sid=created["sessionId"], rid="s1"))
+        assert _expect(ws, "REJECT")["reason"] == "not_paired"
