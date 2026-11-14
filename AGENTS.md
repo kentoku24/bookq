@@ -69,13 +69,13 @@ issue タイトルからスラッグを生成する:
 
 ### フォルダツリー / scanner
 
-- `app/scanner.py:92` `scan_tree` — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`app/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `app/static/app.js:1308` で構築)。prefix を付与しないこと。
-- 変更時は `app/templates/index.html` のサムネ参照と整合させること。`thumbs` (2+ サブフォルダに thumb がある時のみ) による multi-thumb グリッド分岐がある。
+- `app/scanner.py:92` `scan_tree` — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`web/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `web/static/app.js:1308` で構築)。prefix を付与しないこと。
+- 変更時は `web/templates/index.html` のサムネ参照と整合させること。`thumbs` (2+ サブフォルダに thumb がある時のみ) による multi-thumb グリッド分岐がある。
 
 ### URL ハッシュ状態 / Viewer
 
-- `app/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`app/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
-- `app/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `app/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (`app/routes.py:26` の global `_jinja_env = Environment(auto_reload=True, cache_size=0)` が `get_template` をキャッシュしつつ即時反映)。
+- `web/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`web/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
+- `web/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `web/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (`app/routes.py:26` の global `_jinja_env = Environment(auto_reload=True, cache_size=0)` が `get_template` をキャッシュしつつ即時反映)。
 
 ### テスト
 
@@ -86,7 +86,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - `BOOKQ_TEST_MODE=true` が必須 — `app/auth.py` の `_TEST_MODE` は import 時に一度だけ読まれ、OAuth をバイパスして mock user を返す。
 - `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
 - `uvicorn[standard]` は `requirements-dev.txt` 側のみに存在 (runtime `requirements.txt` は hypercorn)。`--with-requirements requirements-dev.txt` の付与を省略しないこと。
-- 隠しルート機能は `app/folder_visibility*.py` + `app/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
+- 隠しルート機能は `app/folder_visibility*.py` + `web/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
 
 ### デプロイ / ネットワーク
 
@@ -117,5 +117,5 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - メインのチェックアウト (リポジトリ直下) は常時 `main` に固定し、直接編集・commit しない (`prd.sh` による本番操作専用)。
 - 作業開始時チェックリスト: `git worktree list` で既存確認 → なければ `git worktree add .worktrees/<name> -b ai/<N>-<slug> origin/main` (plan-track は `-b ai/<slug>`) → その worktree に移動して作業。`origin/main` から切り、ローカル HEAD から切らないこと。
 - 1 worktree = 1 dev 環境名。worktree 作成時に `./dev.sh up <name>` でスロット占有を宣言し、マージ時に `./dev.sh down <name>` + `git worktree remove` で解放する (10スロットプールのため同時10以下を仮定)。
-- 読み取り専用 (調査・レビュー) のみ同居可。`app/static/app.js` の同時編集は直列化すること。
+- 読み取り専用 (調査・レビュー) のみ同居可。`web/static/app.js` の同時編集は直列化すること。
 - 残置掃除は `./scripts/cleanup-worktrees.sh` (既定 dry-run、`--apply` で削除)。マージ済み・clean のみ対象、detached/dirty/dev 環境は手動。

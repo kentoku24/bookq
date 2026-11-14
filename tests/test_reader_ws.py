@@ -75,7 +75,7 @@ def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
             "GOOGLE_CLIENT_ID": "ci-dummy",
             "GOOGLE_CLIENT_SECRET": "ci-dummy",
             "BASE_URL": f"http://127.0.0.1:{port}",
-            "BOOKQ_APP_DIR": str(REPO_ROOT / "app"),
+            "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
             "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
         })
         cmd = [str(_viewer_rs_binary())]

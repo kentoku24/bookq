@@ -1,7 +1,7 @@
 import Foundation
 
 /// Server transport for the single latest reading position — Swift port of
-/// `app/static/progress/sync.js`. Same wire ({folder,page,total,ts}), same
+/// `web/static/progress/sync.js`. Same wire ({folder,page,total,ts}), same
 /// policy: 2s trailing debounce, one in-flight PUT, dedup by
 /// "folder|page|total", backoff 4s→8s→…→60s on network/5xx/408/429, drop
 /// other 4xx, original-ts preserved on requeue.

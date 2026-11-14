@@ -127,7 +127,7 @@ def test_encodepath_per_segment_contract(tmp_path):
     produce a non-matching cache key. The contract fails proof shows bulk encoding
     is distinguishably different.
     """
-    core_text = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    core_text = (REPO_ROOT / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     assert "split(\"/\").map(encodeURIComponent).join(\"/\")" in core_text, "encodePath must be per-segment"
     assert "function imageUrl(folder, name)" in core_text
     # offline-core.js (0ac6dc3): empty folder now emits "/image/<name>" with no
@@ -173,7 +173,7 @@ def test_encodepath_per_segment_contract(tmp_path):
     assert per_work_folder_from_url(bulk) != folder + "/a"
 
     # also ensure sw.js perWorkCacheName unchanged (decodeURIComponent pattern)
-    sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
     assert "decodeURIComponent(parts.slice(0, -1).join('/'))" in sw_text
     assert "cacheNameFor(folder)" in sw_text
 
@@ -365,11 +365,11 @@ def test_thumb_prefetch_cached(page, server):
 
     # Verify implementation details without breaking existing contracts
 
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     # Canonical homes after app.js module split: thumb prefetch lives in
     # thumbs/prefetch.js, offline download/clone logic in offline/storeAdapter.js
-    prefetch_text = (REPO_ROOT / "app" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
-    store_text = (REPO_ROOT / "app" / "static" / "offline" / "storeAdapter.js").read_text(encoding="utf-8")
+    prefetch_text = (REPO_ROOT / "web" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
+    store_text = (REPO_ROOT / "web" / "static" / "offline" / "storeAdapter.js").read_text(encoding="utf-8")
     # Who owns what is asserted against the loaded page, not against app.js as
     # a string: app.js only delegates now, so "the name appears in app.js" no
     # longer says anything about where the function lives (#107).
@@ -404,10 +404,10 @@ def test_thumb_prefetch_cached(page, server):
     # do not call refreshOfflineMap after updateStorageBar for prefetch
     # cheap check: ensure not both in prefetch context consecutively; global still has refreshOfflineMap but prefetch section shouldn't have it paired
     # At minimum verify offline-core and sw unchanged content markers
-    core = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    core = (REPO_ROOT / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     assert "Per-segment percent-encoding" in core, "offline-core.js encodePath comment preserved"
     assert "function encodePath(p)" in core
-    sw = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
+    sw = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
     assert 'function perWorkCacheName(req)' in sw
     assert 'decodeURIComponent(parts.slice(0, -1).join' in sw
 
@@ -437,8 +437,8 @@ def test_thumb_prefetch_cached(page, server):
 
 
 def test_prefetch_visible_preference_over_cap(browser, server):
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
-    prefetch_text = (REPO_ROOT / "app" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    prefetch_text = (REPO_ROOT / "web" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
     assert "__BOOKQ_DEBUG" in app_text
 
     context = browser.new_context(viewport={"width": 1280, "height": 20000})

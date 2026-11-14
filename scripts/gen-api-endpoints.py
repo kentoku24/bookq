@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate app/static/api/endpoints.js from api/openapi.v1.yaml.
+"""Generate web/static/api/endpoints.js from api/openapi.v1.yaml.
 
-The PWA must not hard-code `/api/v1/...` strings outside `app/static/api/`
+The PWA must not hard-code `/api/v1/...` strings outside `web/static/api/`
 (#236): this file is the single source of truth for endpoint paths, loaded
 by the page (before `api/v1.js`) and by the Service Worker via
 `importScripts` (which cannot see `window.BookqApi`).
@@ -23,7 +23,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC = REPO_ROOT / "api" / "openapi.v1.yaml"
-OUT = REPO_ROOT / "app" / "static" / "api" / "endpoints.js"
+OUT = REPO_ROOT / "web" / "static" / "api" / "endpoints.js"
 
 # Spec path -> BookqApiEndpoints key. An unknown /api/v1/* path in the spec
 # fails the script on purpose: add the mapping here first.

@@ -4,7 +4,7 @@ import urllib.error
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SW_PATH = REPO_ROOT / "app" / "static" / "sw.js"
+SW_PATH = REPO_ROOT / "web" / "static" / "sw.js"
 
 def _get(server: str, path: str):
     url = server + path
@@ -129,13 +129,13 @@ def test_static_assets_all_200(server):
 
 def test_dockerignore_excludes_no_app_static():
     text = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
-    assert "app/static" not in text, ".dockerignore must not exclude app/static (offline-harness + sw.js must be in image)"
+    assert "web/static" not in text, ".dockerignore must not exclude web/static (offline-harness + sw.js must be in image)"
 
 
 def test_dockerfile_copies_app():
-    text = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "COPY app/ ./app/" in text, "Dockerfile must COPY app/ ./app/ so app/static/offline-harness.html is included"
-    assert text.find("COPY app/") == text.rfind("COPY app/") or text.count("COPY app/") >= 1
+    text = (REPO_ROOT / "Dockerfile.viewer-rs").read_text(encoding="utf-8")
+    assert "COPY web/" in text, "Dockerfile.viewer-rs must COPY web/ so web/static/offline-harness.html is included"
+    assert text.find("COPY web/") == text.rfind("COPY web/") or text.count("COPY web/") >= 1
 
 
 def test_install_best_effort_per_asset_does_not_reject():

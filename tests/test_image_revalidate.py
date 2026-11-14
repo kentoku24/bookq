@@ -36,7 +36,7 @@ from playwright.sync_api import expect
 from tests.conftest import _make_png
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SW_PATH = REPO_ROOT / "app" / "static" / "sw.js"
+SW_PATH = REPO_ROOT / "web" / "static" / "sw.js"
 
 
 def _is_webkit():

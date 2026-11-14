@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = json.loads(
     (REPO_ROOT / "tests" / "fixtures" / "reader_sync_cases.json").read_text(encoding="utf-8")
 )
-PAIR_MODEL_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairModel.js"
+PAIR_MODEL_JS = REPO_ROOT / "web" / "static" / "viewer" / "pairModel.js"
 
 
 def _chapters(case):
@@ -207,8 +207,8 @@ def test_pair_model_js_in_browser(any_browser):
 
 def test_pair_model_js_is_single_source():
     """No second copy of the projection logic elsewhere in the frontend."""
-    for rel in ("app/static/app.js", "app/static/viewer/spread.js",
-                "app/static/viewer/overview.js", "app/static/viewer/zoom.js"):
+    for rel in ("web/static/app.js", "web/static/viewer/spread.js",
+                "web/static/viewer/overview.js", "web/static/viewer/zoom.js"):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert "projectSpread" not in text, f"{rel} must not re-implement projectSpread"
     text = PAIR_MODEL_JS.read_text(encoding="utf-8")

@@ -2,7 +2,7 @@
 (Phase 2c v1 port, #487 — both lanes: uvicorn + BOOKQ_TEST_SERVER=rs).
 
 These tests assert the route/template wiring only — the metric itself is
-authored in scripts/perf/measure_thumbnails.py + app/perf/thumbnail-probe.js
+authored in scripts/perf/measure_thumbnails.py + web/perf/thumbnail-probe.js
 and covered by tests/test_thumbnail_measurement.py.
 
 rs serves the same shell: shell.rs renders index.html with PROBE_EXPR +

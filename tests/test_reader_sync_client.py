@@ -1,6 +1,6 @@
 """S07 — dual-reader browser sync client + reconnect state machine (#82).
 
-Deterministic browser-side tests for ``app/static/viewer/pairClient.js``:
+Deterministic browser-side tests for ``web/static/viewer/pairClient.js``:
 the REAL production script is evaluated in a page (``add_script_tag`` —
 never a re-implementation) and driven by injected fakes — mock sockets with
 a send log, a fake clock/timer set, fake storage, a fake lifecycle-event
@@ -41,8 +41,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.reader_sync import catalog, model, protocol  # noqa: E402
 
-PAIR_CLIENT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairClient.js"
-PAIR_TRANSPORT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairTransport.js"
+PAIR_CLIENT_JS = REPO_ROOT / "web" / "static" / "viewer" / "pairClient.js"
+PAIR_TRANSPORT_JS = REPO_ROOT / "web" / "static" / "viewer" / "pairTransport.js"
 
 
 @pytest.fixture

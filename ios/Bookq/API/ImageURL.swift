@@ -1,7 +1,7 @@
 import Foundation
 
 /// Path encoding that mirrors `encodeURIComponent` per segment
-/// (`app/static/offline-core.js` `encodePath`). Byte-exact parity with the
+/// (`web/static/offline-core.js` `encodePath`). Byte-exact parity with the
 /// web client's URLs is required (cache keys / server path matching). The
 /// composed path is split on "/" — flattened names like "parent/child"
 /// naturally become two segments, exactly as the JS encodePath does.

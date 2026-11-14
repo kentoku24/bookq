@@ -61,7 +61,7 @@ def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
                 "BASE_URL": base_url,
                 "ALLOWED_EMAILS": "test@example.com",
                 "SECRET_KEY": "ci-not-a-secret",
-                "BOOKQ_APP_DIR": str(REPO_ROOT / "app"),
+                "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
                 "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
             }
         )

@@ -58,8 +58,9 @@ jobs:
               - ".github/workflows/*.yml"
               - "rust/**"
               - "tests/**"
-              - "app/static/**"
-              - "app/templates/**"
+              - "web/static/**"
+              - "web/templates/**"
+              - "web/perf/**"
               - "api/openapi.v1.yaml"
               - "api/vectors/**"
 

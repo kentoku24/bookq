@@ -159,7 +159,7 @@ def test_api_folders_offline_recovery(page, server):
     assert idempotent, "IDB double put idempotency failed — second put corrupted IDB"
 
     # SW networkFirst clone order preserved: sw.js must contain clone before put (harmless opportunistic)
-    sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
     assert "res.clone()" in sw_text and "caches.open" in sw_text, "SW networkFirst must clone before put"
     # SW serves the tree fallback via the api/endpoints.js path constant.
     # #236: the tree path comes from api/endpoints.js (API_PATHS.tree), never hard-coded.
@@ -167,9 +167,9 @@ def test_api_folders_offline_recovery(page, server):
     assert "ignoreSearch" in sw_text, "SW must have ignoreSearch fallback"
 
     # verify app.js uses IDB-only and no longer caches.put/match for the tree endpoint
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     # Single hashchange listener lives in browse/hash.js by design (PR #92 split)
-    hash_text = (REPO_ROOT / "app" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
+    hash_text = (REPO_ROOT / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
     assert "OfflineTree.putTree" in app_text, "app.js must persist via OfflineTree.putTree"
     assert "OfflineTree.getTree" in app_text, "app.js catch must recover via OfflineTree.getTree"
     # loadFolders should not contain caches.open for folders nor caches.match for folders catch
@@ -296,7 +296,7 @@ def test_browse_hierarchy_offline(page, server):
 
     # ── verify parent resolution uses tree walk not split("/") ──
     # Evaluate getParentPath via the app's own function if exposed, else verify via breadcrumb navigation
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     assert "findParentPath" in app_text, "getParentPath must use tree walk findParentPath"
     assert 'split("/")' not in app_text.split("function getParentPath")[1].split("function")[0] or "findParentPath" in app_text, "getParentPath must not use split('/') parent resolution"
     # scanner flatten rewrites name/thumb/thumbs together at 131-147 — verify source contains all three rewrites
@@ -751,13 +751,13 @@ def test_auto_sync_on_first_online_visit(page, server):
       - sessionStorage gating works, second reload 0 extra /image/* fetch, online revalidation spy fires once then debounced.
     """
     REPO_ROOT_LOCAL = REPO_ROOT
-    app_text = (REPO_ROOT_LOCAL / "app" / "static" / "app.js").read_text(encoding="utf-8")
-    sw_text = (REPO_ROOT_LOCAL / "app" / "static" / "sw.js").read_text(encoding="utf-8")
-    core_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT_LOCAL / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT_LOCAL / "web" / "static" / "sw.js").read_text(encoding="utf-8")
+    core_text = (REPO_ROOT_LOCAL / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     # Canonical homes after app.js module split
-    hash_text = (REPO_ROOT_LOCAL / "app" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
-    prefetch_text = (REPO_ROOT_LOCAL / "app" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
-    store_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline" / "storeAdapter.js").read_text(encoding="utf-8")
+    hash_text = (REPO_ROOT_LOCAL / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
+    prefetch_text = (REPO_ROOT_LOCAL / "web" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
+    store_text = (REPO_ROOT_LOCAL / "web" / "static" / "offline" / "storeAdapter.js").read_text(encoding="utf-8")
 
     # ── Static contract pinning (baseline characterization) ──
     # sessionStorage key exactly once per session
@@ -797,7 +797,7 @@ def test_auto_sync_on_first_online_visit(page, server):
     assert "showQuotaConfirm" not in prefetch_text, "prefetch must not reference the quota modal"
     # health probe preserved — it now lives in offline/connectivity.js (the
     # 3-state machine; spec §5) rather than app.js's updateOnlineStatus.
-    conn_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline" / "connectivity.js").read_text(encoding="utf-8")
+    conn_text = (REPO_ROOT_LOCAL / "web" / "static" / "offline" / "connectivity.js").read_text(encoding="utf-8")
     assert "X-Online-Check" in conn_text, "Connectivity probe must keep X-Online-Check header"
     assert "online_check" in conn_text, "must keep health online_check probe"
     assert "cache:\"no-store\"" in conn_text or "cache: \"no-store\"" in conn_text or "'no-store'" in conn_text or '"no-store"' in conn_text, "online probe must use cache no-store"
@@ -1010,11 +1010,11 @@ def test_browse_to_view_offline_transition(page, server):
     wait_for_sw(page)
 
     # ── Static contract pinning (baseline characterization) ──
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
-    sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
     scanner_text = (REPO_ROOT / "app" / "scanner.py").read_text(encoding="utf-8")
     # Single hashchange listener lives in browse/hash.js by design (PR #92 split)
-    hash_text = (REPO_ROOT / "app" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
+    hash_text = (REPO_ROOT / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
     # hashchange only, no popstate
     assert 'addEventListener("hashchange"' in hash_text, "must have single hashchange listener (owned by browse/hash.js)"
     assert app_text.count('addEventListener("hashchange"') == 0, "app.js must not add its own hashchange listener"
@@ -1223,7 +1223,7 @@ def test_browse_to_view_offline_transition(page, server):
 
 
 def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     assert "if(!Array.isArray(data)) return;" in app_text
     assert "while(next && !getNodeAt(next))" in app_text
 

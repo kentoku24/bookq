@@ -3,7 +3,7 @@
  * offlineControlsHtml etc. Depends on window.tree, window.OfflineStore etc.
  *
  * Wire (#236): the leaf image listing goes through the typed window.BookqApi
- * client (app/static/api/v1.js) — the `{folder, images[]}` envelope is
+ * client (web/static/api/v1.js) — the `{folder, images[]}` envelope is
  * spec-typed, so a response-shape change breaks tsc instead of only E2E.
  */
 // @ts-check
