@@ -17,28 +17,28 @@ def _get(server: str, path: str, accept_encoding: str | None = "gzip"):
 
 
 def test_api_folders_is_gzipped_when_accepted(server):
-    r, raw = _get(server, "/api/folders")
+    r, raw = _get(server, "/api/v1/tree")
     assert r.status_code == 200
     assert r.headers.get("content-encoding") == "gzip"
     body = json.loads(gzip.decompress(raw))
-    assert isinstance(body, list) and len(body) > 0
+    assert body["kind"] == "tree" and len(body["nodes"]) > 0
     # 圧縮が効いている（少なくとも 3 倍）
     assert len(raw) * 3 < len(json.dumps(body).encode("utf-8"))
 
 
 def test_api_folders_identity_without_accept_encoding(server):
-    r, raw = _get(server, "/api/folders", accept_encoding="identity")
+    r, raw = _get(server, "/api/v1/tree", accept_encoding="identity")
     assert r.status_code == 200
     assert "content-encoding" not in r.headers
-    assert isinstance(json.loads(raw), list)
+    assert json.loads(raw)["kind"] == "tree"
 
 
 def test_api_folders_etag_survives_gzip(server):
-    r1, _ = _get(server, "/api/folders")
+    r1, _ = _get(server, "/api/v1/tree")
     etag = r1.headers.get("etag")
     assert etag
     with httpx.Client(base_url=server, timeout=10) as c:
-        r2 = c.get("/api/folders", headers={"Accept-Encoding": "gzip", "If-None-Match": etag})
+        r2 = c.get("/api/v1/tree", headers={"Accept-Encoding": "gzip", "If-None-Match": etag})
     assert r2.status_code == 304
 
 

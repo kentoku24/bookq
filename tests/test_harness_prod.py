@@ -43,8 +43,8 @@ def _get(server, path, headers=None):
 
 def test_api_version(server):
     """version/sha/build_date exist, Cache-Control no-store, health unchanged."""
-    status, body, headers = _get(server, "/api/version")
-    assert status == 200, f"/api/version status {status} body {body[:500]}"
+    status, body, headers = _get(server, "/api/v1/version")
+    assert status == 200, f"/api/v1/version status {status} body {body[:500]}"
     data = json.loads(body.decode("utf-8"))
     assert "version" in data, f"missing version key {data}"
     assert "sha" in data, f"missing sha key {data}"
@@ -58,8 +58,8 @@ def test_api_version(server):
     assert "no-store" in cc.lower(), f"Cache-Control should contain no-store, got {cc!r}"
 
     # health unchanged
-    status2, body2, headers2 = _get(server, "/api/health")
-    assert status2 == 200, f"/api/health status {status2}"
+    status2, body2, headers2 = _get(server, "/api/v1/health")
+    assert status2 == 200, f"/api/v1/health status {status2}"
     hdata = json.loads(body2.decode("utf-8"))
     assert hdata == {"status": "ok"}, f"health payload changed {hdata!r}"
 
@@ -164,7 +164,7 @@ def test_harness_wipe_logic(page, server):
                 await shell.put('/dummy-shell-entry-'+Date.now(), new Response('shell', {headers:{'Content-Type':'text/plain'}}));
                 // api + fallback caches to verify deletion
                 const api = await caches.open('bookq-api-v1');
-                await api.put('/api/dummy-wipe', new Response('{}', {headers:{'Content-Type':'application/json'}}));
+                await api.put('/api/v1/dummy-wipe', new Response('{}', {headers:{'Content-Type':'application/json'}}));
                 const fb = await caches.open('bookq-images-fallback');
                 await fb.put('/image/dummy-wipe', new Response('img', {headers:{'Content-Type':'image/png'}}));
                 // storage keys: to be removed
