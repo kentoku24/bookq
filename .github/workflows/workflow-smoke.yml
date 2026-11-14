@@ -84,12 +84,14 @@ jobs:
 
   # Mirrors the verification tail of opencode-auto.yml
   # (implement / research / implement-direct / research-direct).
-  # The suite is split on the auto-applied `browser` marker (conftest.py
-  # marks every test that touches a browser fixture — the same selection
-  # safari-gate already trusts) so the Playwright-free lane skips the
-  # ~30s browser install and both lanes run in parallel. `-m "not browser"`
-  # + `-m browser` still cover every collected test — #230's "no cheaper
-  # lane" constraint is about skipping coverage, which this does not do.
+  # The suite is split on the auto-applied `browser` marker purely as a
+  # work partition — `-m "not browser"` + `-m browser` cover every
+  # collected test (#230's "no cheaper lane" constraint is about
+  # skipping coverage, which this does not do). The marker is a
+  # heuristic: tests that reach a browser through a helper function
+  # (e.g. folder_visibility_helpers.request_browser) escape it and
+  # land in this lane, so chromium stays installed here too — the
+  # browser binaries are cache-shared with uv-gate-browser anyway.
   # `uv-gate` below aggregates the lanes under the required check name.
   uv-gate-unit:
     needs: changes-workflow-smoke
@@ -105,9 +107,23 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
-      # No `playwright install`: non-browser tests never launch a browser.
-      # The playwright *package* is still required — conftest.py imports
-      # playwright.sync_api at module top, so it stays in `uv run --with`.
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      # Needed even though this lane selects `-m "not browser"`: the
+      # marker misses browser users hidden behind helper functions
+      # (folder_visibility_helpers.request_browser et al), and those
+      # tests must still find a chromium executable here.
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
+
       - name: Run non-browser test gate
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
 
@@ -191,6 +207,21 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
+
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      # Same reason as uv-gate-unit: `-m "not browser"` is a partition,
+      # not a guarantee — helper-hidden browser users land here too.
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run non-browser test suite against viewer-rs
         run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
