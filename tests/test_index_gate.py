@@ -300,3 +300,36 @@ def test_i_depth1_fresh_then_expire_shows_new_folder_without_full_fetch(
         assert rebuilds["n"] == 1  # only the cold build; nothing rebuilt since
     finally:
         shutil.rmtree(new, ignore_errors=True)
+
+
+# --- moved from tests/test_folders_shallow.py (#476 port): index/body-cache
+# internals are Python-implementation detail — they retire with `app/`.
+
+
+def test_etag_survives_index_cache_refresh(client):
+    r1 = client.get("/api/folders")
+    etag1 = r1.headers["etag"]
+    # index キャッシュを期限切れにして再構築させる（ツリーは不変）
+    app = client.app
+    app.state.metadata_index_cache["timestamp"] -= 10_000
+    r2 = client.get("/api/folders")
+    assert r2.status_code == 200
+    assert r2.headers["etag"] == etag1
+    r3 = client.get("/api/folders", headers={"If-None-Match": etag1})
+    assert r3.status_code == 304
+
+
+def test_body_serialized_once_per_index_generation(client, monkeypatch):
+    import app.routes as routes
+    calls = {"n": 0}
+    real = routes.json.dumps
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+    monkeypatch.setattr(routes.json, "dumps", counting)
+    client.get("/api/folders")
+    first = calls["n"]
+    assert first >= 1
+    client.get("/api/folders")
+    client.get("/api/folders", headers={"If-None-Match": client.get("/api/folders").headers["etag"]})
+    assert calls["n"] == first, "TTL 内の再リクエストで json.dumps が再実行されている"
