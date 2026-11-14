@@ -114,11 +114,15 @@ def pytest_collection_modifyitems(config, items):
         # backend. Files hardcoding v0 `/api/*` literals test the deprecated
         # compat surface, which answers 501 with no upstream and retires with
         # `app/` in Phase 3 anyway — both are quarantined under rs mode.
+        # #472: `(?!v1/)` also matched bare "`/api/v1`" prose (no trailing
+        # slash, e.g. test_pwa_api_client.py docstrings), wrongly
+        # quarantining a server-agnostic static lint. `\b` only excludes real
+        # v1 paths (`/api/v1/...`, `/api/v1"`).
         skip_incompatible = pytest.mark.skip(
             reason="imports app.* or hardcodes v0 /api/* — incompatible with BOOKQ_TEST_SERVER=rs (#469)"
         )
         app_import = re.compile(r"^\s*(from|import)\s+app[.\s]", re.M)
-        v0_url = re.compile(r"""["'`]/api/(?!v1/)""")
+        v0_url = re.compile(r"""["'`]/api/(?!v1\b)""")
         dirty_files = {
             f
             for f in {Path(str(i.fspath)) for i in items}
