@@ -513,6 +513,24 @@ impl PositionStore {
         })
         .map(|_| ())
     }
+
+    /// `?hard=1` equivalent — drop the whole slot incl. tombstones.
+    /// TEST_MODE-only reset hook: the harness's per-test reset needs a
+    /// truly clean slate, since a tombstone would legitimately reject the
+    /// next test's freshly-written record (#469).
+    pub fn delete_user(&self, user_key: &str) -> rusqlite::Result<()> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM position_folders WHERE user_key = ?1",
+            [user_key],
+        )?;
+        tx.execute(
+            "DELETE FROM position_users WHERE user_key = ?1",
+            [user_key],
+        )?;
+        tx.commit()
+    }
 }
 
 // ── endpoint handlers ────────────────────────────────────────────────────────
@@ -649,6 +667,23 @@ pub async fn delete_positions(
     .await
     .ok()
     .and_then(|r| r.ok());
+    match result {
+        Some(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "ok"})),
+        None => store_error(),
+    }
+}
+
+/// TEST_MODE `?hard=1` equivalent — drop the whole slot incl. tombstones
+/// (the harness's per-test reset needs a truly clean slate, #469).
+pub async fn delete_user_positions(
+    store: std::sync::Arc<PositionStore>,
+    user_key: &str,
+) -> Response {
+    let key = user_key.to_string();
+    let result = tokio::task::spawn_blocking(move || store.delete_user(&key))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
     match result {
         Some(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "ok"})),
         None => store_error(),

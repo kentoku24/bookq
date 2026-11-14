@@ -540,6 +540,16 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
     }
 }
 
+/// TEST_MODE-only `?hard=1` equivalent — drop the mock user's whole
+/// position slot (tombstones too) so the harness's per-test reset starts
+/// clean (#469). Always 404 outside test mode, never part of the contract.
+async fn test_positions_reset(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.test_mode || *req.method() != axum::http::Method::DELETE {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
+    state::delete_user_positions(st.position_store.clone(), auth::TEST_USER_EMAIL).await
+}
+
 /// `/api/v1/tree` — the v1 envelope `{kind, nodes, generation}` over the
 /// shared index cache (`_folder_tree(v1=True)`).
 async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1526,6 +1536,9 @@ async fn main() {
         // 404 outside test mode, never part of the OpenAPI contract.
         .route("/api/v1/pair-report", any(pair_report::handle_report))
         .route("/api/v1/pair-reset", any(pair_report::handle_reset))
+        // #469: TEST_MODE-only `?hard=1` equivalent — wipe the mock user's
+        // whole position slot incl. tombstones (harness per-test reset).
+        .route("/api/v1/test-positions-reset", any(test_positions_reset))
         // M8: dual-reader sync socket — native under "reader-sync" gate;
         // otherwise the upgrade is spliced to Python unchanged.
         .route("/ws/reader-sync", any(reader_sync_ws))

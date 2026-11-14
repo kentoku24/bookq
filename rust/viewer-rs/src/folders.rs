@@ -580,7 +580,10 @@ fn live_fs_response(
     });
     let body_str = serde_json::to_string(&payload).unwrap();
     let digest = Sha1::digest(format!("v1:{norm}:{depth}:{body_str}").as_bytes());
-    let etag = format!("\"{}\"", hex24(&digest));
+    // #469: `-g{gen}` must ride every tree ETag — the client parses the
+    // generation out of it (`render.js` /-g(\d+)/) to seed `?since=` polls;
+    // a bare digest reads as stale and forces a full-tree refetch.
+    let etag = format!("\"{}-g{}\"", hex24(&digest), fallback_gen);
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())

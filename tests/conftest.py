@@ -108,6 +108,26 @@ def pytest_collection_modifyitems(config, items):
             i for i in items
             if zlib.crc32(i.nodeid.encode()) % num_shards == shard_id
         ]
+    if os.environ.get("BOOKQ_TEST_SERVER") == "rs":
+        # #469: files importing `app.*` exercise Python internals (in-process
+        # TestClients, module unit tests) — they can't oracle the Rust
+        # backend. Files hardcoding v0 `/api/*` literals test the deprecated
+        # compat surface, which answers 501 with no upstream and retires with
+        # `app/` in Phase 3 anyway — both are quarantined under rs mode.
+        skip_incompatible = pytest.mark.skip(
+            reason="imports app.* or hardcodes v0 /api/* — incompatible with BOOKQ_TEST_SERVER=rs (#469)"
+        )
+        app_import = re.compile(r"^\s*(from|import)\s+app[.\s]", re.M)
+        v0_url = re.compile(r"""["'`]/api/(?!v1/)""")
+        dirty_files = {
+            f
+            for f in {Path(str(i.fspath)) for i in items}
+            if (src := f.read_text(errors="ignore"))
+            and (app_import.search(src) or v0_url.search(src))
+        }
+        for item in items:
+            if Path(str(item.fspath)) in dirty_files:
+                item.add_marker(skip_incompatible)
     for item in items:
         fnames = set(getattr(item, "fixturenames", ()))
         if _BROWSER_FIXTURES & fnames or any(
@@ -378,40 +398,17 @@ def root_folder_names(downloads_tree: Path) -> list[str]:
 
 @pytest.fixture(scope="session")
 def server(downloads_tree: Path) -> str:
-    """Start FastAPI app in test mode against the fixture tree; yield its base URL."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """Start the backend in test mode against the fixture tree; yield its base URL.
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads_tree)
-    env["BOOKQ_STATE_DIR"] = os.environ["BOOKQ_STATE_DIR"]
+    `BOOKQ_TEST_SERVER=rs` spawns the `viewer-rs` binary instead of uvicorn
+    (#469) — the suite then oracles the production backend's contract.
+    """
+    from rs_spawn import spawn_backend
 
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    proc, base_url = spawn_backend(
+        downloads_dir=downloads_tree,
+        state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
-    base_url = f"http://127.0.0.1:{port}"
-    # Cold starts (metadata warmup + first index build) take ~7-10s on a
-    # loaded machine — 10s is a coin flip, so give real headroom before
-    # declaring a startup failure.
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"Server exited early: {proc.stderr.read().decode()}")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server did not become healthy within 30s")
-
     yield base_url
 
     proc.terminate()
@@ -441,17 +438,36 @@ def _reset_reading_position(request):
     try:
         base_url = request.getfixturevalue("server")
 
-        def _delete():
-            req = urllib.request.Request(
-                base_url + "/api/reading-position?hard=1", method="DELETE"
-            )
-            urllib.request.urlopen(req, timeout=5).read()
+        # #469: under BOOKQ_TEST_SERVER=rs the v0 surface answers 501 —
+        # the TEST_MODE-only v1 hook drops the whole slot incl. tombstones
+        # (the `?hard=1` equivalent), and v1 returns a positions array.
+        if os.environ.get("BOOKQ_TEST_SERVER") == "rs":
 
-        def _empty():
-            with urllib.request.urlopen(
-                base_url + "/api/reading-position", timeout=5
-            ) as resp:
-                return json.loads(resp.read()).get("position") is None
+            def _delete():
+                req = urllib.request.Request(
+                    base_url + "/api/v1/test-positions-reset", method="DELETE"
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+
+            def _empty():
+                with urllib.request.urlopen(
+                    base_url + "/api/v1/reading-positions", timeout=5
+                ) as resp:
+                    return not json.loads(resp.read()).get("positions")
+
+        else:
+
+            def _delete():
+                req = urllib.request.Request(
+                    base_url + "/api/reading-position?hard=1", method="DELETE"
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+
+            def _empty():
+                with urllib.request.urlopen(
+                    base_url + "/api/reading-position", timeout=5
+                ) as resp:
+                    return json.loads(resp.read()).get("position") is None
 
         _delete()
         deadline = time.time() + 3.0
