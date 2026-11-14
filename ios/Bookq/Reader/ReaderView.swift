@@ -331,11 +331,12 @@ struct ReaderView: View {
 
     // MARK: - Chrome
 
-    /// Wide viewport → landscape chrome (right-edge vertical rail, per
-    /// the iPhone Duo HIG "vertical controls" pattern: side placement
-    /// preserves the full-height spread's vertical space). Portrait keeps
-    /// the classic top bar + bottom slider. Same predicate as pageMode's
-    /// orientation term and the landscape-spread toggle's visibility.
+    /// Wide viewport → landscape chrome (split side rails + bottom
+    /// tap-direction corners, per the iPhone Duo HIG "vertical
+    /// controls" pattern: side placement preserves the full-height
+    /// spread's vertical space). Portrait keeps the classic top bar +
+    /// bottom slider. Same predicate as pageMode's orientation term and
+    /// the landscape-spread toggle's visibility.
     private var isLandscape: Bool {
         viewportSize.width >= viewportSize.height
     }
@@ -462,18 +463,64 @@ struct ReaderView: View {
 
     // MARK: - Landscape rail chrome
 
-    /// Right-edge vertical rail (iPhone Duo HIG "vertical controls"):
-    /// top→bottom = primary nav (close), status (counter), frequent
-    /// action (overview), overflow menu, then the chapter slider filling
-    /// the remaining height. Pages keep their max-size centered fit —
-    /// on wide spreads the rail may overlap the page edge, so `railScrim`
-    /// keeps the controls legible.
+    /// Split side rails (iPhone Duo HIG "vertical controls"): mode
+    /// controls the user reaches for while reading sit on the LEFT
+    /// rail (close / spread on-off / spread offset, top→bottom), while
+    /// status + navigation stay on the RIGHT rail (counter, overview,
+    /// overflow menu, chapter slider filling the remaining height).
+    /// Tap-direction picks mirror the web `#tapmode-controls`: two
+    /// corner buttons at the bottom-left / bottom-right instead of a
+    /// grouped pair. Pages keep their max-size centered fit — on wide
+    /// spreads a rail may overlap the page edge, so each rail has a
+    /// hit-test transparent scrim keeping its controls legible.
     private var landscapeChrome: some View {
-        railColumn
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        HStack(spacing: 0) {
+            leftRailColumn
+            Spacer(minLength: 0)
+            railColumn
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) { tapDirectionCorners }
     }
 
-    private var railColumn: some View {
+    /// Bottom-corner tap-direction pair — web `#tapmode-controls`
+    /// parity: ◀ bottom-left = left tap advances, ▶ bottom-right =
+    /// right tap advances; the active direction is highlighted.
+    private var tapDirectionCorners: some View {
+        HStack {
+            tapDirectionButton(systemName: "arrowtriangle.left.fill",
+                               label: "左タップで次へ",
+                               active: tapForwardLeft) {
+                tapForwardLeft = true
+            }
+            Spacer()
+            tapDirectionButton(systemName: "arrowtriangle.right.fill",
+                               label: "右タップで次へ",
+                               active: !tapForwardLeft) {
+                tapForwardLeft = false
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
+    }
+
+    private func tapDirectionButton(systemName: String, label: String,
+                                    active: Bool,
+                                    action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .padding(10)
+                .background(active ? Color.accentColor : .black.opacity(0.5),
+                            in: Circle())
+        }
+        .accessibilityLabel(label)
+    }
+
+    /// Left-edge rail — top→bottom: close, spread on/off, spread
+    /// offset (spread mode only). Items hug the top; the column's
+    /// empty height stays hit-test transparent so edge taps still
+    /// turn pages.
+    private var leftRailColumn: some View {
         VStack(spacing: 12) {
             Button { dismiss() } label: {
                 Image(systemName: "xmark")
@@ -481,6 +528,41 @@ struct ReaderView: View {
                     .background(.black.opacity(0.5), in: Circle())
             }
             .accessibilityIdentifier("readerClose")
+            Button {
+                landscapeSpread.toggle()
+                rebuild()
+            } label: {
+                Image(systemName: pageMode == .spread
+                      ? "rectangle.split.2x1" : "rectangle.portrait")
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Circle())
+            }
+            .accessibilityLabel("spread toggle")
+            if pageMode == .spread {
+                Button {
+                    spreadOffset = spreadOffset == 0 ? 1 : 0
+                    rebuild()
+                } label: {
+                    Image(systemName: spreadOffset == 1 ? "book" : "book.pages")
+                        .padding(10)
+                        .background(spreadOffset == 1 ? Color.accentColor
+                                    : .black.opacity(0.5), in: Circle())
+                }
+                .accessibilityLabel("spread offset")
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.top, 12)
+        .padding(.leading, 6)
+        // Same width as the right rail — symmetric rails keep the
+        // spread's side margins visually balanced.
+        .frame(width: 76)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(alignment: .leading) { leadingRailScrim }
+    }
+
+    private var railColumn: some View {
+        VStack(spacing: 12) {
             counterRailBadge
             Button { showOverview = true } label: {
                 Image(systemName: "rectangle.grid.2x2")
@@ -495,7 +577,11 @@ struct ReaderView: View {
         }
         .foregroundStyle(.white)
         .padding(.top, 12)
-        .padding(.bottom, 14)
+        // Extra bottom room keeps the slider clear of the bottom-right
+        // tap-direction button (`tapDirectionCorners` overlays this
+        // same corner); without it the thumb's chapter-end position
+        // sits under the button.
+        .padding(.bottom, 56)
         .padding(.trailing, 6)
         // Fixed width is load-bearing: the slider's GeometryReader is
         // infinitely flexible, so without it the column expands to the
@@ -527,56 +613,47 @@ struct ReaderView: View {
             .allowsHitTesting(false)
     }
 
-    /// Landscape overflow menu — mode controls that don't earn a
-    /// permanent rail slot (Duo HIG: less-used items go to overflow).
-    /// Same actions as `modeButtons`; the ext diagnostic moves here from
-    /// the counter capsule because the rail is too narrow for it.
+    /// Mirror of `railScrim` for the left rail — dark at the screen's
+    /// leading edge fading toward the page.
+    private var leadingRailScrim: some View {
+        LinearGradient(colors: [.black.opacity(0.4), .clear],
+                       startPoint: .leading, endPoint: .trailing)
+            .frame(width: 120)
+            .allowsHitTesting(false)
+    }
+
+    /// Landscape overflow menu — what's left once the read-mode
+    /// controls moved to the left rail and tap direction to the bottom
+    /// corners: external-display toggle + bring-up diagnostic. Hidden
+    /// entirely when there's nothing to show.
+    @ViewBuilder
     private var railMenu: some View {
-        Menu {
-            if pageMode == .spread {
-                Button {
-                    spreadOffset = spreadOffset == 0 ? 1 : 0
-                    rebuild()
-                } label: {
-                    Label(spreadOffset == 1 ? "見開きずらし: 表紙単独"
-                          : "見開きずらし: 通常",
-                          systemImage: spreadOffset == 1 ? "book" : "book.pages")
+        if ext.accessoryAvailable || ext.connected || !ext.userEnabled
+            || ext.externalScreen != nil {
+            Menu {
+                // External display toggle: shown while a display is
+                // attached or projecting, and stays while disabled so
+                // it can be re-enabled (same rule as `modeButtons`).
+                if ext.accessoryAvailable || ext.connected || !ext.userEnabled {
+                    Button { ext.userEnabled.toggle() } label: {
+                        Label("外部ディスプレイ",
+                              systemImage: ext.connected && ext.userEnabled
+                                ? "tv.fill" : "tv")
+                    }
                 }
-            }
-            Button {
-                landscapeSpread.toggle()
-                rebuild()
+                // External-display bring-up diagnostic (temporary).
+                if let s = ext.externalScreen {
+                    Text(ExternalDisplayStore.describe(s))
+                } else if ext.accessoryAvailable {
+                    Text("ext: display available")
+                }
             } label: {
-                Label(pageMode == .spread ? "見開き: ON" : "見開き: OFF",
-                      systemImage: pageMode == .spread
-                        ? "rectangle.split.2x1" : "rectangle.portrait")
+                Image(systemName: "ellipsis")
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Circle())
             }
-            Picker("タップで進む方向", selection: $tapForwardLeft) {
-                Text("左").tag(true)
-                Text("右").tag(false)
-            }
-            // External display toggle: shown while a display is attached
-            // or projecting, and stays while disabled so it can be
-            // re-enabled (same rule as `modeButtons`).
-            if ext.accessoryAvailable || ext.connected || !ext.userEnabled {
-                Button { ext.userEnabled.toggle() } label: {
-                    Label("外部ディスプレイ",
-                          systemImage: ext.connected && ext.userEnabled
-                            ? "tv.fill" : "tv")
-                }
-            }
-            // External-display bring-up diagnostic (temporary).
-            if let s = ext.externalScreen {
-                Text(ExternalDisplayStore.describe(s))
-            } else if ext.accessoryAvailable {
-                Text("ext: display available")
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-                .padding(10)
-                .background(.black.opacity(0.5), in: Circle())
+            .accessibilityLabel("その他")
         }
-        .accessibilityLabel("その他")
     }
 
     /// Landscape chapter slider — same chapter-scoped value math as
