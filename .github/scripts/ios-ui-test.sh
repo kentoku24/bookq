@@ -17,7 +17,8 @@
 # Usage: ios-ui-test.sh [server_url]
 # Env:   DERIVED_DATA_PATH (default ~/Library/.../Bookq-ci),
 #        IOS_TEST_RESULTS (default ios/build/ios-test-results),
-#        IOS_DEVICE_NAME (dedicated simulator name, default "bookq-ci-tests")
+#        IOS_DEVICE_NAME (dedicated simulator name, default "bookq-ci-tests"),
+#        IOS_SIM_ERASE=1 (force `simctl erase` instead of app uninstall)
 set -u
 set -o pipefail
 cd "$(dirname "$0")/../.."
@@ -32,6 +33,13 @@ mkdir -p "$RESULTS"
 # results dir survives between local runs — clean last run's bundles.
 rm -rf "$RESULTS/build.xcresult" "$RESULTS/tests.xcresult" \
   "$RESULTS"/tests.attempt*.log
+
+# Warm the Xcode build service in the background: the first real
+# xcodebuild invocation otherwise sits silent for minutes before printing
+# "Command line invocation". `-list` exercises the same service startup
+# and overlaps the server gate + simulator prep below. Best-effort —
+# nobody waits on it.
+xcodebuild -list -project "$PROJECT" >/dev/null 2>&1 &
 
 # --- server gate -------------------------------------------------------
 # Host-side check is sufficient: the simulator shares the host network
@@ -53,13 +61,15 @@ for i in $(seq 1 60); do
 done
 
 # --- dedicated test device ---------------------------------------------
-# A script-owned simulator, erased every run, guarantees clean
-# app/Keychain/UserDefaults state. Reusing a daily-driver sim lets
-# leftovers fail stateful unit tests — ProgressSyncTests read
-# UserDefaults.standard and break on progress entries the UI tests
-# wrote on an earlier run (clones inherit device app data).
+# A script-owned simulator guarantees clean app/Keychain/UserDefaults
+# state: app/test-bundle containers are uninstalled before every run
+# (full `simctl erase` remains available via IOS_SIM_ERASE=1). Reusing a
+# daily-driver sim lets leftovers fail stateful unit tests —
+# ProgressSyncTests read UserDefaults.standard and break on progress
+# entries the UI tests wrote on an earlier run (clones inherit device
+# app data).
 DEVICE_NAME="${IOS_DEVICE_NAME:-bookq-ci-tests}"
-echo "== prepare simulator '$DEVICE_NAME' (erased each run)"
+echo "== prepare simulator '$DEVICE_NAME' (app containers cleaned each run)"
 
 # Locate our device by name across all runtimes.
 UDID=""
@@ -124,21 +134,21 @@ PY
 fi
 
 xcrun simctl shutdown "$UDID" 2>/dev/null || true
-xcrun simctl erase "$UDID" || { echo "ERROR: simctl erase failed"; exit 1; }
+# Isolation without a full erase: `simctl erase` pays a cold first boot
+# (~3min) every run. Uninstalling the app + test bundles below removes
+# their data containers — the UserDefaults/Keychain state the suites
+# must not inherit — while the device keeps a warm boot. IOS_SIM_ERASE=1
+# restores the old full-erase path.
+if [ "${IOS_SIM_ERASE:-0}" = "1" ]; then
+  xcrun simctl erase "$UDID" || { echo "ERROR: simctl erase failed"; exit 1; }
+fi
 xcrun simctl boot "$UDID" 2>/dev/null || true
 # bootstatus -b can wedge even after the device reports Booted (seen
 # locally on CoreSimulator after repeated erase/boot cycles) — bound it.
+# The wait overlaps build-for-testing: a build only needs the
+# destination device to exist, not to be Booted.
 xcrun simctl bootstatus "$UDID" -b >/dev/null 2>&1 &
 BSPID=$!
-for _ in $(seq 1 48); do
-  kill -0 "$BSPID" 2>/dev/null || break
-  sleep 5
-done
-if kill -0 "$BSPID" 2>/dev/null; then
-  echo "WARN: bootstatus timed out after 240s — device reports Booted, continuing"
-  kill "$BSPID" 2>/dev/null || true
-fi
-wait "$BSPID" 2>/dev/null || true
 
 [ -z "$DEVNAME" ] && DEVNAME="$DEVICE_NAME"
 echo "simulator: $DEVNAME ($UDID)"
@@ -199,6 +209,27 @@ xcodebuild build-for-testing \
   -destination "$DEST" \
   -derivedDataPath "$DD" \
   -resultBundlePath "$RESULTS/build.xcresult" || exit 1
+
+# The boot usually finished during the build; wait (bounded) for the
+# cases where it did not — the test clones need a Booted device.
+for _ in $(seq 1 48); do
+  kill -0 "$BSPID" 2>/dev/null || break
+  sleep 5
+done
+if kill -0 "$BSPID" 2>/dev/null; then
+  echo "WARN: bootstatus timed out after 240s — device reports Booted, continuing"
+  kill "$BSPID" 2>/dev/null || true
+fi
+wait "$BSPID" 2>/dev/null || true
+
+# Drop the app + test-bundle containers so clones inherit clean state —
+# replaces the old full-device erase (a no-op when IOS_SIM_ERASE=1 ran).
+# The .xctrunner id covers the auto-generated UI-test runner for the
+# non-parallel edge case; unknown ids are harmless no-ops.
+for bid in dev.bookq.reader dev.bookq.reader.tests dev.bookq.reader.uitests \
+           dev.bookq.reader.uitests.xctrunner; do
+  xcrun simctl uninstall "$UDID" "$bid" 2>/dev/null || true
+done
 
 XCTESTRUN="$(ls "$DD"/Build/Products/*.xctestrun 2>/dev/null | head -1)"
 if [ -z "$XCTESTRUN" ]; then

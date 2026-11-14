@@ -64,6 +64,11 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
 
+  # Builds the viewer-rs image once and runs the gateway contract suite
+  # against it — previously image-build and gateway-contract each built
+  # the same Dockerfile.viewer-rs on separate runners (~5min of duplicate
+  # release+LTO compile per run), so the contract steps live here now and
+  # gateway-contract below aggregates the result under its check name.
   image-build:
     needs: changes-rust
     if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
@@ -79,30 +84,6 @@ jobs:
       # Exposes ACTIONS_RUNTIME_TOKEN/ACTIONS_*_URL to the shell — without
       # them `type=gha` cache-from/to is skipped silently (#380).
       - uses: crazy-max/ghaction-github-runtime@v4
-
-      # type=gha layer cache: unchanged Cargo.lock/deps rebuild in seconds
-      # instead of a full cold cargo build (#380).
-      - name: docker build viewer-rs
-        run: >-
-          docker buildx build
-          --cache-from type=gha,scope=viewer-rs
-          --cache-to type=gha,mode=max,scope=viewer-rs
-          -f Dockerfile.viewer-rs .
-
-  # Issue #199 — the same Schemathesis suite api-contract.yml runs against
-  # FastAPI, but pointed at the viewer-rs gateway: every v1 operation must
-  # satisfy the contract whether it is answered natively or proxied, and the
-  # `server` response header discriminates which backend answered
-  # (`hypercorn-h11` = proxied to FastAPI, absent = viewer-rs native).
-  gateway-contract:
-    needs: changes-rust
-    if: github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
 
       - uses: astral-sh/setup-uv@v7
 
@@ -122,19 +103,16 @@ jobs:
                   z.writestr(f"{i+1:02d}.jpg", b.getvalue())
           EOF
 
-      - uses: docker/setup-buildx-action@v3
-
-      # Same runtime env exposure as image-build — required for type=gha.
-      - uses: crazy-max/ghaction-github-runtime@v4
-
-      # --load puts the images in the daemon for the compose-free `docker run`
-      # below; per-image scopes keep the Python and Rust caches independent.
-      - name: Build image
-        run: |
-          docker buildx build --load \
-            --cache-from type=gha,scope=viewer-rs \
-            --cache-to type=gha,mode=max,scope=viewer-rs \
-            -t bookq-ci:viewer-rs -f Dockerfile.viewer-rs .
+      # type=gha layer cache: unchanged Cargo.lock/deps rebuild in seconds
+      # instead of a full cold cargo build (#380). --load puts the image in
+      # the daemon for the `docker run` contract checks below.
+      - name: docker build viewer-rs
+        run: >-
+          docker buildx build --load
+          --cache-from type=gha,scope=viewer-rs
+          --cache-to type=gha,mode=max,scope=viewer-rs
+          -t bookq-ci:viewer-rs
+          -f Dockerfile.viewer-rs .
 
       # Production mode since #409: viewer-rs runs upstream-absent with
       # strict native validation. A silent fallback can no longer hide
@@ -167,6 +145,11 @@ jobs:
           done
           [ "$code" = "200" ] || { docker logs viewer-rs || true; echo "tree never warmed"; exit 1; }
 
+      # Issue #199 — the same Schemathesis suite api-contract.yml runs against
+      # FastAPI, but pointed at the viewer-rs gateway: every v1 operation must
+      # satisfy the contract whether it is answered natively or proxied, and the
+      # `server` response header discriminates which backend answered
+      # (`hypercorn-h11` = proxied to FastAPI, absent = viewer-rs native).
       - name: Schemathesis via gateway
         run: |
           uv run --with "schemathesis>=4.33,<5" schemathesis run api/openapi.v1.yaml \
@@ -241,3 +224,20 @@ jobs:
               print(f"FAIL {p}: status={st} (expected 501)", file=sys.stderr)
           sys.exit(1 if failed else 0)
           EOF
+
+  # Required-check anchor: the gateway contract suite runs inside
+  # image-build now (one image build instead of two). This job keeps the
+  # `gateway-contract` check name reporting — it fails unless image-build
+  # succeeded, so a contract failure still blocks merge via both contexts.
+  gateway-contract:
+    needs: [changes-rust, image-build]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify image-build + gateway contract
+        env:
+          RESULT: ${{ needs.image-build.result }}
+        run: |
+          echo "image-build: $RESULT"
+          [ "$RESULT" = "success" ]

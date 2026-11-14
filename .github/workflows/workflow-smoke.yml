@@ -84,12 +84,55 @@ jobs:
 
   # Mirrors the verification tail of opencode-auto.yml
   # (implement / research / implement-direct / research-direct).
-  uv-gate:
+  # The suite is split on the auto-applied `browser` marker purely as a
+  # work partition — `-m "not browser"` + `-m browser` cover every
+  # collected test (#230's "no cheaper lane" constraint is about
+  # skipping coverage, which this does not do). The marker is a
+  # heuristic: tests that reach a browser through a helper function
+  # (e.g. folder_visibility_helpers.request_browser) escape it and
+  # land in this lane, so chromium stays installed here too — the
+  # browser binaries are cache-shared with uv-gate-browser anyway.
+  # `uv-gate` below aggregates the lanes under the required check name.
+  uv-gate-unit:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # chromium-only gate (mirrors opencode-auto.yml)
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      # Needed even though this lane selects `-m "not browser"`: the
+      # marker misses browser users hidden behind helper functions
+      # (folder_visibility_helpers.request_browser et al), and those
+      # tests must still find a chromium executable here.
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      - name: Run non-browser test gate
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
+
+  # chromium-only gate (mirrors opencode-auto.yml)
+  uv-gate-browser:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -112,18 +155,44 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
+      # --reruns 2: concentrating browser tests on one lane keeps all
+      # -n auto workers on browsers at once — higher contention than the
+      # old mixed suite, so timing-sensitive tests (offline/connectivity
+      # playwright timeouts) flake more. Extra rerun absorbs that without
+      # touching what is asserted.
+      - name: Run browser test gate (chromium)
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 2 --reruns-delay 2
+
+  # Required-check anchor: branch protection names `uv-gate`, so the
+  # aggregate keeps reporting that context — pass only when both lanes
+  # succeeded. Skipped when the path filter says the suite need not run,
+  # matching the old job's skipped semantics.
+  uv-gate:
+    needs: [changes-workflow-smoke, uv-gate-unit, uv-gate-browser]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify lanes
+        env:
+          UNIT: ${{ needs.uv-gate-unit.result }}
+          BROWSER: ${{ needs.uv-gate-browser.result }}
+        run: |
+          echo "uv-gate-unit: $UNIT"
+          echo "uv-gate-browser: $BROWSER"
+          [ "$UNIT" = "success" ] && [ "$BROWSER" = "success" ]
 
   # #469: the same suite oracles viewer-rs — `BOOKQ_TEST_SERVER=rs` swaps
   # the conftest server fixture's spawn to the Rust binary (no-upstream,
   # BOOKQ_RS_NATIVE=all + STRICT), quarantining files that import `app.*`
-  # or hardcode the v0 compat surface.
-  pytest-rs:
+  # or hardcode the v0 compat surface. Split on the `browser` marker like
+  # uv-gate; rust-cache keeps the per-lane cargo build warm (each lane
+  # spawns its own fixture binary).
+  pytest-rs-unit:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -133,6 +202,53 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      # Same reason as uv-gate-unit: `-m "not browser"` is a partition,
+      # not a guarantee — helper-hidden browser users land here too.
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      - name: Run non-browser test suite against viewer-rs
+        run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
+
+  pytest-rs-browser:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
@@ -153,8 +269,26 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run test suite against viewer-rs
-        run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
+      # Same --reruns 2 rationale as uv-gate-browser above.
+      - name: Run browser test suite against viewer-rs
+        run: BOOKQ_TEST_SERVER=rs BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 2 --reruns-delay 2
+
+  # Keeps the `pytest-rs` check name stable for PRs — not a required
+  # check, but the aggregate preserves the single pass/fail signal.
+  pytest-rs:
+    needs: [changes-workflow-smoke, pytest-rs-unit, pytest-rs-browser]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify lanes
+        env:
+          UNIT: ${{ needs.pytest-rs-unit.result }}
+          BROWSER: ${{ needs.pytest-rs-browser.result }}
+        run: |
+          echo "pytest-rs-unit: $UNIT"
+          echo "pytest-rs-browser: $BROWSER"
+          [ "$UNIT" = "success" ] && [ "$BROWSER" = "success" ]
 
   # Real-Safari lane: runs every browser-marked test under safaridriver on an
   # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
@@ -168,7 +302,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -180,5 +314,5 @@ jobs:
       - name: Enable safaridriver
         run: sudo safaridriver --enable
 
-      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/4)
-        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 4 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/8)
+        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 8 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
