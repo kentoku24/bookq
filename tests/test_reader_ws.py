@@ -1,10 +1,15 @@
 """S03 — /ws/reader-sync end-to-end over real WebSocket connections (#78).
 
-Two independent WS clients (websockets sync client) against live uvicorn
-servers spawned as subprocesses — one in BOOKQ_TEST_MODE (mock auth) and one
-with real signed-cookie auth (SECRET_KEY set, TEST_MODE unset), where two
-DIFFERENT emails log in via forged session cookies. Nothing here weakens or
-bypasses the auth checks.
+Two independent WS clients (websockets sync client) against live servers
+spawned as subprocesses — one in BOOKQ_TEST_MODE (mock auth, the shared
+session `server` fixture) and one with real signed-cookie auth (SECRET_KEY
+set, TEST_MODE unset), where two DIFFERENT emails log in via forged session
+cookies. Nothing here weakens or bypasses the auth checks.
+
+Runs in both lanes (default uvicorn + BOOKQ_TEST_SERVER=rs): the auth
+server below spawns uvicorn or the viewer-rs binary depending on
+BOOKQ_TEST_SERVER, and wire constants are inlined from the asyncapi
+contract instead of app.reader_sync (#486 Phase 2c).
 """
 import base64
 import json
@@ -20,55 +25,89 @@ import pytest
 from websockets.exceptions import InvalidHandshake
 from websockets.sync.client import connect as ws_connect
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT))
-
-from app.reader_sync import protocol  # noqa: E402
+# Wire constants inlined from api/asyncapi.yaml (RequestFrame.v const 1,
+# 64KiB max frame) — importing app.reader_sync here would quarantine this
+# file under BOOKQ_TEST_SERVER=rs, where the suite oracles viewer-rs.
+PROTOCOL_VERSION = 1
+MAX_FRAME_BYTES = 64 * 1024
 
 _WS_PATH = "/ws/reader-sync"
 AUTH_SECRET = "reader-sync-test-secret"
 ALICE = {"email": "alice@example.com", "name": "Alice", "picture": ""}
 BOB = {"email": "bob@example.com", "name": "Bob", "picture": ""}
 
+RS_LANE = os.environ.get("BOOKQ_TEST_SERVER") == "rs"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
-def _spawn_server(downloads_tree: Path, extra_env: dict) -> tuple:
-    """Same shape as conftest's server fixture but with a custom env."""
+
+def _viewer_rs_binary() -> Path:
+    """Same lazy build as tests/rs_spawn.py; kept local so this module
+    stays importable without touching sys.path."""
+    bin_path = REPO_ROOT / "rust" / "target" / "debug" / "viewer-rs"
+    if not bin_path.exists():
+        subprocess.run(["cargo", "build", "-p", "viewer-rs"],
+                       cwd=str(REPO_ROOT / "rust"), check=True)
+    return bin_path
+
+
+def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
+    """Live server WITHOUT test-mode: real signed-cookie session auth.
+
+    Same shape as conftest's server fixture but with a custom env — spawns
+    uvicorn (default lane) or viewer-rs (BOOKQ_TEST_SERVER=rs) with the
+    same SECRET_KEY/allowlist contract. The health probe is the public v1
+    endpoint both backends serve, so no v0 literal stays in this file.
+    """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     env = os.environ.copy()
     env.pop("BOOKQ_TEST_MODE", None)
     env["DOWNLOADS_DIR"] = str(downloads_tree)
-    env.update(extra_env)
+    env["BOOKQ_STATE_DIR"] = str(state_dir)
+    env["SECRET_KEY"] = AUTH_SECRET
+    env["ALLOWED_EMAILS"] = f"{ALICE['email']},{BOB['email']}"
+    if RS_LANE:
+        env.update({
+            "BOOKQ_BIND": f"127.0.0.1:{port}",
+            "BOOKQ_RS_NATIVE": "all",
+            "BOOKQ_RS_NATIVE_STRICT": "1",
+            "GOOGLE_CLIENT_ID": "ci-dummy",
+            "GOOGLE_CLIENT_SECRET": "ci-dummy",
+            "BASE_URL": f"http://127.0.0.1:{port}",
+            "BOOKQ_APP_DIR": str(REPO_ROOT / "app"),
+            "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
+        })
+        cmd = [str(_viewer_rs_binary())]
+    else:
+        cmd = [sys.executable, "-m", "uvicorn", "app.main:app",
+               "--host", "127.0.0.1", "--port", str(port)]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app",
-         "--host", "127.0.0.1", "--port", str(port)],
+        cmd,
         env=env, cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
+    deadline = time.time() + 30
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError("auth test server exited early")
         try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
+            with urllib.request.urlopen(base_url + "/api/v1/health", timeout=1):
                 break
         except OSError:
             time.sleep(0.1)
     else:
         proc.terminate()
-        raise RuntimeError("auth test server did not become healthy in 10s")
+        raise RuntimeError("auth test server did not become healthy in 30s")
     return proc, base_url
 
 
 @pytest.fixture(scope="module")
-def auth_server(downloads_tree):
+def auth_server(downloads_tree, tmp_path_factory):
     """Live server WITHOUT test-mode: real signed-cookie session auth."""
-    proc, base_url = _spawn_server(downloads_tree, {
-        "SECRET_KEY": AUTH_SECRET,
-        "ALLOWED_EMAILS": f"{ALICE['email']},{BOB['email']}",
-    })
+    state_dir = tmp_path_factory.mktemp("reader-ws-auth-state")
+    proc, base_url = _spawn_server(downloads_tree, state_dir)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)
@@ -100,7 +139,7 @@ def _recv(ws, timeout: float = 5.0) -> dict:
 
 def _request(rtype: str, payload=None, *, session_id=None, request_id="r1") -> str:
     return json.dumps({
-        "v": protocol.PROTOCOL_VERSION,
+        "v": PROTOCOL_VERSION,
         "requestId": request_id,
         "sessionId": session_id,
         "workEpoch": 0,
@@ -144,7 +183,7 @@ def test_hello_ping_pong_close(server):
     """The scripted probe flow every transport check relies on."""
     with _ws(server) as ws:
         hello = _recv(ws)
-        assert hello["type"] == "HELLO" and hello["v"] == protocol.PROTOCOL_VERSION
+        assert hello["type"] == "HELLO" and hello["v"] == PROTOCOL_VERSION
         ws.send(_request("PING", {"seq": 1}))
         pong = _expect(ws, "PONG")
         assert pong["seq"] == 1
@@ -202,7 +241,7 @@ def test_ui_sync_relay_over_ws(server):
 def test_oversized_frame_closed(server):
     with _ws(server) as ws:
         _recv(ws)
-        ws.send("x" * (protocol.MAX_FRAME_BYTES + 1))
+        ws.send("x" * (MAX_FRAME_BYTES + 1))
         # server must close: recv raises ConnectionClosed; the close code is
         # the explicit too-big code.
         with pytest.raises(Exception) as ei:
@@ -220,7 +259,7 @@ def test_malformed_request_rejected_not_closed(server):
         _recv(ws)
         # requestId/type present but the rest of the request envelope is
         # missing — parse_request raises, _reject must still echo both.
-        ws.send(json.dumps({"v": protocol.PROTOCOL_VERSION,
+        ws.send(json.dumps({"v": PROTOCOL_VERSION,
                             "requestId": "bad1", "type": "RESUME"}))
         rej = _expect(ws, "REJECT")
         assert rej["reason"] == "malformed"
