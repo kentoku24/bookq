@@ -146,6 +146,7 @@ struct ReaderView: View {
     /// with the gesture while `pos` catches up visually).
     private func pager(work: ReaderWork, in size: CGSize) -> some View {
         return ZStack {
+            neighborLayer(work: work, in: size)
             ForEach(pagerSpreadIndices(work: work), id: \.self) { s in
                 PagerLayer(pos: pos, index: s, width: size.width,
                            count: work.spreads.count,
@@ -158,10 +159,17 @@ struct ReaderView: View {
         // NOTE: no RTL environment here — `.offset(x:)` mirrors under
         // rightToLeft, which would invert the turn direction. RTL page
         // order lives inside spreadCell instead.
-        // Tap zones (web zoneActionAt): edge 30% zones follow tapForward
-        // (default left = forward), center toggles chrome. SpatialTap is
-        // single-tap; zoom pan/pinch live inside ZoomableScrollView.
+        // Tap zones (web zoneActionAt): a tap inside a neighbour preview
+        // jumps straight to that spread ("what you see is what you get");
+        // otherwise edge 30% zones follow tapForward (default left =
+        // forward), center toggles chrome. SpatialTap is single-tap;
+        // zoom pan/pinch live inside ZoomableScrollView.
         .gesture(SpatialTapGesture().onEnded { ev in
+            if let s = neighborSpreadAt(ev.location, work: work, size: size),
+               let first = work.spreads[safe: s]?.first {
+                snapTo(first, in: work)
+                return
+            }
             let frac = ev.location.x / max(size.width, 1)
             switch zoneAction(frac: frac, tapForwardLeft: tapForwardLeft) {
             case .turn(let d): turn(d, in: work)
@@ -296,15 +304,19 @@ struct ReaderView: View {
         }
     }
 
-    private func pageView(work: ReaderWork, idx: Int, fast: Bool) -> some View {
+    /// Page image URL — fast tier always uses the normalized /view
+    /// rendition at reduced width (even under originalImages, since it is
+    /// only the flip-through preview); settled content loads full quality.
+    private func imageURL(work: ReaderWork, idx: Int, fast: Bool) -> URL? {
         let page = work.images[idx]
-        // Fast tier always uses the normalized /view rendition at reduced
-        // width — even under originalImages, since it is only the
-        // flip-through preview; the settled spread loads full quality.
-        let url = model.api?.pageURL(
+        return model.api?.pageURL(
             folder: page.folder, name: page.name,
             original: fast ? false : model.config.originalImages,
             width: fast ? PageTurnMath.fastPageWidth : nil)
+    }
+
+    private func pageView(work: ReaderWork, idx: Int, fast: Bool) -> some View {
+        let url = imageURL(work: work, idx: idx, fast: fast)
         return ZoomableScrollView(
             onZoomChange: { z in
                 if z { zoomedPages.insert(idx) } else { zoomedPages.remove(idx) }
@@ -327,6 +339,99 @@ struct ReaderView: View {
         // A destroyed cell (placeholder swap / window slide) must not
         // leave a stale zoom entry — its next mount starts at 1x.
         .onDisappear { zoomedPages.remove(idx) }
+    }
+
+    // MARK: - Landscape 1-page neighbour previews (#496)
+
+    /// One margin preview: spread index, its page, and the viewport
+    /// frame `neighborFrames` assigned (may extend past the screen edge —
+    /// wide neighbours bleed off and the display clips them).
+    private struct NeighborPreview: Equatable {
+        var spread: Int
+        var page: Int          // global image index
+        var frame: CGRect
+    }
+
+    /// The two margin previews for the current pager position, or nils
+    /// outside landscape single-page mode / at the book edges. Mirrors
+    /// the web strip: neighbours keep their own single-page fit and sit
+    /// a fixed gap outside the centred current page. `pos`-driven — the
+    /// "outer of the active pair" rule keeps mid-turn frames consistent
+    /// with what the pager is actually showing.
+    private func neighborPreviews(work: ReaderWork,
+                                  in size: CGSize)
+        -> (prev: NeighborPreview?, next: NeighborPreview?) {
+        guard pageMode == .single, isLandscape, !work.spreads.isEmpty
+        else { return (nil, nil) }
+        let n = work.spreads.count
+        let (ps, ns) = ReaderWork.neighborSpreads(pos: pos, count: n)
+        let curSpread = min(max(Int(pos), 0), n - 1)
+        let curAR = work.spreads[safe: curSpread]?.first
+            .map { pageAR[$0] ?? lastAR } ?? lastAR
+        func resolve(_ s: Int?) -> (spread: Int, page: Int, ar: CGFloat)? {
+            guard let s, let g = work.spreads[safe: s]?.first else { return nil }
+            return (s, g, pageAR[g] ?? lastAR)
+        }
+        let p = resolve(ps), nx = resolve(ns)
+        let frames = ReaderWork.neighborFrames(
+            curAR: curAR, prevAR: p?.ar, nextAR: nx?.ar, in: size)
+        func mk(_ r: (spread: Int, page: Int, ar: CGFloat)?,
+                _ f: CGRect?) -> NeighborPreview? {
+            guard let r, let f else { return nil }
+            return NeighborPreview(spread: r.spread, page: r.page, frame: f)
+        }
+        return (mk(p, frames.prev), mk(nx, frames.next))
+    }
+
+    /// Spread under a tap point when it lands on a visible neighbour
+    /// preview — checked before the zone bands so tapping a preview
+    /// jumps to exactly that page. Frames are clipped to the viewport
+    /// for the hit test (bleeding neighbours only respond where shown).
+    private func neighborSpreadAt(_ loc: CGPoint, work: ReaderWork,
+                                  size: CGSize) -> Int? {
+        let visible = CGRect(origin: .zero, size: size)
+        let (prev, next) = neighborPreviews(work: work, in: size)
+        if let prev, prev.frame.intersection(visible).contains(loc) {
+            return prev.spread
+        }
+        if let next, next.frame.intersection(visible).contains(loc) {
+            return next.spread
+        }
+        return nil
+    }
+
+    /// Prev/next page previews in the side margins, painted BEHIND the
+    /// pager cells (a turning page slides over them) and fully
+    /// hit-test/accessibility transparent — they are previews, not
+    /// controls; taps are resolved by the pager's SpatialTapGesture.
+    @ViewBuilder
+    private func neighborLayer(work: ReaderWork, in size: CGSize) -> some View {
+        let (prev, next) = neighborPreviews(work: work, in: size)
+        ZStack {
+            if let prev { neighborImage(work: work, preview: prev) }
+            if let next { neighborImage(work: work, preview: next) }
+        }
+        // Fill the viewport so `.position` coordinates (viewport space,
+        // origin .zero) line up — without this the ZStack would shrink
+        // to its children and every preview would land offset.
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func neighborImage(work: ReaderWork,
+                               preview: NeighborPreview) -> some View {
+        // Full quality at rest (the prefetch window already warms these
+        // URLs), fast tier mid-turn — same rule as the pager's tiers.
+        RemoteImageView(url: imageURL(work: work, idx: preview.page,
+                                      fast: !pagerSettled),
+                        contentMode: .fit)
+            .frame(width: preview.frame.width,
+                   height: preview.frame.height)
+            // Background BEFORE .position — afterwards it would fill the
+            // whole proposed (viewport-sized) area, not just the frame.
+            .background(Color.black)
+            .position(x: preview.frame.midX, y: preview.frame.midY)
     }
 
     // MARK: - Chrome
