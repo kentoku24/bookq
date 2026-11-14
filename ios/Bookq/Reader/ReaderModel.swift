@@ -38,13 +38,13 @@ func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
 /// Pure drag/commit math for the pager — unit-tested, no UIKit deps.
 ///
 /// The pager is driven by a continuous spread position `pos` (CGFloat):
-/// integers are settled spreads, fractions are mid-turn. `floor(pos)` is
-/// always the top layer sliding right; `ceil(pos)` sits static beneath —
-/// forward (pos rising) slides the current spread off right revealing the
-/// next, backward (pos falling) slides the previous in from the right on
-/// top. One formula yields both directions, so finger reversals mid-drag
-/// need no direction lock: pos just follows the finger back through the
-/// origin.
+/// integers are settled spreads, fractions are mid-turn. Every spread
+/// translates by `(pos - index) * width`, so the strip slides as one —
+/// forward (pos rising) carries the current spread off to the right
+/// while the next sweeps in from the left, backward (pos falling)
+/// mirrors it. One formula yields both directions, so finger reversals
+/// mid-drag need no direction lock: pos just follows the finger back
+/// through the origin.
 enum PageTurnMath {
     /// Horizontal travel (pt) before a drag locks its direction.
     static let decideDistance: CGFloat = 12
@@ -68,11 +68,6 @@ enum PageTurnMath {
     /// 2560px default while flip-through stays sharp enough to read
     /// motion. Settled spreads upgrade to the full rendition.
     static let fastPageWidth = 1600
-    /// Peak black overlay on the covered (static) spread mid-turn —
-    /// the depth scrim that sells the page-lift metaphor (iBooks /
-    /// Android `STACK_SCRIM` parity). Fully covered → this opacity,
-    /// fully revealed → 0.
-    static let stackScrimMax: CGFloat = 0.35
 
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
@@ -123,17 +118,6 @@ enum PageTurnMath {
             return translation > 0 ? 1 : -1
         }
         return nil
-    }
-
-    /// Covered fraction of the static (`ceil`) spread during a turn —
-    /// `ceil(pos) - pos` inside the book. Forward (`pos = i+f`) dims the
-    /// revealed next spread by 1-f so it brightens as the mover slides
-    /// away; backward (`pos = i-f`) dims the current spread by f as the
-    /// previous one covers it. Integer `pos` yields 0 for free, and
-    /// edge overshoot is excluded so rubber-banding never dims.
-    static func coveredFraction(_ pos: CGFloat, count: Int) -> CGFloat {
-        guard pos > 0, pos < CGFloat(count - 1) else { return 0 }
-        return min(max(ceil(pos) - pos, 0), 1)
     }
 }
 

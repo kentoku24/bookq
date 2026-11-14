@@ -37,9 +37,10 @@ struct ReaderView: View {
     /// turns forward (web default), false = right zone turns forward.
     @State private var tapForwardLeft = true
     /// Continuous spread position — the pager's single visual truth.
-    /// Integers are settled spreads; fractions are mid-turn. `floor(pos)`
-    /// is the top layer sliding right, `ceil(pos)` sits static beneath, so
-    /// one formula produces both turn directions (see PageTurnMath).
+    /// Integers are settled spreads; fractions are mid-turn. Every
+    /// spread translates by `(pos - index) * width`, so the strip slides
+    /// as one: pos rising carries the current spread off to the right
+    /// while the next sweeps in from the left (see PageTurnMath).
     @State private var pos: CGFloat = 0
     /// Spread index `pos` is animating toward. Programmatic turns (tap,
     /// keys, slider, overview) just move this target — `pos` chases it
@@ -137,13 +138,14 @@ struct ReaderView: View {
         .padding()
     }
 
-    /// Custom pager — asymmetric page-stack turn driven by continuous
-    /// `pos` (replaces the old TabView strip slide). `floor(pos)` slides
-    /// right on top while `ceil(pos)` waits static beneath: pos rising =
-    /// current spread exits right revealing next; pos falling = previous
-    /// spread enters from the right covering current. `currentIdx` lands
-    /// on the destination at turn start (web parity: counter/slider move
-    /// with the gesture while `pos` catches up visually).
+    /// Custom pager — horizontal strip slide driven by continuous `pos`
+    /// (replaces the old TabView strip slide, and before that the
+    /// page-stack turn). Every spread translates by
+    /// `(pos - index) * width`: pos rising slides the current spread
+    /// right off-screen while the next sweeps in from the left; pos
+    /// falling mirrors it. `currentIdx` lands on the destination at turn
+    /// start (web parity: counter/slider move with the gesture while
+    /// `pos` catches up visually).
     private func pager(work: ReaderWork, in size: CGSize) -> some View {
         return ZStack {
             neighborLayer(work: work, in: size)
@@ -176,8 +178,9 @@ struct ReaderView: View {
             case .toggleChrome: withAnimation { showChrome.toggle() }
             }
         })
-        // Page-turn drag: right = next (current slides right, next revealed
-        // beneath), left = prev (previous slides in from the right on top).
+        // Page-turn drag: right = next (strip slides right — current
+        // exits right, next sweeps in from the left), left = prev
+        // (mirrored).
         // simultaneousGesture so it never blocks the tap zones; zoomed or
         // pinching suspends it inside the handlers.
         .simultaneousGesture(
@@ -855,10 +858,11 @@ struct ReaderView: View {
     // MARK: - Page-turn drag
 
     /// Live drag → `pos`. Waits for a clearly-horizontal move, then the
-    /// finger owns `pos` directly: right = forward (pos rises, current
-    /// slides right revealing next beneath), left = backward (pos falls,
-    /// previous slides in from the right on top). Reversing the finger
-    /// walks `pos` back through the origin — no direction lock needed.
+    /// finger owns `pos` directly: right = forward (pos rises, the strip
+    /// slides right — current exits right, next sweeps in from the
+    /// left), left = backward (pos falls, mirrored). Reversing the
+    /// finger walks `pos` back through the origin — no direction lock
+    /// needed.
     private func pagerDragChanged(_ v: DragGesture.Value,
                                   work: ReaderWork, size: CGSize) {
         guard !pinchActive, !spreadZoomed(in: work) else { return }
@@ -1090,13 +1094,15 @@ private enum PagerCellTier: Equatable {
 ///
 /// `pos` is the animatable data: SwiftUI interpolates it per frame and
 /// re-runs `body`, which is what produces the slide (a plain
-/// `.offset(x: f(pos))` cannot animate — the departing spread's offset
-/// is 0 at both integer endpoints, leaving nothing to interpolate).
+/// `.offset(x: f(pos))` cannot animate — a spread's offset is 0 at both
+/// integer endpoints, leaving nothing to interpolate).
 ///
-/// `floor(pos)` is the top layer: pos rising slides it right off-screen
-/// (forward — next spread revealed beneath), pos falling slides it in
-/// from the right over the current spread (backward). `ceil(pos)` waits
-/// static beneath at offset 0 in both cases.
+/// Slide turn (web strip parity): EVERY spread translates by
+/// `(pos - index) * width`, so the whole strip slides as one — the
+/// departing spread exits toward its side and the arriving spread
+/// enters from the opposite side, both moving with `pos`. Replaces the
+/// old stack turn where only `floor(pos)` moved and `ceil(pos)` waited
+/// static beneath (the page-lift metaphor read as a confusing flip).
 private struct PagerLayer<Content: View>: View {
     var pos: CGFloat
     var index: Int
@@ -1123,21 +1129,9 @@ private struct PagerLayer<Content: View>: View {
 
     var body: some View {
         content(tier)
-            .overlay { Color.black.opacity(Double(scrim)) }
             .opacity(opacity)
             .offset(x: offset)
             .zIndex(z)
-    }
-
-    /// Depth scrim on the static (`ceil`) spread — the covered page
-    /// dims by `coveredFraction` and brightens as the mover uncovers
-    /// it (iBooks / Android `stackTurnScrim` parity). Only the ceil
-    /// layer is ever the covered one; the floor mover stays lit, and
-    /// at rest or edge overshoot the fraction is 0 so nothing dims.
-    private var scrim: CGFloat {
-        guard index == Int(ceil(pos)) else { return 0 }
-        return PageTurnMath.coveredFraction(pos, count: count)
-            * PageTurnMath.stackScrimMax
     }
 
     private var tier: PagerCellTier {
@@ -1157,17 +1151,16 @@ private struct PagerLayer<Content: View>: View {
         return index == Int(floor(pos)) || index == Int(ceil(pos)) ? 1 : 0
     }
 
-    /// Spreads at or behind `floor(pos)` keep sliding right by
-    /// `(pos - index) * width` — spreads ahead of it (the revealed
-    /// `ceil` layer) stay at 0. Departed spreads trail off to +width and
-    /// farther, off-screen, which is what gives `.offset` real endpoint
-    /// deltas for the animation to interpolate.
+    /// Uniform strip translation — every spread sits `index` viewports
+    /// apart, so `pos` moving by 1 carries the whole strip one screen.
+    /// At rest (integer pos) neighbours park exactly one viewport off
+    /// either edge; mid-turn the departing spread exits toward its side
+    /// while the arriving spread sweeps in from the opposite edge —
+    /// through the same margin its landscape-single preview occupied.
+    /// Edge overshoot falls out for free: pos < 0 pulls spread 0 left,
+    /// pos > count-1 pushes the last spread right (rubber-band).
     private var offset: CGFloat {
-        if pos < 0 { return index == 0 ? pos * width : 0 }
-        if pos > CGFloat(count - 1) {
-            return index == count - 1 ? (pos - CGFloat(count - 1)) * width : 0
-        }
-        return index <= Int(floor(pos)) ? (pos - CGFloat(index)) * width : 0
+        (pos - CGFloat(index)) * width
     }
 
     private var z: Double {
