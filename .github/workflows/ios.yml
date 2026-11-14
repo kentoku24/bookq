@@ -112,6 +112,15 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         if: steps.sdk.outputs.ok == 'true'
 
+      # XCBBuildService's first project load sits silent for ~3min before
+      # "Command line invocation" — nohup it now so the cost overlaps the
+      # rust build / server start / DerivedData cache below instead of
+      # the test step. Same orphan-survival pattern as "Start bookq".
+      # ios-ui-test.sh re-warms as a fallback for local runs.
+      - name: Warm Xcode build service
+        if: steps.sdk.outputs.ok == 'true'
+        run: nohup xcodebuild -list -project ios/Bookq.xcodeproj >/dev/null 2>&1 &
+
       - uses: dtolnay/rust-toolchain@stable
         if: steps.sdk.outputs.ok == 'true'
         with:
