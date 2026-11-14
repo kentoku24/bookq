@@ -113,6 +113,20 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   Home=即時で章頭・End=章末 spread 先頭ページへアニメーション遷移
   （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
   （web・Android と同じ RTL 規約）。
+- chrome 配置は向きで分岐: **縦=従来の上部バー+下部スライダー**、
+  **横=画面右端（trailing）の全高バーティカルレール**。見開きは高さ
+  制約 fit で上下に余裕がなく左右に大きな余白ができるため、iPhone
+  Duo HIG の "vertical controls" 指針（側面レールでコンテンツ縦幅を
+  確保、上=プライマリナビ、低頻度操作は overflow へ）に倣い、画像と
+  重なりにくい側面へ寄せる。レールは上→下に 閉じる / カウンタ /
+  複数ページ / ⋯メニュー / 縦章スライダー（`VerticalSlider`、上=章
+  先頭・下=章末・下ドラッグで進む）。モード系操作（見開きずらし /
+  landscape 見開き切替 / タップ方向 / 外部ディスプレイ）は ⋯メニュー
+  へ集約。画像は `spreadFit`/`spreadCell` 無変更で最大サイズのまま
+  中央配置 — 広い AR の見開きでレールが画像端に重なり得るが、
+  レール背後のスクリムで可読性を担保する。`PairedReaderView` は対象外。
+  Android は上部バー+overflow の構成で、iOS の横置きレールとは意図的に
+  異なる。
 
 ## ブラウズ仕様（web parity）
 
