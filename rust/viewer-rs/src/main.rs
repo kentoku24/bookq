@@ -223,11 +223,11 @@ pub(crate) struct AppState {
     pub(crate) build_date: String,
     /// M8: dual-reader session registry (`app.state.reader_sync`).
     pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
-    /// #401: shell/static root (`BOOKQ_APP_DIR`) holding `static/`,
+    /// #401: shell/static root (`BOOKQ_WEB_DIR`) holding `static/`,
     /// `templates/`, `perf/` — the image ships `/app`; dev environments
     /// read it from the image too (asset edits apply on the next
     /// `dev.sh up` rebuild, not live).
-    pub(crate) app_dir: PathBuf,
+    pub(crate) web_dir: PathBuf,
     /// TEST_MODE-only pair-report store (`app/api_v1.py::_PAIR_REPORTS`).
     pub(crate) pair_reports: std::sync::Arc<pair_report::PairReports>,
 }
@@ -696,7 +696,7 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
             let st2 = st.clone();
             match tokio::task::spawn_blocking(move || {
                 shell::index(
-                    &st2.app_dir,
+                    &st2.web_dir,
                     st2.native.test_mode,
                     &st2.secret_key,
                     &st2.visibility,
@@ -738,7 +738,7 @@ async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
     let st2 = st.clone();
     match tokio::task::spawn_blocking(move || {
         shell::named_file(
-            &st2.app_dir.join("static").join("sw.js"),
+            &st2.web_dir.join("static").join("sw.js"),
             "application/javascript",
             shell::SW_HEADERS,
             "sw.js not found",
@@ -775,7 +775,7 @@ async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Respon
     let st2 = st.clone();
     match tokio::task::spawn_blocking(move || {
         shell::named_file(
-            &st2.app_dir.join("static").join("favicon.ico"),
+            &st2.web_dir.join("static").join("favicon.ico"),
             "image/x-icon",
             shell::FAVICON_HEADERS,
             "favicon.ico not found",
@@ -823,7 +823,7 @@ async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Respons
     let req_headers = headers.clone();
     let st2 = st.clone();
     match tokio::task::spawn_blocking(move || {
-        shell::static_file(&st2.app_dir.join("static"), &rel, &headers, head)
+        shell::static_file(&st2.web_dir.join("static"), &rel, &headers, head)
     })
     .await
     .unwrap_or(serve::Serve::Proxy)
@@ -1484,10 +1484,10 @@ async fn main() {
         // ARG ""→ENV path yields "" — same two-state contract.
         git_sha: std::env::var("BOOKQ_GIT_SHA").unwrap_or_else(|_| "unknown".into()),
         build_date: std::env::var("BOOKQ_BUILD_DATE").unwrap_or_else(|_| "unknown".into()),
-        // #401: the image ships `app/{static,templates,perf}` at /app; dev
-        // points this at the worktree's `app/` for live asset edits.
-        app_dir: PathBuf::from(
-            std::env::var("BOOKQ_APP_DIR").unwrap_or_else(|_| "/app".into()),
+        // #401: the image ships `web/{static,templates,perf}` at /web; dev
+        // points this at the worktree's `web/` for live asset edits.
+        web_dir: PathBuf::from(
+            std::env::var("BOOKQ_WEB_DIR").unwrap_or_else(|_| "/web".into()),
         ),
     };
     if st.native.enabled("visibility") || st.native.enabled("tree") {
@@ -1751,7 +1751,7 @@ mod native_gate_tests {
             secret_key: "test-secret".into(),
             auth_flow: None,
             registry,
-            app_dir: dir.join("app"),
+            web_dir: dir.join("web"),
             thumb_cache: dir.join("thumbs"),
             git_sha: "test".into(),
             build_date: "test".into(),

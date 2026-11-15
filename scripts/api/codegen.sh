@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate every artifact derived from the API specs (single entry point).
 #
-#   - app/static/api/api-types.d.ts  (openapi-typescript, version pinned)
+#   - web/static/api/api-types.d.ts  (openapi-typescript, version pinned)
 #   - api/dist/openapi.v1.json       (YAML->JSON bundle of openapi.v1.yaml)
 #   - api/dist/asyncapi.json         (YAML->JSON bundle of asyncapi.yaml)
 #   - api/dist/examples.json         (named `examples:` bundle, #237)
@@ -23,7 +23,7 @@ OPENAPI_TS_VERSION="7.13.0"
 PYYAML_VERSION="6.0.3"
 
 npx --yes "openapi-typescript@${OPENAPI_TS_VERSION}" \
-  "${ROOT}/api/openapi.v1.yaml" -o "${ROOT}/app/static/api/api-types.d.ts"
+  "${ROOT}/api/openapi.v1.yaml" -o "${ROOT}/web/static/api/api-types.d.ts"
 
 mkdir -p "${ROOT}/api/dist"
 uv run --with "pyyaml==${PYYAML_VERSION}" \

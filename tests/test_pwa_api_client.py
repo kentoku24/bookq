@@ -1,6 +1,6 @@
 """PWA API-client guards (#236).
 
-- `/api/v1` literals live only in `app/static/api/` (generated
+- `/api/v1` literals live only in `web/static/api/` (generated
   `endpoints.js` + the typed `v1.js` fallback). Everywhere else the paths
   come from `BookqApi.endpoints` / `BookqApiEndpoints`, so a route rename
   touches one generated file.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-STATIC = REPO_ROOT / "app" / "static"
+STATIC = REPO_ROOT / "web" / "static"
 API_DIR = STATIC / "api"
 
 # app.js is excluded from checkJs for now (staged rollout, see jsconfig.json)
@@ -45,7 +45,7 @@ def _js_files():
 
 
 def test_no_hardcoded_api_v1_literals():
-    """No quoted `/api/v1...` literal outside app/static/api/ (*.js)."""
+    """No quoted `/api/v1...` literal outside web/static/api/ (*.js)."""
     offenders = {}
     for p in _js_files():
         text = p.read_text(encoding="utf-8")
@@ -53,7 +53,7 @@ def test_no_hardcoded_api_v1_literals():
         if hits:
             offenders[str(p.relative_to(REPO_ROOT))] = len(hits)
     assert not offenders, (
-        "hard-coded /api/v1 literals outside app/static/api/ — "
+        "hard-coded /api/v1 literals outside web/static/api/ — "
         f"use BookqApi.endpoints / BookqApiEndpoints instead: {offenders}"
     )
 
@@ -121,8 +121,8 @@ def test_retry_after_honored_only_in_client():
             continue
         if "Retry-After" in p.read_text(encoding="utf-8"):
             offenders.append(str(p.relative_to(REPO_ROOT)))
-    assert offenders == ["app/static/api/v1.js"], (
-        f"Retry-After must be honored only in app/static/api/v1.js: {offenders}"
+    assert offenders == ["web/static/api/v1.js"], (
+        f"Retry-After must be honored only in web/static/api/v1.js: {offenders}"
     )
 
 

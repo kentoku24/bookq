@@ -1,7 +1,7 @@
 import XCTest
 @testable import Bookq
 
-/// Browse rule parity with `app/static/browse/render.js`.
+/// Browse rule parity with `web/static/browse/render.js`.
 final class BrowseModelTests: XCTestCase {
 
     private func folder(_ name: String, children: [TreeNode]? = nil,

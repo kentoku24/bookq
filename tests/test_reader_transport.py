@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from app.reader_sync import protocol  # noqa: E402
 
-PAIR_TRANSPORT_JS = REPO_ROOT / "app" / "static" / "viewer" / "pairTransport.js"
+PAIR_TRANSPORT_JS = REPO_ROOT / "web" / "static" / "viewer" / "pairTransport.js"
 
 
 # ── browser-side adapter + signaling glue ──────────────────────────

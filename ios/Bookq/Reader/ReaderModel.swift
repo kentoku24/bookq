@@ -1,7 +1,7 @@
 import Foundation
 
 /// Pure reader model — chapter assembly + spread construction, byte-faithful
-/// to `app/static/app.js` `loadImages` and `app/static/viewer/spread.js`.
+/// to `web/static/app.js` `loadImages` and `web/static/viewer/spread.js`.
 /// Deterministic and unit-tested.
 struct PageRef: Equatable, Hashable {
     var name: String
@@ -21,7 +21,7 @@ enum ReaderPageMode: String, Equatable {
     case single, spread
 }
 
-/// Tap-zone verdict — `zoneActionAt` (app/static/app.js).
+/// Tap-zone verdict — `zoneActionAt` (web/static/app.js).
 /// Edge 30% zones turn pages in the direction `tapForwardLeft` selects
 /// (web default: left = forward), the center band toggles chrome.
 enum ZoneAction: Equatable {

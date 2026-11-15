@@ -4,7 +4,7 @@
  * exposed by app.js composition root.
  *
  * Wire (#236): search/facets transport goes through the typed window.BookqApi
- * client (app/static/api/v1.js) — 202 (index-building) retries live in
+ * client (web/static/api/v1.js) — 202 (index-building) retries live in
  * BookqApi.fetchWithBuildingRetry only, and response shapes are spec-typed.
  */
 // @ts-check

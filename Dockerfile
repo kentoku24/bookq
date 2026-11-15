@@ -41,6 +41,10 @@ WORKDIR /app
 
 # Copy application code
 COPY app/ ./app/
+# app/{static,templates,perf} are symlinks to web/ during the relocation
+# transition (#498) — the py-rollback image must carry web/ for them to
+# resolve.
+COPY web/ ./web/
 # Shared contract files (api/user-state-schema.sql is read at runtime by
 # app/folder_visibility.py — #200)
 COPY api/ ./api/

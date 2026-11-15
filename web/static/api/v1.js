@@ -18,7 +18,7 @@
  * Loads before all feature modules (after offline-core.js, endpoints.js).
  *
  * Contract source of truth: api/openapi.v1.yaml. Regenerate types with:
- *   npx openapi-typescript@7 api/openapi.v1.yaml -o app/static/api/api-types.d.ts
+ *   npx openapi-typescript@7 api/openapi.v1.yaml -o web/static/api/api-types.d.ts
  * Regenerate paths with:
  *   python3 scripts/gen-api-endpoints.py
  *
@@ -49,7 +49,7 @@
 
   // Canonical paths live in api/endpoints.js (generated). The inline table is
   // for standalone loads only (offline-harness.html) — literals are allowed
-  // here because this file IS app/static/api/.
+  // here because this file IS web/static/api/.
   var _FALLBACK_ENDPOINTS = {
     tree: "/api/v1/tree",
     images: "/api/v1/images",

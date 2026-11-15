@@ -85,7 +85,7 @@ def test_harness_link_visible(server):
     assert "display: none" not in tag.lower(), f"harness-link tag should not have display: none, got {tag!r}"
 
     # also verify index.html source does not gate harness-link behind test_mode conditional hidden style
-    idx_text = (REPO_ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+    idx_text = (REPO_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     # harness-link should be present without display:none in the template
     idx_m = re.search(r'<[^>]*id=["\']harness-link["\'][^>]*>', idx_text, re.I)
     assert idx_m, "index.html missing harness-link tag"
@@ -108,8 +108,8 @@ def test_harness_link_visible(server):
 def _file_wipe_assertions():
     """File-content fallback: the harness delegates the wipe to OfflineCore, which
     owns the coverage (viewing-only work caches included, SHELL kept, progress keys)."""
-    html = (REPO_ROOT / "app" / "static" / "offline-harness.html").read_text(encoding="utf-8")
-    core = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    html = (REPO_ROOT / "web" / "static" / "offline-harness.html").read_text(encoding="utf-8")
+    core = (REPO_ROOT / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     # doWipeAll exists and no longer does the deletion work itself
     assert "doWipeAll" in html, "offline-harness.html missing doWipeAll"
     assert "wipeClientData" in html, "the harness wipe must delegate to OfflineCore.wipeClientData"

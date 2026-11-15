@@ -925,7 +925,7 @@ def test_09_popover_esc_sidebar_single_open_toggle_flip(page, server):
 # ── T2: visual feedback layer (donut ring / listing spinner / transitions) ──
 
 
-STYLE_CSS = REPO_ROOT / "app" / "static" / "style.css"
+STYLE_CSS = REPO_ROOT / "web" / "static" / "style.css"
 
 
 def test_08_visual_layer_computed_styles(page, server):

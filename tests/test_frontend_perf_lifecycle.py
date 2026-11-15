@@ -8,11 +8,11 @@ import pytest
 from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
 
 BASE = Path(__file__).resolve().parent.parent
-APP_JS = BASE / "app" / "static" / "app.js"
-CORE_JS = BASE / "app" / "static" / "offline-core.js"
-PREFETCH_JS = BASE / "app" / "static" / "thumbs" / "prefetch.js"
-SW_JS = BASE / "app" / "static" / "sw.js"
-WRITER_JS = BASE / "app" / "static" / "offline" / "tree-writer.js"
+APP_JS = BASE / "web" / "static" / "app.js"
+CORE_JS = BASE / "web" / "static" / "offline-core.js"
+PREFETCH_JS = BASE / "web" / "static" / "thumbs" / "prefetch.js"
+SW_JS = BASE / "web" / "static" / "sw.js"
+WRITER_JS = BASE / "web" / "static" / "offline" / "tree-writer.js"
 
 
 def _new_page(browser, width=1280, height=800):

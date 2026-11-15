@@ -1,7 +1,7 @@
 //! `/`, `/sw.js`, `/favicon.ico`, `/static/*` — the Jinja shell and the
 //! starlette `StaticFiles`/`FileResponse` surface (#401).
 //!
-//! `GET /` renders `app/templates/index.html`: the `{% if not user %}`
+//! `GET /` renders `web/templates/index.html`: the `{% if not user %}`
 //! branch is a login page (200, not a redirect), the `{% else %}` branch is
 //! the viewer shell with per-user globals embedded. The static routes are
 //! public — they answer regardless of session state (a corrupt signed
@@ -340,7 +340,7 @@ fn form_decode(s: &str) -> String {
 /// `GET /` — renders the shell for the resolved caller. File/template
 /// failures proxy (upstream raises its own 500 surface).
 pub(crate) fn index(
-    app_dir: &Path,
+    web_dir: &Path,
     test_mode: bool,
     secret: &str,
     visibility: &state::VisibilityStore,
@@ -354,15 +354,15 @@ pub(crate) fn index(
         ShellUser::Viewer { user_key } => (true, user_key.clone()),
         ShellUser::Proxy => return Serve::Proxy,
     };
-    let Ok(template) = std::fs::read_to_string(app_dir.join("templates").join("index.html")) else {
+    let Ok(template) = std::fs::read_to_string(web_dir.join("templates").join("index.html")) else {
         return Serve::Proxy;
     };
     // `?thumb_perf=1` reads the probe + panel sources only when enabled.
     let (probe, perf_tpl) = if thumb_perf {
-        let Ok(p) = std::fs::read_to_string(app_dir.join("perf").join("thumbnail-probe.js")) else {
+        let Ok(p) = std::fs::read_to_string(web_dir.join("perf").join("thumbnail-probe.js")) else {
             return Serve::Proxy;
         };
-        let Ok(t) = std::fs::read_to_string(app_dir.join("templates").join("thumbnail_perf.html"))
+        let Ok(t) = std::fs::read_to_string(web_dir.join("templates").join("thumbnail_perf.html"))
         else {
             return Serve::Proxy;
         };
@@ -932,9 +932,9 @@ mod tests {
 
     // ── template render ──
 
-    const TEMPLATE: &str = include_str!("../../../app/templates/index.html");
-    const PERF: &str = include_str!("../../../app/templates/thumbnail_perf.html");
-    const PROBE: &str = include_str!("../../../app/perf/thumbnail-probe.js");
+    const TEMPLATE: &str = include_str!("../../../web/templates/index.html");
+    const PERF: &str = include_str!("../../../web/templates/thumbnail_perf.html");
+    const PROBE: &str = include_str!("../../../web/perf/thumbnail-probe.js");
 
     fn ctx<'a>() -> IndexCtx<'a> {
         IndexCtx {

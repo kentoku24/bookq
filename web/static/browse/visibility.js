@@ -8,7 +8,7 @@
  * Loads after offline-core.js (escapeHtml), before hash/render/facets/app.js.
  *
  * Wire (#236): GET/PUT go through the typed window.BookqApi client
- * (app/static/api/v1.js) — endpoint paths and snapshot shapes are spec-typed,
+ * (web/static/api/v1.js) — endpoint paths and snapshot shapes are spec-typed,
  * so a response-shape change breaks tsc instead of only E2E.
  */
 // @ts-check

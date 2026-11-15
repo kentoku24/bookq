@@ -42,7 +42,7 @@
  * offline pull still returns the last known position.
  *
  * Wire (#236): all transport goes through the typed window.BookqApi client
- * (app/static/api/v1.js). Error responses surface as ApiError with the spec
+ * (web/static/api/v1.js). Error responses surface as ApiError with the spec
  * `code`; a malformed 200 is treated as a failure (retry), never as "empty"
  * — pushing a stale local record over a newer remote one stays impossible.
  */

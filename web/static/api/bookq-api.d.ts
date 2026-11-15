@@ -6,7 +6,7 @@
  * that renames a field breaks `tsc` here (and at the typed call sites)
  * instead of surfacing only in Playwright E2E.
  *
- * Implemented in `app/static/api/v1.js` (plain script, `// @ts-check`);
+ * Implemented in `web/static/api/v1.js` (plain script, `// @ts-check`);
  * this file only declares the surface so every `checkJs` file in scope
  * (`jsconfig.json`) reads the same types. `Window` carries an open index
  * signature: legacy cross-file globals (`FolderVisibility`, `OfflineCore`,
