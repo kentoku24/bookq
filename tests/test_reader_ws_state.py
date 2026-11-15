@@ -7,9 +7,9 @@ manifest delivery, READY gating, page ops from both members,
 duplicate/stale/foreign rejections carrying the latest snapshot,
 disconnect-resume without replay, and data-plane flips.
 
-Runs in both lanes (default uvicorn + BOOKQ_TEST_SERVER=rs): wire constants
-are inlined from the asyncapi contract (v=1) and the manifest reassembly
-below mirrors catalog.join_manifest without importing app.* (#486 Phase 2c).
+Wire constants are inlined from the asyncapi contract (v=1) and the
+manifest reassembly below mirrors the reader-sync catalog join (#486
+Phase 2c, #503 rs-only).
 """
 import hashlib
 import json
@@ -17,9 +17,7 @@ import time
 
 from websockets.sync.client import connect as ws_connect
 
-# Wire constants inlined from api/asyncapi.yaml (RequestFrame.v const 1) —
-# importing app.reader_sync here would quarantine this file under
-# BOOKQ_TEST_SERVER=rs, where the whole suite oracles the viewer-rs backend.
+# Wire constants inlined from api/asyncapi.yaml (RequestFrame.v const 1).
 PROTOCOL_VERSION = 1
 
 _WS_PATH = "/ws/reader-sync"
@@ -33,9 +31,8 @@ def _canonical(obj) -> str:
 
 
 def _join_manifest(chunks) -> dict:
-    """Reassemble split_manifest chunk dicts; mirrors
-    app/reader_sync/catalog.join_manifest (count/index/digest checks plus
-    digest re-verification) without importing app.* so both lanes use it."""
+    """Reassemble split_manifest chunk dicts (count/index/digest checks plus
+digest re-verification)."""
     if not isinstance(chunks, (list, tuple)) or not chunks:
         raise ValueError("no manifest chunks")
     count = None

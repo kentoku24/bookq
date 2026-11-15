@@ -6,17 +6,15 @@ session `server` fixture) and one with real signed-cookie auth (SECRET_KEY
 set, TEST_MODE unset), where two DIFFERENT emails log in via forged session
 cookies. Nothing here weakens or bypasses the auth checks.
 
-Runs in both lanes (default uvicorn + BOOKQ_TEST_SERVER=rs): the auth
-server below spawns uvicorn or the viewer-rs binary depending on
-BOOKQ_TEST_SERVER, and wire constants are inlined from the asyncapi
-contract instead of app.reader_sync (#486 Phase 2c).
+Spawns the viewer-rs binary for the auth server, and wire constants are
+inlined from the asyncapi contract instead of a Python package
+(#486 Phase 2c, #503 rs-only).
 """
 import base64
 import json
 import os
 import socket
 import subprocess
-import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -26,8 +24,7 @@ from websockets.exceptions import InvalidHandshake
 from websockets.sync.client import connect as ws_connect
 
 # Wire constants inlined from api/asyncapi.yaml (RequestFrame.v const 1,
-# 64KiB max frame) — importing app.reader_sync here would quarantine this
-# file under BOOKQ_TEST_SERVER=rs, where the suite oracles viewer-rs.
+# 64KiB max frame).
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 64 * 1024
 
@@ -36,7 +33,6 @@ AUTH_SECRET = "reader-sync-test-secret"
 ALICE = {"email": "alice@example.com", "name": "Alice", "picture": ""}
 BOB = {"email": "bob@example.com", "name": "Bob", "picture": ""}
 
-RS_LANE = os.environ.get("BOOKQ_TEST_SERVER") == "rs"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -51,12 +47,11 @@ def _viewer_rs_binary() -> Path:
 
 
 def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
-    """Live server WITHOUT test-mode: real signed-cookie session auth.
+    """Live viewer-rs WITHOUT test-mode: real signed-cookie session auth.
 
     Same shape as conftest's server fixture but with a custom env — spawns
-    uvicorn (default lane) or viewer-rs (BOOKQ_TEST_SERVER=rs) with the
-    same SECRET_KEY/allowlist contract. The health probe is the public v1
-    endpoint both backends serve, so no v0 literal stays in this file.
+    viewer-rs with the same SECRET_KEY/allowlist contract. The health probe
+    is the public v1 endpoint.
     """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -67,21 +62,17 @@ def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env["SECRET_KEY"] = AUTH_SECRET
     env["ALLOWED_EMAILS"] = f"{ALICE['email']},{BOB['email']}"
-    if RS_LANE:
-        env.update({
-            "BOOKQ_BIND": f"127.0.0.1:{port}",
-            "BOOKQ_RS_NATIVE": "all",
-            "BOOKQ_RS_NATIVE_STRICT": "1",
-            "GOOGLE_CLIENT_ID": "ci-dummy",
-            "GOOGLE_CLIENT_SECRET": "ci-dummy",
-            "BASE_URL": f"http://127.0.0.1:{port}",
-            "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
-            "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
-        })
-        cmd = [str(_viewer_rs_binary())]
-    else:
-        cmd = [sys.executable, "-m", "uvicorn", "app.main:app",
-               "--host", "127.0.0.1", "--port", str(port)]
+    env.update({
+        "BOOKQ_BIND": f"127.0.0.1:{port}",
+        "BOOKQ_RS_NATIVE": "all",
+        "BOOKQ_RS_NATIVE_STRICT": "1",
+        "GOOGLE_CLIENT_ID": "ci-dummy",
+        "GOOGLE_CLIENT_SECRET": "ci-dummy",
+        "BASE_URL": f"http://127.0.0.1:{port}",
+        "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
+        "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
+    })
+    cmd = [str(_viewer_rs_binary())]
     proc = subprocess.Popen(
         cmd,
         env=env, cwd=str(REPO_ROOT),

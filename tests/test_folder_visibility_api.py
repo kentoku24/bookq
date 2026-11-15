@@ -1,9 +1,7 @@
-"""Visibility API v1 contract over live HTTP (both lanes).
+"""Visibility API v1 contract over live HTTP (viewer-rs, #503 rs-only).
 
-Exercises GET/PUT folder-visibility against the session server fixture so
-the same file runs under the default uvicorn lane and under
-BOOKQ_TEST_SERVER=rs. TestClient and store internals live in the
-sibling py-only module, which stays quarantined until it retires.
+Exercises GET/PUT folder-visibility against the session server fixture.
+TestClient and store internals retired with the Python backend in #503.
 
 The hidden set is library-global and shared: every test that hides a root
 unhides it in a finally block (the roundtrip pattern from test_api_v1).

@@ -1,15 +1,13 @@
 """Multi-top-dir archive split over the v1 HTTP contract (#483 v1 port).
 
 Regression first, at the HTTP level against the live ``server`` fixture,
-so this file runs in BOTH lanes (default uvicorn + ``BOOKQ_TEST_SERVER=rs``
-viewer-rs): a multi-folder ZIP appears as multiple folders (each an
+so this file oracles viewer-rs (#503 rs-only): a multi-folder ZIP appears as multiple folders (each an
 independent work at ``<archive>/<innerdir>``), not one flat chapter.
 Single-internal-dir archives nest under one folder node; mixed loose
 images stay images.
 
-Python internals (scan_tree split units) stay in
-``tests/test_archive_split_internals.py`` and retire with ``app/`` in
-Phase 3.
+Python internals (scan_tree split units) retired with ``app/`` in
+#503 (``tests/test_archive_split_internals.py`` deleted).
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_archive_split.py -q

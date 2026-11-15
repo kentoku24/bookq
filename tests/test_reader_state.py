@@ -5,11 +5,9 @@ sequencer contract — fixed op sequences, duplicate replay, staleness
 rejections with snapshots, OPEN_WORK epoch flow, SET_OFFSET rebuilds and
 SWAP_SIDES projection.
 
-The in-process sequencer unit matrix (fake resolver, generation races,
-load timeouts, role tie-break internals) stays in
-test_reader_state_internals.py, which retires with the Python backend.
-Wire constants are inlined from the asyncapi contract instead of the
-Python package so this file runs in both lanes.
+The in-process sequencer unit matrix retired with the Python backend in
+#503 (test_reader_state_internals.py deleted). Wire constants are inlined
+from the asyncapi contract (#503 rs-only).
 """
 import hashlib
 import json

@@ -1,4 +1,4 @@
-"""Native auth HTTP contract over live HTTP (both lanes).
+"""Native auth HTTP contract over live HTTP (viewer-rs, #503 rs-only).
 
 Covers what the v1 token bootstrap exposes without seeding server-side
 state: grant validation, unknown-code rejection, JSON error shape, the

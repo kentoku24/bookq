@@ -1,21 +1,18 @@
-"""Media decode 契約テスト — #406 (Phase 2c v1 port, #487)。
+"""Media decode 契約テスト — #406 (Phase 2c v1 port, #487, #503 rs-only)。
 
-api/v1-semantics.md §7 の正本を HTTP 応答契約として検証する
-(両 lane: 既定 uvicorn + BOOKQ_TEST_SERVER=rs):
+api/v1-semantics.md §7 の正本を HTTP 応答契約として検証する:
 
-- 共通 native 集合 (jpg/png/…) は /thumb・/view とも両 lane で 200
-- Python-only (genuine .avif/.tiff) は Pillow が decode し py lane で 200
-  JPEG。rs lane は Serve::Proxy → no-upstream で 501 (gate 自体は cargo
-  側 thumbs.rs::decode_gate_truth_table /
+- 共通 native 集合 (jpg/png/…) は /thumb・/view とも 200
+- Python-only 由来 (genuine .avif/.tiff) は Serve::Proxy → no-upstream
+  で 501 (gate 自体は cargo 側 thumbs.rs::decode_gate_truth_table /
   thumb_view_python_only_and_unsupported_proxy が検証)
-- 両側 unsupported (.heic/.heif/.jxl の代表 + 破損バイト) は py lane で
-  404 (500 ではない)。rs lane は Proxy → no-upstream で 501
-- py/rs の集合定数が一致している (両ソースを text parse で比較 —
-  片側だけ形式を増やすとここが落ちる。app import なしで両 lane 実行可)
+- unsupported (.heic/.heif/.jxl の代表 + 破損バイト) は Proxy →
+  no-upstream で 501
+- rs の集合定数が自己無矛盾である (NATIVE/ONLY/UNSUP が互いに素 —
+  形式追加時は spec §7 + 定数の同時更新を強制)
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_media_decode_contract.py -q
-    BOOKQ_TEST_SERVER=rs uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_media_decode_contract.py -q
 """
 
 import io
@@ -27,11 +24,9 @@ from pathlib import Path
 
 import pytest
 
-_RS = os.environ.get("BOOKQ_TEST_SERVER") == "rs"
-
-# rs lane は no-upstream のため Serve::Proxy が 501 になる — HTTP level でも
+# no-upstream のため Serve::Proxy が 501 になる — HTTP level でも
 # gate の分岐 (native 直撃か proxy か) が観測できる。
-_PROXY_STATUS = 501 if _RS else None
+_PROXY_STATUS = 501
 
 
 def _get(server: str, path: str, headers: dict | None = None):
@@ -79,7 +74,7 @@ def decode_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def decode_server(decode_tree: Path):
-    """Dedicated backend over the decode tree (both lanes via rs_spawn)."""
+    """Dedicated viewer-rs backend over the decode tree (via rs_spawn)."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
@@ -121,47 +116,31 @@ def test_common_native_thumb_304(decode_server: str):
 
 def test_python_only_avif_200_thumb_and_view(decode_server: str, decode_tree: Path):
     _needs(decode_tree / "plain" / "ok.avif")
-    if _RS:
-        # image crate は avif を decode できない → Proxy → no-upstream 501。
-        # gate の正本は cargo 側 (decode_gate_truth_table)。
-        for path in ("/thumb/plain/ok.avif?w=200", "/view/plain/ok.avif"):
-            status, headers, _ = _get(decode_server, path)
-            assert status == 501
-            assert headers["content-type"] == "application/json"
-        return
-    status, headers, _ = _get(decode_server, "/thumb/plain/ok.avif?w=200")
-    assert status == 200
-    assert headers["content-type"] == "image/jpeg"
-    status, headers, _ = _get(decode_server, "/view/plain/ok.avif")
-    assert status == 200
-    assert headers["content-type"] == "image/jpeg"
+    # image crate は avif を decode できない → Proxy → no-upstream 501。
+    # gate の正本は cargo 側 (decode_gate_truth_table)。
+    for path in ("/thumb/plain/ok.avif?w=200", "/view/plain/ok.avif"):
+        status, headers, _ = _get(decode_server, path)
+        assert status == 501
+        assert headers["content-type"] == "application/json"
 
 
 def test_python_only_tiff_200_thumb_and_view(decode_server: str, decode_tree: Path):
     _needs(decode_tree / "plain" / "ok.tiff")
-    if _RS:
-        for path in ("/thumb/plain/ok.tiff?w=200", "/view/plain/ok.tiff"):
-            status, headers, _ = _get(decode_server, path)
-            assert status == 501
-            assert headers["content-type"] == "application/json"
-        return
-    status, headers, _ = _get(decode_server, "/thumb/plain/ok.tiff?w=200")
-    assert status == 200
-    assert headers["content-type"] == "image/jpeg"
-    status, headers, _ = _get(decode_server, "/view/plain/ok.tiff")
-    assert status == 200
-    assert headers["content-type"] == "image/jpeg"
+    for path in ("/thumb/plain/ok.tiff?w=200", "/view/plain/ok.tiff"):
+        status, headers, _ = _get(decode_server, path)
+        assert status == 501
+        assert headers["content-type"] == "application/json"
 
 
 @pytest.mark.parametrize("name", ["bad.heic", "bad.avif"])
 def test_unsupported_returns_404_not_500(decode_server: str, name: str):
-    """両側 unsupported / 破損バイトは py lane 404 (500 ではない)。
+    """unsupported / 破損バイトは 500 ではない。
 
-    rs lane は拡張子ゲートまたは decode 失敗で Proxy → no-upstream の 501。
+    rs は拡張子ゲートまたは decode 失敗で Proxy → no-upstream の 501。
     gate 自体は cargo 側 (thumbs.rs::thumb_undecodable_proxies /
     thumb_view_python_only_and_unsupported_proxy) が検証する。
     """
-    expected = _PROXY_STATUS or 404
+    expected = _PROXY_STATUS
     for path in (f"/thumb/plain/{name}?w=200", f"/view/plain/{name}"):
         status, headers, _ = _get(decode_server, path)
         assert status == expected, path
@@ -169,14 +148,13 @@ def test_unsupported_returns_404_not_500(decode_server: str, name: str):
 
 
 def test_decode_sets_match_rust():
-    """py 定数と rs NATIVE_DECODE/DECODE_* が一致している。
+    """rs NATIVE_DECODE/DECODE_* が自己無矛盾である。
 
-    両ソースを text parse する (import app なし — 両 lane で実行可)。
-    片側だけ対応形式を増やすと native 直撃と proxy 経由で status が割れる
-    ため、ここで落として spec §7 + 両定数の同時更新を強制する。
+    #503 で app/thumbs.py は削除されたため、py/rs パリティ比較は廃止。
+    形式追加時は spec §7 + rs 定数の同時更新を強制するため、集合の
+    素性 (status 分岐の一意性) をここで担保する。
     """
     repo = Path(__file__).resolve().parent.parent
-    py_src = (repo / "app" / "thumbs.py").read_text()
     rs_src = (repo / "rust" / "viewer-rs" / "src" / "thumbs.rs").read_text()
 
     def _parse_rs(name: str) -> set[str]:
@@ -184,20 +162,11 @@ def test_decode_sets_match_rust():
         assert m, f"{name} not found in thumbs.rs"
         return set(re.findall(r'"(\.[a-z0-9]+)"', m.group(1)))
 
-    def _parse_py(name: str) -> set[str]:
-        m = re.search(name + r"\s*=\s*frozenset\(\{([^}]*)\}\)", py_src)
-        assert m, f"{name} not found in app/thumbs.py"
-        return set(re.findall(r'"(\.[a-z0-9]+)"', m.group(1)))
-
-    assert _parse_rs("NATIVE_DECODE") == _parse_py("COMMON_NATIVE_SUFFIXES")
-    assert _parse_rs("DECODE_PYTHON_ONLY") == _parse_py("PYTHON_ONLY_SUFFIXES")
-    assert _parse_rs("DECODE_UNSUPPORTED_EXAMPLES") == _parse_py(
-        "DECODE_UNSUPPORTED_EXAMPLES"
-    )
+    rs_native = _parse_rs("NATIVE_DECODE")
+    rs_only = _parse_rs("DECODE_PYTHON_ONLY")
+    rs_unsup = _parse_rs("DECODE_UNSUPPORTED_EXAMPLES")
+    assert rs_native and rs_only and rs_unsup
     # 集合は互いに素でなければならない (status 分岐が一意であるため)
-    py_native = _parse_py("COMMON_NATIVE_SUFFIXES")
-    py_only = _parse_py("PYTHON_ONLY_SUFFIXES")
-    py_unsup = _parse_py("DECODE_UNSUPPORTED_EXAMPLES")
-    assert not (py_native & py_only)
-    assert not (py_native & py_unsup)
-    assert not (py_only & py_unsup)
+    assert not (rs_native & rs_only)
+    assert not (rs_native & rs_unsup)
+    assert not (rs_only & rs_unsup)

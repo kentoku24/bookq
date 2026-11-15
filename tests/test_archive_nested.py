@@ -3,13 +3,11 @@
 ZIP + RAR5-store archives with a ``root cover + vol01(+sub) + vol02`` shape
 must scan into a recursive tree, serve descendant-relative prefixes, and keep
 all existing guards (junk exclusion, EPUB-flat, 404s) — pinned at the HTTP
-level against the live ``server`` fixture, so this file runs in BOTH lanes
-(default uvicorn + ``BOOKQ_TEST_SERVER=rs`` viewer-rs).
+level against the live viewer-rs ``server`` fixture (#503 rs-only).
 
 Python internals (scan_tree / build_archive_tree / list_archive_entries /
 _find_tree_node units, entry-cap and deep-nesting collapse, rar-vol2
-lock-in) stay in ``tests/test_archive_nested_internals.py`` and retire
-with ``app/`` in Phase 3.
+lock-in) retired with ``app/`` in #503 (``tests/test_archive_nested_internals.py`` deleted).
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_archive_nested.py -q

@@ -1,17 +1,14 @@
 """Archive support over the v1 HTTP contract — ZIP/CBZ/RAR/PDF/EPUB (#483 v1 port).
 
 Browsable-archive behavior pinned at the HTTP level against the live
-``server`` fixture, so this file runs in BOTH lanes (default uvicorn +
-``BOOKQ_TEST_SERVER=rs`` viewer-rs):
+viewer-rs ``server`` fixture (#503 rs-only):
 
 - tree shape (archive nodes, thumbs, nested prefixes)
 - images envelopes (flat listings, pdf pages, empty/broken archives)
 - entry delivery (ETag/Range/304, non-ASCII names, error codes)
 - thumbnail delivery from archive entries
 
-Python internals (scan_tree / list_archive_entries / archive_pdf /
-MetadataIndex / warmup-cache truncation / tool-missing monkeypatches) stay
-in ``tests/test_archive_internals.py`` and retire with ``app/`` in Phase 3.
+Python internals retired with ``app/`` in #503 (``tests/test_archive_internals.py`` deleted).
 
 The module fixture stages the archives in the shared ``downloads_tree``
 and publishes them with a synchronous index refresh; it removes them

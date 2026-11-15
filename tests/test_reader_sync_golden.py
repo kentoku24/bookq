@@ -10,10 +10,9 @@ against the live session server fixture, where dynamic values (codes,
 member ids, digests) bind at runtime exactly as the in-process harnesses
 assume.
 
-The in-process vector runner itself stays in
-test_reader_sync_golden_internals.py, which retires with the Python
-backend. No Python package imports here so this file runs in both lanes
-(uvicorn + BOOKQ_TEST_SERVER=rs).
+The in-process Python vector runner retired with the backend in #503
+(test_reader_sync_golden_internals.py deleted). This file oracles
+viewer-rs at the HTTP/WS boundary (#503 rs-only).
 """
 import hashlib
 import json
