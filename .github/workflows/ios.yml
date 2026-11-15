@@ -29,7 +29,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # The UI tests boot the repo's viewer-rs binary and drive the
         # real client — server or shell-asset changes can break iOS the
-        # same way they break Android, hence app/** (served payload).
+        # same way they break Android, hence web/** (served payload, #503).
         with:
           filters: |
             run:
@@ -37,7 +37,7 @@ jobs:
               - "api/**"
               - ".github/workflows/ios.yml"
               - ".github/scripts/ios-ui-test.sh"
-              - "app/**"
+              - "web/**"
               - "rust/viewer-rs/**"
 
   test:
