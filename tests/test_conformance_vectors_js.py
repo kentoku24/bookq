@@ -107,6 +107,54 @@ def test_solo_spreads_js(any_browser):
             assert list(got["idxToSpread"]) == case["expectIdxToSpread"], case["name"]
 
 
+def test_chapter_padding_js(any_browser):
+    """padChapterSpacers + rebuildSpreads against chapter-padding vectors.
+
+    The chapter->flat-images/boundaries mapping is glue (same shape
+    loadImages builds); the padding rule and spread grouping under test are
+    the shipped spread.js functions.
+    """
+    data = _load("chapter-padding.json")
+    assert "js" in data["languages"]
+    with _page(any_browser) as pg:
+        pg.add_script_tag(path=str(SPREAD_JS))
+        for case in data["cases"]:
+            got = pg.evaluate(
+                """([chapters, mode, offset]) => {
+                     var images = [], boundaries = [];
+                     for (var ch of chapters) {
+                       boundaries.push(images.length);
+                       for (var p of ch.pages) images.push({folder: ch.folder, name: p});
+                     }
+                     window.padChapterSpacers(images, boundaries, mode, offset);
+                     window.images = images;
+                     window.chapterBoundaries = boundaries;
+                     window.pageMode = mode;
+                     window.spreadOffset = offset;
+                     window.anchorSpread = 0;
+                     window.spreadSizeCache = {};
+                     window.rebuildSpreads();
+                     return {
+                       images: images.map(im => [im.folder, im.name, !!im.isSpacer]),
+                       boundaries: boundaries,
+                       spreads: window.spreads.map(s => s.pages),
+                       chapterStart: window.spreads.map(s => !!s.chapterStart),
+                       idxToSpread: Array.from(window.idxToSpread, v => (v === undefined ? -1 : v)),
+                     };
+                   }""",
+                [case["chapters"], case["pageMode"], case["spreadOffset"]],
+            )
+            expect_images = [
+                [e["folder"], e["name"], bool(e.get("isSpacer"))]
+                for e in case["expectImages"]
+            ]
+            assert got["images"] == expect_images, case["name"]
+            assert got["boundaries"] == case["expectBoundaries"], case["name"]
+            assert got["spreads"] == case["expectSpreads"], case["name"]
+            assert got["chapterStart"] == case["expectChapterStart"], case["name"]
+            assert list(got["idxToSpread"]) == case["expectIdxToSpread"], case["name"]
+
+
 def _extract_function(src, name):
     """Extract `function name(...) {...}` verbatim by brace matching.
 
