@@ -79,7 +79,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Exposes ACTIONS_RUNTIME_TOKEN/ACTIONS_*_URL to the shell — without
       # them `type=gha` cache-from/to is skipped silently (#380).
