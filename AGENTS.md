@@ -63,19 +63,19 @@ issue タイトルからスラッグを生成する:
 
 ## 7. bookq 固有の注意
 
-### Python 実装の frozen 化 (#410 Phase 1)
+### Python 実装の削除済み (#410 Phase 3b: #503)
 
-- **本番バックエンドは viewer-rs (Rust) のみ** (#409)。Python `viewer` は `py-rollback` compose profile 専用の退避。`app/`・`tests/`・`Dockerfile`・`requirements*.txt` は **frozen read-only reference** であり #410 で段階削除される — **これらへの新規変更・バグ修正は禁止**。修正は `rust/` 側に行う。以下の `app/` 参照記述は削除までの過渡期に残るリファレンス。
+- **本番バックエンドは viewer-rs (Rust) のみ** (#409)。Python `viewer` / `py-rollback` profile、`app/`、`Dockerfile`、`requirements.txt` は #503 で source tree から削除済み — rollback は git history からの再 build。修正は `rust/` 側に行う。以下に残る `app/` パス言及は Rust 側の port 元を示す歴史参照（例: `rust/viewer-rs/src/folders.rs` の `Ports app/routes.py` コメント）。
 
 ### フォルダツリー / scanner
 
-- `app/scanner.py:92` `scan_tree` — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`web/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `web/static/app.js:1308` で構築)。prefix を付与しないこと。
+- `rust/viewer-rs/src/tree.rs` `scan_tree` (ex-`app/scanner.py:92`) — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`web/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `web/static/app.js:1308` で構築)。prefix を付与しないこと。
 - 変更時は `web/templates/index.html` のサムネ参照と整合させること。`thumbs` (2+ サブフォルダに thumb がある時のみ) による multi-thumb グリッド分岐がある。
 
 ### URL ハッシュ状態 / Viewer
 
 - `web/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`web/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
-- `web/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `web/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (`app/routes.py:26` の global `_jinja_env = Environment(auto_reload=True, cache_size=0)` が `get_template` をキャッシュしつつ即時反映)。
+- `web/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `web/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (viewer-rs が `BOOKQ_WEB_DIR` を直接 serve し、template 変更を即時反映)。
 
 ### テスト
 
@@ -83,14 +83,14 @@ issue タイトルからスラッグを生成する:
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
 ```
 
-- `BOOKQ_TEST_MODE=true` が必須 — `app/auth.py` の `_TEST_MODE` は import 時に一度だけ読まれ、OAuth をバイパスして mock user を返す。
+- `BOOKQ_TEST_MODE=true` が必須 — viewer-rs が起動時に読み、OAuth をバイパスして mock user を返す。
 - `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
-- `uvicorn[standard]` は `requirements-dev.txt` 側のみに存在 (runtime `requirements.txt` は hypercorn)。`--with-requirements requirements-dev.txt` の付与を省略しないこと。
-- 隠しルート機能は `app/folder_visibility*.py` + `web/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
+- `--with-requirements requirements-dev.txt` の付与を省略しないこと (pillow/httpx 等の fixture 依存が入る)。
+- 隠しルート機能は viewer-rs (`rust/viewer-rs/src/` visibility/state) + `web/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
 
 ### デプロイ / ネットワーク
 
-- viewer はホストポートを公開しない。到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer:8080)。一般公開は opt-in の cloudflared (compose profile `public`、`CLOUDFLARE_TUNNEL_TOKEN` 設定で `rebuild.sh prd deploy` が有効化) が第 2 の経路になる (#349)。`TS_FUNNEL=1` の Tailscale Funnel (#353) も存在するが、公式の変更不可な帯域上限 (実測 ~数十KB/s/接続) で画像配信には使えない — 公開には使わないこと。`viewer` が `bookq_default` ネットワーク外だと 502 になる。
+- viewer-rs はホストポートを公開しない。到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer-rs:8080)。一般公開は opt-in の cloudflared (compose profile `public`、`CLOUDFLARE_TUNNEL_TOKEN` 設定で `rebuild.sh prd deploy` が有効化) が第 2 の経路になる (#349)。`TS_FUNNEL=1` の Tailscale Funnel (#353) も存在するが、公式の変更不可な帯域上限 (実測 ~数十KB/s/接続) で画像配信には使えない — 公開には使わないこと。`viewer-rs` が `bookq_default` ネットワーク外だと 502 になる。
 - 開発環境は `./dev.sh up` で管理 (10スロットプール、project `bookq-dev-pool-XX` 形式。真実は docker label `com.bookq.name` / `com.bookq.pool_slot` のみ)。本番 `docker compose up` を worktree で直接叩かないこと。
 - ユーザー設定 (隠しルート等) と読書位置は `user-state` volume の `/var/lib/bookq` (`folder-visibility.sqlite3`、スキーマ v2) に永続化される。隠しルートはユーザー別ではなくライブラリ共有 (グローバル)、読書位置は認証ユーザー別。キャッシュではないのでキャッシュ掃除経路で消さないこと。
 

@@ -233,17 +233,21 @@ https://dev-*.ts.net/static/offline-harness.html?harness=1  # 後方互換で有
 
 **curl での配信確認 (動的ポート注意)**
 
-`server` fixture は毎回ランダムな空きポートで uvicorn を起動します。固定の 8080 や 18080 ではないので、テストや手元確認では起動ログや `server` fixture が返す URL のポートを使います。
+`server` fixture は毎回ランダムな空きポートで viewer-rs を起動します。固定の 8080 や 18080 ではないので、テストや手元確認では起動ログや `server` fixture が返す URL のポートを使います。
 
 ```bash
 # 例: fixture が http://127.0.0.1:54321 を返した場合
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
-# 手元で一時起動して試す場合
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/tmp/downloads uv run --with-requirements requirements-dev.txt uvicorn app.main:app --port $PORT &
+# 手元で一時起動して試す場合 (viewer-rs を直接起動)
+BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/tmp/downloads BOOKQ_BIND=127.0.0.1:$PORT \
+  BOOKQ_RS_NATIVE=all BOOKQ_RS_NATIVE_STRICT=1 SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:$PORT BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs &
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
 ```
 
-`grep -q "offline-harness" README.md` と `curl` の両方が通れば、StaticFiles 配信とゲート分離が保たれています。`.dockerignore` に `web/static` の除外が無いこと（`! grep -q "web/static" .dockerignore`）と、`Dockerfile:10` の `COPY app/ ./app/` で `web/static/offline-harness.html` がイメージに含まれることも併せて確認します。
+`grep -q "offline-harness" README.md` と `curl` の両方が通れば、static 配信とゲート分離が保たれています。`.dockerignore` に `web/static` の除外が無いこと（`! grep -q "web/static" .dockerignore`）と、`Dockerfile.viewer-rs` の `COPY web/` で `web/static/offline-harness.html` がイメージに含まれることも併せて確認します。
 
 ## 停止
 
@@ -266,7 +270,7 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 | URL | `https://bookq.<your-tailnet>.ts.net` | `https://dev-<名前>.<your-tailnet>.ts.net` |
 | 認証 | Google OAuth | なし（`BOOKQ_TEST_MODE=true`） |
 | 画像ツリー | 読み書き可 | **読み取り専用** (`:ro`) |
-| コンテナ | viewer + tailscale サイドカー | viewer + tailscale サイドカー（ノードは環境ごとに 1 つ） |
+| コンテナ | viewer-rs + tailscale サイドカー | viewer-rs + tailscale サイドカー（ノードは環境ごとに 1 つ） |
 
 > **本番の compose を検証に流用しないこと。** worktree で素の `docker compose up` を打つと、ホスト名 `bookq` を要求する 2 つ目の tailscale ノードが立ち上がって本番と名前を争います。`prd.sh` は worktree からの実行を拒否し、`docker-compose.dev.yml` は `DEV_IMAGE` / `DEV_NAME` 等の必須変数（`:?`）が無いと起動自体が失敗するので、`dev.sh` を使う限りこの事故は起きません。
 
@@ -275,8 +279,12 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 UI をさっと触るだけならこれが一番速い（OAuth もスキップされます）。
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
-  uv run --with-requirements requirements-dev.txt uvicorn app.main:app --port 8080
+# viewer-rs を直接起動 (cargo build -p viewer-rs が前提)
+BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+  BOOKQ_RS_NATIVE=all BOOKQ_RS_NATIVE_STRICT=1 SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 ### 2. テスト
@@ -299,7 +307,7 @@ Chromium が無ければ初回だけ:
 uv run --with playwright playwright install chromium
 ```
 
-`--with-requirements requirements-dev.txt` は省略できません。`server` フィクスチャが `sys.executable -m uvicorn` を起動するので、pytest と同じ環境に fastapi/uvicorn が必要です。`uvicorn[standard]` は開発用の `requirements-dev.txt` 側にあり、ランタイムの `requirements.txt`（本番は hypercorn）には含まれません。
+`--with-requirements requirements-dev.txt` は省略できません。`server` フィクスチャが viewer-rs バイナリを起動し、fixture ツリーの画像生成に pillow、HTTP アサートに httpx が必要です（いずれも `requirements-dev.txt` 側）。
 
 リンタ・フォーマッタは導入していません。
 
@@ -379,7 +387,7 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 
 ### 5. Git Hook（コミット時に開発環境を自動更新）
 
-`app/` 配下・`requirements.txt`・`Dockerfile` を変更してコミットすると、pre-commit hook が**その worktree の開発環境**を更新し、URL を表示してコミットを一旦止めます。本番には触りません。
+`rust/`・`web/`・`requirements-dev.txt`・`Dockerfile.viewer-rs` を変更してコミットすると、pre-commit hook が**その worktree の開発環境**を更新し、URL を表示してコミットを一旦止めます。本番には触りません。
 
 1. コードを変更して `git add <files>`
 2. `git commit` → 開発環境が更新され、URL が表示されて停止

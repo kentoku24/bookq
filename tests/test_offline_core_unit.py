@@ -210,7 +210,7 @@ def test_offline_core_single_source():
     assert "function cacheNameFor(folder)" in core_text
     assert "function dedupedBytes(all)" in core_text
     assert "function rawBytes(all)" in core_text
-    # escapeHtml / folderHasOnlyImages moved here from app.js + 4 copies (#107)
+    # escapeHtml / folderHasOnlyImages moved here from the shell + 4 copies (#107)
     assert "function escapeHtml(s)" in core_text
     assert "function folderHasOnlyImages(node)" in core_text
     # published on globalThis, so sw.js can importScripts the same file
