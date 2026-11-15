@@ -300,8 +300,8 @@ def test_browse_hierarchy_offline(page, server):
     assert "findParentPath" in app_text, "getParentPath must use tree walk findParentPath"
     assert 'split("/")' not in app_text.split("function getParentPath")[1].split("function")[0] or "findParentPath" in app_text, "getParentPath must not use split('/') parent resolution"
     # scanner flatten rewrites name/thumb/thumbs together at 131-147 — verify source contains all three rewrites
-    scanner_text = (REPO_ROOT / "app" / "scanner.py").read_text(encoding="utf-8")
-    assert 'c["name"] = dname + "/" + c["name"]' in scanner_text, "scanner flatten must rewrite name"
+    scanner_text = (REPO_ROOT / "rust" / "viewer-rs" / "src" / "tree.rs").read_text(encoding="utf-8")
+    assert 'format!("{dname}/{}", c.name())' in scanner_text, "scanner flatten must rewrite name"
 
     # ── online drill-down sanity before going offline ──
     # drill into group, then episodes, verify 4 children
@@ -1012,7 +1012,7 @@ def test_browse_to_view_offline_transition(page, server):
     # ── Static contract pinning (baseline characterization) ──
     app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
-    scanner_text = (REPO_ROOT / "app" / "scanner.py").read_text(encoding="utf-8")
+    scanner_text = (REPO_ROOT / "rust" / "viewer-rs" / "src" / "tree.rs").read_text(encoding="utf-8")
     # Single hashchange listener lives in browse/hash.js by design (PR #92 split)
     hash_text = (REPO_ROOT / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
     # hashchange only, no popstate
@@ -1061,7 +1061,7 @@ def test_browse_to_view_offline_transition(page, server):
     assert "const SIBLING_AUTOLOAD_MIN_DEPTH = 2" in app_text, "SIBLING_AUTOLOAD_MIN_DEPTH=2 preserved"
     assert 'split("/").length - 1 < SIBLING_AUTOLOAD_MIN_DEPTH' in app_text or "split(\"/\").length - 1 < SIBLING" in app_text, "depth guard must use split length vs SIBLING"
     # scanner flatten
-    assert 'c["name"] = dname + "/" + c["name"]' in scanner_text, "scanner flatten must rewrite name"
+    assert 'format!("{dname}/{}", c.name())' in scanner_text, "scanner flatten must rewrite name"
     # SW fallback preserved (NetworkFirst offline)
     assert "caches.match" in sw_text
 

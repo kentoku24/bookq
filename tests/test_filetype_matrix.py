@@ -1,32 +1,30 @@
 """Filetype readability matrix — 14 types via the v1 contract (Phase 2c port, #487).
 
-Covers all 14 file types the scanner knows (正: app/scanner.py:14 IMAGE_EXTENSIONS,
-app/archive.py:20-22 ARCHIVE_EXTENSIONS, app/scanner.py:19 PDF_EXTENSIONS):
+Covers all 14 file types the viewer-rs scanner knows
+(IMAGE_EXTENSIONS / ARCHIVE_EXTENSIONS / PDF_EXTENSIONS in rust):
 
 - images (8): .avif / .webp / .jpg / .jpeg / .png / .gif / .bmp / .svg
 - archives (5): .zip / .cbz / .rar / .cbr / .epub
 - pdf (1): .pdf
 
 Each type x (v1 enumeration ``{folder, images}``, ``/image/*`` 200,
-``/thumb/*`` 200) is asserted strictly per backend lane. The two lanes
-disagree exactly where the backends genuinely differ:
+``/thumb/*`` 200) is asserted against viewer-rs (#503 rs-only):
 
-- ``/thumb`` for genuine AVIF: Pillow decodes (py 200 JPEG) but the
-  ``image`` crate cannot — rs proxies, and with no upstream that is 501.
-- PDF pages need libpdfium: py renders them (200), rs proxies them
-  (no-upstream 501) for both ``/image`` and ``/thumb``.
-- RAR/CBR members read natively on both (bundled unrar + Pillow/``image``).
+- ``/thumb`` for genuine AVIF: the ``image`` crate cannot decode it —
+  rs proxies, and with no upstream that is 501.
+- PDF pages need libpdfium: rs proxies them (no-upstream 501) for both
+  ``/image`` and ``/thumb``.
+- RAR/CBR members read natively (bundled unrar + ``image`` crate).
 
 AVIF honesty rule: generated only via Pillow. If Pillow cannot encode AVIF in
 this environment, the AVIF cells are reported as UNMEASURED via
 ``pytest.skip`` with an explicit reason — never a renamed PNG forgery.
 
-The matrix boots its own backend (rs_spawn, both lanes) over a synthetic
+The matrix boots its own backend (rs_spawn) over a synthetic
 tree so the shared session ``server`` tree stays untouched.
 
 Run:
     BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_filetype_matrix.py -q
-    BOOKQ_TEST_SERVER=rs uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_filetype_matrix.py -q
 """
 
 import io
@@ -40,8 +38,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
-_RS = os.environ.get("BOOKQ_TEST_SERVER") == "rs"
 
 _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
@@ -199,7 +195,7 @@ def matrix_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def matrix_server(matrix_tree: Path):
-    """Dedicated backend over the matrix tree (both lanes via rs_spawn)."""
+    """Dedicated backend over the matrix tree (viewer-rs via rs_spawn)."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
@@ -241,7 +237,7 @@ def test_matrix_enumeration(matrix_server, filetype, kind, folder, inner):
 def test_matrix_image(matrix_server, filetype, kind, folder, inner):
     """Cell 2: /image/<folder>/<inner> serves the page.
 
-    PDF pages need libpdfium: py renders them, rs (no-upstream Proxy) 501s.
+    PDF pages need libpdfium: rs (no-upstream Proxy) 501s.
     """
     _skip_if_unmeasurable(filetype)
     path = "/image/{}/{}".format(
@@ -249,7 +245,7 @@ def test_matrix_image(matrix_server, filetype, kind, folder, inner):
         "/".join(urllib.parse.quote(p, safe="") for p in inner.split("/")),
     )
     status, headers, raw = _get(matrix_server, path)
-    if _RS and filetype == "pdf":
+    if filetype == "pdf":
         assert status == 501, path
         assert headers["content-type"] == "application/json"
         return
@@ -262,8 +258,8 @@ def test_matrix_image(matrix_server, filetype, kind, folder, inner):
 def test_matrix_thumb(matrix_server, filetype, kind, folder, inner):
     """Cell 3: /thumb/<folder>/<inner>?w=200 renders a thumbnail.
 
-    AVIF genuine-decode is Pillow-only (py 200, rs no-upstream Proxy 501);
-    PDF pages likewise need libpdfium (py 200, rs 501).
+    AVIF genuine-decode is unsupported by the image crate (rs no-upstream
+    Proxy 501); PDF pages likewise need libpdfium (rs 501).
     """
     _skip_if_unmeasurable(filetype)
     path = "/thumb/{}/{}?w=200".format(
@@ -271,7 +267,7 @@ def test_matrix_thumb(matrix_server, filetype, kind, folder, inner):
         "/".join(urllib.parse.quote(p, safe="") for p in inner.split("/")),
     )
     status, headers, raw = _get(matrix_server, path)
-    if _RS and filetype in ("avif", "pdf"):
+    if filetype in ("avif", "pdf"):
         assert status == 501, path
         assert headers["content-type"] == "application/json"
         return

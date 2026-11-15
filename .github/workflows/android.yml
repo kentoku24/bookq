@@ -30,14 +30,14 @@ jobs:
         if: github.event_name == 'pull_request'
         # The ui job boots the repo's viewer-rs binary and asserts on
         # /api/v1/* — server or shell-asset changes can break the client,
-        # hence app/** (served payload) below.
+        # hence web/** (served payload, #503) below.
         with:
           filters: |
             run:
               - "android/**"
               - "api/**"
               - ".github/workflows/android.yml"
-              - "app/**"
+              - "web/**"
               - "rust/viewer-rs/**"
 
   unit:

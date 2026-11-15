@@ -22,9 +22,11 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 サーバーには `http://127.0.0.1:8080` で直接届く（ATS は loopback 対象外。`localhost` ではなく IPv4 固定にする — `localhost` が `::1` に解決される環境で別サービスが 8080 を掴んでいると別物に繋がる）:
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
-  uv run --with-requirements requirements-dev.txt \
-  uvicorn app.main:app --port 8080
+BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+  BOOKQ_RS_NATIVE=all BOOKQ_RS_NATIVE_STRICT=1 SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 起動時に `-serverURL` 引数を渡すと URL をプリセットできる

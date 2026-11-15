@@ -1,5 +1,5 @@
 """Integration tests for the dev-only ?thumb_perf=1 instrumentation mode
-(Phase 2c v1 port, #487 — both lanes: uvicorn + BOOKQ_TEST_SERVER=rs).
+(Phase 2c v1 port, #487, #503 rs-only).
 
 These tests assert the route/template wiring only — the metric itself is
 authored in scripts/perf/measure_thumbnails.py + web/perf/thumbnail-probe.js

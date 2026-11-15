@@ -68,8 +68,7 @@ def _free_port() -> int:
 def _start_server(downloads: Path):
     """Boot a backend against *downloads* in the current lane; yield its base URL.
 
-    Phase 2c v1 port (#487): uvicorn ``app.main:app`` → rs_spawn, so the
-    H7/H8/search browser tests run under both lanes (uvicorn + rs).
+    Phase 2c v1 port (#487), #503 rs-only: viewer-rs via rs_spawn.
     """
     from rs_spawn import spawn_backend
 

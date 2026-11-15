@@ -1,8 +1,7 @@
-"""Visibility persistence over live HTTP (both lanes).
+"""Visibility persistence over live HTTP (viewer-rs, #503 rs-only).
 
-The unit-level store tests (sqlite revisions, key isolation, schema stamps)
-live in the sibling py-only module, which stays quarantined until it
-retires. This file covers only what is visible through the v1 HTTP
+The unit-level Python store tests retired in #503. This file covers only
+what is visible through the v1 HTTP
 contract: writes are readable, revisions only bump on real changes, and
 the hidden set starts and ends clean.
 

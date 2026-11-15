@@ -1,16 +1,14 @@
 """S04 — shared work manifest over the live server (#79, #485 Phase 2c port).
 
-The leader OPEN_WORKs a work over a real reader-sync socket; both backends
-(uvicorn + viewer-rs) resolve the manifest from the same enumeration the
-solo viewer serves, chunk it into MANIFEST frames and commit a STATE. The
+The leader OPEN_WORKs a work over a real reader-sync socket; viewer-rs
+resolves the manifest from the same enumeration the solo viewer serves,
+chunk it into MANIFEST frames and commit a STATE. The
 tests below assert the wire-visible contract only: manifest shape, digest
 verification, chapter runs and typed load errors.
 
-The in-process catalog unit matrix (flatten rules, kanji order, archives,
-split/join internals) stays in test_reader_manifest_internals.py, which
-retires with the Python backend. Wire constants are inlined from the
-asyncapi contract instead of the Python package so this file runs in both
-lanes.
+The in-process catalog unit matrix retired with the Python backend in
+#503 (test_reader_manifest_internals.py deleted). Wire constants are
+inlined from the asyncapi contract (#503 rs-only).
 """
 import hashlib
 import json

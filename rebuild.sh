@@ -289,21 +289,20 @@ for d in devs:
 
 # ============================================================ 本番
 # prd build: sha のコミット済み内容だけを git archive で取り出し、決定論タグの
-# prod image（viewer＋sidecar）をビルドする。作業ツリーは一切見ない。
+# prod image（viewer-rs＋sidecar）をビルドする。作業ツリーは一切見ない。
 # dev_build の git archive パターンと同型。同 sha＝同内容のため、既存タグは
-# docker image inspect で再利用する。出力は "VIEWER_TAG SIDECAR_TAG"。
+# docker image inspect で再利用する。出力は "RS_TAG SIDECAR_TAG"。
+# #503 rs-only: Python viewer は削除 — viewer-rs のみ build する。
 prd_build_image() {
     [ -n "${1:-}" ] || { usage >&2; die "prd build には sha が必要です: rebuild.sh prd build <sha>"; }
-    local sha="$1" sha12 tmp build_date viewer_tag sidecar_tag
+    local sha="$1" sha12 tmp sidecar_tag rs_tag
     sha12="${sha:0:12}"
 
     tmp="$(mktemp -d)"
     trap "rm -rf \"$tmp\"" EXIT
     git archive --format=tar "$sha" | tar -x -C "$tmp" \
         || die "sha '$sha' を archive できません。git fetch が必要かもしれません。"
-    [ -f "$tmp/Dockerfile" ] || die "archive に Dockerfile がありません (sha=$sha)。"
-    [ -f "$tmp/requirements.txt" ] || die "archive に requirements.txt がありません (sha=$sha)。"
-    [ -d "$tmp/app" ] || die "archive に app/ がありません (sha=$sha)。"
+    [ -f "$tmp/Dockerfile.viewer-rs" ] || die "archive に Dockerfile.viewer-rs がありません (sha=$sha)。"
     # compose の build: ./tailscale は context 内の既定名 Dockerfile を使う。
     [ -f "$tmp/tailscale/Dockerfile" ] || die "archive に tailscale/Dockerfile がありません (sha=$sha)。"
     # sidecar は別 context のため、親参照（../）があると壊れる。存在確認と同時に検査する。
@@ -311,35 +310,19 @@ prd_build_image() {
         die "tailscale context に親参照（COPY ../）があります (sha=$sha)。"
     fi
 
-    viewer_tag="bookq-prd-viewer:${sha12}"
+    rs_tag="bookq-prd-viewer-rs:${sha12}"
     sidecar_tag="bookq-prd-tailscale:${sha12}"
-    if docker image inspect "$viewer_tag" >/dev/null 2>&1 \
+    if docker image inspect "$rs_tag" >/dev/null 2>&1 \
         && docker image inspect "$sidecar_tag" >/dev/null 2>&1; then
-        info "イメージ再利用: $viewer_tag $sidecar_tag (${sha12})"
+        info "イメージ再利用: $rs_tag $sidecar_tag (${sha12})"
     else
-        build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        info "ビルド中: ${sha12} → $viewer_tag $sidecar_tag"
-        docker build -q --build-arg "GIT_SHA=${sha12}" --build-arg "BUILD_DATE=${build_date}" \
-            -t "$viewer_tag" "$tmp" >/dev/null \
-            || die "viewer のビルドに失敗しました (sha=$sha)"
+        info "ビルド中: ${sha12} → $rs_tag $sidecar_tag"
+        docker build -q -f "$tmp/Dockerfile.viewer-rs" -t "$rs_tag" "$tmp" >/dev/null \
+            || die "viewer-rs のビルドに失敗しました (sha=$sha)"
         docker build -q -t "$sidecar_tag" "$tmp/tailscale" >/dev/null \
             || die "sidecar のビルドに失敗しました (sha=$sha)"
     fi
-    # viewer-rs (#211/#409 以降は本体): Dockerfile.viewer-rs がその ref に
-    # 存在するときのみビルドする — 存在しない旧 ref への rollback を
-    # 壊さないため。prd-image.yml 側は ${PRD_RS_IMAGE:?} で pin 必須。
-    local rs_tag=""
-    if [ -f "$tmp/Dockerfile.viewer-rs" ]; then
-        rs_tag="bookq-prd-viewer-rs:${sha12}"
-        if docker image inspect "$rs_tag" >/dev/null 2>&1; then
-            info "イメージ再利用: $rs_tag"
-        else
-            info "ビルド中: ${sha12} → $rs_tag"
-            docker build -q -f "$tmp/Dockerfile.viewer-rs" -t "$rs_tag" "$tmp" >/dev/null \
-                || die "viewer-rs のビルドに失敗しました (sha=$sha)"
-        fi
-    fi
-    printf '%s %s %s' "$viewer_tag" "$sidecar_tag" "$rs_tag"
+    printf '%s %s' "$rs_tag" "$sidecar_tag"
 }
 
 # prd deploy の事後検証: デプロイした viewer-rs コンテナの image タグ
@@ -360,7 +343,7 @@ verify_prd_version() {
 }
 
 deploy_prd() {
-    : "${PRD_VIEWER_IMAGE:?PRD_VIEWER_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
+    : "${PRD_RS_IMAGE:?PRD_RS_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     : "${PRD_TAILSCALE_IMAGE:?PRD_TAILSCALE_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     : "${PRD_EXPECT_SHA:?PRD_EXPECT_SHA が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     echo "🚀 本番コンテナを prebuilt image で起動します..."
@@ -437,7 +420,7 @@ dev_build() {
     }
 
     # DEV_RS=1 のとき同じ build context（ref は git archive、無指定は作業
-    # ツリー）から viewer-rs イメージもビルドする。タグは py 側規則に rs- を
+    # ツリー）から viewer-rs overlay イメージもビルドする。タグは main 側規則に rs- を
     # 前置したもの（bookq-dev:rs-ref-<slug> / rs-<sha12> / rs-wt-<name>）。
     # reuse 判定は py 側と同じく docker image inspect に委ねる。
     rs_build() {
@@ -467,7 +450,7 @@ dev_build() {
                 tag="bookq-dev:ref-${slug}"
                 info "ビルド中（エイリアスタグ上書き）: ${ref} = ${sha:0:12} → $tag"
                 git archive --format=tar "$sha" \
-                    | docker build -q --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
+                    | docker build -q -f Dockerfile.viewer-rs --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
                     || die "ビルドに失敗しました (ref=$ref)"
                 ;;
             *)
@@ -480,7 +463,7 @@ dev_build() {
                 else
                     info "ビルド中: ${ref} = ${sha:0:12}"
                     git archive --format=tar "$sha" \
-                        | docker build -q --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
+                        | docker build -q -f Dockerfile.viewer-rs --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
                         || die "ビルドに失敗しました (ref=$ref)"
                 fi
                 ;;
@@ -505,7 +488,7 @@ dev_build() {
     else
         tag="bookq-dev:wt-${name}"
         info "ビルド中: 現在の作業ツリー"
-        docker build -q --label com.bookq.dev-image=1 -t "$tag" "$SCRIPT_DIR" >/dev/null \
+        docker build -q -f "$SCRIPT_DIR/Dockerfile.viewer-rs" --label com.bookq.dev-image=1 -t "$tag" "$SCRIPT_DIR" >/dev/null \
             || die "ビルドに失敗しました"
         sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
         if [ "${DEV_RS:-}" = "1" ]; then

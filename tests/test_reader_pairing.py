@@ -5,11 +5,9 @@ wire-visible pairing contract — CREATE/JOIN/APPROVE handshake, code errors,
 pending lifecycle, SIGNAL/UI_SYNC relay, MATCH one-tap pairing, RESUME and
 transport switching.
 
-The in-process registry unit matrix (fake clock expiry windows, queue
-bounds, logging hygiene) stays in test_reader_pairing_internals.py, which
-retires with the Python backend. Wire constants and reason strings are
-inlined from the asyncapi contract instead of the Python package so this
-file runs in both lanes (uvicorn + BOOKQ_TEST_SERVER=rs).
+The in-process registry unit matrix retired with the Python backend in
+#503 (test_reader_pairing_internals.py deleted). Wire constants and reason
+strings are inlined from the asyncapi contract (#503 rs-only).
 """
 import json
 import time
@@ -18,8 +16,7 @@ import pytest
 from websockets.sync.client import connect as ws_connect
 
 # Wire constants inlined from the asyncapi contract (RequestFrame.v const 1,
-# 64KiB max frame) — importing the Python package here would quarantine
-# this file under BOOKQ_TEST_SERVER=rs.
+# 64KiB max frame).
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 64 * 1024
 

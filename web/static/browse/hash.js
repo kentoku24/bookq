@@ -2,13 +2,13 @@
  * Plain global script: defines window.parseViewerHash, viewerHash,
  * parseBrowseHash, browseHash, currentViewerState, urlStack etc,
  * and the SINGLE hash listener (applyUrlState).
- * Load before app.js; app.js exposes mutable state via window getters.
+ * Load before the shell bundle; the shell exposes mutable state via window getters.
  */
 (function () {
   var VIEWER_HASH_PREFIX = "#/view/";
   var BROWSE_HASH_PREFIX = "#/browse/";
 
-  // These are mirrored from app.js IIFE closure via window getters.
+  // These are mirrored from the shell IIFE closure via window getters.
   // Access through window.* at call-time so ordering (this loads before app.js)
   // does not matter — lookups happen when functions are invoked.
   function _getTree() {

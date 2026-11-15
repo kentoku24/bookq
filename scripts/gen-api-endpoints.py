@@ -9,7 +9,8 @@ by the page (before `api/v1.js`) and by the Service Worker via
 Sources:
   - v1 paths: `api/openapi.v1.yaml` (`paths:` keys starting with `/api/v1/`)
   - EXTRA (not in the OpenAPI schema on purpose): `/api/v1/pair-report`,
-    the test-only #142 bridge (`app/api_v1.py`, `include_in_schema=False`)
+    the test-only #142 bridge (retired Python `app/api_v1.py`, now viewer-rs native;
+    still `include_in_schema=False` by design)
 
 Usage:
   python3 scripts/gen-api-endpoints.py          # rewrite endpoints.js
@@ -45,14 +46,14 @@ PATH_TO_KEY = {
 
 # Deliberately outside the OpenAPI schema (include_in_schema=False).
 EXTRA = {
-    "pairReport": "/api/v1/pair-report",  # test-only #142 bridge (app/api_v1.py)
+    "pairReport": "/api/v1/pair-report",  # test-only #142 bridge (ex-app/api_v1.py, now rs native)
 }
 
 HEADER = """/* bookq api endpoints — shared `/api/v1/...` path constants.
  * GENERATED — do not hand-edit. Regenerate:
  *   python3 scripts/gen-api-endpoints.py
  * Sources: api/openapi.v1.yaml (v1 paths) + test-only pair-report
- * (app/api_v1.py, include_in_schema=False — see script EXTRA).
+ * (ex-app/api_v1.py, now rs native; include_in_schema=False — see script EXTRA).
  * Loads in both the page (before api/v1.js) and the Service Worker via
  * importScripts (no window there) — hence globalThis, no window/document.
  */

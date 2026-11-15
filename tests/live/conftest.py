@@ -1,12 +1,10 @@
-"""Shared fixtures for live-library regression (#31). See README.md."""
+"""Shared fixtures for live-library regression (#31, #503 viewer-rs). See README.md."""
 import hashlib
 import json
 import os
 import random
 import socket
 import subprocess
-import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -39,31 +37,43 @@ def live_root():
 
 @pytest.fixture(scope="session")
 def live_server(live_root, tmp_path_factory):
-    """uvicorn against the live root with caches sandboxed to tmp."""
+    """viewer-rs against the live root with caches sandboxed to tmp."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     cache = tmp_path_factory.mktemp("live-cache")
+    base = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
     env["BOOKQ_TEST_MODE"] = "true"
     env["DOWNLOADS_DIR"] = str(live_root)
     env["BOOKQ_THUMB_CACHE_DIR"] = str(cache / "thumbs")
-    env["BOOKQ_CACHE_DIR"] = str(cache / "warmup")
+    env["BOOKQ_STATE_DIR"] = str(cache / "state")
+    env["BOOKQ_BIND"] = f"127.0.0.1:{port}"
+    env["BOOKQ_RS_NATIVE"] = "all"
+    env["BOOKQ_RS_NATIVE_STRICT"] = "1"
+    env["GOOGLE_CLIENT_ID"] = "ci-dummy"
+    env["GOOGLE_CLIENT_SECRET"] = "ci-dummy"
+    env["BASE_URL"] = base
+    env["ALLOWED_EMAILS"] = "test@example.com"
+    env["SECRET_KEY"] = "ci-not-a-secret"
+    env["BOOKQ_WEB_DIR"] = str(REPO_ROOT / "web")
+    bin_path = REPO_ROOT / "rust" / "target" / "debug" / "viewer-rs"
+    if not bin_path.exists():
+        subprocess.run(["cargo", "build", "-p", "viewer-rs"],
+                       cwd=str(REPO_ROOT / "rust"), check=True)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app",
-         "--host", "127.0.0.1", "--port", str(port)],
+        [str(bin_path)],
         env=env,
         cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 180
     while time.time() < deadline:
         if proc.poll() is not None:
             raise RuntimeError("live server exited early")
         try:
-            with urllib.request.urlopen(base + "/api/health", timeout=2):
+            with urllib.request.urlopen(base + "/api/v1/health", timeout=2):
                 break
         except OSError:
             time.sleep(0.5)

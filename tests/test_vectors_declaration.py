@@ -14,16 +14,15 @@ VECTORS_DIR = REPO_ROOT / "api" / "vectors"
 # Vector file -> languages that must read it (issue #280's first set +
 # kotlin via #460).
 EXPECTED = {
-    "work-chapters.json": ["python", "js", "swift", "rust", "kotlin"],
-    "path-lookup.json": ["python", "js", "swift", "rust", "kotlin"],
-    "encode-path.json": ["python", "js", "swift", "rust", "kotlin"],
+    "work-chapters.json": ["js", "swift", "rust", "kotlin"],
+    "path-lookup.json": ["js", "swift", "rust", "kotlin"],
+    "encode-path.json": ["js", "swift", "rust", "kotlin"],
     "solo-spreads.json": ["js", "swift", "kotlin"],
-    "positions-cases.json": ["python", "rust"],
+    "positions-cases.json": ["rust"],
 }
 
 # Language -> test file that consumes the vectors for that language.
 READERS = {
-    "python": "tests/test_conformance_vectors.py",
     "js": "tests/test_conformance_vectors_js.py",
     "swift": "ios/BookqTests/ConformanceVectorsTests.swift",
     "kotlin": "android/core/src/test/kotlin/dev/bookq/core/ConformanceVectorsTest.kt",
@@ -34,7 +33,6 @@ READERS = {
 # default — positions-cases is consumed by dedicated store tests, not the
 # shared conformance harness.
 READER_OVERRIDES = {
-    ("positions-cases.json", "python"): "tests/test_reading_positions_store.py",
     ("positions-cases.json", "rust"): "rust/viewer-rs/src/state.rs",
 }
 

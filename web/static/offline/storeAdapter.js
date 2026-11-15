@@ -123,7 +123,7 @@
   var _confirmMap = new Map();
   window._confirmMap = _confirmMap;
 
-  // Need offlineMap etc from app — they live on window
+  // Need offlineMap etc from the shell — they live on window
   function _getOfflineMap(){ return window.offlineMap || {}; }
   function _getOfflineRecordMap(){ return window.offlineRecordMap || new Map(); }
 
