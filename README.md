@@ -203,7 +203,7 @@ https://dev-*.ts.net/static/offline-harness.html?harness=1  # 後方互換で有
 
 **配信とゲート**
 
-`web/static/offline-harness.html` は `app/main.py:28` の `StaticFiles` マウントで常時配信されます。常時表示 (tailnet信頼境界で保護). サイドバーの🧪Harnessリンクは常に表示され、/static/offline-harness.html は ?harness=1 なしでも直接開けます (旧 ?harness=1 / localStorage.bookq_harness 方式は不要になりましたが後方互換で残存).
+`web/static/offline-harness.html` は viewer-rs の static 配信で常時配信されます。常時表示 (tailnet信頼境界で保護). サイドバーの🧪Harnessリンクは常に表示され、/static/offline-harness.html は ?harness=1 なしでも直接開けます (旧 ?harness=1 / localStorage.bookq_harness 方式は不要になりましたが後方互換で残存).
 
 **何が見えるか**
 
@@ -479,15 +479,12 @@ bot 経路はいずれも `AGENTS.md` の規約（ブランチ命名 `ai/<issue�
 
 | ファイル | 説明 |
 |---|---|
-| `app/main.py` | FastAPI アプリケーション |
-| `app/config.py` | 環境変数設定 |
-| `app/auth.py` | Google OAuth 認証 + セッション管理 |
-| `app/routes.py` | 全エンドポイント |
-| `app/scanner.py` | フォルダ/画像スキャン |
+| `rust/viewer-rs/` | viewer-rs (Rust) バックエンド — 唯一の本番実装 (#503 で Python `app/` 削除) |
 | `web/templates/index.html` | ビューア HTML テンプレート |
-| `requirements.txt` | Python 依存パッケージ |
-| `docker-compose.yml` | **本番**: viewer + tailscale サイドカー |
-| `docker-compose.dev.yml` | **開発環境**: viewer + tailscale サイドカー（1 環境 = 1 プロジェクト） |
+| `web/static/` | シェル JS/CSS/PWA アセット |
+| `requirements-dev.txt` | pytest lane 依存 (pillow/httpx 等) |
+| `docker-compose.yml` | **本番**: viewer-rs + tailscale サイドカー |
+| `docker-compose.dev.yml` | **開発環境**: viewer-rs + tailscale サイドカー（1 環境 = 1 プロジェクト） |
 | `Dockerfile` | viewer コンテナ |
 | `prd.sh` | 本番の起動・停止スクリプト（`up` / `down`。メインのチェックアウト専用） |
 | `rebuild.sh` | 汎用デプロイエンジン（`prd` / `dev build\|deploy\|verify`）。ビルド → healthcheck → URL 検証 |

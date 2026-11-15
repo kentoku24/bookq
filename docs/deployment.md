@@ -336,9 +336,9 @@ Service Worker は Secure Context（HTTPS）でのみ登録されます。本番
 
 ### オフライン検証ハーネス `/static/offline-harness.html`
 
-`app/static/offline-harness.html` は Service Worker と同じ `app/static` 配下に置かれ、`app/main.py:28` の `StaticFiles` マウントで配信されます。dev では常時リンク表示の対象ですが、本番ではリンクのみ gated です。`?harness=1` クエリか `localStorage.bookq_harness` か `BOOKQ_TEST_MODE` が真のときだけ `#harness-link` が表示され、それ以外ではリンクが隠れます。ファイル自体は tailnet の信頼境界で保護された `StaticFiles` の素の GET で常に 200 を返します。リンクを隠すだけで 404 にしないのが仕様です。
+`web/static/offline-harness.html` は Service Worker と同じ `web/static` 配下に置かれ、viewer-rs の static 配信で配信されます。dev では常時リンク表示の対象ですが、本番ではリンクのみ gated です。`?harness=1` クエリか `localStorage.bookq_harness` か `BOOKQ_TEST_MODE` が真のときだけ `#harness-link` が表示され、それ以外ではリンクが隠れます。ファイル自体は tailnet の信頼境界で保護された `StaticFiles` の素の GET で常に 200 を返します。リンクを隠すだけで 404 にしないのが仕様です。
 
-`.dockerignore` は `*.md` と `docs/` と `tests/` を除外しますが、`app/static` は除外しません。`! grep -q "app/static" .dockerignore` が通ることで除外漏れが無いことを担保します。`Dockerfile:10` の `COPY app/ ./app/` で `app/static/offline-harness.html` は `sw.js` や `manifest.json` と同じくイメージに必ず含まれます。`grep "COPY app" Dockerfile` で確認できます。ホストポートの追加や Workbox の導入は不要です。
+`.dockerignore` は `*.md` と `docs/` と `tests/` を除外しますが、`web/static` は除外しません。`! grep -q "web/static" .dockerignore` が通ることで除外漏れが無いことを担保します。`Dockerfile.viewer-rs` の `COPY web/` で `web/static/offline-harness.html` は `sw.js` や `manifest.json` と同じくイメージに必ず含まれます。ホストポートの追加や Workbox の導入は不要です。
 
 ```bash
 # 配信確認 (ポートは毎回ランダムなので fixture の URL を使う)
