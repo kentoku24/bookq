@@ -50,6 +50,30 @@ final class BookqAPI: Sendable {
 
     // MARK: - Requests
 
+    /// Query-value charset: RFC 3986 unreserved only. `URLQueryItem` leaves
+    /// "+" literal and form-decoders (Starlette parse_qsl) read it as a
+    /// space — folder paths containing "+" must arrive as %2B (web parity:
+    /// encodeURIComponent). `percentEncodedQuery` takes the string
+    /// verbatim, so encode once here; assigning `query` would re-encode %.
+    private static let queryValueAllowed: CharacterSet = {
+        var s = CharacterSet.alphanumerics
+        s.insert(charactersIn: "-._~")
+        return s
+    }()
+
+    /// Serialize query items with strict percent-encoding.
+    private func applyQuery(_ comps: inout URLComponents, _ items: [URLQueryItem]) {
+        guard !items.isEmpty else { return }
+        comps.percentEncodedQuery = items.map { item in
+            let name = item.name.addingPercentEncoding(
+                withAllowedCharacters: Self.queryValueAllowed) ?? item.name
+            guard let value = item.value else { return name }
+            let v = value.addingPercentEncoding(
+                withAllowedCharacters: Self.queryValueAllowed) ?? value
+            return "\(name)=\(v)"
+        }.joined(separator: "&")
+    }
+
     private func makeRequest(path: String,
                              query: [URLQueryItem] = [],
                              method: String = "GET",
@@ -57,7 +81,7 @@ final class BookqAPI: Sendable {
         var comps = URLComponents(
             url: baseURL.appendingPathComponent(path),
             resolvingAgainstBaseURL: false)!
-        if !query.isEmpty { comps.queryItems = query }
+        applyQuery(&comps, query)
         var req = URLRequest(url: comps.url!)
         req.httpMethod = method
         // Bearer-authed JSON must never replay from URLCache — RFC 7231
@@ -231,7 +255,7 @@ final class BookqAPI: Sendable {
         var base = comps.percentEncodedPath
         if base == "/" { base = "" }
         comps.percentEncodedPath = base + "/" + encodedPath
-        if !query.isEmpty { comps.queryItems = query }
+        applyQuery(&comps, query)
         return comps.url!
     }
 
@@ -249,12 +273,12 @@ final class BookqAPI: Sendable {
             url: baseURL.appendingPathComponent("api/v1/thumb-sprite"),
             resolvingAgainstBaseURL: false)!
         let encodedNames = names.map(ImageURL.encodeSegment).joined(separator: ",")
-        comps.queryItems = [
+        applyQuery(&comps, [
             URLQueryItem(name: "folder", value: folder),
             URLQueryItem(name: "w", value: String(w)),
             URLQueryItem(name: "v", value: "2"),
             URLQueryItem(name: "rows", value: rows.map(String.init).joined(separator: ",")),
-        ]
+        ])
         // names must be percent-encoded *inside* the query manually because
         // URLQueryItem would encode "," too.
         var s = comps.url!.absoluteString
@@ -281,10 +305,14 @@ final class BookqAPI: Sendable {
         encodedURL(encodedPath, query: query)
     }
 
-    /// Authenticated image fetch used by `RemoteImageView`.
+    /// Authenticated image fetch used by `RemoteImageView` and the
+    /// offline downloader. Reader pages and archive entries can be tens of
+    /// MB, and solid-RAR page extraction decompresses every preceding entry
+    /// server-side — far beyond the 60s default request timeout.
     func imageData(url: URL) async throws -> Data {
         var req = URLRequest(url: url)
         req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 300
         if let token = tokenProvider() {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

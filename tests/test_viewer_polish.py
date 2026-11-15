@@ -133,7 +133,7 @@ def test_slider_hit_area_44px_but_thin_track(page, server):
     rendered band is measured with a real screenshot pixel scan.
 
     #toolbar's own backdrop-filter is neutralized for this measurement only
-    (via an injected <style>, not touching app/static/style.css). Empirically
+    (via an injected <style>, not touching web/static/style.css). Empirically
     (see task-5-report.md), Playwright's headless Chromium fails to rasterize
     the ::-webkit-slider-runnable-track pseudo-element at all when the
     ancestor #toolbar has an active backdrop-filter — confirmed both with a

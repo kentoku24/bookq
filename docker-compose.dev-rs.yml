@@ -15,10 +15,6 @@
 services:
   viewer:
     environment:
-      # #320: dev-rs は全 native (BOOKQ_RS_NATIVE=all) なので py 側は index
-      # 構築を既定で止める — 本番フル移管後と同じ姿勢で heap を観測する。
-      # 戻す場合は DEV_PY_DISABLE_INDEX= (空) に。
-      - BOOKQ_DISABLE_INDEX=${DEV_PY_DISABLE_INDEX:-1}
 
   viewer-rs:
     image: "${DEV_RS_IMAGE:?DEV_RS_IMAGE is required — use ./dev.sh up --rs}"

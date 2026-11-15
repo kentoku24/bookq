@@ -5,14 +5,14 @@ Each test clears IndexedDB/caches via evaluate and is independent.
 
 Covers:
  ① navigate ignoreSearch — caches.match("/?offline=1",{ignoreSearch:true}) hit
- ② /api/folders cache hit — first non-controlled then offline fetch len==online len
+ ② tree v1 cache hit — first non-controlled then offline fetch len==online len
  ③ parent-only download not 0 — getLeafPathsFor('group/episodes') >0
  ④ group/episodes flatten proxy — getLeafPathsFor('group/episodes').length>1
  ⑤ double-count / delete leak — dedup sum == raw/2 when parent exists and delete returns to 0
  ⑥ await race — storage-text updates within 800ms after badge
  ⑦ iOS 0/0 + Content-Length missing — mock navigator.storage.estimate returns {usage:0,quota:0} + blob fallback
  ⑧ MB/GB rounding — fmt(50_000_000) -> "50.0 MB", fmt(1_500_000_000) -> "1.5 GB"
- ⑨ VPN split health abort — page.route('/api/health*', lambda route: route.abort('failed')) → ○オフライン
+ ⑨ VPN split health abort — page.route('…/api/v1/health*', lambda route: route.abort('failed')) → ○オフライン
  ⑩ clone consumption order — sizeClone.blob existence + bytes>0 without Content-Length + quota mock via caches.put QuotaExceededError
 """
 
@@ -159,7 +159,7 @@ def test_01_navigate_ignore_search(page, server):
     assert sw_has, "sw.js should match navigations with {ignoreSearch:true}"
 
 
-# ── ② /api/folders cache hit ─────────────────────────────────────────────────
+# ── ② tree v1 cache hit ─────────────────────────────────────────────────
 def test_02_api_folders_cache_hit(page, server):
     clear_all(page)
     goto_offline(page, server)
@@ -179,7 +179,7 @@ def test_02_api_folders_cache_hit(page, server):
                 wait_for_sw(page)
                 continue
             raise
-    assert online_len is not None and online_len > 0, f"online /api/folders len {online_len}"
+    assert online_len is not None and online_len > 0, f"online tree len {online_len}"
     page.context.set_offline(True)
     try:
         offline_len = None
@@ -218,7 +218,7 @@ def test_02_api_folders_cache_hit(page, server):
                     if offline_len != -2:
                         break
                     page.wait_for_selector(".tile", timeout=2400)
-        assert offline_len is not None and offline_len > 0, f"offline /api/folders fallback failed {offline_len}"
+        assert offline_len is not None and offline_len > 0, f"offline tree fallback failed {offline_len}"
         assert offline_len == online_len, f"offline len {offline_len} != online {online_len} (API NetworkFirst fallback)"
     finally:
         page.context.set_offline(False)

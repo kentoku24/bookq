@@ -6,7 +6,7 @@
 //!   the same DB the Python viewer writes (#375), so a position PUT that
 //!   lands on either backend is visible to the other and survives restarts.
 //!   Slot rules are ported verbatim from `app/reading_positions.py`
-//!   (`PositionBook`) and pinned by `tests/fixtures/positions_cases.json`,
+//!   (`PositionBook`) and pinned by `api/vectors/positions-cases.json`,
 //!   which the Python tests consume too.
 //! * folder visibility persists in the same shared DB — the hidden set is
 //!   library-global (every row lives under `GLOBAL_USER_KEY`, matching
@@ -62,6 +62,17 @@ fn json_response(status: StatusCode, body: &Value) -> Response {
 
 pub fn detail(status: StatusCode, msg: &str) -> Response {
     json_response(status, &serde_json::json!({"detail": msg}))
+}
+
+/// FastAPI's 422 issue-array shape — the spec's `ValidationError` schema
+/// declares `detail` as an array of issue objects, not a string (#465).
+pub fn unprocessable(param: &str, ty: &str, msg: &str) -> Response {
+    json_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &serde_json::json!({
+            "detail": [{"loc": ["query", param], "msg": msg, "type": ty}]
+        }),
+    )
 }
 
 // ── reading positions ───────────────────────────────────────────────────────
@@ -502,6 +513,24 @@ impl PositionStore {
         })
         .map(|_| ())
     }
+
+    /// `?hard=1` equivalent — drop the whole slot incl. tombstones.
+    /// TEST_MODE-only reset hook: the harness's per-test reset needs a
+    /// truly clean slate, since a tombstone would legitimately reject the
+    /// next test's freshly-written record (#469).
+    pub fn delete_user(&self, user_key: &str) -> rusqlite::Result<()> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM position_folders WHERE user_key = ?1",
+            [user_key],
+        )?;
+        tx.execute(
+            "DELETE FROM position_users WHERE user_key = ?1",
+            [user_key],
+        )?;
+        tx.commit()
+    }
 }
 
 // ── endpoint handlers ────────────────────────────────────────────────────────
@@ -638,6 +667,23 @@ pub async fn delete_positions(
     .await
     .ok()
     .and_then(|r| r.ok());
+    match result {
+        Some(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "ok"})),
+        None => store_error(),
+    }
+}
+
+/// TEST_MODE `?hard=1` equivalent — drop the whole slot incl. tombstones
+/// (the harness's per-test reset needs a truly clean slate, #469).
+pub async fn delete_user_positions(
+    store: std::sync::Arc<PositionStore>,
+    user_key: &str,
+) -> Response {
+    let key = user_key.to_string();
+    let result = tokio::task::spawn_blocking(move || store.delete_user(&key))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
     match result {
         Some(()) => json_response(StatusCode::OK, &serde_json::json!({"status": "ok"})),
         None => store_error(),
@@ -1016,10 +1062,10 @@ mod tests {
 
     // ── PositionBook conformance (#375) ─────────────────────────────────
     // Same vectors the Python suite runs — py/rs cannot drift on slot
-    // rules. `tests/fixtures/positions_cases.json` is the single source.
+    // rules. `api/vectors/positions-cases.json` is the single source.
 
     const POSITION_CASES: &str =
-        include_str!("../../../tests/fixtures/positions_cases.json");
+        include_str!("../../../api/vectors/positions-cases.json");
 
     fn subset_match(expected: &Value, actual: &Rec) -> bool {
         let folder = expected.get("folder").and_then(|v| v.as_str());

@@ -69,9 +69,21 @@ def wait_for_sw(page, timeout=15000):
     return False
 
 
+def expect_reader_open(page, expect_pages, timeout=15000):
+    """Wait for the async reader-open to actually finish: `stripImgs[0]`
+    attaches only after the image list resolves (SW/cache scan under
+    offline), after which the counter text is settled render output. A
+    bare 8s counter wait raced that chain under `-n auto` CI load (#477
+    — surfaced when playwright floated to chromium-1255)."""
+    page.wait_for_function(
+        "() => window.stripImgs && !!window.stripImgs[0]", timeout=timeout)
+    expect(page.locator("#counter")).to_have_text(
+        re.compile(rf"^1 / {expect_pages}"))
+
+
 def open_folder_simple(page, path="simple_manga", expect_pages=5):
     page.locator(f'.tile[data-path="{path}"]').click()
-    expect(page.locator("#counter")).to_have_text(f"1 / {expect_pages}", timeout=8000)
+    expect_reader_open(page, expect_pages)
 
 
 # ── ① SW registration ────────────────────────────────────────────────────────
@@ -214,7 +226,7 @@ def test_download_offline_viewer(page, server):
             page.locator("#menu-btn").click()
             expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
         page.locator(tile_sel).click()
-        expect(page.locator("#counter")).to_have_text("1 / 5", timeout=8000)
+        expect_reader_open(page, 5)
         # all pages should be reachable; check slider max and navigation
         expect(page.locator("#page-slider")).to_have_attribute("max", "4", timeout=3000)
         # verify at least first page image loaded from cache
@@ -490,8 +502,7 @@ def test_offline_restore_archive_inner_names(page, server):
         # connecting/offline both count as non-online for the readable gate —
         # the open must reach the work-cache scan either way.
         page.evaluate("() => window.loadImages('arc_work')")
-        expect(page.locator("#counter")).to_have_text(
-            re.compile(r"^1 / 2"), timeout=8000)
+        expect_reader_open(page, 2)
     finally:
         page.context.set_offline(False)
 
@@ -518,8 +529,7 @@ def test_offline_restore_uses_record_listing_order(page, server):
     page.context.set_offline(True)
     try:
         page.evaluate("() => window.loadImages('epub_work')")
-        expect(page.locator("#counter")).to_have_text(
-            re.compile(r"^1 / 2"), timeout=8000)
+        expect_reader_open(page, 2)
         src = page.evaluate(
             "() => (window.stripImgs && window.stripImgs[0] && window.stripImgs[0].src) || ''")
         assert "z.jpg" in src, \

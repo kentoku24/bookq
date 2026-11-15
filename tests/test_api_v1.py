@@ -101,16 +101,6 @@ def test_tree_etag_revalidate(server):
     assert status == 304
 
 
-def test_tree_etag_namespaced_from_v0(server):
-    """v0 and v1 must not share ETags/bodies — the cache key is versioned."""
-    _, _, v0h = _get(server, "/api/folders")
-    _, _, v1h = _get(server, "/api/v1/tree")
-    assert v0h["etag"] != v1h["etag"]
-    # Cross-applying the v1 ETag to v0 must not produce a 304.
-    status, _, _ = _get(server, "/api/folders", headers={"If-None-Match": v1h["etag"]})
-    assert status == 200
-
-
 def test_tree_depth_validation(server):
     status, _, _ = _get(server, "/api/v1/tree?depth=0")
     assert status == 400
@@ -235,49 +225,6 @@ def test_positions_put_validation(server):
         assert status == 400, field
 
 
-# ── v0 ↔ v1 store interplay ──────────────────────────────────────────
-
-
-def test_v0_get_reads_global_newest(server):
-    _req(server, "PUT", "/api/v1/reading-positions?folder=long", {"page": 1, "total": 30, "ts": 100})
-    _req(server, "PUT", "/api/v1/reading-positions?folder=series/vol1", {"page": 0, "total": 2, "ts": 300})
-    _, body, _ = _req(server, "GET", "/api/reading-position")
-    assert body["position"]["folder"] == "series/vol1"
-    assert body["position"]["ts"] == 300
-
-
-def test_v0_put_global_newest_wins(server):
-    _req(server, "PUT", "/api/v1/reading-positions?folder=long", {"page": 1, "total": 30, "ts": 100})
-    # ts below the global live newest is stale, and must NOT write the folder slot.
-    _, body, _ = _req(server, "PUT", "/api/reading-position",
-                      {"folder": "other", "page": 0, "total": 5, "ts": 50})
-    assert body["status"] == "stale"
-    assert _v1_positions(server, folder="other") == []
-    _, body, _ = _req(server, "PUT", "/api/reading-position",
-                      {"folder": "other", "page": 0, "total": 5, "ts": 200})
-    assert body["status"] == "ok"
-    assert _v1_positions(server, folder="other")[0]["ts"] == 200
-
-
-def test_v0_delete_wipes_all_folders(server):
-    _req(server, "PUT", "/api/v1/reading-positions?folder=long", {"page": 1, "total": 30, "ts": 200})
-    _req(server, "PUT", "/api/v1/reading-positions?folder=series/vol1", {"page": 0, "total": 2, "ts": 100})
-    status, _, _ = _req(server, "DELETE", "/api/reading-position")
-    assert status == 200
-    assert _v1_positions(server) == []
-    _, body, _ = _req(server, "GET", "/api/reading-position")
-    assert body["position"] is None
-
-
-def test_v1_folder_tombstone_blocks_v0_put(server):
-    """A v1 folder delete must beat an older v0 write for that folder."""
-    _req(server, "PUT", "/api/v1/reading-positions?folder=long", {"page": 1, "total": 30, "ts": 100})
-    _req(server, "DELETE", "/api/v1/reading-positions?folder=long")
-    _, body, _ = _req(server, "PUT", "/api/reading-position",
-                      {"folder": "long", "page": 2, "total": 30, "ts": 90})
-    assert body["status"] == "stale"
-
-
 # ── folder-visibility ────────────────────────────────────────────────
 
 
@@ -335,16 +282,3 @@ def test_pair_report_unknown_id_returns_null_state(server):
 def test_pair_report_post_requires_id(server):
     status, _, _ = _req(server, "POST", "/api/v1/pair-report", {"pc": {}})
     assert status == 400
-
-
-def test_pair_report_gate_blocks_non_test_mode(monkeypatch):
-    """Outside test mode the endpoint must not exist (404)."""
-    from fastapi import HTTPException
-
-    from app import auth
-    from app.api_v1 import _pair_report_gate
-
-    monkeypatch.setattr(auth, "_TEST_MODE", False)
-    with pytest.raises(HTTPException) as ei:
-        _pair_report_gate()
-    assert ei.value.status_code == 404

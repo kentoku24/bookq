@@ -1,6 +1,9 @@
-"""E2E tests for the search / filter / view-mode UI.
+"""E2E tests for the search / filter / view-mode UI (#476 v1 port).
 Covers: search input, filter bottom sheet, view-mode cycling (tile↔list↔card),
 pull-to-refresh, and graceful rendering without metadata.
+
+The UI calls the v1 surface (GET /api/v1/tree, /api/v1/search, /api/v1/facets),
+so route watches assert on v1 URL patterns.
 
 Run:
     uv run --with pytest --with playwright pytest tests/test_search_e2e.py -v
@@ -18,7 +21,7 @@ def test_search_input_exists(page):
 
 
 def test_search_filters_local_folders(page):
-    """Search calls the /api/search endpoint.
+    """Search calls the /api/v1/search endpoint.
     With no metadata.toml files in the fixture the API returns 0 results,
     so the grid shows an empty-state message.
     """
@@ -178,10 +181,10 @@ def test_ptr_top_drag_does_not_trigger_custom_reload(page):
     page.wait_for_timeout(100)
     fetch_count = {"n": 0}
     def _handler(route):
-        if "/api/folders" in route.request.url:
+        if "/api/v1/tree" in route.request.url:
             fetch_count["n"] += 1
         route.continue_()
-    page.route("**/api/folders*", _handler)
+    page.route("**/api/v1/tree*", _handler)
     try:
         _ptr_fire(page, [
             ("touchstart", 20, True),
@@ -196,7 +199,7 @@ def test_ptr_top_drag_does_not_trigger_custom_reload(page):
         b = page.evaluate("window.__ptrDebug ? window.__ptrDebug.bVisual : 0")
         assert b == 0
     finally:
-        page.unroute("**/api/folders*")
+        page.unroute("**/api/v1/tree*")
 
 
 def test_ptr_touchcancel_resets(page):
@@ -259,10 +262,10 @@ def test_pull_bottom_resistance_no_refresh(page):
     assert at_bottom, "not at bottom"
     fetch_count = {"n": 0}
     def _handler(route):
-        if "/api/folders" in route.request.url:
+        if "/api/v1/tree" in route.request.url:
             fetch_count["n"] += 1
         route.continue_()
-    page.route("**/api/folders*", _handler)
+    page.route("**/api/v1/tree*", _handler)
     try:
         page.evaluate("""() => {
             const scroll = document.getElementById('sidebar-scroll');
@@ -318,7 +321,7 @@ def test_pull_bottom_resistance_no_refresh(page):
         b_after = page.evaluate("window.__ptrDebug ? window.__ptrDebug.bVisual : 0")
         assert b_after == 0
     finally:
-        page.unroute("**/api/folders*")
+        page.unroute("**/api/v1/tree*")
         # reset scroll to top for next tests
         page.evaluate("document.getElementById('sidebar-scroll').scrollTop = 0")
 

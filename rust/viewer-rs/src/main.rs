@@ -29,6 +29,8 @@ use std::path::PathBuf;
 // path containment, tree assembly, index cache) that M4–M7 wire onto the
 // v1 envelopes; until then their exports are intentionally unused.
 mod auth;
+#[cfg(test)]
+mod conformance_vectors;
 mod folders;
 mod oauth;
 mod pair_report;
@@ -221,11 +223,11 @@ pub(crate) struct AppState {
     pub(crate) build_date: String,
     /// M8: dual-reader session registry (`app.state.reader_sync`).
     pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
-    /// #401: shell/static root (`BOOKQ_APP_DIR`) holding `static/`,
+    /// #401: shell/static root (`BOOKQ_WEB_DIR`) holding `static/`,
     /// `templates/`, `perf/` — the image ships `/app`; dev environments
     /// read it from the image too (asset edits apply on the next
     /// `dev.sh up` rebuild, not live).
-    pub(crate) app_dir: PathBuf,
+    pub(crate) web_dir: PathBuf,
     /// TEST_MODE-only pair-report store (`app/api_v1.py::_PAIR_REPORTS`).
     pub(crate) pair_reports: std::sync::Arc<pair_report::PairReports>,
 }
@@ -257,6 +259,16 @@ fn is_upgrade(req: &Request) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("upgrade")));
     wants && req.headers().contains_key(header::UPGRADE)
+}
+
+impl AppState {
+    /// Whether a Python upstream is configured — when `false`, requests the
+    /// native layer positively rejects must answer locally (spec 4xx),
+    /// never through the dead proxy (#465). Kept as a method because
+    /// `upstream` is private to this module.
+    pub(crate) fn has_upstream(&self) -> bool {
+        self.upstream.authority.is_some()
+    }
 }
 
 fn bad_gateway(err: impl std::fmt::Display) -> Response {
@@ -326,6 +338,47 @@ async fn delegate_or_proxy(st: &AppState, req: Request<Body>) -> Response {
     } else {
         tracing::info!(path = %req.uri().path(), "no upstream: unverifiable caller answered 401");
         state::detail(StatusCode::UNAUTHORIZED, "authentication required")
+    }
+}
+
+/// Strangler-era shortcut, same shape as `delegate_or_proxy`: requests the
+/// native layer can positively reject (undeclared method, contract-invalid
+/// params) inherited FastAPI's exact 4xx through the proxy. With no
+/// upstream configured the status must come out locally — a dead proxy
+/// would 501 a request the spec says is a 4xx (#465). A local 405 carries
+/// the RFC 9110 `Allow` header; a local 422 keeps FastAPI's issue-array
+/// `detail` shape the spec's `ValidationError` declares.
+fn method_not_allowed_response(allow: &'static str) -> Response {
+    let mut r = state::detail(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+    if let Ok(v) = HeaderValue::from_str(allow) {
+        r.headers_mut().insert(header::ALLOW, v);
+    }
+    r
+}
+
+async fn method_not_allowed_or_proxy(
+    st: &AppState,
+    req: Request<Body>,
+    allow: &'static str,
+) -> Response {
+    if st.upstream.authority.is_some() {
+        proxy(&st.upstream, req).await
+    } else {
+        method_not_allowed_response(allow)
+    }
+}
+
+async fn unprocessable_or_proxy(
+    st: &AppState,
+    req: Request<Body>,
+    param: &'static str,
+    ty: &'static str,
+    msg: &'static str,
+) -> Response {
+    if st.upstream.authority.is_some() {
+        proxy(&st.upstream, req).await
+    } else {
+        state::unprocessable(param, ty, msg)
     }
 }
 
@@ -426,7 +479,8 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
         axum::http::Method::PUT => {
             // `folder` is required → missing keeps FastAPI's 422 upstream.
             let Some(folder) = q.get("folder").cloned() else {
-                return proxy(&st.upstream, req).await;
+                return unprocessable_or_proxy(&st, req, "folder", "missing", "Field required")
+                    .await;
             };
             let (parts, body) = req.into_parts();
             let body = match http_body_util::BodyExt::collect(body).await {
@@ -446,7 +500,10 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
             )
             .await
         }
-        _ => return proxy(&st.upstream, req).await,
+        _ => {
+            return method_not_allowed_or_proxy(&st, req, "GET, PUT, DELETE")
+                .await
+        }
     }
 }
 
@@ -476,15 +533,32 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
             };
             state::put_folder_visibility(&st, &key, &headers, &body).await
         }
-        _ => return proxy(&st.upstream, req).await,
+        _ => {
+            return method_not_allowed_or_proxy(&st, req, "GET, PUT")
+                .await
+        }
     }
+}
+
+/// TEST_MODE-only `?hard=1` equivalent — drop the mock user's whole
+/// position slot (tombstones too) so the harness's per-test reset starts
+/// clean (#469). Always 404 outside test mode, never part of the contract.
+async fn test_positions_reset(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.native.test_mode || *req.method() != axum::http::Method::DELETE {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
+    state::delete_user_positions(st.position_store.clone(), auth::TEST_USER_EMAIL).await
 }
 
 /// `/api/v1/tree` — the v1 envelope `{kind, nodes, generation}` over the
 /// shared index cache (`_folder_tree(v1=True)`).
 async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("tree") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("tree") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -501,8 +575,12 @@ async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
 
 /// `/api/v1/images` — `{folder, images[]}` over `_list_folder_images`.
 async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("images") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("images") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -512,7 +590,8 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
         .unwrap_or_default();
     // `folder` is a required Query param upstream → missing keeps the 422.
     let Some(folder) = q.get("folder").cloned() else {
-        return proxy(&st.upstream, req).await;
+        return unprocessable_or_proxy(&st, req, "folder", "missing", "Field required")
+            .await;
     };
     let headers = req.headers().clone();
     let downloads = st.downloads.clone();
@@ -528,8 +607,12 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// `/api/v1/search` — relevance + filters over the shared index; hidden
 /// roots applied server-side (fail-closed).
 async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("search") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("search") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     // `_user` still gates auth upstream; hidden roots are library-global.
     let Some(_user) = caller_or_proxy(&st, req.headers()) else {
@@ -548,8 +631,12 @@ async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// `/api/v1/facets` — `{artists, tags}` scoped to `path`'s subtree; hidden
 /// roots applied server-side (fail-closed).
 async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("facets") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("facets") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     // `_user` still gates auth upstream; hidden roots are library-global.
     let Some(_user) = caller_or_proxy(&st, req.headers()) else {
@@ -582,12 +669,16 @@ fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
 /// native answer is local, not a delegate).
 async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("shell")
-        || !matches!(
+    {
+        return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
             *req.method(),
             axum::http::Method::GET | axum::http::Method::HEAD
         )
     {
-        return proxy(&st.upstream, req).await;
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
@@ -605,7 +696,7 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
             let st2 = st.clone();
             match tokio::task::spawn_blocking(move || {
                 shell::index(
-                    &st2.app_dir,
+                    &st2.web_dir,
                     st2.native.test_mode,
                     &st2.secret_key,
                     &st2.visibility,
@@ -629,13 +720,17 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
 /// `GET|HEAD /sw.js` — public FileResponse with `Service-Worker-Allowed: /`.
 async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("static")
-        || !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
         || corrupt_session(&st, req.headers())
     {
         return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
@@ -643,7 +738,7 @@ async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
     let st2 = st.clone();
     match tokio::task::spawn_blocking(move || {
         shell::named_file(
-            &st2.app_dir.join("static").join("sw.js"),
+            &st2.web_dir.join("static").join("sw.js"),
             "application/javascript",
             shell::SW_HEADERS,
             "sw.js not found",
@@ -663,20 +758,24 @@ async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
 /// `GET|HEAD /favicon.ico` — public FileResponse, day-long cache.
 async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("static")
-        || !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
         || corrupt_session(&st, req.headers())
     {
         return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
     let st2 = st.clone();
     match tokio::task::spawn_blocking(move || {
         shell::named_file(
-            &st2.app_dir.join("static").join("favicon.ico"),
+            &st2.web_dir.join("static").join("favicon.ico"),
             "image/x-icon",
             shell::FAVICON_HEADERS,
             "favicon.ico not found",
@@ -697,13 +796,17 @@ async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Respon
 /// NoCacheStaticFiles: realpath containment, no-cache, 304 + range.
 async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !st.native.enabled("static")
-        || !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
         || corrupt_session(&st, req.headers())
     {
         return proxy(&st.upstream, req).await;
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let rel = match req.uri().path() {
@@ -720,7 +823,7 @@ async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Respons
     let req_headers = headers.clone();
     let st2 = st.clone();
     match tokio::task::spawn_blocking(move || {
-        shell::static_file(&st2.app_dir.join("static"), &rel, &headers, head)
+        shell::static_file(&st2.web_dir.join("static"), &rel, &headers, head)
     })
     .await
     .unwrap_or(serve::Serve::Proxy)
@@ -741,8 +844,12 @@ async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Respons
 
 /// `/api/v1/health` — public (`security: []`); `{status:"ok"}`.
 async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("health") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("health") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     let headers = req.headers().clone();
     let mut res = Response::builder()
@@ -758,8 +865,12 @@ async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response 
 
 /// `/api/v1/version` — authed; `{version,sha,build_date}` + `no-store`.
 async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("version") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("version") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -789,8 +900,12 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
 /// same swap semantics as the background gate, `{status,folders}`.
 async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("refresh") || req.method() != axum::http::Method::POST {
+    if !st.native.enabled("refresh") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::POST {
+        return method_not_allowed_or_proxy(&st, req, "POST")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -818,8 +933,12 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
 /// pdfium-render; only a missing `libpdfium` still proxies page renders).
 /// Multi-range is a 200-full contract shrink.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("image") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     // /image requires auth upstream too — only positively identified
     // callers may be served natively.
@@ -851,8 +970,12 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
 /// 304 fast path and shared-cache hits; misses render in-process (image
 /// crate) with upstream fallback for sources/decodes it can't reach.
 async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("thumb") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("thumb") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -885,8 +1008,12 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
 /// undecodable/unreachable sources still proxy. `?w=<px>` opts into the
 /// normalized fast-tier branch at that width (#440).
 async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("view") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -919,8 +1046,12 @@ async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// Native answers validation, 304s and shared-cache hits; misses compose
 /// in-process (9-cell strip + `rows` grid) into the shared `sprites/` cache.
 async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("thumb-sprite") || req.method() != axum::http::Method::GET {
+    if !st.native.enabled("thumb-sprite") {
         return proxy(&st.upstream, req).await;
+    }
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed_or_proxy(&st, req, "GET")
+            .await;
     }
     if caller_or_proxy(&st, req.headers()).is_none() {
         return delegate_or_proxy(&st, req).await;
@@ -963,7 +1094,8 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
 
 async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        return proxy(&st.upstream, req).await;
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -982,7 +1114,8 @@ async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response 
 
 async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        return proxy(&st.upstream, req).await;
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -999,7 +1132,8 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
 
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
-        return proxy(&st.upstream, req).await;
+        return method_not_allowed_or_proxy(&st, req, "GET, HEAD")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -1013,7 +1147,8 @@ async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response
 
 async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response {
     if *req.method() != axum::http::Method::POST {
-        return proxy(&st.upstream, req).await;
+        return method_not_allowed_or_proxy(&st, req, "POST")
+            .await;
     }
     let Some(flow) = st.auth_flow.clone() else {
         return proxy(&st.upstream, req).await;
@@ -1349,10 +1484,10 @@ async fn main() {
         // ARG ""→ENV path yields "" — same two-state contract.
         git_sha: std::env::var("BOOKQ_GIT_SHA").unwrap_or_else(|_| "unknown".into()),
         build_date: std::env::var("BOOKQ_BUILD_DATE").unwrap_or_else(|_| "unknown".into()),
-        // #401: the image ships `app/{static,templates,perf}` at /app; dev
-        // points this at the worktree's `app/` for live asset edits.
-        app_dir: PathBuf::from(
-            std::env::var("BOOKQ_APP_DIR").unwrap_or_else(|_| "/app".into()),
+        // #401: the image ships `web/{static,templates,perf}` at /web; dev
+        // points this at the worktree's `web/` for live asset edits.
+        web_dir: PathBuf::from(
+            std::env::var("BOOKQ_WEB_DIR").unwrap_or_else(|_| "/web".into()),
         ),
     };
     if st.native.enabled("visibility") || st.native.enabled("tree") {
@@ -1401,6 +1536,9 @@ async fn main() {
         // 404 outside test mode, never part of the OpenAPI contract.
         .route("/api/v1/pair-report", any(pair_report::handle_report))
         .route("/api/v1/pair-reset", any(pair_report::handle_reset))
+        // #469: TEST_MODE-only `?hard=1` equivalent — wipe the mock user's
+        // whole position slot incl. tombstones (harness per-test reset).
+        .route("/api/v1/test-positions-reset", any(test_positions_reset))
         // M8: dual-reader sync socket — native under "reader-sync" gate;
         // otherwise the upgrade is spliced to Python unchanged.
         .route("/ws/reader-sync", any(reader_sync_ws))
@@ -1531,6 +1669,59 @@ mod native_gate_tests {
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
     }
 
+    /// #465 follow-up: a local 405 must carry the RFC 9110 `Allow` header
+    /// naming the endpoint's declared methods (schemathesis ST204).
+    #[tokio::test]
+    async fn method_not_allowed_carries_allow_without_upstream() {
+        let mut st = hook_state(false);
+        st.upstream.authority = None;
+        let res =
+            method_not_allowed_or_proxy(&st, http_req("TRACE", "/api/v1/reading-positions", ""), "GET, PUT, DELETE")
+                .await;
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            res.headers().get(header::ALLOW).unwrap().to_str().unwrap(),
+            "GET, PUT, DELETE"
+        );
+        // Upstream still answers its own 405.
+        st.upstream.authority = Some("127.0.0.1:9".parse().unwrap());
+        let res =
+            method_not_allowed_or_proxy(&st, http_req("TRACE", "/api/v1/tree", ""), "GET").await;
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// #465 follow-up: a local 422 keeps FastAPI's issue-array `detail`
+    /// the spec's `ValidationError` declares — not a bare string (ST108).
+    #[tokio::test]
+    async fn unprocessable_detail_is_issue_array_without_upstream() {
+        let mut st = hook_state(false);
+        st.upstream.authority = None;
+        let res = unprocessable_or_proxy(
+            &st,
+            http_req("GET", "/api/v1/images", ""),
+            "folder",
+            "missing",
+            "Field required",
+        )
+        .await;
+        let (status, body) = body_json(res).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let detail = body["detail"].as_array().expect("detail must be an array");
+        assert_eq!(detail[0]["loc"], serde_json::json!(["query", "folder"]));
+        assert_eq!(detail[0]["type"], "missing");
+        // Upstream still answers its own 422.
+        st.upstream.authority = Some("127.0.0.1:9".parse().unwrap());
+        let res = unprocessable_or_proxy(
+            &st,
+            http_req("GET", "/api/v1/images", ""),
+            "folder",
+            "missing",
+            "Field required",
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
     /// Minimal AppState for the test-hook handlers: nothing here touches
     /// the network (pair-report/reset are served from memory/the registry)
     /// or the filesystem (the SQLite stores are never consulted).
@@ -1560,7 +1751,7 @@ mod native_gate_tests {
             secret_key: "test-secret".into(),
             auth_flow: None,
             registry,
-            app_dir: dir.join("app"),
+            web_dir: dir.join("web"),
             thumb_cache: dir.join("thumbs"),
             git_sha: "test".into(),
             build_date: "test".into(),

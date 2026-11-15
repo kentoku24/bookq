@@ -275,38 +275,34 @@ docker rm -f <迷子のコンテナ名>
 
 ### viewer-rs が本体（#409 cutover 完了形）
 
-`docker compose up` の既定で起動するバックエンドは **viewer-rs** であり、Python `viewer` は profile `py-rollback` 時のみ起動する rollback 用退避サービス。到達経路は `tailscale serve → viewer-rs:8080`（`TS_SERVE_TARGET` 既定）と opt-in cloudflared（ingress はダッシュボード管理、`http://viewer-rs:8080`）の 2 系統。
+`docker compose up` の既定で起動するバックエンドは **viewer-rs** のみ (#503 で Python `viewer` / `py-rollback` profile を削除)。到達経路は `tailscale serve → viewer-rs:8080`（`TS_SERVE_TARGET` 既定）と opt-in cloudflared（ingress はダッシュボード管理、`http://viewer-rs:8080`）の 2 系統。
 
 構成:
 
 - `viewer-rs` は `BOOKQ_UPSTREAM` 未設定 = **upstream 不在モード**（#408）で動く（明示的に有効化する `BOOKQ_RS_NO_UPSTREAM=1` も同等）。従来の暗黙デフォルト `http://viewer:8080` は #408 で廃止 — 指定し忘れは fail-closed になる。native 化されていない経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエスト（`caller_or_proxy` の Delegate）は **401** をローカルで返す。v0 `/api/*` は全て 501。lenient（STRICT 無し）起動時は未対応 gate 一覧を WARN に出す。
 - `BOOKQ_RS_NATIVE` 既定は全 gate 列挙（`auth` 含む）。`BOOKQ_RS_NATIVE_STRICT=1` 既定で、gate 抜け・auth OAuth 設定欠落・部分グループは起動拒否。
-- `viewer` (Python) は `profiles: ["py-rollback"]` — `docker compose up` では起動しない。user-state/thumb-cache volume は viewer-rs と共有される。
+- Python `viewer` は #503 で削除（`app/`・`Dockerfile`・`requirements.txt` と共に source tree から除去）。`user-state`/`thumb-cache` volume は viewer-rs が使用する。
 - `tailscale.depends_on` / `cloudflared.depends_on` は viewer-rs を指す（profile service への depends_on は profile を auto-enable してしまうため、viewer への依存は残さない）。
-- `./prd.sh up` は `bookq-prd-viewer`/`bookq-prd-viewer-rs`/`tailscale` 3 イメージをビルドし、deploy は `ps -q viewer-rs` の healthcheck + `viewer-rs` image タグの sha 照合で検証する（`/api/v1/version` は認証必須のため HTTP 照合は不可）。
+- `./prd.sh up` は `bookq-prd-viewer-rs`/`tailscale` 2 イメージをビルドし、deploy は `ps -q viewer-rs` の healthcheck + `viewer-rs` image タグの sha 照合で検証する（`/api/v1/version` は認証必須のため HTTP 照合は不可）。
 
 #### auth gate の cutover 注意
 
 `auth` が native 化された時点で、Python 側発行済みの **refresh token は全て 401** になる（code/refresh はプロセス内メモリ）。native クライアントは一度再ログインが必要（session cookie と access JWT は `SECRET_KEY` 共用のため影響しない）。切替は再ログイン許容タイミングで。
 
-#### rollback
+#### rollback (#503 以降)
 
-障害時の復旧は 2 段階。いずれも `docker-compose.prd-image.yml` が `PRD_VIEWER_IMAGE`/`PRD_RS_IMAGE` を pin 済みであることが前提（`./prd.sh up` 経路なら常に成立）。
+Python 実装は source tree から削除済みのため、`py-rollback` profile による
+即時切戻しは廃止。障害時の復旧は git history からの再 build:
 
 ```bash
-# 1) Python を rollback サービスとして起動（py-rollback profile）
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml \
-    --profile py-rollback up -d --no-build viewer
-# 2) tailscale serve の向きを py に戻す（数秒の断）
-#    .env に TS_SERVE_TARGET=http://viewer:8080 を設定してから
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-# 3) cloudflared 利用時は Cloudflare ダッシュボードの ingress を
-#    http://viewer:8080 に戻す
-# 4) viewer-rs は upstream 不在のまま残してよい（traffic は来ない）。
-#    完全停止する場合: docker compose stop viewer-rs
+# 旧 ref の viewer-rs イメージを再 build して deploy
+./prd.sh up --ref <安定動作していた ref>
 ```
 
-戻った後の恒久化は `./prd.sh up --ref <cutover 前の ref>` — その ref の compose には viewer が既定 service として残る。
+`user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。
+なお #503 以前の ref には Python `viewer` + `py-rollback` profile が残るため、
+当時の手順書どおりの切戻しも可能（古い ref からの再 build で `py-rollback`
+image が復活する）。
 
 #### 新規 native route の有効化
 
@@ -326,7 +322,7 @@ docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tails
 - コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health` — upstream 不在でも standalone で healthy になる。
 - proxy-hit の観測: no-upstream では fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。cutover 後に残るはずのない 501 が継続していたら contract 漏れの兆候。
 
-切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、py/rs どちらが書いても同じ DB を読むため、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
+`user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 
 ---
 
@@ -340,9 +336,9 @@ Service Worker は Secure Context（HTTPS）でのみ登録されます。本番
 
 ### オフライン検証ハーネス `/static/offline-harness.html`
 
-`app/static/offline-harness.html` は Service Worker と同じ `app/static` 配下に置かれ、`app/main.py:28` の `StaticFiles` マウントで配信されます。dev では常時リンク表示の対象ですが、本番ではリンクのみ gated です。`?harness=1` クエリか `localStorage.bookq_harness` か `BOOKQ_TEST_MODE` が真のときだけ `#harness-link` が表示され、それ以外ではリンクが隠れます。ファイル自体は tailnet の信頼境界で保護された `StaticFiles` の素の GET で常に 200 を返します。リンクを隠すだけで 404 にしないのが仕様です。
+`web/static/offline-harness.html` は Service Worker と同じ `web/static` 配下に置かれ、viewer-rs の static 配信で配信されます。dev では常時リンク表示の対象ですが、本番ではリンクのみ gated です。`?harness=1` クエリか `localStorage.bookq_harness` か `BOOKQ_TEST_MODE` が真のときだけ `#harness-link` が表示され、それ以外ではリンクが隠れます。ファイル自体は tailnet の信頼境界で保護された `StaticFiles` の素の GET で常に 200 を返します。リンクを隠すだけで 404 にしないのが仕様です。
 
-`.dockerignore` は `*.md` と `docs/` と `tests/` を除外しますが、`app/static` は除外しません。`! grep -q "app/static" .dockerignore` が通ることで除外漏れが無いことを担保します。`Dockerfile:10` の `COPY app/ ./app/` で `app/static/offline-harness.html` は `sw.js` や `manifest.json` と同じくイメージに必ず含まれます。`grep "COPY app" Dockerfile` で確認できます。ホストポートの追加や Workbox の導入は不要です。
+`.dockerignore` は `*.md` と `docs/` と `tests/` を除外しますが、`web/static` は除外しません。`! grep -q "web/static" .dockerignore` が通ることで除外漏れが無いことを担保します。`Dockerfile.viewer-rs` の `COPY web/` で `web/static/offline-harness.html` は `sw.js` や `manifest.json` と同じくイメージに必ず含まれます。ホストポートの追加や Workbox の導入は不要です。
 
 ```bash
 # 配信確認 (ポートは毎回ランダムなので fixture の URL を使う)

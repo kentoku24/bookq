@@ -1,6 +1,6 @@
 """Dual-reader pairing UI (S08 / #83) — mock-controller-driven DOM asserts.
 
-`app/static/viewer/pairUI.js` exposes `window.PairUI`, driven by an injected
+`web/static/viewer/pairUI.js` exposes `window.PairUI`, driven by an injected
 controller interface::
 
     { create(), join(code), approve(), reject(), leave(), swapSides(),

@@ -3,11 +3,11 @@
 Reads api/vectors/*.json and drives the real frontend code — never a
 re-implementation:
 
-* encode-path: the shipped app/static/offline-core.js (OfflineCore).
-* solo-spreads: the shipped app/static/viewer/spread.js (rebuildSpreads).
+* encode-path: the shipped web/static/offline-core.js (OfflineCore).
+* solo-spreads: the shipped web/static/viewer/spread.js (rebuildSpreads).
 * work-chapters / path-lookup: findNodeByPath, findParentPath/getParentPath,
   findParentOf and getSiblingLeafFolders extracted verbatim from the shipped
-  app/static/app.js (brace-matched, so a source drift breaks the extraction
+  web/static/app.js (brace-matched, so a source drift breaks the extraction
   instead of silently testing a copy), run against the vector trees.
   This stands in for the catalog/rules.js extraction (#271): once the pure
   functions move, this harness points at the module instead.
@@ -22,9 +22,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "api" / "vectors"
-APP_JS = REPO_ROOT / "app" / "static" / "app.js"
-OFFLINE_CORE_JS = REPO_ROOT / "app" / "static" / "offline-core.js"
-SPREAD_JS = REPO_ROOT / "app" / "static" / "viewer" / "spread.js"
+APP_JS = REPO_ROOT / "web" / "static" / "app.js"
+OFFLINE_CORE_JS = REPO_ROOT / "web" / "static" / "offline-core.js"
+SPREAD_JS = REPO_ROOT / "web" / "static" / "viewer" / "spread.js"
 
 
 def _load(name):

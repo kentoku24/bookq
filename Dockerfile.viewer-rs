@@ -65,16 +65,16 @@ COPY --from=rsbuilder /viewer-rs-bin /usr/local/bin/viewer-rs
 
 # #401 native shell/static: only the three payload trees the Rust server
 # reads — Python sources intentionally stay out of the Rust image.
-COPY app/static /app/static
-COPY app/templates /app/templates
-COPY app/perf /app/perf
+COPY web/static /web/static
+COPY web/templates /web/templates
+COPY web/perf /web/perf
 
 # No BOOKQ_UPSTREAM default — #408 makes "unset" mean upstream-absent
 # (501/401 fail-fast). Dev/strangler stacks that still want the Python
 # fall-through set it explicitly in compose.
 ENV BOOKQ_BIND=0.0.0.0:8080
 # #401 shell/static payload root (the /app tree copied above).
-ENV BOOKQ_APP_DIR=/app
+ENV BOOKQ_WEB_DIR=/web
 
 # Same build-arg contract as Dockerfile — /api/v1/version reports these.
 ARG GIT_SHA=""

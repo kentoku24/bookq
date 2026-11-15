@@ -331,7 +331,25 @@ struct ReaderView: View {
 
     // MARK: - Chrome
 
+    /// Wide viewport → landscape chrome (right-edge vertical rail, per
+    /// the iPhone Duo HIG "vertical controls" pattern: side placement
+    /// preserves the full-height spread's vertical space). Portrait keeps
+    /// the classic top bar + bottom slider. Same predicate as pageMode's
+    /// orientation term and the landscape-spread toggle's visibility.
+    private var isLandscape: Bool {
+        viewportSize.width >= viewportSize.height
+    }
+
     private var chrome: some View {
+        Group {
+            if isLandscape { landscapeChrome } else { portraitChrome }
+        }
+        .transition(.opacity)
+    }
+
+    /// Portrait chrome — top bar (close / counter / mode buttons) plus
+    /// the bottom chapter slider.
+    private var portraitChrome: some View {
         VStack {
             HStack {
                 Button { dismiss() } label: {
@@ -369,7 +387,6 @@ struct ReaderView: View {
                 sliderRow(work)
             }
         }
-        .transition(.opacity)
     }
 
     private var modeButtons: some View {
@@ -441,6 +458,145 @@ struct ReaderView: View {
             }
         }
         .foregroundStyle(.white)
+    }
+
+    // MARK: - Landscape rail chrome
+
+    /// Right-edge vertical rail (iPhone Duo HIG "vertical controls"):
+    /// top→bottom = primary nav (close), status (counter), frequent
+    /// action (overview), overflow menu, then the chapter slider filling
+    /// the remaining height. Pages keep their max-size centered fit —
+    /// on wide spreads the rail may overlap the page edge, so `railScrim`
+    /// keeps the controls legible.
+    private var landscapeChrome: some View {
+        railColumn
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+    }
+
+    private var railColumn: some View {
+        VStack(spacing: 12) {
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Circle())
+            }
+            .accessibilityIdentifier("readerClose")
+            counterRailBadge
+            Button { showOverview = true } label: {
+                Image(systemName: "rectangle.grid.2x2")
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: Circle())
+            }
+            .accessibilityLabel("複数ページ")
+            railMenu
+            if let work {
+                verticalSliderRow(work)
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.top, 12)
+        .padding(.bottom, 14)
+        .padding(.trailing, 6)
+        // Fixed width is load-bearing: the slider's GeometryReader is
+        // infinitely flexible, so without it the column expands to the
+        // full proposal and VStack centers every item mid-screen.
+        .frame(width: 76)
+        .frame(maxHeight: .infinity)
+        .background(alignment: .trailing) { railScrim }
+    }
+
+    @ViewBuilder
+    private var counterRailBadge: some View {
+        if !counterText.isEmpty {
+            Text(counterText)
+                .font(.caption2).monospacedDigit()
+                .lineLimit(1)
+                .accessibilityIdentifier("readerCounter")
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(.black.opacity(0.5), in: Capsule())
+        }
+    }
+
+    /// Soft fade behind the rail so controls stay legible where a wide
+    /// spread reaches under them. Hit-test transparent — taps in the
+    /// margin still turn pages.
+    private var railScrim: some View {
+        LinearGradient(colors: [.clear, .black.opacity(0.4)],
+                       startPoint: .leading, endPoint: .trailing)
+            .frame(width: 120)
+            .allowsHitTesting(false)
+    }
+
+    /// Landscape overflow menu — mode controls that don't earn a
+    /// permanent rail slot (Duo HIG: less-used items go to overflow).
+    /// Same actions as `modeButtons`; the ext diagnostic moves here from
+    /// the counter capsule because the rail is too narrow for it.
+    private var railMenu: some View {
+        Menu {
+            if pageMode == .spread {
+                Button {
+                    spreadOffset = spreadOffset == 0 ? 1 : 0
+                    rebuild()
+                } label: {
+                    Label(spreadOffset == 1 ? "見開きずらし: 表紙単独"
+                          : "見開きずらし: 通常",
+                          systemImage: spreadOffset == 1 ? "book" : "book.pages")
+                }
+            }
+            Button {
+                landscapeSpread.toggle()
+                rebuild()
+            } label: {
+                Label(pageMode == .spread ? "見開き: ON" : "見開き: OFF",
+                      systemImage: pageMode == .spread
+                        ? "rectangle.split.2x1" : "rectangle.portrait")
+            }
+            Picker("タップで進む方向", selection: $tapForwardLeft) {
+                Text("左").tag(true)
+                Text("右").tag(false)
+            }
+            // External display toggle: shown while a display is attached
+            // or projecting, and stays while disabled so it can be
+            // re-enabled (same rule as `modeButtons`).
+            if ext.accessoryAvailable || ext.connected || !ext.userEnabled {
+                Button { ext.userEnabled.toggle() } label: {
+                    Label("外部ディスプレイ",
+                          systemImage: ext.connected && ext.userEnabled
+                            ? "tv.fill" : "tv")
+                }
+            }
+            // External-display bring-up diagnostic (temporary).
+            if let s = ext.externalScreen {
+                Text(ExternalDisplayStore.describe(s))
+            } else if ext.accessoryAvailable {
+                Text("ext: display available")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .padding(10)
+                .background(.black.opacity(0.5), in: Circle())
+        }
+        .accessibilityLabel("その他")
+    }
+
+    /// Landscape chapter slider — same chapter-scoped value math as
+    /// `sliderRow`, rendered vertically in the rail (top = chapter
+    /// start, bottom = chapter end).
+    private func verticalSliderRow(_ work: ReaderWork) -> some View {
+        let span = work.chapterSliderMax(at: currentIdx)
+        return VerticalSlider(
+            value: Binding(
+                get: { Double(work.idxToChapterSlider(currentIdx)) },
+                set: { v in
+                    if let idx = work.chapterSliderToIdx(
+                        Int(v.rounded()), at: currentIdx) {
+                        snapTo(idx, in: work)
+                    }
+                }),
+            range: 0...Double(max(span, 1)),
+            enabled: span > 0
+        )
+        .accessibilityIdentifier("readerSlider")
     }
 
     /// Chapter-local slider (web `syncChapterSlider` family): the range

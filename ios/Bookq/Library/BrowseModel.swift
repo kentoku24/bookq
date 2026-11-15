@@ -1,6 +1,6 @@
 import Foundation
 
-/// Pure browse/lookup rules mirroring `app/static/browse/render.js`.
+/// Pure browse/lookup rules mirroring `web/static/browse/render.js`.
 /// All functions are free of UI state and unit-tested.
 enum BrowseModel {
 

@@ -1,4 +1,4 @@
-"""Shared fixtures: a synthetic downloads/ tree, a live FastAPI server (test mode),
+"""Shared fixtures: a synthetic downloads/ tree, a live viewer-rs server (test mode),
 and Playwright browser contexts (portrait / landscape).
 
 Run:
@@ -9,9 +9,7 @@ Run:
 import json
 import os
 import re
-import socket
 import struct
-import subprocess
 import sys
 import time
 import urllib.request
@@ -21,11 +19,9 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
-# app.auth reads BOOKQ_TEST_MODE once at import time (_TEST_MODE), and any
-# test module doing `from app.routes import ...` pulls app.auth in. Setting
-# the default here — before collection imports whichever module comes first
-# alphabetically — keeps in-process TestClients deterministic regardless of
-# test order (#326). Tests needing real auth patch auth._TEST_MODE=False.
+# viewer-rs reads BOOKQ_TEST_MODE at process start to bypass OAuth with a
+# mock user. Setting the default here keeps every spawned backend
+# deterministic regardless of test order (#326).
 os.environ.setdefault("BOOKQ_TEST_MODE", "true")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -120,8 +116,8 @@ def pytest_collection_modifyitems(config, items):
 def _bookq_state_dir_sandbox(tmp_path_factory):
     """Point BOOKQ_STATE_DIR at a throwaway dir for the whole test session.
 
-    Without it, in-process TestClients and helper-spawned uvicorn servers
-    would write folder-visibility state into the real ~/.local/share/bookq.
+    Without it, helper-spawned viewer-rs servers would write
+    folder-visibility state into the real ~/.local/share/bookq.
     Restored on teardown.
     """
     prev = os.environ.get("BOOKQ_STATE_DIR")
@@ -357,61 +353,41 @@ def downloads_tree(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def folder_count_text(downloads_tree: Path) -> str:
-    # Expected "#folder-count" text at the browse root, derived from the same
-    # fixture tree the server serves (not a hardcoded count), so extending the
-    # fixture updates every assertion automatically.
-    from app.scanner import scan_tree
-
-    return f"{len(scan_tree(downloads_tree))} 件"
-
-
-@pytest.fixture(scope="session")
-def root_folder_names(downloads_tree: Path) -> list[str]:
-    # Expected root-level tile order/names, derived from the same fixture tree
-    # and the same natural-sort scan_tree uses server-side (not a hardcoded
-    # list), so extending the fixture updates every assertion automatically.
-    from app.scanner import scan_tree
-
-    return [node["name"] for node in scan_tree(downloads_tree)]
+def root_folder_names(server: str) -> list[str]:
+    # Expected root-level tile order/names, read from the live viewer-rs
+    # backend itself (depth=1 children), so extending the fixture tree
+    # updates every assertion automatically without duplicating the
+    # scanner's natural-sort logic in Python.
+    req = urllib.request.Request(server + "/api/v1/tree?depth=1")
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 202:
+                    time.sleep(2.5)
+                    continue
+                body = json.loads(resp.read())
+                return [node["name"] for node in body["nodes"]]
+        except Exception:
+            time.sleep(1.0)
+    # Last attempt — let any error surface as the test failure.
+    with urllib.request.urlopen(
+        urllib.request.Request(server + "/api/v1/tree?depth=1"), timeout=10
+    ) as resp:
+        return [node["name"] for node in json.loads(resp.read())["nodes"]]
 
 
 @pytest.fixture(scope="session")
 def server(downloads_tree: Path) -> str:
-    """Start FastAPI app in test mode against the fixture tree; yield its base URL."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """Start viewer-rs in test mode against the fixture tree; yield its base URL.
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads_tree)
-    env["BOOKQ_STATE_DIR"] = os.environ["BOOKQ_STATE_DIR"]
+    The suite oracles the production backend's contract (#503).
+    """
+    from rs_spawn import spawn_backend
 
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    proc, base_url = spawn_backend(
+        downloads_dir=downloads_tree,
+        state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
-    base_url = f"http://127.0.0.1:{port}"
-    # Cold starts (metadata warmup + first index build) take ~7-10s on a
-    # loaded machine — 10s is a coin flip, so give real headroom before
-    # declaring a startup failure.
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"Server exited early: {proc.stderr.read().decode()}")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server did not become healthy within 30s")
-
     yield base_url
 
     proc.terminate()
@@ -441,17 +417,20 @@ def _reset_reading_position(request):
     try:
         base_url = request.getfixturevalue("server")
 
+        # The TEST_MODE-only v1 hook drops the whole slot incl. tombstones,
+        # and v1 returns a positions array.
+
         def _delete():
             req = urllib.request.Request(
-                base_url + "/api/reading-position?hard=1", method="DELETE"
+                base_url + "/api/v1/test-positions-reset", method="DELETE"
             )
             urllib.request.urlopen(req, timeout=5).read()
 
         def _empty():
             with urllib.request.urlopen(
-                base_url + "/api/reading-position", timeout=5
+                base_url + "/api/v1/reading-positions", timeout=5
             ) as resp:
-                return json.loads(resp.read()).get("position") is None
+                return not json.loads(resp.read()).get("positions")
 
         _delete()
         deadline = time.time() + 3.0
