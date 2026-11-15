@@ -15,7 +15,7 @@
 # this script touches app credentials.
 #
 # Usage: ios-ui-test.sh [server_url]
-# Env:   DERIVED_DATA_PATH (default ~/Library/.../Bookq-ci),
+# Env:   DERIVED_DATA_PATH (default ~/Library/.../Bookq-ci-<worktree>),
 #        IOS_TEST_RESULTS (default ios/build/ios-test-results),
 #        IOS_DEVICE_NAME (dedicated simulator name, default "bookq-ci-tests"),
 #        IOS_SIM_ERASE=1 (force `simctl erase` instead of app uninstall)
@@ -26,7 +26,18 @@ cd "$(dirname "$0")/../.."
 SERVER_URL="${1:-http://127.0.0.1:8080}"
 PROJECT="ios/Bookq.xcodeproj"
 SCHEME="Bookq"
-DD="${DERIVED_DATA_PATH:-$HOME/Library/Developer/Xcode/DerivedData/Bookq-ci}"
+# Worktree ごとに DD を分ける (並列セッションの build.db 競合と単一 DD の肥大化を防ぐ)。
+# CI は DERIVED_DATA_PATH を明示するので従来どおり。
+WT_TAG=$(printf '%s' "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | shasum -a 256 | cut -c1-8)
+DD="${DERIVED_DATA_PATH:-$HOME/Library/Developer/Xcode/DerivedData/Bookq-ci-$WT_TAG}"
+
+# 内蔵ディスクの事前チェック (CI には helper が無いので no-op)。
+if [[ -x "$HOME/.local/bin/disk-guard" ]]; then
+  "$HOME/.local/bin/disk-guard" --check || {
+    echo "!! 内蔵ディスクの空きが不足しています — ビルドを中止します" >&2
+    exit 1
+  }
+fi
 RESULTS="${IOS_TEST_RESULTS:-ios/build/ios-test-results}"
 mkdir -p "$RESULTS"
 # xcodebuild refuses to reuse an existing -resultBundlePath, and the
