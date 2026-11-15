@@ -178,15 +178,36 @@ def _grid_tiles(page):
     Folder tiles carry no read marker; images-tiles carry data-read-child and
     the root self-tile carries data-read-self. Order-sensitive: folders render
     first, images-tiles after.
+
+    The async full-tree/URL render replaces the grid, so per-locator attribute
+    reads can straddle a DOM swap. Wait for the full tree AND the settled
+    browse path, then take one atomic evaluate_all snapshot and split the
+    attributes Python-side.
     """
+    page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+    page.wait_for_function(
+        """() => {
+            const bs = window.parseBrowseHash ? window.parseBrowseHash() : null;
+            const want = bs ? (bs.path || null) : null;
+            return window.currentBrowsePath === want;
+        }""",
+        timeout=15000,
+    )
+    rows = page.locator(".tile").evaluate_all(
+        """els => els.map(t =>
+            (t.getAttribute('data-read-child') === '1' ? 'R\\0'
+             : t.getAttribute('data-read-self') === '1' ? 'S\\0' : 'F\\0')
+            + (t.getAttribute('data-path') || ''))"""
+    )
     folders, reads, selfs = [], [], []
-    for t in page.locator(".tile").all():
-        if t.get_attribute("data-read-child") == "1":
-            reads.append(t.get_attribute("data-path"))
-        elif t.get_attribute("data-read-self") == "1":
-            selfs.append(t.get_attribute("data-path"))
+    for r in rows:
+        kind, _, path = r.partition("\x00")
+        if kind == "R":
+            reads.append(path)
+        elif kind == "S":
+            selfs.append(path)
         else:
-            folders.append(t.get_attribute("data-path"))
+            folders.append(path)
     return folders, reads, selfs
 
 

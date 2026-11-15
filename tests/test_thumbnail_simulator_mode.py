@@ -1,7 +1,7 @@
 """Integration tests for the dev-only ?thumb_perf=1 instrumentation mode.
 
 These tests assert the route/template wiring only — the metric itself is
-authored in scripts/perf/measure_thumbnails.py + app/static/thumbnail-probe.js
+authored in scripts/perf/measure_thumbnails.py + app/thumbnail_probe.js
 and covered by tests/test_thumbnail_measurement.py.
 """
 
@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBE_MARKER = "__thumbnailProbeReport"
+PROBE_SOURCE = (ROOT / "app/thumbnail_probe.js").read_text(encoding="utf-8")
 FIXTURE_NAME = "simple_manga"
 
 
@@ -34,11 +35,19 @@ def test_normal_index_has_no_probe_or_panel(plain_client):
     assert "no-store" not in r.headers.get("cache-control", "")
 
 
+def test_static_probe_path_is_not_served(plain_client):
+    # The probe is inlined server-side under the mode flag only — never a
+    # publicly reachable static asset.
+    r = plain_client.get("/static/thumbnail-probe.js")
+    assert r.status_code == 404
+
+
 def test_thumb_perf_inlines_probe_and_panel(plain_client):
     r = plain_client.get("/?thumb_perf=1")
     assert r.status_code == 200
     html = r.text
-    # Shared probe source inlined before the deferred app.js script tag.
+    # Shared probe source inlined verbatim before the deferred app.js tag.
+    assert PROBE_SOURCE in html
     probe_pos = html.index("Measurement-only observer")
     assert PROBE_MARKER in html[probe_pos:]
     assert probe_pos < html.index("/static/app.js")

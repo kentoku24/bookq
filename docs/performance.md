@@ -10,6 +10,8 @@
 | ページ送り中 long task | 0 | 0 | 0 維持 |
 | 開く時の先読み転送量 | 2.9MB | 2.9MB（不変） | 観測のみ（画像は原寸配信を維持する決定） |
 
+2026-10-17 / PR #39: local Chromium 計測の「本を開く→初画像」中央値 131.9ms / 186.9ms は、ユーザーがいずれも十分速いとして許容済み。この PR では差をデグレ・マージ阻害要因として扱わない。上表は過去の KPI 定義として保持し、今回の数値で全環境の目標を再定義しない。
+
 ## 2 層のデグレ検知
 
 1. **CI（決定的指標）** `tests/test_perf_budget.py` — `/api/folders` ボディ転送 2 回（shallow `?depth=1` 先行 + full 追従）・gzip 比、
@@ -39,7 +41,7 @@ uv run --with playwright --with-requirements requirements-dev.txt \
 
 ### iOS Simulator での計測
 
-iOS Simulator の Safari（WebKit）でも同じ `app/static/thumbnail-probe.js` と同じ指標定義で計測できる。dev 環境の `BOOKQ_TEST_MODE` でのみ有効な `?thumb_perf=1` を付けて開くと、計測終了後に結果パネルが出る。
+iOS Simulator の Safari（WebKit）でも同じ `app/thumbnail_probe.js` と同じ指標定義で計測できる。dev 環境の `BOOKQ_TEST_MODE` でのみ有効な `?thumb_perf=1` を付けて開くと、計測終了後に結果パネルが出る。
 
 ```bash
 ./dev.sh up ios-live-perf-explore --local --fixture --port 8099
@@ -60,6 +62,10 @@ iOS Simulator の Safari（WebKit）でも同じ `app/static/thumbnail-probe.js`
 
 `/image` `/thumb` は gzip 対象外・リサイズ無し。`/api` `/static` `/sw.js` は gzip（`app/compression.py`）。
 静的アセットは `Cache-Control: no-cache` + ETag（`app/static_files.py`）。
+
+viewport 限定の thumbnail prefetch は、未訪問の遠いカバーを意図的にキャッシュしない。
+オフライン再読込・スクロールでは未キャッシュのカバーがプレースホルダ表示になることがあり、
+オンラインのスクロールで徐々にウォームされる。
 
 `/api/folders` の ETag はペイロードのダイジェストのみ（index キャッシュの timestamp を含まない）ため
 5 分の index キャッシュ TTL をまたいでも回転しない。直列化済みボディも index キャッシュの世代ごとに

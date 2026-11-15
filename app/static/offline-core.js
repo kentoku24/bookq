@@ -212,13 +212,11 @@
   }
 
   let _treeWriterGen = 0;
-  let _treeWriterWorker = null;
   let _treeWriterSlot = null;
   function _cancelTreeWrites() {
     _treeWriterGen++;
     const slot = _treeWriterSlot;
     _treeWriterSlot = null;
-    _treeWriterWorker = null;
     if (slot) { try { slot.cancel(); } catch (e) {} }
   }
 
@@ -330,9 +328,11 @@
       });
     }
     async function putTree(data, opts) {
+      // Non-tree input is a resolved no-op and must not supersede a pending
+      // write — only a real snapshot owns latest-wins cancellation.
+      if (!Array.isArray(data)) return Promise.resolve();
       _cancelTreeWrites();
       const gen = _treeWriterGen;
-      if (!Array.isArray(data)) return Promise.resolve();
       if (opts && opts.defer && typeof requestIdleCallback === "function") {
         return _deferTreeJob(gen, function () { return _writeTree(data, gen); });
       }
@@ -348,10 +348,14 @@
       return { data };
     }
     function putJson(jsonText, opts) {
+      // Same guard as putTree: empty/non-string input is a resolved no-op
+      // that must not cancel a pending write. String/schema validation stays
+      // in the Worker/fallback — never a synchronous JSON.parse of the raw
+      // payload on the main thread.
+      if (typeof jsonText !== "string" || !jsonText.length) return Promise.resolve();
       _cancelTreeWrites();
       const gen = _treeWriterGen;
       const treeEnvelope = !!(opts && opts.treeEnvelope);
-      if (typeof jsonText !== "string" || !jsonText.length) return Promise.resolve();
       function start() {
         return new Promise((resolve, reject) => {
           function fallback() {
@@ -375,7 +379,6 @@
             worker.onerror = null;
             if (ownGlobals) {
               if (_treeWriterSlot === slot) _treeWriterSlot = null;
-              if (_treeWriterWorker === worker) _treeWriterWorker = null;
             }
             try { worker.terminate(); } catch (e) {}
           }
@@ -397,7 +400,6 @@
               fallback();
             });
           }
-          _treeWriterWorker = worker;
           _treeWriterSlot = slot;
           worker.onmessage = function (e) {
             if (settled || gen !== _treeWriterGen) return;
