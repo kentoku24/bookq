@@ -224,18 +224,23 @@ owner HMAC による書き込み (`PUT /api/v1/folder-visibility`) は今の仕�
 
 各 Phase は単独でマージでき、単独で切り戻せる。旧クライアントはどの時点でも壊れない。
 
-| 段階 (Phase) | 内容 | 削除できるもの | 進行可否 |
+| 段階 (Phase) | Issue | 内容 | 削除できるもの | 進行可否 |
 |---|---|---|---|
-| **0. 契約** | `openapi.v1.yaml` に `/api/v1/work` と tree ノードの optional フィールド、`examples:`、`v1-semantics.md` に §8 Work を追加。`solo-spreads` / `chapter-padding` に `rust` を追加 (§2.4 の判定) | — | `api-breaking` が緑、codegen-drift が緑、§2.4 の判定結果 |
-| **1. サーバドメイン層** | `viewer-rs/src/domain/{work,library}.rs` を新設。`build_manifest_core` と tree の解決ロジックを移し、WS MANIFEST と REST の両方から呼ぶ。`main.rs` (1,949 行) から ルートハンドラをドメイン別に移す | — | 既存の reader-sync テスト / golden / digest が無変更で緑。Schemathesis が新エンドポイントで緑 |
-| **2. web** | `loadImages` と `downloadWork` を Work 経由に置き換える。IDB の作品レコードに `digest` を持たせる | `getSiblingLeafFolders`、章組み立て、`getLeafPathsFor` の leaf 列挙 (§2.4 の判定が進行可なら `spread.js` の計算部も) | `perf-measurement` で「タップ → 1 ページ目表示」が非悪化 (§5.1)。オフライン系 pytest と iOS シミュレータの PWA 確認が緑 |
-| **3. iOS / Android** | `ReaderModel` / `ReaderWork` を Work 経由に置き換える | `siblingLeaves` / `assemble` / `chapters`、`work-chapters.json` が rust のみになる | `BookqTests` / `:core:test` / UI テストが緑。実機確認 (ios-device-deploy、CP08-J1) |
-| **4. 解決済みツリー + 可視性** | tree の新フィールドと `visibility=apply\|annotate` を 3 クライアントが使う | `resolveCover.js`、path 合成とルックアップの 3 実装、`VisibilityRules` / `VisibilityStore` / `visibility.js` の読み取り述語、`path-lookup.json` / `encode-path.json` のクライアント側 | 隠しルートの pytest (専用 `BOOKQ_STATE_DIR`) が緑。fail-closed がサーバで成り立つこと |
-| **5. 判断点: ペア** | Phase 4 後に残る重複 (reader-sync クライアント状態機械 ×3) を計測し、(a) vectors で維持、(b) Rust リデューサーを UniFFI / wasm で共有、のどちらにするか ADR で決める。任意の最適化として、Work digest で MANIFEST のチャンク転送を省く | 判断次第 | §6 B の前提条件 |
+| **0. 契約** | #518, #519, #520 | `openapi.v1.yaml` に `/api/v1/work` と tree ノードの optional フィールド、`examples:`、`v1-semantics.md` に §8 Work を追加。`solo-spreads` / `chapter-padding` に `rust` を追加 (§2.4 の判定) | — | `api-breaking` が緑、codegen-drift が緑、§2.4 の判定結果 |
+| **1. サーバドメイン層** | #521, #522 | `viewer-rs/src/domain/{work,library}.rs` を新設。`build_manifest_core` と tree の解決ロジックを移し、WS MANIFEST と REST の両方から呼ぶ。`main.rs` (1,949 行) から ルートハンドラをドメイン別に移す | — | 既存の reader-sync テスト / golden / digest が無変更で緑。Schemathesis が新エンドポイントで緑 |
+| **2. web** | #523 | `loadImages` と `downloadWork` を Work 経由に置き換える。IDB の作品レコードに `digest` を持たせる | `getSiblingLeafFolders`、章組み立て、`getLeafPathsFor` の leaf 列挙 (§2.4 の判定が進行可なら `spread.js` の計算部も) | `perf-measurement` で「タップ → 1 ページ目表示」が非悪化 (§5.1)。オフライン系 pytest と iOS シミュレータの PWA 確認が緑 |
+| **3. iOS / Android** | #524, #525 | `ReaderModel` / `ReaderWork` を Work 経由に置き換える | `siblingLeaves` / `assemble` / `chapters`、`work-chapters.json` が rust のみになる | `BookqTests` / `:core:test` / UI テストが緑。実機確認 (ios-device-deploy、CP08-J1) |
+| **4. 解決済みツリー + 可視性** | #522, #526, #527, #528 | tree の新フィールドと `visibility=apply\|annotate` を 3 クライアントが使う | `resolveCover.js`、path 合成とルックアップの 3 実装、`VisibilityRules` / `VisibilityStore` / `visibility.js` の読み取り述語、`path-lookup.json` / `encode-path.json` のクライアント側 | 隠しルートの pytest (専用 `BOOKQ_STATE_DIR`) が緑。fail-closed がサーバで成り立つこと |
+| **5. 判断点: ペア** | #529 | Phase 4 後に残る重複 (reader-sync クライアント状態機械 ×3) を計測し、(a) vectors で維持、(b) Rust リデューサーを UniFFI / wasm で共有、のどちらにするか ADR で決める。任意の最適化として、Work digest で MANIFEST のチャンク転送を省く | 判断次第 | §6 B の前提条件 |
 
 順序の理由: Phase 1 は「既存ロジックの移動」なのでリスクが最も低い。Phase 2 は最大のクライアント
 (web、`app.js` 5,206 行) の重複を最初に外す。Phase 4 は旧クライアントとの共存期間が最も長い
 (可視性の意味論が絡む) ので最後に回す。
+
+依存関係と並列性: Track A (#518 → #520 → #521 → {#523, #524, #525}) と Track B
+(#519 → #522 → {#526, #527, #528}) は完全に独立して進められる。#529 は
+クライアント移行 (6 Issue) 完了後にのみ着手可能。各 Issue の完了条件・観測方法・
+切り戻しと Plan-ID 対応は #507 の依存グラフを参照。
 
 ---
 
