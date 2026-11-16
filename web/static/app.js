@@ -5201,9 +5201,11 @@
   // 60 秒窓で 4 回目以降の online 遷移だけ調停を抑止する。
   var _recentOnlineTransitions = [];
   function _onOnline(){
-    // New connection owns the pipeline from here: every continuation gated
-    // on the previous generation bails instead of overwriting fresh state.
-    _onlineConnectionGen++;
+    // NOTE: no connection-generation bump here — a flap-suppressed online
+    // (see below) starts no pipeline, so bumping would orphan the load that
+    // is still legitimately in flight. Link loss already bumped the
+    // generation via the offline handlers; a fresh loadFolders/revalidate
+    // started below owns the current epoch.
     _onlineRevalidateLast = 0;
     var _now = Date.now();
     _recentOnlineTransitions = _recentOnlineTransitions.filter(function(t){ return _now - t < 60000; });
