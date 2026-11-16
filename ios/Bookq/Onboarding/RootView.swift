@@ -21,8 +21,14 @@ struct RootView: View {
             }
         }
         // web 'online' window-event equivalent — re-probe on foreground.
+        // `model.foregrounded()` is the session keepalive: it exercises
+        // the refresh token so a server restart's wiped refresh store
+        // surfaces as sessionExpired → .login at resume, not dead pages.
         .onChange(of: scenePhase) { _, ph in
-            if ph == .active { model.online.foregrounded() }
+            if ph == .active {
+                model.online.foregrounded()
+                model.foregrounded()
+            }
         }
     }
 }

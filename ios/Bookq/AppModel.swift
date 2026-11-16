@@ -74,6 +74,10 @@ final class AppModel: ObservableObject {
             config.serverURLString = injected
         }
         auth.restore()
+        // Definitive session death (refresh rejected 400/401) — Android
+        // AppModel.sessionExpired parity: a live Ready session drops to
+        // Login; AuthManager already ran logout().
+        auth.onSessionExpired = { [weak self] in self?.sessionDidExpire() }
         #if DEBUG
         // `BOOKQ_TEST_TOKEN` env or `-testToken <jwt>` argv seeds a dummy
         // pair for simulator/dev runs against BOOKQ_TEST_MODE servers,
@@ -85,7 +89,8 @@ final class AppModel: ObservableObject {
             print("[bookq] test token injected")
             auth.testSeed(TokenPair(TokenPairResponse(
                 access_token: token, token_type: "Bearer",
-                expires_in: 3600, refresh_token: "")))
+                expires_in: 3600,
+                refresh_token: Self.injectedTestRefreshToken() ?? "")))
         }
         #endif
         if config.baseURL != nil {
@@ -119,6 +124,23 @@ final class AppModel: ObservableObject {
         }
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-testToken"), i + 1 < args.count
+        else { return nil }
+        let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
+    }
+
+    /// `BOOKQ_TEST_REFRESH_TOKEN` env var or `-testRefreshToken <rt>` argv
+    /// pair, or nil. Pair with `-testToken` to drive the refresh path —
+    /// a TEST_MODE server only honours refresh tokens it issued, so a
+    /// bogus value deterministically lands on the 401 → sessionExpired
+    /// route (the in-memory store wipe a redeploy causes).
+    static func injectedTestRefreshToken() -> String? {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_TEST_REFRESH_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+            return e
+        }
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-testRefreshToken"), i + 1 < args.count
         else { return nil }
         let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
         return v.isEmpty ? nil : v
@@ -302,6 +324,25 @@ final class AppModel: ObservableObject {
         offline.scopeChanged()
         progress.scopeChanged()
         Task { await boot() }
+    }
+
+    /// Definitive session death — only a live Ready session drops to
+    /// Login (mid-boot/onboarding states are untouched). `openReader` and
+    /// `navPath` are kept: re-login returns `phase` to `.ready` and the
+    /// still-set `openReader` re-presents the reader at its saved page.
+    func sessionDidExpire() {
+        guard phase == .ready else { return }
+        phase = .login
+    }
+
+    /// Foreground session keepalive — proactively exercises the refresh
+    /// token so a server restart that wiped the in-memory refresh store
+    /// surfaces at resume (sessionExpired → .login) instead of as dead
+    /// pages mid-read. Reactive 401s cover the same path during use;
+    /// transient refresh failures are ignored (nil → nothing happens).
+    func foregrounded() {
+        guard phase == .ready else { return }
+        Task { _ = await auth.refreshAccessToken() }
     }
 
     func didLogin() {
