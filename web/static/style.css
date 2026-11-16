@@ -267,6 +267,8 @@ body.overview-open #img-retry{pointer-events:none!important;opacity:0}
   #folder-name{order:4;width:100%;max-width:none;font-size:11px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0}
   /* same order as #counter — source order keeps ⊞ to its right */
   #overview-btn{order:3}
+  /* strip stays on row 1, last — without an order it would sort first */
+  #pair-status{order:3}
 }
 
 /* ── overview: series-wide RTL page grid (viewer/overview.js) ── */
@@ -508,14 +510,20 @@ body.landscape-single #spread-shift{display:none}
 #pair-btn:active{background:rgba(255,255,255,.15);transform:scale(0.95)}
 /* session strip: one-line, tappable (→ session panel), only while a
  * session is (or is becoming) real — idle/ended hide it via [hidden] */
-#pair-status{position:fixed;top:calc(104px + env(safe-area-inset-top,0px));right:12px;z-index:4;display:flex;flex-direction:row;align-items:center;gap:0;font-size:11px;letter-spacing:0.01em;transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0);cursor:pointer}
+#pair-status{display:flex;flex-direction:row;align-items:center;gap:0;font-size:11px;letter-spacing:0.01em;transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0)}
+/* Inside #toolbar the strip rides existing chrome instead of floating
+ * over page content (#159); the fixed overlay is only the fallback for
+ * toolbar-less shells. */
+body>#pair-status{position:fixed;top:calc(104px + env(safe-area-inset-top,0px));right:12px;z-index:4}
 #pair-status[hidden]{display:none}
 #pair-status.hidden{opacity:0;pointer-events:none}
-#pair-status>span{display:inline-block;background:rgba(20,24,32,.85);border:1px solid #39414f;color:#aab3c2;white-space:nowrap}
-#pair-status>span:first-child{border-radius:10px 0 0 10px;padding:3px 6px 3px 8px;border-right:none}
-#pair-status>span:last-child{border-radius:0 10px 10px 0;padding:3px 8px 3px 6px;border-left:none}
-#pair-status>span:only-child{border-radius:10px;padding:3px 8px;border:1px solid #39414f}
-#pair-status>[hidden]{display:none}
+#pair-status-btn{background:none;border:none;padding:0 4px;color:inherit;font:inherit;cursor:pointer;display:flex;flex-direction:row;align-items:center;justify-content:center;min-width:44px;min-height:44px;border-radius:10px;-webkit-tap-highlight-color:transparent}
+#pair-status-btn:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px}
+#pair-status-btn>span{display:inline-block;background:rgba(20,24,32,.85);border:1px solid #39414f;color:#aab3c2;white-space:nowrap}
+#pair-status-btn>span:first-child{border-radius:10px 0 0 10px;padding:3px 6px 3px 8px;border-right:none}
+#pair-status-btn>span:last-child{border-radius:0 10px 10px 0;padding:3px 8px 3px 6px;border-left:none}
+#pair-status-btn>span:only-child{border-radius:10px;padding:3px 8px;border:1px solid #39414f}
+#pair-status-btn>[hidden]{display:none}
 #pair-status[data-status="connected"] #pair-status-text{color:#8ab4f8;border-color:rgba(74,122,196,.6)}
 #pair-status[data-status="reconnecting"] #pair-status-text,
 #pair-status[data-status="peer-away"] #pair-status-text{color:#c9a24f;border-color:#6b5a2e}

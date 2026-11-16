@@ -211,8 +211,10 @@
       (_el('sidebar-header') || document.body).appendChild(btn);
     }
 
-    // Persistent status chip — THE state indicator. role=status makes it the
-    // aria-live region for every state change (polite, atomic).
+    // Persistent status chip — THE state indicator. The wrapper stays the
+    // aria-live region (role=status, polite/atomic) while the inner
+    // <button> is the operable control: Tab reaches it and Enter/Space
+    // open the panel natively, with a 44px target (#159).
     const status = document.createElement('div');
     status.id = 'pair-status';
     status.dataset.status = 'idle';
@@ -220,10 +222,16 @@
     status.setAttribute('aria-live', 'polite');
     status.setAttribute('aria-atomic', 'true');
     status.innerHTML =
-      '<span id="pair-status-text">未接続</span>' +
-      '<span id="pair-side" hidden></span>' +
-      '<span id="pair-transport" hidden></span>';
-    document.body.appendChild(status);
+      '<button id="pair-status-btn" type="button" aria-haspopup="dialog" ' +
+        'aria-expanded="false">' +
+        '<span id="pair-status-text">未接続</span>' +
+        '<span id="pair-side" hidden></span>' +
+        '<span id="pair-transport" hidden></span>' +
+      '</button>';
+    // Inside #toolbar the strip rides existing chrome and can never float
+    // over page content (#159); the fixed overlay is only the fallback
+    // for toolbar-less shells.
+    (_el('toolbar') || document.body).appendChild(status);
 
     const overlay = document.createElement('div');
     overlay.id = 'pair-overlay';
@@ -234,6 +242,7 @@
     els = {
       btn: btn,
       status: status,
+      statusBtn: _el('pair-status-btn'),
       statusText: _el('pair-status-text'),
       side: _el('pair-side'),
       transport: _el('pair-transport'),
@@ -272,6 +281,29 @@
       errorLeave: _el('pair-error-leave'),
     };
     wireEvents();
+    syncStripA11y();
+    watchStripA11y();
+  }
+
+  /* The strip must leave the a11y tree whenever chrome hides it — the
+   * .hidden fade, the [hidden] collapse and the overview-open veil all
+   * leave an invisible-but-focusable control behind otherwise (#159). */
+  let hideObs = null;
+  function syncStripA11y() {
+    if (!els.statusBtn) return;
+    const gone = els.status.hidden ||
+      els.status.classList.contains('hidden') ||
+      document.body.classList.contains('overview-open');
+    els.status.setAttribute('aria-hidden', gone ? 'true' : 'false');
+    els.statusBtn.tabIndex = gone ? -1 : 0;
+  }
+  function watchStripA11y() {
+    if (hideObs || typeof MutationObserver !== 'function') return;
+    hideObs = new MutationObserver(syncStripA11y);
+    hideObs.observe(els.status,
+      {attributes: true, attributeFilter: ['class', 'hidden']});
+    hideObs.observe(document.body,
+      {attributes: true, attributeFilter: ['class']});
   }
 
   // ── render: state → indicators + section visibility ──
@@ -433,6 +465,7 @@
     if (open_) return;
     open_ = true;
     lastFocus = document.activeElement;
+    if (els.statusBtn) els.statusBtn.setAttribute('aria-expanded', 'true');
     els.overlay.classList.remove('hidden');
     // aria-modal promises the background is unreachable: put the two other
     // top-level regions inert (snapshot their prior state for restore).
@@ -453,21 +486,28 @@
     pickList = null;
     stopScan();
     els.overlay.classList.add('hidden');
+    if (els.statusBtn) els.statusBtn.setAttribute('aria-expanded', 'false');
     if (inertSnapshot) {
       for (const [el, was] of inertSnapshot) {
         if (!was) el.removeAttribute('inert');
       }
       inertSnapshot = null;
     }
-    // Restore focus to where it came from; if that element is gone or sits
-    // in an inert subtree (e.g. a now-closed sidebar), the launcher is the
-    // safe landing spot.
+    // Restore focus to where it came from; if that element is gone or
+    // hidden/inert, land on a real control — the visible strip first,
+    // then the launcher, then the menu button — never BODY (#159).
+    const usable = el => el && document.contains(el) &&
+      typeof el.focus === 'function' && !el.closest('[inert]') &&
+      !el.closest('[hidden]');
     let back = lastFocus;
     lastFocus = null;
-    if (!back || !document.contains(back) || back.closest('[inert]')) {
-      back = els.btn;
+    if (!usable(back)) {
+      back = (els.status && !els.status.hidden &&
+              !els.status.classList.contains('hidden')) ? els.statusBtn : null;
     }
-    if (back && typeof back.focus === 'function') back.focus();
+    if (!usable(back)) back = els.btn;
+    if (!usable(back)) back = _el('menu-btn');
+    if (usable(back)) back.focus();
   }
 
   // ── code input ──
