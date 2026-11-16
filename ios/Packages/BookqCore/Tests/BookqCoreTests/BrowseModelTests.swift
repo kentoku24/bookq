@@ -1,5 +1,5 @@
 import XCTest
-@testable import Bookq
+@testable import BookqCore
 
 /// Browse rule parity with `web/static/browse/render.js`.
 final class BrowseModelTests: XCTestCase {
