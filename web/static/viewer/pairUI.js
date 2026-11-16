@@ -5,12 +5,14 @@
  * Controller interface (parent issue #75 §3.3/§3.5):
  *   { create(), join(code), connect(pick?), approve(), reject(), leave(),
  *     swapSides(), subscribe(cb) -> unsubscribe, state }
- * connect() is the one-tap MATCH op: tap the launcher while idle and the
- * server binds this device as follower of a fresh waiting session or as a
- * new waiting leader. It resolves {ambiguous, candidates} when several
- * sessions wait (picker → connect(candidate.id)) and {unsupported} on a
- * pre-MATCH server (classic choice remains). Controllers without
- * connect() keep the legacy 開始/参加 choice on launcher tap.
+ * connect() is the one-tap MATCH op: 「近くの相手とつながる」 binds this
+ * device as follower of a fresh waiting session or as a new waiting
+ * leader. It resolves {ambiguous, candidates} when several sessions wait
+ * (picker → connect(candidate.id)) and {unsupported} on a pre-MATCH
+ * server (the choice demotes to the classic 開始/参加 pair). The idle
+ * launcher tap only opens the panel — MATCH and code-join are explicit
+ * choices there (#160); controllers without connect() always get the
+ * legacy 開始/参加 choice.
  * state shape this UI renders (all fields optional except status):
  *   status : 'idle' | 'connecting' | 'connected' | 'reconnecting'
  *          | 'peer-away' | 'loading' | 'error' | 'ended'
@@ -25,10 +27,10 @@
  * Injection: set window.PairController before this script evaluates
  * (defer order), or call window.PairUI.init({controller}) / .attach(c).
  * With no controller the UI still opens and shows 未接続; controller calls
- * no-op. The idle launcher tap IS the pairing gesture — it fires
- * connect() immediately; open/close beyond that never call the
- * controller, and pairing-UI gestures are stopped before they can reach
- * the viewer's page-turn / toolbar / keyboard paths.
+ * no-op. Open/close alone never calls the controller — the pairing
+ * gesture is the explicit つながる/参加 choice inside the panel — and
+ * pairing-UI gestures are stopped before they can reach the viewer's
+ * page-turn / toolbar / keyboard paths.
  */
 (function () {
   'use strict';
@@ -127,6 +129,14 @@
   // the code form can show it inline instead of losing it on 解除.
   let lastJoinError = null;   // mapped message from the latest error state
   let joinNoticeShown = false; // one-shot: already surfaced in the join form
+  let openedAt = 0;            // backdrop dismiss is muted this long (#160)
+  let connectUnsupported = false; // connect() answered {unsupported} →
+                                  // the choice falls back to 開始/参加
+  /* A rapid second launcher tap lands on the freshly-shown overlay as a
+   * backdrop click and instantly closes the panel while the session keeps
+   * connecting (#160-A). Swallow backdrop dismissals for a short grace —
+   * a deliberate tap outside the panel still closes it after the window. */
+  const DISMISS_GRACE_MS = 350;
 
   function st() {
     return (ctl && ctl.state) || { status: 'idle' };
@@ -143,10 +153,14 @@
       '</div>' +
       '<div class="pair-body">' +
         '<div id="pair-sec-choice" class="pair-sec">' +
-          '<button id="pair-create" type="button" class="pair-action">開始' +
-            '<span class="pair-sub">この端末が leader になりコードを発行</span></button>' +
-          '<button id="pair-join-open" type="button" class="pair-action">参加' +
-            '<span class="pair-sub">相手のコードを入力</span></button>' +
+          '<button id="pair-create" type="button" class="pair-action">' +
+            '<span id="pair-create-label">開始</span>' +
+            '<span class="pair-sub" id="pair-create-sub">' +
+              'この端末が leader になりコードを発行</span></button>' +
+          '<button id="pair-join-open" type="button" class="pair-action">' +
+            '<span id="pair-join-open-label">参加</span>' +
+            '<span class="pair-sub" id="pair-join-open-sub">' +
+              '相手のコードを入力</span></button>' +
         '</div>' +
         '<div id="pair-sec-join" class="pair-sec" hidden>' +
           '<video id="pair-scan-video" playsinline muted autoplay hidden></video>' +
@@ -250,6 +264,10 @@
       panel: _el('pair-panel'),
       close: _el('pair-close'),
       secChoice: _el('pair-sec-choice'),
+      createLabel: _el('pair-create-label'),
+      createSub: _el('pair-create-sub'),
+      joinOpenLabel: _el('pair-join-open-label'),
+      joinOpenSub: _el('pair-join-open-sub'),
       secJoin: _el('pair-sec-join'),
       secLeader: _el('pair-sec-leader'),
       secWaiting: _el('pair-sec-waiting'),
@@ -350,6 +368,20 @@
     const trText = TRANSPORT_LABEL[s.transport] || '';
     els.transport.textContent = trText;
     els.transport.hidden = !(trText && inSession);
+
+    /* The idle choice follows controller capability (#160): a MATCH-aware
+     * client offers 「近くの相手とつながる / コードで参加」; a legacy
+     * client — or one whose connect() answered {unsupported} — keeps the
+     * classic 開始/参加 pair. */
+    const matchable = !!(ctl && typeof ctl.connect === 'function' &&
+                         !connectUnsupported);
+    els.createLabel.textContent = matchable ? '近くの相手とつながる' : '開始';
+    els.createSub.textContent = matchable
+      ? '自動でマッチング（なければ待機開始）'
+      : 'この端末が leader になりコードを発行';
+    els.joinOpenLabel.textContent = matchable ? 'コードで参加' : '参加';
+    els.joinOpenSub.textContent = matchable
+      ? '相手の6桁コードを入力' : '相手のコードを入力';
 
     let sec;
     if (status === 'idle' || status === 'ended') {
@@ -464,6 +496,7 @@
   function open() {
     if (open_) return;
     open_ = true;
+    openedAt = Date.now();
     lastFocus = document.activeElement;
     if (els.statusBtn) els.statusBtn.setAttribute('aria-expanded', 'true');
     els.overlay.classList.remove('hidden');
@@ -654,37 +687,25 @@
     // The idle launcher tap is the whole pairing gesture: fire connect()
     // (server-side MATCH) and show the panel tracking its outcome. A
     // controller without connect() gets the legacy 開始/参加 choice.
+    /* The idle launcher tap used to fire connect() itself — a quick
+     * second tap then closed the panel mid-MATCH, and anyone holding a
+     * 6-digit code had to become a waiting leader first (#160). The tap
+     * now only opens the panel; the choice section offers 「近くの相手と
+     * つながる」 (connect) and 「コードで参加」 (join form) explicitly. */
     els.btn.addEventListener('click', e => {
       e.stopPropagation();
-      const s = st();
-      if ((s.status !== 'idle' && s.status !== 'ended') ||
-          !ctl || typeof ctl.connect !== 'function') {
-        open();
-        return;
-      }
       open();
-      let res;
-      try { res = ctl.connect(); } catch (err) { res = null; }
-      if (res && typeof res.then === 'function') {
-        res.then(r => {
-          if (r && r.ambiguous && Array.isArray(r.candidates) &&
-              r.candidates.length) {
-            pickList = r.candidates;
-            if (open_) render(); else open();
-          } else if (open_) {
-            render();
-          }
-        }).catch(() => {});
-      }
     });
     els.status.addEventListener('click', e => { e.stopPropagation(); open(); });
     els.close.addEventListener('click', close);
     els.errorClose.addEventListener('click', close);
     els.errorLeave.addEventListener('click', () => { if (ctl) ctl.leave(); });
     // Backdrop tap dismisses like the other sheets do; a tap that lands on
-    // the panel itself never reaches this branch.
+    // the panel itself never reaches this branch. Right after open() the
+    // double-tap grace swallows the stray second launcher tap (#160).
     els.overlay.addEventListener('click', e => {
-      if (e.target === els.overlay) close();
+      if (e.target === els.overlay &&
+          Date.now() - openedAt > DISMISS_GRACE_MS) close();
     });
     // Pairing-UI gestures must never reach the viewer's page-turn paths
     // (zone clicks live on sibling elements, touch handlers on #img-container,
@@ -713,7 +734,34 @@
       if (e.key === 'Escape') { e.preventDefault(); close(); }
     }, true);
 
-    els.create.addEventListener('click', () => { if (ctl) ctl.create(); });
+    /* 「近くの相手とつながる」 — the explicit MATCH trigger (#160-B).
+     * connect() joins a nearby waiting session or becomes the waiting
+     * leader; {ambiguous} lists candidates, {unsupported} demotes the
+     * choice back to the legacy 開始/参加 pair. */
+    function fireConnect() {
+      if (!ctl || typeof ctl.connect !== 'function') return;
+      let res;
+      try { res = ctl.connect(); } catch (err) { res = null; }
+      if (res && typeof res.then === 'function') {
+        res.then(r => {
+          if (r && r.ambiguous && Array.isArray(r.candidates) &&
+              r.candidates.length) {
+            pickList = r.candidates;
+            if (open_) render(); else open();
+          } else {
+            if (r && r.unsupported) connectUnsupported = true;
+            if (open_) render();
+          }
+        }).catch(() => {});
+      }
+    }
+    els.create.addEventListener('click', () => {
+      if (ctl && typeof ctl.connect === 'function' && !connectUnsupported) {
+        fireConnect();
+      } else if (ctl) {
+        ctl.create();
+      }
+    });
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
       joinPending = false;
@@ -773,6 +821,7 @@
       unsubscribe = null;
     }
     ctl = controller || null;
+    connectUnsupported = false;
     if (ctl && typeof ctl.subscribe === 'function') {
       unsubscribe = ctl.subscribe(() => render());
     }
