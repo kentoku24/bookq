@@ -23,7 +23,7 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 
 ```bash
 BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
-  BOOKQ_RS_NATIVE=all BOOKQ_RS_NATIVE_STRICT=1 SECRET_KEY=dev-not-a-secret \
+  SECRET_KEY=dev-not-a-secret \
   ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
   BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs

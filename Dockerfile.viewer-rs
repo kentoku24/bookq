@@ -69,9 +69,8 @@ COPY web/static /web/static
 COPY web/templates /web/templates
 COPY web/perf /web/perf
 
-# No BOOKQ_UPSTREAM default — #408 makes "unset" mean upstream-absent
-# (501/401 fail-fast). Dev/strangler stacks that still want the Python
-# fall-through set it explicitly in compose.
+# #532: strangler proxy 撤去済み — upstream/gate env は存在しない。
+# 未知経路は 501、認証不能は 401 で fail-fast する。
 ENV BOOKQ_BIND=0.0.0.0:8080
 # #401 shell/static payload root (the /app tree copied above).
 ENV BOOKQ_WEB_DIR=/web
