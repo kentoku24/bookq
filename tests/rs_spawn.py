@@ -22,10 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _external_root_ok(root: Path) -> bool:
-    """root の祖先 (自分自身を含む) のどれかが /Volumes/ 配下の実マウント
-    ポイントなら True。アンマウント後に startup disk 上へできた
-    /Volumes/<name> のファントム dir へ書き込むのを防ぐ。"""
-    p = root
+    """True when some ancestor of `root` (itself included) is a real mount
+    point under /Volumes/. Guards against writing into the phantom
+    /Volumes/<name> dir an unmount can leave on the startup disk."""
+    p = root.resolve()
     while True:
         if str(p).startswith("/Volumes/") and os.path.ismount(p):
             return True
@@ -35,13 +35,12 @@ def _external_root_ok(root: Path) -> bool:
 
 
 def _target_dir() -> Path:
-    """この checkout の cargo target dir。
+    """Cargo target dir for this checkout.
 
-    BOOKQ_TARGET_DIR / CARGO_TARGET_DIR_BASE / CARGO_TARGET_DIR は
-    「ルート」として扱い、checkout 名のサブdirを下に作る — 並行
-    worktree が 1 つの target を取り合ってバイナリを上書きし合うのを
-    防ぐため。未設定・外部ボリューム未接続時は rust/target に
-    フォールバック。
+    BOOKQ_TARGET_DIR / CARGO_TARGET_DIR_BASE / CARGO_TARGET_DIR is treated
+    as a *root* — the checkout name is appended so parallel worktrees can
+    never fight over one target dir and overwrite each other's binary.
+    Falls back to rust/target when unset or no external volume is mounted.
     """
     root = (
         os.environ.get("BOOKQ_TARGET_DIR")

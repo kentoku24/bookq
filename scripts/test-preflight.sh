@@ -25,13 +25,13 @@
 set -uo pipefail
 
 MODE=run
-for arg in "$@"; do
+for arg; do
   case "$arg" in
     --check) MODE=check ;;
     --dry-run) MODE=dry ;;
     --clean) MODE=clean ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,24p' "$0"
       exit 0
       ;;
     *)
@@ -78,8 +78,10 @@ is_stale() {
 # ビルド/テスト系プロセスの cwd が worktree 配下なら「使用中」— その worktree には触らない
 worktree_in_use() {
   local wt="$1" pid cwd
-  command -v lsof >/dev/null 2>&1 || return 1
-  command -v pgrep >/dev/null 2>&1 || return 1
+  # 判定ツールが無い環境では「使用中扱い」に倒す — 保護が無言で外れて
+  # 稼働中 worktree の target を消す方が掃除漏れより悪い
+  command -v lsof >/dev/null 2>&1 || return 0
+  command -v pgrep >/dev/null 2>&1 || return 0
   while read -r pid; do
     [ -n "$pid" ] || continue
     cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
@@ -118,7 +120,7 @@ maybe_rm() {
 }
 
 reclaim() {
-  local d wt sub t pw prefix keep
+  local d wt sub t pw prefix
   # --- 1. .worktrees/ 直下の孤児 dir (worktree list 未登録 & stale) ---
   local wt_list
   wt_list="$(git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0,10)}')"
@@ -173,12 +175,15 @@ reclaim() {
     fi
   fi
 
-  # --- 5. tmp 残骸 (pytest-*, bookq-thumbs) ---
+  # --- 5. tmp 残骸 (pytest-<N> leaf のみ — 親 pytest-of-<user> は触らない, bookq-thumbs) ---
   local tbase
   tbase="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)}"
   while IFS= read -r t; do
     [ -n "$t" ] && maybe_rm "$t"
-  done < <(find "$tbase" /private/tmp -maxdepth 1 -type d -name 'pytest-*' -mtime +1 2>/dev/null | sort -u)
+  done < <({
+    find "$tbase" /private/tmp -maxdepth 1 -type d -name 'pytest-[0-9]*' -mtime +1 2>/dev/null
+    find "$tbase"/pytest-of-* /private/tmp/pytest-of-* -mindepth 1 -maxdepth 1 -type d -name 'pytest-[0-9]*' -mtime +1 2>/dev/null
+  } | sort -u)
   for t in "$tbase/bookq-thumbs" /private/tmp/bookq-thumbs; do
     [ -e "$t" ] && is_stale "$t" && maybe_rm "$t"
   done

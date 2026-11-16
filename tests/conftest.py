@@ -68,9 +68,12 @@ def pytest_sessionstart(session):
     build is what tips the disk over. The script checks free space, reclaims
     stale residues (other worktrees' targets, caches, tmp) and aborts with a
     suspect list if still below BOOKQ_MIN_FREE_GB (default 25GiB).
-    BOOKQ_SKIP_PREFLIGHT=1 opts out.
+    BOOKQ_SKIP_PREFLIGHT=1 opts out. Skipped under CI — the gate exists for
+    long-lived dev machines where worktree targets accumulate; ephemeral
+    runners start fresh every run and can legitimately sit below the
+    threshold.
     """
-    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1":
+    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
         return
     script = REPO_ROOT / "scripts" / "test-preflight.sh"
     if not script.exists():
@@ -87,6 +90,8 @@ def pytest_sessionstart(session):
 
 def pytest_sessionfinish(session, exitstatus):
     """Post-run nudge — warns when the run ends inside the low-space band."""
+    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
+        return
     try:
         free_gb = shutil.disk_usage(REPO_ROOT).free // (1 << 30)
     except OSError:
