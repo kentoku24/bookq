@@ -60,6 +60,9 @@ foreground 復帰時は `AppModel.foregrounded()` が refresh を事前行使し
 再起動で死んだセッションをページをめくる前に検知する。
 リーダー/ペアリーダーのページ画像は失敗時に目立つ ⚠️ +「再読み込み」ボタンを
 表示し、タップでそのページだけ再取得する（グリッドのカバー類はバッジのみ）。
+DEBUG 起動では `-testToken` と併用する `-testRefreshToken <rt>` で refresh
+経路を再現できる — TEST_MODE サーバーが発行していない値を渡すと refresh が
+401 で拒否され、上記の sessionExpired → Login 遷移をそのまま検証できる。
 
 native フローは TEST_MODE でも Google OAuth を通る（`?client=native` は
 `_TEST_MODE` をバイパスしない）。dev 環境でのアプリ側フロー検証には
