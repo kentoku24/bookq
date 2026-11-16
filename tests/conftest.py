@@ -9,7 +9,9 @@ Run:
 import json
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import time
 import urllib.request
@@ -56,6 +58,50 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "browser: test drives a real browser session"
     )
+
+
+def pytest_sessionstart(session):
+    """Disk-space gate — runs scripts/test-preflight.sh before collection.
+
+    A run auto-builds ~1.5GB of rust/target plus Playwright/uv caches, and
+    several worktrees do this in parallel; on a nearly-full internal SSD the
+    build is what tips the disk over. The script checks free space, reclaims
+    stale residues (other worktrees' targets, caches, tmp) and aborts with a
+    suspect list if still below BOOKQ_MIN_FREE_GB (default 25GiB).
+    BOOKQ_SKIP_PREFLIGHT=1 opts out. Skipped under CI — the gate exists for
+    long-lived dev machines where worktree targets accumulate; ephemeral
+    runners start fresh every run and can legitimately sit below the
+    threshold.
+    """
+    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
+        return
+    script = REPO_ROOT / "scripts" / "test-preflight.sh"
+    if not script.exists():
+        return
+    proc = subprocess.run(["bash", str(script)], cwd=REPO_ROOT)
+    if proc.returncode != 0:
+        pytest.exit(
+            "disk preflight failed — free space still below "
+            f"{os.environ.get('BOOKQ_MIN_FREE_GB', '25')}GiB after cleanup; "
+            "see the suspect list above (or BOOKQ_SKIP_PREFLIGHT=1 to bypass)",
+            returncode=3,
+        )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Post-run nudge — warns when the run ends inside the low-space band."""
+    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
+        return
+    try:
+        free_gb = shutil.disk_usage(REPO_ROOT).free // (1 << 30)
+    except OSError:
+        return
+    if free_gb < int(os.environ.get("BOOKQ_WARN_FREE_GB", "40")):
+        print(
+            f"\npreflight: {free_gb}GiB free — この worktree の rust/target 等を"
+            "片付けること (scripts/test-preflight.sh --clean で安全な残骸を回収可能)",
+            file=sys.stderr,
+        )
 
 
 # Any test that (transitively) requests a browser/page fixture gets the

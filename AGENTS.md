@@ -86,6 +86,8 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - `BOOKQ_TEST_MODE=true` が必須 — viewer-rs が起動時に読み、OAuth をバイパスして mock user を返す。
 - `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
 - `--with-requirements requirements-dev.txt` の付与を省略しないこと (pillow/httpx 等の fixture 依存が入る)。
+- pytest 起動時に `scripts/test-preflight.sh` が conftest `pytest_sessionstart` から自動実行される。repo があるボリュームの空きが `BOOKQ_MIN_FREE_GB` (既定 25GiB, `disk-guard --check` と同一) を下回ると、安全な残骸 (stale/マージ済み他worktreeの `rust/target`・`ios/build`・android ビルド出力、`.worktrees/` の孤児dir、uv cache、古い `pytest-*` tmp、`ms-playwright` 旧バージョン) を回収してから再チェックし、それでも不足なら容疑者リスト付きで abort する。`BOOKQ_WARN_FREE_GB` (既定 40GiB) 未満は警告のみ。`--dry-run` で対象列挙、`--clean` で任意タイミングの回収、緊急回避は `BOOKQ_SKIP_PREFLIGHT=1`。CI (`CI` env) ではスキップ — 残留物が世代を跨がない ephemeral runner では閾値未満が正常のため。削除は「stale (> `BOOKQ_STALE_DAYS` 既定7日) or マージ済み」かつ「使用中プロセスの cwd が無い」ものに限定され、自分の worktree は対象外。
+- `rs_spawn` の `cargo build` 出力先は `BOOKQ_TARGET_DIR` / `CARGO_TARGET_DIR_BASE` / `CARGO_TARGET_DIR` で外付けボリュームに移転できる (worktree ごと ~1.5GB が内蔵SSDを埋めない)。値は「ルート」で、その下に checkout 名のサブdirが作られる (並行 worktree 同士で target を共有しない)。`/Volumes/` 配下の実マウントのみ有効 — 未接続や内部パスは `rust/target` にフォールバック。例: `export CARGO_TARGET_DIR_BASE=/Volumes/Sabrent2T/cargo-target`。
 - 隠しルート機能は viewer-rs (`rust/viewer-rs/src/` visibility/state) + `web/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
 
 ### デプロイ / ネットワーク
@@ -101,6 +103,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - **検証終了時は必ず `./scripts/sim-teardown.sh` を実行して CPU 監査に合格させること**（sim shutdown + Clone 削除 + 残留 diagnose/idb 整理を一括。`--dev-env <name>` で検証用 dev 環境の down まで）。`simctl shutdown` だけでは孤児化した診断・runtime プロセスが残りホスト CPU を食い潰すことがある。xcodebuild test を使った検証は終了まで poll してから片付けること。詳細: `.claude/skills/ios-simulator/references/teardown.md`。
 - **ネイティブアプリの実機デプロイは `./scripts/ios-device-deploy.sh`**（paired iPhone へ build → install → launch を一括。`--udid`/`--release`/`--no-launch`/`DEVICE_UDID`）。詳細は `.claude/skills/ios-device-deploy/SKILL.md`。`DEVELOPMENT_TEAM` は pbxproj 記載済みで override 不要。
 - **iOS の単体+UI テストは `.github/workflows/ios.yml` が `xcode-27` イメージ（iOS 27 SDK 搭載 preview runner）で実行**（`BookqTests` + `BookqUITests`、TEST_MODE 合成サーバー + シミュレータ）。ローカル再現は `.github/scripts/ios-ui-test.sh`（サーバー起動は各自）。`CODE_SIGNING_ALLOWED=NO` は禁止 — 署名なしアプリは Keychain 書き込みが失敗し AuthManagerTests が落ちる。詳細は `docs/ios-app.md` テスト節。
+- **UI テスト実行前の環境衛生チェック（必須・自動化済み）**: `xcodebuild test` / UI テストを回す前に `scripts/ui-test-preflight.sh` を実行する（`.github/scripts/ios-ui-test.sh` 経由なら自動で走る）。stale なテストサーバーの kill・reading-positions 残存の警告・メモリ/SSD の確認と安全なクリーンまで自動で行い、未解決の問題があれば exit 1。WARN が出た項目のみ手動対処が必要。背景: 2026-11-16 に Python 時代の孤立 uvicorn が :8080 を占有し、stale な読書位置 state で `ReaderUITests` が連続失敗した実例あり — 同種の stale サーバーは preflight が自動で除去する。
 
 ### Android (`android/`)
 

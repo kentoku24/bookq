@@ -1,3 +1,4 @@
+import BookqCore
 import Foundation
 import SwiftUI
 

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Bookq
+@testable import BookqCore
 
 /// JS encodeURIComponent parity — the same cases the web client produces.
 final class ImageURLTests: XCTestCase {

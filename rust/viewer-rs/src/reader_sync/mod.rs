@@ -518,6 +518,7 @@ impl Registry {
     }
 
     /// Live session count (gateway tests assert reset empties the registry).
+    #[cfg(test)]
     pub async fn session_count(&self) -> usize {
         self.inner.lock().await.sessions.len()
     }

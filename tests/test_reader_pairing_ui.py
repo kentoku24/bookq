@@ -740,15 +740,42 @@ def test_status_strip_button_has_44px_target(page, server):
 
 def test_status_strip_leaves_a11y_tree_when_chrome_hides(page, server):
     """A toolbar-hidden strip must leave the a11y tree entirely — an
-    invisible-but-focusable control is worse than no control."""
+    invisible-but-focusable control is worse than no control. Focus
+    already on the button is moved off, never left on an aria-hidden
+    element."""
     _with_mock(page)
     _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    page.locator("#pair-status-btn").focus()
     page.evaluate("() => window.__toggleToolbarZone()")
     assert "hidden" in page.locator("#pair-status").get_attribute("class")
     assert page.locator("#pair-status").get_attribute("aria-hidden") == "true"
     assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    assert page.evaluate("document.activeElement.tagName") == "BODY"
     page.evaluate("() => window.__toggleToolbarZone()")
     assert page.locator("#pair-status").get_attribute("aria-hidden") == "false"
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "0"
+
+
+def test_status_strip_inert_under_hidden_toolbar_ancestor(page, server):
+    """#159: the visibility check follows ancestors, not just the strip's
+    own flags — a strip (re)built while the toolbar is already hidden,
+    or a hide path the app.js mirror missed, must not leave a tabbable
+    but invisible control behind."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    page.evaluate("() => window.__toggleToolbarZone()")   # chrome hides both
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    # drift the mirror misses: strip loses its own flag while the
+    # toolbar stays .hidden — the ancestor check keeps it inert
+    page.evaluate(
+        "() => document.getElementById('pair-status')"
+        ".classList.remove('hidden')")
+    assert page.locator("#pair-status").get_attribute("aria-hidden") == "true"
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    # and a re-render that clears the strip's own [hidden] changes nothing
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    page.evaluate("() => window.__toggleToolbarZone()")
     assert page.locator("#pair-status-btn").get_attribute("tabindex") == "0"
 
 

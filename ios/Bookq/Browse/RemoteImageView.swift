@@ -80,9 +80,15 @@ final class RemoteImageLoader: ObservableObject {
 struct RemoteImageView: View {
     let url: URL?
     var contentMode: ContentMode = .fill
+    /// Reader pages opt in: a failed fetch shows a 再読み込み button that
+    /// re-runs the load. Grid covers stay badge-only — they sit inside
+    /// Buttons, where a nested control can't live.
+    var retryable: Bool = false
     var onImageLoaded: ((UIImage) -> Void)? = nil
     @State private var image: UIImage?
     @State private var failed = false
+    /// Bumped by retry() — `.task(id:)` refires and load() runs again.
+    @State private var retryTick = 0
 
     /// Solid dark-gray stand-in rendered while `image == nil`. Keeping the
     /// body a single `Image` (only the UIImage value changes on load) avoids
@@ -96,6 +102,12 @@ struct RemoteImageView: View {
         }
     }()
 
+    /// `.task(id:)` key — `url` alone wouldn't refire on retry().
+    private struct LoadKey: Hashable {
+        var url: URL?
+        var tick: Int
+    }
+
     var body: some View {
         // Read the cache synchronously so a warm image renders on the FIRST
         // pass — an async nil→image swap mid-layout is what left grid-cell
@@ -105,14 +117,41 @@ struct RemoteImageView: View {
             .resizable()
             .aspectRatio(contentMode: contentMode)
             .overlay {
-                Image(systemName: failed ? "exclamationmark.triangle" : "book.closed")
-                    .foregroundStyle(.secondary)
+                // A failed fetch must read differently from an in-flight
+                // load: filled orange triangle vs the quiet book glyph.
+                Image(systemName: failed
+                      ? "exclamationmark.triangle.fill" : "book.closed")
+                    .font(failed ? .title3 : .body)
+                    .foregroundStyle(failed ? .orange : .secondary)
                     .opacity((image ?? cached) == nil ? 1 : 0)
             }
-            .task(id: url) { await load() }
+            // Kept as a separate overlay so the retry Button never shares
+            // the status icon's view identity (hit-test stability).
+            .overlay(alignment: .bottom) {
+                if failed && retryable && (image ?? cached) == nil {
+                    Button("再読み込み") { retry() }
+                        .font(.caption2)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .padding(.bottom, 8)
+                }
+            }
+            .task(id: LoadKey(url: url, tick: retryTick)) { await load() }
+    }
+
+    /// Tap-to-retry for `retryable` pages — clears the failure badge and
+    /// refires `.task` so load() fetches again (failures are never cached,
+    /// and the loader's inFlight entry is already gone).
+    private func retry() {
+        failed = false
+        retryTick += 1
     }
 
     private func load() async {
+        // A url/tick refire (tier flip, spread regroup, retry) must not
+        // inherit the previous attempt's failure badge — show the quiet
+        // loading glyph until this fetch resolves.
+        failed = false
         // No cover URL = absent thumb (web shows the neutral placeholder);
         // ⚠️ is reserved for a fetch that actually failed.
         guard let url else { return }

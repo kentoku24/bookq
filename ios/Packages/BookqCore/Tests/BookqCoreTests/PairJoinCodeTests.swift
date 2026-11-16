@@ -1,5 +1,5 @@
 import XCTest
-@testable import Bookq
+@testable import BookqCore
 
 /// PairJoinCode.extract — the scanned-QR payload parser. The leader's QR
 /// carries `<origin>/#/join/<code>` (pairUI.js / QRImage parity); bare

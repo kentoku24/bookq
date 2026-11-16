@@ -28,10 +28,12 @@ uv run --with playwright playwright install chromium
 
 `--with-requirements requirements-dev.txt` is required — the `server` fixture boots the viewer-rs binary and the fixture tree builders need pillow/httpx from `requirements-dev.txt`.
 
+Every pytest start runs `scripts/test-preflight.sh` (conftest `pytest_sessionstart`): below `BOOKQ_MIN_FREE_GB` (default 25GiB) it reclaims stale residues — other worktrees' `rust/target`/`ios/build` (stale or merged, never in-use), orphan `.worktrees` dirs, uv cache, old tmp — then aborts with a suspect list if still short. `--dry-run`/`--clean`/`--check` modes; `BOOKQ_SKIP_PREFLIGHT=1` bypasses. Point `BOOKQ_TARGET_DIR` (or `CARGO_TARGET_DIR_BASE`/`CARGO_TARGET_DIR`) at a mounted `/Volumes/...` dir to build the ~1.5GB target off the internal SSD — a per-checkout subdir is appended automatically.
+
 Run the app locally without Docker or OAuth:
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 BOOKQ_RS_NATIVE=all BOOKQ_RS_NATIVE_STRICT=1 SECRET_KEY=dev-not-a-secret ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
+BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 SECRET_KEY=dev-not-a-secret ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 Bring up a throwaway development environment for the current worktree (Docker, no OAuth, reachable from the tailnet — each environment takes one of ten fixed slots (node `dev-XX`, XX = 01..10), so no port allocation or shared gateway):

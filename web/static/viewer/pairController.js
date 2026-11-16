@@ -542,7 +542,19 @@
   }
 
   function _boot() {
-    if (!_readCreds() && !_hasPersistedResume()) return;
+    if (!_readCreds() && !_hasPersistedResume()) {
+      // #157: a tombstone left by an offline leave still owes the peer its
+      // LEAVE — creating the client fires the boot flush (RESUME+LEAVE on
+      // a throwaway link) even though this tab itself has no session.
+      try {
+        var PC = window.PairClient;
+        if (PC && typeof PC.peekLeaveTombstone === 'function' &&
+            PC.peekLeaveTombstone()) {
+          _ensureClient();
+        }
+      } catch (e) { /* tombstone flush is best-effort */ }
+      return;
+    }
     var FV = window.FolderVisibility;
     if (!FV || typeof FV.ready !== 'function') {
       // Module absent (stale shell): keep the old immediate rejoin — the

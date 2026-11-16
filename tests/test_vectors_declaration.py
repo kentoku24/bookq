@@ -25,7 +25,7 @@ EXPECTED = {
 # Language -> test file that consumes the vectors for that language.
 READERS = {
     "js": "tests/test_conformance_vectors_js.py",
-    "swift": "ios/BookqTests/ConformanceVectorsTests.swift",
+    "swift": "ios/Packages/BookqCore/Tests/BookqCoreTests/ConformanceVectorsTests.swift",
     "kotlin": "android/core/src/test/kotlin/dev/bookq/core/ConformanceVectorsTest.kt",
     "rust": "rust/viewer-rs/src/conformance_vectors.rs",
 }

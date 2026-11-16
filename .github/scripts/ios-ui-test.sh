@@ -41,6 +41,12 @@ rm -rf "$RESULTS/build.xcresult" "$RESULTS/tests.xcresult" \
 # nobody waits on it.
 xcodebuild -list -project "$PROJECT" >/dev/null 2>&1 &
 
+# --- preflight ---------------------------------------------------------
+# Environment hygiene before tests: kills stale test servers squatting
+# the port, warns on persisted reading-positions and low memory/disk.
+# Non-fatal here — the server gate below stays the readiness authority.
+"$(dirname "$0")/../../scripts/ui-test-preflight.sh" || true
+
 # --- server gate -------------------------------------------------------
 # Host-side check is sufficient: the simulator shares the host network
 # namespace for loopback, so if the host can reach it the sim can too.

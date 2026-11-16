@@ -86,8 +86,8 @@ jobs:
       - name: pool slot regression tests
         run: bash .github/scripts/test_pool_slot.sh
 
-  # #503 rs-only: the suite oracles viewer-rs (no-upstream,
-  # BOOKQ_RS_NATIVE=all + STRICT). Split on the `browser` marker;
+  # #503/#532 rs-only: the suite oracles viewer-rs (all routes
+  # native). Split on the `browser` marker;
   # rust-cache keeps the per-lane cargo build warm (each lane spawns its
   # own fixture binary). `uv-gate` below keeps the required-check name
   # and aggregates these rs lanes.
@@ -95,7 +95,15 @@ jobs:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    # ~272s single-runner suite (the PR-gate critical path, #331) —
+    # pytest-split shards it across 3 runners. Until a committed
+    # `.test_durations` exists the split is even-by-count; each shard
+    # stores its own durations file as an artifact for a follow-up merge.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -132,7 +140,17 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run non-browser test suite against viewer-rs
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --splits 3 --group ${{ matrix.shard }} --store-durations --reruns 1 --reruns-delay 2
+
+      # Feeds the follow-up balanced-split merge (#331): upload each
+      # shard's durations so a complete `.test_durations` can be committed.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-durations-${{ matrix.shard }}
+          path: .test_durations
+          if-no-files-found: ignore
+          retention-days: 7
 
   pytest-rs-browser:
     needs: changes-workflow-smoke
@@ -251,3 +269,21 @@ jobs:
 
       - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/8)
         run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 8 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+
+  # Required-check anchor for the safari matrix (#540): matrix legs report
+  # `safari-gate (N)` when they run but a single bare `safari-gate` when the
+  # job is skipped, so no one context name covers both shapes — this gate
+  # reports a stable name backed by needs.safari-gate.result, same pattern
+  # as uv-gate above.
+  safari-gate-all:
+    needs: [changes-workflow-smoke, safari-gate]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify safari shards
+        env:
+          SAFARI: ${{ needs.safari-gate.result }}
+        run: |
+          echo "safari-gate: $SAFARI"
+          [ "$SAFARI" = "success" ]

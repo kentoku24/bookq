@@ -39,8 +39,6 @@ services:
       # OAuth を丸ごとバイパス（viewer-rs が起動時に読む）。
       - BOOKQ_TEST_MODE=true
       - BOOKQ_BIND=0.0.0.0:8080
-      - BOOKQ_RS_NATIVE=all
-      - BOOKQ_RS_NATIVE_STRICT=1
       - GOOGLE_CLIENT_ID=ci-dummy
       - GOOGLE_CLIENT_SECRET=ci-dummy
       - BASE_URL=https://dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}.ts.net

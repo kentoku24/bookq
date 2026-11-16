@@ -40,7 +40,11 @@ jobs:
               - "web/**"
               - "rust/viewer-rs/**"
 
-  test:
+  # Job id doubles as the required-check context; it must be unique across
+  # workflows — a bare `test` collides with rust.yml's test job and GitHub
+  # matches required checks by name only, so a pass in one lane could mask
+  # a failure in the other (#540).
+  ios-test:
     needs: changes-ios
     if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
     # xcode-27 image (public preview): the only hosted arm64 image that
@@ -152,8 +156,7 @@ jobs:
         if: steps.sdk.outputs.ok == 'true'
         run: |
           BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_RS_NO_UPSTREAM=true \
-            BOOKQ_BIND=127.0.0.1:8080 \
+            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-ios-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1

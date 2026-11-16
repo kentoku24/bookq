@@ -64,8 +64,6 @@ def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
     env["ALLOWED_EMAILS"] = f"{ALICE['email']},{BOB['email']}"
     env.update({
         "BOOKQ_BIND": f"127.0.0.1:{port}",
-        "BOOKQ_RS_NATIVE": "all",
-        "BOOKQ_RS_NATIVE_STRICT": "1",
         "GOOGLE_CLIENT_ID": "ci-dummy",
         "GOOGLE_CLIENT_SECRET": "ci-dummy",
         "BASE_URL": f"http://127.0.0.1:{port}",

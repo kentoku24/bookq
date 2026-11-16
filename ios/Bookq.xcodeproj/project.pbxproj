@@ -108,6 +108,7 @@
 			);
 			name = Bookq;
 			packageProductDependencies = (
+				A000000000000000000000B1 /* XCSwiftPackageProductDependency "BookqCore" */,
 			);
 			productName = Bookq;
 			productReference = A00000000000000000000020 /* Bookq.app */;
@@ -131,6 +132,7 @@
 			);
 			name = BookqTests;
 			packageProductDependencies = (
+				A000000000000000000000B1 /* XCSwiftPackageProductDependency "BookqCore" */,
 			);
 			productName = BookqTests;
 			productReference = A00000000000000000000021 /* BookqTests.xctest */;
@@ -192,6 +194,9 @@
 			);
 			mainGroup = A00000000000000000000040;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A000000000000000000000B0 /* XCLocalSwiftPackageReference "BookqCore" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A00000000000000000000041 /* Products */;
 			projectDirPath = "";
@@ -579,6 +584,21 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+/* Begin XCLocalSwiftPackageReference section */
+		A000000000000000000000B0 /* XCLocalSwiftPackageReference "BookqCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/BookqCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A000000000000000000000B1 /* XCSwiftPackageProductDependency "BookqCore" */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A000000000000000000000B0 /* XCLocalSwiftPackageReference "BookqCore" */;
+			productName = BookqCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+
 /* End XCConfigurationList section */
 	};
 	rootObject = A00000000000000000000060 /* Project object */;

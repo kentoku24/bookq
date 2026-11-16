@@ -3,33 +3,45 @@ import Foundation
 /// Pure reader model — chapter assembly + spread construction, byte-faithful
 /// to `web/static/app.js` `loadImages` and `web/static/viewer/spread.js`.
 /// Deterministic and unit-tested.
-struct PageRef: Equatable, Hashable {
-    var name: String
-    var folder: String       // leaf folder path this page lives in
-    var isSpacer: Bool = false
+public struct PageRef: Equatable, Hashable {
+    public var name: String
+    public var folder: String       // leaf folder path this page lives in
+    public var isSpacer: Bool = false
 
-    static let spacer = PageRef(name: "__spacer__", folder: "", isSpacer: true)
+    public init(name: String, folder: String, isSpacer: Bool = false) {
+        self.name = name
+        self.folder = folder
+        self.isSpacer = isSpacer
+    }
+
+    public static let spacer = PageRef(name: "__spacer__", folder: "", isSpacer: true)
 }
 
-struct ReaderChapter: Equatable {
-    var name: String
-    var fullPath: String
-    var images: [PageRef]    // real (non-spacer) pages
+public struct ReaderChapter: Equatable {
+    public var name: String
+    public var fullPath: String
+    public var images: [PageRef]    // real (non-spacer) pages
+
+    public init(name: String, fullPath: String, images: [PageRef]) {
+        self.name = name
+        self.fullPath = fullPath
+        self.images = images
+    }
 }
 
-enum ReaderPageMode: String, Equatable {
+@frozen public enum ReaderPageMode: String, Equatable {
     case single, spread
 }
 
 /// Tap-zone verdict — `zoneActionAt` (web/static/app.js).
 /// Edge 30% zones turn pages in the direction `tapForwardLeft` selects
 /// (web default: left = forward), the center band toggles chrome.
-enum ZoneAction: Equatable {
+@frozen public enum ZoneAction: Equatable {
     case turn(Int)      // +1 forward, -1 back
     case toggleChrome
 }
 
-func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
+public func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
     if frac < 0.30 { return .turn(tapForwardLeft ? 1 : -1) }
     if frac > 0.70 { return .turn(tapForwardLeft ? -1 : 1) }
     return .toggleChrome
@@ -45,40 +57,40 @@ func zoneAction(frac: Double, tapForwardLeft: Bool) -> ZoneAction {
 /// top. One formula yields both directions, so finger reversals mid-drag
 /// need no direction lock: pos just follows the finger back through the
 /// origin.
-enum PageTurnMath {
+public enum PageTurnMath {
     /// Horizontal travel (pt) before a drag locks its direction.
-    static let decideDistance: CGFloat = 12
+    public static let decideDistance: CGFloat = 12
     /// Damping applied to drags that point past the first/last spread.
-    static let edgeRubber: CGFloat = 0.35
+    public static let edgeRubber: CGFloat = 0.35
     /// Commit when the predicted end (flick) covers this fraction of the
     /// viewport width, or deliberate travel covers the web touchend
     /// threshold `min(10% width, 70pt)` (app.js — points ≈ CSS px).
-    static let commitPredictedFrac: CGFloat = 0.5
-    static let commitDistanceCap: CGFloat = 70
+    public static let commitPredictedFrac: CGFloat = 0.5
+    public static let commitDistanceCap: CGFloat = 70
     /// Soft resistance past a full-width travel while dragging.
-    static let overshootDamping: CGFloat = 0.3
+    public static let overshootDamping: CGFloat = 0.3
     /// Base flip-through rate (spreads/sec) when `pos` chases
     /// `posTarget` — must exceed a ~10 taps/s input burst or `pos`
     /// falls behind permanently; the per-target ease (`dist/0.12`)
     /// still lands single turns gently. Long jumps scale up ×(dist/3),
     /// capped ×10.
-    static let chaseSpreadsPerSecond: CGFloat = 12
+    public static let chaseSpreadsPerSecond: CGFloat = 12
     /// `/view/?w=` width for in-flight pages — ~1.3× an iPhone's 3×
     /// viewport, so fast-tier bitmaps decode ~4× cheaper than the
     /// 2560px default while flip-through stays sharp enough to read
     /// motion. Settled spreads upgrade to the full rendition.
-    static let fastPageWidth = 1600
+    public static let fastPageWidth = 1600
     /// Peak black overlay on the covered (static) spread mid-turn —
     /// the depth scrim that sells the page-lift metaphor (iBooks /
     /// Android `STACK_SCRIM` parity). Fully covered → this opacity,
     /// fully revealed → 0.
-    static let stackScrimMax: CGFloat = 0.35
+    public static let stackScrimMax: CGFloat = 0.35
 
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
     /// -1 = backward (drag left) — the manga/RTL convention shared with
     /// the web touch handler (`dragPx > 0 → next`).
-    static func dragDirection(dx: CGFloat, dy: CGFloat) -> Int? {
+    public static func dragDirection(dx: CGFloat, dy: CGFloat) -> Int? {
         let ax = abs(dx), ay = abs(dy)
         guard ax > decideDistance, ax > ay else { return nil }
         return dx > 0 ? 1 : -1
@@ -87,7 +99,7 @@ enum PageTurnMath {
     /// Live drag → signed spread delta for `pos`. Odd-symmetric: positive
     /// dx advances pos (forward), negative retreats it (backward); travel
     /// past one viewport keeps moving at `overshootDamping` rate.
-    static func dragDelta(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
+    public static func dragDelta(dx: CGFloat, viewWidth: CGFloat) -> CGFloat {
         guard viewWidth > 0 else { return 0 }
         let p = dx / viewWidth
         let a = abs(p)
@@ -100,7 +112,7 @@ enum PageTurnMath {
     /// current chapter's spread range (`chapterSpreadRange`), which for
     /// a single-chapter work IS the book edge [0, count-1] — web damps
     /// `dragPx *= 0.35` past the chapter edge the same way.
-    static func rangeClamp(_ p: CGFloat, lo: Int, hi: Int) -> CGFloat {
+    public static func rangeClamp(_ p: CGFloat, lo: Int, hi: Int) -> CGFloat {
         let l = CGFloat(lo), h = CGFloat(max(hi, lo))
         if p < l { return l + (p - l) * edgeRubber }
         if p > h { return h + (p - h) * edgeRubber }
@@ -113,7 +125,7 @@ enum PageTurnMath {
     /// over deliberate travel (web touchend `min(10% width, 70px)`);
     /// direction comes from the firing signal so a reversed flick
     /// commits the way it points.
-    static func commitDirection(translation: CGFloat, predicted: CGFloat,
+    public static func commitDirection(translation: CGFloat, predicted: CGFloat,
                                 viewWidth: CGFloat) -> Int? {
         guard viewWidth > 0 else { return nil }
         if abs(predicted) >= viewWidth * commitPredictedFrac {
@@ -131,24 +143,24 @@ enum PageTurnMath {
     /// away; backward (`pos = i-f`) dims the current spread by f as the
     /// previous one covers it. Integer `pos` yields 0 for free, and
     /// edge overshoot is excluded so rubber-banding never dims.
-    static func coveredFraction(_ pos: CGFloat, count: Int) -> CGFloat {
+    public static func coveredFraction(_ pos: CGFloat, count: Int) -> CGFloat {
         guard pos > 0, pos < CGFloat(count - 1) else { return 0 }
         return min(max(ceil(pos) - pos, 0), 1)
     }
 }
 
-struct ReaderWork: Equatable {
-    var clickedPath: String
-    var images: [PageRef]             // global, including spacers
-    var chapters: [ReaderChapter]
-    var boundaries: [Int]             // global index where each chapter starts
-    var globalToReal: [Int]           // -1 for spacers
-    var realCount: Int
-    var spreads: [[Int]]              // per-spread page indices (non-spacer only)
-    var idxToSpread: [Int]            // global idx → spread index (-1 spacer)
-    var pageMode: ReaderPageMode
+public struct ReaderWork: Equatable {
+    public var clickedPath: String
+    public var images: [PageRef]             // global, including spacers
+    public var chapters: [ReaderChapter]
+    public var boundaries: [Int]            // global index where each chapter starts
+    public var globalToReal: [Int]           // -1 for spacers
+    public var realCount: Int
+    public var spreads: [[Int]]              // per-spread page indices (non-spacer only)
+    public var idxToSpread: [Int]            // global idx → spread index (-1 spacer)
+    public var pageMode: ReaderPageMode
 
-    var isCrossChapter: Bool { chapters.count > 1 }
+    public var isCrossChapter: Bool { chapters.count > 1 }
 
     /// Sibling leaf folders of `path` — `getSiblingLeafFolders` (app.js).
     /// Returns the parent node's children that are leaf folders
@@ -156,7 +168,7 @@ struct ReaderWork: Equatable {
     /// `nil` when `path` is a top-level node (no parent → single chapter).
     /// Depth guard parity with `SIBLING_AUTOLOAD_MIN_DEPTH = 2`: a folder at
     /// raw depth < 2 never concatenates siblings (web/server parity, #274).
-    static func siblingLeaves(of path: String, in roots: [TreeNode]) -> [(node: TreeNode, path: String)]? {
+    public static func siblingLeaves(of path: String, in roots: [TreeNode]) -> [(node: TreeNode, path: String)]? {
         guard path.split(separator: "/").count - 1 >= 2 else { return nil }
         func walk(_ nodes: [TreeNode], _ parent: String) -> [(node: TreeNode, path: String)]? {
             for n in nodes where n.isFolder {
@@ -174,7 +186,7 @@ struct ReaderWork: Equatable {
     }
 
     /// Which chapter a global index belongs to — `getCurrentChapterInfo`.
-    func chapterInfo(at globalIdx: Int) -> (chapterIdx: Int, name: String, localIdx: Int) {
+    public func chapterInfo(at globalIdx: Int) -> (chapterIdx: Int, name: String, localIdx: Int) {
         var ci = 0
         if boundaries.count > 1 {
             for i in 1..<boundaries.count where globalIdx >= boundaries[i] { ci = i }
@@ -185,14 +197,14 @@ struct ReaderWork: Equatable {
     }
 
     /// Display index (real pages only) — `globalToRealIdx`.
-    func realIndex(at globalIdx: Int) -> Int {
+    public func realIndex(at globalIdx: Int) -> Int {
         guard globalIdx >= 0 && globalIdx < globalToReal.count else { return -1 }
         return globalToReal[globalIdx]
     }
 
     /// Chapter-local page index clamped to that chapter's image range
     /// (`saved.page` semantics — always a real page).
-    func resumeGlobalIndex(chapterIdx: Int, localIdx: Int) -> Int {
+    public func resumeGlobalIndex(chapterIdx: Int, localIdx: Int) -> Int {
         let ci = boundaries.indices.contains(chapterIdx) ? chapterIdx : 0
         let b = boundaries[ci]
         let count = chapters[ci].images.count
@@ -203,7 +215,7 @@ struct ReaderWork: Equatable {
     /// Chapter list construction — mirrors loadImages' sibling/mixed/fallback
     /// branching. `images(folder:)` fetches /api/v1/images only for the plain
     /// fallback case (tree leaf and mixed-self use direct children).
-    static func chapters(for path: String, in roots: [TreeNode]) -> (list: [ReaderChapter], cross: Bool) {
+    public static func chapters(for path: String, in roots: [TreeNode]) -> (list: [ReaderChapter], cross: Bool) {
         let siblings = siblingLeaves(of: path, in: roots) ?? []
         let leaves = siblings.filter { $0.node.isFolder && BrowseModel.hasOnlyImages($0.node) }
         let selfNode = BrowseModel.node(at: path, in: roots)
@@ -242,7 +254,7 @@ struct ReaderWork: Equatable {
     /// Assemble the work: boundaries + spacer padding (cross-chapter only)
     /// + real-index maps + spreads. Spacer padding uses mode/offset AT LOAD —
     /// runtime toggles rebuild spreads only (web parity).
-    static func assemble(clickedPath: String, chapters: [ReaderChapter],
+    public static func assemble(clickedPath: String, chapters: [ReaderChapter],
                          pageMode: ReaderPageMode, spreadOffset: Int) -> ReaderWork {
         var images: [PageRef] = []
         var boundaries: [Int] = []
@@ -286,7 +298,7 @@ struct ReaderWork: Equatable {
 
     /// `rebuildSpreads` (spread.js) — groups pages into spreads, filters
     /// spacers, marks chapter-start spreads.
-    func rebuildSpreads(offset: Int) -> ReaderWork {
+    public func rebuildSpreads(offset: Int) -> ReaderWork {
         var groups: [[Int]] = []
         let n = images.count
         if pageMode == .spread {
@@ -316,7 +328,7 @@ struct ReaderWork: Equatable {
     }
 
     /// New work after a mode/offset change (runtime toggle — no re-pad).
-    func withMode(_ mode: ReaderPageMode, offset: Int) -> ReaderWork {
+    public func withMode(_ mode: ReaderPageMode, offset: Int) -> ReaderWork {
         var w = self
         w.pageMode = mode
         return w.rebuildSpreads(offset: offset)
@@ -324,14 +336,14 @@ struct ReaderWork: Equatable {
 
     /// Page-mode rule shared by the device reader and the external-display
     /// projection: landscape viewport + spread enabled → .spread.
-    static func pageMode(for viewport: CGSize, landscapeSpread: Bool) -> ReaderPageMode {
+    public static func pageMode(for viewport: CGSize, landscapeSpread: Bool) -> ReaderPageMode {
         (viewport.width >= viewport.height && landscapeSpread) ? .spread : .single
     }
 
     /// `spreadMetrics` equivalent — fit a spread into the viewport: pages
     /// share one height, each width = ar*h (+gap). Shared by ReaderView's
     /// spreadCell and ExternalReaderView so both lay out identically.
-    static func spreadFit(ars: [CGFloat], gap: CGFloat, in size: CGSize) -> CGSize {
+    public static func spreadFit(ars: [CGFloat], gap: CGFloat, in size: CGSize) -> CGSize {
         let arSum = max(ars.reduce(0, +), 0.001)
         var h = size.height
         var w = arSum * h + gap * CGFloat(ars.count - 1)
@@ -346,7 +358,7 @@ struct ReaderWork: Equatable {
     /// covering chapter `ci`'s real pages. Spreads never mix chapters
     /// (spacer padding aligns boundaries), so the range is contiguous.
     /// Swipes and keys clamp turns to it; taps and overview jumps cross.
-    func chapterSpreadRange(_ ci: Int) -> (lo: Int, hi: Int) {
+    public func chapterSpreadRange(_ ci: Int) -> (lo: Int, hi: Int) {
         guard !spreads.isEmpty else { return (0, 0) }
         if boundaries.count <= 1 { return (0, spreads.count - 1) }
         let c = min(max(ci, 0), boundaries.count - 1)
@@ -367,14 +379,14 @@ struct ReaderWork: Equatable {
     }
 
     /// `spreadOf` — spread containing global index.
-    func spreadOf(_ idx: Int) -> Int {
+    public func spreadOf(_ idx: Int) -> Int {
         guard idx >= 0 && idx < idxToSpread.count else { return 0 }
         return max(0, idxToSpread[idx])
     }
 
     /// Chapter-opening spread — `chapterStart` (spread.js `rebuildSpreads`):
     /// a spread whose first page is a non-zero chapter boundary.
-    func chapterStartSpread(_ s: Int) -> Bool {
+    public func chapterStartSpread(_ s: Int) -> Bool {
         guard spreads.indices.contains(s), let first = spreads[s].first else { return false }
         guard let at = boundaries.firstIndex(of: first) else { return false }
         return at > 0
@@ -384,21 +396,21 @@ struct ReaderWork: Equatable {
 
     /// Spread range [lo, hi] of the chapter `globalIdx` belongs to —
     /// `chapterSpreadRange` resolved through `chapterInfo`.
-    func chapterSliderRange(at globalIdx: Int) -> (lo: Int, hi: Int) {
+    public func chapterSliderRange(at globalIdx: Int) -> (lo: Int, hi: Int) {
         chapterSpreadRange(chapterInfo(at: globalIdx).chapterIdx)
     }
 
     /// `chapterSliderMax` — the slider's span: hi - lo spreads inside the
     /// current chapter only. Cross-chapter moves never come from the
     /// slider; they happen via page turns at the chapter edges.
-    func chapterSliderMax(at globalIdx: Int) -> Int {
+    public func chapterSliderMax(at globalIdx: Int) -> Int {
         let r = chapterSliderRange(at: globalIdx)
         return max(r.hi - r.lo, 0)
     }
 
     /// `idxToChapterSlider` — global index → slider value: the spread's
     /// offset inside its chapter, clamped to 0...span.
-    func idxToChapterSlider(_ globalIdx: Int) -> Int {
+    public func idxToChapterSlider(_ globalIdx: Int) -> Int {
         let r = chapterSliderRange(at: globalIdx)
         return min(max(spreadOf(globalIdx) - r.lo, 0), max(r.hi - r.lo, 0))
     }
@@ -406,7 +418,7 @@ struct ReaderWork: Equatable {
     /// `chapterSliderToIdx` — slider value → first global page of the
     /// clamped chapter-local spread (`spreads[...].pages[0]` parity).
     /// nil when the resolved spread is out of table.
-    func chapterSliderToIdx(_ val: Int, at globalIdx: Int) -> Int? {
+    public func chapterSliderToIdx(_ val: Int, at globalIdx: Int) -> Int? {
         let r = chapterSliderRange(at: globalIdx)
         let s = min(max(r.lo + val, r.lo), r.hi)
         guard spreads.indices.contains(s) else { return nil }
@@ -414,12 +426,12 @@ struct ReaderWork: Equatable {
     }
 
     /// Next/prev spread navigation — `goNext`/`goPrev`.
-    func nextSpreadFirstPage(after globalIdx: Int) -> Int? {
+    public func nextSpreadFirstPage(after globalIdx: Int) -> Int? {
         let s = spreadOf(globalIdx)
         return s + 1 < spreads.count ? spreads[s + 1][0] : nil
     }
 
-    func prevSpreadFirstPage(before globalIdx: Int) -> Int? {
+    public func prevSpreadFirstPage(before globalIdx: Int) -> Int? {
         let s = spreadOf(globalIdx)
         return s > 0 ? spreads[s - 1][0] : nil
     }
