@@ -1,8 +1,7 @@
-"""Shared test-backend spawner — viewer-rs only (#503).
+"""Shared test-backend spawner — viewer-rs only (#503, #532).
 
-Spawns the `viewer-rs` binary: same synthetic tree, same contract surface.
-The binary boots no-upstream (`BOOKQ_RS_NATIVE=all` +
-`BOOKQ_RS_NATIVE_STRICT=1`), exactly as production does.
+Spawns the `viewer-rs` binary: same synthetic tree, same contract surface,
+exactly as production does (all routes native, no upstream).
 
 Builds the binary with `cargo build -p viewer-rs` on first use when
 `rust/target/debug/viewer-rs` is missing.
@@ -48,9 +47,6 @@ def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
     env.update(
         {
             "BOOKQ_BIND": f"127.0.0.1:{port}",
-            "BOOKQ_RS_NATIVE": "all",
-            "BOOKQ_RS_NATIVE_STRICT": "1",
-            # STRICT requires complete OAuth config even in test mode.
             "GOOGLE_CLIENT_ID": "ci-dummy",
             "GOOGLE_CLIENT_SECRET": "ci-dummy",
             "BASE_URL": base_url,

@@ -279,8 +279,8 @@ docker rm -f <迷子のコンテナ名>
 
 構成:
 
-- `viewer-rs` は `BOOKQ_UPSTREAM` 未設定 = **upstream 不在モード**（#408）で動く（明示的に有効化する `BOOKQ_RS_NO_UPSTREAM=1` も同等）。従来の暗黙デフォルト `http://viewer:8080` は #408 で廃止 — 指定し忘れは fail-closed になる。native 化されていない経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエスト（`caller_or_proxy` の Delegate）は **401** をローカルで返す。v0 `/api/*` は全て 501。lenient（STRICT 無し）起動時は未対応 gate 一覧を WARN に出す。
-- `BOOKQ_RS_NATIVE` 既定は全 gate 列挙（`auth` 含む）。`BOOKQ_RS_NATIVE_STRICT=1` 既定で、gate 抜け・auth OAuth 設定欠落・部分グループは起動拒否。
+- `viewer-rs` は全 route を native に serve する（#532 で strangler proxy を撤去 — `BOOKQ_UPSTREAM` / `BOOKQ_RS_NATIVE` / `BOOKQ_RS_NO_UPSTREAM` / `_STRICT` は廃止）。未知経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエストは **401** をローカルで返す。v0 `/api/*` は全て 501。
+- OAuth 一式の欠落時は `/auth/*` + `/api/v1/auth/token` が 501 を返す（起動時 WARN）。
 - Python `viewer` は #503 で削除（`app/`・`Dockerfile`・`requirements.txt` と共に source tree から除去）。`user-state`/`thumb-cache` volume は viewer-rs が使用する。
 - `tailscale.depends_on` / `cloudflared.depends_on` は viewer-rs を指す（profile service への depends_on は profile を auto-enable してしまうため、viewer への依存は残さない）。
 - `./prd.sh up` は `bookq-prd-viewer-rs`/`tailscale` 2 イメージをビルドし、deploy は `ps -q viewer-rs` の healthcheck + `viewer-rs` image タグの sha 照合で検証する（`/api/v1/version` は認証必須のため HTTP 照合は不可）。
@@ -304,9 +304,9 @@ Python 実装は source tree から削除済みのため、`py-rollback` profile
 当時の手順書どおりの切戻しも可能（古い ref からの再 build で `py-rollback`
 image が復活する）。
 
-#### 新規 native route の有効化
+#### 新規 route の追加 (#532 以降)
 
-`BOOKQ_RS_NATIVE` の列挙に新 gate 名を追加する（`all` は将来 route の自動有効化を防ぐため使わない）。追加の前提は従来どおり:
+全 route が無条件 native のため gate への追加は不要。追加の前提は従来どおり:
 
 | 条件 | 確認方法 |
 |---|---|
@@ -314,13 +314,11 @@ image が復活する）。
 | `cargo test --workspace` が通る | `rust/`（CI `rust.yml` の `test`） |
 | gateway-contract が該当 endpoint を native で通る | CI `rust.yml` の `gateway-contract` |
 
-部分グループ（`tree,search,facets,images` / `tree,reader-sync`）は STRICT 既定により起動時に拒否される。
-
 #### 検証済みの運用ポイント
 
-- `verify_url` は `/api/v1/health`（公開・native）を叩く。v0 `/api/health` は 501。
-- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health` — upstream 不在でも standalone で healthy になる。
-- proxy-hit の観測: no-upstream では fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。cutover 後に残るはずのない 501 が継続していたら contract 漏れの兆候。
+- `verify_url` は `/api/v1/health`（公開）を叩く。v0 `/api/health` は 501。
+- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health`。
+- 未知経路の観測: fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。残るはずのない 501 が継続していたら contract 漏れの兆候。
 
 `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 

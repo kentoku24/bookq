@@ -16,10 +16,9 @@
 //! * `POST /api/v1/pair-reset` — end every live reader-sync session with
 //!   `"reset"` so a stale link-drop session can't hijack the next MATCH.
 //!
-//! All three are gated on `native.test_mode` — outside test mode they 404,
+//! All three are gated on `test_mode` — outside test mode they 404,
 //! exactly like the Python `_pair_report_gate`. No auth: the Python routes
-//! carry none either. No `BOOKQ_RS_NATIVE` endpoint id: test mode implies
-//! the full native surface, and outside test mode these must not exist.
+//! carry none either. Outside test mode these must not exist.
 
 use std::collections::HashMap;
 
@@ -114,19 +113,18 @@ pub fn insert_report(
 
 /// `POST /api/v1/pair-report` + `GET /api/v1/pair-report?id=` — one route,
 /// dispatched on method like the other multi-verb natives. Unknown methods
-/// proxy upstream (which answers 405, same as the Python router).
+/// answer 405 locally (#532).
 pub async fn handle_report(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.test_mode {
+    if !st.test_mode {
         return crate::state::detail(StatusCode::NOT_FOUND, "Not Found");
     }
     match *req.method() {
         axum::http::Method::POST => {
-            let (parts, body) = req.into_parts();
+            let (_parts, body) = req.into_parts();
             let bytes = match http_body_util::BodyExt::collect(body).await {
                 Ok(c) => c.to_bytes(),
                 Err(_) => {
-                    return crate::proxy(&st.upstream, Request::from_parts(parts, Body::empty()))
-                        .await
+                    return crate::state::detail(StatusCode::BAD_REQUEST, "invalid body");
                 }
             };
             let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&bytes) else {
@@ -148,27 +146,26 @@ pub async fn handle_report(State(st): State<AppState>, req: Request<Body>) -> Re
             let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
                 .map(|q| q.0)
                 .unwrap_or_default();
-            // `id` is a required Query param upstream — a missing one keeps
-            // FastAPI's 422 by proxying instead of inventing a shape here.
+            // `id` is a required Query param — a missing one answers 422.
             let Some(id) = q.get("id") else {
-                return crate::proxy(&st.upstream, req).await;
+                return crate::serve::unprocessable("id", "missing", "Field required");
             };
             let reports = st.pair_reports.lock().await;
             let state = reports.get(id.as_str()).cloned().unwrap_or(Value::Null);
             json_body(StatusCode::OK, &serde_json::json!({"state": state}))
         }
-        _ => crate::proxy(&st.upstream, req).await,
+        _ => crate::method_not_allowed("GET, POST"),
     }
 }
 
 /// `POST /api/v1/pair-reset` — end every live reader-sync session with
-/// `"reset"`, returning the count. Unknown methods proxy (upstream 405).
+/// `"reset"`, returning the count. Unknown methods answer 405 locally (#532).
 pub async fn handle_reset(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.test_mode {
+    if !st.test_mode {
         return crate::state::detail(StatusCode::NOT_FOUND, "Not Found");
     }
     if *req.method() != axum::http::Method::POST {
-        return crate::proxy(&st.upstream, req).await;
+        return crate::method_not_allowed("POST");
     }
     let n = st.registry.end_all(END_RESET).await;
     json_body(StatusCode::OK, &serde_json::json!({"ended": n}))

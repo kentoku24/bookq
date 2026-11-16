@@ -26,12 +26,12 @@ ps/inspect only — never exec/restart/stop prod, never read `.env`.
 
 ```bash
 DOWNLOADS_HOST_DIR=<source> ./dev.sh up perf-py --ref <REF> --local --port 8081
-DOWNLOADS_HOST_DIR=<source> ./dev.sh up perf-rs --ref <REF> --rs --local --port 8099
+DOWNLOADS_HOST_DIR=<source> ./dev.sh up perf-rs --ref <REF> --local --port 8099
 ```
 
 - `<REF>`: `origin/main` for a mainline comparison, or the branch under test.
 - **Check ports first**: `docker ps --format '{{.Names}} {{.Ports}}'` — dev-01 usually holds 8080. Pick free ones.
-- The `--rs` env runs viewer-rs in front with proxy fall-through to a co-located Python viewer. `BOOKQ_TEST_MODE=true` (dev default) makes `Native::from_env` enable the **entire** native surface — `BOOKQ_RS_NATIVE` need not be set.
+- (#532: `--rs`/proxy retired — dev envs are rs-only; `BOOKQ_TEST_MODE=true` (dev default) uses the mock user. Historical py-vs-rs comparison below is kept for reference.)
 - Slot pool is 10; check `./dev.sh list` first and never evict others' envs.
 
 ### 3. Verify data + which side answers (STOP if empty)
@@ -76,7 +76,7 @@ Tear down only the envs you created: `./dev.sh down perf-py && ./dev.sh down per
 - `urllib` sends `Accept-Encoding: identity` — gzip cost is **not** measured unless you add the header explicitly; real browsers always accept gzip, so per-request `12 MB → gzip` is a separate (larger) number.
 - Fairness: both envs have fresh `thumb-cache` volumes → equally cold; restart the container for cold-index numbers rather than trusting boot order.
 - rs `dev` image is `--release` — slowness you measure is real, not a debug-build artifact.
-- `BOOKQ_RS_NATIVE` unset in test mode is fine (all-native); to pin a subset export `DEV_RS_NATIVE=<csv>` at `up` time.
+- (#532: gate pinning retired — all routes are unconditionally native.)
 
 ## Known structural results (2026-11, library ≈215k imgs / external volume)
 

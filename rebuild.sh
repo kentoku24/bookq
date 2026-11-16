@@ -15,7 +15,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 DEV_COMPOSE="docker-compose.dev.yml"
-DEV_RS_COMPOSE="docker-compose.dev-rs.yml"
 
 die()  { printf '❌ %s\n' "$*" >&2; exit 1; }
 info() { printf '   %s\n' "$*" >&2; }
@@ -402,8 +401,8 @@ deploy_prd() {
 #       イメージはたかだか 1 枚。
 #   ・純 hex SHA / detached など不変参照 → 従来どおりコミット専用タグ
 #     bookq-dev:<sha12>。存在すれば再利用（同じ内容 = 常に同じ ID）。
-# 出力は "TAG SHORT_SHA RS_TAG"（dev.sh がラベルと表示に使う。RS_TAG は
-# DEV_RS=1 時のみ、空のことがある）。
+# 出力は "TAG SHORT_SHA RS_TAG"（dev.sh 互換のため 3 フィールド維持。
+# #532: viewer 自体が viewer-rs のため RS_TAG は常に空）。
 dev_build() {
     local name="${1:?dev build には環境名が必要です}" ref="${2:-}" tag sha sym slug
     local rs_tag=""
@@ -417,23 +416,6 @@ dev_build() {
             | sed -e 's/[^a-z0-9-]/-/g' -e 's/-\{2,\}/-/g' -e 's/^-*//' -e 's/-*$//' \
             | cut -c "1-32" \
             | sed -e 's/-*$//'
-    }
-
-    # DEV_RS=1 のとき同じ build context（ref は git archive、無指定は作業
-    # ツリー）から viewer-rs overlay イメージもビルドする。タグは main 側規則に rs- を
-    # 前置したもの（bookq-dev:rs-ref-<slug> / rs-<sha12> / rs-wt-<name>）。
-    # reuse 判定は py 側と同じく docker image inspect に委ねる。
-    rs_build() {
-        local rs_tag="$1"
-        info "ビルド中: viewer-rs → $rs_tag"
-        if [ -n "$ref" ]; then
-            git archive --format=tar "$sha" \
-                | docker build -q -f Dockerfile.viewer-rs --label com.bookq.dev-image=1 -t "$rs_tag" - >/dev/null \
-                || die "viewer-rs のビルドに失敗しました (ref=$ref)"
-        else
-            docker build -q -f "$SCRIPT_DIR/Dockerfile.viewer-rs" --label com.bookq.dev-image=1 -t "$rs_tag" "$SCRIPT_DIR" >/dev/null \
-                || die "viewer-rs のビルドに失敗しました"
-        fi
     }
 
     if [ -n "$ref" ]; then
@@ -468,22 +450,6 @@ dev_build() {
                 fi
                 ;;
         esac
-        if [ "${DEV_RS:-}" = "1" ]; then
-            case "$tag" in
-                # ref-* は py 側と同じく常時再ビルド（可変エイリアス）、
-                # sha タグは同内容=同 ID なので存在すれば再利用。
-                bookq-dev:ref-*)
-                    rs_tag="bookq-dev:rs-ref-${tag#bookq-dev:ref-}"
-                    rs_build "$rs_tag" ;;
-                *)
-                    rs_tag="bookq-dev:rs-${tag#bookq-dev:}"
-                    if docker image inspect "$rs_tag" >/dev/null 2>&1; then
-                        info "イメージ再利用: $rs_tag"
-                    else
-                        rs_build "$rs_tag"
-                    fi ;;
-            esac
-        fi
         printf '%s %s %s' "$tag" "${sha:0:12}" "$rs_tag"
     else
         tag="bookq-dev:wt-${name}"
@@ -491,10 +457,6 @@ dev_build() {
         docker build -q -f "$SCRIPT_DIR/Dockerfile.viewer-rs" --label com.bookq.dev-image=1 -t "$tag" "$SCRIPT_DIR" >/dev/null \
             || die "ビルドに失敗しました"
         sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-        if [ "${DEV_RS:-}" = "1" ]; then
-            rs_tag="bookq-dev:rs-wt-${name}"
-            rs_build "$rs_tag"
-        fi
         printf '%s %s %s' "$tag" "${sha:0:12}" "$rs_tag"
     fi
 }
@@ -505,11 +467,7 @@ dev_build() {
 # 一度作られたイメージが二度と更新されず、tailscale/ への変更が dev に届かない。
 dev_deploy() {
     : "${DEV_PROJECT:?DEV_PROJECT が未設定です。dev.sh 経由で実行してください。}"
-    local files=(-f "$DEV_COMPOSE")
-    # --rs 環境は viewer-rs サービスと tailscale の serve 先上書きが
-    # overlay に入る（viewer 自体はフォールスルー先として同居）。
-    [ "${DEV_RS:-}" = "1" ] && files+=(-f "$DEV_RS_COMPOSE")
-    docker compose "${files[@]}" -p "$DEV_PROJECT" up -d --build \
+    docker compose -f "$DEV_COMPOSE" -p "$DEV_PROJECT" up -d --build \
         || die "開発環境の起動に失敗しました。ログ: ./dev.sh logs $DEV_NAME"
 }
 
