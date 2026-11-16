@@ -415,10 +415,20 @@ def _kill_ws(pg):
     and poison WebSocket so the client's reconnect loop cannot revive it —
     the server marks the member offline and the peer sees 'peer-away'."""
     pg.evaluate("""() => {
+      window.__RealWS = window.WebSocket;
       const Dead = function () { throw new Error('offline'); };
       Dead.prototype = window.WebSocket.prototype;
       window.WebSocket = Dead;
       window.__wsConns.forEach((ws) => { try { ws.close(); } catch (e) {} });
+    }""")
+
+
+def _restore_ws(pg):
+    """Undo _kill_ws and fire 'online' — the client's online handler flushes
+    any parked leave tombstone on a fresh link (#157)."""
+    pg.evaluate("""() => {
+      if (window.__RealWS) { window.WebSocket = window.__RealWS; }
+      window.dispatchEvent(new Event('online'));
     }""")
 
 
@@ -499,6 +509,110 @@ def test_peer_away_follower_browse_opens_tile_list(devs):
         timeout=15000)
     pf.wait_for_function(
         "() => window.currentFolder === 'simple_manga'", timeout=15000)
+
+
+def test_offline_leave_flushes_leave_and_frees_peer(devs):
+    """#157: leave() while the link is dead still reaches the peer — the
+    tombstone flushes RESUME+LEAVE on the next 'online' instead of leaving
+    the survivor in peer-away until the resume window lapses."""
+    pl, pf = devs
+    _open(pl, "long", "p005.png")
+    _pair_now(pl, pf)
+
+    _kill_ws(pf)                     # follower unreachable, stays dead
+    _await_peer_away(pl)
+    pf.evaluate("() => window.PairController.leave()")
+    # local end stays immediate and final…
+    assert pf.evaluate("() => window.PairController.state.status") == "ended"
+    assert pf.evaluate("() => window.PairController.state.endReason") == "left"
+    # …and the owed LEAVE is parked as a tombstone, not dropped
+    assert pf.evaluate(
+        "() => !!localStorage.getItem('bookq.readerSync.leaveTombstone.v1')")
+
+    _restore_ws(pf)                  # connectivity back → online flush
+    pl.wait_for_function(
+        "() => window.PairController.state.status === 'ended'",
+        timeout=15000)
+    assert pl.evaluate("() => window.PairController.state.endReason") == "left"
+    # delivered → the tombstone is retired
+    pf.wait_for_function(
+        "() => !localStorage.getItem('bookq.readerSync.leaveTombstone.v1')",
+        timeout=15000)
+    # the flush rode a fresh socket: RESUME bound the member, LEAVE ended it
+    types = pf.evaluate("() => window.__wsLog.map(f => f.type)")
+    assert "RESUME" in types and "LEAVE" in types
+    assert types.index("LEAVE") > types.index("RESUME")
+
+
+def test_offline_leave_flushes_on_fresh_boot(browser, server):
+    """#157: a tombstone parked by an offline leave is replayed by a later
+    boot — closing the tab after the leave must not strand the peer."""
+    ctx_l, pl = _dev_page(browser, server)
+    ctx_f, pf = _dev_page(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _kill_ws(pf)
+        _await_peer_away(pl)
+        pf.evaluate("() => window.PairController.leave()")
+        assert pf.evaluate("() => window.PairController.state.status") == "ended"
+
+        pf.close()                   # tab dies before connectivity returns
+        pf2 = ctx_f.new_page()       # fresh tab, same context storage
+        pf2.goto(server)
+        pl.wait_for_function(
+            "() => window.PairController.state.status === 'ended'",
+            timeout=15000)
+        assert pl.evaluate(
+            "() => window.PairController.state.endReason") == "left"
+    finally:
+        ctx_l.close()
+        ctx_f.close()
+
+
+def test_leave_flush_retries_resume_in_use(browser, server):
+    """#157: resume_in_use is transient — the member's old link may still
+    be alive server-side when the first flush lands (~15s of heartbeat
+    silence before the server reaps it). The flush must keep the
+    tombstone and retry instead of dropping the owed LEAVE on the first
+    reject — otherwise a short outage still strands the peer for 300s."""
+    ctx_l, pl = _dev_page(browser, server)
+    ctx_f, pf = _dev_page(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        # Park a tombstone for pf's member while its link stays ALIVE —
+        # the flush's RESUME is answered resume_in_use.
+        creds = pf.evaluate(
+            "() => JSON.parse(sessionStorage.getItem('bookq.readerSync.v1'))")
+        assert creds
+        pf.evaluate(
+            """(c) => localStorage.setItem(
+                'bookq.readerSync.leaveTombstone.v1',
+                JSON.stringify({sessionId: c.sessionId,
+                                memberId: c.memberId,
+                                resumeToken: c.resumeToken,
+                                at: Date.now()}))""", creds)
+        pf.evaluate("() => window.dispatchEvent(new Event('online'))")
+        # at least one RESUME→resume_in_use round-trip lands — and the
+        # tombstone must survive it (pre-fix it was dropped immediately)
+        pf.wait_for_timeout(2000)
+        assert pf.evaluate(
+            "() => !!localStorage.getItem('bookq.readerSync.leaveTombstone.v1')")
+
+        # the member's link finally drops → a later flush rebinds, sends
+        # LEAVE and retires the tombstone — the peer is freed.
+        pf.close()
+        pf2 = ctx_f.new_page()
+        pf2.goto(server)
+        pl.wait_for_function(
+            "() => window.PairController.state.status === 'ended'",
+            timeout=15000)
+        assert pl.evaluate(
+            "() => window.PairController.state.endReason") == "left"
+    finally:
+        ctx_l.close()
+        ctx_f.close()
 
 
 # ── shared anchor: URL hash + ReadingProgress on both devices ─────────────
