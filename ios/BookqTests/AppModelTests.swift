@@ -23,4 +23,15 @@ final class AppModelTests: XCTestCase {
         model.sessionDidExpire()
         XCTAssertEqual(model.phase, .login)
     }
+
+    /// The wiring init installs — `auth.onSessionExpired` must actually
+    /// reach `sessionDidExpire` (calling the method directly can't catch
+    /// a missing/broken closure).
+    func testOnSessionExpiredCallbackDropsReadyToLogin() {
+        let model = AppModel()
+        model.didLogin()
+        XCTAssertEqual(model.phase, .ready)
+        model.auth.onSessionExpired?()
+        XCTAssertEqual(model.phase, .login)
+    }
 }
