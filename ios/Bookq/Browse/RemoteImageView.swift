@@ -148,6 +148,10 @@ struct RemoteImageView: View {
     }
 
     private func load() async {
+        // A url/tick refire (tier flip, spread regroup, retry) must not
+        // inherit the previous attempt's failure badge — show the quiet
+        // loading glyph until this fetch resolves.
+        failed = false
         // No cover URL = absent thumb (web shows the neutral placeholder);
         // ⚠️ is reserved for a fetch that actually failed.
         guard let url else { return }
