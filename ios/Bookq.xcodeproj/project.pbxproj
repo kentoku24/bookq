@@ -194,6 +194,9 @@
 			);
 			mainGroup = A00000000000000000000040;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A000000000000000000000B0 /* XCLocalSwiftPackageReference "BookqCore" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A00000000000000000000041 /* Products */;
 			projectDirPath = "";
