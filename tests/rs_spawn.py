@@ -1,4 +1,4 @@
-    """Shared test-backend spawner — viewer-rs only (#503, #532).
+"""Shared test-backend spawner — viewer-rs only (#503, #532).
 
 Spawns the `viewer-rs` binary: same synthetic tree, same contract surface,
 exactly as production does (all routes native, no upstream).
