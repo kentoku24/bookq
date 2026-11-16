@@ -86,8 +86,8 @@ jobs:
       - name: pool slot regression tests
         run: bash .github/scripts/test_pool_slot.sh
 
-  # #503 rs-only: the suite oracles viewer-rs (no-upstream,
-  # BOOKQ_RS_NATIVE=all + STRICT). Split on the `browser` marker;
+  # #503/#532 rs-only: the suite oracles viewer-rs (all routes
+  # native). Split on the `browser` marker;
   # rust-cache keeps the per-lane cargo build warm (each lane spawns its
   # own fixture binary). `uv-gate` below keeps the required-check name
   # and aggregates these rs lanes.

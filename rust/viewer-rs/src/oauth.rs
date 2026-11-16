@@ -46,14 +46,14 @@
 //!
 //! Config: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`BASE_URL`/
 //! `SECRET_KEY` are all required — the gate
-//! is atomic, so missing config falls the whole surface back to proxy
-//! (warned at startup, fatal under `BOOKQ_RS_NATIVE_STRICT`). This keeps
-//! `BOOKQ_RS_NATIVE=all` dev rigs working without Google creds.
+//! is atomic, so missing config disables the whole auth surface: it is
+//! warned at startup and the routes answer 501 locally (#532 — no
+//! upstream fallback exists anymore). Dev/test rigs run with dummy
+//! `ci-dummy` creds or `BOOKQ_TEST_MODE` to keep the surface live.
 //!
 //! Any signed `session` cookie whose payload won't parse (starlette's
-//! `json.loads` raising → HTTP 500 before the handler runs) proxies
-//! upstream instead of being answered natively — the callers check
-//! `SessionLookup::Corrupt`.
+//! `json.loads` raising → HTTP 500 before the handler runs) answers 500
+//! locally — the callers check `SessionLookup::Corrupt`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;

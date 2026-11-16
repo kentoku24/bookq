@@ -123,8 +123,7 @@ jobs:
           docker volume create bookq-ci-state
           docker run -d --name viewer-rs -p 127.0.0.1:8080:8080 \
             -e BOOKQ_BIND=0.0.0.0:8080 \
-            -e BOOKQ_TEST_MODE=true -e BOOKQ_RS_NATIVE=all \
-            -e BOOKQ_RS_NATIVE_STRICT=1 \
+            -e BOOKQ_TEST_MODE=true \
             -e GOOGLE_CLIENT_ID=ci-dummy -e GOOGLE_CLIENT_SECRET=ci-dummy \
             -e BASE_URL=http://127.0.0.1:8080 \
             -e ALLOWED_EMAILS=test@example.com -e SECRET_KEY=ci-not-a-secret \
