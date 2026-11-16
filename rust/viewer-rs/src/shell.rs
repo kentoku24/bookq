@@ -1022,12 +1022,12 @@ mod tests {
     #[test]
     fn unknown_jinja_falls_back() {
         // A Jinja construct that survives substitution must fail the render
-        // (the handler then proxies upstream rather than emit raw `{%`).
+        // (the handler declines rather than emit raw `{%`).
         let bad = TEMPLATE.replace("</head>", "{% unknown %}</head>");
         assert!(render_index(&bad, &ctx()).is_none());
         let bad2 = TEMPLATE.replace("{{ 'ua-android' if ua_android else '' }}", "{{ x.y }}");
         assert!(render_index(&bad2, &ctx()).is_none());
-        // unterminated comment → Jinja error upstream → proxy
+        // unterminated comment → Jinja error in the Python port source
         let bad3 = TEMPLATE.replace("<title>", "{# open <title>");
         assert!(render_index(&bad3, &ctx()).is_none());
     }

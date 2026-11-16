@@ -708,11 +708,11 @@ fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Resp
     if archive_not_modified(headers, &etag, mtime) {
         return not_modified();
     }
-    let multipart = is_rar_path(archive) && bookq_core::rar_needs_upstream(archive);
+    let multipart = is_rar_path(archive) && bookq_core::rar_needs_external_7z(archive);
     let data = match archive_read_entry(archive, inner) {
         Some(d) => d,
         // #403: multipart store sets read native; a miss (compressed,
-        // missing volumes) answers 501 without an upstream 7z.
+        // missing volumes) answers 501 without an external 7z.
         None if multipart => return not_implemented("multipart RAR extraction unavailable"),
         None => return detail(StatusCode::NOT_FOUND, "File not found"),
     };

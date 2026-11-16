@@ -195,8 +195,8 @@ fn load_source_bytes(
         // PDF pages render in-process via pdfium-render (#402) — except
         // when `libpdfium` is unavailable. rar/cbr entries read natively
         // via `archive_read_entry` (bundled unrar + #403 multipart
-        // store-concat). A native miss (`None`) proxies so upstream 7z
-        // decides — same contract as the /image path.
+        // store-concat). A native miss (`None`) answers 501 — same
+        // contract as the /image path (#532: no upstream).
         if is_pdf_file(&archive) {
             let count = bookq_core::pdf_page_count(&archive);
             let Some(idx) = bookq_core::parse_pdf_page_name(&inner, count) else {
@@ -210,8 +210,8 @@ fn load_source_bytes(
             );
             return match bookq_core::render_pdf_page(&archive, idx, 2.0) {
                 Some(data) => Ok(Some((data, mtime, size, key))),
-                // Missing libpdfium or a corrupt page — upstream decides
-                // (renders or 501s) exactly like the pre-native posture.
+                // Missing libpdfium or a corrupt page answers 501 —
+                // exactly like the no-upstream posture.
                 None => Ok(None),
             };
         }
@@ -933,10 +933,11 @@ fn compose_grid(
 /// `None` per cell = gray (bad name, absent member, corrupt bytes).
 /// Returns `None` (→ proxy whole sheet) when a present member cannot be
 /// proven identical natively (unsupported compression/CRC) or the set
-/// itself needs upstream (multipart RAR), so Python decides instead of a
-/// wrong gray cell. `.avif`/`.tiff` cells Pillow might decode also proxy.
+/// itself needs an external 7z (multipart RAR) answer 501 instead of a
+/// wrong gray cell. `.avif`/`.tiff` cells decode-unknown formats also
+/// decline to 501 (#532: no upstream).
 fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Option<Vec<u8>>>> {
-    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
+    if is_rar_path(archive) && bookq_core::rar_needs_external_7z(archive) {
         return None;
     }
     // Raw membership like Python's `set(zf.namelist())`: epub uses the raw
@@ -999,8 +1000,9 @@ fn load_dir_sprite_cells(
         }
         match load_source_bytes(downloads, &format!("{folder}/{name}")) {
             Ok(Some((data, _, _, _))) => out.push(Some(data)),
-            // `Ok(None)` = needs upstream (PDF page, multipart RAR,
-            // unsupported extraction): proxy whole sheet so Python renders.
+            // `Ok(None)` = needs an external decoder (PDF page,
+            // multipart RAR, unsupported extraction): the whole sheet
+            // declines so the route answers 501.
             Ok(None) => return None,
             // `Err` = per-entry guard failure (400/403/404) → gray cell.
             Err(_) => out.push(None),

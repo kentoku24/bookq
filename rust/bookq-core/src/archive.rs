@@ -2353,11 +2353,12 @@ pub fn rar_names(path: &Path) -> Option<Vec<(String, bool)>> {
 }
 
 /// `true` when the archive is a multipart set — store reads go native
-/// (#403 store-concat); anything else proxies on miss (compressed
-/// multipart is never sent to the bundled unrar — process-abort risk).
-pub fn rar_needs_upstream(path: &Path) -> bool {
+/// (#403 store-concat); anything else declines on miss so routes
+/// answer 501 (compressed multipart is never sent to the bundled
+/// unrar — process-abort risk). #532: no upstream exists anymore.
+pub fn rar_needs_external_7z(path: &Path) -> bool {
     match open_archive(path) {
-        Some(oa) => oa.rar_needs_upstream(),
+        Some(oa) => oa.rar_needs_external_7z(),
         None => rar_entries(path).map(|(_, nu)| nu).unwrap_or(false),
     }
 }
@@ -2601,8 +2602,8 @@ impl OpenArchive {
     }
 
     /// `true` when this RAR is a multipart set — native reads decline so
-    /// routes can proxy (bundled unrar cannot chain volumes).
-    pub fn rar_needs_upstream(&self) -> bool {
+    /// routes answer 501 (bundled unrar cannot chain volumes).
+    pub fn rar_needs_external_7z(&self) -> bool {
         matches!(self.parsed, Parsed::Rar { needs_upstream: true, .. })
     }
 }
@@ -3369,8 +3370,8 @@ mod memo_tests {
             .map(|(n, _)| n)
             .collect();
         assert_eq!(names, vec!["001.png", "002.png", "003.png"]);
-        assert!(a.rar_needs_upstream(), "multipart set must flag upstream");
-        assert!(rar_needs_upstream(&p1));
+        assert!(a.rar_needs_external_7z(), "multipart set must flag upstream");
+        assert!(rar_needs_external_7z(&p1));
         // #403 native store-concat: whole + split members read in-process.
         assert_eq!(a.read_entry(&p1, "001.png").unwrap(), b"page1");
         assert_eq!(a.read_entry(&p1, "002.png").unwrap(), b"helloworld");

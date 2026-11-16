@@ -341,7 +341,8 @@ pub enum Ensure {
     Stale(Arc<CacheData>),
     /// `_IndexBuilding` — cold and still building past the 0.8s budget.
     Building,
-    /// Build failed — Python propagates; the caller proxies upstream.
+    /// Build failed — the error propagates to the caller's 5xx.
+    /// (#532: no upstream left to proxy to.)
     Failed,
 }
 
