@@ -132,6 +132,8 @@
   let openedAt = 0;            // backdrop dismiss is muted this long (#160)
   let connectUnsupported = false; // connect() answered {unsupported} →
                                   // the choice falls back to 開始/参加
+  let connectPending = false;   // a connect() call is in flight — the
+                                // つながる pick must not double-fire
   /* A rapid second launcher tap lands on the freshly-shown overlay as a
    * backdrop click and instantly closes the panel while the session keeps
    * connecting (#160-A). Swallow backdrop dismissals for a short grace —
@@ -385,7 +387,11 @@
 
     let sec;
     if (status === 'idle' || status === 'ended') {
-      sec = pickList ? els.secPicker : (joinView ? els.secJoin : els.secChoice);
+      // joinView wins: a slow {ambiguous} resolving while the code form
+      // is open must not steal the section mid-entry — the picker waits
+      // for the user to back out (#160).
+      sec = joinView ? els.secJoin
+                     : (pickList ? els.secPicker : els.secChoice);
     } else if (status === 'connecting') {
       sec = role === 'leader' ? els.secLeader : els.secWaiting;
     } else if (status === 'error') {
@@ -684,9 +690,6 @@
   // ── events ──
 
   function wireEvents() {
-    // The idle launcher tap is the whole pairing gesture: fire connect()
-    // (server-side MATCH) and show the panel tracking its outcome. A
-    // controller without connect() gets the legacy 開始/参加 choice.
     /* The idle launcher tap used to fire connect() itself — a quick
      * second tap then closed the panel mid-MATCH, and anyone holding a
      * 6-digit code had to become a waiting leader first (#160). The tap
@@ -739,11 +742,15 @@
      * leader; {ambiguous} lists candidates, {unsupported} demotes the
      * choice back to the legacy 開始/参加 pair. */
     function fireConnect() {
-      if (!ctl || typeof ctl.connect !== 'function') return;
+      if (!ctl || typeof ctl.connect !== 'function' || connectPending) {
+        return;
+      }
       let res;
       try { res = ctl.connect(); } catch (err) { res = null; }
       if (res && typeof res.then === 'function') {
+        connectPending = true;
         res.then(r => {
+          connectPending = false;
           if (r && r.ambiguous && Array.isArray(r.candidates) &&
               r.candidates.length) {
             pickList = r.candidates;
@@ -752,7 +759,7 @@
             if (r && r.unsupported) connectUnsupported = true;
             if (open_) render();
           }
-        }).catch(() => {});
+        }).catch(() => { connectPending = false; });
       }
     }
     els.create.addEventListener('click', () => {
@@ -822,6 +829,7 @@
     }
     ctl = controller || null;
     connectUnsupported = false;
+    connectPending = false;
     if (ctl && typeof ctl.subscribe === 'function') {
       unsubscribe = ctl.subscribe(() => render());
     }

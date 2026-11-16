@@ -1032,6 +1032,44 @@ def test_backdrop_tap_after_grace_still_dismisses(page, server):
     expect(page.locator("#pair-overlay")).to_be_hidden()
 
 
+# Mock variant whose connect() stays pending until the test resolves it —
+# exercises the in-flight window where the pick must not double-fire and
+# a late {ambiguous} must not steal an open join form.
+CONNECT_PENDING_JS = CONNECT_JS.replace(
+    "return Promise.resolve(window.__pairConnectResult || null);",
+    "return new Promise(r => { window.__pairConnectResolve = r; });")
+
+
+def test_connect_pick_ignores_second_tap_while_pending(page, server):
+    """#160: while connect() is in flight the つながる pick is inert —
+    a double-tap must not supersede the first MATCH with a second."""
+    _with_mock(page, js=CONNECT_PENDING_JS)
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    page.click("#pair-create")
+    page.click("#pair-create")   # still pending — must not re-fire
+    assert page.evaluate("window.__pairCalls") == ["connect"]
+    page.evaluate("window.__pairConnectResolve({sessionId:'S1'})")
+
+
+def test_ambiguous_resolve_keeps_open_join_form(page, server):
+    """#160: a slow {ambiguous} resolving while the code form is open
+    must not steal the section — the picker waits for the user to back
+    out of the join view."""
+    _with_mock(page, js=CONNECT_PENDING_JS)
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    page.click("#pair-create")              # connect() pending
+    page.click("#pair-join-open")           # user prefers code entry
+    _only_section_visible(page, "#pair-sec-join")
+    page.evaluate(
+        "window.__pairConnectResolve("
+        "{ambiguous:true, candidates:[{id:'tok-a', leaderName:'A'}]})")
+    _only_section_visible(page, "#pair-sec-join")
+    page.click("#pair-join-back")
+    _only_section_visible(page, "#pair-sec-picker")
+
+
 def test_join_deep_link_consumes_hash_and_joins(page, server):
     """#/join/<6桁> is a one-shot input: it joins, then leaves the URL."""
     _with_mock(page)
