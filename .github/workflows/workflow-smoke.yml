@@ -95,7 +95,15 @@ jobs:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    # ~272s single-runner suite (the PR-gate critical path, #331) —
+    # pytest-split shards it across 3 runners. Until a committed
+    # `.test_durations` exists the split is even-by-count; each shard
+    # stores its own durations file as an artifact for a follow-up merge.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -132,7 +140,17 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run non-browser test suite against viewer-rs
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --splits 3 --group ${{ matrix.shard }} --store-durations --reruns 1 --reruns-delay 2
+
+      # Feeds the follow-up balanced-split merge (#331): upload each
+      # shard's durations so a complete `.test_durations` can be committed.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-durations-${{ matrix.shard }}
+          path: .test_durations
+          if-no-files-found: ignore
+          retention-days: 7
 
   pytest-rs-browser:
     needs: changes-workflow-smoke
