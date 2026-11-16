@@ -4,15 +4,15 @@ import Foundation
 /// app/reader_sync/{protocol,model}.py + viewer/pairModel.js.
 /// PageRef {folder,name} is the shared addressing scheme: `folder` is the
 /// downloads-relative path, `name` the entry name inside it.
-public enum PairRole: String, Codable, Equatable {
+@frozen public enum PairRole: String, Codable, Equatable {
     case leader, follower
 }
 
-public enum PairSide: String, Codable, Equatable {
+@frozen public enum PairSide: String, Codable, Equatable {
     case right, left
 }
 
-public enum PairPhase: String, Codable, Equatable {
+@frozen public enum PairPhase: String, Codable, Equatable {
     case waiting, loading, reading, selecting, paused
 }
 
