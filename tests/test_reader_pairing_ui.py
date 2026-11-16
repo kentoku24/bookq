@@ -869,6 +869,7 @@ def test_pair_ui_taps_do_not_turn_pages(ios_page, server):
     # reopen, then a backdrop tap (outside the panel, on the overlay)
     page.click("#pair-btn")
     expect(page.locator("#pair-overlay")).to_be_visible()
+    page.wait_for_timeout(400)   # past the 350ms backdrop-dismiss grace
     tap(s, 10, 400)
     s.detach()
     page.wait_for_timeout(30)
@@ -967,18 +968,35 @@ CONNECT_JS = MOCK_JS.replace(
     create() { window.__pairCalls.push('create'); },""")
 
 
-def test_idle_tap_fires_connect_when_supported(page, server):
-    """The launcher IS the pairing gesture: one idle tap → connect()."""
+def test_idle_tap_opens_choice_then_connect_fires_on_pick(page, server):
+    """#160: the launcher tap only opens the panel — MATCH is an explicit
+    pick (近くの相手とつながる), so a code holder never triggers an
+    unintended auto-join first."""
     _with_mock(page, js=CONNECT_JS)
     page.evaluate("window.__pairConnectResult = "
                   "{sessionId:'S1', code:'042917', role:'leader'}")
     _ensure_sidebar_open(page)
     page.click("#pair-btn")
     expect(page.locator("#pair-overlay")).to_be_visible()
+    _only_section_visible(page, "#pair-sec-choice")
+    assert page.evaluate("window.__pairCalls") == []
+    page.click("#pair-create")   # 近くの相手とつながる
     assert page.evaluate("window.__pairCalls") == ["connect"]
     _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
     _only_section_visible(page, "#pair-sec-leader")
     expect(page.locator("#pair-code-value")).to_have_text("042917")
+
+
+def test_idle_choice_offers_direct_code_join(page, server):
+    """#160: コードで参加 opens the code form straight from idle — no
+    connect(), no waiting-leader detour."""
+    _with_mock(page, js=CONNECT_JS)
+    _open_ui(page)
+    _only_section_visible(page, "#pair-sec-choice")
+    page.click("#pair-join-open")
+    _only_section_visible(page, "#pair-sec-join")
+    page.fill("#pair-code-input", "314159")
+    assert page.evaluate("window.__pairCalls") == ["join:314159"]
 
 
 def test_ambiguous_match_shows_picker_then_picks_token(page, server):
@@ -991,6 +1009,7 @@ def test_ambiguous_match_shows_picker_then_picks_token(page, server):
              {id:'tok-b', leaderName:'B', ageSec:7}]}""")
     _ensure_sidebar_open(page)
     page.click("#pair-btn")
+    page.click("#pair-create")   # 近くの相手とつながる → ambiguous
     _only_section_visible(page, "#pair-sec-picker")
     picks = page.locator(".pair-pick")
     assert picks.count() == 2
@@ -1001,14 +1020,81 @@ def test_ambiguous_match_shows_picker_then_picks_token(page, server):
 
 
 def test_unsupported_match_keeps_classic_choice(page, server):
-    """A pre-MATCH server resolves {unsupported} — 開始/参加 stays usable."""
+    """A pre-MATCH server resolves {unsupported} — the choice demotes
+    back to the classic 開始/参加 pair."""
     _with_mock(page, js=CONNECT_JS)
     page.evaluate("window.__pairConnectResult = {unsupported:'malformed'}")
     _ensure_sidebar_open(page)
     page.click("#pair-btn")
+    page.click("#pair-create")   # connect() → {unsupported}
     _only_section_visible(page, "#pair-sec-choice")
+    # the choice demotes to the classic pair once {unsupported} lands —
+    # wait for the relabel so the re-click hits the create() wiring
+    expect(page.locator("#pair-create-label")).to_have_text("開始")
     page.click("#pair-create")
     assert page.evaluate("window.__pairCalls") == ["connect", "create"]
+
+
+def test_launcher_double_tap_keeps_panel_open(page, server):
+    """#160: a rapid second launcher tap lands on the freshly-shown
+    overlay as a backdrop click — the dismiss grace swallows it instead
+    of closing the panel mid-pairing."""
+    _with_mock(page)
+    _ensure_sidebar_open(page)
+    box = page.locator("#pair-btn").bounding_box()
+    page.click("#pair-btn")
+    # same spot, immediately — the overlay is topmost there now, so the
+    # tap reads as a backdrop click inside the grace window
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    expect(page.locator("#pair-overlay")).to_be_visible()
+
+
+def test_backdrop_tap_after_grace_still_dismisses(page, server):
+    """The grace is a window, not a lock — a deliberate backdrop tap
+    afterwards still closes the panel."""
+    _with_mock(page)
+    _open_ui(page)
+    page.wait_for_timeout(400)   # past the 350ms dismiss grace
+    page.mouse.click(10, 400)    # backdrop, left of the panel
+    expect(page.locator("#pair-overlay")).to_be_hidden()
+
+
+# Mock variant whose connect() stays pending until the test resolves it —
+# exercises the in-flight window where the pick must not double-fire and
+# a late {ambiguous} must not steal an open join form.
+CONNECT_PENDING_JS = CONNECT_JS.replace(
+    "return Promise.resolve(window.__pairConnectResult || null);",
+    "return new Promise(r => { window.__pairConnectResolve = r; });")
+
+
+def test_connect_pick_ignores_second_tap_while_pending(page, server):
+    """#160: while connect() is in flight the つながる pick is inert —
+    a double-tap must not supersede the first MATCH with a second."""
+    _with_mock(page, js=CONNECT_PENDING_JS)
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    page.click("#pair-create")
+    page.click("#pair-create")   # still pending — must not re-fire
+    assert page.evaluate("window.__pairCalls") == ["connect"]
+    page.evaluate("window.__pairConnectResolve({sessionId:'S1'})")
+
+
+def test_ambiguous_resolve_keeps_open_join_form(page, server):
+    """#160: a slow {ambiguous} resolving while the code form is open
+    must not steal the section — the picker waits for the user to back
+    out of the join view."""
+    _with_mock(page, js=CONNECT_PENDING_JS)
+    _ensure_sidebar_open(page)
+    page.click("#pair-btn")
+    page.click("#pair-create")              # connect() pending
+    page.click("#pair-join-open")           # user prefers code entry
+    _only_section_visible(page, "#pair-sec-join")
+    page.evaluate(
+        "window.__pairConnectResolve("
+        "{ambiguous:true, candidates:[{id:'tok-a', leaderName:'A'}]})")
+    _only_section_visible(page, "#pair-sec-join")
+    page.click("#pair-join-back")
+    _only_section_visible(page, "#pair-sec-picker")
 
 
 def test_join_deep_link_consumes_hash_and_joins(page, server):

@@ -181,8 +181,10 @@ def test_match_one_tap_pairs_two_devices(devs):
     onto it as follower, auto-approve runs, and a leader work pick then
     lands the shared spread on both."""
     pl, pf = devs
-    # sidebar is open on boot → the header launcher is a real click target
+    # sidebar is open on boot → the header launcher is a real click target;
+    # #160: MATCH fires on the explicit 近くの相手とつながる pick
     pl.locator("#pair-btn").click()
+    pl.locator("#pair-create").click()
     pl.wait_for_function(
         "() => window.PairController.state.role === 'leader'",
         timeout=timeout)
@@ -190,6 +192,7 @@ def test_match_one_tap_pairs_two_devices(devs):
     assert code and len(str(code)) == 6
     expect(pl.locator("#pair-sec-leader")).to_be_visible()
     pf.locator("#pair-btn").click()
+    pf.locator("#pair-create").click()
     for p in (pl, pf):
         p.wait_for_function(
             "() => window.PairController.state.status === 'connected'"
@@ -214,6 +217,7 @@ def test_match_without_a_waiter_leaves_a_joinable_code(devs):
     classic JOIN stays a working fallback on the very same session."""
     pl, pf = devs
     pl.locator("#pair-btn").click()
+    pl.locator("#pair-create").click()   # 近くの相手とつながる (#160)
     pl.wait_for_function(
         "() => window.PairController.state.role === 'leader'"
         " && !!window.PairController.state.code", timeout=timeout)
