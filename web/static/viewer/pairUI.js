@@ -287,21 +287,31 @@
 
   /* The strip must leave the a11y tree whenever chrome hides it — the
    * .hidden fade, the [hidden] collapse and the overview-open veil all
-   * leave an invisible-but-focusable control behind otherwise (#159). */
+   * leave an invisible-but-focusable control behind otherwise (#159).
+   * Ancestors are checked, not only the strip's own flags: a strip
+   * (re)built while the toolbar is already .hidden, or a hide path that
+   * skips the app.js mirror, must not resurrect the trap. */
   let hideObs = null;
   function syncStripA11y() {
     if (!els.statusBtn) return;
-    const gone = els.status.hidden ||
-      els.status.classList.contains('hidden') ||
+    const gone = !!els.status.closest('.hidden, [hidden]') ||
       document.body.classList.contains('overview-open');
     els.status.setAttribute('aria-hidden', gone ? 'true' : 'false');
     els.statusBtn.tabIndex = gone ? -1 : 0;
+    // Focus may not stay on a control that just left the a11y tree.
+    const ae = document.activeElement;
+    if (gone && ae && els.status.contains(ae)) ae.blur();
   }
   function watchStripA11y() {
     if (hideObs || typeof MutationObserver !== 'function') return;
     hideObs = new MutationObserver(syncStripA11y);
     hideObs.observe(els.status,
       {attributes: true, attributeFilter: ['class', 'hidden']});
+    if (els.status.parentElement) {
+      // the toolbar's own .hidden — mirrored or not
+      hideObs.observe(els.status.parentElement,
+        {attributes: true, attributeFilter: ['class', 'hidden']});
+    }
     hideObs.observe(document.body,
       {attributes: true, attributeFilter: ['class']});
   }
