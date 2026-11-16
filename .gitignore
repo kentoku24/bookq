@@ -23,6 +23,7 @@ dev_fixture/
 .schemathesis/
 
 # Rust build artifacts (docker -v mounts can create this locally)
+rust/target
 rust/target/
 
 # Android ネイティブクライアント (`android/`)

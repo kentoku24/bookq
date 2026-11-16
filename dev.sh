@@ -408,6 +408,10 @@ prune_volumes_from_list() {
 cmd_up() {
     require_repo_root
 
+    # rust/target → 外付け共有 target dir の symlink を確保 (worktree 作成時に
+    # 一度効けばよい。未マウント等の失敗は up を止めない)
+    "$SCRIPT_DIR/scripts/ensure-cargo-target.sh" 2>/dev/null || true
+
     local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow=""
     while [ $# -gt 0 ]; do
         case "$1" in
