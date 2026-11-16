@@ -28,6 +28,8 @@ uv run --with playwright playwright install chromium
 
 `--with-requirements requirements-dev.txt` is required — the `server` fixture boots the viewer-rs binary and the fixture tree builders need pillow/httpx from `requirements-dev.txt`.
 
+Every pytest start runs `scripts/test-preflight.sh` (conftest `pytest_sessionstart`): below `BOOKQ_MIN_FREE_GB` (default 25GiB) it reclaims stale residues — other worktrees' `rust/target`/`ios/build` (stale or merged, never in-use), orphan `.worktrees` dirs, uv cache, old tmp — then aborts with a suspect list if still short. `--dry-run`/`--clean`/`--check` modes; `BOOKQ_SKIP_PREFLIGHT=1` bypasses. Point `BOOKQ_TARGET_DIR` (or `CARGO_TARGET_DIR_BASE`/`CARGO_TARGET_DIR`) at a mounted `/Volumes/...` dir to build the ~1.5GB target off the internal SSD — a per-checkout subdir is appended automatically.
+
 Run the app locally without Docker or OAuth:
 
 ```bash
