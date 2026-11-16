@@ -596,7 +596,7 @@ fn live_fs_response(
 
 // ── handler ─────────────────────────────────────────────────────────────────
 
-use crate::serve::{is_within, Serve};
+use crate::serve::is_within;
 use crate::AppState;
 
 /// `_require_int_literal` parity: only `-?[0-9]+` is an integer literal —
@@ -624,15 +624,14 @@ fn parse_i64(v: Option<&String>) -> Result<Option<i64>, ()> {
 }
 
 /// GET /api/v1/tree — native port of `_folder_tree(v1=True)`.
-pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, String>) -> Serve {
+pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, String>) -> Response {
     // Query types: path:str, depth:int|None, since:int|None. Non-integer
-    // depth/since → FastAPI 422 — fall through to the upstream renderer.
+    // depth/since → FastAPI 422 answered locally.
     let path = q.get("path").cloned().unwrap_or_default();
     let depth = match parse_i64(q.get("depth")) {
         Ok(d) => d,
         Err(()) => {
-            return crate::serve::unprocessable_or_proxy(
-                st.has_upstream(),
+            return crate::serve::unprocessable(
                 "depth",
                 "value_error",
                 "invalid depth",
@@ -642,8 +641,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     let since = match parse_i64(q.get("since")) {
         Ok(s) => s,
         Err(()) => {
-            return crate::serve::unprocessable_or_proxy(
-                st.has_upstream(),
+            return crate::serve::unprocessable(
                 "since",
                 "value_error",
                 "invalid since",
@@ -652,10 +650,10 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     };
     if let Some(d) = depth {
         if d < 1 {
-            return Serve::Done(detail_response(
+            return detail_response(
                 StatusCode::BAD_REQUEST,
                 "depth must be >= 1",
-            ));
+            );
         }
     }
 
@@ -683,13 +681,18 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("no-store"),
                 );
-                return Serve::Done(res);
+                return res;
             }
-            Ensure::Failed => return Serve::Proxy,
+            Ensure::Failed => {
+                return detail_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "index build failed",
+                )
+            }
         };
         let gen_int = data.generation;
         if since == Some(gen_int) {
-            return Serve::Done(not_modified(FOLDERS_CACHE_CONTROL, None));
+            return not_modified(FOLDERS_CACHE_CONTROL, None);
         }
         if since.is_some() {
             // Stale poll → same envelope, but through the body cache
@@ -714,9 +717,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 },
                 generation: gen_int,
             };
-            return Serve::Done(
-                folders_response(&data, &payload, "", None, &headers, "v1-since").await,
-            );
+            return folders_response(&data, &payload, "", None, &headers, "v1-since").await;
         }
         let payload = tree::EnvSer {
             kind: "tree",
@@ -728,7 +729,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
             },
             generation: gen_int,
         };
-        return Serve::Done(folders_response(&data, &payload, "", None, &headers, "v1").await);
+        return folders_response(&data, &payload, "", None, &headers, "v1").await;
     }
 
     // ── Shallow mode (depth >= 1).
@@ -740,10 +741,10 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
         st.downloads.join(&norm)
     };
     if !is_within(&st.downloads, &target) {
-        return Serve::Done(detail_response(
+        return detail_response(
             StatusCode::FORBIDDEN,
             "path outside downloads dir",
-        ));
+        );
     }
     match st.index.current().await {
         Some(data) if data.fresh() => {
@@ -753,10 +754,10 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 match tree::find_tree_node(&data.tree, &norm, "") {
                     Some(tree::Node::Folder(f)) => &f.children,
                     _ => {
-                        return Serve::Done(detail_response(
+                        return detail_response(
                             StatusCode::NOT_FOUND,
                             "folder not found",
-                        ))
+                        )
                     }
                 }
             };
@@ -772,7 +773,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 },
                 generation: data.generation,
             };
-            Serve::Done(folders_response(&data, &payload, &norm, Some(depth), &headers, "v1").await)
+            folders_response(&data, &payload, &norm, Some(depth), &headers, "v1").await
         }
         // Cold/stale → live-FS one-level listing (never waits on the scan).
         // fallback_gen = cache's generation when a (stale) cache exists, else 0.
@@ -781,13 +782,13 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 Some(d) => d.generation,
                 None => 0,
             };
-            Serve::Done(live_fs_response(
+            live_fs_response(
                 &st.downloads,
                 &norm,
                 depth,
                 fallback_gen,
                 &headers,
-            ))
+            )
         }
     }
 }

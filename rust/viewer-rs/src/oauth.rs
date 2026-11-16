@@ -45,7 +45,7 @@
 //! three `/auth/*` routes do; the token endpoint does not.
 //!
 //! Config: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/`BASE_URL`/
-//! `SECRET_KEY` are all required when the `auth` gate is on — the gate
+//! `SECRET_KEY` are all required — the gate
 //! is atomic, so missing config falls the whole surface back to proxy
 //! (warned at startup, fatal under `BOOKQ_RS_NATIVE_STRICT`). This keeps
 //! `BOOKQ_RS_NATIVE=all` dev rigs working without Google creds.
@@ -141,21 +141,17 @@ fn evict_expired<V: HasExp>(store: &mut HashMap<String, V>) {
     }
 }
 
-/// What `from_env` resolved for the `auth` gate.
+/// What `from_env` resolved for the auth surface (#532: always native).
 pub enum Configured {
-    /// `auth` is not in `BOOKQ_RS_NATIVE` — surface proxies.
-    Disabled,
-    /// Gate on + config complete — `/auth/*` and `/api/v1/auth/token`
-    /// are served natively.
+    /// Config complete — `/auth/*` and `/api/v1/auth/token` are served.
     Ready(AuthFlow),
-    /// Gate on but required env is missing — whole surface stays
-    /// proxied (atomic fallback; startup warns, STRICT fails).
+    /// Required env is missing — the surface answers 501 locally.
     Missing(Vec<&'static str>),
 }
 
 /// Everything the native auth surface needs. Constructed once at
 /// startup; `AppState.auth_flow` holds `Option<Arc<AuthFlow>>` where
-/// `Some` already implies "gate on AND configured".
+/// `Some` implies configured, `None` answers 501.
 pub struct AuthFlow {
     http: reqwest::Client,
     client_id: String,
@@ -175,12 +171,8 @@ pub struct AuthFlow {
 
 impl AuthFlow {
     pub fn from_env(
-        native: &crate::Native,
         allowed_emails: std::sync::Arc<HashSet<String>>,
     ) -> Configured {
-        if !native.enabled("auth") {
-            return Configured::Disabled;
-        }
         let mut missing = Vec::new();
         let mut get = |name: &'static str| match std::env::var(name) {
             Ok(v) if !v.is_empty() => Some(v),
