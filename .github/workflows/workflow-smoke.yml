@@ -251,3 +251,21 @@ jobs:
 
       - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/8)
         run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 8 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+
+  # Required-check anchor for the safari matrix (#540): matrix legs report
+  # `safari-gate (N)` when they run but a single bare `safari-gate` when the
+  # job is skipped, so no one context name covers both shapes — this gate
+  # reports a stable name backed by needs.safari-gate.result, same pattern
+  # as uv-gate above.
+  safari-gate-all:
+    needs: [changes-workflow-smoke, safari-gate]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify safari shards
+        env:
+          SAFARI: ${{ needs.safari-gate.result }}
+        run: |
+          echo "safari-gate: $SAFARI"
+          [ "$SAFARI" = "success" ]

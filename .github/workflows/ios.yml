@@ -40,7 +40,11 @@ jobs:
               - "web/**"
               - "rust/viewer-rs/**"
 
-  test:
+  # Job id doubles as the required-check context; it must be unique across
+  # workflows — a bare `test` collides with rust.yml's test job and GitHub
+  # matches required checks by name only, so a pass in one lane could mask
+  # a failure in the other (#540).
+  ios-test:
     needs: changes-ios
     if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
     # xcode-27 image (public preview): the only hosted arm64 image that
