@@ -1,5 +1,5 @@
 import XCTest
-@testable import Bookq
+@testable import BookqCore
 
 /// PairModel.turnIndex / project — direct unit coverage of the shared
 /// projection math (test_reader_sync_model parity: chapter clamp vs

@@ -32,3 +32,7 @@ android/.kotlin/
 android/local.properties
 *.jks
 *.keystore
+
+# SwiftPM (BookqCore ローカルパッケージ + Xcode DerivedData)
+.build/
+ios/build/

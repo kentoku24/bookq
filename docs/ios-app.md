@@ -16,6 +16,22 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 プロジェクトは PBXFileSystemSynchronizedRootGroup（フォルダ自動同期）なので
 `Bookq/` 配下にファイルを置くだけでビルド対象になる。
 
+## ドメイン規則パッケージ (`ios/Packages/BookqCore`)
+
+シミュレータ不要の純粋な規則（`BrowseModel` / `ReaderWork` / `PairModels` /
+`CanonicalJSON` / `ImageURL` / `TreeNode` / `PairJoinCode`）はローカル
+SwiftPM パッケージ `BookqCore` に切り出してある（#282）。Xcode プロジェクト
+は `XCLocalSwiftPackageReference` で参照し、`Bookq` / `BookqTests` ターゲット
+がリンクする。UI に依存しないためシミュレータなしでテストできる：
+
+```bash
+swift test --package-path ios/Packages/BookqCore
+```
+
+ドメインのテストは言語共通テストケース（`api/vectors/*.json`、#280）を
+`TestRepo` 経由の `#filePath` 相対パスで読む。Linux でも通ること
+（CryptoKit/`CGFloat` を使わず純粋 Swift のみ）が条件。
+
 ## 開発用サーバーへの接続
 
 シミュレータは Mac のネットワークを共有するため、ローカルの TEST_MODE

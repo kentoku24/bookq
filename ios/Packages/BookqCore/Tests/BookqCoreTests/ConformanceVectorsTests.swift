@@ -1,5 +1,5 @@
 import XCTest
-@testable import Bookq
+@testable import BookqCore
 
 /// Conformance vectors (#280) — Swift side.
 ///
@@ -12,19 +12,10 @@ final class ConformanceVectorsTests: XCTestCase {
 
     // MARK: - loading
 
-    /// `ios/BookqTests/ConformanceVectorsTests.swift` → repo root is ../..
-    static func repoRoot() -> URL {
-        let thisFile = URL(fileURLWithPath: #filePath)
-        return thisFile
-            .deletingLastPathComponent()   // BookqTests/
-            .deletingLastPathComponent()   // ios/
-            .deletingLastPathComponent()   // worktree root
-    }
-
+    /// `api/vectors/*.json`, located via `TestRepo` so this file works
+    /// from either `ios/BookqTests/` or the BookqCore package.
     static func loadVector(_ name: String) -> [String: Any] {
-        let url = repoRoot().appendingPathComponent("api/vectors/\(name)")
-        let data = try! Data(contentsOf: url)
-        return try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        TestRepo.vector(name, from: #filePath)
     }
 
     static func treeNodes(_ json: Any) -> [TreeNode] {

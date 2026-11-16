@@ -1,98 +1,35 @@
+import BookqCore
 import XCTest
 import SwiftUI
 @testable import Bookq
 
-/// Canonical-JSON + manifest-digest golden tests — the fixture is read from
-/// tests/fixtures/reader_sync_cases.json `manifestDigestCases` (#280), the
-/// same file the Python side pins in test_conformance_vectors.py. The digest
-/// is never hand-copied here: any drift between the two languages fails.
-final class CanonicalJSONTests: XCTestCase {
-
-    /// `ios/BookqTests/PairSyncTests.swift` → repo root is ../..
-    static func repoRoot() -> URL {
-        let thisFile = URL(fileURLWithPath: #filePath)
-        return thisFile
-            .deletingLastPathComponent()   // BookqTests/
-            .deletingLastPathComponent()   // ios/
-            .deletingLastPathComponent()   // worktree root
-    }
-
-    /// (manifest content + initial, expected digest) cases from the shared
-    /// fixture — every entry, matching the Python side's full iteration.
-    static func digestCases() -> [(manifest: [String: Any], digest: String)] {
-        let url = repoRoot()
-            .appendingPathComponent("tests/fixtures/reader_sync_cases.json")
+/// Shared manifest fixture — first `manifestDigestCases` entry of
+/// `tests/fixtures/reader_sync_cases.json` (#280) with its golden digest
+/// attached under "digest". BookqCore's CanonicalJSONTests reads the same
+/// file; this copy keeps the PairStore tests self-contained now that the
+/// digest tests moved to the package.
+private enum PairTestFixture {
+    static func manifest(file: StaticString = #filePath) -> [String: Any] {
+        var root = URL(fileURLWithPath: "\(file)").deletingLastPathComponent()
+        for _ in 0..<10 {
+            root.deleteLastPathComponent()
+            if FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("api/vectors").path) {
+                break
+            }
+        }
+        let url = root.appendingPathComponent(
+            "tests/fixtures/reader_sync_cases.json")
         let data = try! Data(contentsOf: url)
         let fixture = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-        return (fixture["manifestDigestCases"] as! [[String: Any]]).map {
-            ($0["manifest"] as! [String: Any], $0["expectDigest"] as! String)
-        }
-    }
-
-    /// First case — used by tests that need any single fixture pair.
-    static func digestCase() -> (manifest: [String: Any], digest: String) {
-        digestCases()[0]
-    }
-
-    /// Python: {"b": 1, "a": true, "u": "作品"}
-    /// → {"a":true,"b":1,"u":"作品"} — sorted, compact, ASCII-escaped.
-    func testCanonicalEncoding() {
-        let s = CanonicalJSON.encode(["b": 1, "a": true, "u": "作品"])
-        XCTAssertEqual(s, "{\"a\":true,\"b\":1,\"u\":\"\\u4f5c\\u54c1\"}")
-    }
-
-    /// NSNumber bridging must NOT collapse 1 → true / false → 0.
-    /// (JSONSerialization decodes all JSON scalars as NSNumber.)
-    func testBoolVersusNumberRoundTrip() throws {
-        let src = "{\"a\":true,\"b\":1,\"c\":0,\"d\":false}"
-        let obj = try JSONSerialization.jsonObject(
-            with: Data(src.utf8)) as! [String: Any]
-        XCTAssertEqual(CanonicalJSON.encode(obj), src)
-    }
-
-    /// Golden vector from the shared fixture — content keys only
-    /// (v/folder/offset/chapters/pageRefs/spreadTable).
-    func testManifestDigestGolden() {
-        for (manifest, digest) in Self.digestCases() {
-            XCTAssertEqual(CanonicalJSON.manifestDigest(manifest), digest)
-        }
-    }
-
-    /// The digest must change when content changes (typo/classification).
-    func testManifestDigestSensitive() {
-        let (manifest, digest) = Self.digestCase()
-        var m = manifest
-        m["offset"] = 0
-        XCTAssertNotEqual(CanonicalJSON.manifestDigest(m), digest)
-    }
-
-    static var manifestFixture: [String: Any] {
-        var (manifest, digest) = digestCase()
-        manifest["digest"] = digest
+        let first = (fixture["manifestDigestCases"] as! [[String: Any]])[0]
+        var manifest = first["manifest"] as! [String: Any]
+        manifest["digest"] = first["expectDigest"] as! String
         return manifest
     }
 }
 
-/// PairManifest.parse — wire-dict → typed manifest.
-final class PairManifestTests: XCTestCase {
-    func testParse() {
-        let m = PairManifest.parse(CanonicalJSONTests.manifestFixture)
-        XCTAssertNotNil(m)
-        XCTAssertEqual(m?.spreadTable.count, 2)
-        XCTAssertEqual(m?.spreadIndex(byId: "s1"), 1)
-        XCTAssertNil(m?.spreadTable[1].left)   // trailing blank side
-    }
-
-    func testParseRejectsMalformed() {
-        var bad = CanonicalJSONTests.manifestFixture
-        bad["spreadTable"] = [["id": 42]]
-        XCTAssertNil(PairManifest.parse(bad))
-        bad = CanonicalJSONTests.manifestFixture
-        bad.removeValue(forKey: "chapters")
-        XCTAssertNil(PairManifest.parse(bad))
-    }
-}
-
+/// PairManifest.parse — wire-dict → typed manifest (covered in BookqCore).
 /// Scripted PairTransporting — records outbound frames, replays inbound
 /// wire text on demand. connect() yields `.open` immediately.
 actor FakeTransport: PairTransporting {
@@ -292,11 +229,11 @@ final class PairStoreTests: XCTestCase {
 
         // Manifest arrives in 2 chunks (canonical bytes split).
         let manifestData = try JSONSerialization.data(
-            withJSONObject: CanonicalJSONTests.manifestFixture)
+            withJSONObject: PairTestFixture.manifest())
         let text = String(decoding: manifestData, as: UTF8.self)
         let mid = text.index(text.startIndex, offsetBy: text.count / 2)
         let part1 = String(text[..<mid]), part2 = String(text[mid...])
-        let digest = CanonicalJSONTests.manifestFixture["digest"] as! String
+        let digest = PairTestFixture.manifest()["digest"] as! String
         for (i, part) in [part1, part2].enumerated() {
             await fake.emit(wire([
                 "v": 1, "type": "MANIFEST", "kind": "manifest-chunk",
@@ -364,7 +301,7 @@ final class PairStoreTests: XCTestCase {
                   data: bindData)
         try await task.value
         let data = try JSONSerialization.data(
-            withJSONObject: CanonicalJSONTests.manifestFixture)
+            withJSONObject: PairTestFixture.manifest())
         await fake.emit(wire([
             "v": 1, "type": "MANIFEST", "kind": "manifest-chunk",
             "sessionId": "s1", "workEpoch": 1, "manifestVersion": 1,
