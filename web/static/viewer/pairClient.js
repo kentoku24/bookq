@@ -62,6 +62,12 @@
    * resume window lapses (#157). Single-slot like PERSIST_KEY — one
    * session per browser profile. */
   var LEAVE_TOMBSTONE_KEY = 'bookq.readerSync.leaveTombstone.v1';
+  /* Flush retry on resume_in_use: the rejected member may still own a
+   * dead link the server has not reaped yet (~15s of heartbeat silence),
+   * so a few retries cover that reap window — RESUME_REJECT_END already
+   * models resume_in_use as transient for the member's own resume path. */
+  var FLUSH_RETRY_MS = 4000;
+  var FLUSH_RETRY_MAX = 3;
   var RESUME_HB_MS = 4000;            // ownership heartbeat while bound
   var RESUME_HB_STALE_MS = 12000;     // owner presumed dead after this silence
   var RESUME_WINDOW_MS = 300 * 1000;      // sessions.RESUME_WINDOW_SECONDS
@@ -358,6 +364,7 @@
     var _errorSt = null;             // transient error overlay (ERROR frame / apply fail)
     var _suspended = false;
     var _tombstoneFlush = null;      // in-flight leave-flush {t, watchdog}
+    var _flushRetries = 0;           // consecutive resume_in_use retries
     var _plane = 'server-ws';
     var _dataT = null;
     var _switcher = (PT && typeof PT.createSwitcher === 'function')
@@ -605,9 +612,12 @@
      * The tombstone replays it later on a throwaway link: RESUME rebinds
      * the offline member to that link, its ACK proves the member is ours
      * again, and the LEAVE that follows ends the session for the peer.
-     * Any RESUME reject is terminal for this purpose — the session is
-     * already gone (bad_resume/resume_expired) or the member lives on a
-     * healthier link (resume_in_use) — so the tombstone is dropped. */
+     * RESUME rejects split two ways: bad_resume/resume_expired are
+     * terminal (the session is gone), while resume_in_use is transient —
+     * the member's dead link may simply not be reaped server-side yet,
+     * so the tombstone is kept and the flush retried. If the member
+     * genuinely lives on a healthier link, that link's owner sends its
+     * own LEAVE and the tombstone just idles out with the window. */
 
     function _tombstoneRead() {
       if (!_persist) return null;
@@ -624,6 +634,7 @@
 
     function _tombstoneWrite(member) {
       if (!_persist || !member) return;
+      _flushRetries = 0;             // a fresh leave earns a fresh budget
       try {
         _persist.setItem(LEAVE_TOMBSTONE_KEY, JSON.stringify({
           sessionId: member.sessionId, memberId: member.memberId,
@@ -660,17 +671,19 @@
       var done = function (clear) {
         if (rec.done) return;
         rec.done = true;
-        if (clear) _tombstoneClear();
+        if (clear) { _tombstoneClear(); _flushRetries = 0; }
         if (_tombstoneFlush === rec) _tombstoneFlush = null;
         if (rec.watchdog !== null) {
-          delete _timers[rec.watchdog];
           _clearT(rec.watchdog);
           rec.watchdog = null;
         }
         t.onframe = null; t.onclose = null; t.onopen = null;
         try { t.close(); } catch (e) {}
       };
-      rec.watchdog = _later(function () { done(false); }, _attemptTimeout);
+      /* _setT, not _later: the watchdog must survive _timersClear() — a
+       * _terminate() during an in-flight flush would otherwise orphan a
+       * stalled socket and leave _tombstoneFlush set forever. */
+      rec.watchdog = _setT(function () { done(false); }, _attemptTimeout);
       _tombstoneFlush = rec;
       t.onframe = function (f) {
         if (!f || typeof f !== 'object') return;
@@ -684,7 +697,20 @@
           return;
         }
         if (f.type === 'REJECT' && f.requestId === resumeF.requestId) {
-          done(true);
+          if (f.reason === 'resume_in_use' &&
+              _flushRetries < FLUSH_RETRY_MAX) {
+            /* Transient: the member's dead link has not been reaped
+             * server-side yet — close this attempt and retry shortly.
+             * If a healthier link genuinely owns the member its owner
+             * sends LEAVE itself; the tombstone just idles until then. */
+            _flushRetries += 1;
+            done(false);
+            _later(_maybeFlushLeave, FLUSH_RETRY_MS);
+            return;
+          }
+          /* bad_resume/resume_expired are terminal; an exhausted
+           * resume_in_use keeps the tombstone for the next event. */
+          done(f.reason !== 'resume_in_use');
           return;
         }
         if (f.type === 'END') { done(true); return; }
@@ -699,7 +725,6 @@
       _tombstoneFlush = null;
       rec.done = true;
       if (rec.watchdog !== null) {
-        delete _timers[rec.watchdog];
         _clearT(rec.watchdog);
         rec.watchdog = null;
       }
