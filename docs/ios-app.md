@@ -51,6 +51,16 @@ access JWT（1h）+ refresh（30d、rotation 付き）の pair を 1 Keychain it
 （Bearer 一本）。identity は JWT claims（`sub`/`name`/`picture`）由来の `AuthUser`
 — `/api/me` のような検証 endpoint は存在しない。
 
+refresh token はサーバープロセスのインメモリのため、サーバー再起動/再デプロイで
+全消去される。アクセストークン期限切れ後の refresh は 400/401 で拒否される —
+これは確定的なセッション死亡として `AuthManager.onSessionExpired` が発火し、
+`AppModel.sessionDidExpire()` が `.ready` → `.login` に遷移する
+（Android `sessionExpired` parity。ネットワーク断・5xx では発火しない）。
+foreground 復帰時は `AppModel.foregrounded()` が refresh を事前行使し、
+再起動で死んだセッションをページをめくる前に検知する。
+リーダー/ペアリーダーのページ画像は失敗時に目立つ ⚠️ +「再読み込み」ボタンを
+表示し、タップでそのページだけ再取得する（グリッドのカバー類はバッジのみ）。
+
 native フローは TEST_MODE でも Google OAuth を通る（`?client=native` は
 `_TEST_MODE` をバイパスしない）。dev 環境でのアプリ側フロー検証には
 `AuthManager.testSeed(_:)` フックか実 OAuth が必要。
