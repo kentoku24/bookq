@@ -1,3 +1,4 @@
+import BookqCore
 import Foundation
 
 /// HTTP client for the bookq API. Attaches `Authorization: Bearer` when a

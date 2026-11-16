@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Paired-reader surface — the dual-reader equivalent of ReaderView.

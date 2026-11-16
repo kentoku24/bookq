@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Top-level app state machine: configure server → authenticate → browse.
