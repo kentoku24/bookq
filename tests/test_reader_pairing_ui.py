@@ -700,6 +700,93 @@ def test_dialog_semantics(page, server):
     assert panel.get_attribute("aria-labelledby")
 
 
+# ── status strip operability (#159) ──
+
+
+def test_status_strip_is_a_keyboard_operable_button(page, server):
+    """The strip is the only in-reader surface for swap/leave — it must
+    work from a keyboard alone: Tab reaches the button, Enter/Space open
+    the panel, Escape returns focus to the button (never BODY)."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    btn = page.locator("#pair-status-btn")
+    expect(btn).to_be_visible()
+    assert btn.evaluate("el => el.tagName") == "BUTTON"
+    assert btn.get_attribute("type") == "button"
+    assert btn.get_attribute("aria-haspopup") == "dialog"
+    # rides inside the toolbar chrome — never floats over page content
+    assert page.evaluate(
+        "document.getElementById('pair-status').parentElement.id"
+    ) == "toolbar"
+    btn.focus()
+    page.keyboard.press("Enter")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    assert btn.get_attribute("aria-expanded") == "true"
+    # focus moved inside the dialog
+    assert page.evaluate(
+        "!!document.activeElement.closest('#pair-panel')")
+    page.keyboard.press("Escape")
+    expect(page.locator("#pair-overlay")).to_be_hidden()
+    assert btn.get_attribute("aria-expanded") == "false"
+    assert page.evaluate("document.activeElement.id") == "pair-status-btn"
+
+
+def test_status_strip_button_has_44px_target(page, server):
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    r = page.locator("#pair-status-btn").bounding_box()
+    assert r["width"] >= 44 and r["height"] >= 44
+
+
+def test_status_strip_leaves_a11y_tree_when_chrome_hides(page, server):
+    """A toolbar-hidden strip must leave the a11y tree entirely — an
+    invisible-but-focusable control is worse than no control. Focus
+    already on the button is moved off, never left on an aria-hidden
+    element."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    page.locator("#pair-status-btn").focus()
+    page.evaluate("() => window.__toggleToolbarZone()")
+    assert "hidden" in page.locator("#pair-status").get_attribute("class")
+    assert page.locator("#pair-status").get_attribute("aria-hidden") == "true"
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    assert page.evaluate("document.activeElement.tagName") == "BODY"
+    page.evaluate("() => window.__toggleToolbarZone()")
+    assert page.locator("#pair-status").get_attribute("aria-hidden") == "false"
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "0"
+
+
+def test_status_strip_inert_under_hidden_toolbar_ancestor(page, server):
+    """#159: the visibility check follows ancestors, not just the strip's
+    own flags — a strip (re)built while the toolbar is already hidden,
+    or a hide path the app.js mirror missed, must not leave a tabbable
+    but invisible control behind."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    page.evaluate("() => window.__toggleToolbarZone()")   # chrome hides both
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    # drift the mirror misses: strip loses its own flag while the
+    # toolbar stays .hidden — the ancestor check keeps it inert
+    page.evaluate(
+        "() => document.getElementById('pair-status')"
+        ".classList.remove('hidden')")
+    assert page.locator("#pair-status").get_attribute("aria-hidden") == "true"
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    # and a re-render that clears the strip's own [hidden] changes nothing
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    page.evaluate("() => window.__toggleToolbarZone()")
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "0"
+
+
+def test_status_strip_not_focusable_when_idle(page, server):
+    _with_mock(page)
+    # idle: the strip is hidden — the button inside must not be tabbable
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    assert page.locator("#pair-status-btn").get_attribute("tabindex") == "0"
+
+
 # ── 320px layout ──
 
 
@@ -716,7 +803,9 @@ def test_controls_fit_320px_no_overlap(browser, server):
         for b in _visible_control_boxes(page):
             assert b["x"] >= 0 and b["right"] <= 320, b
             assert b["y"] >= 0 and b["bottom"] <= 568, b
-        # persistent affordance must not cover existing chrome
+        # persistent affordance must not cover existing chrome — and the
+        # strip now rides INSIDE #toolbar (#159), so it must stay within
+        # the toolbar's own band instead of floating over the page.
         overlaps = page.evaluate(
             """() => {
               const inter = (a, b) => a && b && a.width > 0 && b.width > 0 &&
@@ -727,10 +816,15 @@ def test_controls_fit_320px_no_overlap(browser, server):
                 return el ? el.getBoundingClientRect() : null;
               };
               const status = rect('#pair-status');
+              const toolbar = rect('#toolbar');
               const covered = [];
-              for (const sel of ['#toolbar', '#spread-controls',
+              if (status && toolbar &&
+                  (status.top < toolbar.top - 1 ||
+                   status.bottom > toolbar.bottom + 1))
+                covered.push('status-outside-toolbar');
+              for (const sel of ['#spread-controls',
                                  '#tapmode-controls', '#overview-close',
-                                 '#menu-btn', '#overview-btn'])
+                                 '#menu-btn', '#overview-btn', '#counter'])
                 if (inter(status, rect(sel))) covered.push(sel);
               const btn = rect('#pair-btn');
               for (const sel of ['#menu-btn', '#overview-btn', '#counter'])
