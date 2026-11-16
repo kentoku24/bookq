@@ -6,7 +6,7 @@ Usage:
 
 Tab selection: picks the first /json page whose URL contains the substring
 arg (default: the BOOKQ_TAB_MATCH env var, or the dev host if unset — set
-BOOKQ_DEV_HOST, e.g. "dev-04.javanese-goblin.ts.net"). When several tabs
+BOOKQ_DEV_HOST, e.g. "dev-04.<tail>.ts.net"). When several tabs
 match, narrow with a more specific substring (e.g. 'r=24' or '#/browse').
 
 Requires: adb forward tcp:9222 localabstract:chrome_devtools_remote

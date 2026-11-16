@@ -6,7 +6,7 @@ Usage:
     prod_monitor.py report   # read verdict JSON, manage the `monitor` issue via gh
 
 Environment:
-    BOOKQ_MONITOR_BASE_URL   probe target (default https://bookq.mats.dpdns.org)
+    BOOKQ_MONITOR_BASE_URL   probe target (required — repo variable in CI, shell env locally)
     BOOKQ_MONITOR_OUT        probe output path (default monitor-result.json)
     BOOKQ_MONITOR_RESULT     report input path (default monitor-result.json)
     BOOKQ_MONITOR_RUN_URL    Actions run URL recorded in the issue body
@@ -43,7 +43,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-DEFAULT_BASE_URL = "https://bookq.mats.dpdns.org"
 DEFAULT_TIMEOUT = 10.0
 MAX_BODY = 1_000_000
 MONITOR_LABEL = "monitor"
@@ -335,7 +334,7 @@ def probe_error_result(exc: BaseException) -> dict:
     return {
         "schema": 1,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "base_url": os.environ.get("BOOKQ_MONITOR_BASE_URL", DEFAULT_BASE_URL),
+        "base_url": os.environ.get("BOOKQ_MONITOR_BASE_URL", ""),
         "verdict": "fail",
         "classification": "probe_error",
         "signature": "probe_error:internal",
@@ -348,9 +347,11 @@ def probe_error_result(exc: BaseException) -> dict:
 
 def cmd_probe(args) -> int:
     out_path = args.out or os.environ.get("BOOKQ_MONITOR_OUT", "monitor-result.json")
-    base = os.environ.get("BOOKQ_MONITOR_BASE_URL", DEFAULT_BASE_URL)
+    base = os.environ.get("BOOKQ_MONITOR_BASE_URL", "")
     timeout = float(os.environ.get("BOOKQ_MONITOR_TIMEOUT", DEFAULT_TIMEOUT))
     try:
+        if not base:
+            raise RuntimeError("BOOKQ_MONITOR_BASE_URL is not set")
         result = run_probe(base, timeout)
     except Exception as e:
         result = probe_error_result(e)

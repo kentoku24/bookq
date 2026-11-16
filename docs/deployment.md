@@ -252,7 +252,7 @@ docker rm -f <迷子のコンテナ名>
 
 ### 本番監視（prod-monitor）
 
-`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン `https://bookq.mats.dpdns.org` の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
+`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン（repo variable `BOOKQ_MONITOR_BASE_URL` で設定）の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
 
 プローブ本体は `scripts/prod_monitor.py`（stdlib + `gh` CLI のみ）。7 つの check（#407 で v1 のみに整理 — v0 は viewer 停止と同時廃止のため監視対象外）:
 

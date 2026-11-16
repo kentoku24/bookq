@@ -1,6 +1,7 @@
 downloads/
 .DS_Store
 .omo/
+.archify/
 .omc/
 .env
 __pycache__/
