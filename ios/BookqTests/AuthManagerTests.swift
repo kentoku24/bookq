@@ -210,4 +210,63 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertFalse(expired)
         XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/auth/token"), 0)
     }
+
+    /// A refresh exchange suspended across logout() must not write the
+    /// old session's pair back — credentialEpoch discards the stale
+    /// result instead of silently re-authenticating a logged-out app.
+    func testInFlightRefreshDiscardedAfterLogout() async throws {
+        let auth = manager()
+        auth.baseURLProvider = { URL(string: "http://unit.test")! }
+        let newAccess = jwt(sub: "u@x.jp", name: "U")
+        let gate = AsyncGate()
+        StubURLProtocol.asyncHandler = { _ in
+            await gate.wait()
+            return StubURLProtocol.json([
+                "access_token": newAccess, "token_type": "Bearer",
+                "expires_in": 3600, "refresh_token": "r2"])
+        }
+        auth.testSeed(TokenPair(.init(access_token: jwt(), token_type: "Bearer",
+                                      expires_in: 3600, refresh_token: "r1")))
+        async let pending = auth.refreshAccessToken()
+        // Wait until the exchange request actually reaches the stub.
+        var waited = 0
+        while StubURLProtocol.hits(path: "api/v1/auth/token") == 0, waited < 500 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+            waited += 1
+        }
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/auth/token"), 1)
+        auth.logout()
+        gate.resume()   // exchange now returns a fresh pair — too late
+        let tok = await pending
+        XCTAssertNil(tok)
+        XCTAssertNil(auth.token)
+        XCTAssertNil(auth.user)
+        // The stale pair was never persisted — a second refresh finds no
+        // refresh token and never touches the wire again.
+        _ = await auth.refreshAccessToken()
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/auth/token"), 1)
+    }
+}
+
+/// One-shot async gate for `StubURLProtocol.asyncHandler` — `wait()`
+/// suspends the stub's response until the test calls `resume()`.
+private final class AsyncGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { c in
+            lock.lock()
+            cont = c
+            lock.unlock()
+        }
+    }
+
+    func resume() {
+        lock.lock()
+        let c = cont
+        cont = nil
+        lock.unlock()
+        c?.resume()
+    }
 }
