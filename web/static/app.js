@@ -5075,6 +5075,7 @@
     _isEpisodeNode, _hasAnyDownload, getBrowseChildrenAt,
     get etagByKey(){ return etagByKey; },
     get onlineConnectionGen(){ return _onlineConnectionGen; },
+    get onlineRevalidateLast(){ return _onlineRevalidateLast; },
     setTree(v){ tree=v; setFullPathsAndIndex(tree); invalidateLeafPaths(); updateBrowseHeader(); renderView(); },
     getTree(){ return tree; },
     get treeLoaded(){ return treeLoaded; },
