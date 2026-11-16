@@ -125,4 +125,89 @@ final class AuthManagerTests: XCTestCase {
         let tok = await auth.refreshAccessToken()
         XCTAssertNil(tok)
     }
+
+    // MARK: - Session death (Android sessionExpired parity)
+
+    /// Refresh rejected 401 (e.g. server restart wiped the in-memory
+    /// store) → nil + onSessionExpired fires + local credentials dropped.
+    func testRefreshRejectedEmitsSessionExpired() async {
+        let auth = manager()
+        auth.baseURLProvider = { URL(string: "http://unit.test")! }
+        var expired = false
+        auth.onSessionExpired = { expired = true }
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.json(["detail": "invalid or expired refresh_token"], status: 401)
+        }
+        auth.testSeed(TokenPair(.init(access_token: jwt(), token_type: "Bearer",
+                                      expires_in: 3600, refresh_token: "r1")))
+        let tok = await auth.refreshAccessToken()
+        XCTAssertNil(tok)
+        XCTAssertTrue(expired)
+        XCTAssertNil(auth.user)       // logout() ran
+        XCTAssertNil(auth.token)
+    }
+
+    /// 400 is equally definitive (Android parity — consumed/malformed).
+    func testRefreshBadRequestEmitsSessionExpired() async {
+        let auth = manager()
+        auth.baseURLProvider = { URL(string: "http://unit.test")! }
+        var expired = false
+        auth.onSessionExpired = { expired = true }
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.json(["detail": "refresh_token required"], status: 400)
+        }
+        auth.testSeed(TokenPair(.init(access_token: jwt(), token_type: "Bearer",
+                                      expires_in: 3600, refresh_token: "r1")))
+        let tok = await auth.refreshAccessToken()
+        XCTAssertNil(tok)
+        XCTAssertTrue(expired)
+    }
+
+    /// 5xx is transient — no emit, credentials retained.
+    func testRefreshServerErrorDoesNotEmit() async {
+        let auth = manager()
+        auth.baseURLProvider = { URL(string: "http://unit.test")! }
+        var expired = false
+        auth.onSessionExpired = { expired = true }
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.json(["detail": "boom"], status: 500)
+        }
+        auth.testSeed(TokenPair(.init(access_token: jwt(), token_type: "Bearer",
+                                      expires_in: 3600, refresh_token: "r1")))
+        let tok = await auth.refreshAccessToken()
+        XCTAssertNil(tok)
+        XCTAssertFalse(expired)
+        XCTAssertNotNil(auth.user)
+        XCTAssertNotNil(auth.token)
+    }
+
+    /// Network failure is transient — no emit, credentials retained.
+    func testRefreshNetworkErrorDoesNotEmit() async {
+        let auth = manager()
+        auth.baseURLProvider = { URL(string: "http://unit.test")! }
+        var expired = false
+        auth.onSessionExpired = { expired = true }
+        StubURLProtocol.failWith = .cannotConnectToHost
+        auth.testSeed(TokenPair(.init(access_token: jwt(), token_type: "Bearer",
+                                      expires_in: 3600, refresh_token: "r1")))
+        let tok = await auth.refreshAccessToken()
+        XCTAssertNil(tok)
+        XCTAssertFalse(expired)
+        XCTAssertNotNil(auth.user)
+    }
+
+    /// An empty refresh (e.g. -testToken seeds "") can never succeed —
+    /// skip the exchange entirely so its 400 can't read as session death.
+    func testRefreshEmptyRefreshTokenSkipsExchange() async {
+        let auth = manager()
+        auth.baseURLProvider = { URL(string: "http://unit.test")! }
+        var expired = false
+        auth.onSessionExpired = { expired = true }
+        auth.testSeed(TokenPair(.init(access_token: jwt(), token_type: "Bearer",
+                                      expires_in: 3600, refresh_token: "")))
+        let tok = await auth.refreshAccessToken()
+        XCTAssertNil(tok)
+        XCTAssertFalse(expired)
+        XCTAssertEqual(StubURLProtocol.hits(path: "api/v1/auth/token"), 0)
+    }
 }
