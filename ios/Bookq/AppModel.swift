@@ -6,7 +6,6 @@ import SwiftUI
 final class AppModel: ObservableObject {
     enum Phase {
         case onboarding     // no server URL yet
-        case booting        // checking /api/v1/version
         case login          // server demands auth, no valid token
         case ready          // authenticated (or TEST_MODE server)
     }
