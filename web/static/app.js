@@ -226,7 +226,7 @@
     return Promise.resolve(false);
   }
   let _onlineRevalidateLast = 0;
-  // Connection generation: bumped on every offline/online transition so a
+  // Connection generation: bumped on link loss (the offline handlers) so a
   // slow response from the previous connection can never continue (index
   // build, cache/IDB writes, render, stamp) over the new connection's state.
   // Deliberately not an AbortController — in-flight work that already left
@@ -415,9 +415,11 @@
   // Going offline must invalidate the freshness stamp: an online→offline→online
   // flip inside the 5-minute window has to revalidate immediately, since the
   // tree could not be revalidated while offline.
-  // Both transitions bump the connection generation so continuations from
+  // Link loss also bumps the connection generation so continuations from
   // the previous connection bail at their next gate instead of overwriting
-  // the new connection's state.
+  // the new connection's state (deliberately not on 'online': a flap-
+  // suppressed reconnect starts no pipeline and must not orphan the load
+  // that is still legitimately in flight).
   window.addEventListener('offline',()=>{ _onlineConnectionGen++; _onlineRevalidateLast = 0; updateStorageBar(); });
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   function ensurePersist(deps){
