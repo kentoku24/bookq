@@ -54,6 +54,14 @@
    * tab heartbeats `hb` while bound; a boot only adopts a record whose
    * heartbeat went stale, so two live tabs never fight over one member. */
   var PERSIST_KEY = 'bookq.readerSync.persist.v1';
+  /* Leave tombstone (localStorage): a member-bound leave() that could not
+   * put LEAVE on the wire (link dead / in-flight entry on a dead link)
+   * records {sessionId,memberId,resumeToken,at}; the next 'online' event,
+   * pageshow, or fresh client boot replays RESUME+LEAVE on a throwaway
+   * link so the peer is freed instead of sitting peer-away until the
+   * resume window lapses (#157). Single-slot like PERSIST_KEY — one
+   * session per browser profile. */
+  var LEAVE_TOMBSTONE_KEY = 'bookq.readerSync.leaveTombstone.v1';
   var RESUME_HB_MS = 4000;            // ownership heartbeat while bound
   var RESUME_HB_STALE_MS = 12000;     // owner presumed dead after this silence
   var RESUME_WINDOW_MS = 300 * 1000;      // sessions.RESUME_WINDOW_SECONDS
@@ -349,6 +357,7 @@
     var _destroyed = false;
     var _errorSt = null;             // transient error overlay (ERROR frame / apply fail)
     var _suspended = false;
+    var _tombstoneFlush = null;      // in-flight leave-flush {t, watchdog}
     var _plane = 'server-ws';
     var _dataT = null;
     var _switcher = (PT && typeof PT.createSwitcher === 'function')
@@ -588,6 +597,114 @@
 
     function _hbStop() {
       if (_hbT !== null) { _clearT(_hbT); _hbT = null; }
+    }
+
+    /* ── leave tombstone (#157) ──
+     * LEAVE is a member-bound frame — with no live link it can never reach
+     * the peer, who then sits in peer-away until the resume window lapses.
+     * The tombstone replays it later on a throwaway link: RESUME rebinds
+     * the offline member to that link, its ACK proves the member is ours
+     * again, and the LEAVE that follows ends the session for the peer.
+     * Any RESUME reject is terminal for this purpose — the session is
+     * already gone (bad_resume/resume_expired) or the member lives on a
+     * healthier link (resume_in_use) — so the tombstone is dropped. */
+
+    function _tombstoneRead() {
+      if (!_persist) return null;
+      try {
+        var d = JSON.parse(_persist.getItem(LEAVE_TOMBSTONE_KEY) || 'null');
+        if (d && d.sessionId && d.memberId && d.resumeToken &&
+            typeof d.at === 'number') {
+          if (_now() - d.at <= _resumeWindow) return d;
+          _tombstoneClear();         // server already reaped the member
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    function _tombstoneWrite(member) {
+      if (!_persist || !member) return;
+      try {
+        _persist.setItem(LEAVE_TOMBSTONE_KEY, JSON.stringify({
+          sessionId: member.sessionId, memberId: member.memberId,
+          resumeToken: member.resumeToken, at: _now(),
+        }));
+      } catch (e) { /* best-effort */ }
+    }
+
+    function _tombstoneClear() {
+      if (!_persist) return;
+      try { _persist.removeItem(LEAVE_TOMBSTONE_KEY); } catch (e) {}
+    }
+
+    /* Best-effort flush: own throwaway link, own frames — the session the
+     * tombstone names may be older than anything this client remembers,
+     * so nothing here touches _member/_seen or emits to subscribers. */
+    function _maybeFlushLeave() {
+      if (_destroyed || _tombstoneFlush) return;
+      var d = _tombstoneRead();
+      if (!d) return;
+      var raw;
+      try { raw = _factory(_url); } catch (e) { return; }
+      var t = _adapt(raw, 'leave-flush');
+      var resumeF = {
+        v: PROTOCOL_VERSION, requestId: _rid(), sessionId: d.sessionId,
+        workEpoch: 0, baseRevision: 0, type: 'RESUME',
+        payload: {memberId: d.memberId, resumeToken: d.resumeToken},
+      };
+      var leaveF = {
+        v: PROTOCOL_VERSION, requestId: _rid(), sessionId: d.sessionId,
+        workEpoch: 0, baseRevision: 0, type: 'LEAVE', payload: {},
+      };
+      var rec = {t: t, watchdog: null, done: false};
+      var done = function (clear) {
+        if (rec.done) return;
+        rec.done = true;
+        if (clear) _tombstoneClear();
+        if (_tombstoneFlush === rec) _tombstoneFlush = null;
+        if (rec.watchdog !== null) {
+          delete _timers[rec.watchdog];
+          _clearT(rec.watchdog);
+          rec.watchdog = null;
+        }
+        t.onframe = null; t.onclose = null; t.onopen = null;
+        try { t.close(); } catch (e) {}
+      };
+      rec.watchdog = _later(function () { done(false); }, _attemptTimeout);
+      _tombstoneFlush = rec;
+      t.onframe = function (f) {
+        if (!f || typeof f !== 'object') return;
+        if (f.type === 'HELLO') {
+          try { t.send(resumeF); } catch (e) { done(false); }
+          return;
+        }
+        if (f.type === 'ACK' && f.requestId === resumeF.requestId) {
+          try { t.send(leaveF); done(true); }
+          catch (e) { done(false); }
+          return;
+        }
+        if (f.type === 'REJECT' && f.requestId === resumeF.requestId) {
+          done(true);
+          return;
+        }
+        if (f.type === 'END') { done(true); return; }
+      };
+      t.onclose = function () { done(false); };
+      t.onopen = function () {};
+    }
+
+    function _abortFlushLeave() {
+      var rec = _tombstoneFlush;
+      if (!rec) return;
+      _tombstoneFlush = null;
+      rec.done = true;
+      if (rec.watchdog !== null) {
+        delete _timers[rec.watchdog];
+        _clearT(rec.watchdog);
+        rec.watchdog = null;
+      }
+      rec.t.onframe = null; rec.t.onclose = null; rec.t.onopen = null;
+      try { rec.t.close(); } catch (e) {}
     }
 
     /* ── transport plumbing ── */
@@ -1006,6 +1123,7 @@
     function leave() {
       if (_destroyed) return Promise.resolve({left: false});
       var l = _link, e = _entry, flushAfter = null;
+      if (_member) _tombstoneWrite(_member);   // cleared below once LEAVE is on the wire
       if (_member && e && l && l.t && !l.gone) {
         /* The server binds member→link only on the entry ACK — a LEAVE sent
          * earlier is rejected NO_SESSION and the peer sits in peer-away
@@ -1023,7 +1141,12 @@
           var watchdog = _setT(function () {
             try { t.close(); } catch (x) {}
           }, _attemptTimeout);
-          var done = function () {
+          /* delivered=true once LEAVE is on the wire (or made moot — a
+           * REJECT means the member never bound, END means the session is
+           * already over): the tombstone can go. A silent close/watchdog
+           * leaves it for the next flush to replay. */
+          var done = function (delivered) {
+            if (delivered) _tombstoneClear();
             _clearT(watchdog);
             try { t.close(); } catch (x) {}
           };
@@ -1033,26 +1156,28 @@
             if (!f || typeof f !== 'object') return;
             if (f.type === 'HELLO') {
               if (entryFrame) {
-                try { t.send(entryFrame); } catch (x) { done(); }
+                try { t.send(entryFrame); } catch (x) { done(false); }
               }
               return;
             }
             if (f.type === 'ACK' && f.requestId === wantRid) {
-              try { t.send(leaveFrame); } catch (x) {}
-              done();
+              try { t.send(leaveFrame); done(true); }
+              catch (x) { done(false); }
               return;
             }
-            if (f.type === 'REJECT' || f.type === 'END' || f.type === 'ERROR') {
-              done();
+            if (f.type === 'REJECT' || f.type === 'END') {
+              done(true);
+              return;
             }
+            if (f.type === 'ERROR') { done(false); }
           };
         };
-      } else if (_member && _linkOpen()) {
-        _ctlSend(_req('LEAVE', {}));
+      } else if (_member && _linkOpen() && _ctlSend(_req('LEAVE', {}))) {
+        _tombstoneClear();             // LEAVE is queued on a live link
       }
       _left = true;
       _terminate('ended', END_REASON.LEFT);
-      if (flushAfter) flushAfter();
+      if (flushAfter) flushAfter(); else _maybeFlushLeave();
       return Promise.resolve({left: true});
     }
 
@@ -1694,6 +1819,7 @@
           break;
         case 'visible':
         case 'pageshow':
+          _maybeFlushLeave();
           var was = _suspended;
           _suspended = false;
           if (_member) {
@@ -1715,6 +1841,7 @@
           }
           break;
         case 'online':
+          _maybeFlushLeave();
           _wakeReconnect();
           break;
         default:
@@ -1803,6 +1930,7 @@
     function destroy() {
       if (_destroyed) return;
       _destroyed = true;
+      _abortFlushLeave();
       _rejectAllPending('destroyed');
       _teardownLink();
       _timersClear();
@@ -1832,6 +1960,10 @@
     }
 
     _attachEvents();
+    // Boot-time flush: a tombstone left by an earlier tab's offline leave
+    // gets its LEAVE replayed now — the peer's peer-away ends here instead
+    // of at the resume-window deadline (#157).
+    _maybeFlushLeave();
 
     var api = {
       create: create,
@@ -1880,6 +2012,22 @@
     } catch (e) { return null; }
   }
 
+  /* Cheap boot check (pairController): is a leave tombstone waiting for a
+   * flush? Same window rule as _tombstoneRead — the pair controller creates
+   * a client for the flush only while one is still worth sending (#157). */
+  function peekLeaveTombstone(storage, now) {
+    try {
+      var p = storage !== undefined ? storage : _defaultLocalStorage();
+      if (!p) return null;
+      var d = JSON.parse(p.getItem(LEAVE_TOMBSTONE_KEY) || 'null');
+      if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
+          typeof d.at !== 'number') return null;
+      var t = typeof now === 'function' ? now() : Date.now();
+      if (t - d.at > RESUME_WINDOW_MS) return null;
+      return d;
+    } catch (e) { return null; }
+  }
+
   globalThis.PairClient = {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     STATUS: STATUS,
@@ -1889,5 +2037,6 @@
     canonicalJson: canonicalJson,
     manifestDigestHex: manifestDigestHex,
     peekPersistedResume: peekPersistedResume,
+    peekLeaveTombstone: peekLeaveTombstone,
   };
 })();
