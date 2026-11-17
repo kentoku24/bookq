@@ -603,7 +603,7 @@ cmd_up() {
     cmd_gc || warn "gc の自動実行に失敗しました（up 自体には影響ありません）。"
 
     printf '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
-    printf '✅ 開発環境 "%s" が起動しました（認証なし / データは読み取り専用）\n' "$name"
+    printf '✅ 開発環境 "%s" が起動しました（認証なし / データは読み書き可 — library upload/delete 有効）\n' "$name"
     printf '   %s @ %s\n\n' "${ref:-作業ツリー}" "$sha"
     if [ -n "$local_mode" ]; then
         printf '   http://127.0.0.1:%s\n' "$local_port"

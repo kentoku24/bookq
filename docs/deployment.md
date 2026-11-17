@@ -9,7 +9,7 @@
 | tailnet ノード | `bookq` | `dev-01`〜`dev-10`（固定 10 個を使い回し） |
 | URL | `https://bookq.your-tailnet.ts.net` | `https://dev-XX.your-tailnet.ts.net`（XX=01..10） |
 | 認証 | Google OAuth + メール許可リスト | なし（`BOOKQ_TEST_MODE=true`） |
-| 画像ツリー | 読み書き可でマウント | **読み取り専用** (`:ro`) |
+| 画像ツリー | 読み書き可でマウント (`:rw`) | 読み書き可 (`:rw`) — `/api/v1/library/*` の upload/delete が有効 |
 | 起動/停止方法 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、Freeプランでノード再利用） |
 
 ---
@@ -65,8 +65,8 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 ```
 
 - 既定は `http://127.0.0.1:8080`。2つ目の同時環境は `--port 1024-65535` で別ポートを指定する（使用中ポートはビルド前に fail fast する）。
-- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（プール通常環境と同じ）。画像ツリーは読み取り専用。
-- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の読み取り専用ツリーを晒すので、検証用 LAN でのみ使うこと。
+- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（プール通常環境と同じ）。画像ツリーは読み書き可 — `/api/v1/library/*` の upload/delete が有効。
+- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の**書き込み可**ツリーを晒す（upload/delete が誰でも使える）ので、検証用 LAN でのみ使うこと。
 - Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `app/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
 - iOS Simulator からもそのまま開ける（host network 共有）: `./scripts/open-simulator.sh http://127.0.0.1:<port>`。helper は `https://` と loopback `http://` のみ受理し、`http://<lan-ip>` は Secure Context でないため拒否する。手順は `.claude/skills/ios-simulator/references/overview.md: Local mode`。
 - 10スロットプールを共有する。ローカル環境も `find_free_slot` の割当に数えられ、10/10 枯渇時は通常環境と同じく `pool exhausted (10/10)` で失敗する（仕様として許容）。

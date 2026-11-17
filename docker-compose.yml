@@ -18,7 +18,8 @@ services:
       dockerfile: Dockerfile.viewer-rs
     container_name: bookq-prd-viewer-rs
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      # read-write: /api/v1/library/* (upload/delete) writes here.
+      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:rw"
       # folder-visibility SQLite — user-state volume に永続化。
       - user-state:/var/lib/bookq
       # thumb/sprite hit-path cache — 共有しないと native thumb は常に
