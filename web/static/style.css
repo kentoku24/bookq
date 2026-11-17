@@ -33,7 +33,9 @@ body{position:fixed;inset:0}
 		#sidebar-header h1{font-size:16px;font-weight:600;color:#e0e0e0;white-space:nowrap;flex-shrink:0;letter-spacing:-0.01em;line-height:1.2;max-width:calc(50% - 32px);min-width:0;overflow:hidden;text-overflow:ellipsis}
 		/* pair launcher is centered in the tile header (2台見開き entry);
 		 * the right cluster stays above it so a tap near the edge still
-		 * hits フィルタ/オンライン status, never a stray MATCH. */
+		 * hits フィルタ/オンライン status, never a stray MATCH. The cluster
+		 * must stay narrow — anything added to the header goes on the
+		 * title side (see #lib-edit-btn) so it can't reach center. */
 		#sidebar-header #pair-btn{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
 		#sidebar-header #pair-btn:active{transform:translate(-50%,-50%) scale(0.95)}
 		#sidebar-header #filter-btn{margin-left:auto;position:relative;z-index:1}
