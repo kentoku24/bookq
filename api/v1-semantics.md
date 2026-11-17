@@ -200,7 +200,8 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
 
 - **対応形式**: `.zip .cbz .rar .cbr .epub .pdf` のみ
   (`serve.rs::ARCHIVE_EXTENSIONS` + `PDF_EXTENSIONS`)。拡張子は小文字化して
-  判定。それ以外は **415**。
+  判定。それ以外は **415** — ただし multipart (`/library/files`) では
+  per-file `unsupported_type` として `errors[]` に列挙され 200 を返し得る。
 - **uploads 無効化**: 起動時に `<library>/.bookq-uploads/` を作成できない
   デプロイ (read-only マウント等) では、upload 系・delete ともに
   **503** `{detail:"uploads disabled"}`。読み取り面は従来どおり動作する。

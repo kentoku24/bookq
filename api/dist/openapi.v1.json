@@ -1879,9 +1879,6 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
-          "422": {
-            "$ref": "#/components/responses/ValidationError"
-          },
           "503": {
             "content": {
               "application/json": {
@@ -2260,7 +2257,13 @@
             "content": {
               "application/json": {
                 "examples": {
-                  "default": {
+                  "conflict": {
+                    "summary": "dedupe 枯渇",
+                    "value": {
+                      "detail": "no free filename slot"
+                    }
+                  },
+                  "incomplete": {
                     "summary": "未完",
                     "value": {
                       "code": "incomplete",
@@ -2273,7 +2276,8 @@
                   "properties": {
                     "code": {
                       "enum": [
-                        "incomplete"
+                        "incomplete",
+                        "conflict"
                       ],
                       "type": "string"
                     },
@@ -2286,15 +2290,13 @@
                     }
                   },
                   "required": [
-                    "detail",
-                    "code",
-                    "offset"
+                    "detail"
                   ],
                   "type": "object"
                 }
               }
             },
-            "description": "未完（body の `offset` が現在の受領位置）"
+            "description": "未完（`code:incomplete`、`offset` が現在の受領位置）または\ndedupe の空き名枯渇（`conflict`、detail のみ）\n"
           },
           "503": {
             "content": {
@@ -3075,7 +3077,7 @@
                 }
               }
             },
-            "description": "不正な Range ヘッダ等。Starlette の FileResponse Range 処理は\n`text/plain` ボディを返す（`{\"detail\": …}` JSON とは別形式）。\n"
+            "description": "不正な Range ヘッダ等。viewer-rs の Range 検証は\n`text/plain` ボディを返す（`{\"detail\": …}` JSON とは別形式）。\n"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"

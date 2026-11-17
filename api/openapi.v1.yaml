@@ -456,7 +456,7 @@ paths:
         "304": {description: ETag 一致}
         "400":
           description: |
-            不正な Range ヘッダ等。Starlette の FileResponse Range 処理は
+            不正な Range ヘッダ等。viewer-rs の Range 検証は
             `text/plain` ボディを返す（`{"detail": …}` JSON とは別形式）。
           content:
             application/json:
@@ -891,7 +891,6 @@ paths:
               schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
-        "422": {$ref: "#/components/responses/ValidationError"}
         "503":
           description: uploads が無効（library 書き込み不可のデプロイ）
           content:
@@ -1133,20 +1132,25 @@ paths:
                   value: {name: "work.rar", path: "Series/work.rar", size: 500000000}
         "404": {$ref: "#/components/responses/NotFound"}
         "409":
-          description: 未完（body の `offset` が現在の受領位置）
+          description: |
+            未完（`code:incomplete`、`offset` が現在の受領位置）または
+            dedupe の空き名枯渇（`conflict`、detail のみ）
           content:
             application/json:
               schema:
                 type: object
-                required: [detail, code, offset]
+                required: [detail]
                 properties:
                   detail: {type: string}
-                  code: {type: string, enum: [incomplete]}
+                  code: {type: string, enum: [incomplete, conflict]}
                   offset: {type: integer, minimum: 0}
               examples:
-                default:
+                incomplete:
                   summary: 未完
                   value: {detail: "upload incomplete", code: "incomplete", offset: 33554432}
+                conflict:
+                  summary: dedupe 枯渇
+                  value: {detail: "no free filename slot"}
         "503":
           description: uploads が無効
           content:

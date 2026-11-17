@@ -1086,7 +1086,7 @@ export interface operations {
                 content?: never;
             };
             /**
-             * @description 不正な Range ヘッダ等。Starlette の FileResponse Range 処理は
+             * @description 不正な Range ヘッダ等。viewer-rs の Range 検証は
              *     `text/plain` ボディを返す（`{"detail": …}` JSON とは別形式）。
              */
             400: {
@@ -1452,7 +1452,6 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            422: components["responses"]["ValidationError"];
             /** @description uploads が無効（library 書き込み不可のデプロイ） */
             503: {
                 headers: {
@@ -1722,7 +1721,10 @@ export interface operations {
                 };
             };
             404: components["responses"]["NotFound"];
-            /** @description 未完（body の `offset` が現在の受領位置） */
+            /**
+             * @description 未完（`code:incomplete`、`offset` が現在の受領位置）または
+             *     dedupe の空き名枯渇（`conflict`、detail のみ）
+             */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1731,8 +1733,8 @@ export interface operations {
                     "application/json": {
                         detail: string;
                         /** @enum {string} */
-                        code: "incomplete";
-                        offset: number;
+                        code?: "incomplete" | "conflict";
+                        offset?: number;
                     };
                 };
             };
