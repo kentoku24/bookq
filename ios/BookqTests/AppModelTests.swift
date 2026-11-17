@@ -34,4 +34,26 @@ final class AppModelTests: XCTestCase {
         model.auth.onSessionExpired?()
         XCTAssertEqual(model.phase, .login)
     }
+
+    /// `-uitestReset` wipe — progress (all scopes), pair-sync snapshots
+    /// and layout prefs go; `serverURL` (re-injected per launch) stays.
+    func testUITestResetWipesPersistedKeys() {
+        let suite = "AppModelTests.uitestReset.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("x", forKey: "bookq_progress_v1")
+        defaults.set("x", forKey: "bookq_progress_v1:host|a@b.c")
+        defaults.set("x", forKey: "bookq.pairSync.v1.example.com")
+        defaults.set(true, forKey: "originalImages")
+        defaults.set("list", forKey: "browseLayout")
+        defaults.set("http://localhost:8080", forKey: "serverURL")
+        AppModel.wipeUITestState(in: defaults)
+        for key in ["bookq_progress_v1", "bookq_progress_v1:host|a@b.c",
+                    "bookq.pairSync.v1.example.com", "originalImages",
+                    "browseLayout"] {
+            XCTAssertNil(defaults.object(forKey: key), key)
+        }
+        XCTAssertEqual(defaults.string(forKey: "serverURL"),
+                       "http://localhost:8080")
+    }
 }

@@ -91,6 +91,15 @@ final class AppModel: ObservableObject {
                 expires_in: 3600,
                 refresh_token: Self.injectedTestRefreshToken() ?? "")))
         }
+        // `-uitestReset` / `BOOKQ_UI_TEST_RESET` — UI tests set this so
+        // every launch starts from clean persisted state. Local keys are
+        // wiped here, before configureAPI() lazily initialises the
+        // stores that read them; server-side positions are deleted in
+        // boot() ahead of the first syncWithServer().
+        if Self.uitestResetRequested() {
+            Self.wipeUITestState()
+            print("[bookq] uitest reset: local state wiped")
+        }
         #endif
         if config.baseURL != nil {
             configureAPI()
@@ -126,6 +135,27 @@ final class AppModel: ObservableObject {
         else { return nil }
         let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
         return v.isEmpty ? nil : v
+    }
+
+    /// `-uitestReset` argv flag or `BOOKQ_UI_TEST_RESET` env var.
+    static func uitestResetRequested() -> Bool {
+        if ProcessInfo.processInfo.environment["BOOKQ_UI_TEST_RESET"] != nil {
+            return true
+        }
+        return ProcessInfo.processInfo.arguments.contains("-uitestReset")
+    }
+
+    /// Removes every UserDefaults key that can leak state between UI
+    /// test methods — reading positions (all account scopes), pair-sync
+    /// snapshots, and layout prefs. `serverURL` is kept: it is
+    /// re-injected via `-serverURL` on every test launch anyway.
+    static func wipeUITestState(in defaults: UserDefaults = .standard) {
+        for key in defaults.dictionaryRepresentation().keys {
+            if key.hasPrefix("bookq_progress_v1") || key.hasPrefix("bookq.pairSync")
+                || key == "originalImages" || key == "browseLayout" {
+                defaults.removeObject(forKey: key)
+            }
+        }
     }
 
     /// `BOOKQ_TEST_REFRESH_TOKEN` env var or `-testRefreshToken <rt>` argv
@@ -265,6 +295,13 @@ final class AppModel: ObservableObject {
             visibility.accountChanged(knownOwner: auth.user?.email)
             offline.scopeChanged()
             progress.scopeChanged()
+            #if DEBUG
+            if Self.uitestResetRequested() {
+                // Positions live server-side too — wipe before the sync
+                // below repopulates local entries from remote.
+                try? await api.deleteReadingPosition()
+            }
+            #endif
             Task { await progress.syncWithServer() }
             pair.bootResume()
             print("[bookq] boot: probe ok")
