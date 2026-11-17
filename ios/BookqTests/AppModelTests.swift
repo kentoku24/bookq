@@ -56,4 +56,24 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: "serverURL"),
                        "http://localhost:8080")
     }
+
+    /// `-uitestReset` also clears Documents/ — offline download scopes
+    /// (`works.json` + files) live there, outside UserDefaults.
+    func testUITestResetWipesOfflineDownloads() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("uitest-wipe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let scope = dir.appendingPathComponent("127.0.0.1%3A8080|user")
+        try FileManager.default.createDirectory(
+            at: scope.appendingPathComponent("nested"),
+            withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: scope.appendingPathComponent("works.json"))
+        try Data("img".utf8).write(
+            to: scope.appendingPathComponent("nested/p00.jpg"))
+        AppModel.wipeUITestOfflineDownloads(in: dir)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(
+            atPath: dir.path), [])
+    }
 }

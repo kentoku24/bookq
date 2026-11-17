@@ -98,6 +98,7 @@ final class AppModel: ObservableObject {
         // boot() ahead of the first syncWithServer().
         if Self.uitestResetRequested() {
             Self.wipeUITestState()
+            Self.wipeUITestOfflineDownloads()
             print("[bookq] uitest reset: local state wiped")
         }
         #endif
@@ -139,7 +140,8 @@ final class AppModel: ObservableObject {
 
     /// `-uitestReset` argv flag or `BOOKQ_UI_TEST_RESET` env var.
     static func uitestResetRequested() -> Bool {
-        if ProcessInfo.processInfo.environment["BOOKQ_UI_TEST_RESET"] != nil {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_UI_TEST_RESET"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
             return true
         }
         return ProcessInfo.processInfo.arguments.contains("-uitestReset")
@@ -155,6 +157,22 @@ final class AppModel: ObservableObject {
                 || key == "originalImages" || key == "browseLayout" {
                 defaults.removeObject(forKey: key)
             }
+        }
+    }
+
+    /// Offline downloads live under `Documents/<scope>/` (`works.json`
+    /// + image files) — file-backed, outside UserDefaults. Documents
+    /// holds nothing else in this app, so its contents are wiped
+    /// wholesale; per-item `try?` keeps a single failure from aborting
+    /// the rest.
+    static func wipeUITestOfflineDownloads(
+        in directory: URL? = nil,
+        fm: FileManager = .default) {
+        let docs = directory ?? fm
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for item in (try? fm.contentsOfDirectory(
+            at: docs, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: item)
         }
     }
 
