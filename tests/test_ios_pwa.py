@@ -1,4 +1,4 @@
-"""T4 PWA/Offline on ios_page 390x844 — WebKit narrow check (Cache/estimate only)."""
+"""PWA/Offline on ios_page 390x844 — WebKit narrow check (Cache/estimate only)."""
 
 import re
 

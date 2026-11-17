@@ -1,4 +1,4 @@
-"""Offline harness E2E — 10 failure modes via harness (Todo 3).
+"""Offline harness E2E — 10 failure modes via harness.
 
 Uses the server fixture's dynamic port (never a fixed 8080/18080) with the ?offline=1 gate.
 Each test clears IndexedDB/caches via evaluate and is independent.

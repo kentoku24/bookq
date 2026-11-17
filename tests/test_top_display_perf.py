@@ -1,7 +1,5 @@
 """Top-page display-complete measurement harness.
 
-Plan: `.omo/plans/top-page-display-speed.md` Todo 1 (計測ハーネス固定).
-
 Measures the time from navigation to `/` until every top-page tile image
 (`#tile-grid .tile[data-path] img` ONLY) has settled (`img.complete`,
 which covers both `load` and `error`), then prints numeric logs for
@@ -14,11 +12,8 @@ which covers both `load` and `error`), then prints numeric logs for
 
 Visibility checks use `getBoundingClientRect` (no `IntersectionObserver`).
 
-Later plan todos (4/5) will ADD asserts to this file — the `_wait_*` /
-`_collect_*` helpers are kept small and reusable for that.
-
 BOOKQ_TEST_MODE handling: none needed here — the shared `server`
-fixture (tests/conftest.py) already launches uvicorn with
+fixture (tests/conftest.py) already launches viewer-rs with
 `BOOKQ_TEST_MODE=true` + a synthetic DOWNLOADS_DIR tree.
 
 Run:
@@ -128,7 +123,7 @@ def test_top_display_complete(server, browser):
         context.close()
 
 
-# Todo 4 (フロント切替): every browse-list cover must load via
+# Every browse-list cover must load via
 # `/thumb/...?w=` with `loading="lazy"`. Same scope as the harness
 # (TILE_IMG_SELECTOR); the zero-eager check spans `#tile-grid` per spec.
 def _tile_img_srcs(page) -> list:
@@ -147,7 +142,7 @@ def _non_lazy_tile_img_count(page) -> int:
     )
 
 
-# Todo 5 (初回フェッチ順): first paint must fetch shallow folders
+# First paint must fetch shallow folders
 # (`/api/folders?...depth=1`) BEFORE the first `/thumb` request, so visible
 # covers start from the cheap shallow snapshot. Order comes from
 # `performance.getEntriesByType("resource")` start times.
@@ -160,7 +155,7 @@ def _resource_start_times(page) -> list:
 
 
 def test_top_covers_use_thumbnails(server, browser):
-    """Todo 4: all tile covers via `/thumb/`, zero eager imgs."""
+    """All tile covers via `/thumb/`, zero eager imgs."""
     context = browser.new_context(viewport={"width": 1280, "height": 800})
     page = context.new_page()
     try:

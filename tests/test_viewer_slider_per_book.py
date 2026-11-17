@@ -1,6 +1,6 @@
-"""Per-book (chapter-local) slider behavior (viewer-slider-per-book Task 9, #476 v1 port).
+"""Per-book (chapter-local) slider behavior (#476 v1 port).
 
-Proves the T1-T8 wiring: the page slider's ``max``/``value`` and the counter
+Proves the wiring: the page slider's ``max``/``value`` and the counter
 are scoped to the opened chapter, slider input / swipe / keyboard clamp inside
 the chapter, and only the tap zones (``goNext``/``goPrev`` with
 ``crossChapter:true``) cross into the sibling book.
@@ -64,7 +64,7 @@ def slider_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def slider_server(slider_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against the slider tree."""
+    """viewer-rs backend against the slider tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(

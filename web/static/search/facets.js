@@ -67,7 +67,7 @@
     if (OC && OC.coverWidth) return OC.coverWidth();
     return (typeof window !== "undefined" && (window.devicePixelRatio || 0) >= 2) ? 400 : 200;
   }
-  // Todo 4: search renders share the one-shot ctx (single localStorage parse +
+  // Search renders share the one-shot ctx (single localStorage parse +
   // single offlineMap snapshot + memoized leafPaths per visible folder).
   // Render-scoped like the browse ctx — rebuilt on every search render, so
   // _downloadingSet/progress/refreshOfflineMap freshness comes for free.

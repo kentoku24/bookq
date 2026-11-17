@@ -252,7 +252,6 @@ def test_ptr_touchcancel_resets(page):
 
 def test_pull_bottom_resistance_no_refresh(page):
     """At bottom, dragging up 80 shows ~15px resistance and triggers no fetch."""
-    # Scroll to bottom
     page.evaluate("""() => {
         const s = document.getElementById('sidebar-scroll');
         s.scrollTop = s.scrollHeight;
