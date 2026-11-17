@@ -529,6 +529,18 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     if data_start < 0 || data_start + e.compress_size as i64 > e.end_offset {
         return ReadOutcome::Bail; // "Overlapped entries" → BadZipFile
     }
+    // `end_offset` only proves header-level consistency — it's the NEXT
+    // entry's header_offset, another CD-supplied value, so it can't bound
+    // the alloc by real bytes. `compress_size` must fit inside the file:
+    // the read below can't succeed past EOF, so refuse the declaration
+    // before it sizes the buffer (same posture as read_store_parts).
+    let avail = f
+        .metadata()
+        .map(|m| m.len().saturating_sub(data_start as u64))
+        .unwrap_or(0);
+    if e.compress_size > avail {
+        return ReadOutcome::Bail;
+    }
     let mut comp = vec![0u8; e.compress_size as usize];
     if f.seek(SeekFrom::Start(data_start as u64)).is_err()
         || f.read_exact(&mut comp).is_err()
@@ -2220,7 +2232,9 @@ fn rar5_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>>
             parts.push(StorePart { volfile: volfile.clone(), offset: h.data_offset, len: h.add_size });
         }
         if h.add_size > 0 {
-            fd.seek(h.data_offset + h.add_size).ok()?;
+            // saturating: crafted near-u64::MAX offsets must not wrap in
+            // debug builds — the seek just fails later either way.
+            fd.seek(h.data_offset.saturating_add(h.add_size)).ok()?;
         }
     }
     let total = want_size?;
@@ -2359,7 +2373,7 @@ fn rar3_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>>
         }
         // SUB "CMT" payloads don't affect store reads — skip data area.
         if h.add_size > 0 {
-            fd.seek(h.data_offset + h.add_size).ok()?;
+            fd.seek(h.data_offset.saturating_add(h.add_size)).ok()?;
         }
     }
     let total = want_size?;
@@ -3649,6 +3663,78 @@ mod memo_tests {
             crafted_zip(8, "a.png", &comp, comp.len() as u32, 1024 * 1024, &raw),
         )
         .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Two-CD-entry variant: entry A's `end_offset` is entry B's
+    /// `header_offset`, so a fake B makes A's overlap check pass while the
+    /// claimed data far exceeds the file — the compress_size alloc must
+    /// refuse on real bytes, not header consistency.
+    fn crafted_zip_pair() -> Vec<u8> {
+        let name = "a.png";
+        let data = b"tiny";
+        let crc = crc32fast::hash(data);
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0)); // stored
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(4));
+        out.extend_from_slice(&le32(4));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        let cd_off = out.len() as u32;
+        // A: real LFH at 0, compress_size lied to ~4GiB.
+        let mut cd_entry = |name: &str, csize: u32, fsize: u32, off: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&le32(0x0201_4b50));
+            e.extend_from_slice(&le16(20));
+            e.extend_from_slice(&le16(20));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le32(crc));
+            e.extend_from_slice(&le32(csize));
+            e.extend_from_slice(&le32(fsize));
+            e.extend_from_slice(&le16(name.len() as u16));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le32(0));
+            e.extend_from_slice(&le32(off));
+            e.extend_from_slice(name.as_bytes());
+            e
+        };
+        let a = cd_entry("a.png", 0xFFFF_F000, 4, 0);
+        let b = cd_entry("b.png", 0, 0, 0xFFFF_FF00);
+        out.extend_from_slice(&a);
+        out.extend_from_slice(&b);
+        let cd_len = out.len() as u32 - cd_off;
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(2));
+        out.extend_from_slice(&le16(2));
+        out.extend_from_slice(&le32(cd_len));
+        out.extend_from_slice(&le32(cd_off));
+        out.extend_from_slice(&le16(0));
+        out
+    }
+
+    #[test]
+    fn zip_oversized_compress_size_is_none() {
+        // compress_size passes the end_offset overlap check (set by fake
+        // entry B) but exceeds the real file — refuse before the alloc.
+        let p = tmp_cbz("big-comp");
+        std::fs::write(&p, crafted_zip_pair()).unwrap();
         assert_eq!(zip_read_entry(&p, "a.png"), None);
         std::fs::remove_file(&p).ok();
     }
