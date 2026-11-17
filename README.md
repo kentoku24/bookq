@@ -269,7 +269,7 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 | 起動/停止 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、何個でも） |
 | URL | `https://bookq.<your-tailnet>.ts.net` | `https://dev-<名前>.<your-tailnet>.ts.net` |
 | 認証 | Google OAuth | なし（`BOOKQ_TEST_MODE=true`） |
-| 画像ツリー | 読み書き可 (`:rw`) | 読み書き可 (`:rw`) — `/api/v1/library/*` の upload/delete が有効 |
+| 画像ツリー | 読み書き可 (`:rw`) | 既定 read-only (`:ro`) — 書き込み検証は `--fixture` (合成ツリー、常に rw) か `./dev.sh up --writable-library` で opt-in |
 | コンテナ | viewer-rs + tailscale サイドカー | viewer-rs + tailscale サイドカー（ノードは環境ごとに 1 つ） |
 
 > **本番の compose を検証に流用しないこと。** worktree で素の `docker compose up` を打つと、ホスト名 `bookq` を要求する 2 つ目の tailscale ノードが立ち上がって本番と名前を争います。`prd.sh` は worktree からの実行を拒否し、`docker-compose.dev.yml` は `DEV_IMAGE` / `DEV_NAME` 等の必須変数（`:?`）が無いと起動自体が失敗するので、`dev.sh` を使う限りこの事故は起きません。
@@ -357,8 +357,8 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 ```
 
 - 既定は `http://127.0.0.1:8080`。2つ目の同時環境は `--port 1024-65535` で別ポートを指定する（使用中ポートはビルド前に fail fast する）。
-- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（tailnet モードと同じ）。画像ツリーは読み書き可 — `/api/v1/library/*` の upload/delete が有効。
-- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の**書き込み可**ツリーを晒す（upload/delete が誰でも使える）ので、検証用 LAN でのみ使うこと。
+- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（tailnet モードと同じ）。画像ツリーは既定 read-only — upload/delete を試すなら `--fixture`（使い捨て合成ツリー、常に rw）か `--writable-library`（実ライブラリを rw、明示 opt-in）。
+- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証のツリーを晒す（`--writable-library` 併用時は upload/delete も誰でも使える）ので、検証用 LAN でのみ使うこと。
 - Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `web/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
 - iOS Simulator からもそのまま開ける（host network 共有）: `./scripts/open-simulator.sh http://127.0.0.1:<port>`。helper は `https://` と loopback `http://` のみ受理し、`http://<lan-ip>` は Secure Context でないため拒否する。手順は `.claude/skills/ios-simulator/references/overview.md: Local mode`。
 - 10スロットプールを共有する。ローカル環境も `find_free_slot` の割当に数えられ、10/10 枯渇時は通常環境と同じく `pool exhausted (10/10)` で失敗する（仕様として許容）。

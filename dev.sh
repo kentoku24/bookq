@@ -618,7 +618,11 @@ cmd_up() {
     cmd_gc || warn "gc の自動実行に失敗しました（up 自体には影響ありません）。"
 
     printf '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
-    printf '✅ 開発環境 "%s" が起動しました（認証なし / データは読み書き可 — library upload/delete 有効）\n' "$name"
+    if [ -n "$writable" ]; then
+        printf '✅ 開発環境 "%s" が起動しました（認証なし / ライブラリ書き込み可 — upload/delete 有効）\n' "$name"
+    else
+        printf '✅ 開発環境 "%s" が起動しました（認証なし / ライブラリ read-only — 書き込み検証は --fixture か --writable-library）\n' "$name"
+    fi
     printf '   %s @ %s\n\n' "${ref:-作業ツリー}" "$sha"
     if [ -n "$local_mode" ]; then
         printf '   http://127.0.0.1:%s\n' "$local_port"
