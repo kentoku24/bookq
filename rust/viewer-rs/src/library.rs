@@ -347,6 +347,16 @@ async fn drain_field(field: &mut axum::extract::multipart::Field<'_>) {
     while let Ok(Some(_)) = field.chunk().await {}
 }
 
+/// Does the part's Content-Disposition actually carry a `filename` token
+/// (`filename=` or RFC 5987 `filename*=`)? Checked on the raw bytes —
+/// the whole point is catching names the UTF-8 decode couldn't show us.
+fn disposition_has_filename(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .map(|v| v.as_bytes().windows(8).any(|w| w == b"filename"))
+        .unwrap_or(false)
+}
+
 /// `dir` is resolved + validated by the caller. Streams each `file` field to
 /// a `.bq-tmp-*` sibling then renames; per-file failures land in `errors[]`.
 pub(crate) async fn post_files(
@@ -384,10 +394,21 @@ pub(crate) async fn post_files(
         }
         // A `file` part without a filename is a form field, not a file
         // upload — skip it like unknown fields so an all-nonfile request
-        // hits the "no file fields" 400 below instead of a 200.
-        let Some(name) = field.file_name().map(str::to_string) else {
-            drain_field(&mut field).await;
-            continue;
+        // hits the "no file fields" 400 below instead of a 200. But
+        // `file_name()` is also None when the name exists and just isn't
+        // UTF-8 (or is RFC 5987 `filename*=` only) — that IS an upload
+        // attempt, so report it as a per-file error instead of skipping.
+        let name = match field.file_name() {
+            Some(n) => n.to_string(),
+            None if disposition_has_filename(field.headers()) => {
+                drain_field(&mut field).await;
+                errors.push(serde_json::json!({"name": "?", "code": "invalid_name"}));
+                continue;
+            }
+            None => {
+                drain_field(&mut field).await;
+                continue;
+            }
         };
         if let Some(code) = precheck_file(&name) {
             drain_field(&mut field).await;

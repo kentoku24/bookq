@@ -518,12 +518,27 @@ def test_upload_contract_rejections(lib_server, lib_root):
     assert r.status_code == 400
 
     # Unparseable multipart is a bad request, not a partial-success report.
+    # Pin the JSON detail so we know it's the handler's saw_malformed 400,
+    # not the extractor's text/plain 400 (missing boundary etc.).
     r = httpx.post(
         f"{lib_server}/api/v1/library/files",
         content=b"--b\r\nContent-Disposition: form-data; name=\"\x0f\xc3\xa4\"\r\n\r\nx\r\n--b--\r\n",
         headers={"Content-Type": "multipart/form-data; boundary=b"},
     )
     assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["detail"] == "malformed multipart body"
+
+    # A filename present in the disposition but undecodable as UTF-8 is an
+    # upload attempt with a bad name — reported per-file at 200, not
+    # silently skipped like a form field.
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/files",
+        content=b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\xff.cbz\"\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--b--\r\n",
+        headers={"Content-Type": "multipart/form-data; boundary=b"},
+    )
+    assert r.status_code == 200
+    assert r.json()["errors"] == [{"name": "?", "code": "invalid_name"}]
 
     # ...but a schema-valid batch whose entries all fail per-file checks
     # still reports them under `errors` at 200.

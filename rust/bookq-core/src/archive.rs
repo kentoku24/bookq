@@ -525,8 +525,14 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     }
     let fnlen = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
     let extralen = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
-    let data_start = e.header_offset + SIZE_LFH as i64 + fnlen as i64 + extralen as i64;
-    if data_start < 0 || data_start + e.compress_size as i64 > e.end_offset {
+    let data_start = e
+        .header_offset
+        .saturating_add(SIZE_LFH as i64)
+        .saturating_add(fnlen as i64)
+        .saturating_add(extralen as i64);
+    if data_start < 0
+        || data_start.saturating_add(e.compress_size as i64) > e.end_offset
+    {
         return ReadOutcome::Bail; // "Overlapped entries" → BadZipFile
     }
     // `end_offset` only proves header-level consistency — it's the NEXT
