@@ -3,7 +3,7 @@
  * Plain global script (no build step): defines window.resolveCover.
  * Load BEFORE app.js (see index.html deferred script order).
  * Fallback chain: node.thumb → node.thumbs[0] → null (caller shows placeholder).
- * Todo 3 (single-cover-first): resolveCoverSingle(node) is thumb-ONLY at the
+ * Single-cover-first: resolveCoverSingle(node) is thumb-ONLY at the
  * device cover width (OfflineCore.coverWidth: dpr>=2 → 400, else 200; null
  * when no node.thumb — caller shows placeholder). First-to-verdict stays
  * unified on that one width, never a second fetch (no double-fetch).

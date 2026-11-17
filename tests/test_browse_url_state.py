@@ -27,7 +27,7 @@ def test_drill_down_sets_browse_hash(page):
     page.locator("#footer-refresh-btn").click()  # tile → list (one click)
     page.locator('.item[data-path="group"]').click()
     # The view mode (v=list) carries in the URL across folder navigation
-    # (Task 2, PR 4) — only the default "tile" mode omits the param.
+    # — only the default "tile" mode omits the param.
     expect(page).to_have_url(re.compile(r"#/browse/group\?v=list$"))
 
 
@@ -60,7 +60,7 @@ def test_breadcrumb_pop_does_not_duplicate_entries(page, server):
     page.go_back()
     # Back lands on root (NOT episodes): proves the pop happened instead of a
     # duplicate push — a duplicate push would make go_back land on episodes.
-    # Root-grid rendering on a no-hash arrival is T2's Oracle-F1 behavior (test_back_walks_hierarchy final leg).
+    # Root-grid rendering on a no-hash arrival is the expected no-hash behavior (test_back_walks_hierarchy final leg).
     expect(page).to_have_url(re.compile(r"^" + re.escape(server) + r"/?$"))
 
 
@@ -82,7 +82,7 @@ def test_drill_into_flattened_wrapper_sets_hash(page):
     expect(page.locator("#browse-header")).to_have_text("↩ wrap")
 
 
-# ── T2: browse restore (deep links, Back from a book, reload) ─────────────────
+# ── Browse restore (deep links, Back from a book, reload) ─────────────────
 # The reader half: applyUrlState gains a #/browse/ branch that restores the
 # folder level (teardownViewer + renderView + scroll), dead/empty paths
 # normalize to canonical root (no hash), and a no-hash arrival while a browse
@@ -234,7 +234,7 @@ def test_page_turn_after_browse_push_does_not_grow_history(page):
     assert after == before, f"page turn grew history: {before} -> {after}"
 
 
-# ── T3: consistency — empty/failure branches, resume hop, pull-refresh ────────
+# ── Consistency — empty/failure branches, resume hop, pull-refresh ────────
 # Every path that clears/rewrites the hash to no-hash must also reset the
 # browse state (currentBrowsePath = null, urlStack = [], searchMode cleared)
 # so the screen matches the canonical root URL (stale-stack hazard, Oracle F4).
@@ -342,7 +342,7 @@ def test_pull_refresh_at_root_keeps_root(page, server):
     expect(page.locator("#folder-count")).to_have_text("18 件")
 
 
-# ── T4: unicode round-trip + manual hash edit ─────────────────────────────────
+# ── Unicode round-trip + manual hash edit ─────────────────────────────────
 # No browse-able level has a non-ASCII name in the fixture — unicode paths are
 # exercised via deep links to unicode-named CHILD leaves (present-but-childless
 # levels: 【第一部】 is an image-only leaf under kanji/series1).

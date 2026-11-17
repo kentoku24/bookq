@@ -644,7 +644,7 @@ def test_flattened_wrapper_chapters_still_auto_concatenate(landscape_page):
 
 
 def test_cross_chapter_concat_natural_order(page):
-    """T4 — forward page turns across chapter seams must follow episode order
+    """Forward page turns across chapter seams must follow episode order
     (ch-2 → ch-10 → ch-11): regression guard for the client-side
     _naturalCompare in getSiblingLeafFolders (SIBLING_AUTOLOAD_MIN_DEPTH=2)."""
     # Sidebar is one-level drill-down: the ch-2 tile only exists after
@@ -728,7 +728,7 @@ def test_tight_fit_neighbours_sit_flush_at_the_edges(landscape_page):
     px per side. gapBefore() widens every gap to at least the
     centred spread's leftover, so a neighbour never peeks into that margin — but
     it must not be pushed further away either: it sits flush at the viewport
-    edge. (Before V3 this test asserted the neighbours were visible; its
+    edge. (This test previously asserted the neighbours were visible; its
     `right > 0` then only held by float rounding, and failed on CI.)"""
     page = landscape_page
     page.set_viewport_size({"width": 1180, "height": 820})

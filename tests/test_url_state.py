@@ -28,7 +28,7 @@ def turn_page(page, from_pages: int):
     expect(page.locator("#counter")).to_have_text(f"{from_pages + 1} / 5")
 
 
-# ── T1: URL writers ────────────────────────────────────────────────────────────
+# ── URL writers ────────────────────────────────────────────────────────────
 
 
 def test_opening_folder_sets_url_hash(page):
@@ -53,7 +53,7 @@ def test_page_turn_does_not_grow_history(page):
     expect(page).to_have_url(re.compile(r"#/view/simple_manga\?p=2$"))
 
 
-# ── T2: URL readers + re-sync ─────────────────────────────────────────────────
+# ── URL readers + re-sync ─────────────────────────────────────────────────
 
 
 def test_reload_keeps_position(page):
@@ -136,7 +136,7 @@ def test_unicode_round_trip(page, server):
     expect(page).to_have_url(re.compile(r"#/view/%E5%A4%8F%20%E3%81%AE%20%E6%9C%AC\?p=0$"))
 
 
-# ── T3: cross-chapter URL semantics ────────────────────────────────────────────
+# ── Cross-chapter URL semantics ────────────────────────────────────────────
 # group/deep_series/vol1 (p1, p2) + vol2 (p1) concatenate into one strip of 3
 # real images (chapter concat needs raw-path depth >= SIBLING_AUTOLOAD_MIN_DEPTH
 # = 2, so the depth-1 "series/" fixture deliberately does NOT concatenate).
@@ -172,9 +172,9 @@ def test_page_turn_into_next_chapter_updates_url(page, server):
     expect(page).to_have_url(re.compile(r"#/view/group/deep_series/vol2\?p=0$"))
 
 
-# ── T4: login round-trip (sessionStorage bridge) ──────────────────────────────
+# ── Login round-trip (sessionStorage bridge) ──────────────────────────────
 # The login-side stash script writes {hash, ts} into sessionStorage while the
-# login page renders; T2's init restores it (fresh < 10 min, location.hash
+# login page renders; the viewer's init restores it (fresh < 10 min, location.hash
 # empty) after the OAuth callback redirect to "/" would have dropped the
 # fragment. Tests are driven headlessly via add_init_script because test mode
 # (BOOKQ_TEST_MODE=true) never renders the login branch itself.
@@ -203,7 +203,7 @@ def test_url_hash_wins_over_stored(page, server):
     expect(page).to_have_url(re.compile(r"#/view/long\?p=5$"))
 
 
-# ── T5: hardening locks ───────────────────────────────────────────────────────
+# ── Hardening locks ───────────────────────────────────────────────────────
 # Spacer-padded chapter deep links (boundaries point past leading spacers, so a
 # restore can never land on a spacer) and corrupt-stash-tolerant init.
 

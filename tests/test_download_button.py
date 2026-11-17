@@ -631,7 +631,7 @@ def test_06_complete_delete_confirm_regression(page, server):
             pass
 
 
-# ── T3: anchored labeled popover (.ux-pop) replaces the full-screen overlay ──
+# ── Anchored labeled popover (.ux-pop) replaces the full-screen overlay ──
 
 TASK3_EVIDENCE = REPO_ROOT / ".omo" / "evidence"
 
@@ -922,7 +922,7 @@ def test_09_popover_esc_sidebar_single_open_toggle_flip(page, server):
         pass
 
 
-# ── T2: visual feedback layer (donut ring / listing spinner / transitions) ──
+# ── Visual feedback layer (donut ring / listing spinner / transitions) ──
 
 
 STYLE_CSS = REPO_ROOT / "web" / "static" / "style.css"
@@ -1082,7 +1082,7 @@ def test_10_style_css_static_gates():
         "confirm-delete 🗑 needs the whitening filter for contrast on red"
 
 
-# ── T4: keyboard activation of .offline-btn / .ux-pop buttons ────────────────
+# ── Keyboard activation of .offline-btn / .ux-pop buttons ────────────────
 # Regression: both live inside the tile, so the grid keydown handler's
 # closest(".tile,.card,.item") used to match and Enter navigated to the viewer
 # instead of natively activating the focused button. Tile-name Enter navigation
@@ -1193,7 +1193,7 @@ def test_keyboard_activation_of_offline_button(page, server):
             pass
 
 
-# ── T5: toast variants — success neutral (.ok), error red (.err) ────────────
+# ── Toast variants — success neutral (.ok), error red (.err) ────────────
 
 
 def _toast_state(page):
@@ -1291,7 +1291,7 @@ def test_toast_error_red_on_dl_failure(page, server):
             pass
 
 
-# ── T6: quota-exceeded in-app modal (showQuotaConfirm) ──────────────────────
+# ── Quota-exceeded in-app modal (showQuotaConfirm) ──────────────────────
 
 
 TASK6_EVIDENCE = REPO_ROOT / ".omo" / "evidence"
