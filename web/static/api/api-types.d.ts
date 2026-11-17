@@ -1056,6 +1056,7 @@ export interface operations {
                 };
                 content: {
                     "image/*": string;
+                    "application/*": string;
                 };
             };
             /** @description 単一 Range レスポンス */
@@ -1063,7 +1064,10 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "image/*": string;
+                    "application/*": string;
+                };
             };
             /** @description ETag 一致 */
             304: {
@@ -1116,6 +1120,15 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description 非画像などネイティブでサムネ生成不能なソース */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     getView: {
@@ -1142,6 +1155,15 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description 非画像などネイティブで正規化不能なソース */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     listReadingPositions: {
@@ -1381,7 +1403,20 @@ export interface operations {
                     };
                 };
             };
-            400: components["responses"]["BadRequest"];
+            /**
+             * @description パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は
+             *     extractor がハンドラ到達前に `text/plain` を返す（/image の 400
+             *     と同じ二形式）。
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                    "text/plain": string;
+                };
+            };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description 単一ファイルが `BOOKQ_UPLOAD_MAX_BYTES` 超過 */
@@ -1393,13 +1428,17 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description multipart 以外の Content-Type */
+            /**
+             * @description multipart 以外の Content-Type。extractor 拒否時は `text/plain`、
+             *     拡張子非対応は `{"detail": …}` JSON。
+             */
             415: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Error"];
+                    "text/plain": string;
                 };
             };
             422: components["responses"]["ValidationError"];
@@ -1439,7 +1478,19 @@ export interface operations {
                     };
                 };
             };
-            400: components["responses"]["BadRequest"];
+            /**
+             * @description パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の
+             *     parse 失敗時は extractor が `text/plain` を返す。
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                    "text/plain": string;
+                };
+            };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationError"];

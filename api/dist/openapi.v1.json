@@ -1712,7 +1712,19 @@
             "description": "削除完了"
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の\nparse 失敗時は extractor が `text/plain` を返す。\n"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -1852,7 +1864,19 @@
             "description": "受理結果（errors が空なら全件成功）"
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は\nextractor がハンドラ到達前に `text/plain` を返す（/image の 400\nと同じ二形式）。\n"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -1876,9 +1900,14 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
               }
             },
-            "description": "multipart 以外の Content-Type"
+            "description": "multipart 以外の Content-Type。extractor 拒否時は `text/plain`、\n拡張子非対応は `{\"detail\": …}` JSON。\n"
           },
           "422": {
             "$ref": "#/components/responses/ValidationError"
@@ -3018,6 +3047,12 @@
         "responses": {
           "200": {
             "content": {
+              "application/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "image/*": {
                 "schema": {
                   "format": "binary",
@@ -3028,6 +3063,20 @@
             "description": "画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない"
           },
           "206": {
+            "content": {
+              "application/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
             "description": "単一 Range レスポンス"
           },
           "304": {
@@ -3104,6 +3153,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "非画像などネイティブでサムネ生成不能なソース"
           }
         },
         "summary": "リサイズ JPEG サムネイル",
@@ -3146,6 +3205,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "非画像などネイティブで正規化不能なソース"
           }
         },
         "summary": "リーダー用正規化ページ",
