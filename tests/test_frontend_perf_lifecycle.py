@@ -201,10 +201,16 @@ def test_failed_revalidate_stays_retryable(browser, server):
                 window.__failFolders = true;
             }"""
         )
-        page.evaluate("() => window.revalidateFoldersForOnline()")
+        # deps.fetch bypasses Connectivity.fetch: a rejected cfetch demotes
+        # online→connecting and the probe's reconnect legitimately fires its
+        # own ungated revalidate — a real second /api/v1/tree that raced this
+        # assertion on CI (#552). Retryability is the property under test;
+        # the connectivity reconnect loop is covered elsewhere.
+        raw = "{fetch: (u, i) => window.fetch(u, i)}"
+        page.evaluate(f"() => window.revalidateFoldersForOnline({raw})")
         assert page.evaluate("() => window.__perf.foldersReqs.length") == 0
         page.evaluate("() => { window.__failFolders = false; }")
-        page.evaluate("() => window.revalidateFoldersForOnline()")
+        page.evaluate(f"() => window.revalidateFoldersForOnline({raw})")
         reqs = page.evaluate("() => window.__perf.foldersReqs")
         assert len(reqs) == 1, f"failed revalidate must stay retryable: {reqs}"
     finally:
@@ -795,8 +801,16 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
     try:
         page.goto(server + "/?offline=1")
         _ensure_sw_interception(page)
+        # safaridriver can leave .controller unset even while the SW is
+        # already intercepting (the probe above just proved it) — accept a
+        # resolved .ready as the equivalent "active SW" signal (#552).
+        page.evaluate(
+            "() => { navigator.serviceWorker && navigator.serviceWorker.ready"
+            ".then(() => { window.__swReady = true; }); }"
+        )
         page.wait_for_function(
-            "() => navigator.serviceWorker && navigator.serviceWorker.controller",
+            "() => navigator.serviceWorker && "
+            "(navigator.serviceWorker.controller || window.__swReady)",
             timeout=15000,
         )
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
@@ -1196,8 +1210,16 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
     try:
         page.goto(server + "/?offline=1")
         _ensure_sw_interception(page)
+        # safaridriver can leave .controller unset even while the SW is
+        # already intercepting (the probe above just proved it) — accept a
+        # resolved .ready as the equivalent "active SW" signal (#552).
+        page.evaluate(
+            "() => { navigator.serviceWorker && navigator.serviceWorker.ready"
+            ".then(() => { window.__swReady = true; }); }"
+        )
         page.wait_for_function(
-            "() => navigator.serviceWorker && navigator.serviceWorker.controller",
+            "() => navigator.serviceWorker && "
+            "(navigator.serviceWorker.controller || window.__swReady)",
             timeout=15000,
         )
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
