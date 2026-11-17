@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -42,6 +42,9 @@ pub struct IndexState {
     building: Mutex<Option<Arc<Notify>>>,
     /// Single-flight background refresh (`index_refresh_task`).
     refreshing: Mutex<bool>,
+    /// A schedule request that arrived mid-refresh — the running task
+    /// re-scans once more instead of dropping the mutation for a TTL.
+    refresh_pending: AtomicBool,
 }
 
 pub struct CacheData {
@@ -106,6 +109,7 @@ impl IndexState {
             cache: Mutex::new(None),
             building: Mutex::new(None),
             refreshing: Mutex::new(false),
+            refresh_pending: AtomicBool::new(false),
         }
     }
 
@@ -126,6 +130,9 @@ impl IndexState {
     /// Also kicked by `/api/v1/library/*` after a successful write; those
     /// callers need the change visible promptly, so the stamp is aged past
     /// the TTL first (the gate then rebuilds instead of re-stamping).
+    /// A call that lands mid-refresh sets `refresh_pending` under the same
+    /// mutex (its write already hit the FS, so the in-flight scan may or may
+    /// not see it — the extra pass settles it) instead of being dropped.
     pub(crate) fn schedule_refresh(self: &Arc<Self>, library: &Path) {
         let st = self.clone();
         let d = library.to_path_buf();
@@ -133,15 +140,31 @@ impl IndexState {
             {
                 let mut r = st.refreshing.lock().await;
                 if *r {
+                    st.refresh_pending.store(true, Ordering::SeqCst);
                     return;
                 }
                 *r = true;
             }
-            if let Some(c) = st.current().await {
-                c.mark_stale();
+            loop {
+                if let Some(c) = st.current().await {
+                    c.mark_stale();
+                }
+                st.refresh_pending.store(false, Ordering::SeqCst);
+                background_index_refresh(&st, &d).await;
+                if !st.refresh_pending.load(Ordering::SeqCst) {
+                    break;
+                }
             }
-            background_index_refresh(&st, &d).await;
-            *st.refreshing.lock().await = false;
+            {
+                let mut r = st.refreshing.lock().await;
+                *r = false;
+                // A caller that slipped in between the last pending check
+                // and this release would be dropped — reschedule for it.
+                if st.refresh_pending.swap(false, Ordering::SeqCst) {
+                    drop(r);
+                    st.schedule_refresh(&d);
+                }
+            }
         });
     }
 }
