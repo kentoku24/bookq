@@ -88,7 +88,7 @@ fn upload_suffix(name: &str) -> bool {
 // ── name / dir validation ────────────────────────────────────────────────────
 
 /// Final filename rules (v1-semantics §8): basename only — no separators,
-/// controls, `*`/`?`, edge spaces/dots, or leading dot (hidden + staging).
+/// controls, edge spaces/dots, or leading dot (hidden + staging).
 pub(crate) fn sanitize_upload_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
         return Err("empty name");
@@ -369,7 +369,11 @@ pub(crate) async fn post_files(
             Ok(Some(f)) => f,
             Ok(None) => break,
             Err(_) => {
-                return state::detail(StatusCode::BAD_REQUEST, "malformed multipart body");
+                // Mid-stream parse failure must not hide the files that
+                // already placed — report them (and refresh the index)
+                // instead of returning a bare 400.
+                errors.push(serde_json::json!({"name": "*", "code": "malformed"}));
+                break;
             }
         };
         if field.name() != Some("file") {
