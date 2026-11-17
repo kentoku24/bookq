@@ -328,7 +328,7 @@ uv run --with playwright playwright install chromium
 
 | コマンド | 動作 |
 |---|---|
-| `./dev.sh up [name] [--ref REF] [--fixture]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント |
+| `./dev.sh up [name] [--ref REF] [--fixture] [--writable-library]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント（常に rw）。ライブラリのマウントは既定 read-only — dev は `BOOKQ_TEST_MODE=true` で認証をバイパスするため、実ライブラリへの書き込み (upload/delete) は `--writable-library` の明示時のみ。書き込み検証は `--fixture` 推奨 |
 | `./dev.sh down [name]` / `--all` | 撤去（ボリュームと tailnet ノードの登録は保持）。`--full` でボリューム・イメージ・ノード登録まで完全撤去（TS_API_KEY 設定時。`--all --full` は `--yes` 必須）。`--all` は実行前に既に孤立していたボリューム（コンテナの無い `bookq-dev-*` の残骸）も回収する（`--no-prune-volumes` で無効化） |
 | `./dev.sh list` | 一覧（名前・状態・ref・commit・URL） |
 | `./dev.sh url [name]` | URL だけ出力（スクリプト用） |
