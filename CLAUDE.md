@@ -33,7 +33,7 @@ Every pytest start runs `scripts/test-preflight.sh` (conftest `pytest_sessionsta
 Run the app locally without Docker or OAuth:
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 SECRET_KEY=dev-not-a-secret ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 SECRET_KEY=dev-not-a-secret ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 Bring up a throwaway development environment for the current worktree (Docker, no OAuth, reachable from the tailnet — each environment takes one of ten fixed slots (node `dev-XX`, XX = 01..10), so no port allocation or shared gateway):
@@ -59,7 +59,7 @@ There is no linter or formatter configured.
 
 - Nothing on the host can reach viewer-rs directly, so liveness has to be checked from *inside* the container. That is what the `healthcheck` in `docker-compose.yml` is for; `rebuild.sh` (the shared deploy engine behind `prd.sh up` and `dev.sh up`) waits on it and then curls the public URL, which is the only check that catches "container is up but the proxy isn't serving it".
 - **If `viewer-rs` is not on the `bookq_default` network, the site returns 502** — `tailscale serve` resolves the literal name `viewer-rs` through compose DNS. Diagnose with `docker inspect $(docker compose ps -q viewer-rs) --format '{{json .NetworkSettings.Networks}}'`.
-- The host mount path defaults to `./downloads`; override with `DOWNLOADS_HOST_DIR`.
+- The host mount path defaults to `./library`; override with `LIBRARY_HOST_DIR`.
 - Production runs the single `viewer-rs` binary behind `tailscale serve` — TLS/HTTP-2 terminates at the sidecar proxying plain HTTP to `viewer-rs:8080`. Tests boot the same binary via `tests/rs_spawn.py`.
 - **The production backend is `viewer-rs` (Rust) since #409** — the Python `viewer` service, `app/`, `Dockerfile` and `requirements.txt` were deleted in #503 (Phase 3b): fixes go to `rust/`. Rollback is a rebuild from git history. The `BOOKQ_DISABLE_INDEX` strangler flag is retired.
 
@@ -147,7 +147,7 @@ Viewer conventions that will bite if assumed otherwise:
 
 ## Testing approach
 
-`tests/conftest.py` synthesizes a downloads tree in a tmpdir (natural-sort cases, a 30-page folder, a single-child chain, a mixed folder, an empty folder, a Unicode-with-spaces folder), boots viewer-rs on a random port in test mode, and drives headless Chromium. Fixtures `page` (390×844 portrait) and `landscape_page` (900×600) select the viewer mode. Touch-swipe gestures are deliberately untested — synthetic touch velocity is too flaky.
+`tests/conftest.py` synthesizes a library tree in a tmpdir (natural-sort cases, a 30-page folder, a single-child chain, a mixed folder, an empty folder, a Unicode-with-spaces folder), boots viewer-rs on a random port in test mode, and drives headless Chromium. Fixtures `page` (390×844 portrait) and `landscape_page` (900×600) select the viewer mode. Touch-swipe gestures are deliberately untested — synthetic touch velocity is too flaky.
 
 Server-side behavior currently has no unit tests; everything is asserted through the browser.
 

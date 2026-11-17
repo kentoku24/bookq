@@ -61,7 +61,7 @@ Automated tests exercise the app logic; this step exercises the actual image you
 ```bash
 URL="$(./dev.sh url <name>)"   # omit <name> to use the current branch's environment
 curl -sf "$URL/api/health"       # expect {"status":"ok"}
-curl -sf "$URL/api/folders" | head -c 200   # confirm the downloads tree is actually readable
+curl -sf "$URL/api/folders" | head -c 200   # confirm the library tree is actually readable
 ```
 
 For anything UI-facing (layout, page-turn behavior, spread sizing — see CLAUDE.md's viewer conventions), open `$URL` in a browser and drive the actual feature. `BOOKQ_TEST_MODE=true` means no login step. Don't claim a UI change works from `curl` output alone.
@@ -93,7 +93,7 @@ Don't run `./dev.sh down --all` unless you've confirmed via `./dev.sh list` that
 | `up` fails: `TS_AUTHKEY が見つかりません` | No auth key available for the sidecar's first boot | Check `.env` in the main checkout, or export `TS_AUTHKEY` |
 | `up` fails: `tailnet ドメインを導出できません` | `DEV_TS_DOMAIN` unset and no `BASE_URL` in `.env` | Set `DEV_TS_DOMAIN=<tailnet-domain>` or check `BASE_URL` in the main checkout's `.env` |
 | `https://dev-<name>...` URL doesn't respond | Tailnet ACL blocking the node, or the sidecar failed to join | `./dev.sh list` to confirm the env is running; ACL fix is in `docs/deployment.md` |
-| Health check passes but `/api/folders` is empty | Wrong `DOWNLOADS_HOST_DIR` or an unrelated empty fixture tree | Check what `DOWNLOADS_HOST_DIR` resolved to for this environment |
+| Health check passes but `/api/folders` is empty | Wrong `LIBRARY_HOST_DIR` or an unrelated empty fixture tree | Check what `LIBRARY_HOST_DIR` resolved to for this environment |
 | URL verification fails with a different hostname | Node-name collision (another env holds `dev-<name>`) | `./dev.sh list` to find the holder, `down` the one you don't need, re-`up` |
 | Environment won't go away / `list` shows stale entries | A previous crash mid-operation | `./dev.sh down <name>` still removes the containers; `./dev.sh list` shows what remains so you can `down` the stale ones |
 

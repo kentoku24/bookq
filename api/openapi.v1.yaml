@@ -855,7 +855,7 @@ paths:
               schema: {$ref: "#/components/schemas/Error"}
         "422": {$ref: "#/components/responses/ValidationError"}
         "503":
-          description: uploads が無効（downloads 書き込み不可のデプロイ）
+          description: uploads が無効（library 書き込み不可のデプロイ）
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
@@ -897,7 +897,7 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
         "503":
-          description: uploads が無効（downloads 書き込み不可のデプロイ）
+          description: uploads が無効（library 書き込み不可のデプロイ）
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
@@ -911,7 +911,7 @@ paths:
         再開可能な分割アップロード。init（本 op）→
         `PUT /api/v1/library/uploads/{id}` で `Upload-Offset` 順に chunk を
         append → `POST .../finalize` でライブラリへ確定。セッションは
-        `<downloads>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
+        `<library>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
         `name`/`dir` の検証は `/files` と同一、`size` は確定後の総バイト数。
       requestBody:
         required: true
@@ -954,7 +954,7 @@ paths:
               schema: {$ref: "#/components/schemas/Error"}
         "422": {$ref: "#/components/responses/ValidationError"}
         "503":
-          description: uploads が無効（downloads 書き込み不可のデプロイ）
+          description: uploads が無効（library 書き込み不可のデプロイ）
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
@@ -1502,7 +1502,7 @@ components:
           examples:
             default:
               summary: 経路外アクセス
-              value: {detail: "path escapes downloads root"}
+              value: {detail: "path escapes library root"}
             hidden:
               summary: hidden 配下（サーバ側除外）
               value: {detail: "path is hidden"}

@@ -132,9 +132,9 @@ fn stat_archive_source(archive: &Path, inner: &str) -> Result<(f64, f64, String)
 
 /// `_stat_source` — mtime/size/cache-key WITHOUT opening archives or
 /// extracting bytes (same validation as `load_source_bytes`).
-fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Response> {
-    if let Some((archive, inner)) = resolve_archive(downloads, path) {
-        if !is_within(downloads, &archive) {
+fn stat_source(library: &Path, path: &str) -> Result<(f64, f64, String), Response> {
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
             return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
         let archive = realpath(&archive)
@@ -147,8 +147,8 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
     if path.contains('\x00') {
         return Err(detail(StatusCode::NOT_FOUND, "File not found"));
     }
-    let file_path = downloads.join(path);
-    if !is_within(downloads, &file_path) {
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
         return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let file_path =
@@ -177,11 +177,11 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
 /// PDF pages render natively via `pdfium-render` (same PDFium engine as
 /// pypdfium2) when the library is present.
 fn load_source_bytes(
-    downloads: &Path,
+    library: &Path,
     path: &str,
 ) -> Result<Option<(Vec<u8>, f64, f64, String)>, Response> {
-    if let Some((archive, inner)) = resolve_archive(downloads, path) {
-        if !is_within(downloads, &archive) {
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
             return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
         let archive = realpath(&archive)
@@ -238,8 +238,8 @@ fn load_source_bytes(
     if path.contains('\x00') {
         return Err(detail(StatusCode::NOT_FOUND, "File not found"));
     }
-    let file_path = downloads.join(path);
-    if !is_within(downloads, &file_path) {
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
         return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let file_path =
@@ -542,9 +542,9 @@ fn view_etag(mtime: f64, size: f64, digest: &str) -> String {
 /// in-process (SVG sources pass their bytes through like Pillow's
 /// `_make_thumb_bytes`), falling back to proxy only when the source can't
 /// be reached natively (rar/pdf) or the `image` crate can't decode it.
-pub fn thumb(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
+pub fn thumb(library: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
     let width = normalize_width(w);
-    let (mtime, size, key) = match stat_source(downloads, path) {
+    let (mtime, size, key) = match stat_source(library, path) {
         Ok(x) => x,
         Err(res) => return res,
     };
@@ -556,7 +556,7 @@ pub fn thumb(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, hea
     }
     let dest = thumb_dest(cache, &digest, width, is_svg);
     if !dest.is_file() {
-        return generate_thumb(downloads, cache, path, width, is_svg, headers);
+        return generate_thumb(library, cache, path, width, is_svg, headers);
     }
     let body = match std::fs::read(&dest) {
         Ok(b) => b,
@@ -575,7 +575,7 @@ pub fn thumb(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, hea
 /// recheck the cache (a concurrent writer may have landed it) → render →
 /// `_store_thumb`. SVG sources store/served as their original bytes.
 fn generate_thumb(
-    downloads: &Path,
+    library: &Path,
     cache: &Path,
     path: &str,
     width: i64,
@@ -585,7 +585,7 @@ fn generate_thumb(
     if !is_svg && !native_decodable(path) {
         return not_implemented("not implemented"); // e.g. .avif — decode would fail after the read
     }
-    let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
+    let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
         Ok(x) => x,
         Err(res) => return res,
     }) else {
@@ -664,7 +664,7 @@ fn view_etag_w(mtime: f64, size: f64, wtag: &str, digest: &str) -> String {
 /// in-process with upstream fallback. `?w=<px>` opts into the normalized
 /// branch at that width — the fast-tier rendition mobile readers use
 /// while flip-through is in flight (iOS `BookqAPI.swift`; #440).
-pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
+pub fn view(library: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
     let suffix = suffix_lower(Path::new(path));
     let width = normalize_view_width(w);
     let passthrough = VIEW_PASSTHROUGH
@@ -676,7 +676,7 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
     // it passes through even when ?w= asks for a size. Passthrough types
     // also pass through ONLY with no valid w — ?w= is the fast-tier opt-in.
     if is_svg || (width.is_none() && passthrough.is_some()) {
-        let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
+        let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
             Ok(x) => x,
             Err(res) => return res,
         }) else {
@@ -699,7 +699,7 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
             is_svg,
         );
     }
-    let (mtime, size, key) = match stat_source(downloads, path) {
+    let (mtime, size, key) = match stat_source(library, path) {
         Ok(x) => x,
         Err(res) => return res,
     };
@@ -717,7 +717,7 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
     }
     let dest = cache.join("view").join(format!("{digest}.jpg"));
     if !dest.is_file() {
-        return generate_view(downloads, cache, path, width, headers);
+        return generate_view(library, cache, path, width, headers);
     }
     let body = match std::fs::read(&dest) {
         Ok(b) => b,
@@ -730,11 +730,11 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
 /// re-derive etag/dest → recheck the cache → `make_view_bytes` →
 /// `_store_thumb`. Sources only upstream can reach (rar/pdf) and decodes
 /// the `image` crate can't handle still proxy.
-fn generate_view(downloads: &Path, cache: &Path, path: &str, width: Option<u32>, headers: &HeaderMap) -> Response {
+fn generate_view(library: &Path, cache: &Path, path: &str, width: Option<u32>, headers: &HeaderMap) -> Response {
     if !native_decodable(path) {
         return not_implemented("not implemented"); // e.g. .avif — decode would fail after the read
     }
-    let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
+    let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
         Ok(x) => x,
         Err(res) => return res,
     }) else {
@@ -977,7 +977,7 @@ fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Opt
 /// tooling (PDF page render, multipart RAR member, undecodable archive
 /// member) or decodes Pillow might handle (`.avif`/`.tiff`).
 fn load_dir_sprite_cells(
-    downloads: &Path,
+    library: &Path,
     folder: &str,
     names: &[String],
 ) -> Option<Vec<Option<Vec<u8>>>> {
@@ -998,7 +998,7 @@ fn load_dir_sprite_cells(
             out.push(None);
             continue;
         }
-        match load_source_bytes(downloads, &format!("{folder}/{name}")) {
+        match load_source_bytes(library, &format!("{folder}/{name}")) {
             Ok(Some((data, _, _, _))) => out.push(Some(data)),
             // `Ok(None)` = needs an external decoder (PDF page,
             // multipart RAR, unsupported extraction): the whole sheet
@@ -1013,7 +1013,7 @@ fn load_dir_sprite_cells(
 
 /// `handle_thumb_sprite` — validation + key → hit serve; miss renders native.
 pub fn thumb_sprite(
-    downloads: &Path,
+    library: &Path,
     cache: &Path,
     q: &HashMap<String, String>,
     query_string: &str,
@@ -1038,8 +1038,8 @@ pub fn thumb_sprite(
     if folder.split('/').any(|p| p == "..") {
         return detail(StatusCode::BAD_REQUEST, "Invalid sprite folder");
     }
-    let folder_path = downloads.join(folder);
-    if !is_within(downloads, &folder_path) {
+    let folder_path = library.join(folder);
+    if !is_within(library, &folder_path) {
         return detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let Ok(folder_path) = realpath(&folder_path) else {
@@ -1102,7 +1102,7 @@ pub fn thumb_sprite(
                 keys.push(format!("bad:{name}"));
                 continue;
             }
-            match stat_source(downloads, &format!("{folder}/{name}")) {
+            match stat_source(library, &format!("{folder}/{name}")) {
                 Ok((mtime, _size, skey)) => {
                     max_mtime = max_mtime.max(mtime);
                     keys.push(skey);
@@ -1149,7 +1149,7 @@ pub fn thumb_sprite(
             None => return not_implemented("not implemented"),
         }
     } else {
-        match load_dir_sprite_cells(downloads, folder, &names) {
+        match load_dir_sprite_cells(library, folder, &names) {
             Some(c) => c,
             None => return not_implemented("not implemented"),
         }

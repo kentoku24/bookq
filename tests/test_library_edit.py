@@ -1,6 +1,6 @@
 """Library edit API tests — /api/v1/library/* (upload, delete, chunked).
 
-These tests MUTATE the downloads tree, so they spawn a dedicated viewer-rs
+These tests MUTATE the library tree, so they spawn a dedicated viewer-rs
 against a private tmp root (same pattern as the folder-visibility write
 tests) instead of the shared session `server` fixture.
 """
@@ -48,7 +48,7 @@ def lib_server(lib_root, tmp_path_factory):
     from rs_spawn import spawn_backend
 
     state = tmp_path_factory.mktemp("lib-edit-state")
-    proc, base_url = spawn_backend(downloads_dir=lib_root, state_dir=state)
+    proc, base_url = spawn_backend(library_dir=lib_root, state_dir=state)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)
@@ -66,7 +66,7 @@ def lib_server_auth(lib_root, tmp_path_factory):
     env.pop("BOOKQ_TEST_MODE", None)
     env.update(
         {
-            "DOWNLOADS_DIR": str(lib_root),
+            "LIBRARY_DIR": str(lib_root),
             "BOOKQ_STATE_DIR": str(state),
             "BOOKQ_BIND": f"127.0.0.1:{port}",
             "GOOGLE_CLIENT_ID": "ci-dummy",

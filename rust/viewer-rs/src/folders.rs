@@ -115,10 +115,10 @@ impl IndexState {
     }
 
     /// Startup warmup — mirrors `warmup_metadata_index`.
-    pub fn spawn_warmup(self: &Arc<Self>, downloads: PathBuf) {
+    pub fn spawn_warmup(self: &Arc<Self>, library: PathBuf) {
         let st = self.clone();
         tokio::spawn(async move {
-            let _ = ensure_tree_and_index(&st, &downloads).await;
+            let _ = ensure_tree_and_index(&st, &library).await;
         });
     }
 
@@ -126,9 +126,9 @@ impl IndexState {
     /// Also kicked by `/api/v1/library/*` after a successful write; those
     /// callers need the change visible promptly, so the stamp is aged past
     /// the TTL first (the gate then rebuilds instead of re-stamping).
-    pub(crate) fn schedule_refresh(self: &Arc<Self>, downloads: &Path) {
+    pub(crate) fn schedule_refresh(self: &Arc<Self>, library: &Path) {
         let st = self.clone();
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         tokio::spawn(async move {
             {
                 let mut r = st.refreshing.lock().await;
@@ -148,13 +148,13 @@ impl IndexState {
 
 /// `_background_index_refresh` — signature gate outside the lock; an
 /// unchanged tree re-stamps in place, a verified change swaps with prev+1.
-async fn background_index_refresh(st: &IndexState, downloads: &Path) {
+async fn background_index_refresh(st: &IndexState, library: &Path) {
     let cur = match st.current().await {
         Some(c) => c,
         None => return,
     };
     let sig = tokio::task::spawn_blocking({
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         move || bookq_core::tree_signature(&d)
     })
     .await
@@ -176,7 +176,7 @@ async fn background_index_refresh(st: &IndexState, downloads: &Path) {
     }
     // Full rebuild outside the lock; swap under it.
     let built = tokio::task::spawn_blocking({
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         move || build_cache(&d)
     })
     .await
@@ -291,9 +291,9 @@ fn snapshot_load() -> Option<CacheData> {
 /// same rule as the background path — verified signature change bumps
 /// `prev+1`, otherwise `prev` — so `since=` tokens stay honest about a
 /// tree that actually changed.
-pub async fn force_rebuild(st: &Arc<IndexState>, downloads: &Path) -> Option<usize> {
+pub async fn force_rebuild(st: &Arc<IndexState>, library: &Path) -> Option<usize> {
     let mut data = tokio::task::spawn_blocking({
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         move || build_cache(&d)
     })
     .await
@@ -313,20 +313,20 @@ pub async fn force_rebuild(st: &Arc<IndexState>, downloads: &Path) -> Option<usi
 }
 
 /// `_scan_and_rebuild` — full tree + metadata + attaches in one walk.
-fn build_cache(downloads: &Path) -> Option<CacheData> {
+fn build_cache(library: &Path) -> Option<CacheData> {
     // The signature walk is independent of the scan/metadata walk — run it
     // on its own thread so the two full-tree traversals overlap instead of
     // serialising back to back (each is a complete stat-walk of the volume).
     let signature_walk = {
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         std::thread::spawn(move || bookq_core::tree_signature(&d))
     };
     let mut interner = tree::Interner::default();
-    let mut t = tree::scan_tree(downloads, &mut interner)?;
+    let mut t = tree::scan_tree(library, &mut interner)?;
     // `rebuild_from_tree` (NOT `_walk`): tree-driven parse — archive
     // nodes' internal dirs produce phantom minimal records, and real
     // dirs absent from the tree are never indexed.
-    let comics = tree::rebuild_index_from_tree(&t, downloads);
+    let comics = tree::rebuild_index_from_tree(&t, library);
     let lookup: HashMap<String, ComicRec> =
         comics.iter().map(|c| (c.0.clone(), c.clone())).collect();
     tree::attach_metadata(&mut t, &lookup, "", &mut interner);
@@ -358,12 +358,12 @@ pub enum Ensure {
     Failed,
 }
 
-pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) -> Ensure {
+pub async fn ensure_tree_and_index(st: &Arc<IndexState>, library: &PathBuf) -> Ensure {
     if let Some(c) = st.current().await {
         if c.fresh() {
             return Ensure::Fresh(c);
         }
-        st.schedule_refresh(downloads);
+        st.schedule_refresh(library);
         return Ensure::Stale(c);
     }
     enum Role {
@@ -397,13 +397,13 @@ pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) ->
             }
             *st.building.lock().await = None;
             n.notify_waiters();
-            st.schedule_refresh(&downloads);
+            st.schedule_refresh(&library);
             return match st.current().await {
                 Some(c) => Ensure::Stale(c),
                 None => Ensure::Building,
             };
         }
-        return build_and_serve(st, downloads.clone(), n).await;
+        return build_and_serve(st, library.clone(), n).await;
     }
     let Role::Follower(follower) = role else {
         unreachable!()
@@ -421,8 +421,8 @@ pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) ->
 }
 
 /// Builder branch: scan outside the lock, swap under it, wake the waiters.
-async fn build_and_serve(st: &Arc<IndexState>, downloads: PathBuf, done: Arc<Notify>) -> Ensure {
-    let built = tokio::task::spawn_blocking(move || build_cache(&downloads))
+async fn build_and_serve(st: &Arc<IndexState>, library: PathBuf, done: Arc<Notify>) -> Ensure {
+    let built = tokio::task::spawn_blocking(move || build_cache(&library))
         .await
         .ok()
         .flatten();
@@ -570,16 +570,16 @@ fn depth_repr(depth: Option<i64>) -> String {
 /// v1: `{"kind":"children", nodes, generation: fallback_gen}` where
 /// fallback_gen is the cache's generation or 0 when there is no cache.
 fn live_fs_response(
-    downloads: &Path,
+    library: &Path,
     norm: &str,
     depth: i64,
     fallback_gen: i64,
     headers: &HeaderMap,
 ) -> Response {
     let target = if norm.is_empty() {
-        downloads.to_path_buf()
+        library.to_path_buf()
     } else {
-        downloads.join(norm)
+        library.join(norm)
     };
     let shallow = if norm.is_empty() || target.is_dir() {
         tree::shallow_live(&target).unwrap_or_default()
@@ -672,7 +672,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
 
     if depth.is_none() {
         // ── Full tree mode — `path` is ignored by the Python handler.
-        let data = match ensure_tree_and_index(&st.index, &st.downloads).await {
+        let data = match ensure_tree_and_index(&st.index, &st.library).await {
             Ensure::Fresh(c) | Ensure::Stale(c) => c,
             Ensure::Building => {
                 let mut res = Response::builder()
@@ -749,14 +749,14 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     let depth = depth.unwrap();
     let norm = path.trim_end_matches('/').to_string();
     let target = if norm.is_empty() {
-        st.downloads.clone()
+        st.library.clone()
     } else {
-        st.downloads.join(&norm)
+        st.library.join(&norm)
     };
-    if !is_within(&st.downloads, &target) {
+    if !is_within(&st.library, &target) {
         return detail_response(
             StatusCode::FORBIDDEN,
-            "path outside downloads dir",
+            "path outside library dir",
         );
     }
     match st.index.current().await {
@@ -796,7 +796,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 None => 0,
             };
             live_fs_response(
-                &st.downloads,
+                &st.library,
                 &norm,
                 depth,
                 fallback_gen,
@@ -810,9 +810,9 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
 /// in-flight build to completion (no await budget).
 pub async fn ensure_tree_and_index_wait(
     st: &Arc<IndexState>,
-    downloads: &PathBuf,
+    library: &PathBuf,
 ) -> Option<Arc<CacheData>> {
-    match ensure_tree_and_index(st, downloads).await {
+    match ensure_tree_and_index(st, library).await {
         Ensure::Fresh(c) | Ensure::Stale(c) => return Some(c),
         Ensure::Failed => return None,
         Ensure::Building => {}

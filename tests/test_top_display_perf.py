@@ -19,7 +19,7 @@ Later plan todos (4/5) will ADD asserts to this file — the `_wait_*` /
 
 BOOKQ_TEST_MODE handling: none needed here — the shared `server`
 fixture (tests/conftest.py) already launches uvicorn with
-`BOOKQ_TEST_MODE=true` + a synthetic DOWNLOADS_DIR tree.
+`BOOKQ_TEST_MODE=true` + a synthetic LIBRARY_DIR tree.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt \\

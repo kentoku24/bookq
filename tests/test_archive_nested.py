@@ -169,30 +169,30 @@ JUNK_ENTRIES = [
 
 
 @pytest.fixture(scope="module", autouse=True)
-def nested_lib(server, downloads_tree: Path):
+def nested_lib(server, library_tree: Path):
     """Stage the nested-archive fixtures in the shared tree and publish."""
     from tests.fixtures.rar5 import make_rar5_store
 
-    work = downloads_tree / "_aport_nested_work"
+    work = library_tree / "_aport_nested_work"
     work.mkdir(exist_ok=True)
     _make_png(work / "src.png")
     png = (work / "src.png").read_bytes()
     payloads = [(name, png) for name in NESTED_ENTRIES + JUNK_ENTRIES]
-    with zipfile.ZipFile(downloads_tree / "nested.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "nested.zip", "w") as zf:
         for name, data in payloads:
             zf.writestr(name, data)
-    make_rar5_store(downloads_tree / "nested.cbr", payloads)
+    make_rar5_store(library_tree / "nested.cbr", payloads)
     jp_payloads = [("vol01/\u7b2c01\u8a71/01.jpg", png), ("vol01/01.jpg", png)]
-    with zipfile.ZipFile(downloads_tree / "aport_jp.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "aport_jp.zip", "w") as zf:
         for name, data in jp_payloads:
             zf.writestr(name, data)
-    make_rar5_store(downloads_tree / "aport_jp.cbr", jp_payloads)
+    make_rar5_store(library_tree / "aport_jp.cbr", jp_payloads)
     _make_epub(
-        downloads_tree / "aport_manga.epub",
+        library_tree / "aport_manga.epub",
         [("c.xhtml", "z_cover.png"), ("b.xhtml", "a_p1.png"), ("a.xhtml", "m_p2.png")],
         png,
     )
-    (downloads_tree / "aport_broken.rar").write_bytes(b"Rar!\x1a\x07\x01\x00garbage")
+    (library_tree / "aport_broken.rar").write_bytes(b"Rar!\x1a\x07\x01\x00garbage")
     import shutil
 
     shutil.rmtree(work)
@@ -202,7 +202,7 @@ def nested_lib(server, downloads_tree: Path):
 
     for name in ("nested.zip", "nested.cbr", "aport_jp.zip", "aport_jp.cbr",
                  "aport_manga.epub", "aport_broken.rar"):
-        (downloads_tree / name).unlink(missing_ok=True)
+        (library_tree / name).unlink(missing_ok=True)
     _post(server, "/api/v1/index/refresh")
 
 
@@ -330,12 +330,12 @@ VOL2_CASE_NAMES = ["cover.jpg", "top/v01/cover.jpg"] + VOL2_LOOSE + [
 ]
 
 
-def test_rar_vol2_prefix_and_delivery(server, downloads_tree: Path, tmp_path: Path):
+def test_rar_vol2_prefix_and_delivery(server, library_tree: Path, tmp_path: Path):
     from tests.fixtures.rar5 import make_rar5_store
 
     _make_png(tmp_path / "src.png")
     png = (tmp_path / "src.png").read_bytes()
-    make_rar5_store(downloads_tree / "aport_vol2.cbr", [(name, png) for name in VOL2_CASE_NAMES])
+    make_rar5_store(library_tree / "aport_vol2.cbr", [(name, png) for name in VOL2_CASE_NAMES])
     try:
         assert _post(server, "/api/v1/index/refresh") == 200
         assert _images(server, "aport_vol2.cbr/top/v02") == [f"p{i:02d}.jpg" for i in range(1, 7)] + [
@@ -354,5 +354,5 @@ def test_rar_vol2_prefix_and_delivery(server, downloads_tree: Path, tmp_path: Pa
             server, "/api/v1/images?folder=" + urllib.parse.quote("aport_vol2.cbr/top/nope", safe="")
         )[0] == 404
     finally:
-        (downloads_tree / "aport_vol2.cbr").unlink(missing_ok=True)
+        (library_tree / "aport_vol2.cbr").unlink(missing_ok=True)
         _post(server, "/api/v1/index/refresh")

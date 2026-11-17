@@ -144,7 +144,7 @@ def test_auto_cache_offline(page, server):
             "() => window.Connectivity && window.Connectivity.state === 'offline'",
             timeout=20000,
         )
-        # Return to browse grid — spec §6: with zero downloads the grid is
+        # Return to browse grid — spec §6: with zero library the grid is
         # empty (auto-cached pages are not "downloaded"), not greyed tiles.
         page.locator("#menu-btn").click()
         expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
@@ -262,7 +262,7 @@ def test_delete_offline(page, server):
     expect(btn).to_be_visible(timeout=5000)
 
     if "state-idle" in (btn.get_attribute("class") or ""):
-        # single tap downloads straight to complete
+        # single tap library straight to complete
         btn.click()
         expect(page.locator(f"{tile_sel} .offline-btn.state-complete").first).to_be_visible(timeout=15000)
 

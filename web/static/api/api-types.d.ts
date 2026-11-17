@@ -318,7 +318,7 @@ export interface paths {
          * @description 再開可能な分割アップロード。init（本 op）→
          *     `PUT /api/v1/library/uploads/{id}` で `Upload-Offset` 順に chunk を
          *     append → `POST .../finalize` でライブラリへ確定。セッションは
-         *     `<downloads>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
+         *     `<library>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
          *     `name`/`dir` の検証は `/files` と同一、`size` は確定後の総バイト数。
          */
         post: operations["createLibraryUpload"];
@@ -1403,7 +1403,7 @@ export interface operations {
                 };
             };
             422: components["responses"]["ValidationError"];
-            /** @description uploads が無効（downloads 書き込み不可のデプロイ） */
+            /** @description uploads が無効（library 書き込み不可のデプロイ） */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1443,7 +1443,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationError"];
-            /** @description uploads が無効（downloads 書き込み不可のデプロイ） */
+            /** @description uploads が無効（library 書き込み不可のデプロイ） */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1503,7 +1503,7 @@ export interface operations {
                 };
             };
             422: components["responses"]["ValidationError"];
-            /** @description uploads が無効（downloads 書き込み不可のデプロイ） */
+            /** @description uploads が無効（library 書き込み不可のデプロイ） */
             503: {
                 headers: {
                     [name: string]: unknown;

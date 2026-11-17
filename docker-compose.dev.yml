@@ -24,7 +24,7 @@ services:
     # 本番と同じ画像ツリーを read-write でマウント — /api/v1/library/*
     # (upload/delete) がここへ書く。cache volume も read-write。
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:rw"
+      - "${LIBRARY_HOST_DIR:-./library}:/app/library:rw"
       # thumb/sprite disk cache の永続化 (issue #276、本番と同値): 既定
       # /tmp/bookq-thumbs はコンテナ再作成で消えるため
       # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の

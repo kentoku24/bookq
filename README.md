@@ -239,7 +239,7 @@ https://dev-*.ts.net/static/offline-harness.html?harness=1  # 後方互換で有
 # 例: fixture が http://127.0.0.1:54321 を返した場合
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
 # 手元で一時起動して試す場合 (viewer-rs を直接起動)
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/tmp/downloads BOOKQ_BIND=127.0.0.1:$PORT \
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/tmp/library BOOKQ_BIND=127.0.0.1:$PORT \
   SECRET_KEY=dev-not-a-secret \
   ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:$PORT BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
@@ -280,7 +280,7 @@ UI をさっと触るだけならこれが一番速い（OAuth もスキップ�
 
 ```bash
 # viewer-rs を直接起動 (cargo build -p viewer-rs が前提)
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
   SECRET_KEY=dev-not-a-secret \
   ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
@@ -322,7 +322,7 @@ uv run --with playwright playwright install chromium
 ./dev.sh up demo --fixture                        # 実データの代わりに合成テストツリーをマウント
 ```
 
-`--fixture` を付けると、`tests/fixtures/uiux_tree.py`（依存パッケージ不要の色分け PNG 生成スクリプト）が作る合成ツリー — 9 フォルダ + metadata.toml 3 件（`simple_manga` / `series` / `mixed_ar`）— を `/tmp/bookq-fixture-<name>/downloads` に生成してマウントします。実データに手を付けたくない UI の動作確認やスクリーンショット用途に使います。単色ページは拡大しても違いが分からないので、ピンチズーム・ページ送り・エピソード境界の目視確認には `zoom_episodes/series/ep-1..3`（720x1080、グリッド・巨大な EP/ページ番号・START/END バッジ・拡大時のみ読める細字）を使います。ディープリンクは `#/view/zoom_episodes/series/ep-1?p=0`。兄弟チャプター連結は深さ2以上でしか発動しないため、`series/` を1段挟んでいます。マウント元は `DOWNLOADS_HOST_DIR` 環境変数で上書きも可能です（`--fixture` が指定された場合はそちらが優先。既存の環境変数上書きの挙動は従来どおり）。
+`--fixture` を付けると、`tests/fixtures/uiux_tree.py`（依存パッケージ不要の色分け PNG 生成スクリプト）が作る合成ツリー — 9 フォルダ + metadata.toml 3 件（`simple_manga` / `series` / `mixed_ar`）— を `/tmp/bookq-fixture-<name>/library` に生成してマウントします。実データに手を付けたくない UI の動作確認やスクリーンショット用途に使います。単色ページは拡大しても違いが分からないので、ピンチズーム・ページ送り・エピソード境界の目視確認には `zoom_episodes/series/ep-1..3`（720x1080、グリッド・巨大な EP/ページ番号・START/END バッジ・拡大時のみ読める細字）を使います。ディープリンクは `#/view/zoom_episodes/series/ep-1?p=0`。兄弟チャプター連結は深さ2以上でしか発動しないため、`series/` を1段挟んでいます。マウント元は `LIBRARY_HOST_DIR` 環境変数で上書きも可能です（`--fixture` が指定された場合はそちらが優先。既存の環境変数上書きの挙動は従来どおり）。
 
 表示された `https://dev-review-42.<your-tailnet>.ts.net` は tailnet 内なら **iPad からもそのまま開けます**。ホストからも同じ HTTPS URL でアクセスします（ポートは公開しません — ホストは tailnet に参加している前提）。
 

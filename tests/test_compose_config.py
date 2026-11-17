@@ -80,11 +80,11 @@ def test_dev_compose_mounts_user_state_volume():
     assert re.search(r"^volumes:\n(?:\s+\S.*\n)*\s{2}user-state:", DEV_COMPOSE, re.M)
 
 
-def test_dev_compose_downloads_stay_writable():
+def test_dev_compose_library_stay_writable():
     # Library editing (upload/delete via /api/v1/library/*) writes into the
-    # downloads tree — the mount must stay rw in dev and prod.
-    assert ":/app/downloads:rw" in DEV_COMPOSE
-    assert ":/app/downloads:rw" in PROD_COMPOSE
+    # library tree — the mount must stay rw in dev and prod.
+    assert ":/app/library:rw" in DEV_COMPOSE
+    assert ":/app/library:rw" in PROD_COMPOSE
 
 
 def test_user_state_is_not_a_cache_mount():

@@ -99,7 +99,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p .ci-dl/Series/vol1 .ci-dl/Manga
           uv run --with pillow python - <<'EOF'
@@ -143,9 +143,9 @@ jobs:
             -e GOOGLE_CLIENT_ID=ci-dummy -e GOOGLE_CLIENT_SECRET=ci-dummy \
             -e BASE_URL=http://127.0.0.1:8080 \
             -e ALLOWED_EMAILS=test@example.com -e SECRET_KEY=ci-not-a-secret \
-            -e DOWNLOADS_DIR=/app/downloads -e BOOKQ_STATE_DIR=/var/lib/bookq \
+            -e LIBRARY_DIR=/app/library -e BOOKQ_STATE_DIR=/var/lib/bookq \
             -e BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs \
-            -v "$PWD/.ci-dl:/app/downloads:ro" \
+            -v "$PWD/.ci-dl:/app/library:ro" \
             -v bookq-ci-state:/var/lib/bookq -v bookq-ci-thumbs:/var/cache/bookq-thumbs \
             bookq-ci:viewer-rs
           for i in $(seq 1 90); do

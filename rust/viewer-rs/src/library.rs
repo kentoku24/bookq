@@ -2,7 +2,7 @@
 //!
 //! `api/openapi.v1.yaml` の `/api/v1/library/*` と `v1-semantics.md` §8 の実装:
 //! multipart 単発アップロード・分割アップロードセッション・削除。すべての
-//! 書き込みは対象 dir 内の `.bq-tmp-*` か downloads 直下の `.bookq-uploads/`
+//! 書き込みは対象 dir 内の `.bq-tmp-*` か library 直下の `.bookq-uploads/`
 //! (scanner は dot-prefixed entry を拾わない) 経由で、fsync → atomic rename
 //! で確定する。途中切断で未完成の本体がライブラリ名で残ることはない。
 
@@ -111,23 +111,23 @@ pub(crate) fn sanitize_upload_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// `dir` (ルート相対、空 = ルート) → canonical dir inside downloads.
+/// `dir` (ルート相対、空 = ルート) → canonical dir inside library.
 /// Err maps to `state::detail`: 400 unsafe shape / staging / not-a-dir,
 /// 403 outside, 404 missing.
 pub(crate) fn resolve_upload_dir(
-    downloads: &Path,
+    library: &Path,
     dir: &str,
 ) -> Result<PathBuf, (StatusCode, &'static str)> {
     if !dir.is_empty() && !serve::is_safe_entry(dir) {
         return Err((StatusCode::BAD_REQUEST, "invalid dir"));
     }
     let cand = if dir.is_empty() {
-        downloads.to_path_buf()
+        library.to_path_buf()
     } else {
-        downloads.join(dir)
+        library.join(dir)
     };
-    if !serve::is_within(downloads, &cand) {
-        return Err((StatusCode::FORBIDDEN, "dir escapes downloads root"));
+    if !serve::is_within(library, &cand) {
+        return Err((StatusCode::FORBIDDEN, "dir escapes library root"));
     }
     let rp = match serve::realpath(&cand) {
         Ok(p) => p,
@@ -137,7 +137,7 @@ pub(crate) fn resolve_upload_dir(
         Err(_) => Err((StatusCode::NOT_FOUND, "dir not found")),
         Ok(m) if !m.is_dir() => Err((StatusCode::BAD_REQUEST, "dir is not a directory")),
         Ok(_) => {
-            if let Ok(rel) = rp.strip_prefix(downloads) {
+            if let Ok(rel) = rp.strip_prefix(library) {
                 if rel
                     .components()
                     .next()
@@ -283,9 +283,9 @@ pub(crate) fn sweep_stale_sessions(upload_root: &Path, ttl_secs: u64) {
     }
 }
 
-/// Startup probe: `<downloads>/.bookq-uploads/` creatable → uploads enabled.
-pub(crate) fn probe_upload_root(downloads: &Path) -> Option<PathBuf> {
-    let root = downloads.join(UPLOAD_DIR_NAME);
+/// Startup probe: `<library>/.bookq-uploads/` creatable → uploads enabled.
+pub(crate) fn probe_upload_root(library: &Path) -> Option<PathBuf> {
+    let root = library.join(UPLOAD_DIR_NAME);
     match std::fs::create_dir_all(&root) {
         Ok(()) => {
             sweep_stale_sessions(&root, session_ttl());
@@ -295,7 +295,7 @@ pub(crate) fn probe_upload_root(downloads: &Path) -> Option<PathBuf> {
             tracing::warn!(
                 path = %root.display(),
                 error = %e,
-                "downloads not writable — library upload/delete answer 503"
+                "library not writable — library upload/delete answer 503"
             );
             None
         }
@@ -331,7 +331,7 @@ pub(crate) async fn post_files(
     let Some(_root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
-    let target = match resolve_upload_dir(&st.downloads, dir) {
+    let target = match resolve_upload_dir(&st.library, dir) {
         Ok(p) => p,
         Err((c, m)) => return state::detail(c, m),
     };
@@ -421,7 +421,7 @@ pub(crate) async fn post_files(
         return state::detail(StatusCode::BAD_REQUEST, "no file fields");
     }
     if !files.is_empty() {
-        st.index.schedule_refresh(&st.downloads);
+        st.index.schedule_refresh(&st.library);
     }
     json(
         StatusCode::OK,
@@ -446,22 +446,22 @@ pub(crate) async fn delete_file(st: &AppState, path: &str) -> Response {
             "cannot delete the upload staging area",
         );
     }
-    let cand = st.downloads.join(path);
-    if !serve::is_within(&st.downloads, &cand) {
+    let cand = st.library.join(path);
+    if !serve::is_within(&st.library, &cand) {
         return state::detail(
             StatusCode::FORBIDDEN,
-            "path escapes downloads root",
+            "path escapes library root",
         );
     }
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let path_owned = path.to_string();
     let out = tokio::task::spawn_blocking(move || {
         let rp = serve::realpath(&cand)
             .map_err(|_| StatusCode::NOT_FOUND)?;
-        if rp == downloads {
+        if rp == library {
             return Err(StatusCode::BAD_REQUEST);
         }
-        if let Ok(rel) = rp.strip_prefix(&downloads) {
+        if let Ok(rel) = rp.strip_prefix(&library) {
             if rel
                 .components()
                 .next()
@@ -489,7 +489,7 @@ pub(crate) async fn delete_file(st: &AppState, path: &str) -> Response {
     .await;
     match out {
         Ok(Ok(kind)) => {
-            st.index.schedule_refresh(&st.downloads);
+            st.index.schedule_refresh(&st.library);
             json(
                 StatusCode::OK,
                 serde_json::json!({"deleted": path_owned, "kind": kind}),
@@ -544,7 +544,7 @@ pub(crate) async fn uploads_init(st: &AppState, body: &[u8]) -> Response {
             );
         }
     }
-    if let Err((c, m)) = resolve_upload_dir(&st.downloads, &init.dir) {
+    if let Err((c, m)) = resolve_upload_dir(&st.library, &init.dir) {
         return state::detail(c, m);
     }
     sweep_stale_sessions(&root, session_ttl());
@@ -747,7 +747,7 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
             "unsupported file type",
         );
     }
-    let target = match resolve_upload_dir(&st.downloads, &sess.dir) {
+    let target = match resolve_upload_dir(&st.library, &sess.dir) {
         Ok(p) => p,
         Err((c, m)) => return state::detail(c, m),
     };
@@ -765,7 +765,7 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
     .await;
     match placed {
         Ok(Ok(())) => {
-            st.index.schedule_refresh(&st.downloads);
+            st.index.schedule_refresh(&st.library);
             let mut e = placed_entry(&sess.dir, &dest);
             e["size"] = serde_json::json!(sess.size);
             json(StatusCode::OK, e)
@@ -787,7 +787,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         // `is_within` expects a canonical base (AppState canonicalizes
-        // `downloads` at startup) — temp_dir is a symlink on macOS.
+        // `library` at startup) — temp_dir is a symlink on macOS.
         d.canonicalize().unwrap()
     }
 

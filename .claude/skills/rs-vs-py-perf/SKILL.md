@@ -17,7 +17,7 @@ Run everything **serially** — the py dev server is single-worker, and parallel
 ### 1. Discover the live-data source (read-only)
 
 ```bash
-docker inspect bookq-prd-viewer --format '{{range .Mounts}}{{if eq .Destination "/app/downloads"}}{{.Source}}{{end}}{{end}}'
+docker inspect bookq-prd-viewer --format '{{range .Mounts}}{{if eq .Destination "/app/library"}}{{.Source}}{{end}}{{end}}'
 ```
 
 ps/inspect only — never exec/restart/stop prod, never read `.env`.
@@ -25,8 +25,8 @@ ps/inspect only — never exec/restart/stop prod, never read `.env`.
 ### 2. Boot both environments at the same ref
 
 ```bash
-DOWNLOADS_HOST_DIR=<source> ./dev.sh up perf-py --ref <REF> --local --port 8081
-DOWNLOADS_HOST_DIR=<source> ./dev.sh up perf-rs --ref <REF> --local --port 8099
+LIBRARY_HOST_DIR=<source> ./dev.sh up perf-py --ref <REF> --local --port 8081
+LIBRARY_HOST_DIR=<source> ./dev.sh up perf-rs --ref <REF> --local --port 8099
 ```
 
 - `<REF>`: `origin/main` for a mainline comparison, or the branch under test.
@@ -38,7 +38,7 @@ DOWNLOADS_HOST_DIR=<source> ./dev.sh up perf-rs --ref <REF> --local --port 8099
 
 ```bash
 for p in 8081 8099; do curl -s "http://127.0.0.1:$p/api/folders?depth=1" | python3 -c "import sys,json;print(len(json.load(sys.stdin)))"; done
-docker inspect bookq-dev-viewer-rs-dev-NN --format '{{range .Mounts}}{{if eq .Destination "/app/downloads"}}{{.Source}} {{.Mode}}{{end}}{{end}}'
+docker inspect bookq-dev-viewer-rs-dev-NN --format '{{range .Mounts}}{{if eq .Destination "/app/library"}}{{.Source}} {{.Mode}}{{end}}{{end}}'
 ```
 
 - Both counts must match and be > 0; mount Mode must be `ro`.

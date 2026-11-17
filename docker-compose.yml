@@ -19,7 +19,7 @@ services:
     container_name: bookq-prd-viewer-rs
     volumes:
       # read-write: /api/v1/library/* (upload/delete) writes here.
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:rw"
+      - "${LIBRARY_HOST_DIR:-./library}:/app/library:rw"
       # folder-visibility SQLite — user-state volume に永続化。
       - user-state:/var/lib/bookq
       # thumb/sprite hit-path cache — 共有しないと native thumb は常に
@@ -29,7 +29,7 @@ services:
     environment:
       # #532: strangler proxy 撤去済み — upstream/gate env は存在しない。
       # 未知経路の着弾は 501 + path WARN、認証不能は 401 で fail-fast する。
-      - DOWNLOADS_DIR=/app/downloads
+      - LIBRARY_DIR=/app/library
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC。

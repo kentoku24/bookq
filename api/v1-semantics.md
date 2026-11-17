@@ -196,15 +196,15 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
 
 `/api/v1/library/*` — ライブラリへの書き込み面 (参照:
 `rust/viewer-rs/src/library.rs`)。読み取り面と同じくダウンロードルート
-(`DOWNLOADS_DIR`) 相対パスで指定し、realpath 後の containment を全 op で検証する。
+(`LIBRARY_DIR`) 相対パスで指定し、realpath 後の containment を全 op で検証する。
 
 - **対応形式**: `.zip .cbz .rar .cbr .epub .pdf` のみ
   (`serve.rs::ARCHIVE_EXTENSIONS` + `PDF_EXTENSIONS`)。拡張子は小文字化して
   判定。それ以外は **415**。
-- **uploads 無効化**: 起動時に `<downloads>/.bookq-uploads/` を作成できない
+- **uploads 無効化**: 起動時に `<library>/.bookq-uploads/` を作成できない
   デプロイ (read-only マウント等) では、upload 系・delete ともに
   **503** `{detail:"uploads disabled"}`。読み取り面は従来どおり動作する。
-- **`dir` の検証**: 空 = ルート。realpath 後 `is_within(downloads)`、
+- **`dir` の検証**: 空 = ルート。realpath 後 `is_within(library)`、
   実在 `is_dir()`。書庫ファイルを dir に指定した場合・`.bookq-uploads`
   配下は **400**、不存在は **404**。
 - **`name` の sanitize**: 空・制御文字・`/`・`\`・`.`/`..`・先頭 `.`・
@@ -224,7 +224,7 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
   クライアントは返された offset から再開する。`offset+len > size` は **400**。
 - **finalize**: `offset == size` の時のみ。rename 後にセッション dir を
   削除するので finalize は冪等ではない (2 回目は **404**)。
-- **セッション寿命**: `<downloads>/.bookq-uploads/<id>/{meta.json,blob}` に
+- **セッション寿命**: `<library>/.bookq-uploads/<id>/{meta.json,blob}` に
   永続 (再起動をまたぐ)。`BOOKQ_UPLOAD_SESSION_TTL_SECS` (既定 7 日) を
   超えたものは起動時・init 時に sweep される。
 - **index 反映**: 確定・削除の成功後にバックグラウンド refresh が走り、

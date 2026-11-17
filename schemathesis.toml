@@ -79,7 +79,7 @@ checks.positive_data_acceptance.expected-statuses = [
 
 # library edit ops: `dir`/`name`/`path` carry semantic constraints the schema
 # can't express (dir must exist as a real directory, name must sanitize, path
-# must stay inside the downloads root and outside `.bookq-uploads`), so
+# must stay inside the library root and outside `.bookq-uploads`), so
 # schema-valid-but-rejected input legitimately 4xxs. Uploads are disabled on
 # read-only deployments → 503.
 

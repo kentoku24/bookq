@@ -132,7 +132,7 @@ pub(crate) fn realpath(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `_is_within`: target inside base after resolving both.
-/// `base` must already be canonical — `AppState` canonicalizes `downloads`
+/// `base` must already be canonical — `AppState` canonicalizes `library`
 /// once at startup. Only `target` pays a per-call realpath (required for
 /// symlink-escape safety); canonicalizing `base` per request was a
 /// stat-walk on every hot-path call.
@@ -146,7 +146,7 @@ pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
 /// `_resolve_archive`: longest prefix of `rel` that resolves to an
 /// archive/PDF file → `(archive_path, inner_path)`. `.` and empty components
 /// are dropped; any `..` rejects the whole path.
-pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn resolve_archive(library: &Path, rel: &str) -> Option<(PathBuf, String)> {
     let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
     if parts.iter().any(|p| *p == "..") {
         return None;
@@ -154,7 +154,7 @@ pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, S
     // `range(len(parts) - 1, 0, -1)` — the inner entry is mandatory: a bare
     // archive filename is an ordinary file (plain-file branch downstream).
     for i in (1..parts.len()).rev() {
-        let cand = downloads.join(parts[..i].join("/"));
+        let cand = library.join(parts[..i].join("/"));
         if is_archive_file(&cand) || is_pdf_file(&cand) {
             return Some((cand, parts[i..].join("/")));
         }
@@ -475,9 +475,9 @@ fn archive_bytes_response(
 /// shared `{detail}` shape unwrapped. PDF folders list natively via
 /// `bookq_core::pdf_page_count` (#402); a missing libpdfium only affects
 /// page *rendering* (proxied), never the listing.
-pub fn api_images(downloads: &Path, folder: &str) -> Response {
-    let folder_path = downloads.join(folder);
-    if !is_within(downloads, &folder_path) {
+pub fn api_images(library: &Path, folder: &str) -> Response {
+    let folder_path = library.join(folder);
+    if !is_within(library, &folder_path) {
         return detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let resolved = match realpath(&folder_path) {
@@ -493,8 +493,8 @@ pub fn api_images(downloads: &Path, folder: &str) -> Response {
         let names = (0..count).map(bookq_core::pdf_page_name).collect();
         return json_list(folder, names);
     }
-    if let Some((archive, inner)) = resolve_archive(downloads, folder) {
-        if !is_within(downloads, &archive) {
+    if let Some((archive, inner)) = resolve_archive(library, folder) {
+        if !is_within(library, &archive) {
             return detail(StatusCode::FORBIDDEN, "Forbidden");
         }
         // PDFs have no inner prefixes: their virtual children are the flat
@@ -594,9 +594,9 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 /// pypdfium2) and answer 501 when `libpdfium` is unavailable.
 /// Multi-range is a contract shrink (200 full) on both plain and archive
 /// paths — see `serve_plain_file`.
-pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Response {
-    if let Some((archive, inner)) = resolve_archive(downloads, path) {
-        if !is_within(downloads, &archive) {
+pub fn image(library: &Path, path: &str, headers: &HeaderMap) -> Response {
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
             return detail(StatusCode::FORBIDDEN, "Forbidden");
         }
         let archive_resolved = match realpath(&archive) {
@@ -613,8 +613,8 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Response {
     if path.starts_with('/') || path.ends_with('/') {
         return detail(StatusCode::BAD_REQUEST, "Invalid image path");
     }
-    let file_path = downloads.join(path);
-    if !is_within(downloads, &file_path) {
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
         return detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let file_path = match realpath(&file_path) {
@@ -1077,7 +1077,7 @@ mod tests {
         std::fs::write(path, out).unwrap();
     }
 
-    fn pdf_downloads(tag: &str) -> std::path::PathBuf {
+    fn pdf_library(tag: &str) -> std::path::PathBuf {
         let dl = std::env::temp_dir().join(format!(
             "bq-serve-{tag}-{}-{}",
             std::process::id(),
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn pdf_api_images_lists_pages_natively() {
-        let dl = pdf_downloads("ai");
+        let dl = pdf_library("ai");
         let res = api_images(&dl, "doc.pdf");
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_bytes(res);
@@ -1130,7 +1130,7 @@ mod tests {
     fn pdf_inner_prefix_is_404_like_python() {
         // PDFs have no inner prefixes — Python's empty `_list_archive_prefix`
         // answers 404, never a listing.
-        let dl = pdf_downloads("aip");
+        let dl = pdf_library("aip");
         let res = api_images(&dl, "doc.pdf/sub");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         std::fs::remove_dir_all(&dl).ok();
@@ -1138,7 +1138,7 @@ mod tests {
 
     #[test]
     fn pdf_image_page_contract() {
-        let dl = pdf_downloads("ip");
+        let dl = pdf_library("ip");
         // Out-of-range and misshapen names 404 natively (count-gated).
         for bad in ["doc.pdf/p009.png", "doc.pdf/x.png", "doc.pdf/p000.png"] {
             let res = image(&dl, bad, &HeaderMap::new());
@@ -1173,7 +1173,7 @@ mod tests {
     #[test]
     fn pdf_image_page_304() {
         // Conditional revalidation matches Python's int(mtime) semantics.
-        let dl = pdf_downloads("i304");
+        let dl = pdf_library("i304");
         if bookq_core::render_pdf_page(&dl.join("doc.pdf"), 0, 2.0).is_none() {
             std::fs::remove_dir_all(&dl).ok();
             return; // no libpdfium here — covered by pdf_image_page_contract

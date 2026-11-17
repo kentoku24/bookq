@@ -1,6 +1,6 @@
 # UI テスト
 
-FastAPI アプリを合成フィクスチャ（`conftest.py` が生成する downloads ツリー）に対して起動し、Playwright（headless Chromium）でブラウザ操作して UI の挙動を検証する。
+FastAPI アプリを合成フィクスチャ（`conftest.py` が生成する library ツリー）に対して起動し、Playwright（headless Chromium）でブラウザ操作して UI の挙動を検証する。
 
 ## 実行
 

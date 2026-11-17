@@ -273,15 +273,15 @@ compose_env_defaults() {
     DEV_HOSTNAME="${DEV_HOSTNAME:-dev-$DEV_POOL_SLOT}"
     export DEV_IMAGE DEV_NAME DEV_ENV_NAME DEV_POOL_SLOT DEV_HOSTNAME
     # compose の補間はカレントの .env しか見ないため、worktree から実行すると
-    # DOWNLOADS_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
+    # LIBRARY_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
     # メインのチェックアウトの .env からも解決して渡す。
-    if [ -z "${DOWNLOADS_HOST_DIR:-}" ]; then
-        DOWNLOADS_HOST_DIR="$(dotenv_value DOWNLOADS_HOST_DIR || true)"
+    if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
+        LIBRARY_HOST_DIR="$(dotenv_value LIBRARY_HOST_DIR || true)"
     fi
-    if [ -z "${DOWNLOADS_HOST_DIR:-}" ]; then
-        DOWNLOADS_HOST_DIR="$SCRIPT_DIR/downloads"
+    if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
+        LIBRARY_HOST_DIR="$SCRIPT_DIR/library"
     fi
-    [ -z "${DOWNLOADS_HOST_DIR:-}" ] || export DOWNLOADS_HOST_DIR
+    [ -z "${LIBRARY_HOST_DIR:-}" ] || export LIBRARY_HOST_DIR
     if [ -z "${TS_AUTHKEY:-}" ]; then
         TS_AUTHKEY="$(find_authkey || true)"
     fi
@@ -451,16 +451,16 @@ cmd_up() {
     fi
 
     # --fixture: 実データの代わりに合成テストツリー（tests/fixtures/uiux_tree.py）を
-    # マウントする。DOWNLOADS_HOST_DIR に export するので compose のマウントが
-    # そのまま /tmp/bookq-fixture-<name>/downloads を指す（.env の値より優先）。
+    # マウントする。LIBRARY_HOST_DIR に export するので compose のマウントが
+    # そのまま /tmp/bookq-fixture-<name>/library を指す（.env の値より優先）。
     if [ -n "$fixture" ]; then
         local fixture_dir="/tmp/bookq-fixture-$name"
-        printf '🧪 テストフィクスチャツリーを生成します: %s/downloads\n' "$fixture_dir"
+        printf '🧪 テストフィクスチャツリーを生成します: %s/library\n' "$fixture_dir"
         mkdir -p "$fixture_dir"
-        uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/tests/fixtures/uiux_tree.py" "$fixture_dir/downloads" >/dev/null \
+        uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/tests/fixtures/uiux_tree.py" "$fixture_dir/library" >/dev/null \
             || die "フィクスチャツリーの生成に失敗しました (tests/fixtures/uiux_tree.py)"
-        DOWNLOADS_HOST_DIR="$fixture_dir/downloads"
-        export DOWNLOADS_HOST_DIR
+        LIBRARY_HOST_DIR="$fixture_dir/library"
+        export LIBRARY_HOST_DIR
     fi
 
     # プール割当: 既存なら再利用（冪等）、無ければ空きスロットを取得
@@ -567,7 +567,7 @@ cmd_up() {
         export LOCAL_BIND="$local_bind"
     fi
 
-    # DOWNLOADS_HOST_DIR / TS_AUTHKEY をメインの .env から解決して export する
+    # LIBRARY_HOST_DIR / TS_AUTHKEY をメインの .env から解決して export する
     # （rebuild.sh は compose を直接叩くので、ここでの解決が必須）。
     compose_env_defaults
 
