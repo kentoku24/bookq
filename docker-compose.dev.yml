@@ -27,7 +27,7 @@ services:
     # 検証は使い捨ての合成ツリー (--fixture、常に rw) か、明示 opt-in の
     # DEV_LIBRARY_MODE=rw / ./dev.sh up --writable-library で。
     volumes:
-      - "${LIBRARY_HOST_DIR:-./library}:/app/library:${DEV_LIBRARY_MODE:-ro}"
+      - "${LIBRARY_HOST_DIR:-${DOWNLOADS_HOST_DIR:-./library}}:/app/library:${DEV_LIBRARY_MODE:-ro}"
       # thumb/sprite disk cache の永続化 (issue #276、本番と同値): 既定
       # /tmp/bookq-thumbs はコンテナ再作成で消えるため
       # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の

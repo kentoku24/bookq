@@ -282,7 +282,8 @@ compose_env_defaults() {
     # LIBRARY_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
     # メインのチェックアウトの .env からも解決して渡す。
     if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
-        LIBRARY_HOST_DIR="$(dotenv_value LIBRARY_HOST_DIR || true)"
+        # rename 前の変数名にもフォールバック（旧 .env のまま動く）。
+        LIBRARY_HOST_DIR="$(dotenv_value LIBRARY_HOST_DIR || dotenv_value DOWNLOADS_HOST_DIR || true)"
     fi
     if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
         LIBRARY_HOST_DIR="$SCRIPT_DIR/library"
