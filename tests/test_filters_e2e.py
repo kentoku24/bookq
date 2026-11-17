@@ -102,7 +102,7 @@ def facet_downloads(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def facet_server(facet_downloads: Path):
-    """Dual-lane backend (uvicorn or viewer-rs) against the nested tree."""
+    """viewer-rs backend against the nested tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(

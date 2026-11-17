@@ -12,11 +12,8 @@ which covers both `load` and `error`), then prints numeric logs for
 
 Visibility checks use `getBoundingClientRect` (no `IntersectionObserver`).
 
-Later plan todos (4/5) will ADD asserts to this file — the `_wait_*` /
-`_collect_*` helpers are kept small and reusable for that.
-
 BOOKQ_TEST_MODE handling: none needed here — the shared `server`
-fixture (tests/conftest.py) already launches uvicorn with
+fixture (tests/conftest.py) already launches viewer-rs with
 `BOOKQ_TEST_MODE=true` + a synthetic DOWNLOADS_DIR tree.
 
 Run:

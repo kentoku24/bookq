@@ -27,7 +27,7 @@ def test_drill_down_sets_browse_hash(page):
     page.locator("#footer-refresh-btn").click()  # tile → list (one click)
     page.locator('.item[data-path="group"]').click()
     # The view mode (v=list) carries in the URL across folder navigation
-    # — only the default "tile" mode omits the param.
+    # only the default "tile" mode omits the param.
     expect(page).to_have_url(re.compile(r"#/browse/group\?v=list$"))
 
 
@@ -86,7 +86,7 @@ def test_drill_into_flattened_wrapper_sets_hash(page):
 # The reader half: applyUrlState gains a #/browse/ branch that restores the
 # folder level (teardownViewer + renderView + scroll), dead/empty paths
 # normalize to canonical root (no hash), and a no-hash arrival while a browse
-# level or book is showing resets to root browse (Oracle F1).
+# level or book is showing resets to root browse.
 
 
 def test_deep_link_browse_restores_level(page, server):
@@ -237,7 +237,7 @@ def test_page_turn_after_browse_push_does_not_grow_history(page):
 # ── Consistency — empty/failure branches, resume hop, pull-refresh ────────
 # Every path that clears/rewrites the hash to no-hash must also reset the
 # browse state (currentBrowsePath = null, urlStack = [], searchMode cleared)
-# so the screen matches the canonical root URL (stale-stack hazard, Oracle F4).
+# so the screen matches the canonical root URL (stale-stack hazard).
 
 
 def test_empty_viewer_reset_renders_root_browse(page, server):

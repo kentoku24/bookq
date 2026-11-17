@@ -127,14 +127,14 @@ def test_slider_hit_area_44px_but_thin_track(page, server):
     runnable-track') is not usable here: -webkit-appearance:none on the host
     makes Chromium stop rendering/exposing that pseudo-element, so the call
     silently falls back to the *host's* computed height (44px, not the
-    authored 8px — confirmed empirically, see task-5-report.md). Instead:
+    authored 8px — confirmed empirically). Instead:
     the host background must be transparent (so only the pseudo-element's
     #333 track paints anything inside the 44px box), and the actual
     rendered band is measured with a real screenshot pixel scan.
 
     #toolbar's own backdrop-filter is neutralized for this measurement only
-    (via an injected <style>, not touching web/static/style.css). Empirically
-    (see task-5-report.md), Playwright's headless Chromium fails to rasterize
+    (via an injected <style>, not touching web/static/style.css). Empirically,
+    Playwright's headless Chromium fails to rasterize
     the ::-webkit-slider-runnable-track pseudo-element at all when the
     ancestor #toolbar has an active backdrop-filter — confirmed both with a
     minimal isolated reproduction (passes) and a real, non-headless Chrome

@@ -19,7 +19,7 @@ Fixture mirrors group/deep_series (raw depth 2, so SIBLING_AUTOLOAD_MIN_DEPTH
       mgroup/other/        c1.png                 (keeps mgroup unflattened)
       solo/                a.png b.png c.png      (root image-only)
 
-Server/page fixtures mirror tests/conftest.py (own uvicorn on a module tree so
+Server/page fixtures mirror tests/conftest.py (own viewer-rs on a module tree so
 the shared session tree stays untouched); selectors mirror
 tests/test_url_state.py (#counter, #folder-name, .tile[data-path]) and
 tests/test_ui.py (#img-track .page-cell img[src*=...]).
@@ -116,7 +116,7 @@ def mixed_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def mixed_server(mixed_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against mixed_tree."""
+    """viewer-rs backend against mixed_tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
@@ -352,7 +352,7 @@ def reach_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def reach_server(reach_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against reach_tree."""
+    """viewer-rs backend against reach_tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(

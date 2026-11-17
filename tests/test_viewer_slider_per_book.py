@@ -64,7 +64,7 @@ def slider_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def slider_server(slider_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against the slider tree."""
+    """viewer-rs backend against the slider tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(

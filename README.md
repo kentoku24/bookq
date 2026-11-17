@@ -10,7 +10,7 @@
 
 ```
 ブラウザ ── HTTPS ──▶ tailscale ── HTTP ──▶ viewer (:8080)
- (Tailnet内)        (TLS終端 + Serve)         FastAPI + hypercorn
+ (Tailnet内)        (TLS終端 + Serve)         viewer-rs (Rust)
                      bookq.….ts.net
 ```
 
@@ -24,7 +24,7 @@
 
 | コンテナ | 役割 |
 |---|---|
-| `viewer` | 画像ビューア + API (FastAPI) |
+| `viewer` | 画像ビューア + API (viewer-rs / Rust) |
 | `tailscale` | 本番の Tailscale ノード、TLS 終端、tailnet 内公開（開発環境は環境ごとに `dev-<名前>` ノードを持つ） |
 
 ## 必要なもの
