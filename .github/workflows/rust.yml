@@ -176,10 +176,12 @@ jobs:
       # it may delete canonical fixtures or leave uploads behind — the
       # 200-check below hits fixture paths and would flake. Empty the
       # mount *contents* only (the dir itself is the bind inode), rebuild,
-      # and force an index refresh.
+      # and force an index refresh. The delete runs inside the container:
+      # .bookq-uploads/ session dirs are written by viewer-rs as root, so
+      # the host runner gets EACCES unlinking them.
       - name: Regenerate fuzzed library fixtures
         run: |
-          find .ci-dl -mindepth 1 -delete
+          docker exec viewer-rs find /app/library -mindepth 1 -delete
           mkdir -p .ci-dl/Series/vol1 .ci-dl/Manga
           uv run --with pillow python - <<'EOF'
           from PIL import Image
