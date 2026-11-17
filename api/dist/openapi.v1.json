@@ -1747,7 +1747,7 @@
         ]
       },
       "post": {
-        "description": "`dir`（ルート相対。省略・空 = ライブラリルート）直下に multipart の\n`file` フィールドを保存する。`dir` は実在ディレクトリ必須\n（書庫ファイルや `.bookq-uploads` 配下は 400、不存在は 404）。\n同名が既にある場合は `name (n).ext` で自動リネームし、採用名を\n`files[].name` で返す。\n\nリクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。\nファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する\n（`invalid_name` / `unsupported_type` / `too_large` / `io_error`）。\n大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の\n分割アップロードを使うこと。\n",
+        "description": "`dir`（ルート相対。省略・空 = ライブラリルート）直下に multipart の\n`file` フィールドを保存する。`dir` は実在ディレクトリ必須\n（書庫ファイルや `.bookq-uploads` 配下は 400、不存在は 404）。\n同名が既にある場合は `name (n).ext` で自動リネームし、採用名を\n`files[].name` で返す。\n\nリクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。\nファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する\n（`invalid_name` / `unsupported_type` / `too_large` / `io_error` /\n`conflict` (dedupe 名が尽きた) / `malformed` (multipart が途中で\n切れた)）。非UTF-8 で復号不能な filename は `name:\"?\"`、\n`malformed` は `name:\"*\"` の sentinel を使う。\n大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の\n分割アップロードを使うこと。\n",
         "operationId": "uploadLibraryFiles",
         "parameters": [
           {
@@ -3091,7 +3091,7 @@
                 }
               }
             },
-            "description": "Range がファイル長を超過（open-ended `bytes=N-` が EOF 超え）"
+            "description": "Range がファイル長を超過（`bytes=N-` や `bytes=a-b` で\na ≥ size、`bytes=-0` 等の unsatisfiable 指定）\n"
           },
           "501": {
             "content": {

@@ -285,7 +285,10 @@ export interface paths {
          *
          *     リクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。
          *     ファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する
-         *     （`invalid_name` / `unsupported_type` / `too_large` / `io_error`）。
+         *     （`invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+         *     `conflict` (dedupe 名が尽きた) / `malformed` (multipart が途中で
+         *     切れた)）。非UTF-8 で復号不能な filename は `name:"?"`、
+         *     `malformed` は `name:"*"` の sentinel を使う。
          *     大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の
          *     分割アップロードを使うこと。
          */
@@ -1097,7 +1100,10 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description Range がファイル長を超過（open-ended `bytes=N-` が EOF 超え） */
+            /**
+             * @description Range がファイル長を超過（`bytes=N-` や `bytes=a-b` で
+             *     a ≥ size、`bytes=-0` 等の unsatisfiable 指定）
+             */
             416: {
                 headers: {
                     [name: string]: unknown;
