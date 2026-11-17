@@ -303,7 +303,7 @@
       "LibraryFileError": {
         "properties": {
           "code": {
-            "description": "invalid_name / unsupported_type / too_large / io_error",
+            "description": "`invalid_name` / `unsupported_type` / `too_large` / `io_error` /\n`conflict` (dedupe で空き名なし) / `malformed` (multipart が\n途中で切れた — `name` は `\"*\"` の sentinel)\n",
             "type": "string"
           },
           "name": {
@@ -1717,14 +1717,9 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
-              },
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
               }
             },
-            "description": "パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の\nparse 失敗時は extractor が `text/plain` を返す。\n"
+            "description": "パラメータ不正（空・ルート・`.bookq-uploads` 配下）"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
@@ -1883,31 +1878,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "413": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "単一ファイルが `BOOKQ_UPLOAD_MAX_BYTES` 超過"
-          },
-          "415": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              },
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "multipart 以外の Content-Type。extractor 拒否時は `text/plain`、\n拡張子非対応は `{\"detail\": …}` JSON。\n"
           },
           "422": {
             "$ref": "#/components/responses/ValidationError"
@@ -3058,6 +3028,11 @@
                   "format": "binary",
                   "type": "string"
                 }
+              },
+              "text/*": {
+                "schema": {
+                  "type": "string"
+                }
               }
             },
             "description": "画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない"
@@ -3073,6 +3048,11 @@
               "image/*": {
                 "schema": {
                   "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/*": {
+                "schema": {
                   "type": "string"
                 }
               }
@@ -3102,6 +3082,26 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "416": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Range がファイル長を超過（open-ended `bytes=N-` が EOF 超え）"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium\n無し環境での PDF ページ\n"
           }
         },
         "summary": "画像本体（Range / ETag 対応）",

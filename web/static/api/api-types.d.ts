@@ -686,7 +686,11 @@ export interface components {
         };
         LibraryFileError: {
             name: string;
-            /** @description invalid_name / unsupported_type / too_large / io_error */
+            /**
+             * @description `invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+             *     `conflict` (dedupe で空き名なし) / `malformed` (multipart が
+             *     途中で切れた — `name` は `"*"` の sentinel)
+             */
             code: string;
         };
         LibraryUploadInit: {
@@ -1057,6 +1061,7 @@ export interface operations {
                 content: {
                     "image/*": string;
                     "application/*": string;
+                    "text/*": string;
                 };
             };
             /** @description 単一 Range レスポンス */
@@ -1067,6 +1072,7 @@ export interface operations {
                 content: {
                     "image/*": string;
                     "application/*": string;
+                    "text/*": string;
                 };
             };
             /** @description ETag 一致 */
@@ -1091,6 +1097,27 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description Range がファイル長を超過（open-ended `bytes=N-` が EOF 超え） */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /**
+             * @description 抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium
+             *     無し環境での PDF ページ
+             */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     getThumb: {
@@ -1419,28 +1446,6 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description 単一ファイルが `BOOKQ_UPLOAD_MAX_BYTES` 超過 */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                };
-            };
-            /**
-             * @description multipart 以外の Content-Type。extractor 拒否時は `text/plain`、
-             *     拡張子非対応は `{"detail": …}` JSON。
-             */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Error"];
-                    "text/plain": string;
-                };
-            };
             422: components["responses"]["ValidationError"];
             /** @description uploads が無効（library 書き込み不可のデプロイ） */
             503: {
@@ -1478,17 +1483,13 @@ export interface operations {
                     };
                 };
             };
-            /**
-             * @description パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の
-             *     parse 失敗時は extractor が `text/plain` を返す。
-             */
+            /** @description パラメータ不正（空・ルート・`.bookq-uploads` 配下） */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["Error"];
-                    "text/plain": string;
                 };
             };
             403: components["responses"]["Forbidden"];
