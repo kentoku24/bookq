@@ -7,7 +7,7 @@
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Query, Request, State},
+    extract::{FromRequest, FromRequestParts, Path as AxumPath, Query, Request, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -25,6 +25,7 @@ mod auth;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+mod library;
 mod oauth;
 mod pair_report;
 mod reader_sync;
@@ -70,6 +71,10 @@ pub(crate) struct AppState {
     pub(crate) web_dir: PathBuf,
     /// TEST_MODE-only pair-report store (`app/api_v1.py::_PAIR_REPORTS`).
     pub(crate) pair_reports: std::sync::Arc<pair_report::PairReports>,
+    /// `<downloads>/.bookq-uploads` — `Some` when the probe at startup
+    /// proved the library writable, else `None` and `/api/v1/library/*`
+    /// answers 503 (read-only deploys stay fully functional).
+    pub(crate) upload_root: Option<PathBuf>,
 }
 
 /// A local 405 carries the RFC 9110 `Allow` header.
@@ -526,6 +531,91 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
         HeaderValue::from_static("no-store"),
     );
     serve::maybe_gzip(&headers, res, true).await
+}
+
+/// `/api/v1/library/files` — POST multipart upload / DELETE file-or-dir.
+/// `dir` (upload) and `path` (delete) are query params; the body streams.
+async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    match *req.method() {
+        axum::http::Method::POST => {
+            let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+                .map(|q| q.0)
+                .unwrap_or_default();
+            let dir = q.get("dir").cloned().unwrap_or_default();
+            let mp = match axum::extract::Multipart::from_request(req, &st).await {
+                Ok(mp) => mp,
+                Err(e) => return e.into_response(),
+            };
+            library::post_files(&st, &dir, mp).await
+        }
+        axum::http::Method::DELETE => {
+            let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+                .map(|q| q.0)
+                .unwrap_or_default();
+            let Some(path) = q.get("path").cloned() else {
+                return state::unprocessable("path", "missing", "Field required");
+            };
+            library::delete_file(&st, &path).await
+        }
+        _ => method_not_allowed("POST, DELETE"),
+    }
+}
+
+/// `/api/v1/library/uploads` — POST init a chunked upload session.
+async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    let (_parts, body) = req.into_parts();
+    let body = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return state::detail(StatusCode::BAD_REQUEST, "invalid body");
+        }
+    };
+    library::uploads_init(&st, &body).await
+}
+
+/// `/api/v1/library/uploads/{id}` — GET state / PUT chunk / DELETE cancel.
+async fn library_upload(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    match *req.method() {
+        axum::http::Method::GET => library::upload_get(&st, &id).await,
+        axum::http::Method::PUT => {
+            let headers = req.headers().clone();
+            let (_parts, body) = req.into_parts();
+            library::upload_append(&st, &id, &headers, body).await
+        }
+        axum::http::Method::DELETE => library::upload_cancel(&st, &id).await,
+        _ => method_not_allowed("GET, PUT, DELETE"),
+    }
+}
+
+/// `/api/v1/library/uploads/{id}/finalize` — POST commit into the library.
+async fn library_upload_finalize(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    library::upload_finalize(&st, &id).await
 }
 
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
@@ -1032,6 +1122,9 @@ async fn main() {
         web_dir: PathBuf::from(
             std::env::var("BOOKQ_WEB_DIR").unwrap_or_else(|_| "/web".into()),
         ),
+        // Library write surface: probe once — a read-only deploy keeps every
+        // read route but `/api/v1/library/*` answers 503.
+        upload_root: library::probe_upload_root(&downloads),
     };
     // warmup_metadata_index — lifespan kicks the same cold-miss path.
     index.spawn_warmup(downloads.clone());
@@ -1063,6 +1156,16 @@ async fn main() {
         .route("/api/v1/health", any(api_health))
         .route("/api/v1/version", any(api_version))
         .route("/api/v1/index/refresh", any(api_refresh))
+        // Library edit: multipart upload + delete, chunked upload sessions.
+        // Bodies stream (Multipart chunks / raw Body) so DefaultBodyLimit
+        // never applies — large files don't need a raised cap.
+        .route("/api/v1/library/files", any(library_files))
+        .route("/api/v1/library/uploads", any(library_uploads))
+        .route("/api/v1/library/uploads/{id}", any(library_upload))
+        .route(
+            "/api/v1/library/uploads/{id}/finalize",
+            any(library_upload_finalize),
+        )
         // #400: the auth surface moves as one unit — the callback's
         // one-time codes are redeemed by the token endpoint in the same
         // process. `auth_flow.is_none()` answers 501 (unconfigured).
@@ -1167,6 +1270,7 @@ mod handler_tests {
             pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
                 std::collections::HashMap::new(),
             )),
+            upload_root: None,
         }
     }
 

@@ -82,6 +82,12 @@ impl CacheData {
         self.timestamp_micros
             .store((now_secs() * 1e6) as u64, Ordering::Relaxed);
     }
+    /// Age the stamp past the TTL — a `/api/v1/library/*` write must surface
+    /// at the next tree read, not when the 300s TTL rolls over. The
+    /// signature gate then rebuilds instead of re-stamping the same body.
+    fn mark_stale(&self) {
+        self.timestamp_micros.store(0, Ordering::Relaxed);
+    }
     fn fresh(&self) -> bool {
         now_secs() - self.timestamp() <= INDEX_CACHE_TTL_SECS
     }
@@ -117,7 +123,10 @@ impl IndexState {
     }
 
     /// `_schedule_index_refresh` — single-flight background refresh.
-    fn schedule_refresh(self: &Arc<Self>, downloads: &Path) {
+    /// Also kicked by `/api/v1/library/*` after a successful write; those
+    /// callers need the change visible promptly, so the stamp is aged past
+    /// the TTL first (the gate then rebuilds instead of re-stamping).
+    pub(crate) fn schedule_refresh(self: &Arc<Self>, downloads: &Path) {
         let st = self.clone();
         let d = downloads.to_path_buf();
         tokio::spawn(async move {
@@ -127,6 +136,9 @@ impl IndexState {
                     return;
                 }
                 *r = true;
+            }
+            if let Some(c) = st.current().await {
+                c.mark_stale();
             }
             background_index_refresh(&st, &d).await;
             *st.refreshing.lock().await = false;

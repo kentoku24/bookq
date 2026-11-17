@@ -165,7 +165,7 @@ pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, S
 // ── Archive listing (port of app/archive.py) ──────────────────────────────────
 
 /// `_is_safe_entry`: no drive-letter / absolute / unsafe components.
-fn is_safe_entry(name: &str) -> bool {
+pub(crate) fn is_safe_entry(name: &str) -> bool {
     if name.len() >= 2 && name.as_bytes()[1] == b':' {
         return false;
     }
