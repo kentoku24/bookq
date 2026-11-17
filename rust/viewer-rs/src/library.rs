@@ -351,8 +351,9 @@ async fn drain_field(field: &mut axum::extract::multipart::Field<'_>) {
 /// (`filename=` or RFC 5987 `filename*=`)? Checked on the raw bytes —
 /// the whole point is catching names the UTF-8 decode couldn't show us.
 /// Mirrors multer's parameter boundary: the token must start at a `;`
-/// or ASCII whitespace boundary so `myfilename=` or a quoted value
-/// mentioning "filename" can't false-positive.
+/// or ASCII whitespace boundary so `myfilename=` can't false-positive.
+/// (Not quote-aware, like multer itself — harmless because this check
+/// is only consulted when multer already failed to decode the name.)
 fn disposition_has_filename(headers: &axum::http::HeaderMap) -> bool {
     let Some(v) = headers.get(axum::http::header::CONTENT_DISPOSITION) else {
         return false;

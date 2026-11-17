@@ -223,7 +223,10 @@ fn read_endrec64(f: &mut File, mut offset: i64, e: &mut EndRec) -> Result<(), ()
         return Err(());
     }
     offset -= SIZE_EOCD64 as i64;
-    if reloff as i64 > offset {
+    // reloff is attacker u64 — clamp the domain before any `as i64` so a
+    // value ≥ 2^63 can't wrap past the guard. offset < 0 means the file
+    // was too short to hold the records we already sliced.
+    if offset < 0 || reloff > offset as u64 {
         return Err(());
     }
     let mut data = [0u8; SIZE_EOCD64];
@@ -243,7 +246,9 @@ fn read_endrec64(f: &mut File, mut offset: i64, e: &mut EndRec) -> Result<(), ()
     let sz = u64::from_le_bytes(data[4..12].try_into().unwrap());
     let dirsize = u64::from_le_bytes(data[40..48].try_into().unwrap());
     let diroffset = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    if diroffset + dirsize != reloff || sz + 12 != SIZE_EOCD64 as u64 + extrasz as u64 {
+    if diroffset.checked_add(dirsize) != Some(reloff)
+        || sz.checked_add(12) != Some(SIZE_EOCD64 as u64 + extrasz as u64)
+    {
         return Err(());
     }
     e.size_cd = dirsize;
