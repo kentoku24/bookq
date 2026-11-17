@@ -416,6 +416,22 @@ fn set_header(r: &mut Response, name: header::HeaderName, value: &str) {
     }
 }
 
+/// #62: media bodies come from library files (and, since #556, uploads) —
+/// `nosniff` stops a crafted type from being sniffed into HTML, and the
+/// one decodable text format that can execute (SVG) gets the sandbox CSP
+/// the thumb pipeline already applies.
+fn set_media_headers(r: &mut Response, media: &str) {
+    set_header(r, header::CONTENT_TYPE, media);
+    set_header(r, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if media == "image/svg+xml" {
+        set_header(
+            r,
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        );
+    }
+}
+
 fn detail(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({"detail": msg}).to_string();
     let mut r = response(status, Body::from(body));
@@ -431,7 +447,11 @@ pub(crate) fn not_implemented(msg: &str) -> Response {
 }
 
 pub(crate) fn not_modified() -> Response {
-    response(StatusCode::NOT_MODIFIED, Body::empty())
+    // 304s carry no body, but the revalidated object is a media entry —
+    // keep the nosniff on the validation too (#62).
+    let mut r = response(StatusCode::NOT_MODIFIED, Body::empty());
+    set_header(&mut r, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    r
 }
 
 /// `_archive_bytes_response`: in-memory bytes with conditional/Range support.
@@ -451,7 +471,7 @@ fn archive_bytes_response(
     set_header(&mut r, header::ETAG, etag);
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
-    set_header(&mut r, header::CONTENT_TYPE, media);
+    set_media_headers(&mut r, media);
     if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
         if let Some((start, end)) = parse_archive_range(range_header, data.len() as u64) {
             *r.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -801,7 +821,7 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
     set_header(&mut r, header::CACHE_CONTROL, "private, max-age=3600");
     set_header(&mut r, header::ETAG, etag);
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
-    set_header(&mut r, header::CONTENT_TYPE, guess_type(&path.to_string_lossy()));
+    set_media_headers(&mut r, guess_type(&path.to_string_lossy()));
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
     match plan_range(headers, size) {
         RangePlan::Full => match std::fs::read(path) {
@@ -1010,6 +1030,80 @@ mod tests {
         let h2 = hdrs(&[("if-modified-since", "Sat, 31 Oct 2026 02:00:00 GMT")]);
         assert!(archive_not_modified(&h2, "\"x\"", 1_700_000_000.9)); // int(mtime) <= ts
         assert!(!archive_not_modified(&h2, "\"x\"", 1_800_000_000.9)); // mtime after header
+    }
+
+    /// #62: every media response carries `nosniff`; `image/svg+xml` also
+    /// gets the thumb pipeline's sandbox CSP so a planted SVG can't run
+    /// script on the viewer origin.
+    #[test]
+    fn media_headers_nosniff_and_svg_sandbox() {
+        let lm = "Thu, 01 Jan 1970 00:00:00 GMT";
+        let r = archive_bytes_response(&hdrs(&[]), b"x".to_vec(), "image/jpeg", "\"e\"", lm, 0.0);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert!(r.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
+
+        let r = archive_bytes_response(
+            &hdrs(&[]),
+            b"<svg/>".to_vec(),
+            "image/svg+xml",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+
+        // 206 keeps them — the headers are set on the shared response.
+        let r = archive_bytes_response(
+            &hdrs(&[("range", "bytes=0-0")]),
+            b"<svg/>".to_vec(),
+            "image/svg+xml",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+
+        // …and the 304 validation carries nosniff.
+        let r = archive_bytes_response(
+            &hdrs(&[("if-none-match", "\"e\"")]),
+            b"x".to_vec(),
+            "image/png",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+
+        // Loose files go through set_media_headers via guess_type.
+        let dir = std::env::temp_dir().join(format!(
+            "bq-svg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.svg");
+        std::fs::write(&p, b"<svg/>").unwrap();
+        let r = serve_plain_file(&p, 6, "\"e\"", lm, &hdrs(&[]));
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 
     #[tokio::test]
