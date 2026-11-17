@@ -172,6 +172,36 @@ jobs:
             --exclude-checks ignored_auth,allow_header_conformance \
             --exclude-deprecated
 
+      # Schemathesis fuzzes POST/DELETE against the rw-mounted library, so
+      # it may delete canonical fixtures or leave uploads behind — the
+      # 200-check below hits fixture paths and would flake. Empty the
+      # mount *contents* only (the dir itself is the bind inode), rebuild,
+      # and force an index refresh.
+      - name: Regenerate fuzzed library fixtures
+        run: |
+          find .ci-dl -mindepth 1 -delete
+          mkdir -p .ci-dl/Series/vol1 .ci-dl/Manga
+          uv run --with pillow python - <<'EOF'
+          from PIL import Image
+          import io, zipfile
+          for i in range(3):
+              Image.new("RGB", (80, 120), (i * 60, 0, 0)).save(f".ci-dl/Series/vol1/p{i:02d}.jpg")
+          Image.new("RGB", (80, 120), (0, 60, 0)).save(".ci-dl/Series/vol1/cover.png")
+          with zipfile.ZipFile(".ci-dl/Manga/pack.zip", "w") as z:
+              for i in range(3):
+                  b = io.BytesIO()
+                  Image.new("RGB", (80, 120), (0, 0, i * 60)).save(b, "JPEG")
+                  z.writestr(f"{i+1:02d}.jpg", b.getvalue())
+          pages = [Image.new("RGB", (80, 120), (i * 60, 60, 0)) for i in range(2)]
+          pages[0].save(".ci-dl/Series/vol1/doc.pdf", save_all=True, append_images=pages[1:])
+          EOF
+          curl -sf -X POST http://127.0.0.1:8080/api/v1/refresh >/dev/null || true
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/tree)
+            [ "$code" = "200" ] && break || sleep 1
+          done
+          [ "$code" = "200" ] || { docker logs viewer-rs || true; echo "tree never re-warmed"; exit 1; }
+
       # With no upstream there is no proxy to hide behind: a 200 on a v1
       # path is native by construction, and any silent fall-through shows
       # up as a "fallback answered 501" WARN. Request each path twice —

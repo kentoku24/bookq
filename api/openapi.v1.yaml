@@ -442,6 +442,8 @@ paths:
               schema: {type: string, format: binary}
             application/*:
               schema: {type: string, format: binary}
+            text/*:
+              schema: {type: string}
         "206":
           description: 単一 Range レスポンス
           content:
@@ -449,6 +451,8 @@ paths:
               schema: {type: string, format: binary}
             application/*:
               schema: {type: string, format: binary}
+            text/*:
+              schema: {type: string}
         "304": {description: ETag 一致}
         "400":
           description: |
@@ -461,6 +465,18 @@ paths:
               schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "416":
+          description: Range がファイル長を超過（open-ended `bytes=N-` が EOF 超え）
+          content:
+            text/plain:
+              schema: {type: string}
+        "501":
+          description: |
+            抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium
+            無し環境での PDF ページ
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /thumb/{path}:
     get:
@@ -870,20 +886,6 @@ paths:
               schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
-        "413":
-          description: 単一ファイルが `BOOKQ_UPLOAD_MAX_BYTES` 超過
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Error"}
-        "415":
-          description: |
-            multipart 以外の Content-Type。extractor 拒否時は `text/plain`、
-            拡張子非対応は `{"detail": …}` JSON。
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Error"}
-            text/plain:
-              schema: {type: string}
         "422": {$ref: "#/components/responses/ValidationError"}
         "503":
           description: uploads が無効（library 書き込み不可のデプロイ）
@@ -924,14 +926,10 @@ paths:
                   summary: フォルダ削除（再帰）
                   value: {deleted: "Series/vol1", kind: dir}
         "400":
-          description: |
-            パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の
-            parse 失敗時は extractor が `text/plain` を返す。
+          description: パラメータ不正（空・ルート・`.bookq-uploads` 配下）
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
-            text/plain:
-              schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
@@ -1706,7 +1704,10 @@ components:
         name: {type: string}
         code:
           type: string
-          description: "invalid_name / unsupported_type / too_large / io_error"
+          description: |
+            `invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+            `conflict` (dedupe で空き名なし) / `malformed` (multipart が
+            途中で切れた — `name` は `"*"` の sentinel)
 
     LibraryUploadInit:
       type: object
