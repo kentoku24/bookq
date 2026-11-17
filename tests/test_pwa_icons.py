@@ -1,4 +1,4 @@
-"""Regression tests for PWA icon unification (Todo 6).
+"""Regression tests for PWA icon unification.
 
 Covers:
   (a) manifest valid JSON with 192 any, 512 any, 512 maskable, theme #0f172a, no display_override

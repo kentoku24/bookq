@@ -127,7 +127,7 @@
   function _getOfflineMap(){ return window.offlineMap || {}; }
   function _getOfflineRecordMap(){ return window.offlineRecordMap || new Map(); }
 
-  // ── Todo 4 ctx-aware read path (additive; write path untouched) ──
+  // ── ctx-aware read path (additive; write path untouched) ──
   // A render builds ONE ctx per renderView call (see browse/render.js
   // _buildRenderCtx): {leafMap, offlineMap, offlineRecordMap}. Per-tile code
   // then does map lookups only — no per-tile getLeafPathsFor walks, no O(L²)

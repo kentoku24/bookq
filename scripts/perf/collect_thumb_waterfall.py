@@ -1,6 +1,5 @@
-"""TEMPORARY Todo1 harness: /thumb waterfall + cold breakdown (DO NOT permanize).
+"""/thumb waterfall + cold breakdown collector.
 
-Plan: `.omo/plans/root-folder-perf-under-5s.md` Todo 1, Step 2.
 Extracts `performance.getEntriesByType('resource')` entries whose name
 contains `/thumb/`, plus the `/api/folders` split
 (TTFB / body bytes+gzip / parse+restore window / first-tile /
@@ -9,9 +8,9 @@ lightweight display-complete / multi follow-up), and writes JSON.
 Lightweight display-complete (D3): every `#tile-grid .tile[data-path] img`
 `img.complete` — the same polling as
 `tests/test_top_display_perf.py::_wait_for_all_tile_images`.
-`single-cover w=200 first` is NOT implemented yet (Todo3), so on current
-code lightweight == final settle; both timestamps are recorded separately
-so Todo3 can show the split. The "multi follow-up" pass waits an extra
+`single-cover w=200 first` splits lightweight vs final settle; both
+timestamps are recorded separately so the split stays visible. The
+"multi follow-up" pass waits an extra
 idle window and recounts imgs/bytes.
 
 Cold definition (plan Goal): viewer restart
@@ -40,7 +39,7 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
 
-parser = argparse.ArgumentParser(description="TEMP Todo1 thumb waterfall collector")
+parser = argparse.ArgumentParser(description="thumb waterfall collector")
 parser.add_argument("base_url", nargs="?", default="http://127.0.0.1:8080")
 parser.add_argument("--runs", type=int, default=3)
 parser.add_argument("--out", default=None,
@@ -161,7 +160,7 @@ def run_once(browser):
     #  w_js      = folders.responseEnd -> firstTile (res.json+parse+restoreTree+render)
     #  w_thumbs  = firstTile -> lightweight settle (thumb fetch+settle)
     # res.json+parse vs restoreTree cannot be split without app
-    # instrumentation (out of scope for Todo1) — recorded combined as w_js.
+    # instrumentation — recorded combined as w_js.
     w_backend = (f0["end"] - 0) if f0 else None  # startTime-base below
     result = {
         "t_nav0_ms": round(t_nav0, 1),
@@ -178,7 +177,7 @@ def run_once(browser):
         "thumb_count": len(thumbs),
         "thumb_transfer_bytes": sum((r["transfer"] or 0) for r in thumbs),
         "thumb_decoded_bytes": sum((r["decoded"] or 0) for r in thumbs),
-        # waterfall: startTime order (reference for Todo2 depth=1-first assert)
+        # waterfall: startTime order (reference for the depth=1-first assert)
         "thumb_waterfall": [{"name": r["name"], "start": round(r["start"], 1),
                              "dur": round(r["dur"], 1),
                              "ttfb": round(r["ttfb"], 1),

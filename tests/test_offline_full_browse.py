@@ -1,4 +1,4 @@
-"""Task 2 — tree v1 endpoint offline persistence double put + full browse hierarchy offline.
+"""Tree v1 endpoint offline persistence double put + full browse hierarchy offline.
 
 Covers:
   - Baseline characterization: loadFolders success path double-put (app + SW) and catch fallback via caches.match
@@ -736,11 +736,11 @@ def test_viewer_hash_relaunch_offline_restores_tiles(page, server):
 # ── 4. Auto-sync on first online visit + online revalidation (debounced 5min) ──
 
 def test_auto_sync_on_first_online_visit(page, server):
-    """Task 4 — first online visit auto-sync trigger + online debounced revalidation.
+    """First online visit auto-sync trigger + online debounced revalidation.
 
     Spec:
       - After treeLoaded true + navigator.onLine + !sessionStorage.getItem('bookq_auto_sync_done'),
-        background kick Todo3 prefetch via requestIdleCallback→setTimeout(0), cap 50 or
+        background thumb prefetch kick via requestIdleCallback→setTimeout(0), cap 50 or
         viewport-visible, dedup via caches.match, simultaneous 3 fixed, silent skip on
         QuotaExceededError without showQuotaConfirm; online event does debounced 5min
         fetch("/api/v1/tree",{cache:"no-store"}) NetworkFirst revalidation with
@@ -821,7 +821,6 @@ def test_auto_sync_on_first_online_visit(page, server):
     assert "Per-segment percent-encoding" in core_text
 
     # ── Runtime: first online visit sets sessionStorage and prefetches thumbs ──
-    # Start with clean sessionStorage for this context
     goto_offline(page, server)
     wait_for_sw(page)
     page.evaluate("() => { try { sessionStorage.removeItem('bookq_auto_sync_done'); } catch {} }")
@@ -996,10 +995,10 @@ def test_auto_sync_on_first_online_visit(page, server):
         page.context.set_offline(False)
 
 
-# ── 6. Browse→viewer hash routing + offline fast path (Task 6) ────────────────
+# ── 6. Browse→viewer hash routing + offline fast path ────────────────
 
 def test_browse_to_view_offline_transition(page, server):
-    """Task 6 — hash routing offline consistency + flatten + SIBLING guard.
+    """Hash routing offline consistency + flatten + SIBLING guard.
 
     Verifies:
       - getBrowseChildren/getNodeAt/findNodeByPath prefix walk, getParentPath tree-walk (not split), folderHasOnlyImages, getLeafPathsFor, navigateToFolder, renderTiles/List/Cards all present
@@ -1126,7 +1125,6 @@ def test_browse_to_view_offline_transition(page, server):
         img_hits = page.evaluate("() => window.__imgHits.length")
         assert img_hits == 0, f"offline leaf open must not fetch /api/v1/images (fast path), got {img_hits} hits: {page.evaluate('() => window.__imgHits.slice(0,3)')}"
         # Also verify SIBLING guard offline: deeper sibling folder offline still works via sibling map
-        # Close viewer back to browse
         page.locator("#menu-btn").click()
         expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
         page.wait_for_selector(".tile", timeout=5000)

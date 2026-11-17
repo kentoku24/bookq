@@ -261,7 +261,12 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   の Testables に両方登録済みで `xcodebuild test` が両方走る。
 - UI テストは `BookqUITests/UITestSupport.swift` が `-serverURL` /
   `-testToken` 起動引数で TEST_MODE サーバーへ直接接続する（fixture は
-  android.yml と同じ合成木: Series/vol1+vol2, Other）。タップ対象は
+  android.yml と同じ合成木: Series/vol1+vol2, Other）。`-uitestReset`
+  （または `BOOKQ_UI_TEST_RESET`）で起動毎に永続状態を初期化する —
+  ローカルの読書位置・pair-sync・レイアウト設定を init で wipe し、
+  Documents/ 配下のオフラインダウンロードとサーバー側の
+  reading-positions（boot 内の初回 sync 前に DELETE）も初期化する。
+  テスト間の状態持ち越しによるフレーク防止（#551）。タップ対象は
   `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
   `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
   （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。

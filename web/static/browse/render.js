@@ -86,7 +86,7 @@
   function _getCurrentBrowsePath(){ try { return window.currentBrowsePath || null; } catch(e){ return null; } }
   function _emptyBrowseMessage(){ return window.emptyBrowseMessage ? window.emptyBrowseMessage() : "フォルダが見つかりません"; }
 
-  // Todo 4 one-shot render ctx: ONE localStorage parse + ONE offlineMap snapshot
+  // One-shot render ctx: ONE localStorage parse + ONE offlineMap snapshot
   // + memoized leafPaths per visible folder, built once per render call.
   // Per-tile code does map lookups only (no per-tile getPartialProgress walks,
   // no per-tile ReadingProgress.get parses). Corrupt localStorage degrades to
@@ -241,7 +241,7 @@
     _ensureBrowseDelegated();
   }
 
-  // Todo 3 single-cover-first: while window.__cc_singleCoverFirst===true
+  // Single-cover-first: while window.__cc_singleCoverFirst===true
   // (shallow window; set by app.js restoreTree, consumed here — never
   // re-derived), tiles emit ONLY the single cover at the device cover
   // width via window.resolveCoverSingle, with onerror matching
@@ -434,7 +434,7 @@
       return r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
     } catch(e){ return true; }
   }
-  // Lazy multi hydration (Todo 3): on idle after full arrival, upgrade any
+  // Lazy multi hydration: on idle after full arrival, upgrade any
   // remaining single-first tiles (img[data-cc-single]) to the multi-grid,
   // visible-first. No-op when the full render already replaced them (normal
   // path) or while the flag is still true (shallow window / full failed).
@@ -465,7 +465,7 @@
     if (typeof requestIdleCallback === 'function') requestIdleCallback(fn);
     else setTimeout(fn, 0);
   }
-  // Shallow-warmup idle fill poll (plan T4): after the first full
+  // Shallow-warmup idle fill poll: after the first full
   // /api/folders load, app.js hands the response ETag to noteFullLoad and
   // the poll loop takes over. Each idle tick fetches
   // GET /api/folders?since=<gen> (bare /api/folders while the generation is

@@ -239,7 +239,7 @@ actual_dev_fqdn() {
 }
 
 # ローカル検出はラベル com.bookq.local=true のみ（shell export は
-# 後続プロセスに見えないため labels が唯一の受渡し手段 — Todo 2 契約）。
+# 後続プロセスに見えないため labels が唯一の受渡し手段）。
 # 成功時は http://<bind>:<port> を出力して 0、非ローカル/不在は 1。
 # port/bind 空ラベルは防御既定 8080 / 127.0.0.1。
 local_url_for() {
@@ -302,7 +302,7 @@ compose() {
 }
 
 # ローカル専用: viewer だけを起動する追加フラグメント付き。tailscale サービスは
-# 決して作らない（up -d viewer で明示）。labels のみが Todo 3 への受渡し手段。
+# 決して作らない（up -d viewer で明示）。labels のみが後続処理への受渡し手段。
 compose_local() {
     local project="$1"; shift
     compose_env_defaults

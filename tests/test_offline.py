@@ -1,4 +1,4 @@
-"""Offline E2E tests (Todo 9) — SW registration + Cache API offline.
+"""Offline E2E tests — SW registration + Cache API offline.
 
 All cases use `?offline=1` to enable SW; normal tests without offline=1 are not affected.
 Run:

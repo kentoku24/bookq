@@ -1,4 +1,4 @@
-/* bookq Service Worker — Todo3 full strategies
+/* bookq Service Worker — fetch strategies
  * - install: SHELL precache + skipWaiting
  * - activate: delete old bookq-* caches (whitelist), enable navigationPreload, clients.claim
  * - fetch: guard + cacheFirst (per-work) / networkFirst (api) / navigate fallback

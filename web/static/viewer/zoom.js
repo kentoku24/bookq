@@ -260,8 +260,8 @@
       var c0 = { x: W / 2, y: H / 2 };
       var dest = (!reducedMotion() && window.Zoom.driftTarget) ? window.Zoom.driftTarget() : null;
       var p = clamp((1 - target) / 0.5, 0, 1);
-      // driftTarget() speaks viewport coordinates (Task 7 reads an overview
-      // cell's client rect); convert to the layer's local frame.
+      // driftTarget() speaks viewport coordinates (the overview reads a cell's
+      // client rect); convert to the layer's local frame.
       var cx = dest ? c0.x + p * ((dest.x - origin.left) - c0.x) : c0.x;
       var cy = dest ? c0.y + p * ((dest.y - origin.top) - c0.y) : c0.y;
       // layer is inset:0 → its natural center is (W/2, H/2); with origin 0 0: center = t + s*(W/2,H/2)
