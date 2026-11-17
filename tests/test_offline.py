@@ -500,7 +500,15 @@ def test_offline_restore_archive_inner_names(page, server):
     page.context.set_offline(True)
     try:
         # connecting/offline both count as non-online for the readable gate —
-        # the open must reach the work-cache scan either way.
+        # the open must reach the work-cache scan either way. Wait for the
+        # 'offline' event to demote Connectivity first: while it still reads
+        # "online" the listing fetch's failure re-checks _connOffline(),
+        # finds false, and the open throws instead of falling back to the
+        # work-cache scan (#552 — stripImgs never landed on CI).
+        page.wait_for_function(
+            "() => window.Connectivity && !window.Connectivity.isOnline()",
+            timeout=15000,
+        )
         page.evaluate("() => window.loadImages('arc_work')")
         expect_reader_open(page, 2)
     finally:
@@ -528,6 +536,13 @@ def test_offline_restore_uses_record_listing_order(page, server):
     }""")
     page.context.set_offline(True)
     try:
+        # Same ordering guarantee as the archive-inner-names case above —
+        # the listing fetch must see a non-online Connectivity state to fall
+        # back to the work-cache scan (#552).
+        page.wait_for_function(
+            "() => window.Connectivity && !window.Connectivity.isOnline()",
+            timeout=15000,
+        )
         page.evaluate("() => window.loadImages('epub_work')")
         expect_reader_open(page, 2)
         src = page.evaluate(
