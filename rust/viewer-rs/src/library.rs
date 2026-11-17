@@ -364,6 +364,7 @@ pub(crate) async fn post_files(
     let cap = max_upload_bytes();
     let mut files: Vec<serde_json::Value> = Vec::new();
     let mut errors: Vec<serde_json::Value> = Vec::new();
+    let mut saw_malformed = false;
     loop {
         let mut field = match mp.next_field().await {
             Ok(Some(f)) => f,
@@ -372,6 +373,7 @@ pub(crate) async fn post_files(
                 // Mid-stream parse failure must not hide the files that
                 // already placed — report them (and refresh the index)
                 // instead of returning a bare 400.
+                saw_malformed = true;
                 errors.push(serde_json::json!({"name": "*", "code": "malformed"}));
                 break;
             }
@@ -380,7 +382,13 @@ pub(crate) async fn post_files(
             drain_field(&mut field).await;
             continue;
         }
-        let name = field.file_name().unwrap_or_default().to_string();
+        // A `file` part without a filename is a form field, not a file
+        // upload — skip it like unknown fields so an all-nonfile request
+        // hits the "no file fields" 400 below instead of a 200.
+        let Some(name) = field.file_name().map(str::to_string) else {
+            drain_field(&mut field).await;
+            continue;
+        };
         if let Some(code) = precheck_file(&name) {
             drain_field(&mut field).await;
             errors.push(serde_json::json!({"name": name, "code": code}));
@@ -461,8 +469,13 @@ pub(crate) async fn post_files(
             }
         }
     }
-    if files.is_empty() && errors.is_empty() {
-        return state::detail(StatusCode::BAD_REQUEST, "no file fields");
+    // Nothing placed: an empty request is 400, and so is a body that
+    // failed to parse — a malformed multipart is a bad request, not a
+    // per-file rejection (unlike unsupported extensions, which are
+    // schema-valid input reported under `errors` at 200).
+    if files.is_empty() && (errors.is_empty() || saw_malformed) {
+        let msg = if saw_malformed { "malformed multipart body" } else { "no file fields" };
+        return state::detail(StatusCode::BAD_REQUEST, msg);
     }
     if !files.is_empty() {
         st.index.schedule_refresh(&st.library);
@@ -552,6 +565,7 @@ pub(crate) async fn delete_file(st: &AppState, path: &str) -> Response {
 // ── /api/v1/library/uploads (chunked sessions) ───────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InitBody {
     #[serde(default)]
     dir: String,

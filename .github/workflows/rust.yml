@@ -145,7 +145,7 @@ jobs:
             -e ALLOWED_EMAILS=test@example.com -e SECRET_KEY=ci-not-a-secret \
             -e LIBRARY_DIR=/app/library -e BOOKQ_STATE_DIR=/var/lib/bookq \
             -e BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs \
-            -v "$PWD/.ci-dl:/app/library:ro" \
+            -v "$PWD/.ci-dl:/app/library" \
             -v bookq-ci-state:/var/lib/bookq -v bookq-ci-thumbs:/var/cache/bookq-thumbs \
             bookq-ci:viewer-rs
           for i in $(seq 1 90); do

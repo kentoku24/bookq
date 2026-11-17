@@ -500,3 +500,37 @@ def test_session_load_reconciles_unconfirmed_tail(lib_server, lib_root):
     r = httpx.post(f"{lib_server}/api/v1/library/uploads/{uid}/finalize")
     assert r.status_code == 200, r.text
     assert (lib_root / "series" / "reconcile.cbz").read_bytes() == b"012345abcd"
+
+def test_upload_contract_rejections(lib_server, lib_root):
+    # Schema-invalid bodies must 4xx, not 200 — schemathesis' negative_data
+    # check exercises exactly these shapes against the live contract.
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/uploads",
+        json={"name": "x.cbz", "size": 10, "extra": 1},
+    )
+    assert r.status_code == 400
+
+    # A `file` part with no filename is a form field, not an upload.
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/files",
+        files={"file": (None, b"{}")},
+    )
+    assert r.status_code == 400
+
+    # Unparseable multipart is a bad request, not a partial-success report.
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/files",
+        content=b"--b\r\nContent-Disposition: form-data; name=\"\x0f\xc3\xa4\"\r\n\r\nx\r\n--b--\r\n",
+        headers={"Content-Type": "multipart/form-data; boundary=b"},
+    )
+    assert r.status_code == 400
+
+    # ...but a schema-valid batch whose entries all fail per-file checks
+    # still reports them under `errors` at 200.
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/files",
+        files={"file": ("b.txt", b"hello")},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["files"] == [] and body["errors"][0]["code"] == "unsupported_type"

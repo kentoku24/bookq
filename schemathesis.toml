@@ -88,39 +88,59 @@ include-name = "POST /api/v1/library/files"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "413", "415", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
 [[operations]]
 include-name = "DELETE /api/v1/library/files"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
 [[operations]]
 include-name = "POST /api/v1/library/uploads"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "413", "415", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
 [[operations]]
 include-name = "GET /api/v1/library/uploads/{id}"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
 [[operations]]
 include-name = "PUT /api/v1/library/uploads/{id}"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "413", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
 [[operations]]
 include-name = "DELETE /api/v1/library/uploads/{id}"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
 [[operations]]
 include-name = "POST /api/v1/library/uploads/{id}/finalize"
 checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "429", "503", "5xx",
 ]
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
+
+# `/thumb` and `/view` answer 501 by design when the source can't be decoded
+# natively (non-image files, compressed multipart RAR sets, PDF without
+# libpdfium — serve.rs "not_implemented"). The status is documented in the
+# spec; allow it here since not_a_server_error flags every 5xx.
+
+[[operations]]
+include-name = "GET /thumb/{path}"
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "501"]
+
+[[operations]]
+include-name = "GET /view/{path}"
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "501"]

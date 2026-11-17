@@ -440,7 +440,15 @@ paths:
           content:
             image/*:
               schema: {type: string, format: binary}
-        "206": {description: 単一 Range レスポンス}
+            application/*:
+              schema: {type: string, format: binary}
+        "206":
+          description: 単一 Range レスポンス
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+            application/*:
+              schema: {type: string, format: binary}
         "304": {description: ETag 一致}
         "400":
           description: |
@@ -478,6 +486,11 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 非画像などネイティブでサムネ生成不能なソース
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /view/{path}:
     get:
@@ -499,6 +512,11 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 非画像などネイティブで正規化不能なソース
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /api/v1/reading-positions:
     get:
@@ -840,7 +858,16 @@ paths:
                       - {name: "a.cbz", path: "Series/a.cbz", size: 1000}
                     errors:
                       - {name: "b.txt", code: "unsupported_type"}
-        "400": {$ref: "#/components/responses/BadRequest"}
+        "400":
+          description: |
+            パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は
+            extractor がハンドラ到達前に `text/plain` を返す（/image の 400
+            と同じ二形式）。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "413":
@@ -849,10 +876,14 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
         "415":
-          description: multipart 以外の Content-Type
+          description: |
+            multipart 以外の Content-Type。extractor 拒否時は `text/plain`、
+            拡張子非対応は `{"detail": …}` JSON。
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
         "422": {$ref: "#/components/responses/ValidationError"}
         "503":
           description: uploads が無効（library 書き込み不可のデプロイ）
@@ -892,7 +923,15 @@ paths:
                 dir:
                   summary: フォルダ削除（再帰）
                   value: {deleted: "Series/vol1", kind: dir}
-        "400": {$ref: "#/components/responses/BadRequest"}
+        "400":
+          description: |
+            パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の
+            parse 失敗時は extractor が `text/plain` を返す。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
