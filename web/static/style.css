@@ -33,7 +33,9 @@ body{position:fixed;inset:0}
 		#sidebar-header h1{font-size:16px;font-weight:600;color:#e0e0e0;white-space:nowrap;flex-shrink:0;letter-spacing:-0.01em;line-height:1.2;max-width:calc(50% - 32px);min-width:0;overflow:hidden;text-overflow:ellipsis}
 		/* pair launcher is centered in the tile header (2台見開き entry);
 		 * the right cluster stays above it so a tap near the edge still
-		 * hits フィルタ/オンライン status, never a stray MATCH. */
+		 * hits フィルタ/オンライン status, never a stray MATCH. The cluster
+		 * must stay narrow — anything added to the header goes on the
+		 * title side (see #lib-edit-btn) so it can't reach center. */
 		#sidebar-header #pair-btn{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
 		#sidebar-header #pair-btn:active{transform:translate(-50%,-50%) scale(0.95)}
 		#sidebar-header #filter-btn{margin-left:auto;position:relative;z-index:1}
@@ -597,3 +599,23 @@ body.fv-showall #visibility-status:not(:empty){display:flex}
    unhide toggle stay usable in 全表示 mode. */
 .visibility-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;line-height:1.4;background:rgba(196,68,68,.18);color:#ffb4b4;border:1px solid rgba(196,68,68,.4);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 #tile-grid.list-mode .item .visibility-badge{margin-left:6px;flex:none}
+
+/* ── library edit (追加+削除) — edit-mode bar, per-tile 🗑, drop hint ── */
+#lib-edit-btn{background:none;border:none;color:#888;font-size:15px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;flex-shrink:0;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;transition:background .15s,color .15s}
+#lib-edit-btn:hover{background:rgba(255,255,255,0.08);color:#aaa}
+#lib-edit-btn[aria-pressed="true"]{color:#8ab4f8;background:rgba(138,180,248,.12)}
+#lib-edit-bar{display:flex;align-items:center;gap:8px;padding:4px 16px 8px;font-size:12px}
+#lib-edit-bar[hidden]{display:none}
+#lib-upload-btn,#lib-edit-done{min-height:32px;padding:3px 12px;border-radius:6px;border:1px solid #555;background:#1a1a1a;color:#ccc;font-size:12px;cursor:pointer;font-family:inherit}
+#lib-upload-btn:hover,#lib-edit-done:hover{background:#222;border-color:#777}
+#lib-edit-status{flex:1;min-width:0;font-size:11px;color:#9a9a9a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 🗑 on tile/card: bottom-right (.visibility-toggle owns top-left,
+   .offline-btn top-right). 2タップ目 (lib-del-arm) で赤化。 */
+.lib-del{position:absolute;bottom:4px;right:4px;width:44px;height:44px;padding:0;border:none;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.65);color:#fff;font-size:16px;cursor:pointer;transition:background-color .18s ease,transform .12s ease}
+.lib-del:hover{filter:brightness(1.18)}
+.lib-del:active{transform:scale(0.95)}
+.lib-del.lib-del-arm{background:rgba(196,68,68,.85)}
+#tile-grid.list-mode .item .lib-del{position:static;flex:none;order:0;margin-left:auto;width:36px;height:36px;font-size:13px}
+#tile-grid .tile,#tile-grid .card,#tile-grid .item{position:relative}
+/* drop hint — 編集モード中のサイドバーへのドラッグ */
+#sidebar-scroll.lib-drop{outline:2px dashed #4a7ac4;outline-offset:-4px}

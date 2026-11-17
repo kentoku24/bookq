@@ -50,7 +50,7 @@ def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) 
 
 @pytest.fixture(scope="module")
 def slider_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("slider_downloads")
+    root = tmp_path_factory.mktemp("slider_library")
     for ch, count in [("chA", 5), ("chB", 3)]:
         d = root / "slidergroup" / "sliderseries" / ch
         d.mkdir(parents=True)
@@ -68,7 +68,7 @@ def slider_server(slider_tree: Path) -> str:
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=slider_tree,
+        library_dir=slider_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url

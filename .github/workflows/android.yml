@@ -64,7 +64,7 @@ jobs:
           # same-repo PRs write so the cache warms; fork PRs stay read-only.
           cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
           # Default includes omit wrapper; without it every job
-          # re-downloads the Gradle distribution.
+          # re-library the Gradle distribution.
           gradle-home-cache-includes: |
             caches
             notifications
@@ -144,7 +144,7 @@ jobs:
           # same-repo PRs write so the cache warms; fork PRs stay read-only.
           cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
           # Default includes omit wrapper; without it every job
-          # re-downloads the Gradle distribution.
+          # re-library the Gradle distribution.
           gradle-home-cache-includes: |
             caches
             notifications
@@ -168,7 +168,7 @@ jobs:
 
       # Synthetic tree — Series/vol1 flattens to one "Series/vol1" node;
       # Other/ has direct images so its top-level name stays "Other".
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Other /tmp/bookq-state
           uv run --with pillow python - <<'PYEOF'
@@ -183,7 +183,7 @@ jobs:
 
       - name: Start bookq (test mode)
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
             BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-android-ci-server.log 2>&1 &
           for i in $(seq 1 60); do

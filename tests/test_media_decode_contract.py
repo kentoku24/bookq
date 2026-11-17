@@ -78,7 +78,7 @@ def decode_server(decode_tree: Path):
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=decode_tree, state_dir=os.environ["BOOKQ_STATE_DIR"]
+        library_dir=decode_tree, state_dir=os.environ["BOOKQ_STATE_DIR"]
     )
     try:
         yield base_url

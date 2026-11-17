@@ -132,7 +132,7 @@ pub(crate) fn realpath(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `_is_within`: target inside base after resolving both.
-/// `base` must already be canonical — `AppState` canonicalizes `downloads`
+/// `base` must already be canonical — `AppState` canonicalizes `library`
 /// once at startup. Only `target` pays a per-call realpath (required for
 /// symlink-escape safety); canonicalizing `base` per request was a
 /// stat-walk on every hot-path call.
@@ -146,7 +146,7 @@ pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
 /// `_resolve_archive`: longest prefix of `rel` that resolves to an
 /// archive/PDF file → `(archive_path, inner_path)`. `.` and empty components
 /// are dropped; any `..` rejects the whole path.
-pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn resolve_archive(library: &Path, rel: &str) -> Option<(PathBuf, String)> {
     let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
     if parts.iter().any(|p| *p == "..") {
         return None;
@@ -154,7 +154,7 @@ pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, S
     // `range(len(parts) - 1, 0, -1)` — the inner entry is mandatory: a bare
     // archive filename is an ordinary file (plain-file branch downstream).
     for i in (1..parts.len()).rev() {
-        let cand = downloads.join(parts[..i].join("/"));
+        let cand = library.join(parts[..i].join("/"));
         if is_archive_file(&cand) || is_pdf_file(&cand) {
             return Some((cand, parts[i..].join("/")));
         }
@@ -165,7 +165,7 @@ pub(crate) fn resolve_archive(downloads: &Path, rel: &str) -> Option<(PathBuf, S
 // ── Archive listing (port of app/archive.py) ──────────────────────────────────
 
 /// `_is_safe_entry`: no drive-letter / absolute / unsafe components.
-fn is_safe_entry(name: &str) -> bool {
+pub(crate) fn is_safe_entry(name: &str) -> bool {
     if name.len() >= 2 && name.as_bytes()[1] == b':' {
         return false;
     }
@@ -416,6 +416,22 @@ fn set_header(r: &mut Response, name: header::HeaderName, value: &str) {
     }
 }
 
+/// #62: media bodies come from library files (and, since #556, uploads) —
+/// `nosniff` stops a crafted type from being sniffed into HTML, and the
+/// one decodable text format that can execute (SVG) gets the sandbox CSP
+/// the thumb pipeline already applies.
+fn set_media_headers(r: &mut Response, media: &str) {
+    set_header(r, header::CONTENT_TYPE, media);
+    set_header(r, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if media == "image/svg+xml" {
+        set_header(
+            r,
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        );
+    }
+}
+
 fn detail(status: StatusCode, msg: &str) -> Response {
     let body = serde_json::json!({"detail": msg}).to_string();
     let mut r = response(status, Body::from(body));
@@ -431,7 +447,11 @@ pub(crate) fn not_implemented(msg: &str) -> Response {
 }
 
 pub(crate) fn not_modified() -> Response {
-    response(StatusCode::NOT_MODIFIED, Body::empty())
+    // 304s carry no body, but the revalidated object is a media entry —
+    // keep the nosniff on the validation too (#62).
+    let mut r = response(StatusCode::NOT_MODIFIED, Body::empty());
+    set_header(&mut r, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    r
 }
 
 /// `_archive_bytes_response`: in-memory bytes with conditional/Range support.
@@ -451,7 +471,7 @@ fn archive_bytes_response(
     set_header(&mut r, header::ETAG, etag);
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
-    set_header(&mut r, header::CONTENT_TYPE, media);
+    set_media_headers(&mut r, media);
     if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
         if let Some((start, end)) = parse_archive_range(range_header, data.len() as u64) {
             *r.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -475,9 +495,9 @@ fn archive_bytes_response(
 /// shared `{detail}` shape unwrapped. PDF folders list natively via
 /// `bookq_core::pdf_page_count` (#402); a missing libpdfium only affects
 /// page *rendering* (proxied), never the listing.
-pub fn api_images(downloads: &Path, folder: &str) -> Response {
-    let folder_path = downloads.join(folder);
-    if !is_within(downloads, &folder_path) {
+pub fn api_images(library: &Path, folder: &str) -> Response {
+    let folder_path = library.join(folder);
+    if !is_within(library, &folder_path) {
         return detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let resolved = match realpath(&folder_path) {
@@ -493,8 +513,8 @@ pub fn api_images(downloads: &Path, folder: &str) -> Response {
         let names = (0..count).map(bookq_core::pdf_page_name).collect();
         return json_list(folder, names);
     }
-    if let Some((archive, inner)) = resolve_archive(downloads, folder) {
-        if !is_within(downloads, &archive) {
+    if let Some((archive, inner)) = resolve_archive(library, folder) {
+        if !is_within(library, &archive) {
             return detail(StatusCode::FORBIDDEN, "Forbidden");
         }
         // PDFs have no inner prefixes: their virtual children are the flat
@@ -594,9 +614,9 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 /// pypdfium2) and answer 501 when `libpdfium` is unavailable.
 /// Multi-range is a contract shrink (200 full) on both plain and archive
 /// paths — see `serve_plain_file`.
-pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Response {
-    if let Some((archive, inner)) = resolve_archive(downloads, path) {
-        if !is_within(downloads, &archive) {
+pub fn image(library: &Path, path: &str, headers: &HeaderMap) -> Response {
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
             return detail(StatusCode::FORBIDDEN, "Forbidden");
         }
         let archive_resolved = match realpath(&archive) {
@@ -613,8 +633,8 @@ pub fn image(downloads: &Path, path: &str, headers: &HeaderMap) -> Response {
     if path.starts_with('/') || path.ends_with('/') {
         return detail(StatusCode::BAD_REQUEST, "Invalid image path");
     }
-    let file_path = downloads.join(path);
-    if !is_within(downloads, &file_path) {
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
         return detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let file_path = match realpath(&file_path) {
@@ -801,7 +821,7 @@ fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, hea
     set_header(&mut r, header::CACHE_CONTROL, "private, max-age=3600");
     set_header(&mut r, header::ETAG, etag);
     set_header(&mut r, header::LAST_MODIFIED, last_modified);
-    set_header(&mut r, header::CONTENT_TYPE, guess_type(&path.to_string_lossy()));
+    set_media_headers(&mut r, guess_type(&path.to_string_lossy()));
     set_header(&mut r, header::ACCEPT_RANGES, "bytes");
     match plan_range(headers, size) {
         RangePlan::Full => match std::fs::read(path) {
@@ -1012,6 +1032,80 @@ mod tests {
         assert!(!archive_not_modified(&h2, "\"x\"", 1_800_000_000.9)); // mtime after header
     }
 
+    /// #62: every media response carries `nosniff`; `image/svg+xml` also
+    /// gets the thumb pipeline's sandbox CSP so a planted SVG can't run
+    /// script on the viewer origin.
+    #[test]
+    fn media_headers_nosniff_and_svg_sandbox() {
+        let lm = "Thu, 01 Jan 1970 00:00:00 GMT";
+        let r = archive_bytes_response(&hdrs(&[]), b"x".to_vec(), "image/jpeg", "\"e\"", lm, 0.0);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert!(r.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
+
+        let r = archive_bytes_response(
+            &hdrs(&[]),
+            b"<svg/>".to_vec(),
+            "image/svg+xml",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+
+        // 206 keeps them — the headers are set on the shared response.
+        let r = archive_bytes_response(
+            &hdrs(&[("range", "bytes=0-0")]),
+            b"<svg/>".to_vec(),
+            "image/svg+xml",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+
+        // …and the 304 validation carries nosniff.
+        let r = archive_bytes_response(
+            &hdrs(&[("if-none-match", "\"e\"")]),
+            b"x".to_vec(),
+            "image/png",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+
+        // Loose files go through set_media_headers via guess_type.
+        let dir = std::env::temp_dir().join(format!(
+            "bq-svg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.svg");
+        std::fs::write(&p, b"<svg/>").unwrap();
+        let r = serve_plain_file(&p, 6, "\"e\"", lm, &hdrs(&[]));
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     #[tokio::test]
     async fn maybe_gzip_passes_206_untouched() {
         // GZipResponder partial_response: 206 → no compression, no Vary.
@@ -1077,7 +1171,7 @@ mod tests {
         std::fs::write(path, out).unwrap();
     }
 
-    fn pdf_downloads(tag: &str) -> std::path::PathBuf {
+    fn pdf_library(tag: &str) -> std::path::PathBuf {
         let dl = std::env::temp_dir().join(format!(
             "bq-serve-{tag}-{}-{}",
             std::process::id(),
@@ -1116,7 +1210,7 @@ mod tests {
 
     #[test]
     fn pdf_api_images_lists_pages_natively() {
-        let dl = pdf_downloads("ai");
+        let dl = pdf_library("ai");
         let res = api_images(&dl, "doc.pdf");
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_bytes(res);
@@ -1130,7 +1224,7 @@ mod tests {
     fn pdf_inner_prefix_is_404_like_python() {
         // PDFs have no inner prefixes — Python's empty `_list_archive_prefix`
         // answers 404, never a listing.
-        let dl = pdf_downloads("aip");
+        let dl = pdf_library("aip");
         let res = api_images(&dl, "doc.pdf/sub");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         std::fs::remove_dir_all(&dl).ok();
@@ -1138,7 +1232,7 @@ mod tests {
 
     #[test]
     fn pdf_image_page_contract() {
-        let dl = pdf_downloads("ip");
+        let dl = pdf_library("ip");
         // Out-of-range and misshapen names 404 natively (count-gated).
         for bad in ["doc.pdf/p009.png", "doc.pdf/x.png", "doc.pdf/p000.png"] {
             let res = image(&dl, bad, &HeaderMap::new());
@@ -1173,7 +1267,7 @@ mod tests {
     #[test]
     fn pdf_image_page_304() {
         // Conditional revalidation matches Python's int(mtime) semantics.
-        let dl = pdf_downloads("i304");
+        let dl = pdf_library("i304");
         if bookq_core::render_pdf_page(&dl.join("doc.pdf"), 0, 2.0).is_none() {
             std::fs::remove_dir_all(&dl).ok();
             return; // no libpdfium here — covered by pdf_image_page_contract

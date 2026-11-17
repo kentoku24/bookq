@@ -11,10 +11,12 @@
 # down は通常ボリュームを保持、--full のみで state をリセットする。
 #
 #   ./dev.sh up [name] [--ref REF]   起動（初回は空きスロット 01..10 を割当、既存なら同じスロットを再利用）
-#   ./dev.sh up [name] [--ref REF] [--fixture]   起動（--fixture: 実データの代わりに合成テストツリーをマウント）
+#   ./dev.sh up [name] [--ref REF] [--fixture]   起動（--fixture: 実データの代わりに合成テストツリーをマウント、常に rw）
+#   ./dev.sh up [name] [--writable-library]     実ライブラリを read-write でマウント（既定は ro — TEST_MODE で認証が無いため）
+
 #   （#532: --rs は撤去済み。viewer サービス自体が viewer-rs を実行する
 #    rs-only 構成のため、指定があっても無視される）
-#   ./dev.sh up [name] [--local [--port N] [--lan-allow]] [--fixture]   起動（--local: tailscale 無しで http://127.0.0.1:<port> に公開。2つ目の同時環境には --port が必要）
+#   ./dev.sh up [name] [--local [--port N] [--lan-allow]] [--fixture] [--writable-library]   起動（--local: tailscale 無しで http://127.0.0.1:<port> に公開。2つ目の同時環境には --port が必要）
 #   ./dev.sh down [name] [--full]    停止・削除（--full 無しはボリューム保持でスロット再利用 / --full は state ボリュームまで削除してスロット解放）
 #   ./dev.sh down --all [--full] [--yes] [--no-prune-volumes]   全環境を削除（--all --full は --yes 必須）
 #                                    --full: ボリューム・イメージ・ノード登録まで完全撤去
@@ -271,17 +273,22 @@ compose_env_defaults() {
             || die "不正な DEV_POOL_SLOT: ${DEV_POOL_SLOT}（./dev.sh down $DEV_NAME --full で作り直してください）" ;;
     esac
     DEV_HOSTNAME="${DEV_HOSTNAME:-dev-$DEV_POOL_SLOT}"
-    export DEV_IMAGE DEV_NAME DEV_ENV_NAME DEV_POOL_SLOT DEV_HOSTNAME
+    # ro が既定 — TEST_MODE で認証を抜く dev が本番ライブラリを rw で
+    # マウントする組み合わせを暗黙に許さない (up --fixture / --writable-library
+    # で rw になる)。
+    DEV_LIBRARY_MODE="${DEV_LIBRARY_MODE:-ro}"
+    export DEV_IMAGE DEV_NAME DEV_ENV_NAME DEV_POOL_SLOT DEV_HOSTNAME DEV_LIBRARY_MODE
     # compose の補間はカレントの .env しか見ないため、worktree から実行すると
-    # DOWNLOADS_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
+    # LIBRARY_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
     # メインのチェックアウトの .env からも解決して渡す。
-    if [ -z "${DOWNLOADS_HOST_DIR:-}" ]; then
-        DOWNLOADS_HOST_DIR="$(dotenv_value DOWNLOADS_HOST_DIR || true)"
+    if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
+        # rename 前の変数名にもフォールバック（旧 .env のまま動く）。
+        LIBRARY_HOST_DIR="$(dotenv_value LIBRARY_HOST_DIR || dotenv_value DOWNLOADS_HOST_DIR || true)"
     fi
-    if [ -z "${DOWNLOADS_HOST_DIR:-}" ]; then
-        DOWNLOADS_HOST_DIR="$SCRIPT_DIR/downloads"
+    if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
+        LIBRARY_HOST_DIR="$SCRIPT_DIR/library"
     fi
-    [ -z "${DOWNLOADS_HOST_DIR:-}" ] || export DOWNLOADS_HOST_DIR
+    [ -z "${LIBRARY_HOST_DIR:-}" ] || export LIBRARY_HOST_DIR
     if [ -z "${TS_AUTHKEY:-}" ]; then
         TS_AUTHKEY="$(find_authkey || true)"
     fi
@@ -408,12 +415,13 @@ prune_volumes_from_list() {
 cmd_up() {
     require_repo_root
 
-    local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow=""
+    local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow="" writable=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --ref)  [ $# -ge 2 ] || die "--ref には値が必要です";  ref="$2";  shift 2 ;;
             --ref=*)  ref="${1#--ref=}";  shift ;;
             --fixture) fixture=1; shift ;;
+            --writable-library) writable=1; shift ;;
             --rs) warn "--rs は #532 で撤去済み（rs-only のため無視）"; shift ;;
             --local) local_mode=1; shift ;;
             --lan-allow) lan_allow=1; shift ;;
@@ -451,16 +459,23 @@ cmd_up() {
     fi
 
     # --fixture: 実データの代わりに合成テストツリー（tests/fixtures/uiux_tree.py）を
-    # マウントする。DOWNLOADS_HOST_DIR に export するので compose のマウントが
-    # そのまま /tmp/bookq-fixture-<name>/downloads を指す（.env の値より優先）。
+    # マウントする。LIBRARY_HOST_DIR に export するので compose のマウントが
+    # そのまま /tmp/bookq-fixture-<name>/library を指す（.env の値より優先）。
+    # 使い捨ての生成物なので書き込み検証の正規経路として常に rw にする —
+    # 実ライブラリへの rw は --writable-library のみが開ける。
     if [ -n "$fixture" ]; then
         local fixture_dir="/tmp/bookq-fixture-$name"
-        printf '🧪 テストフィクスチャツリーを生成します: %s/downloads\n' "$fixture_dir"
+        printf '🧪 テストフィクスチャツリーを生成します: %s/library\n' "$fixture_dir"
         mkdir -p "$fixture_dir"
-        uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/tests/fixtures/uiux_tree.py" "$fixture_dir/downloads" >/dev/null \
+        uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/tests/fixtures/uiux_tree.py" "$fixture_dir/library" >/dev/null \
             || die "フィクスチャツリーの生成に失敗しました (tests/fixtures/uiux_tree.py)"
-        DOWNLOADS_HOST_DIR="$fixture_dir/downloads"
-        export DOWNLOADS_HOST_DIR
+        LIBRARY_HOST_DIR="$fixture_dir/library"
+        export LIBRARY_HOST_DIR
+        writable=1
+    fi
+    if [ -n "$writable" ]; then
+        DEV_LIBRARY_MODE="rw"
+        export DEV_LIBRARY_MODE
     fi
 
     # プール割当: 既存なら再利用（冪等）、無ければ空きスロットを取得
@@ -567,7 +582,7 @@ cmd_up() {
         export LOCAL_BIND="$local_bind"
     fi
 
-    # DOWNLOADS_HOST_DIR / TS_AUTHKEY をメインの .env から解決して export する
+    # LIBRARY_HOST_DIR / TS_AUTHKEY をメインの .env から解決して export する
     # （rebuild.sh は compose を直接叩くので、ここでの解決が必須）。
     compose_env_defaults
 
@@ -603,7 +618,11 @@ cmd_up() {
     cmd_gc || warn "gc の自動実行に失敗しました（up 自体には影響ありません）。"
 
     printf '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
-    printf '✅ 開発環境 "%s" が起動しました（認証なし / データは読み取り専用）\n' "$name"
+    if [ -n "$writable" ]; then
+        printf '✅ 開発環境 "%s" が起動しました（認証なし / ライブラリ書き込み可 — upload/delete 有効）\n' "$name"
+    else
+        printf '✅ 開発環境 "%s" が起動しました（認証なし / ライブラリ read-only — 書き込み検証は --fixture か --writable-library）\n' "$name"
+    fi
     printf '   %s @ %s\n\n' "${ref:-作業ツリー}" "$sha"
     if [ -n "$local_mode" ]; then
         printf '   http://127.0.0.1:%s\n' "$local_port"

@@ -1,6 +1,6 @@
 # UI テスト
 
-viewer-rs を合成フィクスチャ（`conftest.py` が生成する downloads ツリー）に対して起動し、Playwright（headless Chromium）でブラウザ操作して UI の挙動を検証する。
+viewer-rs を合成フィクスチャ（`conftest.py` が生成する library ツリー）に対して起動し、Playwright（headless Chromium）でブラウザ操作して UI の挙動を検証する。
 
 ## 実行
 

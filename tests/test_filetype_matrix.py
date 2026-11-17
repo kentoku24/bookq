@@ -199,7 +199,7 @@ def matrix_server(matrix_tree: Path):
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=matrix_tree, state_dir=os.environ["BOOKQ_STATE_DIR"]
+        library_dir=matrix_tree, state_dir=os.environ["BOOKQ_STATE_DIR"]
     )
     try:
         yield base_url

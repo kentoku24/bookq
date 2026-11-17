@@ -151,6 +151,13 @@ fn unixtime_ok(secs: i64) -> bool {
     (-62135596800..=253402300799).contains(&secs)
 }
 
+/// Upper bound for one extracted archive entry's bytes. Every size field
+/// in ZIP/RAR headers is attacker-controlled and drives an allocation or
+/// a decompression buffer below — a real page/EPUB member is orders of
+/// magnitude smaller, so anything past this is treated as malformed.
+/// (Library uploads make these paths remotely plantable — #556 review.)
+const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
 // ══════════════════════════════════════════════════════════════════════════
 // ZIP / CBZ — port of zipfile._EndRecData/_EndRecData64/_RealGetContents
 // ══════════════════════════════════════════════════════════════════════════
@@ -169,6 +176,12 @@ const ZIP_MAX_COMMENT: usize = 65535;
 const MASK_UTF_FILENAME: u16 = 1 << 11;
 const MASK_ENCRYPTED: u16 = 1;
 const MAX_EXTRACT_VERSION: u8 = 63;
+/// The central directory is buffered whole for parsing — cap both its
+/// declared size and the parsed entry count so a crafted EOCD can't drive
+/// a file-size-proportional allocation (≥46B per CD record → ~5.7M
+/// entries at the cap, far past any real archive).
+const MAX_CD_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CD_ENTRIES: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct ZipEntry {
@@ -370,6 +383,12 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
     if start_dir < 0 {
         return Err(());
     }
+    // `start_dir == location - size_cd`, so the check above already keeps
+    // the CD inside the file — but a declared CD of e.g. 4GB inside a
+    // 4GB file still allocates the declaration. Bound it absolutely.
+    if endrec.size_cd > MAX_CD_BYTES {
+        return Err(());
+    }
     if f.seek(SeekFrom::Start(start_dir as u64)).is_err() {
         return Err(());
     }
@@ -433,6 +452,9 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
             &mut filename,
             filename_crc,
         )?;
+        if entries.len() >= MAX_CD_ENTRIES {
+            return Err(());
+        }
         entries.push(ZipEntry {
             filename,
             flag_bits,
@@ -483,6 +505,12 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     if e.filename.ends_with('/') {
         return ReadOutcome::Bail; // directory entry → Python decides
     }
+    // The declared uncompressed size is attacker input and sizes the
+    // output buffer — refuse anything above the entry cap before it can
+    // allocate. (zip64 extras can claim u64::MAX.)
+    if e.file_size > MAX_ENTRY_BYTES {
+        return ReadOutcome::Bail;
+    }
     if e.header_offset < 0 {
         return ReadOutcome::Bail;
     }
@@ -501,6 +529,18 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     if data_start < 0 || data_start + e.compress_size as i64 > e.end_offset {
         return ReadOutcome::Bail; // "Overlapped entries" → BadZipFile
     }
+    // `end_offset` only proves header-level consistency — it's the NEXT
+    // entry's header_offset, another CD-supplied value, so it can't bound
+    // the alloc by real bytes. `compress_size` must fit inside the file:
+    // the read below can't succeed past EOF, so refuse the declaration
+    // before it sizes the buffer (same posture as read_store_parts).
+    let avail = f
+        .metadata()
+        .map(|m| m.len().saturating_sub(data_start as u64))
+        .unwrap_or(0);
+    if e.compress_size > avail {
+        return ReadOutcome::Bail;
+    }
     let mut comp = vec![0u8; e.compress_size as usize];
     if f.seek(SeekFrom::Start(data_start as u64)).is_err()
         || f.read_exact(&mut comp).is_err()
@@ -510,10 +550,14 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     let out: Vec<u8> = match e.compress_type {
         0 => comp, // stored
         8 => {
-            use flate2::{Decompress, FlushDecompress};
-            let mut d = Decompress::new(false); // raw deflate
-            let mut out = Vec::with_capacity(e.file_size as usize);
-            match d.decompress_vec(&comp, &mut out, FlushDecompress::Finish) {
+            // Bound the inflation itself: `decompress_vec` expands the
+            // output unbounded, so a ~1000:1 bomb OOMs before the size
+            // check below could run. `take` caps the decoded stream; the
+            // exact-length check then rejects both over- and undersize.
+            let mut out = Vec::with_capacity(e.file_size.min(64 << 20) as usize);
+            let mut d =
+                flate2::read::DeflateDecoder::new(&comp[..]).take(MAX_ENTRY_BYTES + 1);
+            match d.read_to_end(&mut out) {
                 Ok(_) => out,
                 Err(_) => return ReadOutcome::Bail,
             }
@@ -1637,6 +1681,12 @@ fn r5_parse_block_header(fd: &mut Fd, enc: &mut bool) -> RResult<Option<R5Header
         return Err(RarErr::Partial); // EOF → _set_error → stop
     }
     while *start.last().unwrap() & 0x80 != 0 {
+        // The hdrlen vint is ≤11 bytes (load_vint); an 0x80-padded file
+        // would grow `start` byte-at-a-time past any header bound before
+        // load_vint could reject it.
+        if start.len() >= 16 {
+            return Err(RarErr::Partial);
+        }
         let b = fd.read(1).map_err(|_| RarErr::Partial)?;
         if b.is_empty() {
             return Err(RarErr::Partial);
@@ -2048,9 +2098,20 @@ struct StorePart {
 
 fn read_store_parts(parts: &[StorePart], total: u64, crc: u32) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
+    // `total`/`p.len` come from archive headers and size both `out` and
+    // each part buffer — bound them before they can allocate.
+    if total > MAX_ENTRY_BYTES {
+        return None;
+    }
     let mut out = Vec::with_capacity(total.min(64 << 20) as usize);
     for p in parts {
         let mut f = std::fs::File::open(&p.volfile).ok()?;
+        // A part longer than the bytes left in its own volume can never
+        // satisfy read_exact — refuse it before it sizes the buffer.
+        let avail = f.metadata().ok()?.len().saturating_sub(p.offset);
+        if p.len > avail {
+            return None;
+        }
         f.seek(SeekFrom::Start(p.offset)).ok()?;
         let mut buf = vec![0u8; p.len as usize];
         f.read_exact(&mut buf).ok()?;
@@ -2171,7 +2232,9 @@ fn rar5_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>>
             parts.push(StorePart { volfile: volfile.clone(), offset: h.data_offset, len: h.add_size });
         }
         if h.add_size > 0 {
-            fd.seek(h.data_offset + h.add_size).ok()?;
+            // saturating: crafted near-u64::MAX offsets must not wrap in
+            // debug builds — the seek just fails later either way.
+            fd.seek(h.data_offset.saturating_add(h.add_size)).ok()?;
         }
     }
     let total = want_size?;
@@ -2310,7 +2373,7 @@ fn rar3_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>>
         }
         // SUB "CMT" payloads don't affect store reads — skip data area.
         if h.add_size > 0 {
-            fd.seek(h.data_offset + h.add_size).ok()?;
+            fd.seek(h.data_offset.saturating_add(h.add_size)).ok()?;
         }
     }
     let total = want_size?;
@@ -2434,6 +2497,13 @@ fn rar_read_ordinal(
                 return None;
             }
             if e.is_directory() || e.is_encrypted() {
+                return None;
+            }
+            // Bound the in-process decode the same way the ZIP/RAR5 paths
+            // do. This screens only the *declared* size — a stream that
+            // expands past it inside unrar needs the extractor-isolation
+            // follow-up (unrar upgrade/subprocess, tracked separately).
+            if want.unpacked_size > MAX_ENTRY_BYTES {
                 return None;
             }
             let (data, _rest) = header.read().ok()?;
@@ -3488,6 +3558,250 @@ mod memo_tests {
                 .unwrap(),
             b"aaa-data"
         );
+        std::fs::remove_file(&p).ok();
+    }
+
+    // ── #556 review: crafted-archive allocation/decompression bounds ──────
+
+    /// Emit a zip holding one member with caller-chosen CD size fields —
+    /// make_zip can't lie, and lying is the point here. `data` is the
+    /// stored (compressed) byte stream; `crc_data` is what the CD crc is
+    /// computed over (the uncompressed bytes — zip checksums plaintext).
+    fn crafted_zip(
+        method: u16,
+        name: &str,
+        data: &[u8],
+        csize: u32,
+        fsize: u32,
+        crc_data: &[u8],
+    ) -> Vec<u8> {
+        let crc = crc32fast::hash(crc_data);
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(method));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(csize));
+        out.extend_from_slice(&le32(fsize));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+
+        let cd_off = out.len() as u32;
+        out.extend_from_slice(&le32(0x0201_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(method));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(csize));
+        out.extend_from_slice(&le32(fsize));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(0));
+        out.extend_from_slice(&le32(0));
+        out.extend_from_slice(name.as_bytes());
+        let cd_len = out.len() as u32 - cd_off;
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(1));
+        out.extend_from_slice(&le16(1));
+        out.extend_from_slice(&le32(cd_len));
+        out.extend_from_slice(&le32(cd_off));
+        out.extend_from_slice(&le16(0));
+        out
+    }
+
+    #[test]
+    fn zip_oversized_declared_entry_is_none() {
+        // file_size declares > MAX_ENTRY_BYTES — the pre-read bound must
+        // refuse before it sizes a buffer.
+        let p = tmp_cbz("big-decl");
+        std::fs::write(
+            &p,
+            crafted_zip(0, "a.png", b"tiny", 4, 0xFFFF_FFFE, b"tiny"),
+        )
+        .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn zip_deflate_roundtrip_and_overexpansion() {
+        use std::io::Write;
+        let raw = vec![7u8; 2 * 1024 * 1024];
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        let comp = enc.finish().unwrap();
+        assert!(comp.len() < raw.len());
+
+        // Honest declaration → the bounded decoder still serves it.
+        let p = tmp_cbz("defl-ok");
+        std::fs::write(
+            &p,
+            crafted_zip(8, "a.png", &comp, comp.len() as u32, raw.len() as u32, &raw),
+        )
+        .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png").unwrap(), raw);
+        std::fs::remove_file(&p).ok();
+
+        // Declared 1MiB, expands 2MiB — the stream is capped and the
+        // length check must reject, not serve a truncated prefix.
+        let p = tmp_cbz("defl-bomb");
+        std::fs::write(
+            &p,
+            crafted_zip(8, "a.png", &comp, comp.len() as u32, 1024 * 1024, &raw),
+        )
+        .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Two-CD-entry variant: entry A's `end_offset` is entry B's
+    /// `header_offset`, so a fake B makes A's overlap check pass while the
+    /// claimed data far exceeds the file — the compress_size alloc must
+    /// refuse on real bytes, not header consistency.
+    fn crafted_zip_pair() -> Vec<u8> {
+        let name = "a.png";
+        let data = b"tiny";
+        let crc = crc32fast::hash(data);
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0)); // stored
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(4));
+        out.extend_from_slice(&le32(4));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        let cd_off = out.len() as u32;
+        // A: real LFH at 0, compress_size lied to ~4GiB.
+        let mut cd_entry = |name: &str, csize: u32, fsize: u32, off: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&le32(0x0201_4b50));
+            e.extend_from_slice(&le16(20));
+            e.extend_from_slice(&le16(20));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le32(crc));
+            e.extend_from_slice(&le32(csize));
+            e.extend_from_slice(&le32(fsize));
+            e.extend_from_slice(&le16(name.len() as u16));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le32(0));
+            e.extend_from_slice(&le32(off));
+            e.extend_from_slice(name.as_bytes());
+            e
+        };
+        let a = cd_entry("a.png", 0xFFFF_F000, 4, 0);
+        let b = cd_entry("b.png", 0, 0, 0xFFFF_FF00);
+        out.extend_from_slice(&a);
+        out.extend_from_slice(&b);
+        let cd_len = out.len() as u32 - cd_off;
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(2));
+        out.extend_from_slice(&le16(2));
+        out.extend_from_slice(&le32(cd_len));
+        out.extend_from_slice(&le32(cd_off));
+        out.extend_from_slice(&le16(0));
+        out
+    }
+
+    #[test]
+    fn zip_oversized_compress_size_is_none() {
+        // compress_size passes the end_offset overlap check (set by fake
+        // entry B) but exceeds the real file — refuse before the alloc.
+        let p = tmp_cbz("big-comp");
+        std::fs::write(&p, crafted_zip_pair()).unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn zip_huge_cd_declaration_fails_fast() {
+        // Sparse 300MB file ending in an EOCD that declares a >cap CD:
+        // size_cd stays inside the file (start_dir ≥ 0), so only the
+        // absolute MAX_CD_BYTES bound stops the pre-parse allocation.
+        let p = tmp_cbz("huge-cd");
+        {
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(300 * 1024 * 1024).unwrap();
+        }
+        use std::io::{Seek, Write};
+        let mut f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.seek(std::io::SeekFrom::End(-22)).unwrap();
+        let mut eocd = Vec::new();
+        eocd.extend_from_slice(&le32(0x0605_4b50));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le32(280 * 1024 * 1024)); // size_cd > MAX_CD_BYTES
+        eocd.extend_from_slice(&le32(0));
+        eocd.extend_from_slice(&le16(0));
+        f.write_all(&eocd).unwrap();
+        drop(f);
+        assert!(zip_names(&p).is_none());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn store_parts_refuse_oversized_declarations() {
+        let p = tmp_cbz("store");
+        std::fs::write(&p, b"0123456789").unwrap();
+        // A part larger than its own volume: declared add_size must not
+        // allocate — refuse before the buffer exists.
+        let parts = [StorePart {
+            volfile: p.clone(),
+            offset: 0,
+            len: u64::MAX / 2,
+        }];
+        assert!(read_store_parts(&parts, 4, 0).is_none());
+        // A total beyond the entry cap is refused up front.
+        let parts = [StorePart {
+            volfile: p.clone(),
+            offset: 0,
+            len: 1,
+        }];
+        assert!(read_store_parts(&parts, MAX_ENTRY_BYTES + 1, 0).is_none());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn r5_header_prefix_padding_is_bounded() {
+        // 0x80 continuation bytes must not grow the header-prefix buffer
+        // unbounded — the hdrlen vint is ≤11 bytes so the prefix stops
+        // well before this 1KB pad could.
+        let p = tmp_cbz("r5-pad");
+        let mut bytes = RAR5_ID.to_vec();
+        bytes.extend_from_slice(&[0x80u8; 1024]);
+        std::fs::write(&p, bytes).unwrap();
+        let mut fd = Fd::open(&p).ok().unwrap();
+        fd.seek(RAR5_ID.len() as u64).ok().unwrap();
+        let mut enc = false;
+        assert!(r5_parse_block_header(&mut fd, &mut enc).is_err());
         std::fs::remove_file(&p).ok();
     }
 }

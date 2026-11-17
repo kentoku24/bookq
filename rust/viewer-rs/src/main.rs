@@ -7,7 +7,7 @@
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Query, Request, State},
+    extract::{FromRequest, FromRequestParts, Path as AxumPath, Query, Request, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
@@ -25,6 +25,7 @@ mod auth;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+mod library;
 mod oauth;
 mod pair_report;
 mod reader_sync;
@@ -38,7 +39,7 @@ mod tree;
 #[derive(Clone)]
 pub(crate) struct AppState {
     /// Downloads root, resolved once (symlinks collapsed like the Python side).
-    pub(crate) downloads: PathBuf,
+    pub(crate) library: PathBuf,
     /// `BOOKQ_TEST_MODE` — mock-user posture for dev/test.
     pub(crate) test_mode: bool,
     /// `ALLOWED_EMAILS` (trim+lowercase) — Bearer allowlist, fail-closed.
@@ -70,6 +71,18 @@ pub(crate) struct AppState {
     pub(crate) web_dir: PathBuf,
     /// TEST_MODE-only pair-report store (`app/api_v1.py::_PAIR_REPORTS`).
     pub(crate) pair_reports: std::sync::Arc<pair_report::PairReports>,
+    /// `<library>/.bookq-uploads` — `Some` when the probe at startup
+    /// proved the library writable, else `None` and `/api/v1/library/*`
+    /// answers 503 (read-only deploys stay fully functional).
+    pub(crate) upload_root: Option<PathBuf>,
+    /// Serializes the dedupe+rename placement critical section — without it
+    /// two same-name uploads pick the same free slot and `rename` clobbers
+    /// the first (Unix rename replaces the destination).
+    pub(crate) place_lock: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Serializes upload-session mutations (append/finalize/cancel) —
+    /// the load→verify→write cycle races otherwise and corrupts the
+    /// blob/offset pair.
+    pub(crate) session_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 /// A local 405 carries the RFC 9110 `Allow` header.
@@ -272,8 +285,8 @@ async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response 
         return state::unprocessable("folder", "missing", "Field required");
     };
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
-    let res = tokio::task::spawn_blocking(move || serve::api_images(&downloads, &folder))
+    let library = st.library.clone();
+    let res = tokio::task::spawn_blocking(move || serve::api_images(&library, &folder))
         .await
         .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"));
     serve::maybe_gzip(&headers, res, true).await
@@ -528,6 +541,97 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
     serve::maybe_gzip(&headers, res, true).await
 }
 
+/// `/api/v1/library/files` — POST multipart upload / DELETE file-or-dir.
+/// `dir` (upload) and `path` (delete) are query params; the body streams.
+async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    match *req.method() {
+        axum::http::Method::POST => {
+            let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+                .map(|q| q.0)
+                .unwrap_or_default();
+            let dir = q.get("dir").cloned().unwrap_or_default();
+            let mp = match axum::extract::Multipart::from_request(req, &st).await {
+                Ok(mp) => mp,
+                Err(e) => return e.into_response(),
+            };
+            library::post_files(&st, &dir, mp).await
+        }
+        axum::http::Method::DELETE => {
+            let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+                .map(|q| q.0)
+                .unwrap_or_default();
+            let Some(path) = q.get("path").cloned() else {
+                return state::unprocessable("path", "missing", "Field required");
+            };
+            library::delete_file(&st, &path).await
+        }
+        _ => method_not_allowed("POST, DELETE"),
+    }
+}
+
+/// `/api/v1/library/uploads` — POST init a chunked upload session.
+/// Init is a tiny JSON; the route-level `DefaultBodyLimit::disable` (the
+/// file routes need streaming bodies) removes axum's cap here too, so
+/// bound the `collect` explicitly or a fat body buffers unbounded.
+const LIBRARY_INIT_BODY_MAX: usize = 64 * 1024;
+
+async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    let (_parts, body) = req.into_parts();
+    let body = http_body_util::Limited::new(body, LIBRARY_INIT_BODY_MAX);
+    let body = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return state::detail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        }
+    };
+    library::uploads_init(&st, &body).await
+}
+
+/// `/api/v1/library/uploads/{id}` — GET state / PUT chunk / DELETE cancel.
+async fn library_upload(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    match *req.method() {
+        axum::http::Method::GET => library::upload_get(&st, &id).await,
+        axum::http::Method::PUT => {
+            let headers = req.headers().clone();
+            let (_parts, body) = req.into_parts();
+            library::upload_append(&st, &id, &headers, body).await
+        }
+        axum::http::Method::DELETE => library::upload_cancel(&st, &id).await,
+        _ => method_not_allowed("GET, PUT, DELETE"),
+    }
+}
+
+/// `/api/v1/library/uploads/{id}/finalize` — POST commit into the library.
+async fn library_upload_finalize(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    library::upload_finalize(&st, &id).await
+}
+
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
 /// same swap semantics as the background gate, `{status,folders}`.
 async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -538,7 +642,7 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
         return unauthenticated();
     }
     let headers = req.headers().clone();
-    match folders::force_rebuild(&st.index, &st.downloads).await {
+    match folders::force_rebuild(&st.index, &st.library).await {
         Some(folders) => {
             let mut res = Response::builder()
                 .status(StatusCode::OK)
@@ -579,10 +683,10 @@ async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response
         return state::detail(StatusCode::BAD_REQUEST, "invalid path");
     };
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let path = path.into_owned();
     // /image is outside the gzip prefixes.
-    tokio::task::spawn_blocking(move || serve::image(&downloads, &path, &headers))
+    tokio::task::spawn_blocking(move || serve::image(&library, &path, &headers))
         .await
         .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
 }
@@ -607,11 +711,11 @@ async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let cache = st.thumb_cache.clone();
     let path = path.into_owned();
     // /thumb is outside the gzip prefixes.
-    tokio::task::spawn_blocking(move || thumbs::thumb(&downloads, &cache, &path, q.get("w"), &headers))
+    tokio::task::spawn_blocking(move || thumbs::thumb(&library, &cache, &path, q.get("w"), &headers))
         .await
         .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
 }
@@ -637,12 +741,12 @@ async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response 
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let cache = st.thumb_cache.clone();
     let path = path.into_owned();
     // /view is outside the gzip prefixes.
     tokio::task::spawn_blocking(move || {
-        thumbs::view(&downloads, &cache, &path, q.get("w"), &headers)
+        thumbs::view(&library, &cache, &path, q.get("w"), &headers)
     })
     .await
     .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
@@ -664,10 +768,10 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
     let query_string = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
     let headers2 = headers.clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let cache = st.thumb_cache.clone();
     let res = tokio::task::spawn_blocking(move || {
-        thumbs::thumb_sprite(&downloads, &cache, &q, &query_string, &headers2)
+        thumbs::thumb_sprite(&library, &cache, &q, &query_string, &headers2)
     })
     .await
     .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"));
@@ -967,10 +1071,10 @@ async fn main() {
         .init();
 
     let bind = std::env::var("BOOKQ_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let downloads = PathBuf::from(std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/app/downloads".into()));
+    let library = PathBuf::from(std::env::var("LIBRARY_DIR").unwrap_or_else(|_| "/app/library".into()));
     // Canonicalize once — `is_within` treats this as the canonical base so
     // per-request checks canonicalize only the target path.
-    let downloads = std::fs::canonicalize(&downloads).unwrap_or(downloads);
+    let library = std::fs::canonicalize(&library).unwrap_or(library);
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
     let test_mode = std::env::var("BOOKQ_TEST_MODE")
         .unwrap_or_default()
@@ -998,7 +1102,7 @@ async fn main() {
     };
 
     let index = std::sync::Arc::new(folders::IndexState::new());
-    let registry = reader_sync::Registry::new(index.clone(), downloads.clone());
+    let registry = reader_sync::Registry::new(index.clone(), library.clone());
     {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
@@ -1007,7 +1111,7 @@ async fn main() {
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
     let st = AppState {
-        downloads: downloads.clone(),
+        library: library.clone(),
         test_mode,
         allowed_emails,
         auth_flow,
@@ -1032,12 +1136,17 @@ async fn main() {
         web_dir: PathBuf::from(
             std::env::var("BOOKQ_WEB_DIR").unwrap_or_else(|_| "/web".into()),
         ),
+        // Library write surface: probe once — a read-only deploy keeps every
+        // read route but `/api/v1/library/*` answers 503.
+        upload_root: library::probe_upload_root(&library),
+        place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+        session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     // warmup_metadata_index — lifespan kicks the same cold-miss path.
-    index.spawn_warmup(downloads.clone());
+    index.spawn_warmup(library.clone());
     tracing::info!(
         test_mode = st.test_mode,
-        downloads = %st.downloads.display(),
+        library = %st.library.display(),
         "all routes native"
     );
 
@@ -1079,6 +1188,22 @@ async fn main() {
         .route("/api/v1/test-positions-reset", any(test_positions_reset))
         // M8: dual-reader sync socket.
         .route("/ws/reader-sync", any(reader_sync_ws))
+        // Library edit: multipart upload + delete, chunked upload sessions.
+        // `Multipart::from_request` calls `with_limited_body`, which honors
+        // the 2MiB DefaultBodyLimit even for manual extractor calls — the
+        // disable must be a route_layer scoped to these four routes, or
+        // uploads >2MiB answer 413.
+        .merge(
+            Router::new()
+                .route("/api/v1/library/files", any(library_files))
+                .route("/api/v1/library/uploads", any(library_uploads))
+                .route("/api/v1/library/uploads/{id}", any(library_upload))
+                .route(
+                    "/api/v1/library/uploads/{id}/finalize",
+                    any(library_upload_finalize),
+                )
+                .route_layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .fallback(axum::routing::any(|State(_st): State<AppState>, req: Request<Body>| async move {
             tracing::warn!(path = %req.uri().path(), "unknown route: answered 501");
             state::detail(StatusCode::NOT_IMPLEMENTED, "not found")
@@ -1150,7 +1275,7 @@ mod handler_tests {
         let index = std::sync::Arc::new(folders::IndexState::new());
         let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
         AppState {
-            downloads: dir.join("dl"),
+            library: dir.join("dl"),
             test_mode,
             allowed_emails: std::sync::Arc::new(HashSet::new()),
             index,
@@ -1167,6 +1292,9 @@ mod handler_tests {
             pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
                 std::collections::HashMap::new(),
             )),
+            upload_root: None,
+            place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

@@ -139,7 +139,7 @@ jobs:
 
       # Same synthetic tree as android.yml, plus Series/vol2 so the iOS
       # drill-down test sees two volumes under Series/.
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         if: steps.sdk.outputs.ok == 'true'
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Series/vol2 /tmp/dl/Other /tmp/bookq-state
@@ -155,7 +155,7 @@ jobs:
       - name: Start bookq (test mode)
         if: steps.sdk.outputs.ok == 'true'
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
             BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-ios-ci-server.log 2>&1 &
           for i in $(seq 1 60); do

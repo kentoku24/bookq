@@ -14,6 +14,7 @@
 5. [gzip / 圧縮対象](#5-gzip)
 6. [エラー応答の形](#6-エラー応答)
 7. [media decode — thumb/view/sprite の対応形式契約](#7-media-decode)
+8. [library edit — アップロード (単発/分割) と削除](#8-library-edit)
 
 ## 1. tree
 
@@ -190,3 +191,47 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
   すること。片側だけ増やすと native 直撃と proxy 経由で status が割れる
   (例: Rust が `.heic` を decode 可能にしても Python が 404 のままなら、
   native 経路は 200・proxy 経路は 404 になる)。
+
+## 8. library edit
+
+`/api/v1/library/*` — ライブラリへの書き込み面 (参照:
+`rust/viewer-rs/src/library.rs`)。読み取り面と同じくダウンロードルート
+(`LIBRARY_DIR`) 相対パスで指定し、realpath 後の containment を全 op で検証する。
+
+- **対応形式**: `.zip .cbz .rar .cbr .epub .pdf` のみ
+  (`serve.rs::ARCHIVE_EXTENSIONS` + `PDF_EXTENSIONS`)。拡張子は小文字化して
+  判定。それ以外は **415**。
+- **uploads 無効化**: 起動時に `<library>/.bookq-uploads/` を作成できない
+  デプロイ (read-only マウント等) では、upload 系・delete ともに
+  **503** `{detail:"uploads disabled"}`。読み取り面は従来どおり動作する。
+- **`dir` の検証**: 空 = ルート。realpath 後 `is_within(library)`、
+  実在 `is_dir()`。書庫ファイルを dir に指定した場合・`.bookq-uploads`
+  配下は **400**、不存在は **404**。
+- **`name` の sanitize**: 空・制御文字・`/`・`\`・`.`/`..`・先頭 `.`・
+  末尾空白/`.`・255B 超は **400** (`invalid_name`)。`/api/v1/library/files`
+  (multipart) ではファイル単位の拒否なので `errors[]` に列挙され
+  リクエスト自体は 200 を返し得る。
+- **衝突の自動リネーム**: 同名 (ファイルでもディレクトリでも) が既に
+  存在する場合、`name (1).ext` `name (2).ext` … を 999 まで試す。
+  尽きたら **409**。採用名は応答の `name`/`path` で返る。
+- **書き込みの atomicity**: ファイルは必ず tmp (multipart は対象 dir 内の
+  `.bq-tmp-*`、session は `.bookq-uploads/<id>/blob`) に書き、fsync 後に
+  rename する。途中失敗・切断で未完成の本体がライブラリ名で残ることはない
+  (tmp 残骸のみ。`.bookq-uploads` と `.` 始まりの名は scanner が拾わない)。
+- **分割アップロードの順序契約**: `PUT …/uploads/{id}` は
+  `Upload-Offset == 現在 offset` の時のみ append。不一致は
+  **409 `{offset: <現在値>}`** — 重複・順序外・再送はすべてこれで検出し、
+  クライアントは返された offset から再開する。`offset+len > size` は **400**。
+- **finalize**: `offset == size` の時のみ。rename 後にセッション dir を
+  削除するので finalize は冪等ではない (2 回目は **404**)。
+- **セッション寿命**: `<library>/.bookq-uploads/<id>/{meta.json,blob}` に
+  永続 (再起動をまたぐ)。`BOOKQ_UPLOAD_SESSION_TTL_SECS` (既定 7 日) を
+  超えたものは起動時・init 時に sweep される。
+- **index 反映**: 確定・削除の成功後にバックグラウンド refresh が走り、
+  signature 変化を検証して generation が進む。同期で確実に反映したい
+  クライアントは `POST /api/v1/index/refresh` を使う。
+- **delete**: `path` はファイル (単体) またはディレクトリ (再帰)。
+  ルート・`.bookq-uploads` 配下は **400**、不存在は **404**。
+  reading positions・visibility・クライアント側オフライン cache は
+  削除しない (orphan 化するが無害; 同名再アップロードで positions は
+  自然に復活する)。

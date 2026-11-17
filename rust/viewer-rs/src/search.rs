@@ -226,7 +226,7 @@ async fn index_and_hidden(
     st: &AppState,
     include_hidden: bool,
 ) -> Result<(Arc<CacheData>, Vec<String>), Response> {
-    let data = match ensure_tree_and_index(&st.index, &st.downloads).await {
+    let data = match ensure_tree_and_index(&st.index, &st.library).await {
         Ensure::Fresh(d) | Ensure::Stale(d) => d,
         Ensure::Building => return Err(building()),
         Ensure::Failed => return Err(detail(StatusCode::INTERNAL_SERVER_ERROR, "index build failed")),

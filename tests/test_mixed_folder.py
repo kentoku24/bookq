@@ -80,7 +80,7 @@ def _make_png(path: Path, rgb: tuple = (60, 120, 200)) -> None:
 
 @pytest.fixture(scope="module")
 def mixed_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("mixed_downloads")
+    root = tmp_path_factory.mktemp("mixed_library")
     for leaf, pages in [("v01", 2), ("v03", 2)]:
         d = root / "mgroup" / "mseries" / leaf
         d.mkdir(parents=True)
@@ -120,7 +120,7 @@ def mixed_server(mixed_tree: Path) -> str:
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=mixed_tree,
+        library_dir=mixed_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url
@@ -335,7 +335,7 @@ REACH_READ_CHILD = {
 
 @pytest.fixture(scope="module")
 def reach_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("reach_downloads")
+    root = tmp_path_factory.mktemp("reach_library")
     for name in REACH_LOOSE[""]:
         _make_png(root / name)
     for folder, names in {**REACH_LOOSE, **REACH_LEAVES}.items():
@@ -356,7 +356,7 @@ def reach_server(reach_tree: Path) -> str:
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=reach_tree,
+        library_dir=reach_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url

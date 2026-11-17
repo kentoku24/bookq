@@ -239,7 +239,7 @@ https://dev-*.ts.net/static/offline-harness.html?harness=1  # 後方互換で有
 # 例: fixture が http://127.0.0.1:54321 を返した場合
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
 # 手元で一時起動して試す場合 (viewer-rs を直接起動)
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/tmp/downloads BOOKQ_BIND=127.0.0.1:$PORT \
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/tmp/library BOOKQ_BIND=127.0.0.1:$PORT \
   SECRET_KEY=dev-not-a-secret \
   ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:$PORT BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
@@ -269,7 +269,7 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 | 起動/停止 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、何個でも） |
 | URL | `https://bookq.<your-tailnet>.ts.net` | `https://dev-<名前>.<your-tailnet>.ts.net` |
 | 認証 | Google OAuth | なし（`BOOKQ_TEST_MODE=true`） |
-| 画像ツリー | 読み書き可 | **読み取り専用** (`:ro`) |
+| 画像ツリー | 読み書き可 (`:rw`) | 既定 read-only (`:ro`) — 書き込み検証は `--fixture` (合成ツリー、常に rw) か `./dev.sh up --writable-library` で opt-in |
 | コンテナ | viewer-rs + tailscale サイドカー | viewer-rs + tailscale サイドカー（ノードは環境ごとに 1 つ） |
 
 > **本番の compose を検証に流用しないこと。** worktree で素の `docker compose up` を打つと、ホスト名 `bookq` を要求する 2 つ目の tailscale ノードが立ち上がって本番と名前を争います。`prd.sh` は worktree からの実行を拒否し、`docker-compose.dev.yml` は `DEV_IMAGE` / `DEV_NAME` 等の必須変数（`:?`）が無いと起動自体が失敗するので、`dev.sh` を使う限りこの事故は起きません。
@@ -280,7 +280,7 @@ UI をさっと触るだけならこれが一番速い（OAuth もスキップ�
 
 ```bash
 # viewer-rs を直接起動 (cargo build -p viewer-rs が前提)
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
   SECRET_KEY=dev-not-a-secret \
   ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
@@ -322,13 +322,13 @@ uv run --with playwright playwright install chromium
 ./dev.sh up demo --fixture                        # 実データの代わりに合成テストツリーをマウント
 ```
 
-`--fixture` を付けると、`tests/fixtures/uiux_tree.py`（依存パッケージ不要の色分け PNG 生成スクリプト）が作る合成ツリー — 9 フォルダ + metadata.toml 3 件（`simple_manga` / `series` / `mixed_ar`）— を `/tmp/bookq-fixture-<name>/downloads` に生成してマウントします。実データに手を付けたくない UI の動作確認やスクリーンショット用途に使います。単色ページは拡大しても違いが分からないので、ピンチズーム・ページ送り・エピソード境界の目視確認には `zoom_episodes/series/ep-1..3`（720x1080、グリッド・巨大な EP/ページ番号・START/END バッジ・拡大時のみ読める細字）を使います。ディープリンクは `#/view/zoom_episodes/series/ep-1?p=0`。兄弟チャプター連結は深さ2以上でしか発動しないため、`series/` を1段挟んでいます。マウント元は `DOWNLOADS_HOST_DIR` 環境変数で上書きも可能です（`--fixture` が指定された場合はそちらが優先。既存の環境変数上書きの挙動は従来どおり）。
+`--fixture` を付けると、`tests/fixtures/uiux_tree.py`（依存パッケージ不要の色分け PNG 生成スクリプト）が作る合成ツリー — 9 フォルダ + metadata.toml 3 件（`simple_manga` / `series` / `mixed_ar`）— を `/tmp/bookq-fixture-<name>/library` に生成してマウントします。実データに手を付けたくない UI の動作確認やスクリーンショット用途に使います。単色ページは拡大しても違いが分からないので、ピンチズーム・ページ送り・エピソード境界の目視確認には `zoom_episodes/series/ep-1..3`（720x1080、グリッド・巨大な EP/ページ番号・START/END バッジ・拡大時のみ読める細字）を使います。ディープリンクは `#/view/zoom_episodes/series/ep-1?p=0`。兄弟チャプター連結は深さ2以上でしか発動しないため、`series/` を1段挟んでいます。マウント元は `LIBRARY_HOST_DIR` 環境変数で上書きも可能です（`--fixture` が指定された場合はそちらが優先。既存の環境変数上書きの挙動は従来どおり）。
 
 表示された `https://dev-review-42.<your-tailnet>.ts.net` は tailnet 内なら **iPad からもそのまま開けます**。ホストからも同じ HTTPS URL でアクセスします（ポートは公開しません — ホストは tailnet に参加している前提）。
 
 | コマンド | 動作 |
 |---|---|
-| `./dev.sh up [name] [--ref REF] [--fixture]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント |
+| `./dev.sh up [name] [--ref REF] [--fixture] [--writable-library]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント（常に rw）。ライブラリのマウントは既定 read-only — dev は `BOOKQ_TEST_MODE=true` で認証をバイパスするため、実ライブラリへの書き込み (upload/delete) は `--writable-library` の明示時のみ。書き込み検証は `--fixture` 推奨 |
 | `./dev.sh down [name]` / `--all` | 撤去（ボリュームと tailnet ノードの登録は保持）。`--full` でボリューム・イメージ・ノード登録まで完全撤去（TS_API_KEY 設定時。`--all --full` は `--yes` 必須）。`--all` は実行前に既に孤立していたボリューム（コンテナの無い `bookq-dev-*` の残骸）も回収する（`--no-prune-volumes` で無効化） |
 | `./dev.sh list` | 一覧（名前・状態・ref・commit・URL） |
 | `./dev.sh url [name]` | URL だけ出力（スクリプト用） |
@@ -357,8 +357,8 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 ```
 
 - 既定は `http://127.0.0.1:8080`。2つ目の同時環境は `--port 1024-65535` で別ポートを指定する（使用中ポートはビルド前に fail fast する）。
-- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（tailnet モードと同じ）。画像ツリーは読み取り専用。
-- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の読み取り専用ツリーを晒すので、検証用 LAN でのみ使うこと。
+- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（tailnet モードと同じ）。画像ツリーは既定 read-only — upload/delete を試すなら `--fixture`（使い捨て合成ツリー、常に rw）か `--writable-library`（実ライブラリを rw、明示 opt-in）。
+- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証のツリーを晒す（`--writable-library` 併用時は upload/delete も誰でも使える）ので、検証用 LAN でのみ使うこと。
 - Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `web/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
 - iOS Simulator からもそのまま開ける（host network 共有）: `./scripts/open-simulator.sh http://127.0.0.1:<port>`。helper は `https://` と loopback `http://` のみ受理し、`http://<lan-ip>` は Secure Context でないため拒否する。手順は `.claude/skills/ios-simulator/references/overview.md: Local mode`。
 - 10スロットプールを共有する。ローカル環境も `find_free_slot` の割当に数えられ、10/10 枯渇時は通常環境と同じく `pool exhausted (10/10)` で失敗する（仕様として許容）。

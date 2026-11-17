@@ -208,7 +208,7 @@ def test_api_folders_offline_recovery(page, server):
         assert page.locator(".tile").count() > 0, "tiles should be visible after offline reload"
         expect(page.locator('.tile[data-path="simple_manga"]')).to_be_visible(timeout=5000)
         assert page.locator('.tile[data-path="group"]').count() == 0, \
-            "group has no downloads — must be hidden from offline navigation (spec §6)"
+            "group has no library — must be hidden from offline navigation (spec §6)"
         page.locator("#browse-header").evaluate("el => el.textContent")
     finally:
         page.context.set_offline(False)
@@ -348,7 +348,7 @@ def test_browse_hierarchy_offline(page, server):
         tl = page.evaluate("() => { try { return !!window.treeLoaded; } catch { return null; } }")
         if tl is not None:
             assert tl is True
-        # spec §6 uniform rule: root level has downloads → every root EPISODE
+        # spec §6 uniform rule: root level has library → every root EPISODE
         # stays (greyed when not downloaded); intermediates without a
         # downloaded descendant drop out of navigation entirely.
         top_offline = page.evaluate(
@@ -360,7 +360,7 @@ def test_browse_hierarchy_offline(page, server):
             assert hidden not in top_offline, f"{hidden} has no download — must be hidden offline: {top_offline}"
         # root episodes without a record render greyed + aria-disabled
         chain_path = next((p for p in top_offline if p.startswith("chain")), None)
-        assert chain_path, "flattened chain leaf should still render (level has downloads)"
+        assert chain_path, "flattened chain leaf should still render (level has library)"
         chain_cls = page.locator(f'.tile[data-path="{chain_path}"]').get_attribute("class") or ""
         assert "off-unavail" in chain_cls, f"non-downloaded episode must be greyed: {chain_cls!r}"
 
@@ -923,7 +923,7 @@ def test_auto_sync_on_first_online_visit(page, server):
         # even though the initial load stamped the 5-minute freshness gate.
         # Ensure we are online, then simulate offline→online flip
         page.context.set_offline(True)
-        # spec §6: with no downloads the offline grid is empty — a settle
+        # spec §6: with no library the offline grid is empty — a settle
         # wait is all this step needs, not a .tile selector.
         page.wait_for_timeout(2300)
         # Flip back online — this should trigger window online event and debounced revalidation

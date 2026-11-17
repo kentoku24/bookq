@@ -97,6 +97,7 @@ tags:
   - name: media
   - name: state
   - name: auth
+  - name: library
 
 paths:
   /api/v1/health:
@@ -439,7 +440,15 @@ paths:
           content:
             image/*:
               schema: {type: string, format: binary}
-        "206": {description: 単一 Range レスポンス}
+            application/*:
+              schema: {type: string, format: binary}
+        "206":
+          description: 単一 Range レスポンス
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+            application/*:
+              schema: {type: string, format: binary}
         "304": {description: ETag 一致}
         "400":
           description: |
@@ -477,6 +486,11 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 非画像などネイティブでサムネ生成不能なソース
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /view/{path}:
     get:
@@ -498,6 +512,11 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 非画像などネイティブで正規化不能なソース
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /api/v1/reading-positions:
     get:
@@ -764,6 +783,372 @@ paths:
                     refresh_token: "refresh-abc123"
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {description: コード / verifier / refresh token 不正}
+
+  # ── library edit ────────────────────────────────────────────────────
+  # ライブラリへの書き込み面。対応形式は .zip .cbz .rar .cbr .epub .pdf
+  # (serve.rs::ARCHIVE_EXTENSIONS + PDF_EXTENSIONS)。衝突は `name (1).ext`
+  # 形式の自動リネーム、書き込みは tmp + atomic rename。意味論の正本は
+  # `v1-semantics.md` §8。
+  /api/v1/library/files:
+    post:
+      tags: [library]
+      operationId: uploadLibraryFiles
+      summary: 作品ファイルのアップロード（multipart・1〜複数ファイル）
+      description: |
+        `dir`（ルート相対。省略・空 = ライブラリルート）直下に multipart の
+        `file` フィールドを保存する。`dir` は実在ディレクトリ必須
+        （書庫ファイルや `.bookq-uploads` 配下は 400、不存在は 404）。
+        同名が既にある場合は `name (n).ext` で自動リネームし、採用名を
+        `files[].name` で返す。
+
+        リクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。
+        ファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する
+        （`invalid_name` / `unsupported_type` / `too_large` / `io_error`）。
+        大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の
+        分割アップロードを使うこと。
+      parameters:
+        - name: dir
+          in: query
+          schema: {type: string, default: ""}
+          description: 保存先フォルダ（ルート相対、空 = ルート）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: array
+                  items: {type: string, format: binary}
+                  minItems: 1
+      responses:
+        "200":
+          description: 受理結果（errors が空なら全件成功）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files, errors]
+                properties:
+                  files:
+                    type: array
+                    items: {$ref: "#/components/schemas/LibraryFileEntry"}
+                  errors:
+                    type: array
+                    items: {$ref: "#/components/schemas/LibraryFileError"}
+              examples:
+                default:
+                  summary: 全件成功
+                  value:
+                    files:
+                      - {name: "work.rar", path: "Series/work.rar", size: 12345678}
+                    errors: []
+                renamed:
+                  summary: 衝突で自動リネーム
+                  value:
+                    files:
+                      - {name: "work (1).rar", path: "Series/work (1).rar", size: 12345678}
+                    errors: []
+                partial:
+                  summary: 一部失敗
+                  value:
+                    files:
+                      - {name: "a.cbz", path: "Series/a.cbz", size: 1000}
+                    errors:
+                      - {name: "b.txt", code: "unsupported_type"}
+        "400":
+          description: |
+            パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は
+            extractor がハンドラ到達前に `text/plain` を返す（/image の 400
+            と同じ二形式）。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413":
+          description: 単一ファイルが `BOOKQ_UPLOAD_MAX_BYTES` 超過
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "415":
+          description: |
+            multipart 以外の Content-Type。extractor 拒否時は `text/plain`、
+            拡張子非対応は `{"detail": …}` JSON。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "503":
+          description: uploads が無効（library 書き込み不可のデプロイ）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    delete:
+      tags: [library]
+      operationId: deleteLibraryFile
+      summary: 作品ファイル / フォルダの削除
+      description: |
+        `path`（ルート相対、必須）を削除する。ファイルは単体削除、
+        ディレクトリは配下ごと再帰削除。ルート（空パス）・
+        `.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。
+        読書位置やクライアント側オフラインキャッシュは消えない
+        （孤立するが無害 — v1-semantics.md §8）。
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: 削除完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, kind]
+                properties:
+                  deleted: {type: string, description: 削除したルート相対パス}
+                  kind: {type: string, enum: [file, dir]}
+              examples:
+                file:
+                  summary: ファイル削除
+                  value: {deleted: "Series/work.rar", kind: file}
+                dir:
+                  summary: フォルダ削除（再帰）
+                  value: {deleted: "Series/vol1", kind: dir}
+        "400":
+          description: |
+            パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の
+            parse 失敗時は extractor が `text/plain` を返す。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "503":
+          description: uploads が無効（library 書き込み不可のデプロイ）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/library/uploads:
+    post:
+      tags: [library]
+      operationId: createLibraryUpload
+      summary: 分割アップロードセッション開始
+      description: |
+        再開可能な分割アップロード。init（本 op）→
+        `PUT /api/v1/library/uploads/{id}` で `Upload-Offset` 順に chunk を
+        append → `POST .../finalize` でライブラリへ確定。セッションは
+        `<library>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
+        `name`/`dir` の検証は `/files` と同一、`size` は確定後の総バイト数。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, size]
+              additionalProperties: false
+              properties:
+                dir: {type: string, default: ""}
+                name: {type: string, minLength: 1}
+                size: {type: integer, minimum: 1}
+            examples:
+              default:
+                summary: セッション開始
+                value: {dir: "Series", name: "work.rar", size: 500000000}
+      responses:
+        "201":
+          description: セッション作成
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LibraryUploadInit"}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {upload_id: "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b", offset: 0}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413":
+          description: "`size` が `BOOKQ_UPLOAD_MAX_BYTES` 超過"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "415":
+          description: 対応外の拡張子
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "503":
+          description: uploads が無効（library 書き込み不可のデプロイ）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/library/uploads/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: createLibraryUpload が発行した upload_id
+    get:
+      tags: [library]
+      operationId: getLibraryUpload
+      summary: セッション状態（再開位置の確認）
+      responses:
+        "200":
+          description: セッション状態
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LibraryUploadState"}
+              examples:
+                default:
+                  summary: 途中状態
+                  value:
+                    upload_id: "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b"
+                    dir: "Series"
+                    name: "work.rar"
+                    size: 500000000
+                    offset: 134217728
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    put:
+      tags: [library]
+      operationId: appendLibraryUpload
+      summary: チャンクの追記（offset 順）
+      description: |
+        ボディ（raw octet-stream）を `Upload-Offset` が示す位置から追記する。
+        `Upload-Offset` はサーバの現在 `offset` と一致必須 — 不一致は
+        **409 + `{offset: <現在値>}`** を返し、クライアントは返された
+        offset から送り直す。`offset + len(body) > size` は 400。
+        順序外・重複チャンクは offset 不一致で 409 になるため安全に再送できる。
+      parameters:
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: {type: integer, minimum: 0}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: 追記完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [offset]
+                properties:
+                  offset: {type: integer, minimum: 0}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {offset: 167772160}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: offset 不一致（body の `offset` が現在の受領位置）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail, code, offset]
+                properties:
+                  detail: {type: string}
+                  code: {type: string, enum: [offset_mismatch]}
+                  offset: {type: integer, minimum: 0}
+              examples:
+                default:
+                  summary: offset 不一致
+                  value: {detail: "offset mismatch", code: "offset_mismatch", offset: 33554432}
+        "413":
+          description: "`BOOKQ_UPLOAD_MAX_BYTES` 超過"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    delete:
+      tags: [library]
+      operationId: cancelLibraryUpload
+      summary: セッション破棄
+      responses:
+        "204": {description: 破棄完了（本体なし）}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/library/uploads/{id}/finalize:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      tags: [library]
+      operationId: finalizeLibraryUpload
+      summary: セッション確定（ライブラリへ配置）
+      description: |
+        `offset == size` の時のみ受理。blob を fsync してから
+        `dir` 内で自動リネームして atomic rename、セッションを掃除し、
+        採用名を返す。未完は **409 + `{offset: <現在値>}`**。
+      responses:
+        "200":
+          description: 確定完了
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LibraryFileEntry"}
+              examples:
+                default:
+                  summary: 正常系（リネームなし）
+                  value: {name: "work.rar", path: "Series/work.rar", size: 500000000}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: 未完（body の `offset` が現在の受領位置）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail, code, offset]
+                properties:
+                  detail: {type: string}
+                  code: {type: string, enum: [incomplete]}
+                  offset: {type: integer, minimum: 0}
+              examples:
+                default:
+                  summary: 未完
+                  value: {detail: "upload incomplete", code: "incomplete", offset: 33554432}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   # ── v0 互換 (deprecated: v1 へ移行後に削除) ────────────────────────
   # 退役方針 (#212/#407): 全 3 client は v1 移行済み。v0 応答には
@@ -1156,7 +1541,7 @@ components:
           examples:
             default:
               summary: 経路外アクセス
-              value: {detail: "path escapes downloads root"}
+              value: {detail: "path escapes library root"}
             hidden:
               summary: hidden 配下（サーバ側除外）
               value: {detail: "path is hidden"}
@@ -1303,6 +1688,42 @@ components:
           type: array
           items: {type: string}
           description: 先頭パスセグメント（書庫も対象）
+
+    LibraryFileEntry:
+      type: object
+      required: [name, path, size]
+      properties:
+        name:
+          type: string
+          description: 採用されたファイル名（衝突時は `name (n).ext` に自動リネーム）
+        path: {type: string, description: ルート相対パス}
+        size: {type: integer, minimum: 0}
+
+    LibraryFileError:
+      type: object
+      required: [name, code]
+      properties:
+        name: {type: string}
+        code:
+          type: string
+          description: "invalid_name / unsupported_type / too_large / io_error"
+
+    LibraryUploadInit:
+      type: object
+      required: [upload_id, offset]
+      properties:
+        upload_id: {type: string}
+        offset: {type: integer, minimum: 0}
+
+    LibraryUploadState:
+      type: object
+      required: [upload_id, dir, name, size, offset]
+      properties:
+        upload_id: {type: string}
+        dir: {type: string, description: 保存先（ルート相対、空 = ルート）}
+        name: {type: string}
+        size: {type: integer, minimum: 0}
+        offset: {type: integer, minimum: 0, description: 受領済みバイト数（次の追記開始位置）}
 
 security:
   - cookieAuth: []

@@ -14,7 +14,7 @@ Visibility checks use `getBoundingClientRect` (no `IntersectionObserver`).
 
 BOOKQ_TEST_MODE handling: none needed here — the shared `server`
 fixture (tests/conftest.py) already launches viewer-rs with
-`BOOKQ_TEST_MODE=true` + a synthetic DOWNLOADS_DIR tree.
+`BOOKQ_TEST_MODE=true` + a synthetic LIBRARY_DIR tree.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt \\

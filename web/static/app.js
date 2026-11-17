@@ -2264,7 +2264,7 @@
     return undefined;
   }
 
-  // Physical directory depth of a folder relative to the downloads root,
+  // Physical directory depth of a folder relative to the library root,
   // counted from the raw path rather than the post-flatten tree: scanner.py's
   // single-child flattening merges wrapper folders into a node's name (e.g.
   // "wrap/inner/vol1"), so a real multi-chapter series can end up looking
