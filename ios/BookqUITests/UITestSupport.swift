@@ -41,6 +41,10 @@ enum UITestSupport {
         app.launchArguments = [
             "-serverURL", serverURL,
             "-testToken", testToken,
+            // Every test method starts from clean persisted state —
+            // positions/pair-sync/layout prefs would otherwise leak
+            // between tests sharing one app install.
+            "-uitestReset",
         ]
         app.launch()
     }
