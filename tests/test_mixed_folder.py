@@ -1,4 +1,4 @@
-"""Mixed-folder parent-level images-tile spec pins (plan Todo 4).
+"""Mixed-folder parent-level images-tile spec pins.
 
 Parent-level spec: a mixed folder (loose images + subfolder, e.g.
 ``mgroup/mseries/v02`` = 3 loose + ``sub`` of 2) shows NO tile for its own

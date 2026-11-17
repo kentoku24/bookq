@@ -1,4 +1,4 @@
-"""Shallow folder listing — `GET /api/v1/tree?path=<rel>&depth=1` (Todo 2, #476 v1 port).
+"""Shallow folder listing — `GET /api/v1/tree?path=<rel>&depth=1` (#476 v1 port).
 
 `?depth=1` returns only direct `type == "folder"` children (children == [],
 metadata/subtree_facets keys only when the index actually carries them);
@@ -145,7 +145,7 @@ def test_non_literal_int_params_return_422(server):
     assert _get(server, "/api/v1/tree?depth=1")[0] == 200
 
 
-# --- Todo 6: HTTP cache (ETag + Cache-Control: private, max-age=60) ---
+# --- HTTP cache (ETag + Cache-Control: private, max-age=60) ---
 
 
 def test_full_tree_carries_etag_and_private_cache_control(server):
@@ -196,7 +196,7 @@ def test_etag_differs_by_path_and_depth(server):
     assert full_etag != shallow_group_etag
 
 
-# --- Task 12 (#196): ETag tracks the tree, not the index-cache TTL ---
+# --- (#196) ETag tracks the tree, not the index-cache TTL ---
 
 
 def test_etag_changes_when_tree_changes(server, downloads_tree):

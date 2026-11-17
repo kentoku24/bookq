@@ -1,6 +1,6 @@
-"""Task 1+3 (offline-ux-refinements) — single-tap start/stop + anchored popover E2E.
+"""Single-tap start/stop + anchored popover E2E (offline UX).
 
-Spec (plan Todo 1):
+Spec — tap/abort:
   ① IDLE single tap -> downloadWork starts immediately (no intermediate confirm)
   ② delayed image stub, first image recorded, single tap -> immediate abort -> final .state-partial
   ③ listing loop (0 records, /api/images delayed), single tap -> immediate abort -> final .state-idle
@@ -8,7 +8,7 @@ Spec (plan Todo 1):
   ④ STOPPING transient asserted via window._stoppingSet (DOM class window can be <100ms)
   ⑤ title attribute == aria-label on every .offline-btn
   regression: COMPLETE -> CONFIRM_DELETE (red trash, 2 taps) -> DELETING lock intact
-Spec (plan Todo 3, T3):
+Spec — partial popover:
   ⑦ PARTIAL tap -> anchored labeled popover .ux-pop below the button
      (「続きをダウンロード」+残りNページ / 「削除」+保存済みMページ),
      single-open invariant, toggle, Esc/outside-tap close (sidebar stays open),

@@ -1,11 +1,11 @@
-"""Viewer URL-state behavior tests (Todo 1: URL helpers + writers).
+"""Viewer URL-state behavior tests (URL helpers + writers).
 
-T1 covers the writer half of the URL-state feature: opening a folder pushes
+This file covers the writer half of the URL-state feature: opening a folder pushes
 `#/view/<folder>?p=<page>` and every page turn rewrites it in place with
 replaceState so the browser history never grows page-by-page.
 
-The reader half (deep links, reload restore, Back/Forward re-sync) is wired in
-Todo 2 and covered by tests added there.
+The reader half (deep links, reload restore, Back/Forward re-sync) is covered
+separately.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_url_state.py -q

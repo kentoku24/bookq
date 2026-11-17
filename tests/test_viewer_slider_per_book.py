@@ -1,4 +1,4 @@
-"""Per-book (chapter-local) slider behavior (viewer-slider-per-book Task 9, #476 v1 port).
+"""Per-book (chapter-local) slider behavior (#476 v1 port).
 
 Proves the T1-T8 wiring: the page slider's ``max``/``value`` and the counter
 are scoped to the opened chapter, slider input / swipe / keyboard clamp inside

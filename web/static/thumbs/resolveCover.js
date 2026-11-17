@@ -35,10 +35,10 @@
     }
     return null;
   }
-  // Todo 3 single-first cover: node.thumb ONLY at the device cover width
+  // Single-first cover: node.thumb ONLY at the device cover width
   // (OfflineCore.coverWidth), else null (caller shows placeholder).
   // Signature: resolveCoverSingle(node) -> url|null.
-  // Todo 5 integration point: setFullPathsAndIndex/thumbSingleList reuse this.
+  // Integration point: setFullPathsAndIndex/thumbSingleList reuse this.
   function resolveCoverSingle(node) {
     if (!node) return null;
     var folder = node._fullPath;

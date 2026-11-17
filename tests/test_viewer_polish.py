@@ -1,4 +1,4 @@
-"""ビューア磨き込み（監査 V3/V4/V5）。"""
+"""ビューア磨き込み。"""
 import io
 import re
 import time
@@ -12,7 +12,7 @@ DARK_MAX = 40  # 背景 #0d0d0d 近傍とみなす RGB 上限
 # The anchor spread's own <img>s live inside the .spread-container positioned
 # at left:0 (spreadLeft(anchorSpread) is always 0 — see spread.js:spreadLeft).
 # Any <img> outside that container must not intersect the viewport
-# horizontally: with gapBefore() widened (Task 4 / 監査 V3), a narrower
+# horizontally: with gapBefore() widened, a narrower
 # (solo/odd) spread's leftover margin must never be filled by the *next*
 # spread's real page content peeking in.
 _FIND_NEIGHBOUR_PEEK_JS = """
@@ -100,7 +100,7 @@ def test_odd_trailing_page_does_not_show_neighbour(landscape_page, server):
 
 
 def test_chapter_start_spread_does_not_show_previous_chapter(landscape_page, server):
-    """監査 V3: a chapter-start spread (vol2's solo spread, 1 page) used to use a
+    """A chapter-start spread (vol2's solo spread, 1 page) used to use a
     fixed CHAPTER_GAP_PX=20 seam regardless of leftover, so the previous
     chapter's spread (vol1, 2 pages) peeked ~230px into view at 900x600.
     gapBefore() now treats CHAPTER_GAP_PX as a floor under the same

@@ -1,13 +1,13 @@
-"""Browse URL-state behavior tests (Todo 1: browse hash writers + ancestor-pop stack).
+"""Browse URL-state behavior tests (browse hash writers + ancestor-pop stack).
 
-T1 covers the writer half of the browse URL-state feature: drilling into a
+This file covers the writer half of the browse URL-state feature: drilling into a
 folder writes `#/browse/<path>` (one pushState per level), the breadcrumb ↩
 goes UP one tree level — popping to an ancestor entry in the tracked stack
 (history.go(-k)) instead of pushing a duplicate — and identical-URL writes are
 no-ops, so the history never grows from browse navigation.
 
 The reader half (deep links, reload restore, Back/Forward re-sync, dead-path
-fallback) is wired in Todo 2 and covered by tests added there.
+fallback) is covered separately.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_browse_url_state.py -q
