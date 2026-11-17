@@ -213,7 +213,9 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
   リクエスト自体は 200 を返し得る。
 - **衝突の自動リネーム**: 同名 (ファイルでもディレクトリでも) が既に
   存在する場合、`name (1).ext` `name (2).ext` … を 999 まで試す。
-  尽きたら **409**。採用名は応答の `name`/`path` で返る。
+  尽きた場合は `conflict` — multipart (`/library/files`) では per-file
+  `errors[]` として 200 に列挙、分割アップロードの finalize では
+  **409** を返す。採用名は応答の `name`/`path` で返る。
 - **書き込みの atomicity**: ファイルは必ず tmp (multipart は対象 dir 内の
   `.bq-tmp-*`、session は `.bookq-uploads/<id>/blob`) に書き、fsync 後に
   rename する。途中失敗・切断で未完成の本体がライブラリ名で残ることはない

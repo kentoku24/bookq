@@ -227,7 +227,9 @@ def test_upload_non_multipart_rejected(lib_server):
         params={"dir": "series"},
         json={"name": "x.cbz"},
     )
-    assert r.status_code in (400, 415)
+    # Non-multipart Content-Type is an extractor rejection → 400 text/plain.
+    # (415 is unreachable — axum's MultipartRejection has no 415 variant.)
+    assert r.status_code == 400
 
 
 # ── DELETE /api/v1/library/files ─────────────────────────────────────────────
