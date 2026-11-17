@@ -378,8 +378,16 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
         Some(e) => e,
         None => return Ok(None),
     };
-    let concat: i64 = endrec.location - endrec.size_cd as i64 - endrec.offset_cd as i64;
-    let start_dir: i64 = endrec.offset_cd as i64 + concat;
+    // zip64 fields are u64 attacker input — `as i64` alone can wrap
+    // negative and `+`/`-` can panic in debug builds. Clamp the casts
+    // and saturate the arithmetic; the `start_dir < 0` check below
+    // still rejects every overflowed value.
+    let clamp = |v: u64| v.min(i64::MAX as u64) as i64;
+    let concat: i64 = endrec
+        .location
+        .saturating_sub(clamp(endrec.size_cd))
+        .saturating_sub(clamp(endrec.offset_cd));
+    let start_dir: i64 = clamp(endrec.offset_cd).saturating_add(concat);
     if start_dir < 0 {
         return Err(());
     }
@@ -462,7 +470,8 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
             crc,
             compress_size,
             file_size,
-            header_offset: header_offset as i64 + concat,
+            header_offset: (header_offset.min(i64::MAX as u64) as i64)
+                .saturating_add(concat),
             end_offset: 0,
         });
         total = total

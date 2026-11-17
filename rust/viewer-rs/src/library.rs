@@ -350,11 +350,18 @@ async fn drain_field(field: &mut axum::extract::multipart::Field<'_>) {
 /// Does the part's Content-Disposition actually carry a `filename` token
 /// (`filename=` or RFC 5987 `filename*=`)? Checked on the raw bytes —
 /// the whole point is catching names the UTF-8 decode couldn't show us.
+/// Mirrors multer's parameter boundary: the token must start at a `;`
+/// or ASCII whitespace boundary so `myfilename=` or a quoted value
+/// mentioning "filename" can't false-positive.
 fn disposition_has_filename(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::CONTENT_DISPOSITION)
-        .map(|v| v.as_bytes().windows(8).any(|w| w == b"filename"))
-        .unwrap_or(false)
+    let Some(v) = headers.get(axum::http::header::CONTENT_DISPOSITION) else {
+        return false;
+    };
+    let b = v.as_bytes();
+    (0..b.len()).any(|i| {
+        (i == 0 || matches!(b[i - 1], b';' | b' ' | b'\t'))
+            && (b[i..].starts_with(b"filename=") || b[i..].starts_with(b"filename*="))
+    })
 }
 
 /// `dir` is resolved + validated by the caller. Streams each `file` field to
