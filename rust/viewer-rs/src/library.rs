@@ -216,7 +216,7 @@ fn placed_entry(dir_rel: &str, dest: &Path) -> serde_json::Value {
 
 // ── chunked sessions ─────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct UploadSession {
     pub dir: String,
     pub name: String,
@@ -248,6 +248,19 @@ fn load_session(
     let text = std::fs::read_to_string(dir.join("meta.json")).ok()?;
     let sess: UploadSession = serde_json::from_str(&text).ok()?;
     let blob = dir.join("blob");
+    // Reconcile the acked offset against the blob: meta is written after the
+    // data fsync, so `offset` never leads the file — if it does the pair is
+    // corrupt. A longer blob is an unconfirmed tail (the append landed but
+    // the offset persist failed or the request raced) — truncate it so a
+    // resent chunk can't double-append.
+    let blob_len = std::fs::metadata(&blob).map(|m| m.len()).unwrap_or(0);
+    if blob_len < sess.offset {
+        return None;
+    }
+    if blob_len > sess.offset {
+        let f = std::fs::File::options().write(true).open(&blob).ok()?;
+        f.set_len(sess.offset).ok()?;
+    }
     Some((sess, dir, blob))
 }
 
@@ -258,8 +271,12 @@ fn save_session(dir: &Path, sess: &UploadSession) -> std::io::Result<()> {
     std::fs::rename(&tmp, &meta)
 }
 
-/// Drop sessions older than `ttl_secs` (meta unreadable = stale). Runs at
-/// startup and on each init.
+/// Drop sessions older than `ttl_secs`. A dir whose meta is unreadable is
+/// only stale once it is also older than `SWEEP_GRACE_SECS` — an init races
+/// this sweep between `create_dir_all` and the first `save_session`, and a
+/// bare "no meta" verdict would delete a session still being created.
+const SWEEP_GRACE_SECS: u64 = 60;
+
 pub(crate) fn sweep_stale_sessions(upload_root: &Path, ttl_secs: u64) {
     let Ok(rd) = std::fs::read_dir(upload_root) else {
         return;
@@ -276,7 +293,16 @@ pub(crate) fn sweep_stale_sessions(upload_root: &Path, ttl_secs: u64) {
             .ok()
             .and_then(|s| serde_json::from_str::<UploadSession>(&s).ok())
             .map(|s| now.saturating_sub(s.created) > ttl_secs)
-            .unwrap_or(true);
+            .unwrap_or_else(|| {
+                // Meta missing/corrupt — stale only past the grace window,
+                // measured on the dir's own mtime.
+                e.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| now.saturating_sub(d.as_secs()) > SWEEP_GRACE_SECS)
+                    .unwrap_or(false)
+            });
         if stale {
             let _ = std::fs::remove_dir_all(e.path());
         }
@@ -396,22 +422,36 @@ pub(crate) async fn post_files(
             errors.push(serde_json::json!({"name": name, "code": code}));
             continue;
         }
-        let Some(dest) = dedupe_name(&target, &name) else {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            errors.push(serde_json::json!({"name": name, "code": "conflict"}));
-            continue;
+        // Dedupe + rename under the placement lock — a check-then-rename
+        // across tasks lets two same-name uploads pick the same free slot,
+        // and Unix `rename` silently replaces the destination.
+        let placed = {
+            let lock = st.place_lock.clone();
+            let target_c = target.clone();
+            let name_c = name.clone();
+            let tmp_c = tmp.clone();
+            tokio::task::spawn_blocking(move || {
+                let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(dest) = dedupe_name(&target_c, &name_c) else {
+                    return Err("conflict");
+                };
+                atomic_place(&tmp_c, &dest)
+                    .map(|()| dest)
+                    .map_err(|_| "io_error")
+            })
+            .await
         };
-        let dest2 = dest.clone();
-        let tmp2 = tmp.clone();
-        let placed =
-            tokio::task::spawn_blocking(move || atomic_place(&tmp2, &dest2)).await;
         match placed {
-            Ok(Ok(())) => {
+            Ok(Ok(dest)) => {
                 let mut e = placed_entry(dir, &dest);
                 e["size"] = serde_json::json!(written);
                 files.push(e);
             }
-            _ => {
+            Ok(Err(code)) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                errors.push(serde_json::json!({"name": name, "code": code}));
+            }
+            Err(_) => {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 errors.push(serde_json::json!({"name": name, "code": "io_error"}));
             }
@@ -600,6 +640,9 @@ pub(crate) async fn upload_cancel(st: &AppState, id: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
+    // Serialize against an in-flight append — deleting the dir mid-append
+    // would orphan a half-written blob.
+    let _sess_guard = st.session_lock.lock().await;
     let Some((_, dir, _)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
@@ -626,6 +669,11 @@ pub(crate) async fn upload_append(
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
+    // Serialize the load→append→persist cycle — two PUTs at the same
+    // offset both pass the check otherwise and the blob/meta pair
+    // diverges. One lock covers every session: correctness over fairness
+    // (a stalled client delays other sessions' ops; appends are short).
+    let _sess_guard = st.session_lock.lock().await;
     let Some((mut sess, dir, blob)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
@@ -697,13 +745,22 @@ pub(crate) async fn upload_append(
             }
         }
     }
-    let _ = f.sync_all().await;
+    if f.sync_all().await.is_err() {
+        io_fail = true;
+    }
     drop(f);
     // Bytes already landed are a valid prefix — persist the advanced offset
-    // even on a short/aborted body so the client resumes from the truth.
+    // even on a short/aborted body so the client resumes from the truth. If
+    // the persist fails the acked offset would be a lie (load reconciles the
+    // blob down to the last saved offset), so fail the request instead.
     if received > 0 {
         sess.offset += received;
-        let _ = save_session(&dir, &sess);
+        if save_session(&dir, &sess).is_err() {
+            return state::detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not persist upload state",
+            );
+        }
     }
     if io_fail || received != clen {
         return state::detail(
@@ -723,6 +780,9 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
+    // Same serialization as append — a racing PUT must not land more bytes
+    // while the blob is being renamed out from under it.
+    let _sess_guard = st.session_lock.lock().await;
     let Some((sess, dir, blob)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
@@ -751,24 +811,34 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
         Ok(p) => p,
         Err((c, m)) => return state::detail(c, m),
     };
-    let Some(dest) = dedupe_name(&target, &sess.name) else {
-        return state::detail(
-            StatusCode::CONFLICT,
-            "no free filename slot",
-        );
+    // Dedupe + place under the same placement lock as post_files.
+    let placed = {
+        let lock = st.place_lock.clone();
+        let name_c = sess.name.clone();
+        let dir2 = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(dest) = dedupe_name(&target, &name_c) else {
+                return Err("conflict");
+            };
+            atomic_place(&blob, &dest)
+                .map(|()| {
+                    let _ = std::fs::remove_dir_all(&dir2);
+                    dest
+                })
+                .map_err(|_| "io_error")
+        })
+        .await
     };
-    let dest2 = dest.clone();
-    let dir2 = dir.clone();
-    let placed = tokio::task::spawn_blocking(move || {
-        atomic_place(&blob, &dest2).and_then(|()| std::fs::remove_dir_all(&dir2))
-    })
-    .await;
     match placed {
-        Ok(Ok(())) => {
+        Ok(Ok(dest)) => {
             st.index.schedule_refresh(&st.library);
             let mut e = placed_entry(&sess.dir, &dest);
             e["size"] = serde_json::json!(sess.size);
             json(StatusCode::OK, e)
+        }
+        Ok(Err("conflict")) => {
+            state::detail(StatusCode::CONFLICT, "no free filename slot")
         }
         _ => state::detail(StatusCode::INTERNAL_SERVER_ERROR, "finalize failed"),
     }
@@ -922,6 +992,8 @@ mod tests {
             created: now_secs(),
         };
         save_session(&sdir, &sess).unwrap();
+        // reconcile: blob must reach at least the acked offset.
+        std::fs::write(sdir.join("blob"), b"1234").unwrap();
         let (loaded, _, blob) = load_session(&d, &id).unwrap();
         assert_eq!(loaded.offset, 4);
         assert_eq!(loaded.name, "a.rar");
@@ -976,6 +1048,91 @@ mod tests {
         atomic_place(&tmp, &d.join("a.rar")).unwrap();
         assert_eq!(std::fs::read(d.join("a.rar")).unwrap(), b"data");
         assert!(!tmp.exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn load_session_reconciles_blob_against_meta() {
+        let d = tmpdir("reconcile");
+        let id = new_id();
+        let sdir = session_dir(&d, &id);
+        std::fs::create_dir_all(&sdir).unwrap();
+        let sess = UploadSession {
+            dir: String::new(),
+            name: "a.rar".into(),
+            size: 10,
+            offset: 4,
+            created: now_secs(),
+        };
+        save_session(&sdir, &sess).unwrap();
+        // Unconfirmed tail: the append landed but the offset persist died —
+        // the blob is truncated back to the acked offset so a resent chunk
+        // can't double-append.
+        std::fs::write(sdir.join("blob"), b"1234567").unwrap();
+        let (loaded, _, _) = load_session(&d, &id).unwrap();
+        assert_eq!(loaded.offset, 4);
+        assert_eq!(std::fs::metadata(sdir.join("blob")).unwrap().len(), 4);
+        // Meta ahead of the blob is corrupt, not recoverable.
+        let mut ahead = sess.clone();
+        ahead.offset = 9;
+        save_session(&sdir, &ahead).unwrap();
+        assert!(load_session(&d, &id).is_none());
+        // A fresh session (offset 0, no blob yet) still loads.
+        let mut fresh = sess;
+        fresh.offset = 0;
+        save_session(&sdir, &fresh).unwrap();
+        std::fs::remove_file(sdir.join("blob")).unwrap();
+        assert!(load_session(&d, &id).is_some());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn sweep_keeps_fresh_metaless_dirs() {
+        let d = tmpdir("sweep-grace");
+        // An init in flight — dir exists, meta.json not yet written. A
+        // concurrent sweep must not reap it inside the grace window.
+        let id = "c".repeat(32);
+        let sdir = session_dir(&d, &id);
+        std::fs::create_dir_all(&sdir).unwrap();
+        sweep_stale_sessions(&d, 60);
+        assert!(sdir.exists());
+        // Corrupt meta on a fresh dir lands on the same grace branch.
+        std::fs::write(sdir.join("meta.json"), b"{not json").unwrap();
+        sweep_stale_sessions(&d, 60);
+        assert!(sdir.exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn dedupe_under_lock_is_race_free() {
+        // The handler's critical section, at unit level: N racers each do
+        // dedupe + publish inside the one lock — every name must be unique.
+        let d = tmpdir("dedupe-lock");
+        let lock = std::sync::Mutex::new(());
+        let barrier = std::sync::Barrier::new(8);
+        // collect handles BEFORE joining — a lazy map would join each
+        // thread before spawning the next and deadlock on the barrier.
+        let names: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        let _g = lock.lock().unwrap();
+                        let dest = dedupe_name(&d, "a.rar").unwrap();
+                        std::fs::write(&dest, b"x").unwrap();
+                        dest.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut uniq = names.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), names.len(), "racing dedupes shared a slot");
         std::fs::remove_dir_all(&d).ok();
     }
 }

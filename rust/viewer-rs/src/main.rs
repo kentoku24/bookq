@@ -75,6 +75,14 @@ pub(crate) struct AppState {
     /// proved the library writable, else `None` and `/api/v1/library/*`
     /// answers 503 (read-only deploys stay fully functional).
     pub(crate) upload_root: Option<PathBuf>,
+    /// Serializes the dedupe+rename placement critical section — without it
+    /// two same-name uploads pick the same free slot and `rename` clobbers
+    /// the first (Unix rename replaces the destination).
+    pub(crate) place_lock: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Serializes upload-session mutations (append/finalize/cancel) —
+    /// the load→verify→write cycle races otherwise and corrupts the
+    /// blob/offset pair.
+    pub(crate) session_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 /// A local 405 carries the RFC 9110 `Allow` header.
@@ -1125,6 +1133,8 @@ async fn main() {
         // Library write surface: probe once — a read-only deploy keeps every
         // read route but `/api/v1/library/*` answers 503.
         upload_root: library::probe_upload_root(&library),
+        place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+        session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     // warmup_metadata_index — lifespan kicks the same cold-miss path.
     index.spawn_warmup(library.clone());
@@ -1156,16 +1166,6 @@ async fn main() {
         .route("/api/v1/health", any(api_health))
         .route("/api/v1/version", any(api_version))
         .route("/api/v1/index/refresh", any(api_refresh))
-        // Library edit: multipart upload + delete, chunked upload sessions.
-        // Bodies stream (Multipart chunks / raw Body) so DefaultBodyLimit
-        // never applies — large files don't need a raised cap.
-        .route("/api/v1/library/files", any(library_files))
-        .route("/api/v1/library/uploads", any(library_uploads))
-        .route("/api/v1/library/uploads/{id}", any(library_upload))
-        .route(
-            "/api/v1/library/uploads/{id}/finalize",
-            any(library_upload_finalize),
-        )
         // #400: the auth surface moves as one unit — the callback's
         // one-time codes are redeemed by the token endpoint in the same
         // process. `auth_flow.is_none()` answers 501 (unconfigured).
@@ -1182,6 +1182,22 @@ async fn main() {
         .route("/api/v1/test-positions-reset", any(test_positions_reset))
         // M8: dual-reader sync socket.
         .route("/ws/reader-sync", any(reader_sync_ws))
+        // Library edit: multipart upload + delete, chunked upload sessions.
+        // `Multipart::from_request` calls `with_limited_body`, which honors
+        // the 2MiB DefaultBodyLimit even for manual extractor calls — the
+        // disable must be a route_layer scoped to these four routes, or
+        // uploads >2MiB answer 413.
+        .merge(
+            Router::new()
+                .route("/api/v1/library/files", any(library_files))
+                .route("/api/v1/library/uploads", any(library_uploads))
+                .route("/api/v1/library/uploads/{id}", any(library_upload))
+                .route(
+                    "/api/v1/library/uploads/{id}/finalize",
+                    any(library_upload_finalize),
+                )
+                .route_layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .fallback(axum::routing::any(|State(_st): State<AppState>, req: Request<Body>| async move {
             tracing::warn!(path = %req.uri().path(), "unknown route: answered 501");
             state::detail(StatusCode::NOT_IMPLEMENTED, "not found")
@@ -1271,6 +1287,8 @@ mod handler_tests {
                 std::collections::HashMap::new(),
             )),
             upload_root: None,
+            place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

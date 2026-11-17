@@ -5,7 +5,9 @@ against a private tmp root (same pattern as the folder-visibility write
 tests) instead of the shared session `server` fixture.
 """
 
+import concurrent.futures
 import io
+import json
 import os
 import socket
 import subprocess
@@ -417,3 +419,84 @@ def test_library_requires_auth(lib_server_auth):
     assert r.status_code == 401
     r = httpx.post(f"{base}/api/v1/library/uploads", json={"name": "x.cbz", "size": 1})
     assert r.status_code == 401
+
+
+# ── review hardening: body limit, races, reconcile ──────────────────────────
+
+
+def test_multipart_body_over_default_limit(lib_server, lib_root):
+    # DefaultBodyLimit::disable() is scoped to the library routes — a >2MiB
+    # multipart body must not 413 (axum's Multipart extractor applies the
+    # 2MiB default even for manual extraction).
+    payload = _zip_bytes() + b"\0" * (3 * 1024 * 1024)
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/files",
+        params={"dir": "series"},
+        files={"file": ("big.cbz", payload, "application/zip")},
+        timeout=30,
+    )
+    assert r.status_code == 200, r.text
+    assert (lib_root / "series" / "big.cbz").stat().st_size == len(payload)
+
+
+def test_concurrent_same_name_uploads_unique(lib_server, lib_root):
+    # Racing same-name uploads each get a distinct slot — dedupe+rename runs
+    # under the placement lock so no rename clobbers another upload.
+    def post(_):
+        return httpx.post(
+            f"{lib_server}/api/v1/library/files",
+            params={"dir": "series"},
+            files={"file": ("race.cbz", _zip_bytes(), "application/zip")},
+            timeout=30,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        rs = list(ex.map(post, range(8)))
+    assert all(r.status_code == 200 for r in rs), [r.status_code for r in rs]
+    names = [r.json()["files"][0]["name"] for r in rs]
+    assert len(set(names)) == len(names), names
+    for n in names:
+        assert (lib_root / "series" / n).exists()
+
+
+def test_concurrent_chunk_puts_serialize(lib_server, lib_root):
+    # Two PUTs at the same offset serialize on the session lock — the loser
+    # sees the advanced offset and gets a 409, never a double-append.
+    payload = _zip_bytes()
+    half = len(payload) // 2
+    uid = _init(lib_server, "race-chunk.cbz", len(payload))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        rs = list(ex.map(lambda _: _put(lib_server, uid, payload[:half], 0), range(2)))
+    assert sorted(r.status_code for r in rs) == [200, 409], [
+        r.status_code for r in rs
+    ]
+    # the blob holds the prefix exactly once — resume + finalize proves it
+    r = _put(lib_server, uid, payload[half:], half)
+    assert r.status_code == 200
+    r = httpx.post(f"{lib_server}/api/v1/library/uploads/{uid}/finalize")
+    assert r.status_code == 200, r.text
+    assert (lib_root / "series" / "race-chunk.cbz").read_bytes() == payload
+
+
+def test_session_load_reconciles_unconfirmed_tail(lib_server, lib_root):
+    # The append landed but the offset persist died: meta says N, blob is
+    # longer. The next load truncates the unconfirmed tail so a resent chunk
+    # appends at the true position instead of double-writing.
+    uid = _init(lib_server, "reconcile.cbz", 10)
+    sdir = lib_root / UPLOAD_DIR_NAME / uid
+    (sdir / "blob").write_bytes(b"0123456789")
+    meta = sdir / "meta.json"
+    m = json.loads(meta.read_text())
+    m["offset"] = 6
+    meta.write_text(json.dumps(m))
+
+    g = httpx.get(f"{lib_server}/api/v1/library/uploads/{uid}")
+    assert g.status_code == 200
+    assert g.json()["offset"] == 6
+    assert (sdir / "blob").stat().st_size == 6
+
+    r = _put(lib_server, uid, b"abcd", 6)
+    assert r.status_code == 200
+    r = httpx.post(f"{lib_server}/api/v1/library/uploads/{uid}/finalize")
+    assert r.status_code == 200, r.text
+    assert (lib_root / "series" / "reconcile.cbz").read_bytes() == b"012345abcd"
