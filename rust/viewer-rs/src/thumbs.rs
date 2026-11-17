@@ -342,11 +342,19 @@ static GEN_PERMITS: std::sync::LazyLock<tokio::sync::Semaphore> =
 /// the EXIF orientation applied. Animated formats decode to their first
 /// frame, like Pillow's thumbnail path.
 fn load_oriented(data: &[u8]) -> Option<image::DynamicImage> {
-    let mut dec = image::ImageReader::new(std::io::Cursor::new(data))
+    let mut rd = image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
-        .ok()?
-        .into_decoder()
         .ok()?;
+    // Decode bombs: a tiny crafted PNG can declare ~100k×100k — the
+    // default limits are unbounded, so a full-res RGBA buffer (~40GB)
+    // would allocate before decode failed. Manga pages sit far below
+    // these bounds; violations surface as decode errors → 501, not OOM.
+    let mut limits = image::Limits::no_limits();
+    limits.max_image_width = Some(32_768);
+    limits.max_image_height = Some(32_768);
+    limits.max_alloc = Some(1 << 30); // 1 GiB raw-pixel ceiling
+    rd.limits(limits);
+    let mut dec = rd.into_decoder().ok()?;
     let orientation = dec
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);

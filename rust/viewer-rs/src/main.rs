@@ -573,6 +573,11 @@ async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Respon
 }
 
 /// `/api/v1/library/uploads` — POST init a chunked upload session.
+/// Init is a tiny JSON; the route-level `DefaultBodyLimit::disable` (the
+/// file routes need streaming bodies) removes axum's cap here too, so
+/// bound the `collect` explicitly or a fat body buffers unbounded.
+const LIBRARY_INIT_BODY_MAX: usize = 64 * 1024;
+
 async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Response {
     if caller(&st, req.headers()).is_none() {
         return unauthenticated();
@@ -581,10 +586,11 @@ async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Resp
         return method_not_allowed("POST");
     }
     let (_parts, body) = req.into_parts();
+    let body = http_body_util::Limited::new(body, LIBRARY_INIT_BODY_MAX);
     let body = match http_body_util::BodyExt::collect(body).await {
         Ok(c) => c.to_bytes(),
         Err(_) => {
-            return state::detail(StatusCode::BAD_REQUEST, "invalid body");
+            return state::detail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
         }
     };
     library::uploads_init(&st, &body).await
