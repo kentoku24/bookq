@@ -607,9 +607,9 @@ body.fv-showall #visibility-status:not(:empty){display:flex}
 #lib-upload-btn,#lib-edit-done{min-height:32px;padding:3px 12px;border-radius:6px;border:1px solid #555;background:#1a1a1a;color:#ccc;font-size:12px;cursor:pointer;font-family:inherit}
 #lib-upload-btn:hover,#lib-edit-done:hover{background:#222;border-color:#777}
 #lib-edit-status{flex:1;min-width:0;font-size:11px;color:#9a9a9a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 🗑 on tile/card: top-right (.visibility-toggle owns top-left,
-   .offline-btn bottom). 2タップ目 (lib-del-arm) で赤化。 */
-.lib-del{position:absolute;top:4px;right:4px;width:44px;height:44px;padding:0;border:none;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.65);color:#fff;font-size:16px;cursor:pointer;transition:background-color .18s ease,transform .12s ease}
+/* 🗑 on tile/card: bottom-right (.visibility-toggle owns top-left,
+   .offline-btn top-right). 2タップ目 (lib-del-arm) で赤化。 */
+.lib-del{position:absolute;bottom:4px;right:4px;width:44px;height:44px;padding:0;border:none;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.65);color:#fff;font-size:16px;cursor:pointer;transition:background-color .18s ease,transform .12s ease}
 .lib-del:hover{filter:brightness(1.18)}
 .lib-del:active{transform:scale(0.95)}
 .lib-del.lib-del-arm{background:rgba(196,68,68,.85)}

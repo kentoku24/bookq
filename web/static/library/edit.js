@@ -170,9 +170,20 @@
     }
     if (!small.length && !large.length) return;
 
+    // 1 リクエストの合計も CHUNK_THRESHOLD まで — 個別に閾値以下でも
+    // まとめた body が CF の request-body 上限を超えると 413 になる。
+    var batches = [], cur = [], curBytes = 0;
+    for (var s = 0; s < small.length; s++) {
+      if (cur.length && curBytes + small[s].size > CHUNK_THRESHOLD) {
+        batches.push(cur); cur = []; curBytes = 0;
+      }
+      cur.push(small[s]); curBytes += small[s].size;
+    }
+    if (cur.length) batches.push(cur);
+
     var totalBytes = 0, sentBytes = 0;
     for (var j = 0; j < files.length; j++) totalBytes += files[j].size;
-    var idx = 0, jobs = (small.length ? 1 : 0) + large.length;
+    var idx = 0, jobs = batches.length + large.length;
     function _tick(n) {
       idx++;
       if (_status()) _status().textContent = "アップロード中 " + idx + "/" + jobs + " (" + n + "%)";
@@ -187,12 +198,14 @@
       if (done && !failed.length) _toastOk(done + " 件追加しました");
     }
     var chain = Promise.resolve();
-    if (small.length) {
+    for (var b = 0; b < batches.length; b++) (function (batch) {
+      var batchBytes = totalBytesOf(batch);
       chain = chain.then(function () {
-        return _postMultipart(dir, small, function (sent, total) {
-          _tick(Math.round(100 * (sentBytes + sent) / totalBytes));
+        var base = sentBytes;
+        return _postMultipart(dir, batch, function (sent, total) {
+          _tick(Math.round(100 * (base + sent) / totalBytes));
         }).then(function (res) {
-          sentBytes += totalBytesOf(small);
+          sentBytes += batchBytes;
           done += (res && Array.isArray(res.files)) ? res.files.length : 0;
           var errs = (res && Array.isArray(res.errors)) ? res.errors : [];
           for (var e = 0; e < errs.length; e++) {
@@ -200,7 +213,7 @@
           }
         });
       });
-    }
+    })(batches[b]);
     for (var li = 0; li < large.length; li++) (function (f) {
       var base = sentBytes;
       chain = chain.then(function () {
