@@ -587,6 +587,12 @@ pub(crate) async fn uploads_init(st: &AppState, body: &[u8]) -> Response {
     if let Err((c, m)) = resolve_upload_dir(&st.library, &init.dir) {
         return state::detail(c, m);
     }
+    // Sweep under the session lock: it deletes session dirs, and an
+    // append/finalize in flight on a stale-but-active session must not
+    // have its dir removed mid-write. Held through the create so a
+    // concurrent init's sweep can't see this dir pre-meta (belt-and-braces
+    // with the sweep grace — the lock makes the gap unreachable anyway).
+    let _sess_guard = st.session_lock.lock().await;
     sweep_stale_sessions(&root, session_ttl());
     let id = new_id();
     let dir = session_dir(&root, &id);
@@ -620,6 +626,11 @@ pub(crate) async fn upload_get(st: &AppState, id: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
+    // Read-only to the client, but load_session's reconcile WRITES (it
+    // truncates an unconfirmed tail) — a probe that lands mid-append would
+    // otherwise cut the blob under the in-flight PUT and strand the
+    // session. Same lock as every other session mutation.
+    let _sess_guard = st.session_lock.lock().await;
     let Some((sess, _, _)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
