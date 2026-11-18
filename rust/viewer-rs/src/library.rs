@@ -121,6 +121,13 @@ pub(crate) fn resolve_upload_dir(
     if !dir.is_empty() && !serve::is_safe_entry(dir) {
         return Err((StatusCode::BAD_REQUEST, "invalid dir"));
     }
+    // Dot components are never listable — refuse them outright. Besides
+    // hiding user dot-dirs uniformly, this blocks `.bookq-uploads` under
+    // every case spelling (the post-realpath name compare below preserves
+    // the caller's case on case-insensitive filesystems).
+    if serve::has_dot_component(dir) {
+        return Err((StatusCode::BAD_REQUEST, "invalid dir"));
+    }
     let cand = if dir.is_empty() {
         library.to_path_buf()
     } else {
@@ -526,6 +533,11 @@ pub(crate) async fn delete_file(st: &AppState, path: &str) -> Response {
     if path.is_empty() || !serve::is_safe_entry(path) {
         return state::detail(StatusCode::BAD_REQUEST, "invalid path");
     }
+    // Dot-prefixed components are never listable — covers `.bookq-uploads`
+    // in any caller-supplied case on case-insensitive filesystems.
+    if serve::has_dot_component(path) {
+        return state::detail(StatusCode::BAD_REQUEST, "invalid path");
+    }
     if path.split('/').next() == Some(UPLOAD_DIR_NAME) {
         return state::detail(
             StatusCode::BAD_REQUEST,
@@ -844,7 +856,11 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
     let Some((sess, dir, blob)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
-    if sess.offset != sess.size {
+    // The blob is the authority, not the meta counter — load_session already
+    // reconciles them (shorter = corrupt → None, longer = truncate), so
+    // agreeing here means the file really holds `size` bytes.
+    let blob_len = std::fs::metadata(&blob).map(|m| m.len()).unwrap_or(0);
+    if sess.offset != sess.size || blob_len != sess.size {
         return json(
             StatusCode::CONFLICT,
             serde_json::json!({

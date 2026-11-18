@@ -38,8 +38,8 @@ use image::ImageDecoder;
 use sha1::{Digest, Sha1};
 
 use crate::serve::{
-    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file,
-    is_rar_path, is_within, not_implemented, not_modified, realpath,
+    archive_not_modified, fmt_mtime, has_dot_component, http_date, is_image_entry,
+    is_pdf_file, is_rar_path, is_within, not_implemented, not_modified, realpath,
     resolve_archive, suffix_lower,
 };
 
@@ -551,6 +551,11 @@ fn view_etag(mtime: f64, size: f64, digest: &str) -> String {
 /// `_make_thumb_bytes`), falling back to proxy only when the source can't
 /// be reached natively (rar/pdf) or the `image` crate can't decode it.
 pub fn thumb(library: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
+    // Dot-prefixed components are never listable — keep `.bookq-uploads`
+    // staging unreadable here too (404 so it isn't discoverable).
+    if has_dot_component(path) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
     let width = normalize_width(w);
     let (mtime, size, key) = match stat_source(library, path) {
         Ok(x) => x,
@@ -673,6 +678,9 @@ fn view_etag_w(mtime: f64, size: f64, wtag: &str, digest: &str) -> String {
 /// branch at that width — the fast-tier rendition mobile readers use
 /// while flip-through is in flight (iOS `BookqAPI.swift`; #440).
 pub fn view(library: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
+    if has_dot_component(path) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
     let suffix = suffix_lower(Path::new(path));
     let width = normalize_view_width(w);
     let passthrough = VIEW_PASSTHROUGH
@@ -1040,6 +1048,7 @@ pub fn thumb_sprite(
         || folder.starts_with('/')
         || folder.ends_with('/')
         || folder.contains('\x00')
+        || has_dot_component(folder)
     {
         return detail(StatusCode::BAD_REQUEST, "Invalid sprite folder");
     }
