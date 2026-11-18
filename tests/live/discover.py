@@ -34,16 +34,24 @@ def get_tree(base: str, deadline_s: float = 600.0):
 
     deadline = time.time() + deadline_s
     while True:
+        status = None
+        body = None
         try:
             with urllib.request.urlopen(base + "/api/v1/tree", timeout=300) as r:
-                assert r.status == 200
-                body = json.load(r)
+                status = r.status
+                if status == 200:
+                    body = json.load(r)
         except urllib.error.HTTPError as e:
             if e.code == 202:
-                assert time.time() < deadline, "tree stayed cold"
-                time.sleep(5)
-                continue
-            raise
+                status = 202
+            else:
+                raise
+        # urllib treats 202 as success (no HTTPError) — a cold index polls
+        # here, not in the except branch (dead code before #563).
+        if status != 200:
+            assert time.time() < deadline, "tree stayed cold"
+            time.sleep(5)
+            continue
         tree = body.get("nodes", body) if isinstance(body, dict) else body
         if tree:
             return tree
