@@ -1528,6 +1528,76 @@ mod tests {
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
+    /// Every NATIVE_DECODE format really decodes end-to-end (#563): thumb
+    /// → 200 JPEG; view honours each contract shape — original bytes for
+    /// passthrough types (jpg/jpeg/png/gif), normalized JPEG for
+    /// webp/bmp/avif, and `?w=` always normalizes to JPEG. Sources are
+    /// encoded in-test by the same `image` build (avif has no encoder —
+    /// the committed fixture stands in).
+    #[test]
+    fn native_formats_decode_end_to_end() {
+        let (dl, cache) = tmp_dirs("nf");
+        let h = HeaderMap::new();
+        let w400 = "400".to_string();
+        let mut im = image::RgbImage::new(48, 64);
+        for p in im.pixels_mut() {
+            *p = image::Rgb([12, 34, 56]);
+        }
+        let src = image::DynamicImage::ImageRgb8(im);
+        // (name, encode format — None uses the AVIF fixture, /view no-w mime)
+        let cases: &[(&str, Option<image::ImageFormat>, &str)] = &[
+            ("p.jpg", Some(image::ImageFormat::Jpeg), "image/jpeg"),
+            ("p.jpeg", Some(image::ImageFormat::Jpeg), "image/jpeg"),
+            ("p.png", Some(image::ImageFormat::Png), "image/png"),
+            ("p.gif", Some(image::ImageFormat::Gif), "image/gif"),
+            ("p.webp", Some(image::ImageFormat::WebP), "image/jpeg"),
+            ("p.bmp", Some(image::ImageFormat::Bmp), "image/jpeg"),
+            ("p.avif", None, "image/jpeg"),
+        ];
+        for (name, fmt, view_mime) in cases {
+            let bytes = match fmt {
+                Some(f) => {
+                    let mut out = Vec::new();
+                    src.write_to(&mut Cursor::new(&mut out), *f)
+                        .unwrap_or_else(|e| panic!("encode {name}: {e}"));
+                    out
+                }
+                None => include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+            };
+            std::fs::write(dl.join(name), &bytes).unwrap();
+            for (res, want) in [
+                (thumb(&dl, &cache, name, None, &h), "image/jpeg"),
+                (view(&dl, &cache, name, None, &h), *view_mime),
+                (view(&dl, &cache, name, Some(&w400), &h), "image/jpeg"),
+            ] {
+                assert_eq!(res.status(), StatusCode::OK, "{name}");
+                assert_eq!(res.headers()[header::CONTENT_TYPE], want, "{name}");
+            }
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: an AVIF member inside a zip decodes through the same path as
+    /// a directory file — /thumb and /view answer 200 JPEG.
+    #[test]
+    fn archive_avif_member_decodes() {
+        let (dl, cache) = tmp_dirs("a1");
+        let entries: Vec<(&str, Vec<u8>)> = vec![(
+            "p.avif",
+            include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+        )];
+        write_zip(&dl.join("book.zip"), &entries);
+        let h = HeaderMap::new();
+        for res in [
+            thumb(&dl, &cache, "book.zip/p.avif", None, &h),
+            view(&dl, &cache, "book.zip/p.avif", None, &h),
+        ] {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
     /// An archive member we can't extract (unsupported compression, CRC
     /// failure, absent) answers 501 — there is no upstream zipfile/rarfile
     /// left to decide (#532).
@@ -1915,6 +1985,43 @@ mod tests {
             status(&thumb_sprite(&dl, &cache, &qbad, "names=nope.png,nada.png", &HeaderMap::new())),
             StatusCode::NOT_FOUND
         );
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: an AVIF cell composes natively in both sprite paths —
+    /// before, `.avif` was upstream-only and the whole sheet 501'd.
+    #[test]
+    fn sprite_avif_cell_composes() {
+        let (dl, cache) = tmp_dirs("s4");
+        std::fs::write(
+            dl.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,p.avif")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=r.png,p.avif", &HeaderMap::new());
+        assert_eq!(status(&out), StatusCode::OK);
+        assert_eq!(jpeg_dims(&sprite_body(out)), (400, 150));
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: same for an AVIF member inside a zip archive cell.
+    #[test]
+    fn sprite_archive_avif_cell_composes() {
+        let (dl, cache) = tmp_dirs("s5");
+        let entries: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "p.avif",
+                include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+            ),
+            ("r.png", png_rgb(400, 300, [255, 0, 0])),
+        ];
+        write_zip(&dl.join("work.zip"), &entries);
+        let q = sprite_q(&[("folder", "work.zip"), ("names", "p.avif,r.png")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=p.avif,r.png", &HeaderMap::new());
+        assert_eq!(status(&out), StatusCode::OK);
+        assert_eq!(jpeg_dims(&sprite_body(out)), (400, 150));
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 

@@ -19,6 +19,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -60,12 +61,32 @@ def decode_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("decode")
     plain = root / "plain"
     plain.mkdir()
-    Image.new("RGB", (64, 64), (10, 20, 30)).save(plain / "ok.png", format="PNG")
-    for name, fmt in (("ok.avif", "AVIF"), ("ok.tiff", "TIFF")):
+    for ext, fmt in (
+        ("jpg", "JPEG"),
+        ("jpeg", "JPEG"),
+        ("png", "PNG"),
+        ("gif", "GIF"),
+        ("webp", "WEBP"),
+        ("bmp", "BMP"),
+        ("avif", "AVIF"),
+        ("tiff", "TIFF"),
+    ):
         try:
-            (plain / name).write_bytes(_raster(fmt))
+            (plain / f"ok.{ext}").write_bytes(_raster(fmt))
         except Exception:
-            pass
+            pass  # env lacks the encoder (e.g. AVIF build) — _needs skips
+    (plain / "ok.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="60">'
+        '<rect width="40" height="60" fill="red"/></svg>',
+        encoding="utf-8",
+    )
+    # Archive member paths share load_source_bytes with directory files —
+    # the AVIF member exercises the same decode gate as plain/ok.avif.
+    with zipfile.ZipFile(root / "arc.zip", "w") as zf:
+        zf.writestr("ok.png", _raster("PNG"))
+        avif = plain / "ok.avif"
+        if avif.exists():
+            zf.writestr("ok.avif", avif.read_bytes())
     (plain / "bad.heic").write_bytes(b"not an image at all")
     (plain / "bad.avif").write_bytes(b"not an image at all")
     return root
@@ -91,13 +112,53 @@ def _needs(path: Path) -> None:
         pytest.skip(f"Pillow cannot encode {path.suffix} in this env")
 
 
-def test_common_native_200_thumb_and_view(decode_server: str):
-    status, headers, _ = _get(decode_server, "/thumb/plain/ok.png?w=200")
+#: spec §7 の native 集合 (svg は passthrough で別 test)。値は `/view`
+#: (w なし) の content-type — passthrough 型は素の bytes、それ以外は
+#: normalized JPEG。#563 で avif も native 化。
+_NATIVE_VIEW_MIME = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "gif": "image/gif",
+    "webp": "image/jpeg",
+    "bmp": "image/jpeg",
+    "avif": "image/jpeg",
+}
+
+
+@pytest.mark.parametrize("ext,view_mime", sorted(_NATIVE_VIEW_MIME.items()))
+def test_native_formats_thumb_and_view(decode_server: str, decode_tree: Path, ext: str, view_mime: str):
+    """native 全形式が実 decode される — /thumb は常に 200 JPEG、/view は
+    passthrough mime または normalized JPEG、`?w=` は常に normalized JPEG。
+    (#563: gate 分類だけでなく実エンコード済みバイトの decode を検証)"""
+    _needs(decode_tree / "plain" / f"ok.{ext}")
+    status, headers, _ = _get(decode_server, f"/thumb/plain/ok.{ext}?w=200")
     assert status == 200
     assert headers["content-type"] == "image/jpeg"
-    status, headers, _ = _get(decode_server, "/view/plain/ok.png")
+    status, headers, _ = _get(decode_server, f"/view/plain/ok.{ext}")
     assert status == 200
-    assert headers["content-type"] == "image/png"
+    assert headers["content-type"] == view_mime
+    status, headers, _ = _get(decode_server, f"/view/plain/ok.{ext}?w=400")
+    assert status == 200
+    assert headers["content-type"] == "image/jpeg"
+
+
+def test_svg_passthrough_thumb_and_view(decode_server: str):
+    """`.svg` は decode せず素の bytes + sandbox CSP を両 endpoint で返す。"""
+    for path in ("/thumb/plain/ok.svg?w=200", "/view/plain/ok.svg"):
+        status, headers, _ = _get(decode_server, path)
+        assert status == 200
+        assert headers["content-type"] == "image/svg+xml"
+        assert headers.get("content-security-policy") == "default-src 'none'; sandbox"
+
+
+def test_avif_archive_member_thumb_and_view(decode_server: str, decode_tree: Path):
+    """#563: zip 内の AVIF member も dir file と同じ decode 経路で 200。"""
+    _needs(decode_tree / "plain" / "ok.avif")
+    for path in ("/thumb/arc.zip/ok.avif?w=200", "/view/arc.zip/ok.avif"):
+        status, headers, _ = _get(decode_server, path)
+        assert status == 200
+        assert headers["content-type"] == "image/jpeg"
 
 
 def test_common_native_thumb_304(decode_server: str):
@@ -111,15 +172,6 @@ def test_common_native_thumb_304(decode_server: str):
         decode_server, "/thumb/plain/ok.png?w=200", {"If-None-Match": etag}
     )
     assert status == 304
-
-
-def test_native_avif_200_thumb_and_view(decode_server: str, decode_tree: Path):
-    _needs(decode_tree / "plain" / "ok.avif")
-    # #563: image crate avif-native (mp4parse + dav1d) で native decode。
-    for path in ("/thumb/plain/ok.avif?w=200", "/view/plain/ok.avif"):
-        status, headers, _ = _get(decode_server, path)
-        assert status == 200
-        assert headers["content-type"] == "image/jpeg"
 
 
 def test_python_only_tiff_501_thumb_and_view(decode_server: str, decode_tree: Path):
