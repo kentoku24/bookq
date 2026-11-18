@@ -37,6 +37,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from browse_header_helpers import open_header_menu
+
 WARNING_MARK = "⚠"
 
 
@@ -512,9 +514,9 @@ def test_search_cards_show_thumbnail(search_page):
 
     RED pre-fix (placeholder div only), GREEN post-fix.
     """
-    # tile → list → card (two clicks from the tile default).
-    search_page.locator("#footer-refresh-btn").click()
-    search_page.locator("#footer-refresh-btn").click()
+    # ⋯menu → カード (direct pick; no more cycling).
+    open_header_menu(search_page)
+    search_page.locator("#menu-view-card").click()
     search_page.wait_for_selector("#tile-grid.card-mode")
 
     with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
