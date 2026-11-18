@@ -180,11 +180,12 @@ pub(crate) fn is_safe_entry(name: &str) -> bool {
 /// paths may not name them either. Covers `.bookq-uploads` under every
 /// caller-supplied case/spelling on case-insensitive filesystems, where the
 /// post-realpath staging compare (which preserves the caller's case) can't.
-/// `.` self-references pass: `folder=.` is a supported root alias and it
-/// resolves inside the library anyway. `..` is a dot-name here — callers
-/// also reject it upstream.
+/// `.`/`..` are traversal syntax, not hidden names — they keep their
+/// existing handling (`folder=.` is a supported root alias, `..` gets 403
+/// from the containment check or 400 from `is_safe_entry` upstream).
 pub(crate) fn has_dot_component(path: &str) -> bool {
-    path.split('/').any(|c| c.len() > 1 && c.starts_with('.'))
+    path.split('/')
+        .any(|c| c.starts_with('.') && c != "." && c != "..")
 }
 
 /// `_is_image_entry`: exposable image inside an archive.
