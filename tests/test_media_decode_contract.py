@@ -1,13 +1,12 @@
-"""Media decode 契約テスト — #406 (Phase 2c v1 port, #487, #503 rs-only)。
+"""Media decode 契約テスト — #406 (Phase 2c v1 port, #487, #503 rs-only, #563 avif)。
 
 api/v1-semantics.md §7 の正本を HTTP 応答契約として検証する:
 
-- 共通 native 集合 (jpg/png/…) は /thumb・/view とも 200
-- Python-only 由来 (genuine .avif/.tiff) は Serve::Proxy → no-upstream
-  で 501 (gate 自体は cargo 側 thumbs.rs::decode_gate_truth_table /
-  thumb_view_python_only_and_unsupported_proxy が検証)
-- unsupported (.heic/.heif/.jxl の代表 + 破損バイト) は Proxy →
-  no-upstream で 501
+- 共通 native 集合 (jpg/png/avif/…) は /thumb・/view とも 200
+- Pillow-only 由来 (genuine .tiff) は no-upstream で 501 (gate 自体は
+  cargo 側 thumbs.rs::decode_gate_truth_table /
+  thumb_view_python_only_and_unsupported_501 が検証)
+- unsupported (.heic/.heif/.jxl の代表 + 破損バイト) は 501
 - rs の集合定数が自己無矛盾である (NATIVE/ONLY/UNSUP が互いに素 —
   形式追加時は spec §7 + 定数の同時更新を強制)
 
@@ -114,17 +113,16 @@ def test_common_native_thumb_304(decode_server: str):
     assert status == 304
 
 
-def test_python_only_avif_200_thumb_and_view(decode_server: str, decode_tree: Path):
+def test_native_avif_200_thumb_and_view(decode_server: str, decode_tree: Path):
     _needs(decode_tree / "plain" / "ok.avif")
-    # image crate は avif を decode できない → Proxy → no-upstream 501。
-    # gate の正本は cargo 側 (decode_gate_truth_table)。
+    # #563: image crate avif-native (mp4parse + dav1d) で native decode。
     for path in ("/thumb/plain/ok.avif?w=200", "/view/plain/ok.avif"):
         status, headers, _ = _get(decode_server, path)
-        assert status == 501
-        assert headers["content-type"] == "application/json"
+        assert status == 200
+        assert headers["content-type"] == "image/jpeg"
 
 
-def test_python_only_tiff_200_thumb_and_view(decode_server: str, decode_tree: Path):
+def test_python_only_tiff_501_thumb_and_view(decode_server: str, decode_tree: Path):
     _needs(decode_tree / "plain" / "ok.tiff")
     for path in ("/thumb/plain/ok.tiff?w=200", "/view/plain/ok.tiff"):
         status, headers, _ = _get(decode_server, path)
@@ -136,9 +134,10 @@ def test_python_only_tiff_200_thumb_and_view(decode_server: str, decode_tree: Pa
 def test_unsupported_returns_404_not_500(decode_server: str, name: str):
     """unsupported / 破損バイトは 500 ではない。
 
-    rs は拡張子ゲートまたは decode 失敗で Proxy → no-upstream の 501。
-    gate 自体は cargo 側 (thumbs.rs::thumb_undecodable_proxies /
-    thumb_view_python_only_and_unsupported_proxy) が検証する。
+    rs は拡張子ゲート (heic) または decode 失敗 (corrupt avif — #563 で
+    native 入りしたため gate ではなく decoder が弾く) で 501。
+    gate 自体は cargo 側 (thumbs.rs::thumb_undecodable_answers_501 /
+    thumb_view_python_only_and_unsupported_501) が検証する。
     """
     expected = _PROXY_STATUS
     for path in (f"/thumb/plain/{name}?w=200", f"/view/plain/{name}"):
