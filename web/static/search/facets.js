@@ -390,6 +390,8 @@
       r.checked = (r.value === activeFilters.sort);
     });
     if (filterBtn) filterBtn.classList.toggle('active', activeFilters.artist.length > 0 || activeFilters.tag.length > 0);
+    var menuBtn = document.getElementById('header-menu-btn');
+    if (menuBtn) menuBtn.classList.toggle('active', activeFilters.artist.length > 0 || activeFilters.tag.length > 0);
   }
 
   // Bottom sheet open/close — called by app.js wiring (needs sidebar etc)

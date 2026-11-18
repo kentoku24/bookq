@@ -1150,7 +1150,7 @@
   }
   function hideResumeBtn(){ resumeBtn.classList.add("hidden"); setInert(resumeBtn, true); sidebar.classList.remove("has-resume"); }
   function showResumeBtn(){ resumeBtn.classList.remove("hidden"); setInert(resumeBtn, false); sidebar.classList.add("has-resume"); }
-  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); syncSidebarA11y(); }
+  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); closeHeaderMenu({focus:false}); syncSidebarA11y(); }
   try { window.closeSidebar = closeSidebar; window.setInert = setInert; window.syncSidebarA11y = syncSidebarA11y; } catch(e) { console.warn(e); }
   // The visual side of opening the drawer — shared with browse/pairSync.js
   // (paired scroll-mirror opens the follower's sidebar without a nav intent).
@@ -1184,6 +1184,9 @@
   });
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape") return;
+    // The header ⋯menu is the topmost layer while open — Escape closes it
+    // (and returns focus to its button) rather than the sidebar behind it.
+    if (closeHeaderMenu()) return;
     // H4(c): the filter sheet is a real dialog (role=dialog aria-modal=true)
     // now — Escape must dismiss IT first, not the sidebar behind it.
     if (bottomSheet.classList.contains("open")) { closeFilterSheet(); return; }
@@ -2129,6 +2132,9 @@
     });
     filterBtn.classList.toggle('active',
       activeFilters.artist.length > 0 || activeFilters.tag.length > 0);
+    // the ⋯menu button mirrors the active state — it's the only always-
+    // visible hint now that the funnel lives inside the menu.
+    if (headerMenuBtn) headerMenuBtn.classList.toggle('active', filterBtn.classList.contains('active'));
   }
 
   function openFilterSheet() {
@@ -4091,6 +4097,10 @@
     const u = sidebar.cloneNode(true);
     u.style.transform = '';          // never inherit a mid-gesture translate
     u.style.transition = 'none';     // per-rAF parallax writes must not lag
+    // The clone is a static snapshot: never freeze an open ⋯menu into it,
+    // and the floating connectivity pill belongs to the live panel only.
+    const _hm = u.querySelector('#header-menu'); if (_hm) _hm.hidden = true;
+    const _os = u.querySelector('#offline-status'); if (_os) _os.remove();
     if (patch) { try { patch(u); } catch(e) { console.warn(e); } }
     navUnderlaySlot.appendChild(u);
     navUnderlay = host;
@@ -4143,6 +4153,7 @@
     const header = document.getElementById('sidebar-header');
     if (header) {
       const hc = header.cloneNode(true);
+      const _hcMenu = hc.querySelector('#header-menu'); if (_hcMenu) _hcMenu.hidden = true;
       const h = hc.querySelector('#browse-header');
       if (h) {
         if (!parent) h.innerHTML = '<span id="browse-root-icon">\uD83D\uDCC1</span> フォルダ';
@@ -4909,24 +4920,91 @@
     if (dragDecided) snapTo(currentIdx);
   });
 
-  // ── footer: toggle tile ↔ list ↔ card ──
-  const footerBtn = document.getElementById("footer-refresh-btn");
-  function updateFooterBtn(){
-    const labels = { tile: "🎨", list: "📋", card: "🃏" };
-    footerBtn.textContent = labels[viewMode] || "🎨";
-    footerBtn.title = "表示: " + ({tile:"タイル",list:"リスト",card:"カード"}[viewMode] || viewMode);
+  // ── header ⋯menu: filter / edit / view / reload / harness / logout ──
+  // The view-mode radios are the successor of the old footer cycle button —
+  // URL restore still pokes window.updateViewMenu (hash.js) to resync them.
+  const headerMenuBtn = document.getElementById("header-menu-btn");
+  const headerMenu = document.getElementById("header-menu");
+  function updateViewMenu(){
+    const ids = { tile: "menu-view-tile", list: "menu-view-list", card: "menu-view-card" };
+    for (const [mode, id] of Object.entries(ids)) {
+      const el = document.getElementById(id);
+      if (el) el.setAttribute("aria-checked", viewMode === mode ? "true" : "false");
+    }
   }
-  try { window.updateFooterBtn = updateFooterBtn; } catch(e) { console.warn(e); }
-  footerBtn.addEventListener("click", async () => {
-    const modes = ["tile", "list", "card"];
-    const idx = modes.indexOf(viewMode);
-    viewMode = modes[(idx + 1) % modes.length];
-    updateFooterBtn();
+  try { window.updateViewMenu = updateViewMenu; } catch(e) { console.warn(e); }
+  // Returns true when it actually closed an open menu — the global Escape
+  // chain and closeSidebar use that to tell "menu ate the event" apart.
+  function closeHeaderMenu(opts){
+    if (!headerMenu || headerMenu.hidden) return false;
+    headerMenu.hidden = true;
+    headerMenuBtn.setAttribute("aria-expanded", "false");
+    if (!opts || opts.focus !== false) headerMenuBtn.focus();
+    return true;
+  }
+  try { window.closeHeaderMenu = closeHeaderMenu; } catch(e) { console.warn(e); }
+  function openHeaderMenu(){
+    headerMenu.hidden = false;
+    headerMenuBtn.setAttribute("aria-expanded", "true");
+    const first = headerMenu.querySelector("[role=menuitem]:not([disabled]),[role=menuitemradio]");
+    if (first) first.focus();
+  }
+  if (headerMenuBtn && headerMenu){
+    headerMenuBtn.addEventListener("click", e => {
+      e.stopPropagation();   // #sidebar-header's delegated close must not see it
+      if (headerMenu.hidden) openHeaderMenu(); else closeHeaderMenu();
+    });
+    // Capture: the menu hides BEFORE the item's own action runs — e.g.
+    // #filter-btn's listener stopPropagations at target, which a bubble
+    // closer would never survive. Dispatch continues to the (now hidden)
+    // item either way since the path is already computed.
+    headerMenu.addEventListener("click", e => {
+      if (e.target.closest("[role=menuitem],[role=menuitemradio]")) closeHeaderMenu();
+    }, true);
+    headerMenu.addEventListener("click", e => { e.stopPropagation(); });
+    headerMenu.addEventListener("keydown", e => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+      const items = Array.from(headerMenu.querySelectorAll("[role=menuitem],[role=menuitemradio]")).filter(el => !el.disabled);
+      if (!items.length) return;
+      e.preventDefault(); e.stopPropagation();
+      let i = items.indexOf(document.activeElement);
+      if (e.key === "Home") i = 0;
+      else if (e.key === "End") i = items.length - 1;
+      else i = (i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[i].focus();
+    });
+    document.addEventListener("click", e => {
+      if (headerMenu.hidden) return;
+      if (e.target.closest("#header-menu") || e.target.closest("#header-menu-btn")) return;
+      closeHeaderMenu({focus:false});
+    });
+  }
+  async function setViewMode(mode){
+    if (["tile", "list", "card"].indexOf(mode) < 0) return;
+    viewMode = mode;
+    updateViewMenu();
     try { await refreshOfflineMap(); } catch(e) { console.warn(e); }
     renderView();
     window.HashRouter.writeBrowseStateReplace();
+  }
+  for (const mode of ["tile", "list", "card"]) {
+    const el = document.getElementById("menu-view-" + mode);
+    if (el) el.addEventListener("click", () => { setViewMode(mode); });
+  }
+  const menuReload = document.getElementById("menu-reload");
+  if (menuReload) menuReload.addEventListener("click", async () => {
+    // iOS library.refresh() parity: rescan the index, then reload the tree
+    // keeping the current folder.
+    try {
+      const res = await _connFetch()(globalThis.BookqApi.endpoints.indexRefresh, {method: "POST"});
+      if (!res.ok) throw new Error("http " + res.status);
+      await loadFolders({preservePath: true});
+    } catch(e) {
+      console.warn(e);
+      try { showErrorToast("再読み込みに失敗しました"); } catch(e2) { console.warn(e2); }
+    }
   });
-  updateFooterBtn();
+  updateViewMenu();
 
   // ── continue-reading button ──
   function updateResumeButton() {
