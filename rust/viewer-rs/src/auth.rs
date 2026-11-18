@@ -185,12 +185,20 @@ pub fn resolve(
     // still return it as the caller, and the Bearer may be someone else.
     match session_lookup(headers, session_key) {
         SessionLookup::User(u) => {
-            return match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
-                Some(email) => Caller::User(Identity {
-                    email: email.to_lowercase(),
-                }),
-                None => Caller::Delegate,
-            };
+            match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
+                // #373: the Bearer path re-checks ALLOWED_EMAILS on every
+                // request; the session cookie gets the same evaluation so
+                // a removed email loses access now, not at cookie expiry.
+                // A disallowed session yields no identity — fall to
+                // Bearer exactly like `NoUser`.
+                Some(email) => {
+                    let email = email.to_lowercase();
+                    if allowlist.contains(&email) {
+                        return Caller::User(Identity { email });
+                    }
+                }
+                None => return Caller::Delegate,
+            }
         }
         SessionLookup::Corrupt => return Caller::Delegate,
         SessionLookup::Absent | SessionLookup::NoUser => {}
@@ -399,8 +407,17 @@ pub fn resolve_ws_user(
         return Some(Value::Object(u));
     }
     match session_lookup(headers, session_key) {
-        // Any non-null `user` is the caller upstream — return it whole.
-        SessionLookup::User(u) => return Some(u),
+        SessionLookup::User(u) => {
+            match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
+                // #373: same ALLOWED_EMAILS re-evaluation as `resolve` —
+                // a removed email fails the handshake; the Bearer
+                // fallback below still applies.
+                Some(e) if !allowlist.contains(&e.to_lowercase()) => {}
+                // Any other non-null `user` is the caller upstream —
+                // return it whole.
+                _ => return Some(u),
+            }
+        }
         // Signed but not a session object — starlette raises on load and
         // the handshake dies; fail closed.
         SessionLookup::Corrupt => return None,
@@ -715,6 +732,51 @@ mod tests {
             Caller::User(u) => assert_eq!(u.email, "b@example.com"),
             Caller::Delegate => panic!("bearer after bad session delegated"),
         }
+    }
+
+    /// #373: the session cookie gets the Bearer path's per-request
+    /// ALLOWED_EMAILS re-check — a removed email yields no identity.
+    #[test]
+    fn disallowed_session_user_falls_to_bearer() {
+        const REMOVED_JSON: &str =
+            "{\"user\":{\"email\":\"b@example.com\",\"name\":\"Bob\",\"picture\":\"\"}}";
+        let cookie = sign_session(SECRET, REMOVED_JSON.as_bytes(), now_ts());
+        // No Bearer → the request is simply unauthenticated.
+        let h = headers_with(Some(&format!("session={cookie}")), None);
+        assert!(matches!(
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            Caller::Delegate
+        ));
+        // A valid Bearer still wins — the disallowed session yields no
+        // identity, it does not veto the request.
+        let h = headers_with(
+            Some(&format!("session={cookie}")),
+            Some(&format!("Bearer {}", bearer_for("a@example.com", 3600))),
+        );
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()) {
+            Caller::User(u) => assert_eq!(u.email, "a@example.com"),
+            Caller::Delegate => panic!("bearer after disallowed session delegated"),
+        }
+    }
+
+    /// #373: the same re-check on the reader-sync handshake path.
+    #[test]
+    fn disallowed_session_user_fails_ws_handshake() {
+        const REMOVED_JSON: &str =
+            "{\"user\":{\"email\":\"b@example.com\",\"name\":\"Bob\",\"picture\":\"\"}}";
+        let cookie = sign_session(SECRET, REMOVED_JSON.as_bytes(), now_ts());
+        let h = headers_with(Some(&format!("session={cookie}")), None);
+        assert!(
+            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist())
+                .is_none()
+        );
+        // An allowlisted session still resolves.
+        let good = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
+        let h = headers_with(Some(&format!("session={good}")), None);
+        assert!(
+            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist())
+                .is_some()
+        );
     }
 
     /// `SESSION_MAX_AGE` mirrors the Python-era `SessionMiddleware(max_age=86400 * 7)`
