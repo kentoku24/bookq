@@ -42,9 +42,14 @@ checks.positive_data_acceptance.expected-statuses = [
 
 [[operations]]
 include-name = "GET /image/{path}"
+# 416 is reachable on schema-valid input: `bytes=N-` with N ≥ file size
+# on a real fixture (path has an example the fuzzer can resolve).
 checks.positive_data_acceptance.expected-statuses = [
-  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
+  "2xx", "3xx", "400", "401", "403", "404", "409", "416", "429", "5xx",
 ]
+# 501 is a real answer here too (compressed multipart RAR entries,
+# PDF pages without libpdfium) — same rationale as thumb/view below.
+checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "501"]
 
 # Media paths reject shapes the `type: string` schema can't express
 # (empty segments, trailing slashes, NUL bytes, unresolvable names).
@@ -86,7 +91,7 @@ checks.positive_data_acceptance.expected-statuses = [
 [[operations]]
 include-name = "POST /api/v1/library/files"
 checks.positive_data_acceptance.expected-statuses = [
-  "2xx", "3xx", "400", "401", "403", "404", "409", "413", "415", "429", "503", "5xx",
+  "2xx", "3xx", "400", "401", "403", "404", "409", "429", "503", "5xx",
 ]
 checks.not_a_server_error.expected-statuses = ["2xx", "3xx", "4xx", "503"]
 
