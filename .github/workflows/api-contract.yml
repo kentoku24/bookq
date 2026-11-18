@@ -58,8 +58,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: System deps (zlib for flate2)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
+      - name: System deps (zlib for flate2, dav1d for avif-native #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config libdav1d-dev
 
       - uses: Swatinem/rust-cache@v2
         with:

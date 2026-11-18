@@ -118,6 +118,9 @@ jobs:
         with:
           workspaces: rust
 
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
@@ -170,6 +173,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
@@ -261,6 +267,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml

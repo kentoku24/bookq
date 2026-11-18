@@ -133,6 +133,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.sdk.outputs.ok == 'true'
 
+      # dav1d-sys (image avif-native, #563) probes system dav1d via
+      # pkg-config — brew satisfies it so no meson/ninja fallback runs.
+      - name: System deps (dav1d for avif-native, #563)
+        if: steps.sdk.outputs.ok == 'true'
+        run: brew install dav1d pkg-config || brew upgrade dav1d pkg-config || true
+
       - name: Build viewer-rs
         if: steps.sdk.outputs.ok == 'true'
         run: cargo build --manifest-path rust/Cargo.toml -p viewer-rs
