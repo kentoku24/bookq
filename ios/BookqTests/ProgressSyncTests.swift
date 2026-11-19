@@ -24,6 +24,16 @@ final class ProgressSyncTests: XCTestCase {
         sync.sleep = { _ in }            // timers fire immediately
     }
 
+    override func tearDown() async throws {
+        // Drain before the next test's StubURLProtocol.reset(): armed
+        // retry timers / in-flight sendTasks outlive the test and their
+        // late requests would land in the NEXT test's `requests` —
+        // e.g. testSyncPushesNewerLocal's trailing PUT broke
+        // testTransientRetriesWithSameTs's last-record assertion on CI.
+        sync?.reset()
+        sync = nil
+    }
+
     private func waitPuts(_ n: Int,
                           file: StaticString = #filePath,
                           line: UInt = #line) async {
