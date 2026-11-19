@@ -17,8 +17,8 @@ EXPECTED = {
     "work-chapters.json": ["js", "swift", "rust", "kotlin"],
     "path-lookup.json": ["js", "swift", "rust", "kotlin"],
     "encode-path.json": ["js", "swift", "rust", "kotlin"],
-    "solo-spreads.json": ["js", "swift", "kotlin"],
-    "chapter-padding.json": ["js", "swift", "kotlin"],
+    "solo-spreads.json": ["js", "swift", "kotlin", "rust"],
+    "chapter-padding.json": ["js", "swift", "kotlin", "rust"],
     "positions-cases.json": ["rust"],
 }
 
