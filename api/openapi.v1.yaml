@@ -158,6 +158,13 @@ paths:
 
         `since` に既知の `generation` を渡すと、一致時 304、
         不一致時は全木を返す（`since` 指定時は常に全木モード）。
+
+        `visibility` 省略時 (既定) の挙動は不変 — 隠しルートを除外せず
+        従来どおりの未フィルタ木を返す (旧クライアント互換)。
+        `visibility=apply` は隠しルートをサーバ側で除外する。
+        `visibility=annotate` は除外せず隠しノードに `hidden: true` を付ける。
+        意味論の正本は `api/v1-semantics.md` §1 (apply の 503 fail-closed、
+        ETag への visibility リビジョン含有を含む)。
       parameters:
         - name: path
           in: query
@@ -171,6 +178,10 @@ paths:
           in: query
           schema: {type: integer}
           description: 既知 generation。一致 = 304
+        - name: visibility
+          in: query
+          schema: {type: string, enum: [apply, annotate]}
+          description: 省略 = 不変 (未フィルタ)。apply=隠しルート除外、annotate=`hidden:true` 付与
       responses:
         "200":
           description: "ツリー。`ETag` + `Cache-Control: private, max-age=60`"
@@ -213,12 +224,70 @@ paths:
                         type: folder
                         archive: true
                         children: []
+                resolved:
+                  summary: 解決済みフィールド付き (T03・加算的)
+                  value:
+                    kind: tree
+                    generation: 7
+                    nodes:
+                      - name: "Series/vol1"
+                        type: folder
+                        path: "Series/vol1"
+                        kind: work
+                        work: "Series/vol1"
+                        coverUrl: "/thumb/Series/vol1/p00.jpg"
+                        thumb: "p00.jpg"
+                        children:
+                          - name: "p00.jpg"
+                            type: image
+                            path: "Series/vol1/p00.jpg"
+                          - name: "p01.jpg"
+                            type: image
+                            path: "Series/vol1/p01.jpg"
+                      - name: "Shelf"
+                        type: folder
+                        path: "Shelf"
+                        kind: shelf
+                        coverUrl: "/thumb/Shelf/a/p00.jpg"
+                        coverUrls:
+                          - "/thumb/Shelf/a/p00.jpg"
+                          - "/thumb/Shelf/b/p00.jpg"
+                        thumbs: ["a/p00.jpg", "b/p00.jpg"]
+                        children:
+                          - name: "a"
+                            type: folder
+                            path: "Shelf/a"
+                            kind: work
+                            work: "Shelf/a"
+                            coverUrl: "/thumb/Shelf/a/p00.jpg"
+                            children: []
+                annotated:
+                  summary: visibility=annotate (hidden 付与)
+                  value:
+                    kind: tree
+                    generation: 7
+                    nodes:
+                      - name: "Series"
+                        type: folder
+                        path: "Series"
+                        kind: shelf
+                        coverUrl: "/thumb/Series/vol1/p00.jpg"
+                        children: []
+                      - name: "Secret"
+                        type: folder
+                        path: "Secret"
+                        kind: work
+                        work: "Secret"
+                        hidden: true
+                        coverUrl: "/thumb/Secret/p00.jpg"
+                        children: []
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "304": {description: since が generation に一致（本体なし）}
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
+        "503": {$ref: "#/components/responses/ServiceUnavailable"}
 
   /api/v1/images:
     get:
@@ -1613,6 +1682,11 @@ components:
         `name` は flatten 規約により `/` を含み得る（"parent/child"）。
         `thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`
         に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。
+        `path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は
+        サーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは
+        未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`
+        始まりの絶対 URL で、クライアントは `?w=` のみを付与する。
+        `hidden` は `visibility=annotate` 時のみ付く。
       properties:
         name: {type: string}
         type: {type: string, enum: [folder, image]}
@@ -1632,6 +1706,30 @@ components:
         has_metadata: {type: boolean}
         metadata: {$ref: "#/components/schemas/ComicMetadata"}
         subtree_facets: {$ref: "#/components/schemas/Facets"}
+        path:
+          type: string
+          description: 合成済みフル path (flatten 後の `parent/child` を含む。不透明値として扱う)
+          example: "Series/vol1"
+        coverUrl:
+          type: string
+          description: "`/thumb/…` 始まりの絶対 URL。クライアントは `?w=` のみ付与する"
+          example: "/thumb/Series/vol1/p00.jpg"
+        coverUrls:
+          type: array
+          items: {type: string}
+          description: "`coverUrl` の複数版 (multi-thumb グリッド用)。`thumbs` がある時の解決済み形"
+          example: ["/thumb/Shelf/a/p00.jpg", "/thumb/Shelf/b/p00.jpg"]
+        kind:
+          type: string
+          enum: [work, shelf, mixed]
+          description: "`work`=タップで開く作品、`shelf`=階層のみ、`mixed`=両方を含む"
+        work:
+          type: string
+          description: タップ時に開く Work の `folder` (不透明値として `GET /api/v1/work?folder=` に渡す)
+          example: "Series/vol1"
+        hidden:
+          type: boolean
+          description: "`visibility=annotate` 時のみ付く。`true` = 隠しルート配下"
 
     TreeResponse:
       type: object
