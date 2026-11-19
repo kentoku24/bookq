@@ -346,23 +346,39 @@ def test_async_index_yields_real_macrotask(browser, server):
     try:
         page.goto(server + "/")
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
         out = page.evaluate(
             """async () => {
                 const kids = [];
                 for (let i = 0; i < 20000; i++)
                     kids.push({name: 'i' + i + '.png', type: 'image'});
                 const t = [{name:'big', type:'folder', children:kids}];
-                let beats = 0;
-                const ch = new MessageChannel();
-                ch.port1.onmessage = () => {
-                    beats++;
-                    if (beats < 100) ch.port2.postMessage(0);
-                };
-                ch.port2.postMessage(0);
-                const map = await window.setFullPathsAndIndexAsync(t);
-                ch.port1.onmessage = null;
+                // A concurrent index request legitimately supersedes this
+                // build (resolve(null)) — boot-time restoreOfflineFirst does
+                // exactly that whenever IndexedDB still holds a snapshot or
+                // works records (observed on Safari's shared profile when the
+                // per-test scrub can't fully clear IDB). Supersede semantics
+                // are covered by test_superseded_async_index_never_publishes;
+                // here we only need ONE uncontended build to prove real
+                // macrotask yields + correct output, so retry a bounded number
+                // of times instead of racing the drain.
+                let beats = 0, size = -1, attempts = 0;
+                for (let a = 0; a < 8 && size !== 20001; a++){
+                    attempts++;
+                    beats = 0;
+                    const ch = new MessageChannel();
+                    ch.port1.onmessage = () => {
+                        beats++;
+                        if (beats < 100) ch.port2.postMessage(0);
+                    };
+                    ch.port2.postMessage(0);
+                    const map = await window.setFullPathsAndIndexAsync(t);
+                    ch.port1.onmessage = null;
+                    if (map) size = map.size;
+                    else await new Promise(r => setTimeout(r, 250));
+                }
                 window.setFullPathsAndIndex(window.__BOOKQ_DEBUG.getTree());
-                return {beats, size: map ? map.size : -1};
+                return {beats, size, attempts};
             }"""
         )
         assert out["size"] == 20001, out
