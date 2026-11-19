@@ -2,26 +2,46 @@
 # android-ui-test.sh — emulator UI smoke test runner for .github/workflows/android.yml
 #
 # Invoked as the `script:` of reactivecircus/android-emulator-runner (the
-# emulator is already booted; adb is on PATH). Two defences against the
-# environment flake from #326, where all four connected tests failed
-# identically when the emulator could not reach the host-side bookq:
+# emulator is already booted; adb is on PATH). Defences against the
+# environment flake from #326, where all connected tests failed identically
+# when the emulator could not reach the host-side bookq:
 #
-#  1. Connectivity gate — probe the server FROM INSIDE the emulator
-#     (10.0.2.2 is host loopback through the emulated NAT). adb being
-#     mid-handshake counts as not-ready, same as a refused probe; either way
-#     this is a bounded wait instead of an instant all-tests-fail run.
-#  2. One in-session retry — the second attempt reuses the already-booted
-#     emulator, so it costs seconds rather than a fresh boot, and covers the
-#     case where the probe passed but adb/emulator wedged mid-run.
+#  0. adb reverse instead of the guest NAT — #481 was the same class as
+#     #326 but mid-run: slirp's 10.0.2.2 bridge intermittently drops
+#     established connections, failing one test while the suite's other
+#     requests recover. With `adb reverse tcp:PORT tcp:PORT` the app's
+#     loopback connection rides the adb transport channel instead of the
+#     emulator NAT, so the unstable leg is gone entirely (loopback URLs
+#     only; remote/serverless URLs still go through their normal route).
+#  1. Build once, probe per attempt — `assemble*` runs before the first
+#     probe so a NAT bridge that dies during the ~4min Gradle build is
+#     caught by the gate instead of surfacing as a mid-suite network error.
+#  2. `adb install` + `am instrument` instead of `connectedDebugAndroidTest`:
+#     the retry reuses the already-installed APKs, so a second attempt costs
+#     ~1min of probes+instrumentation instead of another Gradle invocation.
+#     Pass/fail is read from the `OK (N tests)` / `FAILURES!!!` summary —
+#     `am instrument`'s exit status alone is not a reliable test verdict.
+#     The app module ships ABI splits (arm64-v8a / x86_64 / universal), so
+#     the APK is picked by the emulator's `ro.product.cpu.abi` with the
+#     universal APK as fallback.
+#  3. One in-session retry — the second attempt reuses the already-booted
+#     emulator, so it costs seconds rather than a fresh boot. The reverse
+#     forward is re-established first: an adb transport reconnect wipes
+#     forwards, and `wait_for_server`'s probe is the only check that
+#     exercises the tunnel end-to-end.
 #
 # Usage: android-ui-test.sh [server_url] [expected_folder]
 set -u
 
-SERVER_URL="${1:-http://10.0.2.2:8080}"
+SERVER_URL="${1:-http://127.0.0.1:8080}"
 EXPECTED_FOLDER="${2:-Other}"
 PROBE_URL="$SERVER_URL/api/v1/health"
 PROBE_ATTEMPTS="${PROBE_ATTEMPTS:-60}"
 PROBE_SLEEP="${PROBE_SLEEP:-2}"
+
+APP_APK="${APP_APK:-}"
+TEST_APK="${TEST_APK:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+RESULTS_FILE="${RESULTS_FILE:-build/outputs/android-ui-test-results.txt}"
 
 HOSTPORT="${SERVER_URL#*://}"
 HOSTPORT="${HOSTPORT%%/*}"
@@ -40,13 +60,20 @@ probe() {
     || adb shell "toybox nc -w 3 '$HOST' '$PORT' </dev/null >/dev/null 2>&1"
 }
 
-run_tests() {
-  ./gradlew :app:connectedDebugAndroidTest \
-    "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$SERVER_URL" \
-    "-Pandroid.testInstrumentationRunnerArguments.bookqExpectedFolder=$EXPECTED_FOLDER"
+# For loopback server URLs the guest reaches the host through
+# `adb reverse`, not the 10.0.2.2 slirp NAT — the transport that dropped
+# mid-suite in #326/#481. Re-run before every probe gate: the command is
+# idempotent, and an adb transport reconnect silently wipes forwards.
+setup_reverse() {
+  case "$HOST" in
+    127.0.0.1|localhost)
+      adb reverse "tcp:$PORT" "tcp:$PORT"
+      ;;
+  esac
 }
 
 wait_for_server() {
+  setup_reverse || return 1
   for i in $(seq 1 "$PROBE_ATTEMPTS"); do
     if probe; then
       echo "emulator reached server after $i probe(s)"
@@ -60,18 +87,94 @@ wait_for_server() {
   return 1
 }
 
-echo "== emulator->server connectivity gate: $PROBE_URL"
-wait_for_server || exit 1
+build_apks() {
+  ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+}
 
-echo "== connected tests (attempt 1)"
-if run_tests; then
+wait_for_adb() {
+  # The emulator-runner action returns once the guest boots, but the adb
+  # transport can still be mid-reconnect — and install_apks runs before
+  # the server probe, so a dropped device here would exit before any
+  # retry path exists.
+  local i
+  for i in $(seq 1 60); do
+    if adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | grep -q '^1'; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: adb/device not ready after 120s"
+  adb devices
+  return 1
+}
+
+install_apks() {
+  local app_apk="$APP_APK"
+  if [[ -z "$app_apk" ]]; then
+    local abi
+    abi="$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+    app_apk="app/build/outputs/apk/debug/app-${abi}-debug.apk"
+    [[ -f "$app_apk" ]] || app_apk="app/build/outputs/apk/debug/app-universal-debug.apk"
+  fi
+  local apk
+  for apk in "$app_apk" "$TEST_APK"; do
+    if [[ ! -f "$apk" ]]; then
+      echo "ERROR: APK not found: $apk"
+      ls app/build/outputs/apk/debug/ app/build/outputs/apk/androidTest/debug/ 2>/dev/null || true
+      return 1
+    fi
+  done
+  adb install -r "$app_apk" || return 1
+  adb install -r "$TEST_APK" || return 1
+}
+
+instrumentation_component() {
+  # `pm list instrumentation` → "instrumentation:<pkg>/<runner> (target=...)".
+  # Discovered rather than hardcoded so a testApplicationId change can't
+  # silently point at a stale component.
+  adb shell pm list instrumentation | tr -d '\r' \
+    | grep -o 'instrumentation:[^ ]*' | grep 'bookq' | head -1 \
+    | sed 's/^instrumentation://'
+}
+
+run_tests() {
+  local comp
+  comp="$(instrumentation_component)"
+  comp="${comp:-dev.bookq.reader.debug.test/androidx.test.runner.AndroidJUnitRunner}"
+  mkdir -p "$(dirname "$RESULTS_FILE")"
+  adb shell am instrument -w \
+    -e bookqServerUrl "$SERVER_URL" \
+    -e bookqExpectedFolder "$EXPECTED_FOLDER" \
+    "$comp" 2>&1 | tee "$RESULTS_FILE"
+  # The runner prints "OK (N tests)" on success and "FAILURES!!!" on test
+  # failures; am's own exit status does not distinguish the two. N must be
+  # >0 — "OK (0 tests)" would be a silent pass if instrumentation ever
+  # resolved to an empty suite.
+  if grep -q 'FAILURES' "$RESULTS_FILE" \
+    || ! grep -qE 'OK \([1-9][0-9]* tests?\)' "$RESULTS_FILE"; then
+    return 1
+  fi
+}
+
+echo "== build APKs"
+build_apks || exit 1
+
+echo "== install APKs"
+wait_for_adb || exit 1
+install_apks || exit 1
+
+echo "== emulator->server connectivity gate: $PROBE_URL"
+echo "== instrumented tests (attempt 1)"
+if wait_for_server && run_tests; then
   exit 0
 fi
 
 # Retry only makes sense once connectivity is back — if the NAT bridge
 # dropped mid-run it may take tens of seconds to recover; a retry fired
-# while still unreachable would waste the attempt.
+# while still unreachable would waste the attempt. APKs stay installed,
+# so the retry is probe + instrument only.
 echo "== attempt 1 failed; re-gating on $PROBE_URL before retry"
-wait_for_server || exit 1
-echo "== connected tests (attempt 2)"
-run_tests
+if wait_for_server && run_tests; then
+  exit 0
+fi
+exit 1

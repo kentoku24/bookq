@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Multi-page overview grid — `viewer/overview.js` equivalent.

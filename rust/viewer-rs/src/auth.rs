@@ -203,7 +203,7 @@ pub fn resolve(
 
 /// The `Bearer` token portion of `Authorization`, if well-formed —
 /// `partition(" ")` semantics: the scheme ends at the first space.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = auth.split_once(' ').unwrap_or((auth, ""));
     if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
@@ -263,16 +263,44 @@ pub fn session_key(secret: &str) -> Option<SessionKey> {
 /// left to right). First-wins would let `session=<valid>; session=<x>`
 /// authenticate where Python sees the tampered value and falls to 401.
 fn session_cookie_value(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, "session")
+}
+
+/// `<name>=<value>` lookup over all Cookie headers — last wins (see
+/// `session_cookie_value`).
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut last = None;
     for v in headers.get_all(header::COOKIE) {
         let Ok(v) = v.to_str() else { continue };
         for kv in v.split(';') {
-            if let Some(rest) = kv.trim().strip_prefix("session=") {
-                last = Some(rest.trim_matches('"').to_string());
+            let kv = kv.trim();
+            if let Some(rest) = kv.strip_prefix(name) {
+                if let Some(rest) = rest.strip_prefix('=') {
+                    last = Some(rest.trim_matches('"').to_string());
+                }
             }
         }
     }
     last
+}
+
+/// `TimestampSigner(secret).sign(data)` — mint the cookie value starlette
+/// emits: `b64std(payload) + "." + b64url(ts) + "." + b64url(sig)`. The
+/// payload base64 is STANDARD (`b64encode`, padding kept) — `+`/`/`/`=`
+/// all appear; ts is the big-endian integer with leading zero bytes
+/// stripped (`int_to_bytes`); the signature is URL_SAFE_NO_PAD HMAC-SHA1
+/// over `value + "." + ts`.
+pub fn sign_session(key: &SessionKey, payload: &[u8], ts: u64) -> String {
+    let value_b64 = STANDARD.encode(payload);
+    let ts_bytes = ts.to_be_bytes();
+    let start = ts_bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    let ts_b64 = URL_SAFE_NO_PAD.encode(&ts_bytes[start..]);
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key.0).expect("hmac key");
+    mac.update(value_b64.as_bytes());
+    mac.update(b".");
+    mac.update(ts_b64.as_bytes());
+    let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("{value_b64}.{ts_b64}.{sig}")
 }
 
 /// `TimestampSigner(secret).unsign(data, max_age)` → the session payload
@@ -520,23 +548,11 @@ mod tests {
 
     // ── resolve(): session-cookie callers ────────────────────────────────
 
-    /// Mint a cookie the way starlette does: the value is STANDARD
-    /// base64 of the JSON (`b64encode`, `=` padding kept — `+`/`/` can
-    /// appear), ts and signature are itsdangerous urlsafe-b64. The key
-    /// comes from the shared `session_key` derivation so tests can't
-    /// drift from the verifier they exercise.
+    /// Mint a cookie the way starlette does — delegates to the prod
+    /// `sign_session` so tests exercise the same code path the OAuth
+    /// callback mints with.
     fn sign_session(secret: &str, payload: &[u8], ts: u64) -> String {
-        let value_b64 = STANDARD.encode(payload);
-        let ts_bytes = ts.to_be_bytes();
-        let start = ts_bytes.iter().position(|&b| b != 0).unwrap_or(7);
-        let ts_b64 = URL_SAFE_NO_PAD.encode(&ts_bytes[start..]);
-        let key = session_key(secret).unwrap();
-        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key.0).unwrap();
-        mac.update(value_b64.as_bytes());
-        mac.update(b".");
-        mac.update(ts_b64.as_bytes());
-        let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-        format!("{value_b64}.{ts_b64}.{sig}")
+        super::sign_session(&session_key(secret).unwrap(), payload, ts)
     }
 
     fn headers_with(cookie: Option<&str>, auth: Option<&str>) -> HeaderMap {
@@ -701,16 +717,13 @@ mod tests {
         }
     }
 
-    /// `SESSION_MAX_AGE` is hand-mirrored from `SessionMiddleware(max_age=)`
-    /// — a Python-side change must trip this test, not silently diverge
-    /// (Rust would accept cookies Python already revoked).
+    /// `SESSION_MAX_AGE` mirrors the Python-era `SessionMiddleware(max_age=86400 * 7)`
+    /// so cookies minted before the Rust cutover stay valid. Live sessions carry
+    /// this value — lowering it revokes them early, raising it extends a contract
+    /// already baked into signed cookies. The Python source this was pinned
+    /// against was deleted in #473; the constant is now owned here.
     #[test]
-    fn session_max_age_matches_python() {
-        let main_py = include_str!("../../../app/main.py");
-        assert!(
-            main_py.contains("max_age=86400 * 7"),
-            "app/main.py SessionMiddleware max_age changed — update SESSION_MAX_AGE"
-        );
+    fn session_max_age_matches_deployed_contract() {
         assert_eq!(SESSION_MAX_AGE, 86400 * 7);
     }
 

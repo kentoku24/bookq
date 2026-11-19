@@ -80,38 +80,93 @@ final class RemoteImageLoader: ObservableObject {
 struct RemoteImageView: View {
     let url: URL?
     var contentMode: ContentMode = .fill
+    /// Reader pages opt in: a failed fetch shows a 再読み込み button that
+    /// re-runs the load. Grid covers stay badge-only — they sit inside
+    /// Buttons, where a nested control can't live.
+    var retryable: Bool = false
     var onImageLoaded: ((UIImage) -> Void)? = nil
     @State private var image: UIImage?
     @State private var failed = false
+    /// Bumped by retry() — `.task(id:)` refires and load() runs again.
+    @State private var retryTick = 0
 
-    var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: contentMode)
-            } else {
-                placeholder
-            }
+    /// Solid dark-gray stand-in rendered while `image == nil`. Keeping the
+    /// body a single `Image` (only the UIImage value changes on load) avoids
+    /// the if/else view-identity swap that left Buttons inside grid cells
+    /// with stale hit-test/accessibility frames.
+    private static let placeholderImage: UIImage = {
+        let size = CGSize(width: 2, height: 3)
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            UIColor(white: 0.16, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
         }
-        .task(id: url) { await load() }
+    }()
+
+    /// `.task(id:)` key — `url` alone wouldn't refire on retry().
+    private struct LoadKey: Hashable {
+        var url: URL?
+        var tick: Int
     }
 
-    private var placeholder: some View {
-        Rectangle()
-            .fill(Color(white: 0.16))
+    var body: some View {
+        // Read the cache synchronously so a warm image renders on the FIRST
+        // pass — an async nil→image swap mid-layout is what left grid-cell
+        // Buttons with stale hit-test frames.
+        let cached = url.flatMap { RemoteImageLoader.shared.image(for: $0) }
+        return Image(uiImage: image ?? cached ?? Self.placeholderImage)
+            .resizable()
+            .aspectRatio(contentMode: contentMode)
             .overlay {
-                Image(systemName: failed ? "exclamationmark.triangle" : "book.closed")
-                    .foregroundStyle(.secondary)
+                // A failed fetch must read differently from an in-flight
+                // load: filled orange triangle vs the quiet book glyph.
+                Image(systemName: failed
+                      ? "exclamationmark.triangle.fill" : "book.closed")
+                    .font(failed ? .title3 : .body)
+                    .foregroundStyle(failed ? .orange : .secondary)
+                    .opacity((image ?? cached) == nil ? 1 : 0)
             }
+            // Kept as a separate overlay so the retry Button never shares
+            // the status icon's view identity (hit-test stability).
+            .overlay(alignment: .bottom) {
+                if failed && retryable && (image ?? cached) == nil {
+                    Button("再読み込み") { retry() }
+                        .font(.caption2)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .padding(.bottom, 8)
+                }
+            }
+            .task(id: LoadKey(url: url, tick: retryTick)) { await load() }
+    }
+
+    /// Tap-to-retry for `retryable` pages — clears the failure badge and
+    /// refires `.task` so load() fetches again (failures are never cached,
+    /// and the loader's inFlight entry is already gone).
+    private func retry() {
+        failed = false
+        retryTick += 1
     }
 
     private func load() async {
+        // A url/tick refire (tier flip, spread regroup, retry) must not
+        // inherit the previous attempt's failure badge — show the quiet
+        // loading glyph until this fetch resolves.
+        failed = false
         // No cover URL = absent thumb (web shows the neutral placeholder);
         // ⚠️ is reserved for a fetch that actually failed.
         guard let url else { return }
-        image = await RemoteImageLoader.shared.load(url)
-        failed = image == nil
-        if let image { onImageLoaded?(image) }
+        let img = await RemoteImageLoader.shared.load(url)
+        // `.task(id: url)` cancels this task when the url changes (tier
+        // flip, spread regroup). The awaited loader call still returns —
+        // without this guard a slow stale fetch would overwrite the newer
+        // image (and fire onImageLoaded for the wrong page) permanently.
+        guard !Task.isCancelled else { return }
+        // Always store into @State — the body is a single stable Image, so
+        // this write can't change the view's structure (and thus can't
+        // stale a Button's hit-test frame the way the old if/else swap did).
+        // Keeping the value also survives a later NSCache eviction.
+        image = img
+        failed = img == nil
+        if let img { onImageLoaded?(img) }
     }
 }

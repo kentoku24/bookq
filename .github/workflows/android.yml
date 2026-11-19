@@ -5,22 +5,44 @@ name: android
 
 on:
   pull_request:
-    paths:
-      - "android/**"
-      - "api/**"
-      - ".github/workflows/android.yml"
-      # The ui job boots the repo's FastAPI server and asserts on
-      # /api/v1/* — server or dependency changes can break the client.
-      - "app/**"
-      - "requirements*.txt"
-      - "rust/viewer-rs/**"
   workflow_dispatch:
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 jobs:
+  # Path gating lives at job level, not on.pull_request.paths: required
+  # status checks need every check name reported on every PR, and a
+  # workflow-level filter leaves the check pending forever on
+  # non-matching PRs (#382). Non-matching jobs end `skipped`, which
+  # satisfies a required check.
+  changes-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        # workflow_dispatch keeps running everything, as before.
+        if: github.event_name == 'pull_request'
+        # The ui job boots the repo's viewer-rs binary and asserts on
+        # /api/v1/* — server or shell-asset changes can break the client,
+        # hence web/** (served payload, #503) below.
+        with:
+          filters: |
+            run:
+              - "android/**"
+              - "api/**"
+              - ".github/workflows/android.yml"
+              - "web/**"
+              - "rust/viewer-rs/**"
+
   unit:
+    needs: changes-android
+    if: github.event_name == 'workflow_dispatch' || needs.changes-android.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -31,12 +53,37 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          # v6 defaults cache-read-only on non-default branches — let
+          # same-repo PRs write so the cache warms; fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+          # Default includes omit wrapper; without it every job
+          # re-library the Gradle distribution.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            wrapper
+
+      # configuration-cache lives in the project .gradle/ dir, which
+      # setup-gradle's gradle-home cache does not cover — persist it so
+      # the task-graph configuration phase is skipped on warm runs.
+      # Per-job keys: unit and ui request different task graphs, so each
+      # keeps its own entries. Gradle re-validates the fingerprint itself,
+      # so a stale restore is safe (it just recomputes).
+      - name: Cache Gradle configuration-cache
+        uses: actions/cache@v6
+        with:
+          path: android/.gradle/configuration-cache
+          key: android-config-cache-${{ github.job }}-${{ hashFiles('android/**/*.gradle.kts', 'android/**/*.gradle', 'android/gradle.properties', 'android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-config-cache-${{ github.job }}-
+            android-config-cache-
 
       # Installed platform on this repo is android-37.2 (minor release);
       # compileSdk { release(37) { minorApiLevel = 2 } } resolves it.
@@ -51,14 +98,14 @@ jobs:
           :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bookq-debug-apk
           path: android/app/build/outputs/apk/debug/app-*-debug.apk
           if-no-files-found: error
 
       - name: Upload test reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: android-test-reports
@@ -69,6 +116,8 @@ jobs:
           if-no-files-found: ignore
 
   ui:
+    needs: changes-android
+    if: github.event_name == 'workflow_dispatch' || needs.changes-android.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -78,12 +127,38 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
-      - uses: actions/setup-java@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          # v6 defaults cache-read-only on non-default branches — let
+          # same-repo PRs write so the cache warms; fork PRs stay read-only.
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+          # Default includes omit wrapper; without it every job
+          # re-library the Gradle distribution.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            wrapper
+
+      # Same configuration-cache persistence as the unit job — see there.
+      - name: Cache Gradle configuration-cache
+        uses: actions/cache@v6
+        with:
+          path: android/.gradle/configuration-cache
+          key: android-config-cache-${{ github.job }}-${{ hashFiles('android/**/*.gradle.kts', 'android/**/*.gradle', 'android/gradle.properties', 'android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-config-cache-${{ github.job }}-
+            android-config-cache-
 
       - name: Install Android SDK packages
         working-directory: android
@@ -93,7 +168,7 @@ jobs:
 
       # Synthetic tree — Series/vol1 flattens to one "Series/vol1" node;
       # Other/ has direct images so its top-level name stays "Other".
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Other /tmp/bookq-state
           uv run --with pillow python - <<'PYEOF'
@@ -103,15 +178,20 @@ jobs:
           Image.new("RGB", (80, 120), (0, 120, 0)).save("/tmp/dl/Other/p00.jpg")
           PYEOF
 
+      - name: Build viewer-rs
+        run: cargo build --manifest-path rust/Cargo.toml -p viewer-rs
+
       - name: Start bookq (test mode)
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            uv run --with-requirements requirements-dev.txt \
-            uvicorn app.main:app --host 127.0.0.1 --port 8080 &
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
+            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
+            ./rust/target/debug/viewer-rs > /tmp/bookq-android-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
           done
-          echo "server did not become healthy" && exit 1
+          echo "server did not become healthy"
+          cat /tmp/bookq-android-ci-server.log
+          exit 1
 
       - name: Enable KVM
         run: |
@@ -119,25 +199,37 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # Emulator reaches the host uvicorn via 10.0.2.2 (cleartext allowed
-      # for that host in the debug network security config). The script
-      # gates on emulator->server reachability first and retries once in the
-      # same booted session — the whole class used to fail when the NAT
-      # bridge or adb was wedged (#326).
+      # Emulator reaches the host viewer-rs via `adb reverse` over
+      # loopback (cleartext for 127.0.0.1 allowed in the debug network
+      # security config) — the 10.0.2.2 slirp NAT bridge intermittently
+      # dropped connections mid-suite (#326, #481); the adb transport
+      # channel has no NAT leg. The script gates on emulator->server
+      # reachability first and retries once in the same booted session.
       - name: Emulator UI test
         uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: 35
           arch: x86_64
           target: google_apis
+          # Runner has 4 vCPUs; the action default of 2 leaves half idle.
+          cores: 4
           disable-animations: true
           working-directory: android
           script: bash "$GITHUB_WORKSPACE/.github/scripts/android-ui-test.sh"
 
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p android/build/outputs
+          cp /tmp/bookq-android-ci-server.log android/build/outputs/server.log 2>/dev/null || true
+
       - name: Upload connected test report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: android-connected-test-report
-          path: android/app/build/reports/androidTests/
+          path: |
+            android/app/build/reports/androidTests/
+            android/build/outputs/android-ui-test-results.txt
+            android/build/outputs/server.log
           if-no-files-found: ignore

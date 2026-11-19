@@ -4,7 +4,7 @@ import java.text.Normalizer
 import java.util.Locale
 
 /**
- * Port of `app/static/browse/visibility.js` (read path) — hidden-root
+ * Port of `web/static/browse/visibility.js` (read path) — hidden-root
  * predicates and the snapshot state machine. Write/mutation paths
  * (PUT + owner header + coalesce) arrive in M6; this holds everything the
  * browse render and navigation guards need.

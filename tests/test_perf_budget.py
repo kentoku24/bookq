@@ -23,7 +23,7 @@ def _wait_for_folders_entries(page, n: int, timeout_ms: int = 10_000):
 def test_top_page_fetches_folders_body_once(server, browser):
     """初回ロードで /api/v1/tree のボディ転送は shallow + full のちょうど 2 回。
 
-    Todo2 の shallow-first 契約: 1 回目 `?depth=1` (first paint)、2 回目 full
+    shallow-first 契約: 1 回目 `?depth=1` (first paint)、2 回目 full
     (同一 DOM への追従)。ボディ判定は transfer >= encoded の実転送で行う。
     起動時の tryAutoSync は freshness gate（5 分）に守られ第 3 リクエストを
     出さない — 3 回目はゲートを越えた手動 revalidateFoldersForOnline() の

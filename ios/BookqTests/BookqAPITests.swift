@@ -87,6 +87,20 @@ final class BookqAPITests: XCTestCase {
         } catch APIError.unauthorized { }
     }
 
+    /// `+` and other reserved chars in folder paths must be percent-encoded
+    /// on the wire — URLQueryItem leaves "+" literal and the server reads
+    /// it as a space, which broke downloads for "+" folders (#414).
+    func testImagesFolderQueryEncoding() async throws {
+        StubURLProtocol.handler = { _ in
+            StubURLProtocol.json(["folder": "a+b", "images": ["p1.jpg"]])
+        }
+        _ = try await StubURLProtocol.api().images(folder: "a+b/第1話 x")
+        let rec = StubURLProtocol.last(path: "api/v1/images")
+        XCTAssertEqual(
+            rec?.request.url?.absoluteString,
+            "http://unit.test/api/v1/images?folder=a%2Bb%2F%E7%AC%AC1%E8%A9%B1%20x")
+    }
+
     /// search() unwraps the 202 → 200 {query,total,results} envelope.
     func testSearch202Then200() async throws {
         var hits = 0
@@ -101,5 +115,62 @@ final class BookqAPITests: XCTestCase {
             q: "x", artist: [], tag: [], includeHidden: false)
         XCTAssertEqual(hits, 2)
         XCTAssertEqual(r?.total, 0)
+    }
+
+    // MARK: - Connectivity reporter (docs/offline-spec.md §5)
+
+    private final class Verdicts: @unchecked Sendable {
+        var ok = 0, fail = 0
+    }
+
+    private func apiWithReporter(_ v: Verdicts) -> BookqAPI {
+        BookqAPI(baseURL: URL(string: "http://unit.test")!,
+                 session: StubURLProtocol.session(),
+                 tokenProvider: { nil },
+                 reporter: ConnectivityReporter(
+                    success: { v.ok += 1 },
+                    unreachable: { v.fail += 1 }))
+    }
+
+    /// A 2xx body is the only "online" proof — the server answered.
+    func testReporter2xxIsSuccess() async throws {
+        let v = Verdicts()
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:]) }
+        try await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 1); XCTAssertEqual(v.fail, 0)
+    }
+
+    /// No response at all (unreachable URLError) → fail verdict.
+    func testReporterUnreachableErrorIsFail() async {
+        let v = Verdicts()
+        StubURLProtocol.failWith = .notConnectedToInternet
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 1)
+    }
+
+    /// Proxy-band 5xx means the server did not answer → fail verdict.
+    func testReporter503IsFail() async {
+        let v = Verdicts()
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:], status: 503) }
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 1)
+    }
+
+    /// A real 4xx/5xx response is neutral — the server answered, the
+    /// machine must not demote over an application-level error.
+    func testReporter404IsNeutral() async {
+        let v = Verdicts()
+        StubURLProtocol.handler = { _ in StubURLProtocol.json([:], status: 404) }
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 0)
+    }
+
+    /// Cancellations are caller-driven (intentional aborts) — never
+    /// connectivity evidence (spec §5 note).
+    func testReporterCancelledIsNeutral() async {
+        let v = Verdicts()
+        StubURLProtocol.failWith = .cancelled
+        try? await apiWithReporter(v).health()
+        XCTAssertEqual(v.ok, 0); XCTAssertEqual(v.fail, 0)
     }
 }

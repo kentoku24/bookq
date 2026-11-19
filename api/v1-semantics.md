@@ -13,6 +13,8 @@
 4. [認証 — PKCE フローと token のライフサイクル](#4-認証)
 5. [gzip / 圧縮対象](#5-gzip)
 6. [エラー応答の形](#6-エラー応答)
+7. [media decode — thumb/view/sprite の対応形式契約](#7-media-decode)
+8. [library edit — アップロード (単発/分割) と削除](#8-library-edit)
 
 ## 1. tree
 
@@ -46,7 +48,9 @@
 
 `GET/PUT/DELETE /api/v1/reading-positions` (参照: `app/api_v1.py`)。
 
-- **user key**: `str(email or "unknown").lower()` — ユーザー毎に独立した slot。
+- **user key**: `user_key_for_email(email)` = `strip().lower()` — ユーザー毎に
+  独立した slot。email が取れない呼び出しは **403** (共有 "unknown" バケットへは
+  フォールバックしない — `app/reading_positions.py::position_user_key`)。
 - **GET**: `{positions: [{folder,page,total,ts}]}` — **ts 降順 (newest first)**。
   `?folder=` で単一 folder に絞れる (tombstone/不在時は空配列)。
 - **PUT**: `?folder=` 必須 (省略 → 422)、body `{page,total,ts}`。
@@ -56,17 +60,26 @@
     `{status:"stale"}` (書き込みは行わない)。
   - **delete-all tombstone との競合**: `ts <= tombstone_ts` → `{status:"stale"}`。
   - 正常 → `{status:"ok"}`。2xx 系は受理扱いでよい (`ok`/`stale` は best-effort)。
-  - **上限**: user 100 (`_POSITION_MAX_USERS`, LRU 追い出し)、folder 512。
+  - **上限**: user 100 (`POSITION_MAX_USERS`, LRU 追い出し)、folder 512。
 - **DELETE**: `?folder=` → その folder に tombstone を記録 (in-flight な古い PUT が
   復活させない)。`?folder` なし → delete-all tombstone_ts を記録。
-- **揮発性**: **per-process in-memory** — 再起動・backend 切替 (strangler flip) で
-  全消失する設計。永続性を期待しないこと。
+- **永続化** (#375): **user-state SQLite に永続** — `BOOKQ_STATE_DIR/
+  folder-visibility.sqlite3` の `position_users`/`position_folders`
+  (schema v2、`api/user-state-schema.sql` が py/rs 共通の DDL 正本)。
+  FastAPI (`app/reading_positions.py`) と viewer-rs
+  (`rust/viewer-rs/src/state.rs`) が同じ DB を読み書きするため、
+  再起動・コンテナ再起動・strangler flip のいずれでも位置は失われない。
+  規則実装は `PositionBook` (純粋 LWW/検証) と store に分離され、
+  `tests/fixtures/positions_cases.json` が py/rs 共通の conformance fixture。
+  v0 `/api/reading-position` は同ストアの「ユーザー最新1件」互換ビュー。
 
 ## 3. folder-visibility
 
 `GET/PUT /api/v1/folder-visibility` (参照: `app/folder_visibility.py`)。
 
-- **owner トークン**:
+- **hiddenRoots はライブラリ共有**: 全認証ユーザーに同一のセットが効く。
+  DB 上は sentinel `user_key = "*"` (`GLOBAL_USER_KEY`) 配下に保存される。
+- **owner トークン** (書き込み者の stale タブ対策。データのスコープではない):
   `hex(HMAC-SHA256(key=SECRET_KEY, msg="folder-visibility:v1:" + user_key))`
   - `user_key` = `email.strip().lower()`
   - `X-Bookq-Visibility-Owner` ヘッダで提示する。クライアントは自身の email と
@@ -134,3 +147,94 @@ spec の `security` は cookie OR Bearer のどちらか。
 - **意味的拒否は schema で表現不可**: 未来 ts ガード (§2)、visibility owner
   (§3)、traversal 403 等は schema-valid でも拒否される —
   `schemathesis.toml` で expected-statuses を op 単位で許容している。
+
+## 7. media decode
+
+decode を要する endpoint (`GET /thumb/{path}`、`GET /view/{path}` の
+normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
+(#406。参照: `app/thumbs.py::COMMON_NATIVE_SUFFIXES`、
+`rust/viewer-rs/src/thumbs.rs::NATIVE_DECODE`)。
+
+- **両 backend がネイティブ decode する共通集合**: `.jpg` `.jpeg` `.png`
+  `.gif` `.webp` `.bmp`。両側とも正常時は **200 + `image/jpeg`**
+  (寸法・品質は同一、バイトは非同一 — `image` JpegEncoder は 4:4:4、
+  Pillow/libjpeg-turbo は 4:2:0 のため)。
+- **`.svg` は decode しない**: 両 backend とも元バイトを `image/svg+xml`
+  で pass-through (Pillow/`image` ともに SVG decoder を持たない)。
+  CSP `default-src 'none'; sandbox` を付与。
+- **Python のみ decode (代表: `.avif` `.tif`/`.tiff`)**: Pillow ≥13
+  (libavif 同梱 wheel) が decode するため Python 直撃は
+  **200 + `image/jpeg`**。Rust (`image` crate は bmp/gif/jpeg/png/webp
+  のみ有効) は `Serve::Proxy` で upstream に流すため、gateway 経由の
+  client 可視は同じ **200** (成功パリティは proxy が保証する)。
+  なお Pillow の `Image.open` は拡張子ではなく内容を sniff するため、
+  ここに列挙しない形式 (`.tga` `.pcx` `.dds` `.qoi` `.ico` `.sgi`
+  `.sun` `.xbm` `.xpm` `.ppm` `.psd` 等) も decode され得る — これらは
+  上と同じく Rust Proxy → upstream 200 でパリティが保たれる。ただし
+  tree に載るのは `app/scanner.py::IMAGE_EXTENSIONS` の 8 形式だけなので、
+  `.tiff`/`.heic`/`.tga` 等は tree 経由では見えず direct URL でのみ
+  到達する点に注意。
+- **両 backend とも decode 不可**: `.heic`/`.heif` `.jxl`、
+  破損バイト等 — Pillow `Image.open` が失敗し Python は **404**
+  (`make_thumbnail`/`make_view_bytes` は全 decode 失敗を 404 に写像 —
+  500 ではない)。Rust は拡張子ゲート (`NATIVE_DECODE` 外 → `Proxy`)
+  または decode 失敗 (`make_thumb`/`make_view` が `None` → `Proxy`)
+  で upstream に流すため、gateway 経由の client 可視も同じ **404**
+  (error パリティは proxy が保証する)。
+- **`/image/{path}` は対象外**: 生バイト配布で decode しないため、
+  上記いずれの形式も **200** (存在すれば)。
+- **将来の対応形式追加時の規則**: `image` crate に feature を足す
+  (例: `tiff`、`avif-encoder` 系) 場合、または Pillow に plugin を足す
+  (例: `pillow-heif`、`pillow-avif-plugin`) 場合は、必ず本節の集合と
+  `app/thumbs.py` / `rust/viewer-rs/src/thumbs.rs` の両定数と
+  `tests/test_media_decode_contract.py` + `thumbs.rs::tests` を同時更新
+  すること。片側だけ増やすと native 直撃と proxy 経由で status が割れる
+  (例: Rust が `.heic` を decode 可能にしても Python が 404 のままなら、
+  native 経路は 200・proxy 経路は 404 になる)。
+
+## 8. library edit
+
+`/api/v1/library/*` — ライブラリへの書き込み面 (参照:
+`rust/viewer-rs/src/library.rs`)。読み取り面と同じくダウンロードルート
+(`LIBRARY_DIR`) 相対パスで指定し、realpath 後の containment を全 op で検証する。
+
+- **対応形式**: `.zip .cbz .rar .cbr .epub .pdf` のみ
+  (`serve.rs::ARCHIVE_EXTENSIONS` + `PDF_EXTENSIONS`)。拡張子は小文字化して
+  判定。それ以外は **415** — ただし multipart (`/library/files`) では
+  per-file `unsupported_type` として `errors[]` に列挙され 200 を返し得る。
+- **uploads 無効化**: 起動時に `<library>/.bookq-uploads/` を作成できない
+  デプロイ (read-only マウント等) では、upload 系・delete ともに
+  **503** `{detail:"uploads disabled"}`。読み取り面は従来どおり動作する。
+- **`dir` の検証**: 空 = ルート。realpath 後 `is_within(library)`、
+  実在 `is_dir()`。書庫ファイルを dir に指定した場合・`.bookq-uploads`
+  配下は **400**、不存在は **404**。
+- **`name` の sanitize**: 空・制御文字・`/`・`\`・`.`/`..`・先頭 `.`・
+  末尾空白/`.`・255B 超は **400** (`invalid_name`)。`/api/v1/library/files`
+  (multipart) ではファイル単位の拒否なので `errors[]` に列挙され
+  リクエスト自体は 200 を返し得る。
+- **衝突の自動リネーム**: 同名 (ファイルでもディレクトリでも) が既に
+  存在する場合、`name (1).ext` `name (2).ext` … を 999 まで試す。
+  尽きた場合は `conflict` — multipart (`/library/files`) では per-file
+  `errors[]` として 200 に列挙、分割アップロードの finalize では
+  **409** を返す。採用名は応答の `name`/`path` で返る。
+- **書き込みの atomicity**: ファイルは必ず tmp (multipart は対象 dir 内の
+  `.bq-tmp-*`、session は `.bookq-uploads/<id>/blob`) に書き、fsync 後に
+  rename する。途中失敗・切断で未完成の本体がライブラリ名で残ることはない
+  (tmp 残骸のみ。`.bookq-uploads` と `.` 始まりの名は scanner が拾わない)。
+- **分割アップロードの順序契約**: `PUT …/uploads/{id}` は
+  `Upload-Offset == 現在 offset` の時のみ append。不一致は
+  **409 `{offset: <現在値>}`** — 重複・順序外・再送はすべてこれで検出し、
+  クライアントは返された offset から再開する。`offset+len > size` は **400**。
+- **finalize**: `offset == size` の時のみ。rename 後にセッション dir を
+  削除するので finalize は冪等ではない (2 回目は **404**)。
+- **セッション寿命**: `<library>/.bookq-uploads/<id>/{meta.json,blob}` に
+  永続 (再起動をまたぐ)。`BOOKQ_UPLOAD_SESSION_TTL_SECS` (既定 7 日) を
+  超えたものは起動時・init 時に sweep される。
+- **index 反映**: 確定・削除の成功後にバックグラウンド refresh が走り、
+  signature 変化を検証して generation が進む。同期で確実に反映したい
+  クライアントは `POST /api/v1/index/refresh` を使う。
+- **delete**: `path` はファイル (単体) またはディレクトリ (再帰)。
+  ルート・`.bookq-uploads` 配下は **400**、不存在は **404**。
+  reading positions・visibility・クライアント側オフライン cache は
+  削除しない (orphan 化するが無害; 同名再アップロードで positions は
+  自然に復活する)。

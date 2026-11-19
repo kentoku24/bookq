@@ -1,4 +1,4 @@
-"""Mixed-folder parent-level images-tile spec pins (plan Todo 4).
+"""Mixed-folder parent-level images-tile spec pins.
 
 Parent-level spec: a mixed folder (loose images + subfolder, e.g.
 ``mgroup/mseries/v02`` = 3 loose + ``sub`` of 2) shows NO tile for its own
@@ -19,7 +19,7 @@ Fixture mirrors group/deep_series (raw depth 2, so SIBLING_AUTOLOAD_MIN_DEPTH
       mgroup/other/        c1.png                 (keeps mgroup unflattened)
       solo/                a.png b.png c.png      (root image-only)
 
-Server/page fixtures mirror tests/conftest.py (own uvicorn on a module tree so
+Server/page fixtures mirror tests/conftest.py (own viewer-rs on a module tree so
 the shared session tree stays untouched); selectors mirror
 tests/test_url_state.py (#counter, #folder-name, .tile[data-path]) and
 tests/test_ui.py (#img-track .page-cell img[src*=...]).
@@ -29,12 +29,8 @@ Run:
 """
 
 import os
-import socket
-import struct
-import subprocess
-import sys
-import time
 import json
+import struct
 import urllib.parse
 import urllib.request
 import zlib
@@ -44,8 +40,6 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.fixtures.rar5 import make_rar5_store
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 MIXED = "mgroup/mseries/v02"
 MIXED_PARENT = "mgroup/mseries"
@@ -57,8 +51,8 @@ MIXED_LOOSE = 3
 AMIXED = "mixed.cbr/amseries/v02"
 AMIXED_PARENT = "mixed.cbr/amseries"
 # Same mixed shape inside a RAR5-store archive. The archive backend lists ALL
-# descendants recursively, so /api/images for the mixed prefix returns 5 —
-# but the viewer chapter is tree-driven (direct image children only) and
+# descendants recursively, so the v1 images listing for the mixed prefix
+# would return 5 — but the viewer chapter is tree-driven (direct image
 # reads the 3 loose pages, each exactly once.
 AMIXED_LOOSE = 3
 
@@ -86,7 +80,7 @@ def _make_png(path: Path, rgb: tuple = (60, 120, 200)) -> None:
 
 @pytest.fixture(scope="module")
 def mixed_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("mixed_downloads")
+    root = tmp_path_factory.mktemp("mixed_library")
     for leaf, pages in [("v01", 2), ("v03", 2)]:
         d = root / "mgroup" / "mseries" / leaf
         d.mkdir(parents=True)
@@ -122,38 +116,14 @@ def mixed_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def mixed_server(mixed_tree: Path) -> str:
-    """Live FastAPI server in test mode against mixed_tree (conftest.py idiom)."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """viewer-rs backend against mixed_tree."""
+    from rs_spawn import spawn_backend
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(mixed_tree)
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    proc, base_url = spawn_backend(
+        library_dir=mixed_tree,
+        state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("mixed server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("mixed server did not become healthy within 10s")
-
     yield base_url
-
     proc.terminate()
     proc.wait(timeout=5)
 
@@ -365,7 +335,7 @@ REACH_READ_CHILD = {
 
 @pytest.fixture(scope="module")
 def reach_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("reach_downloads")
+    root = tmp_path_factory.mktemp("reach_library")
     for name in REACH_LOOSE[""]:
         _make_png(root / name)
     for folder, names in {**REACH_LOOSE, **REACH_LEAVES}.items():
@@ -382,38 +352,14 @@ def reach_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def reach_server(reach_tree: Path) -> str:
-    """Live FastAPI server in test mode against reach_tree (conftest idiom)."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    """viewer-rs backend against reach_tree."""
+    from rs_spawn import spawn_backend
 
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(reach_tree)
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    proc, base_url = spawn_backend(
+        library_dir=reach_tree,
+        state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("reach server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("reach server did not become healthy within 10s")
-
     yield base_url
-
     proc.terminate()
     proc.wait(timeout=5)
 
@@ -497,14 +443,16 @@ def test_reachability_matrix(reach_page, reach_server):
     expect(reach_page.locator("#counter")).to_have_text("1 / 2")
 
     # (d) closure: union over every reachable chapter == every fixture image
-    # exactly once (no dupes, none missing). /api/images is direct-children
-    # only, matching the loose-only chapter semantics.
+    # exactly once (no dupes, none missing). The v1 images endpoint is
+    # direct-children only, matching the loose-only chapter semantics.
     seen: dict[str, int] = {}
 
     def _chapter(folder):
-        url = base + "/api/images?folder=" + urllib.parse.quote(folder, safe="/")
+        url = base + "/api/v1/images?folder=" + urllib.parse.quote(folder, safe="/")
         with urllib.request.urlopen(url, timeout=5) as resp:
-            names = json.load(resp)
+            data = json.load(resp)
+        assert data["folder"] == folder, f"chapter echo for {folder!r}"
+        names = data["images"]
         assert sorted(names) == sorted(
             REACH_LOOSE.get(folder, REACH_LEAVES.get(folder, []))
         ), f"chapter listing for {folder!r}"

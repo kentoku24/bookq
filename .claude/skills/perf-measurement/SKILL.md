@@ -32,14 +32,14 @@ Measurement itself is read-only and produces no repo files. Run the measurement 
 
 ### 2. Verify the real-data mount (STOP if empty)
 
-A green boot does NOT guarantee real data — a fresh worktree falls back to its empty `downloads/`. Check:
+A green boot does NOT guarantee real data — a fresh worktree falls back to its empty `library/`. Check:
 
 ```bash
-docker inspect <viewer-container> --format '{{json .Mounts}}'   # /app/downloads Source must be the real library, Mode ro
+docker inspect <viewer-container> --format '{{json .Mounts}}'   # /app/library Source must be the real library, Mode ro
 curl -s "http://127.0.0.1:<port>/api/folders?depth=1" | python3 -c "import sys,json;print(len(json.load(sys.stdin)))"
 ```
 
-- Count must be > 0. If 0 → STOP, do not measure: discover the live-data source read-only via `docker ps --filter name=bookq-prd` + `docker inspect bookq-prd-viewer --format '{{json .Mounts}}'` (ps/inspect only — never exec/restart/stop prod, never read `.env`), verify with an `ls` count, then `./dev.sh down <name>` + `DOWNLOADS_HOST_DIR=<source> ./dev.sh up <name> --local --port <port>`.
+- Count must be > 0. If 0 → STOP, do not measure: discover the live-data source read-only via `docker ps --filter name=bookq-prd` + `docker inspect bookq-prd-viewer --format '{{json .Mounts}}'` (ps/inspect only — never exec/restart/stop prod, never read `.env`), verify with an `ls` count, then `./dev.sh down <name>` + `LIBRARY_HOST_DIR=<source> ./dev.sh up <name> --local --port <port>`.
 - Record env facts: URL/port, container, mount source + top-level count, `/api/version`, folders bytes + count, `/` status (expect 200).
 
 ### 3. Canonical baseline (measure.py)
@@ -91,7 +91,7 @@ Verify with label-filtered `docker ps` (empty) + `./dev.sh list` (row gone). Nev
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/api/folders?depth=1` returns `[]` | `DOWNLOADS_HOST_DIR` unset → empty worktree `downloads/` fallback | Discover prod source read-only (§2), re-up with explicit `DOWNLOADS_HOST_DIR` |
+| `/api/folders?depth=1` returns `[]` | `LIBRARY_HOST_DIR` unset → empty worktree `library/` fallback | Discover prod source read-only (§2), re-up with explicit `LIBRARY_HOST_DIR` |
 | `dev.sh up` pool exhausted (10/10) | No free slot | Record `./dev.sh list`, STOP — never evict others |
 | `tiles_settled` false on all runs | Broken env or page | Cross-check with the precision pass; both failing → STOP as env failure |
 | Settle fires with few imgs (e.g. 3 thumbs) | Intermediate render (progressive grid population) | Keep as-recorded; the median absorbs it; document the caveat |
