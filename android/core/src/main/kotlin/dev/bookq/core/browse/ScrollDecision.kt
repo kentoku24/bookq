@@ -1,7 +1,7 @@
 package dev.bookq.core.browse
 
 /**
- * Port of `app/static/browse/scroll.js` — the per-level scroll-position
+ * Port of `web/static/browse/scroll.js` — the per-level scroll-position
  * decision table. JS reads the live DOM and localStorage; here the caller
  * supplies the visible child paths and the set of folders that have saved
  * reading progress, keeping the decision pure and unit-testable.

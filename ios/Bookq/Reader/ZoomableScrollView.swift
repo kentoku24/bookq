@@ -24,6 +24,11 @@ struct ZoomableScrollView<Content: View>: UIViewRepresentable {
 
         let hosted = context.coordinator.host
         hosted.view.backgroundColor = .clear
+        // The reader is full-bleed: without this the hosting controller
+        // re-imposes the window's safe-area insets on the SwiftUI content,
+        // shrinking every page by the bottom/home-indicator strip even
+        // though the scroll view itself is sized to the full frame.
+        hosted.safeAreaRegions = []
         hosted.view.translatesAutoresizingMaskIntoConstraints = false
         sv.addSubview(hosted.view)
         NSLayoutConstraint.activate([

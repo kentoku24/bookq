@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// A single browse tile/row/card for a folder. Cover = `/thumb/` single
@@ -16,6 +17,9 @@ struct FolderTileView: View {
     /// Visibility presentation (showAll only): badge text + whether
     /// the caller renders the eye toggle.
     var vis: VisibilityStore.Presentation? = nil
+    /// spec §6 `.off-unavail` — offline/connecting + no download record:
+    /// greyscale + dimmed + "オフライン" badge (tap rejected upstream).
+    var unavailable: Bool = false
 
     @EnvironmentObject private var model: AppModel
 
@@ -27,9 +31,25 @@ struct FolderTileView: View {
             case .card: rowBody(thumbSize: 72)
             }
         }
+        .saturation(unavailable ? 0 : 1)
+        .opacity(unavailable ? 0.55 : 1)
+        .overlay(alignment: .top) { unavailableBadge }
         // Web parity: hidden tiles are NOT dimmed — `is-hidden` has no
         // visual rule; the badge alone marks them.
         .overlay(alignment: .topLeading) { visBadge }
+    }
+
+    /// `.off-unavail-badge` equivalent.
+    @ViewBuilder
+    private var unavailableBadge: some View {
+        if unavailable {
+            Text("オフライン")
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(.black.opacity(0.7), in: Capsule())
+                .foregroundStyle(.white)
+                .padding(4)
+        }
     }
 
     @ViewBuilder
@@ -41,6 +61,7 @@ struct FolderTileView: View {
                 .background(.black.opacity(0.7), in: Capsule())
                 .foregroundStyle(.white)
                 .padding(4)
+                .accessibilityIdentifier("visBadge:\(path)")
         }
     }
 

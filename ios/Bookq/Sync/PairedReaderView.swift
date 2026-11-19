@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Paired-reader surface — the dual-reader equivalent of ReaderView.
@@ -15,12 +16,16 @@ struct PairedReaderView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color.black
                 content(in: geo.size)
             }
             .statusBarHidden(!showChrome)
             .overlay(alignment: .top) { if showChrome { chrome } }
         }
+        // Full-screen geometry (ReaderView parity): pages use every point
+        // of the display; the chrome overlay keeps its own safe-area
+        // insets automatically.
+        .ignoresSafeArea()
         .onChange(of: scenePhase) { _, ph in pair.scenePhase(ph) }
         .onDisappear {
             // Leader closing the paired view = browsing the work list —
@@ -67,7 +72,7 @@ struct PairedReaderView: View {
                 let url = model.api?.pageURL(folder: ref.folder, name: ref.name,
                                              original: model.config.originalImages)
                 ZoomableScrollView(onZoomChange: { z in zoomed = z }) {
-                    RemoteImageView(url: url, contentMode: .fit)
+                    RemoteImageView(url: url, contentMode: .fit, retryable: true)
                         .background(Color.black)
                 }
                 .id("\(ref.folder)|\(ref.name)")   // fresh zoom state per page

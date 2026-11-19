@@ -48,7 +48,6 @@ DEFAULT_TIMEOUT = 10.0
 MAX_BODY = 1_000_000
 MONITOR_LABEL = "monitor"
 SIG_MARKER_RE = re.compile(r"<!--\s*monitor-sig:([A-Za-z0-9_:+,.\-]+)\s*-->")
-SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 COMMENT_THROTTLE_MIN = 60
 
 # HTTP statuses that mean "Cloudflare edge could not get a usable response
@@ -190,21 +189,14 @@ def eval_health(r: HttpResult) -> CheckOutcome:
     return CheckOutcome(True, "ok")
 
 
-def eval_version(r: HttpResult) -> CheckOutcome:
-    pre = _unreachable_or_status(r)
-    if pre:
-        return pre
-    data = _json_body(r)
-    if not isinstance(data, dict):
-        return CheckOutcome(False, "non-JSON body", "contract_break")
-    sha = str(data.get("sha") or "")
-    if not SHA_RE.match(sha):
-        return CheckOutcome(False, f"missing/invalid sha: {sha[:40]!r}", "contract_break")
-    return CheckOutcome(
-        True,
-        f"sha={sha[:12]}",
-        extra={"sha": sha, "build_date": str(data.get("build_date") or "")},
-    )
+def eval_version_gate(r: HttpResult) -> CheckOutcome:
+    """v1 version endpoint must require auth (#359, #407).
+
+    Unauthenticated GET /api/v1/version answers 401; a 200 would leak the
+    deployed sha/build_date to the public internet, so it is the most
+    severe class alongside the tree gate.
+    """
+    return eval_auth_gate(r)
 
 
 def eval_root(r: HttpResult) -> CheckOutcome:
@@ -228,10 +220,11 @@ def eval_auth_login(r: HttpResult) -> CheckOutcome:
     return CheckOutcome(False, f"HTTP {r.status} (expected 3xx)", cls)
 
 
-def eval_folders_gate(r: HttpResult) -> CheckOutcome:
-    """Auth gate must answer exactly 401 unauthenticated.
+def eval_auth_gate(r: HttpResult) -> CheckOutcome:
+    """An authenticated endpoint must answer exactly 401 unauthenticated.
 
     200 means the allowlist/auth path is broken — the most severe class.
+    Shared by the v1 tree and v1 version gates (#407: v1-only probes).
     """
     if r.error:
         return CheckOutcome(False, r.error, "unreachable")
@@ -261,12 +254,11 @@ def eval_static_app(r: HttpResult) -> CheckOutcome:
 
 
 CHECKS = [
-    Check("health", "/api/health", eval_health),
     Check("v1_health", "/api/v1/health", eval_health),
-    Check("version", "/api/version", eval_version),
+    Check("v1_version_gate", "/api/v1/version", eval_version_gate),
     Check("root", "/", eval_root),
     Check("auth_login", "/auth/login", eval_auth_login),
-    Check("folders_gate", "/api/folders", eval_folders_gate),
+    Check("tree_gate", "/api/v1/tree", eval_auth_gate),
     Check("static_sw", "/static/sw.js", eval_static_sw),
     Check("static_app", "/static/app.js", eval_static_app),
 ]
@@ -276,7 +268,6 @@ def run_probe(base_url: str, timeout: float) -> dict:
     base = base_url.rstrip("/")
     started = datetime.now(timezone.utc)
     outcomes: list[CheckResult] = []
-    version_extra = None
     for check in CHECKS:
         r = fetch(base + check.path, timeout)
         try:
@@ -294,8 +285,6 @@ def run_probe(base_url: str, timeout: float) -> dict:
             cf_ray=cf_ray,
             extra=oc.extra,
         ))
-        if check.id == "version" and oc.extra:
-            version_extra = oc.extra
 
     failed = [c for c in outcomes if not c.ok]
     if not failed:
@@ -323,7 +312,9 @@ def run_probe(base_url: str, timeout: float) -> dict:
         "classification": classification,
         "signature": signature,
         "summary": summary,
-        "version": version_extra,
+        # v1-only (#407): /api/v1/version requires auth, so the deployed
+        # sha is no longer observable from an unauthenticated probe.
+        "version": None,
         "checks": [
             {
                 "id": c.id,

@@ -6,9 +6,12 @@ info:
     bookq サーバ/クライアント間の単一の正 (single source of truth)。
 
     この spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。
-    FastAPI (`app/`) と Rust (`server-rs/`) の両実装はこの spec に対して
-    Schemathesis 契約テストで検証される。iOS / Web クライアントはこの spec
-    からコード生成する。
+    FastAPI (`app/`) と Rust (`rust/viewer-rs`) の両実装はこの spec に対して
+    Schemathesis 契約テストで検証される。Web クライアントの型
+    (`web/static/api/api-types.d.ts`) と JSON バンドル (`api/dist/*.json`)
+    は `scripts/api/codegen.sh` でこの spec から生成し、iOS クライアントは
+    適合テスト (`ios/BookqTests/SpecConformanceTests.swift`) で契約遵守を
+    検証する。
 
     ## 認証
 
@@ -60,6 +63,20 @@ info:
     この共有 hidden セットの除外をスキップする（閲覧者個人の
     全表示モード用。一時的・非永続）。
 
+    ## v0 退役方針（#212 / #407）
+
+    `deprecated: true` の v0 互換面（`/api/folders` 等 10 path）は
+    viewer (Python) 停止と同時に廃止する（#410 の Python 撤去で
+    自然に消える）。viewer-rs は v0 を native 実装しない
+    （upstream proxy のまま → v0 停止時に upstream は不要）。
+    PWA / iOS / Android と `scripts/prod_monitor.py` は v1 移行済み。
+
+    `Deprecation` / `Sunset` 応答ヘッダは送らない。
+    Python バックエンドは凍結中（`app/` untouched）のため二重実装の
+    コストに見合わず、具体的な退役日の確定は #212 に委ねる。
+    それまでは本 spec の `deprecated: true` + 各 v0 operation の
+    Sunset 記載を正とする。
+
     ## 振る舞いの正本
 
     wire shape に表れない意味論（ETag 世代・positions LWW・
@@ -80,6 +97,7 @@ tags:
   - name: media
   - name: state
   - name: auth
+  - name: library
 
 paths:
   /api/v1/health:
@@ -98,6 +116,10 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, enum: [ok]}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {status: ok}
 
   /api/v1/version:
     get:
@@ -116,6 +138,13 @@ paths:
                   version: {type: string}
                   sha: {type: string}
                   build_date: {type: string}
+              examples:
+                default:
+                  summary: 正常系
+                  value:
+                    version: "1.0.0"
+                    sha: "abc1234"
+                    build_date: "2026-05-01T00:00:00Z"
 
   /api/v1/tree:
     get:
@@ -148,6 +177,42 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/TreeResponse"}
+              examples:
+                default:
+                  summary: 全木（flatten・サムネ解決込み）
+                  value:
+                    kind: tree
+                    generation: 7
+                    nodes:
+                      - name: "Series"
+                        type: folder
+                        children:
+                          - name: "vol1"
+                            type: folder
+                            thumb: "p00.jpg"
+                            children:
+                              - name: "p00.jpg"
+                                type: image
+                              - name: "p01.jpg"
+                                type: image
+                      - name: "work.cbz"
+                        type: folder
+                        archive: true
+                        thumb: "cover.jpg"
+                        children: []
+                children:
+                  summary: depth=1 の浅い一覧
+                  value:
+                    kind: children
+                    generation: 7
+                    nodes:
+                      - name: "Series"
+                        type: folder
+                        children: []
+                      - name: "work.cbz"
+                        type: folder
+                        archive: true
+                        children: []
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "304": {description: since が generation に一致（本体なし）}
         "400": {$ref: "#/components/responses/BadRequest"}
@@ -182,6 +247,17 @@ paths:
                   images:
                     type: array
                     items: {type: string}
+              examples:
+                default:
+                  summary: 正常系（natural sort 済み）
+                  value:
+                    folder: "Series/vol1"
+                    images: ["p00.jpg", "p01.jpg", "p02.jpg"]
+                empty:
+                  summary: 画像なしフォルダ
+                  value:
+                    folder: "Series/empty"
+                    images: []
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
@@ -227,6 +303,28 @@ paths:
                   results:
                     type: array
                     items: {$ref: "#/components/schemas/ComicMetadata"}
+              examples:
+                default:
+                  summary: 正常系（1件ヒット）
+                  value:
+                    query: "vol1"
+                    total: 1
+                    results:
+                      - folder_path: "Series/vol1"
+                        folder_name: "vol1"
+                        title_jp: "サンプル作品"
+                        title_en: "Sample Work"
+                        artist: ["sample-artist"]
+                        tags: ["tag1", "tag2"]
+                        source: "test"
+                        has_metadata: true
+                        total_pages: 3
+                empty:
+                  summary: ヒットなし
+                  value:
+                    query: "no-such-work"
+                    total: 0
+                    results: []
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "422": {$ref: "#/components/responses/ValidationError"}
 
@@ -249,6 +347,12 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Facets"}
+              examples:
+                default:
+                  summary: 正常系
+                  value:
+                    artists: ["sample-artist"]
+                    tags: ["tag1", "tag2"]
         "202": {$ref: "#/components/responses/IndexBuilding"}
         "422": {$ref: "#/components/responses/ValidationError"}
 
@@ -269,6 +373,10 @@ paths:
                 properties:
                   status: {type: string, enum: [ok]}
                   folders: {type: integer, description: インデックスされた作品数}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {status: ok, folders: 3}
 
   /api/v1/thumb-sprite:
     get:
@@ -322,20 +430,33 @@ paths:
         - name: Range
           in: header
           schema: {type: string, pattern: '^bytes='}
+          description: 単一 Range のみ (`bytes=start-end` / `bytes=start-` / `bytes=-N`)。複数 Range (`bytes=0-99,200-299`) は契約外で 200 フルとして応答する (#403)。
         - name: If-None-Match
           in: header
           schema: {type: string}
       responses:
         "200":
-          description: 画像バイナリ
+          description: 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない #403)
           content:
             image/*:
               schema: {type: string, format: binary}
-        "206": {description: Range レスポンス}
+            application/*:
+              schema: {type: string, format: binary}
+            text/*:
+              schema: {type: string}
+        "206":
+          description: 単一 Range レスポンス
+          content:
+            image/*:
+              schema: {type: string, format: binary}
+            application/*:
+              schema: {type: string, format: binary}
+            text/*:
+              schema: {type: string}
         "304": {description: ETag 一致}
         "400":
           description: |
-            不正な Range ヘッダ等。Starlette の FileResponse Range 処理は
+            不正な Range ヘッダ等。viewer-rs の Range 検証は
             `text/plain` ボディを返す（`{"detail": …}` JSON とは別形式）。
           content:
             application/json:
@@ -344,6 +465,20 @@ paths:
               schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "416":
+          description: |
+            Range がファイル長を超過（`bytes=N-` や `bytes=a-b` で
+            a ≥ size、`bytes=-0` 等の unsatisfiable 指定）
+          content:
+            text/plain:
+              schema: {type: string}
+        "501":
+          description: |
+            抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium
+            無し環境での PDF ページ
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /thumb/{path}:
     get:
@@ -369,6 +504,11 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 非画像などネイティブでサムネ生成不能なソース
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /view/{path}:
     get:
@@ -390,6 +530,11 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "501":
+          description: 非画像などネイティブで正規化不能なソース
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /api/v1/reading-positions:
     get:
@@ -413,6 +558,30 @@ paths:
                   positions:
                     type: array
                     items: {$ref: "#/components/schemas/ReadingPosition"}
+              examples:
+                default:
+                  summary: 正常系（2件）
+                  value:
+                    positions:
+                      - folder: "Series/vol1"
+                        page: 2
+                        total: 10
+                        ts: 1716000000000
+                      - folder: "work.cbz"
+                        page: 0
+                        total: 5
+                        ts: 1715900000000
+                single:
+                  summary: folder 絞り込み（1件）
+                  value:
+                    positions:
+                      - folder: "Series/vol1"
+                        page: 2
+                        total: 10
+                        ts: 1716000000000
+                empty:
+                  summary: 記録なし
+                  value: {positions: []}
         "403": {$ref: "#/components/responses/Forbidden"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
     put:
@@ -438,6 +607,10 @@ paths:
                   type: integer
                   minimum: 0
                   description: クライアント ms epoch。未来側は ±5min クランプ
+            examples:
+              default:
+                summary: 正常系リクエスト
+                value: {page: 2, total: 10, ts: 1716000000000}
       responses:
         "200":
           description: |
@@ -449,6 +622,16 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, enum: [ok, stale]}
+              examples:
+                default:
+                  summary: 正常系（受理）
+                  value: {status: ok}
+                ok:
+                  summary: 受理
+                  value: {status: ok}
+                stale:
+                  summary: 古い ts で棄却（newest-wins）
+                  value: {status: stale}
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "422": {$ref: "#/components/responses/ValidationError"}
@@ -472,6 +655,10 @@ paths:
                 required: [status]
                 properties:
                   status: {type: string, enum: [ok]}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {status: ok}
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "503": {$ref: "#/components/responses/ServiceUnavailable"}
@@ -487,6 +674,19 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}
+              examples:
+                default:
+                  summary: 正常系（1件 hidden）
+                  value:
+                    owner: "owner-abc123"
+                    revision: 4
+                    hiddenRoots: ["Secret"]
+                empty:
+                  summary: hidden なし
+                  value:
+                    owner: "owner-abc123"
+                    revision: 4
+                    hiddenRoots: []
         "503":
           description: ストア読み取り失敗（fail-closed：フィルタなし一覧は返さない）
           content:
@@ -514,12 +714,26 @@ paths:
               properties:
                 root: {type: string, description: 先頭パスセグメント（書庫名も可）}
                 hidden: {type: boolean}
+            examples:
+              hide:
+                summary: 隠す
+                value: {root: "Secret", hidden: true}
+              unhide:
+                summary: 戻す
+                value: {root: "Secret", hidden: false}
       responses:
         "200":
           description: 更新後スナップショット
           content:
             application/json:
               schema: {$ref: "#/components/schemas/FolderVisibility"}
+              examples:
+                default:
+                  summary: 更新後
+                  value:
+                    owner: "owner-def456"
+                    revision: 5
+                    hiddenRoots: ["Secret"]
         "400": {$ref: "#/components/responses/BadRequest"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "409": {$ref: "#/components/responses/Conflict"}
@@ -552,6 +766,18 @@ paths:
                   properties:
                     grant_type: {type: string, const: refresh_token}
                     refresh_token: {type: string, minLength: 1}
+            examples:
+              authorization_code:
+                summary: 認可コード交換
+                value:
+                  grant_type: authorization_code
+                  code: "authcode-123"
+                  code_verifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+              refresh_token:
+                summary: リフレッシュ
+                value:
+                  grant_type: refresh_token
+                  refresh_token: "refresh-abc"
       responses:
         "200":
           description: トークン発行
@@ -565,16 +791,384 @@ paths:
                   token_type: {type: string, const: Bearer}
                   expires_in: {type: integer, description: 秒}
                   refresh_token: {type: string}
+              examples:
+                default:
+                  summary: 正常系
+                  value:
+                    access_token: "eyJhbGciOiJIUzI1NiJ9.spec-example"
+                    token_type: Bearer
+                    expires_in: 3600
+                    refresh_token: "refresh-abc123"
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {description: コード / verifier / refresh token 不正}
 
+  # ── library edit ────────────────────────────────────────────────────
+  # ライブラリへの書き込み面。対応形式は .zip .cbz .rar .cbr .epub .pdf
+  # (serve.rs::ARCHIVE_EXTENSIONS + PDF_EXTENSIONS)。衝突は `name (1).ext`
+  # 形式の自動リネーム、書き込みは tmp + atomic rename。意味論の正本は
+  # `v1-semantics.md` §8。
+  /api/v1/library/files:
+    post:
+      tags: [library]
+      operationId: uploadLibraryFiles
+      summary: 作品ファイルのアップロード（multipart・1〜複数ファイル）
+      description: |
+        `dir`（ルート相対。省略・空 = ライブラリルート）直下に multipart の
+        `file` フィールドを保存する。`dir` は実在ディレクトリ必須
+        （書庫ファイルや `.bookq-uploads` 配下は 400、不存在は 404）。
+        同名が既にある場合は `name (n).ext` で自動リネームし、採用名を
+        `files[].name` で返す。
+
+        リクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。
+        ファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する
+        （`invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+        `conflict` (dedupe 名が尽きた) / `malformed` (multipart が途中で
+        切れた)）。非UTF-8 で復号不能な filename は `name:"?"`、
+        `malformed` は `name:"*"` の sentinel を使う。
+        大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の
+        分割アップロードを使うこと。
+      parameters:
+        - name: dir
+          in: query
+          schema: {type: string, default: ""}
+          description: 保存先フォルダ（ルート相対、空 = ルート）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: array
+                  items: {type: string, format: binary}
+                  minItems: 1
+      responses:
+        "200":
+          description: 受理結果（errors が空なら全件成功）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files, errors]
+                properties:
+                  files:
+                    type: array
+                    items: {$ref: "#/components/schemas/LibraryFileEntry"}
+                  errors:
+                    type: array
+                    items: {$ref: "#/components/schemas/LibraryFileError"}
+              examples:
+                default:
+                  summary: 全件成功
+                  value:
+                    files:
+                      - {name: "work.rar", path: "Series/work.rar", size: 12345678}
+                    errors: []
+                renamed:
+                  summary: 衝突で自動リネーム
+                  value:
+                    files:
+                      - {name: "work (1).rar", path: "Series/work (1).rar", size: 12345678}
+                    errors: []
+                partial:
+                  summary: 一部失敗
+                  value:
+                    files:
+                      - {name: "a.cbz", path: "Series/a.cbz", size: 1000}
+                    errors:
+                      - {name: "b.txt", code: "unsupported_type"}
+        "400":
+          description: |
+            パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は
+            extractor がハンドラ到達前に `text/plain` を返す（/image の 400
+            と同じ二形式）。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+            text/plain:
+              schema: {type: string}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503":
+          description: uploads が無効（library 書き込み不可のデプロイ）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    delete:
+      tags: [library]
+      operationId: deleteLibraryFile
+      summary: 作品ファイル / フォルダの削除
+      description: |
+        `path`（ルート相対、必須）を削除する。ファイルは単体削除、
+        ディレクトリは配下ごと再帰削除。ルート（空パス）・
+        `.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。
+        読書位置やクライアント側オフラインキャッシュは消えない
+        （孤立するが無害 — v1-semantics.md §8）。
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: 削除完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, kind]
+                properties:
+                  deleted: {type: string, description: 削除したルート相対パス}
+                  kind: {type: string, enum: [file, dir]}
+              examples:
+                file:
+                  summary: ファイル削除
+                  value: {deleted: "Series/work.rar", kind: file}
+                dir:
+                  summary: フォルダ削除（再帰）
+                  value: {deleted: "Series/vol1", kind: dir}
+        "400":
+          description: パラメータ不正（空・ルート・`.bookq-uploads` 配下）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "503":
+          description: uploads が無効（library 書き込み不可のデプロイ）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/library/uploads:
+    post:
+      tags: [library]
+      operationId: createLibraryUpload
+      summary: 分割アップロードセッション開始
+      description: |
+        再開可能な分割アップロード。init（本 op）→
+        `PUT /api/v1/library/uploads/{id}` で `Upload-Offset` 順に chunk を
+        append → `POST .../finalize` でライブラリへ確定。セッションは
+        `<library>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
+        `name`/`dir` の検証は `/files` と同一、`size` は確定後の総バイト数。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, size]
+              additionalProperties: false
+              properties:
+                dir: {type: string, default: ""}
+                name: {type: string, minLength: 1}
+                size: {type: integer, minimum: 1}
+            examples:
+              default:
+                summary: セッション開始
+                value: {dir: "Series", name: "work.rar", size: 500000000}
+      responses:
+        "201":
+          description: セッション作成
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LibraryUploadInit"}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {upload_id: "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b", offset: 0}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413":
+          description: "`size` が `BOOKQ_UPLOAD_MAX_BYTES` 超過"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "415":
+          description: 対応外の拡張子
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "422": {$ref: "#/components/responses/ValidationError"}
+        "503":
+          description: uploads が無効（library 書き込み不可のデプロイ）
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/library/uploads/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: createLibraryUpload が発行した upload_id
+    get:
+      tags: [library]
+      operationId: getLibraryUpload
+      summary: セッション状態（再開位置の確認）
+      responses:
+        "200":
+          description: セッション状態
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LibraryUploadState"}
+              examples:
+                default:
+                  summary: 途中状態
+                  value:
+                    upload_id: "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b"
+                    dir: "Series"
+                    name: "work.rar"
+                    size: 500000000
+                    offset: 134217728
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    put:
+      tags: [library]
+      operationId: appendLibraryUpload
+      summary: チャンクの追記（offset 順）
+      description: |
+        ボディ（raw octet-stream）を `Upload-Offset` が示す位置から追記する。
+        `Upload-Offset` はサーバの現在 `offset` と一致必須 — 不一致は
+        **409 + `{offset: <現在値>}`** を返し、クライアントは返された
+        offset から送り直す。`offset + len(body) > size` は 400。
+        順序外・重複チャンクは offset 不一致で 409 になるため安全に再送できる。
+      parameters:
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: {type: integer, minimum: 0}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: 追記完了
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [offset]
+                properties:
+                  offset: {type: integer, minimum: 0}
+              examples:
+                default:
+                  summary: 正常系
+                  value: {offset: 167772160}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: offset 不一致（body の `offset` が現在の受領位置）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail, code, offset]
+                properties:
+                  detail: {type: string}
+                  code: {type: string, enum: [offset_mismatch]}
+                  offset: {type: integer, minimum: 0}
+              examples:
+                default:
+                  summary: offset 不一致
+                  value: {detail: "offset mismatch", code: "offset_mismatch", offset: 33554432}
+        "413":
+          description: "`BOOKQ_UPLOAD_MAX_BYTES` 超過"
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+    delete:
+      tags: [library]
+      operationId: cancelLibraryUpload
+      summary: セッション破棄
+      responses:
+        "204": {description: 破棄完了（本体なし）}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
+  /api/v1/library/uploads/{id}/finalize:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      tags: [library]
+      operationId: finalizeLibraryUpload
+      summary: セッション確定（ライブラリへ配置）
+      description: |
+        `offset == size` の時のみ受理。blob を fsync してから
+        `dir` 内で自動リネームして atomic rename、セッションを掃除し、
+        採用名を返す。未完は **409 + `{offset: <現在値>}`**。
+      responses:
+        "200":
+          description: 確定完了
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LibraryFileEntry"}
+              examples:
+                default:
+                  summary: 正常系（リネームなし）
+                  value: {name: "work.rar", path: "Series/work.rar", size: 500000000}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: |
+            未完（`code:incomplete`、`offset` が現在の受領位置）または
+            dedupe の空き名枯渇（`conflict`、detail のみ）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail]
+                properties:
+                  detail: {type: string}
+                  code: {type: string, enum: [incomplete, conflict]}
+                  offset: {type: integer, minimum: 0}
+              examples:
+                incomplete:
+                  summary: 未完
+                  value: {detail: "upload incomplete", code: "incomplete", offset: 33554432}
+                conflict:
+                  summary: dedupe 枯渇
+                  value: {detail: "no free filename slot"}
+        "503":
+          description: uploads が無効
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+
   # ── v0 互換 (deprecated: v1 へ移行後に削除) ────────────────────────
+  # 退役方針 (#212/#407): 全 3 client は v1 移行済み。v0 応答には
+  # `Deprecation: true` ヘッダを付与する。`Sunset` ヘッダは送出しない —
+  # shutdown は viewer 停止時 (#410, 日付未定) のため暦日 Sunset は書けない。
+  # 各 v0 operation の description に同旨を記載する。
   /api/folders:
     get:
       tags: [tree]
       deprecated: true
       operationId: legacyGetFolders
       summary: "[v0] GET /api/v1/tree を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: path
           in: query
@@ -616,6 +1210,7 @@ paths:
       deprecated: true
       operationId: legacyListImages
       summary: "[v0] 素配列を返す旧版。GET /api/v1/images を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -639,6 +1234,7 @@ paths:
       deprecated: true
       operationId: legacySearch
       summary: "[v0] GET /api/v1/search を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: q
           in: query
@@ -674,6 +1270,7 @@ paths:
       deprecated: true
       operationId: legacyFacets
       summary: "[v0] GET /api/v1/facets を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: path
           in: query
@@ -696,6 +1293,7 @@ paths:
       deprecated: true
       operationId: legacyRefresh
       summary: "[v0] POST /api/v1/index/refresh を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: 再構築完了
@@ -713,6 +1311,7 @@ paths:
       deprecated: true
       operationId: legacyHealth
       summary: "[v0] GET /api/v1/health を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       security: []
       responses:
         "200":
@@ -730,6 +1329,7 @@ paths:
       deprecated: true
       operationId: legacyVersion
       summary: "[v0] GET /api/v1/version を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "バージョン情報。`Cache-Control: no-store`"
@@ -748,6 +1348,7 @@ paths:
       deprecated: true
       operationId: legacyThumbSprite
       summary: "[v0] GET /api/v1/thumb-sprite を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -782,6 +1383,7 @@ paths:
       deprecated: true
       operationId: legacyGetReadingPosition
       summary: "[v0] ユーザー最新1件のみ。/api/v1/reading-positions を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "`{position: レコードまたは null}` — 常にオブジェクト envelope"
@@ -802,6 +1404,7 @@ paths:
       deprecated: true
       operationId: legacyPutReadingPosition
       summary: "[v0] newest-ts-wins 単一レコード"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       requestBody:
         required: true
         content:
@@ -834,6 +1437,7 @@ paths:
       deprecated: true
       operationId: legacyDeleteReadingPosition
       summary: "[v0] 最新レコードの消去"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: folder
           in: query
@@ -856,6 +1460,7 @@ paths:
       deprecated: true
       operationId: legacyGetFolderVisibility
       summary: "[v0] GET /api/v1/folder-visibility を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       responses:
         "200":
           description: "可視性スナップショット。`Cache-Control: private, no-store`"
@@ -867,6 +1472,7 @@ paths:
       deprecated: true
       operationId: legacyPutFolderVisibility
       summary: "[v0] PUT /api/v1/folder-visibility を使う"
+      description: "v0 互換面。Sunset = viewer (Python) 停止と同時 (#407)。応答に Deprecation: true を付与（Sunset ヘッダは日付未定のため送出しない #212）。方針は info.description「v0 退役方針」。"
       parameters:
         - name: x-bookq-visibility-owner
           in: header
@@ -921,26 +1527,49 @@ components:
             required: [detail]
             properties:
               detail: {type: string, example: "metadata index building"}
+          examples:
+            index_building:
+              summary: 構築中（Retry-After で再送）
+              value: {detail: "metadata index building"}
     BadRequest:
       description: パラメータ不正
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: パラメータ不正
+              value: {detail: "invalid folder parameter"}
     Forbidden:
       description: パスがダウンロードルート外 / 権限なし
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: 経路外アクセス
+              value: {detail: "path escapes library root"}
+            hidden:
+              summary: hidden 配下（サーバ側除外）
+              value: {detail: "path is hidden"}
     NotFound:
       description: 対象が存在しない
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: 対象なし
+              value: {detail: "not found: Series/vol1"}
     Conflict:
       description: 競合（visibility owner mismatch 等の同時更新衝突）
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            owner_mismatch:
+              summary: visibility owner 不一致（stale タブ）
+              value: {detail: "visibility owner mismatch", code: "owner_mismatch"}
     ValidationError:
       description: 入力バリデーション失敗（FastAPI 自動バリデーション。`detail` は issue 配列）
       content:
@@ -951,11 +1580,21 @@ components:
               detail:
                 type: array
                 items: {type: object}
+          examples:
+            default:
+              summary: バリデーション失敗
+              value:
+                detail:
+                  - {loc: ["query", "folder"], msg: "field required", type: "missing"}
     ServiceUnavailable:
       description: user-state ストアの読み書き失敗（fail-closed。ディスク/DB 障害時）
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: ストア障害（fail-closed）
+              value: {detail: "user-state store unavailable"}
 
   schemas:
     Error:
@@ -1056,6 +1695,45 @@ components:
           type: array
           items: {type: string}
           description: 先頭パスセグメント（書庫も対象）
+
+    LibraryFileEntry:
+      type: object
+      required: [name, path, size]
+      properties:
+        name:
+          type: string
+          description: 採用されたファイル名（衝突時は `name (n).ext` に自動リネーム）
+        path: {type: string, description: ルート相対パス}
+        size: {type: integer, minimum: 0}
+
+    LibraryFileError:
+      type: object
+      required: [name, code]
+      properties:
+        name: {type: string}
+        code:
+          type: string
+          description: |
+            `invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+            `conflict` (dedupe で空き名なし) / `malformed` (multipart が
+            途中で切れた — `name` は `"*"` の sentinel)
+
+    LibraryUploadInit:
+      type: object
+      required: [upload_id, offset]
+      properties:
+        upload_id: {type: string}
+        offset: {type: integer, minimum: 0}
+
+    LibraryUploadState:
+      type: object
+      required: [upload_id, dir, name, size, offset]
+      properties:
+        upload_id: {type: string}
+        dir: {type: string, description: 保存先（ルート相対、空 = ルート）}
+        name: {type: string}
+        size: {type: integer, minimum: 0}
+        offset: {type: integer, minimum: 0, description: 受領済みバイト数（次の追記開始位置）}
 
 security:
   - cookieAuth: []
