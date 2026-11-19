@@ -15,6 +15,8 @@ FROM rust:1-slim-bookworm AS rsbuilder
 # Static .a means the runtime stage needs no dav1d package. nasm is x86
 # asm only (aarch64 uses gas; no nasm package exists for it). The tarball
 # is sha256-pinned — GitHub regenerates archives deterministically.
+# -Dlibdir=lib: meson's amd64 default is lib64, which lands dav1d.pc in
+# /usr/local/lib64/pkgconfig — outside pkg-config's search path.
 ARG DAV1D_SHA256=78b15d9954b513ea92d27f39362535ded2243e1b0924fde39f37a31ebed5f76b
 RUN apt-get update && apt-get install -y --no-install-recommends \
       zlib1g-dev g++ git pkg-config meson ninja-build curl ca-certificates \
@@ -26,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        -o /tmp/dav1d.tgz \
     && echo "$DAV1D_SHA256  /tmp/dav1d.tgz" | sha256sum -c - \
     && tar xzf /tmp/dav1d.tgz -C /tmp \
-    && meson setup -Ddefault_library=static --prefix=/usr/local \
+    && meson setup -Ddefault_library=static -Dlibdir=lib --prefix=/usr/local \
          /tmp/dav1d-1.5.0/build /tmp/dav1d-1.5.0 \
     && ninja -C /tmp/dav1d-1.5.0/build \
     && meson install -C /tmp/dav1d-1.5.0/build \
