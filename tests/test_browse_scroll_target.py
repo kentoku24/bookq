@@ -32,6 +32,8 @@ import os
 
 import pytest
 
+from browse_header_helpers import set_view_mode
+
 # 400: 最終行のタイル（例 group/other_work の offset 357）を上端まで運べる高さ。
 # 到達可能性の上限は実測で約 423（±2 許容時）。±TOL(=10) まで広げると 430（max 348）でも
 # 9px 差で通ってしまうため、clamp された値を測らないよう 400 を維持する。
@@ -401,12 +403,10 @@ def test_render_without_anchor_does_not_move_the_list(small):
     assert _scroll(small)["top"] == 200, "scrollAnchor: undefined でも動かない"
 
 
-@pytest.mark.parametrize("mode,clicks", [("list", 1), ("card", 2)])
-def test_apply_geometry_in_list_and_card(small, mode, clicks):
+@pytest.mark.parametrize("mode", ["list", "card"])
+def test_apply_geometry_in_list_and_card(small, mode):
     """list/card でも適用先は同じスクローラで、タイル上端＝scrollTop になる。"""
-    for _ in range(clicks):
-        small.locator("#footer-refresh-btn").click()
-        small.wait_for_timeout(200)
+    set_view_mode(small, mode)
     assert small.evaluate("() => window.viewMode") == mode
     _assert_scrollable(small)
     target = small.evaluate("""() => {

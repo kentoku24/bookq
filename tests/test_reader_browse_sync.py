@@ -253,8 +253,10 @@ def test_folder_nav_and_viewmode_propagate_bidirectionally(browser, server):
             p.wait_for_function(
                 "() => window.currentBrowsePath === 'series'", timeout=10000)
 
-        # display mode: leader tile -> list cycles on both devices.
-        pl.eval_on_selector("#footer-refresh-btn", "el => el.click()")
+        # display mode: leader tile -> list via the ⋯menu radio; the JS
+        # .click() reaches the item's own listener even while #header-menu
+        # is hidden.
+        pl.eval_on_selector("#menu-view-list", "el => el.click()")
         for p in (pl, pf):
             p.wait_for_function(
                 "() => window.viewMode === 'list'", timeout=10000)
@@ -738,7 +740,7 @@ def test_list_mode_remote_scroll_stays_immediate(browser, server):
         _start_browse(pl, pf)
         _wait_follower_offset(pl, pf)
 
-        pl.eval_on_selector("#footer-refresh-btn", "el => el.click()")
+        pl.eval_on_selector("#menu-view-list", "el => el.click()")
         for p in (pl, pf):
             p.wait_for_function("() => window.viewMode === 'list'",
                                 timeout=10000)

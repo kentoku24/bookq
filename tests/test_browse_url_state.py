@@ -17,6 +17,8 @@ import re
 
 from playwright.sync_api import expect
 
+from browse_header_helpers import set_view_mode
+
 
 def test_drill_down_sets_browse_hash(page):
     # Tile mode: drilling into a folder writes #/browse/<path>.
@@ -24,7 +26,7 @@ def test_drill_down_sets_browse_hash(page):
     expect(page).to_have_url(re.compile(r"#/browse/series$"))
     # Back to root via the breadcrumb, switch to list mode, drill again.
     page.locator("#browse-header").click()
-    page.locator("#footer-refresh-btn").click()  # tile → list (one click)
+    set_view_mode(page, "list")
     page.locator('.item[data-path="group"]').click()
     # The view mode (v=list) carries in the URL across folder navigation
     # only the default "tile" mode omits the param.

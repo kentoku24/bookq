@@ -468,7 +468,7 @@
             var _nextMode = bs.v ? bs.v : "tile";
             if (window.viewMode !== _nextMode){
               window.viewMode = _nextMode;
-              if (window.updateFooterBtn) window.updateFooterBtn();
+              if (window.updateViewMenu) window.updateViewMenu();
             }
             window.navigateToFolder(bs.path);
           }
@@ -506,7 +506,7 @@
       var nextMode = (bs && bs.v) ? bs.v : "tile";
       if (window.viewMode !== nextMode) {
         window.viewMode = nextMode;
-        if (window.updateFooterBtn) window.updateFooterBtn();
+        if (window.updateViewMenu) window.updateViewMenu();
         modeChanged = true;
       }
     }
