@@ -20,13 +20,13 @@ final class ReaderUITests: XCTestCase {
     /// so callers start from a settled reader.
     @discardableResult
     private func openVol1Reader() -> XCUIElement {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60))
+        app.assertExists(tile("Series"), within: 60)
         tile("Series").tap()
-        XCTAssertTrue(tile("Series/vol1").waitForExistence(timeout: 30))
+        app.assertExists(tile("Series/vol1"), within: 30)
         tile("Series/vol1").tap()
         let counter = app.staticTexts["readerCounter"]
-        XCTAssertTrue(counter.waitForExistence(timeout: 60),
-                      "reader never opened (counter missing)")
+        app.assertExists(counter, within: 60,
+                         "reader never opened (counter missing)")
         return counter
     }
 
@@ -64,8 +64,12 @@ final class ReaderUITests: XCTestCase {
     func testReaderCloseReturnsToBrowse() throws {
         _ = openVol1Reader()
         app.buttons["readerClose"].tap()
-        // Back on the Series level — the volume tiles are still there.
-        XCTAssertTrue(tile("Series/vol1").waitForExistence(timeout: 15),
-                      "browse level did not restore after reader close")
+        // Dismiss is cover-local — no refetch — so a stuck cover and a
+        // missing level are different bugs. Check them separately, and
+        // give the restore the same headroom the other waits get.
+        app.assertGone(app.buttons["readerClose"], within: 10,
+                       "reader cover did not dismiss")
+        app.assertExists(tile("Series/vol1"), within: 30,
+                         "browse level did not restore after reader close")
     }
 }
