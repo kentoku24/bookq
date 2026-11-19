@@ -29,7 +29,7 @@ jobs:
         if: github.event_name == 'pull_request'
         # The UI tests boot the repo's viewer-rs binary and drive the
         # real client — server or shell-asset changes can break iOS the
-        # same way they break Android, hence app/** (served payload).
+        # same way they break Android, hence web/** (served payload, #503).
         with:
           filters: |
             run:
@@ -37,10 +37,14 @@ jobs:
               - "api/**"
               - ".github/workflows/ios.yml"
               - ".github/scripts/ios-ui-test.sh"
-              - "app/**"
+              - "web/**"
               - "rust/viewer-rs/**"
 
-  test:
+  # Job id doubles as the required-check context; it must be unique across
+  # workflows — a bare `test` collides with rust.yml's test job and GitHub
+  # matches required checks by name only, so a pass in one lane could mask
+  # a failure in the other (#540).
+  ios-test:
     needs: changes-ios
     if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
     # xcode-27 image (public preview): the only hosted arm64 image that
@@ -112,6 +116,15 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         if: steps.sdk.outputs.ok == 'true'
 
+      # XCBBuildService's first project load sits silent for ~3min before
+      # "Command line invocation" — nohup it now so the cost overlaps the
+      # rust build / server start / DerivedData cache below instead of
+      # the test step. Same orphan-survival pattern as "Start bookq".
+      # ios-ui-test.sh re-warms as a fallback for local runs.
+      - name: Warm Xcode build service
+        if: steps.sdk.outputs.ok == 'true'
+        run: nohup xcodebuild -list -project ios/Bookq.xcodeproj >/dev/null 2>&1 &
+
       - uses: dtolnay/rust-toolchain@stable
         if: steps.sdk.outputs.ok == 'true'
         with:
@@ -126,7 +139,7 @@ jobs:
 
       # Same synthetic tree as android.yml, plus Series/vol2 so the iOS
       # drill-down test sees two volumes under Series/.
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         if: steps.sdk.outputs.ok == 'true'
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Series/vol2 /tmp/dl/Other /tmp/bookq-state
@@ -142,9 +155,8 @@ jobs:
       - name: Start bookq (test mode)
         if: steps.sdk.outputs.ok == 'true'
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            BOOKQ_APP_DIR="$GITHUB_WORKSPACE/app" BOOKQ_RS_NO_UPSTREAM=true \
-            BOOKQ_BIND=127.0.0.1:8080 \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
+            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-ios-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1

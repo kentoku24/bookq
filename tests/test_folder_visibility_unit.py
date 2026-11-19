@@ -16,10 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 from folder_visibility_helpers import request_browser  # noqa: E402
 
-CORE_SRC = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
-ENDPOINTS_SRC = (REPO_ROOT / "app" / "static" / "api" / "endpoints.js").read_text(encoding="utf-8")
-API_SRC = (REPO_ROOT / "app" / "static" / "api" / "v1.js").read_text(encoding="utf-8")
-VIS_SRC = (REPO_ROOT / "app" / "static" / "browse" / "visibility.js").read_text(encoding="utf-8")
+CORE_SRC = (REPO_ROOT / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
+ENDPOINTS_SRC = (REPO_ROOT / "web" / "static" / "api" / "endpoints.js").read_text(encoding="utf-8")
+API_SRC = (REPO_ROOT / "web" / "static" / "api" / "v1.js").read_text(encoding="utf-8")
+VIS_SRC = (REPO_ROOT / "web" / "static" / "browse" / "visibility.js").read_text(encoding="utf-8")
 
 _STUB_HTML = """<!DOCTYPE html><html><body>
 <div id="tile-grid"></div>

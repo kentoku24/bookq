@@ -1,7 +1,7 @@
 """Shared helpers for folder-visibility tests that mutate state.
 
 Each test file builds its own synthetic library + its own BOOKQ_STATE_DIR +
-its own uvicorn — the shared conftest `server`/`downloads_tree` fixtures keep
+its own viewer-rs — the shared conftest `server`/`library_tree` fixtures keep
 their exact root count and never see a hidden flag. Never reuse the session
 server for hide/unhide writes.
 """
@@ -52,7 +52,7 @@ def make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -
 
 def _metadata_toml(title: str) -> str:
     """Minimal parseable metadata.toml — /api/search scores title_jp/title_en/
-    artist/tags only (app/metadata/search.py); folder names alone never match.
+    artist/tags only (rust search port); folder names alone never match.
     """
     return (
         "[source]\n"
@@ -147,14 +147,11 @@ def spawn_vis_server(tree: Path, state_dir: Path) -> tuple:
     """Same shape as conftest's server fixture but with a dedicated state dir."""
     from rs_spawn import spawn_backend
 
-    return spawn_backend(downloads_dir=tree, state_dir=state_dir)
+    return spawn_backend(library_dir=tree, state_dir=state_dir)
 
 
 def _vis_path() -> str:
-    # #469: v0 compat surface answers 501 under BOOKQ_TEST_SERVER=rs.
-    if os.environ.get("BOOKQ_TEST_SERVER") == "rs":
-        return "/api/v1/folder-visibility"
-    return "/api/folder-visibility"
+    return "/api/v1/folder-visibility"
 
 
 def vis_get(base_url: str) -> dict:

@@ -30,14 +30,14 @@ jobs:
         if: github.event_name == 'pull_request'
         # The ui job boots the repo's viewer-rs binary and asserts on
         # /api/v1/* — server or shell-asset changes can break the client,
-        # hence app/** (served payload) below.
+        # hence web/** (served payload, #503) below.
         with:
           filters: |
             run:
               - "android/**"
               - "api/**"
               - ".github/workflows/android.yml"
-              - "app/**"
+              - "web/**"
               - "rust/viewer-rs/**"
 
   unit:
@@ -64,7 +64,7 @@ jobs:
           # same-repo PRs write so the cache warms; fork PRs stay read-only.
           cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
           # Default includes omit wrapper; without it every job
-          # re-downloads the Gradle distribution.
+          # re-library the Gradle distribution.
           gradle-home-cache-includes: |
             caches
             notifications
@@ -144,7 +144,7 @@ jobs:
           # same-repo PRs write so the cache warms; fork PRs stay read-only.
           cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
           # Default includes omit wrapper; without it every job
-          # re-downloads the Gradle distribution.
+          # re-library the Gradle distribution.
           gradle-home-cache-includes: |
             caches
             notifications
@@ -168,7 +168,7 @@ jobs:
 
       # Synthetic tree — Series/vol1 flattens to one "Series/vol1" node;
       # Other/ has direct images so its top-level name stays "Other".
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Other /tmp/bookq-state
           uv run --with pillow python - <<'PYEOF'
@@ -183,9 +183,8 @@ jobs:
 
       - name: Start bookq (test mode)
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            BOOKQ_APP_DIR="$GITHUB_WORKSPACE/app" BOOKQ_RS_NO_UPSTREAM=true \
-            BOOKQ_BIND=127.0.0.1:8080 \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
+            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-android-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
@@ -200,11 +199,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # Emulator reaches the host viewer-rs via 10.0.2.2 (cleartext allowed
-      # for that host in the debug network security config). The script
-      # gates on emulator->server reachability first and retries once in the
-      # same booted session — the whole class used to fail when the NAT
-      # bridge or adb was wedged (#326).
+      # Emulator reaches the host viewer-rs via `adb reverse` over
+      # loopback (cleartext for 127.0.0.1 allowed in the debug network
+      # security config) — the 10.0.2.2 slirp NAT bridge intermittently
+      # dropped connections mid-suite (#326, #481); the adb transport
+      # channel has no NAT leg. The script gates on emulator->server
+      # reachability first and retries once in the same booted session.
       - name: Emulator UI test
         uses: reactivecircus/android-emulator-runner@v2.38.0
         with:

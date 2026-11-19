@@ -16,7 +16,7 @@ Env knobs: `BOOKQ_LIVE_TOP` (default 6, biggest leaves), `BOOKQ_LIVE_RANDOM`
 ## Safety
 
 - The app never writes into the library (thumb/warmup caches live outside
-  `DOWNLOADS_DIR`; audit: `app/thumbs.py::cache_root`,
+  `LIBRARY_DIR`; audit: `app/thumbs.py::cache_root`,
   `app/warmup_cache.py::BOOKQ_CACHE_DIR`). The suite additionally sandboxes
   both cache dirs to tmp and asserts a file count+bytes census of the live
   root is identical before/after the session.

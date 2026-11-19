@@ -79,7 +79,7 @@ fi
 # Note ${VAR-default}, not ${VAR:-default}: an explicitly empty value means
 # "serve entries are managed from outside — don't touch them". Keep that escape
 # hatch (and the no-colon form) so a future caller can opt out.
-SERVE_TARGET="${TS_SERVE_TARGET-http://viewer:8080}"
+SERVE_TARGET="${TS_SERVE_TARGET-http://viewer-rs:8080}"
 
 if [ -n "$SERVE_TARGET" ]; then
     if [ "${TS_FUNNEL:-}" = "1" ]; then

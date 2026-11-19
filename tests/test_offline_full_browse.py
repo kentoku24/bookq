@@ -1,4 +1,4 @@
-"""Task 2 — tree v1 endpoint offline persistence double put + full browse hierarchy offline.
+"""Tree v1 endpoint offline persistence double put + full browse hierarchy offline.
 
 Covers:
   - Baseline characterization: loadFolders success path double-put (app + SW) and catch fallback via caches.match
@@ -159,7 +159,7 @@ def test_api_folders_offline_recovery(page, server):
     assert idempotent, "IDB double put idempotency failed — second put corrupted IDB"
 
     # SW networkFirst clone order preserved: sw.js must contain clone before put (harmless opportunistic)
-    sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
     assert "res.clone()" in sw_text and "caches.open" in sw_text, "SW networkFirst must clone before put"
     # SW serves the tree fallback via the api/endpoints.js path constant.
     # #236: the tree path comes from api/endpoints.js (API_PATHS.tree), never hard-coded.
@@ -167,9 +167,9 @@ def test_api_folders_offline_recovery(page, server):
     assert "ignoreSearch" in sw_text, "SW must have ignoreSearch fallback"
 
     # verify app.js uses IDB-only and no longer caches.put/match for the tree endpoint
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     # Single hashchange listener lives in browse/hash.js by design (PR #92 split)
-    hash_text = (REPO_ROOT / "app" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
+    hash_text = (REPO_ROOT / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
     assert "OfflineTree.putTree" in app_text, "app.js must persist via OfflineTree.putTree"
     assert "OfflineTree.getTree" in app_text, "app.js catch must recover via OfflineTree.getTree"
     # loadFolders should not contain caches.open for folders nor caches.match for folders catch
@@ -208,7 +208,7 @@ def test_api_folders_offline_recovery(page, server):
         assert page.locator(".tile").count() > 0, "tiles should be visible after offline reload"
         expect(page.locator('.tile[data-path="simple_manga"]')).to_be_visible(timeout=5000)
         assert page.locator('.tile[data-path="group"]').count() == 0, \
-            "group has no downloads — must be hidden from offline navigation (spec §6)"
+            "group has no library — must be hidden from offline navigation (spec §6)"
         page.locator("#browse-header").evaluate("el => el.textContent")
     finally:
         page.context.set_offline(False)
@@ -296,12 +296,12 @@ def test_browse_hierarchy_offline(page, server):
 
     # ── verify parent resolution uses tree walk not split("/") ──
     # Evaluate getParentPath via the app's own function if exposed, else verify via breadcrumb navigation
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     assert "findParentPath" in app_text, "getParentPath must use tree walk findParentPath"
     assert 'split("/")' not in app_text.split("function getParentPath")[1].split("function")[0] or "findParentPath" in app_text, "getParentPath must not use split('/') parent resolution"
     # scanner flatten rewrites name/thumb/thumbs together at 131-147 — verify source contains all three rewrites
-    scanner_text = (REPO_ROOT / "app" / "scanner.py").read_text(encoding="utf-8")
-    assert 'c["name"] = dname + "/" + c["name"]' in scanner_text, "scanner flatten must rewrite name"
+    scanner_text = (REPO_ROOT / "rust" / "viewer-rs" / "src" / "tree.rs").read_text(encoding="utf-8")
+    assert 'format!("{dname}/{}", c.name())' in scanner_text, "scanner flatten must rewrite name"
 
     # ── online drill-down sanity before going offline ──
     # drill into group, then episodes, verify 4 children
@@ -348,7 +348,7 @@ def test_browse_hierarchy_offline(page, server):
         tl = page.evaluate("() => { try { return !!window.treeLoaded; } catch { return null; } }")
         if tl is not None:
             assert tl is True
-        # spec §6 uniform rule: root level has downloads → every root EPISODE
+        # spec §6 uniform rule: root level has library → every root EPISODE
         # stays (greyed when not downloaded); intermediates without a
         # downloaded descendant drop out of navigation entirely.
         top_offline = page.evaluate(
@@ -360,7 +360,7 @@ def test_browse_hierarchy_offline(page, server):
             assert hidden not in top_offline, f"{hidden} has no download — must be hidden offline: {top_offline}"
         # root episodes without a record render greyed + aria-disabled
         chain_path = next((p for p in top_offline if p.startswith("chain")), None)
-        assert chain_path, "flattened chain leaf should still render (level has downloads)"
+        assert chain_path, "flattened chain leaf should still render (level has library)"
         chain_cls = page.locator(f'.tile[data-path="{chain_path}"]').get_attribute("class") or ""
         assert "off-unavail" in chain_cls, f"non-downloaded episode must be greyed: {chain_cls!r}"
 
@@ -736,11 +736,11 @@ def test_viewer_hash_relaunch_offline_restores_tiles(page, server):
 # ── 4. Auto-sync on first online visit + online revalidation (debounced 5min) ──
 
 def test_auto_sync_on_first_online_visit(page, server):
-    """Task 4 — first online visit auto-sync trigger + online debounced revalidation.
+    """First online visit auto-sync trigger + online debounced revalidation.
 
     Spec:
       - After treeLoaded true + navigator.onLine + !sessionStorage.getItem('bookq_auto_sync_done'),
-        background kick Todo3 prefetch via requestIdleCallback→setTimeout(0), cap 50 or
+        background thumb prefetch kick via requestIdleCallback→setTimeout(0), cap 50 or
         viewport-visible, dedup via caches.match, simultaneous 3 fixed, silent skip on
         QuotaExceededError without showQuotaConfirm; online event does debounced 5min
         fetch("/api/v1/tree",{cache:"no-store"}) NetworkFirst revalidation with
@@ -751,13 +751,13 @@ def test_auto_sync_on_first_online_visit(page, server):
       - sessionStorage gating works, second reload 0 extra /image/* fetch, online revalidation spy fires once then debounced.
     """
     REPO_ROOT_LOCAL = REPO_ROOT
-    app_text = (REPO_ROOT_LOCAL / "app" / "static" / "app.js").read_text(encoding="utf-8")
-    sw_text = (REPO_ROOT_LOCAL / "app" / "static" / "sw.js").read_text(encoding="utf-8")
-    core_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT_LOCAL / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT_LOCAL / "web" / "static" / "sw.js").read_text(encoding="utf-8")
+    core_text = (REPO_ROOT_LOCAL / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     # Canonical homes after app.js module split
-    hash_text = (REPO_ROOT_LOCAL / "app" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
-    prefetch_text = (REPO_ROOT_LOCAL / "app" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
-    store_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline" / "storeAdapter.js").read_text(encoding="utf-8")
+    hash_text = (REPO_ROOT_LOCAL / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
+    prefetch_text = (REPO_ROOT_LOCAL / "web" / "static" / "thumbs" / "prefetch.js").read_text(encoding="utf-8")
+    store_text = (REPO_ROOT_LOCAL / "web" / "static" / "offline" / "storeAdapter.js").read_text(encoding="utf-8")
 
     # ── Static contract pinning (baseline characterization) ──
     # sessionStorage key exactly once per session
@@ -797,7 +797,7 @@ def test_auto_sync_on_first_online_visit(page, server):
     assert "showQuotaConfirm" not in prefetch_text, "prefetch must not reference the quota modal"
     # health probe preserved — it now lives in offline/connectivity.js (the
     # 3-state machine; spec §5) rather than app.js's updateOnlineStatus.
-    conn_text = (REPO_ROOT_LOCAL / "app" / "static" / "offline" / "connectivity.js").read_text(encoding="utf-8")
+    conn_text = (REPO_ROOT_LOCAL / "web" / "static" / "offline" / "connectivity.js").read_text(encoding="utf-8")
     assert "X-Online-Check" in conn_text, "Connectivity probe must keep X-Online-Check header"
     assert "online_check" in conn_text, "must keep health online_check probe"
     assert "cache:\"no-store\"" in conn_text or "cache: \"no-store\"" in conn_text or "'no-store'" in conn_text or '"no-store"' in conn_text, "online probe must use cache no-store"
@@ -821,7 +821,6 @@ def test_auto_sync_on_first_online_visit(page, server):
     assert "Per-segment percent-encoding" in core_text
 
     # ── Runtime: first online visit sets sessionStorage and prefetches thumbs ──
-    # Start with clean sessionStorage for this context
     goto_offline(page, server)
     wait_for_sw(page)
     page.evaluate("() => { try { sessionStorage.removeItem('bookq_auto_sync_done'); } catch {} }")
@@ -924,7 +923,7 @@ def test_auto_sync_on_first_online_visit(page, server):
         # even though the initial load stamped the 5-minute freshness gate.
         # Ensure we are online, then simulate offline→online flip
         page.context.set_offline(True)
-        # spec §6: with no downloads the offline grid is empty — a settle
+        # spec §6: with no library the offline grid is empty — a settle
         # wait is all this step needs, not a .tile selector.
         page.wait_for_timeout(2300)
         # Flip back online — this should trigger window online event and debounced revalidation
@@ -996,10 +995,10 @@ def test_auto_sync_on_first_online_visit(page, server):
         page.context.set_offline(False)
 
 
-# ── 6. Browse→viewer hash routing + offline fast path (Task 6) ────────────────
+# ── 6. Browse→viewer hash routing + offline fast path ────────────────
 
 def test_browse_to_view_offline_transition(page, server):
-    """Task 6 — hash routing offline consistency + flatten + SIBLING guard.
+    """Hash routing offline consistency + flatten + SIBLING guard.
 
     Verifies:
       - getBrowseChildren/getNodeAt/findNodeByPath prefix walk, getParentPath tree-walk (not split), folderHasOnlyImages, getLeafPathsFor, navigateToFolder, renderTiles/List/Cards all present
@@ -1010,11 +1009,11 @@ def test_browse_to_view_offline_transition(page, server):
     wait_for_sw(page)
 
     # ── Static contract pinning (baseline characterization) ──
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
-    sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
-    scanner_text = (REPO_ROOT / "app" / "scanner.py").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
+    scanner_text = (REPO_ROOT / "rust" / "viewer-rs" / "src" / "tree.rs").read_text(encoding="utf-8")
     # Single hashchange listener lives in browse/hash.js by design (PR #92 split)
-    hash_text = (REPO_ROOT / "app" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
+    hash_text = (REPO_ROOT / "web" / "static" / "browse" / "hash.js").read_text(encoding="utf-8")
     # hashchange only, no popstate
     assert 'addEventListener("hashchange"' in hash_text, "must have single hashchange listener (owned by browse/hash.js)"
     assert app_text.count('addEventListener("hashchange"') == 0, "app.js must not add its own hashchange listener"
@@ -1061,7 +1060,7 @@ def test_browse_to_view_offline_transition(page, server):
     assert "const SIBLING_AUTOLOAD_MIN_DEPTH = 2" in app_text, "SIBLING_AUTOLOAD_MIN_DEPTH=2 preserved"
     assert 'split("/").length - 1 < SIBLING_AUTOLOAD_MIN_DEPTH' in app_text or "split(\"/\").length - 1 < SIBLING" in app_text, "depth guard must use split length vs SIBLING"
     # scanner flatten
-    assert 'c["name"] = dname + "/" + c["name"]' in scanner_text, "scanner flatten must rewrite name"
+    assert 'format!("{dname}/{}", c.name())' in scanner_text, "scanner flatten must rewrite name"
     # SW fallback preserved (NetworkFirst offline)
     assert "caches.match" in sw_text
 
@@ -1126,7 +1125,6 @@ def test_browse_to_view_offline_transition(page, server):
         img_hits = page.evaluate("() => window.__imgHits.length")
         assert img_hits == 0, f"offline leaf open must not fetch /api/v1/images (fast path), got {img_hits} hits: {page.evaluate('() => window.__imgHits.slice(0,3)')}"
         # Also verify SIBLING guard offline: deeper sibling folder offline still works via sibling map
-        # Close viewer back to browse
         page.locator("#menu-btn").click()
         expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
         page.wait_for_selector(".tile", timeout=5000)
@@ -1223,7 +1221,7 @@ def test_browse_to_view_offline_transition(page, server):
 
 
 def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     assert "if(!Array.isArray(data)) return;" in app_text
     assert "while(next && !getNodeAt(next))" in app_text
 

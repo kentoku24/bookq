@@ -1,7 +1,7 @@
 //! `/`, `/sw.js`, `/favicon.ico`, `/static/*` — the Jinja shell and the
 //! starlette `StaticFiles`/`FileResponse` surface (#401).
 //!
-//! `GET /` renders `app/templates/index.html`: the `{% if not user %}`
+//! `GET /` renders `web/templates/index.html`: the `{% if not user %}`
 //! branch is a login page (200, not a redirect), the `{% else %}` branch is
 //! the viewer shell with per-user globals embedded. The static routes are
 //! public — they answer regardless of session state (a corrupt signed
@@ -11,11 +11,7 @@
 //! and the `NoCacheStaticFiles` cache-control. `/static/*` and `/sw.js` sit
 //! under the gzip prefixes; `/` and `/favicon.ico` do not.
 
-use crate::{
-    auth,
-    serve::{self, Serve},
-    state,
-};
+use crate::{auth, serve, state};
 use axum::{
     body::Body,
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
@@ -30,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// `get_current_user` reduced to the three outcomes the shell template
 /// cares about. Unlike the API handlers, an unidentified caller is NOT a
-/// delegate — upstream answers the login page (200), and so do we.
+/// delegate — the login page is answered locally (200).
 pub(crate) enum ShellUser {
     /// Falsy session/bearer user (or none) → the `{% if not user %}` page.
     Login,
@@ -38,14 +34,13 @@ pub(crate) enum ShellUser {
     /// `strip().lower()` of a string email, else `None` — the viewer shell
     /// still renders, with `null` embedded globals.
     Viewer { user_key: Option<String> },
-    /// We cannot decide natively (a signed session whose payload is not a
-    /// dict — Python's middleware raises on `json.loads`, producing a 500
-    /// upstream). Defer so the error surface matches.
-    Proxy,
+    /// A signed session whose payload is not a dict — Python's middleware
+    /// raises on `json.loads`, producing a 500. Answered locally (#532).
+    Corrupt,
 }
 
 /// Order mirrors `user_from_connection`: TEST_MODE mock → session `user` →
-/// Bearer. A signed non-dict/undecodable session defers (upstream 500).
+/// Bearer. A signed non-dict/undecodable session is corrupt (500).
 pub(crate) fn index_caller(
     test_mode: bool,
     secret: &str,
@@ -59,7 +54,7 @@ pub(crate) fn index_caller(
         };
     }
     match auth::session_lookup(headers, session_key) {
-        auth::SessionLookup::Corrupt => return ShellUser::Proxy,
+        auth::SessionLookup::Corrupt => return ShellUser::Corrupt,
         auth::SessionLookup::User(u) => {
             // `{% if not user %}`: the session value's own truthiness decides
             // the branch — an empty object renders the login page, any
@@ -117,8 +112,8 @@ fn json_truthy(v: &Value) -> bool {
 //   {{ thumbnail_probe | safe }}                   (verbatim insert)
 //   {# … #}                                        (comments, stripped)
 // Anything left over after substitution (`{{`/`{%`/`{#`) means the template
-// grew a construct we don't port — the caller falls back to upstream
-// rather than emit raw Jinja.
+// grew a construct we don't port — the caller answers 500 locally rather
+// than emit raw Jinja.
 
 pub(crate) struct IndexCtx<'a> {
     /// `user_key_for_email` — feeds `visibility_owner` + `progress_user_key`.
@@ -145,7 +140,7 @@ const PROBE_EXPR: &str = "{{ thumbnail_probe | safe }}";
 const INCLUDE_EXPR: &str = "{% include \"thumbnail_perf.html\" %}";
 
 /// Render `index.html` for one caller state. `None` when the template uses
-/// Jinja constructs we don't port — the handler proxies upstream instead.
+/// Jinja constructs we don't port — the handler answers 500 instead.
 pub(crate) fn render_index(src: &str, ctx: &IndexCtx) -> Option<String> {
     let src = strip_comments(src)?;
     let rest = src.strip_prefix(IF_NOT_USER)?;
@@ -193,7 +188,7 @@ fn strip_trailing_nl(s: &str) -> &str {
     s.strip_suffix('\n').unwrap_or(s)
 }
 
-/// `None` when Jinja constructs remain — the caller must proxy.
+/// `None` when Jinja constructs remain — the caller answers 500.
 fn guarded(out: &str) -> Option<String> {
     (!out.contains("{{") && !out.contains("{%") && !out.contains("{#")).then(|| out.to_string())
 }
@@ -338,9 +333,9 @@ fn form_decode(s: &str) -> String {
 // ── static file serving (starlette StaticFiles/FileResponse) ────────────────
 
 /// `GET /` — renders the shell for the resolved caller. File/template
-/// failures proxy (upstream raises its own 500 surface).
+/// failures answer 500 locally, matching the Python 500 surface (#532).
 pub(crate) fn index(
-    app_dir: &Path,
+    web_dir: &Path,
     test_mode: bool,
     secret: &str,
     visibility: &state::VisibilityStore,
@@ -348,23 +343,37 @@ pub(crate) fn index(
     headers: &HeaderMap,
     thumb_perf: bool,
     head: bool,
-) -> Serve {
+) -> Response {
     let (viewer, user_key) = match user {
         ShellUser::Login => (false, None),
         ShellUser::Viewer { user_key } => (true, user_key.clone()),
-        ShellUser::Proxy => return Serve::Proxy,
+        ShellUser::Corrupt => {
+            return state::detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid session",
+            )
+        }
     };
-    let Ok(template) = std::fs::read_to_string(app_dir.join("templates").join("index.html")) else {
-        return Serve::Proxy;
+    let Ok(template) = std::fs::read_to_string(web_dir.join("templates").join("index.html")) else {
+        return state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "template missing",
+        );
     };
     // `?thumb_perf=1` reads the probe + panel sources only when enabled.
     let (probe, perf_tpl) = if thumb_perf {
-        let Ok(p) = std::fs::read_to_string(app_dir.join("perf").join("thumbnail-probe.js")) else {
-            return Serve::Proxy;
+        let Ok(p) = std::fs::read_to_string(web_dir.join("perf").join("thumbnail-probe.js")) else {
+            return state::detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "probe missing",
+            );
         };
-        let Ok(t) = std::fs::read_to_string(app_dir.join("templates").join("thumbnail_perf.html"))
+        let Ok(t) = std::fs::read_to_string(web_dir.join("templates").join("thumbnail_perf.html"))
         else {
-            return Serve::Proxy;
+            return state::detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "template missing",
+            );
         };
         (Some(p), Some(t))
     } else {
@@ -403,7 +412,10 @@ pub(crate) fn index(
     };
     let login = !viewer;
     let Some(body) = render_index_for(login, &template, &ctx) else {
-        return Serve::Proxy;
+        return state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "template render failed",
+        );
     };
     let mut h: Vec<(HeaderName, HeaderValue)> = Vec::new();
     push(&mut h, "content-length", &body.len().to_string());
@@ -418,7 +430,7 @@ pub(crate) fn index(
     if !test_mode {
         push(&mut h, "vary", "Cookie");
     }
-    Serve::Done(finish(h, if head { Vec::new() } else { body.into_bytes() }, StatusCode::OK))
+    finish(h, if head { Vec::new() } else { body.into_bytes() }, StatusCode::OK)
 }
 
 /// Dispatch on the login/viewer branch without complicating `IndexCtx`.
@@ -443,57 +455,71 @@ pub(crate) fn named_file(
     missing_detail: &str,
     req: &HeaderMap,
     head: bool,
-) -> Serve {
+) -> Response {
     let Ok(md) = std::fs::metadata(path) else {
-        return Serve::Done(state::detail(StatusCode::NOT_FOUND, missing_detail));
+        return state::detail(StatusCode::NOT_FOUND, missing_detail);
     };
     // `FileResponse.__call__` itself runs no is_not_modified check — the
     // 304 path lives in `StaticFiles.file_response` — so sw.js/favicon
-    // always answer 200/206 upstream regardless of If-None-Match.
+    // always answer 200/206 regardless of If-None-Match.
     match file_response(path, &md, media_type, extra, &[], req, head, false) {
-        Ok(res) => Serve::Done(res),
-        Err(_) => Serve::Proxy,
+        Ok(res) => res,
+        Err(_) => state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "file read failed",
+        ),
     }
 }
 
 /// `/static/{*path}` — `NoCacheStaticFiles`: FileResponse + `Cache-Control:
 /// no-cache` appended after the stat headers.
-pub(crate) fn static_file(static_dir: &Path, rel: &str, req: &HeaderMap, head: bool) -> Serve {
+pub(crate) fn static_file(static_dir: &Path, rel: &str, req: &HeaderMap, head: bool) -> Response {
     if rel.starts_with(['/', '\\']) {
-        return Serve::Done(state::detail(StatusCode::NOT_FOUND, "Not Found"));
+        return state::detail(StatusCode::NOT_FOUND, "Not Found");
     }
     let base = match serve::realpath(static_dir) {
         Ok(b) => b,
-        Err(_) => return Serve::Proxy,
+        Err(_) => {
+            return state::detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "static root unavailable",
+            )
+        }
     };
     let full = match serve::realpath(&base.join(rel)) {
         Ok(p) => p,
-        Err(_) => return Serve::Proxy,
+        Err(_) => return state::detail(StatusCode::NOT_FOUND, "Not Found"),
     };
     if !full.starts_with(&base) {
-        return Serve::Done(state::detail(StatusCode::NOT_FOUND, "Not Found"));
+        return state::detail(StatusCode::NOT_FOUND, "Not Found");
     }
     let md = match std::fs::metadata(&full) {
         Ok(m) if m.is_file() => m,
-        Ok(_) => return Serve::Done(state::detail(StatusCode::NOT_FOUND, "Not Found")),
+        Ok(_) => return state::detail(StatusCode::NOT_FOUND, "Not Found"),
         Err(e) => {
             return match e.kind() {
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => {
-                    Serve::Done(state::detail(StatusCode::NOT_FOUND, "Not Found"))
+                    state::detail(StatusCode::NOT_FOUND, "Not Found")
                 }
                 std::io::ErrorKind::PermissionDenied => {
-                    Serve::Done(state::detail(StatusCode::UNAUTHORIZED, "Unauthorized"))
+                    state::detail(StatusCode::UNAUTHORIZED, "Unauthorized")
                 }
-                _ => Serve::Proxy,
+                _ => state::detail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "file stat failed",
+                ),
             };
         }
     };
     match file_response(&full, &md, mime_for(&full), &[], NO_CACHE, req, head, true) {
-        Ok(res) => Serve::Done(res),
+        Ok(res) => res,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Serve::Done(state::detail(StatusCode::NOT_FOUND, "Not Found"))
+            state::detail(StatusCode::NOT_FOUND, "Not Found")
         }
-        Err(_) => Serve::Proxy,
+        Err(_) => state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "file read failed",
+        ),
     }
 }
 
@@ -932,9 +958,9 @@ mod tests {
 
     // ── template render ──
 
-    const TEMPLATE: &str = include_str!("../../../app/templates/index.html");
-    const PERF: &str = include_str!("../../../app/templates/thumbnail_perf.html");
-    const PROBE: &str = include_str!("../../../app/perf/thumbnail-probe.js");
+    const TEMPLATE: &str = include_str!("../../../web/templates/index.html");
+    const PERF: &str = include_str!("../../../web/templates/thumbnail_perf.html");
+    const PROBE: &str = include_str!("../../../web/perf/thumbnail-probe.js");
 
     fn ctx<'a>() -> IndexCtx<'a> {
         IndexCtx {
@@ -996,12 +1022,12 @@ mod tests {
     #[test]
     fn unknown_jinja_falls_back() {
         // A Jinja construct that survives substitution must fail the render
-        // (the handler then proxies upstream rather than emit raw `{%`).
+        // (the handler declines rather than emit raw `{%`).
         let bad = TEMPLATE.replace("</head>", "{% unknown %}</head>");
         assert!(render_index(&bad, &ctx()).is_none());
         let bad2 = TEMPLATE.replace("{{ 'ua-android' if ua_android else '' }}", "{{ x.y }}");
         assert!(render_index(&bad2, &ctx()).is_none());
-        // unterminated comment → Jinja error upstream → proxy
+        // unterminated comment → Jinja error in the Python port source
         let bad3 = TEMPLATE.replace("<title>", "{# open <title>");
         assert!(render_index(&bad3, &ctx()).is_none());
     }

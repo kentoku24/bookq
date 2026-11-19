@@ -150,7 +150,7 @@ jobs:
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
       - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@9bbb8ce18c80f099e0e448775f59d965ead40a21
+        uses: anomalyco/opencode/github@fedc6f208aa2bd54c1019227214568083f6380ad
         env:
           OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
         with:
@@ -162,6 +162,17 @@ jobs:
             - Small incremental commits with conventional-commit messages.
             - Open a PR titled "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})" whose body references
               #${{ github.event.issue.number || github.event.client_payload.issue_number }} and includes testing considerations.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -179,7 +190,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Swap label to ✅ done
@@ -239,7 +250,7 @@ jobs:
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
       - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@9bbb8ce18c80f099e0e448775f59d965ead40a21
+        uses: anomalyco/opencode/github@fedc6f208aa2bd54c1019227214568083f6380ad
         env:
           OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
         with:
@@ -252,6 +263,17 @@ jobs:
                AGENTS.md rule (lowercase, hyphens, alphanumeric only, <=50 chars) and open a PR
                containing that file with title "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})"
                referencing #${{ github.event.issue.number || github.event.client_payload.issue_number }} in the body.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -269,7 +291,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Swap label to ✅ done
@@ -360,6 +382,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
@@ -376,7 +409,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Branch, commit, push, open PR
@@ -512,6 +545,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
 
@@ -528,7 +572,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Branch, commit, push, open PR

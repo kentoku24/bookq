@@ -10,7 +10,7 @@
 
 ```
 ブラウザ ── HTTPS ──▶ tailscale ── HTTP ──▶ viewer (:8080)
- (Tailnet内)        (TLS終端 + Serve)         FastAPI + hypercorn
+ (Tailnet内)        (TLS終端 + Serve)         viewer-rs (Rust)
                      bookq.….ts.net
 ```
 
@@ -24,7 +24,7 @@
 
 | コンテナ | 役割 |
 |---|---|
-| `viewer` | 画像ビューア + API (FastAPI) |
+| `viewer` | 画像ビューア + API (viewer-rs / Rust) |
 | `tailscale` | 本番の Tailscale ノード、TLS 終端、tailnet 内公開（開発環境は環境ごとに `dev-<名前>` ノードを持つ） |
 
 ## 必要なもの
@@ -151,7 +151,7 @@ iPad Safari では7日間起動しないとオフライン保存が自動削除�
 
 ### 技術概要
 
-- Service Worker は `/sw.js` で配信されます（`app/static/sw.js` を `Service-Worker-Allowed: /` ヘッダ付きで返却）。`/sw.js` と `/static/sw.js` の両方で同じ内容が取得でき、scope は `/` です。tailnet の HTTPS（Secure Context）でのみ登録され、`?offline=1` または `localStorage.bookq_enable_sw=1` でテスト時も有効化できます
+- Service Worker は `/sw.js` で配信されます（`web/static/sw.js` を `Service-Worker-Allowed: /` ヘッダ付きで返却）。`/sw.js` と `/static/sw.js` の両方で同じ内容が取得でき、scope は `/` です。tailnet の HTTPS（Secure Context）でのみ登録され、`?offline=1` または `localStorage.bookq_enable_sw=1` でテスト時も有効化できます
 - 画像は CacheFirst（作品ごとの `bookq-work-<encoded>-v1`、フォールバックは `bookq-images-fallback`）、API は NetworkFirst（`bookq-api-v1`）、ナビゲーションは NetworkFirst で失敗時にまず同一 URL のキャッシュ、次に `/static/offline.html`、最後に precache 済みの `/` にフォールバックします。`Range` リクエストはキャッシュをバイパスします
 - メタデータは IndexedDB `bookq-offline` の `works` ストア（keyPath `folder`）で管理し、フォルダ、キャッシュ名、ページ数、キャッシュ済み数、容量、サムネ、追加日時、最終閲覧日時を保持します。キャッシュ名は `cacheNameFor(folder) => 'bookq-work-'+encodeURIComponent(folder)+'-v1'` で生成され、`/` は `%2F` に置換されます
 - `manifest.json`（`display: standalone`）と `offline.html`、`icons`（192 any / 512 any / 512 maskable の3点）で PWA の最小構成を満たします。`theme_color` / `background_color` は `#0f172a`、`display` は `standalone`、`id` は `/`
@@ -176,15 +176,15 @@ SS, erode, r = 4, 4, 300.8  # 角丸半径フィット値・エッジ残差ぶ�
 m = Image.new('L', (src.width*SS, src.height*SS), 0)
 ImageDraw.Draw(m).rounded_rectangle((erode*SS, erode*SS, src.width*SS-1-erode*SS, src.height*SS-1-erode*SS), radius=(r-erode)*SS, fill=255)
 master = src.convert('RGBA'); master.putalpha(m.resize(src.size, Image.BOX))
-master.resize((512,512), Image.LANCZOS).save('app/static/icons/icon-512.png')
-master.resize((192,192), Image.LANCZOS).save('app/static/icons/icon-192.png')
-master.resize((32,32), Image.LANCZOS).save('app/static/favicon-32x32.png')
-master.resize((32,32), Image.LANCZOS).save('app/static/favicon.ico', sizes=[(16,16),(32,32),(48,48)])
+master.resize((512,512), Image.LANCZOS).save('web/static/icons/icon-512.png')
+master.resize((192,192), Image.LANCZOS).save('web/static/icons/icon-192.png')
+master.resize((32,32), Image.LANCZOS).save('web/static/favicon-32x32.png')
+master.resize((32,32), Image.LANCZOS).save('web/static/favicon.ico', sizes=[(16,16),(32,32),(48,48)])
 mk = Image.new('RGB', (512,512), '#0f172a'); fg = master.resize((408,408), Image.LANCZOS); mk.paste(fg, (52,52), fg)
-mk.save('app/static/icons/icon-512-maskable.png')
+mk.save('web/static/icons/icon-512-maskable.png')
 big = src.resize((int(src.width*1.3), int(src.height*1.3)), Image.LANCZOS)
 x0, y0 = (big.width-src.width)//2, (big.height-src.height)//2
-big.crop((x0, y0, x0+src.width, y0+src.height)).resize((180,180), Image.LANCZOS).save('app/static/apple-touch-icon.png')
+big.crop((x0, y0, x0+src.width, y0+src.height)).resize((180,180), Image.LANCZOS).save('web/static/apple-touch-icon.png')
 PY
 ```
 
@@ -203,7 +203,7 @@ https://dev-*.ts.net/static/offline-harness.html?harness=1  # 後方互換で有
 
 **配信とゲート**
 
-`app/static/offline-harness.html` は `app/main.py:28` の `StaticFiles` マウントで常時配信されます。常時表示 (tailnet信頼境界で保護). サイドバーの🧪Harnessリンクは常に表示され、/static/offline-harness.html は ?harness=1 なしでも直接開けます (旧 ?harness=1 / localStorage.bookq_harness 方式は不要になりましたが後方互換で残存).
+`web/static/offline-harness.html` は viewer-rs の static 配信で常時配信されます。常時表示 (tailnet信頼境界で保護). サイドバーの🧪Harnessリンクは常に表示され、/static/offline-harness.html は ?harness=1 なしでも直接開けます (旧 ?harness=1 / localStorage.bookq_harness 方式は不要になりましたが後方互換で残存).
 
 **何が見えるか**
 
@@ -233,17 +233,21 @@ https://dev-*.ts.net/static/offline-harness.html?harness=1  # 後方互換で有
 
 **curl での配信確認 (動的ポート注意)**
 
-`server` fixture は毎回ランダムな空きポートで uvicorn を起動します。固定の 8080 や 18080 ではないので、テストや手元確認では起動ログや `server` fixture が返す URL のポートを使います。
+`server` fixture は毎回ランダムな空きポートで viewer-rs を起動します。固定の 8080 や 18080 ではないので、テストや手元確認では起動ログや `server` fixture が返す URL のポートを使います。
 
 ```bash
 # 例: fixture が http://127.0.0.1:54321 を返した場合
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
-# 手元で一時起動して試す場合
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/tmp/downloads uv run --with-requirements requirements-dev.txt uvicorn app.main:app --port $PORT &
+# 手元で一時起動して試す場合 (viewer-rs を直接起動)
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/tmp/library BOOKQ_BIND=127.0.0.1:$PORT \
+  SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:$PORT BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs &
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
 ```
 
-`grep -q "offline-harness" README.md` と `curl` の両方が通れば、StaticFiles 配信とゲート分離が保たれています。`.dockerignore` に `app/static` の除外が無いこと（`! grep -q "app/static" .dockerignore`）と、`Dockerfile:10` の `COPY app/ ./app/` で `app/static/offline-harness.html` がイメージに含まれることも併せて確認します。
+`grep -q "offline-harness" README.md` と `curl` の両方が通れば、static 配信とゲート分離が保たれています。`.dockerignore` に `web/static` の除外が無いこと（`! grep -q "web/static" .dockerignore`）と、`Dockerfile.viewer-rs` の `COPY web/` で `web/static/offline-harness.html` がイメージに含まれることも併せて確認します。
 
 ## 停止
 
@@ -265,8 +269,8 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 | 起動/停止 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、何個でも） |
 | URL | `https://bookq.<your-tailnet>.ts.net` | `https://dev-<名前>.<your-tailnet>.ts.net` |
 | 認証 | Google OAuth | なし（`BOOKQ_TEST_MODE=true`） |
-| 画像ツリー | 読み書き可 | **読み取り専用** (`:ro`) |
-| コンテナ | viewer + tailscale サイドカー | viewer + tailscale サイドカー（ノードは環境ごとに 1 つ） |
+| 画像ツリー | 読み書き可 (`:rw`) | 既定 read-only (`:ro`) — 書き込み検証は `--fixture` (合成ツリー、常に rw) か `./dev.sh up --writable-library` で opt-in |
+| コンテナ | viewer-rs + tailscale サイドカー | viewer-rs + tailscale サイドカー（ノードは環境ごとに 1 つ） |
 
 > **本番の compose を検証に流用しないこと。** worktree で素の `docker compose up` を打つと、ホスト名 `bookq` を要求する 2 つ目の tailscale ノードが立ち上がって本番と名前を争います。`prd.sh` は worktree からの実行を拒否し、`docker-compose.dev.yml` は `DEV_IMAGE` / `DEV_NAME` 等の必須変数（`:?`）が無いと起動自体が失敗するので、`dev.sh` を使う限りこの事故は起きません。
 
@@ -275,8 +279,12 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 UI をさっと触るだけならこれが一番速い（OAuth もスキップされます）。
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
-  uv run --with-requirements requirements-dev.txt uvicorn app.main:app --port 8080
+# viewer-rs を直接起動 (cargo build -p viewer-rs が前提)
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+  SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 ### 2. テスト
@@ -299,7 +307,7 @@ Chromium が無ければ初回だけ:
 uv run --with playwright playwright install chromium
 ```
 
-`--with-requirements requirements-dev.txt` は省略できません。`server` フィクスチャが `sys.executable -m uvicorn` を起動するので、pytest と同じ環境に fastapi/uvicorn が必要です。`uvicorn[standard]` は開発用の `requirements-dev.txt` 側にあり、ランタイムの `requirements.txt`（本番は hypercorn）には含まれません。
+`--with-requirements requirements-dev.txt` は省略できません。`server` フィクスチャが viewer-rs バイナリを起動し、fixture ツリーの画像生成に pillow、HTTP アサートに httpx が必要です（いずれも `requirements-dev.txt` 側）。
 
 リンタ・フォーマッタは導入していません。
 
@@ -314,13 +322,13 @@ uv run --with playwright playwright install chromium
 ./dev.sh up demo --fixture                        # 実データの代わりに合成テストツリーをマウント
 ```
 
-`--fixture` を付けると、`tests/fixtures/uiux_tree.py`（依存パッケージ不要の色分け PNG 生成スクリプト）が作る合成ツリー — 9 フォルダ + metadata.toml 3 件（`simple_manga` / `series` / `mixed_ar`）— を `/tmp/bookq-fixture-<name>/downloads` に生成してマウントします。実データに手を付けたくない UI の動作確認やスクリーンショット用途に使います。単色ページは拡大しても違いが分からないので、ピンチズーム・ページ送り・エピソード境界の目視確認には `zoom_episodes/series/ep-1..3`（720x1080、グリッド・巨大な EP/ページ番号・START/END バッジ・拡大時のみ読める細字）を使います。ディープリンクは `#/view/zoom_episodes/series/ep-1?p=0`。兄弟チャプター連結は深さ2以上でしか発動しないため、`series/` を1段挟んでいます。マウント元は `DOWNLOADS_HOST_DIR` 環境変数で上書きも可能です（`--fixture` が指定された場合はそちらが優先。既存の環境変数上書きの挙動は従来どおり）。
+`--fixture` を付けると、`tests/fixtures/uiux_tree.py`（依存パッケージ不要の色分け PNG 生成スクリプト）が作る合成ツリー — 9 フォルダ + metadata.toml 3 件（`simple_manga` / `series` / `mixed_ar`）— を `/tmp/bookq-fixture-<name>/library` に生成してマウントします。実データに手を付けたくない UI の動作確認やスクリーンショット用途に使います。単色ページは拡大しても違いが分からないので、ピンチズーム・ページ送り・エピソード境界の目視確認には `zoom_episodes/series/ep-1..3`（720x1080、グリッド・巨大な EP/ページ番号・START/END バッジ・拡大時のみ読める細字）を使います。ディープリンクは `#/view/zoom_episodes/series/ep-1?p=0`。兄弟チャプター連結は深さ2以上でしか発動しないため、`series/` を1段挟んでいます。マウント元は `LIBRARY_HOST_DIR` 環境変数で上書きも可能です（`--fixture` が指定された場合はそちらが優先。既存の環境変数上書きの挙動は従来どおり）。
 
 表示された `https://dev-review-42.<your-tailnet>.ts.net` は tailnet 内なら **iPad からもそのまま開けます**。ホストからも同じ HTTPS URL でアクセスします（ポートは公開しません — ホストは tailnet に参加している前提）。
 
 | コマンド | 動作 |
 |---|---|
-| `./dev.sh up [name] [--ref REF] [--fixture]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント |
+| `./dev.sh up [name] [--ref REF] [--fixture] [--writable-library]` | 起動（既存なら同じ環境を作り直し）。`--fixture` で実データの代わりに合成テストツリーをマウント（常に rw）。ライブラリのマウントは既定 read-only — dev は `BOOKQ_TEST_MODE=true` で認証をバイパスするため、実ライブラリへの書き込み (upload/delete) は `--writable-library` の明示時のみ。書き込み検証は `--fixture` 推奨 |
 | `./dev.sh down [name]` / `--all` | 撤去（ボリュームと tailnet ノードの登録は保持）。`--full` でボリューム・イメージ・ノード登録まで完全撤去（TS_API_KEY 設定時。`--all --full` は `--yes` 必須）。`--all` は実行前に既に孤立していたボリューム（コンテナの無い `bookq-dev-*` の残骸）も回収する（`--no-prune-volumes` で無効化） |
 | `./dev.sh list` | 一覧（名前・状態・ref・commit・URL） |
 | `./dev.sh url [name]` | URL だけ出力（スクリプト用） |
@@ -349,9 +357,9 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 ```
 
 - 既定は `http://127.0.0.1:8080`。2つ目の同時環境は `--port 1024-65535` で別ポートを指定する（使用中ポートはビルド前に fail fast する）。
-- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（tailnet モードと同じ）。画像ツリーは読み取り専用。
-- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の読み取り専用ツリーを晒すので、検証用 LAN でのみ使うこと。
-- Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `app/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
+- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（tailnet モードと同じ）。画像ツリーは既定 read-only — upload/delete を試すなら `--fixture`（使い捨て合成ツリー、常に rw）か `--writable-library`（実ライブラリを rw、明示 opt-in）。
+- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証のツリーを晒す（`--writable-library` 併用時は upload/delete も誰でも使える）ので、検証用 LAN でのみ使うこと。
+- Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `web/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
 - iOS Simulator からもそのまま開ける（host network 共有）: `./scripts/open-simulator.sh http://127.0.0.1:<port>`。helper は `https://` と loopback `http://` のみ受理し、`http://<lan-ip>` は Secure Context でないため拒否する。手順は `.claude/skills/ios-simulator/references/overview.md: Local mode`。
 - 10スロットプールを共有する。ローカル環境も `find_free_slot` の割当に数えられ、10/10 枯渇時は通常環境と同じく `pool exhausted (10/10)` で失敗する（仕様として許容）。
 - `down` / `list` / `url` / `logs` はそのまま使える。`list` と `url` はローカル行に `http://<bind>:<port>` を出し、非ローカル行の `https://dev-XX` 形式は変わらない。`down` と `logs` の挙動は tailnet モードと同じ。
@@ -379,7 +387,7 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 
 ### 5. Git Hook（コミット時に開発環境を自動更新）
 
-`app/` 配下・`requirements.txt`・`Dockerfile` を変更してコミットすると、pre-commit hook が**その worktree の開発環境**を更新し、URL を表示してコミットを一旦止めます。本番には触りません。
+`rust/`・`web/`・`requirements-dev.txt`・`Dockerfile.viewer-rs` を変更してコミットすると、pre-commit hook が**その worktree の開発環境**を更新し、URL を表示してコミットを一旦止めます。本番には触りません。
 
 1. コードを変更して `git add <files>`
 2. `git commit` → 開発環境が更新され、URL が表示されて停止
@@ -471,15 +479,12 @@ bot 経路はいずれも `AGENTS.md` の規約（ブランチ命名 `ai/<issue�
 
 | ファイル | 説明 |
 |---|---|
-| `app/main.py` | FastAPI アプリケーション |
-| `app/config.py` | 環境変数設定 |
-| `app/auth.py` | Google OAuth 認証 + セッション管理 |
-| `app/routes.py` | 全エンドポイント |
-| `app/scanner.py` | フォルダ/画像スキャン |
-| `app/templates/index.html` | ビューア HTML テンプレート |
-| `requirements.txt` | Python 依存パッケージ |
-| `docker-compose.yml` | **本番**: viewer + tailscale サイドカー |
-| `docker-compose.dev.yml` | **開発環境**: viewer + tailscale サイドカー（1 環境 = 1 プロジェクト） |
+| `rust/viewer-rs/` | viewer-rs (Rust) バックエンド — 唯一の本番実装 (#503 で Python `app/` 削除) |
+| `web/templates/index.html` | ビューア HTML テンプレート |
+| `web/static/` | シェル JS/CSS/PWA アセット |
+| `requirements-dev.txt` | pytest lane 依存 (pillow/httpx 等) |
+| `docker-compose.yml` | **本番**: viewer-rs + tailscale サイドカー |
+| `docker-compose.dev.yml` | **開発環境**: viewer-rs + tailscale サイドカー（1 環境 = 1 プロジェクト） |
 | `Dockerfile` | viewer コンテナ |
 | `prd.sh` | 本番の起動・停止スクリプト（`up` / `down`。メインのチェックアウト専用） |
 | `rebuild.sh` | 汎用デプロイエンジン（`prd` / `dev build\|deploy\|verify`）。ビルド → healthcheck → URL 検証 |

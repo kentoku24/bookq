@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 import UIKit
 
@@ -327,7 +328,7 @@ struct ReaderView: View {
             onPinchOut: { showOverview = true },
             onPinchState: { active in pinchActive = active }
         ) {
-            RemoteImageView(url: url, contentMode: .fit) { img in
+            RemoteImageView(url: url, contentMode: .fit, retryable: true) { img in
                 let ar = img.size.width / max(img.size.height, 1)
                 if lastAR != ar { lastAR = ar }
                 if pageAR[idx] != ar { pageAR[idx] = ar }

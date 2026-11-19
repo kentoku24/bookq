@@ -3,13 +3,13 @@ name = "viewer-rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Rust backend for bookq — parallel deployment with proxy fall-through (issue #163)"
+description = "Rust backend for bookq — sole production backend, all routes native (#532)"
 license = "Proprietary"
 
 [dependencies]
 bookq-core = { path = "../bookq-core" }
 crc32fast = "1"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 base64 = "0.22"
 flate2 = { version = "1", features = ["zlib"] }
 futures-util = { version = "0.3", features = ["sink"] }
@@ -24,8 +24,6 @@ rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 # default-features off: default pulls ~40 unused crates (ravif/rav1e AVIF
 # encoder, exr, tiff, qoi, moxcms, rayon). Min = locked version, which is
 # what we build/test (ImageDecoder::orientation landed in 0.25.5).

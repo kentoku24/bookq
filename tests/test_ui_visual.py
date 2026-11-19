@@ -5,7 +5,7 @@ Values come from .omo/reports/ui-ux-audit.md §4:
 - H9: minimum 44x44 touch targets (WCAG 2.5.5).
 
 These assert the *remediated* values, so they fail (RED) against the pre-fix
-style.css and pass (GREEN) after app/static/style.css is updated.
+style.css and pass (GREEN) after web/static/style.css is updated.
 """
 
 # H5 exact target colors from the audit report
@@ -108,15 +108,15 @@ def test_resume_btn_clears_footer(page):
     """Resume pill must clear the sidebar footer (RED on bottom:16px).
 
     Regression for the #resume-btn / #sidebar-footer overlap: with the old
-    CSS (`bottom:16px` at app/static/style.css:248) the fixed-position
+    CSS (`bottom:16px` at web/static/style.css:248) the fixed-position
     resume pill sits on top of the footer; the fix (`bottom:76px` = ~60px
     footer + 16px gap) leaves an 8px+ vertical gap.
 
     RED pre-fix (gap assertion fails at 16px), GREEN post-fix (76px).
     """
-    # Seed reading progress (shape per app/static/app.js:403-408
+    # Seed reading progress (shape per web/static/app.js:403-408
     # {page, total, ts}); simple_manga is a leaf in the conftest fixture
-    # tree (tests/conftest.py downloads_tree) and in
+    # tree (tests/conftest.py library_tree) and in
     # tests/fixtures/uiux_tree.py, so no dynamic resolution is needed.
     page.evaluate("localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify({'simple_manga':{page:4,total:10,ts:Date.now()}}))")
     page.reload()

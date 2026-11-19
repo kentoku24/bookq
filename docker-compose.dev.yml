@@ -1,50 +1,54 @@
 # bookq — 開発環境（固定 10 スロットプール、1 スロット = tailnet ノード 1 つ）
 #
-# 本番 (docker-compose.yml) と同じ構成パターン: viewer + tailscale サイドカー。
+# 本番 (docker-compose.yml) と同じ構成パターン: viewer-rs + tailscale サイドカー。
 # 到達経路は https://dev-XX.<tailnet>.ts.net（XX は 01..10、プールスロット）だけ。
 # ホストにポートを公開しない — ホストからのアクセスも HTTPS 経由
 # （ホストは tailnet に参加していることが前提）。
 #
-# イメージは dev.sh が事前にビルドして DEV_IMAGE で渡す。ここで build: を
+# #503 rs-only: `viewer` サービスは viewer-rs バイナリを実行する
+# (サービス名は dev.sh 互換のため維持)。イメージは dev.sh が事前に
+# Dockerfile.viewer-rs からビルドして DEV_IMAGE で渡す。ここで build: を
 # 書かないのは、--ref 指定時に「作業ツリーではなく特定コミットの中身」を
 # git archive からビルドするため。タグ方式は ref の種別で 2 分岐:
 # シンボリック ref（ブランチ/タグ/HEAD）→ bookq-dev:ref-<slug> に常時
 # 再ビルドしてエイリアス上書き / hex SHA → bookq-dev:<短縮SHA> で
 # SHA 単位の再利用。
 #
-# 直接 docker compose を叩かないこと。必須変数 (:?) が未設定だと失敗する。
+# 直接 docker compose を叩かないこと。必須変数 (:?) が未設定だと失敗する.
 
 services:
   viewer:
     image: "${DEV_IMAGE:?DEV_IMAGE is required — use ./dev.sh up}"
     container_name: "bookq-dev-viewer-dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}"
 
-    # 本番と同じ画像ツリーを *読み取り専用* でマウント。
-    # cache volume は read-write のまま（downloads の :ro とは無関係）。
+    # 本番と同じ画像ツリーをマウントするが既定は read-only — dev は
+    # BOOKQ_TEST_MODE=true で認証をバイパスするため、rw 既定だと到達可能な
+    # 誰でも本番ライブラリを upload/delete で改変できてしまう。書き込み
+    # 検証は使い捨ての合成ツリー (--fixture、常に rw) か、明示 opt-in の
+    # DEV_LIBRARY_MODE=rw / ./dev.sh up --writable-library で。
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
-      # warmup disk cache の永続化 (issue #259、本番と同値): 既定 /tmp は
-      # コンテナ再作成で消えるため BOOKQ_CACHE_DIR を名前付き volume 上の
-      # /var/cache/bookq に向ける。名前の明示は不要 — compose が
-      # project  prefix を付けるので dev 環境ごとの分離は自動。
-      - warmup-cache:/var/cache/bookq
+      - "${LIBRARY_HOST_DIR:-${DOWNLOADS_HOST_DIR:-./library}}:/app/library:${DEV_LIBRARY_MODE:-ro}"
       # thumb/sprite disk cache の永続化 (issue #276、本番と同値): 既定
       # /tmp/bookq-thumbs はコンテナ再作成で消えるため
       # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の
-      # /var/cache/bookq-thumbs に向ける。app/thumbs.py cache_root() は
-      # env を call time に読むので、この env + volume の組だけで有効になる
-      #（code 変更不要）。thumbs/ と sprites/ の両 namespace が同 root 配下。
+      # /var/cache/bookq-thumbs に向ける。thumbs/ と sprites/ の両 namespace
+      # が同 root 配下。
       - thumb-cache:/var/cache/bookq-thumbs
       # ユーザー別の永続設定 (folder-visibility): cache volume と分離し、
-      # project prefix 付きでスロットごとに自動分離される（warmup と同型）。
+      # project prefix 付きでスロットごとに自動分離される。
       - user-state:/var/lib/bookq
 
     environment:
-      # OAuth を丸ごとバイパス（app/auth.py が import 時に一度だけ読む）。
+      # OAuth を丸ごとバイパス（viewer-rs が起動時に読む）。
       - BOOKQ_TEST_MODE=true
-      - BOOKQ_CACHE_DIR=/var/cache/bookq
+      - BOOKQ_BIND=0.0.0.0:8080
+      - GOOGLE_CLIENT_ID=ci-dummy
+      - GOOGLE_CLIENT_SECRET=ci-dummy
+      - BASE_URL=https://dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}.ts.net
+      - ALLOWED_EMAILS=test@example.com
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       - BOOKQ_STATE_DIR=/var/lib/bookq
+      - BOOKQ_WEB_DIR=/web
       - SECRET_KEY=dev-not-a-secret
 
     # dev.sh はこのラベルだけを情報源にする（状態ファイルを持たない）。
@@ -58,25 +62,21 @@ services:
       com.bookq.branch: "${DEV_BRANCH:-unknown}"
       com.bookq.worktree: "${DEV_WORKTREE:-unknown}"
       com.bookq.dev-image-tag: "${DEV_IMAGE}"
-      # "rs" のとき tailscale serve は viewer-rs を指す（docker-compose.dev-rs.yml
-      # overlay、./dev.sh up --rs）。up の冪等再利用でもモードを復元する。
-      com.bookq.backend: "${DEV_BACKEND:-py}"
+      com.bookq.backend: "rs"
 
-    # イメージに curl は無い。2 秒毎の python spawn コストを避けるため
-    # 本番と同型の bash /dev/tcp probe で /api/health を叩く。
+    # イメージは debian-slim + バイナリのみ (curl/wget/python なし) —
+    # bash の /dev/tcp で /api/v1/health を叩く。
     healthcheck:
       test:
         - CMD
         - bash
         - -c
-        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200'"
+        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/v1/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200'"
       interval: 2s
       timeout: 3s
       retries: 15
       start_period: 2s
 
-    # --workers 0 で hypercorn が単一プロセスになるため、孤児化する
-    # extractor 子孫 (unrar/7z 経由) の reap 用に tini を PID1 に置く。
     init: true
     # Mac のスリープや Docker 再起動をまたいで生き残らせる。
     restart: unless-stopped
@@ -95,6 +95,9 @@ services:
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_HOSTNAME=${DEV_HOSTNAME:-dev-${DEV_POOL_SLOT}}
+      # dev のサービス名は viewer — entrypoint の既定は prod 名 viewer-rs
+      # で、未指定だと serve が解決不能になって 502 になる。
+      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer:8080}
     volumes:
       - tailscale-state:/var/lib/tailscale
     restart: unless-stopped
@@ -104,6 +107,5 @@ services:
 volumes:
   tailscale-state:
     name: bookq-dev-pool-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}_tailscale-state
-  warmup-cache:
   thumb-cache:
   user-state:

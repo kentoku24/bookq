@@ -142,7 +142,7 @@ def test_new_gesture_clears_bounce_transition(ios_page, server, touch):
     touch_end(touch)
 
 
-# ── Task 5: pan / clamp / edge-turn / center zone ──────────────────────────
+# ── Pan / clamp / edge-turn / center zone ──────────────────────────
 #
 # CURRENT_SPREAD_RECT reads the spread the reader is actually on. A plain
 # `querySelector('#img-track .spread-container')` returns the first container in

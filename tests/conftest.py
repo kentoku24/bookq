@@ -1,4 +1,4 @@
-"""Shared fixtures: a synthetic downloads/ tree, a live FastAPI server (test mode),
+"""Shared fixtures: a synthetic library/ tree, a live viewer-rs server (test mode),
 and Playwright browser contexts (portrait / landscape).
 
 Run:
@@ -9,7 +9,7 @@ Run:
 import json
 import os
 import re
-import socket
+import shutil
 import struct
 import subprocess
 import sys
@@ -21,11 +21,9 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
-# app.auth reads BOOKQ_TEST_MODE once at import time (_TEST_MODE), and any
-# test module doing `from app.routes import ...` pulls app.auth in. Setting
-# the default here — before collection imports whichever module comes first
-# alphabetically — keeps in-process TestClients deterministic regardless of
-# test order (#326). Tests needing real auth patch auth._TEST_MODE=False.
+# viewer-rs reads BOOKQ_TEST_MODE at process start to bypass OAuth with a
+# mock user. Setting the default here keeps every spawned backend
+# deterministic regardless of test order (#326).
 os.environ.setdefault("BOOKQ_TEST_MODE", "true")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +58,50 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "browser: test drives a real browser session"
     )
+
+
+def pytest_sessionstart(session):
+    """Disk-space gate — runs scripts/test-preflight.sh before collection.
+
+    A run auto-builds ~1.5GB of rust/target plus Playwright/uv caches, and
+    several worktrees do this in parallel; on a nearly-full internal SSD the
+    build is what tips the disk over. The script checks free space, reclaims
+    stale residues (other worktrees' targets, caches, tmp) and aborts with a
+    suspect list if still below BOOKQ_MIN_FREE_GB (default 25GiB).
+    BOOKQ_SKIP_PREFLIGHT=1 opts out. Skipped under CI — the gate exists for
+    long-lived dev machines where worktree targets accumulate; ephemeral
+    runners start fresh every run and can legitimately sit below the
+    threshold.
+    """
+    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
+        return
+    script = REPO_ROOT / "scripts" / "test-preflight.sh"
+    if not script.exists():
+        return
+    proc = subprocess.run(["bash", str(script)], cwd=REPO_ROOT)
+    if proc.returncode != 0:
+        pytest.exit(
+            "disk preflight failed — free space still below "
+            f"{os.environ.get('BOOKQ_MIN_FREE_GB', '25')}GiB after cleanup; "
+            "see the suspect list above (or BOOKQ_SKIP_PREFLIGHT=1 to bypass)",
+            returncode=3,
+        )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Post-run nudge — warns when the run ends inside the low-space band."""
+    if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
+        return
+    try:
+        free_gb = shutil.disk_usage(REPO_ROOT).free // (1 << 30)
+    except OSError:
+        return
+    if free_gb < int(os.environ.get("BOOKQ_WARN_FREE_GB", "40")):
+        print(
+            f"\npreflight: {free_gb}GiB free — この worktree の rust/target 等を"
+            "片付けること (scripts/test-preflight.sh --clean で安全な残骸を回収可能)",
+            file=sys.stderr,
+        )
 
 
 # Any test that (transitively) requests a browser/page fixture gets the
@@ -108,30 +150,6 @@ def pytest_collection_modifyitems(config, items):
             i for i in items
             if zlib.crc32(i.nodeid.encode()) % num_shards == shard_id
         ]
-    if os.environ.get("BOOKQ_TEST_SERVER") == "rs":
-        # #469: files importing `app.*` exercise Python internals (in-process
-        # TestClients, module unit tests) — they can't oracle the Rust
-        # backend. Files hardcoding v0 `/api/*` literals test the deprecated
-        # compat surface, which answers 501 with no upstream and retires with
-        # `app/` in Phase 3 anyway — both are quarantined under rs mode.
-        # #472: `(?!v1/)` also matched bare "`/api/v1`" prose (no trailing
-        # slash, e.g. test_pwa_api_client.py docstrings), wrongly
-        # quarantining a server-agnostic static lint. `\b` only excludes real
-        # v1 paths (`/api/v1/...`, `/api/v1"`).
-        skip_incompatible = pytest.mark.skip(
-            reason="imports app.* or hardcodes v0 /api/* — incompatible with BOOKQ_TEST_SERVER=rs (#469)"
-        )
-        app_import = re.compile(r"^\s*(from|import)\s+app[.\s]", re.M)
-        v0_url = re.compile(r"""["'`]/api/(?!v1\b)""")
-        dirty_files = {
-            f
-            for f in {Path(str(i.fspath)) for i in items}
-            if (src := f.read_text(errors="ignore"))
-            and (app_import.search(src) or v0_url.search(src))
-        }
-        for item in items:
-            if Path(str(item.fspath)) in dirty_files:
-                item.add_marker(skip_incompatible)
     for item in items:
         fnames = set(getattr(item, "fixturenames", ()))
         if _BROWSER_FIXTURES & fnames or any(
@@ -144,8 +162,8 @@ def pytest_collection_modifyitems(config, items):
 def _bookq_state_dir_sandbox(tmp_path_factory):
     """Point BOOKQ_STATE_DIR at a throwaway dir for the whole test session.
 
-    Without it, in-process TestClients and helper-spawned uvicorn servers
-    would write folder-visibility state into the real ~/.local/share/bookq.
+    Without it, helper-spawned viewer-rs servers would write
+    folder-visibility state into the real ~/.local/share/bookq.
     Restored on teardown.
     """
     prev = os.environ.get("BOOKQ_STATE_DIR")
@@ -180,7 +198,7 @@ def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) 
 
 
 @pytest.fixture(scope="session")
-def downloads_tree(tmp_path_factory) -> Path:
+def library_tree(tmp_path_factory) -> Path:
     """Build the fixture folder layout the tests rely on.
 
     Note: thumb_grid_* (9 folders for multi-thumb grid 2..9) are NOT generated
@@ -221,7 +239,7 @@ def downloads_tree(tmp_path_factory) -> Path:
                             "inner/aa" under nest/wrap — its _fullPath
                             "nest/wrap/inner/aa" has no live textual parent)
     """
-    root = tmp_path_factory.mktemp("downloads")
+    root = tmp_path_factory.mktemp("library")
 
     simple = root / "simple_manga"
     simple.mkdir()
@@ -381,36 +399,39 @@ def downloads_tree(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def folder_count_text(downloads_tree: Path) -> str:
-    # Expected "#folder-count" text at the browse root, derived from the same
-    # fixture tree the server serves (not a hardcoded count), so extending the
-    # fixture updates every assertion automatically.
-    from app.scanner import scan_tree
-
-    return f"{len(scan_tree(downloads_tree))} 件"
+def root_folder_names(server: str) -> list[str]:
+    # Expected root-level tile order/names, read from the live viewer-rs
+    # backend itself (depth=1 children), so extending the fixture tree
+    # updates every assertion automatically without duplicating the
+    # scanner's natural-sort logic in Python.
+    req = urllib.request.Request(server + "/api/v1/tree?depth=1")
+    for _ in range(30):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 202:
+                    time.sleep(2.5)
+                    continue
+                body = json.loads(resp.read())
+                return [node["name"] for node in body["nodes"]]
+        except Exception:
+            time.sleep(1.0)
+    # Last attempt — let any error surface as the test failure.
+    with urllib.request.urlopen(
+        urllib.request.Request(server + "/api/v1/tree?depth=1"), timeout=10
+    ) as resp:
+        return [node["name"] for node in json.loads(resp.read())["nodes"]]
 
 
 @pytest.fixture(scope="session")
-def root_folder_names(downloads_tree: Path) -> list[str]:
-    # Expected root-level tile order/names, derived from the same fixture tree
-    # and the same natural-sort scan_tree uses server-side (not a hardcoded
-    # list), so extending the fixture updates every assertion automatically.
-    from app.scanner import scan_tree
+def server(library_tree: Path) -> str:
+    """Start viewer-rs in test mode against the fixture tree; yield its base URL.
 
-    return [node["name"] for node in scan_tree(downloads_tree)]
-
-
-@pytest.fixture(scope="session")
-def server(downloads_tree: Path) -> str:
-    """Start the backend in test mode against the fixture tree; yield its base URL.
-
-    `BOOKQ_TEST_SERVER=rs` spawns the `viewer-rs` binary instead of uvicorn
-    (#469) — the suite then oracles the production backend's contract.
+    The suite oracles the production backend's contract (#503).
     """
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=downloads_tree,
+        library_dir=library_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url
@@ -442,36 +463,20 @@ def _reset_reading_position(request):
     try:
         base_url = request.getfixturevalue("server")
 
-        # #469: under BOOKQ_TEST_SERVER=rs the v0 surface answers 501 —
-        # the TEST_MODE-only v1 hook drops the whole slot incl. tombstones
-        # (the `?hard=1` equivalent), and v1 returns a positions array.
-        if os.environ.get("BOOKQ_TEST_SERVER") == "rs":
+        # The TEST_MODE-only v1 hook drops the whole slot incl. tombstones,
+        # and v1 returns a positions array.
 
-            def _delete():
-                req = urllib.request.Request(
-                    base_url + "/api/v1/test-positions-reset", method="DELETE"
-                )
-                urllib.request.urlopen(req, timeout=5).read()
+        def _delete():
+            req = urllib.request.Request(
+                base_url + "/api/v1/test-positions-reset", method="DELETE"
+            )
+            urllib.request.urlopen(req, timeout=5).read()
 
-            def _empty():
-                with urllib.request.urlopen(
-                    base_url + "/api/v1/reading-positions", timeout=5
-                ) as resp:
-                    return not json.loads(resp.read()).get("positions")
-
-        else:
-
-            def _delete():
-                req = urllib.request.Request(
-                    base_url + "/api/reading-position?hard=1", method="DELETE"
-                )
-                urllib.request.urlopen(req, timeout=5).read()
-
-            def _empty():
-                with urllib.request.urlopen(
-                    base_url + "/api/reading-position", timeout=5
-                ) as resp:
-                    return json.loads(resp.read()).get("position") is None
+        def _empty():
+            with urllib.request.urlopen(
+                base_url + "/api/v1/reading-positions", timeout=5
+            ) as resp:
+                return not json.loads(resp.read()).get("positions")
 
         _delete()
         deadline = time.time() + 3.0

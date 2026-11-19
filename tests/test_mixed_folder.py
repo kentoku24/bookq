@@ -1,4 +1,4 @@
-"""Mixed-folder parent-level images-tile spec pins (plan Todo 4).
+"""Mixed-folder parent-level images-tile spec pins.
 
 Parent-level spec: a mixed folder (loose images + subfolder, e.g.
 ``mgroup/mseries/v02`` = 3 loose + ``sub`` of 2) shows NO tile for its own
@@ -19,7 +19,7 @@ Fixture mirrors group/deep_series (raw depth 2, so SIBLING_AUTOLOAD_MIN_DEPTH
       mgroup/other/        c1.png                 (keeps mgroup unflattened)
       solo/                a.png b.png c.png      (root image-only)
 
-Server/page fixtures mirror tests/conftest.py (own uvicorn on a module tree so
+Server/page fixtures mirror tests/conftest.py (own viewer-rs on a module tree so
 the shared session tree stays untouched); selectors mirror
 tests/test_url_state.py (#counter, #folder-name, .tile[data-path]) and
 tests/test_ui.py (#img-track .page-cell img[src*=...]).
@@ -80,7 +80,7 @@ def _make_png(path: Path, rgb: tuple = (60, 120, 200)) -> None:
 
 @pytest.fixture(scope="module")
 def mixed_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("mixed_downloads")
+    root = tmp_path_factory.mktemp("mixed_library")
     for leaf, pages in [("v01", 2), ("v03", 2)]:
         d = root / "mgroup" / "mseries" / leaf
         d.mkdir(parents=True)
@@ -116,11 +116,11 @@ def mixed_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def mixed_server(mixed_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against mixed_tree."""
+    """viewer-rs backend against mixed_tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=mixed_tree,
+        library_dir=mixed_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url
@@ -335,7 +335,7 @@ REACH_READ_CHILD = {
 
 @pytest.fixture(scope="module")
 def reach_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("reach_downloads")
+    root = tmp_path_factory.mktemp("reach_library")
     for name in REACH_LOOSE[""]:
         _make_png(root / name)
     for folder, names in {**REACH_LOOSE, **REACH_LEAVES}.items():
@@ -352,11 +352,11 @@ def reach_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def reach_server(reach_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against reach_tree."""
+    """viewer-rs backend against reach_tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=reach_tree,
+        library_dir=reach_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url

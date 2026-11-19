@@ -1,8 +1,8 @@
-"""Todo 8 — Pure unit tests for OfflineCore helpers with deps injection.
+"""Pure unit tests for OfflineCore helpers with deps injection.
 
 Covers fmt, cacheNameFor, dedupedBytes/rawBytes, getLeafPathsFor without Playwright or SW.
 
-Refs: app/static/offline-core.js (single source), app/static/app.js deps injection.
+Refs: web/static/offline-core.js (single source), web/static/app.js deps injection.
 """
 import urllib.parse as up
 from pathlib import Path
@@ -193,7 +193,7 @@ def test_getLeafPathsFor_with_mocked_tree():
 
 def test_feature_test_replaces_ua_sniff():
     """Ensure storage feature test is used, not UA string."""
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     assert "isSafari =" not in app_text and "isSafari=" not in app_text
     assert "navigator.userAgent" not in app_text
     # quota fallback still present: 0/0 check
@@ -205,12 +205,12 @@ def test_feature_test_replaces_ua_sniff():
 
 def test_offline_core_single_source():
     """OfflineCore pure helpers still single-source and exported."""
-    core_text = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    core_text = (REPO_ROOT / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     assert "function fmt(bytes)" in core_text
     assert "function cacheNameFor(folder)" in core_text
     assert "function dedupedBytes(all)" in core_text
     assert "function rawBytes(all)" in core_text
-    # escapeHtml / folderHasOnlyImages moved here from app.js + 4 copies (#107)
+    # escapeHtml / folderHasOnlyImages moved here from the shell + 4 copies (#107)
     assert "function escapeHtml(s)" in core_text
     assert "function folderHasOnlyImages(node)" in core_text
     # published on globalThis, so sw.js can importScripts the same file
@@ -223,10 +223,10 @@ def test_offline_core_single_source():
     apos_i = core_text.index("replace(/'/g, \"&#39;\")")
     assert amp_i < lt_i < gt_i < quot_i < apos_i
     # ESM shim removed (#110, kept): no .mjs re-export exists anymore.
-    assert not (REPO_ROOT / "app" / "static" / "offline-core.mjs").exists()
+    assert not (REPO_ROOT / "web" / "static" / "offline-core.mjs").exists()
 
     # sw.js shares cacheNameFor instead of redefining it
-    sw_text = (REPO_ROOT / "app" / "static" / "sw.js").read_text(encoding="utf-8")
+    sw_text = (REPO_ROOT / "web" / "static" / "sw.js").read_text(encoding="utf-8")
     # sw.js importScripts both files in one call (#236: offline-core.js for
     # cacheNameFor + api/endpoints.js for API_PATHS) — prefix match accepts
     # the multi-arg form (see test_sw_offline_contract.py verbatim assert).
@@ -237,9 +237,9 @@ def test_offline_core_single_source():
     assert '"/static/offline-core.js"' in sw_text, "offline-core.js must stay precached for offline importScripts"
 
     # no second copy of either helper anywhere in the frontend
-    for rel in ("app/static/app.js", "app/static/browse/render.js",
-                "app/static/search/facets.js", "app/static/offline/storeAdapter.js",
-                "app/static/offline-harness.html"):
+    for rel in ("web/static/app.js", "web/static/browse/render.js",
+                "web/static/search/facets.js", "web/static/offline/storeAdapter.js",
+                "web/static/offline-harness.html"):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert "function escapeHtml" not in text, f"{rel} must not define escapeHtml"
         assert "function folderHasOnlyImages" not in text, f"{rel} must not define folderHasOnlyImages"
@@ -252,7 +252,7 @@ def test_app_js_has_no_module_fallback_bodies():
     A missing module must throw at startup (wrong defer order in index.html)
     instead of silently running a second, drifting implementation. Refs #107.
     """
-    app_text = (REPO_ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    app_text = (REPO_ROOT / "web" / "static" / "app.js").read_text(encoding="utf-8")
     import re
     hits = re.findall(r"window\.[A-Za-z]+ && window\.", app_text)
     assert hits == [], f"module fallback bodies are back in app.js: {hits}"

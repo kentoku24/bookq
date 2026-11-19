@@ -1,6 +1,6 @@
 """E2E tests for the filter facet sheet + in-place browse filtering (#476 v1 port).
 
-The downloads tree is deliberately NESTED (metadata.toml only at depth 2-3),
+The library tree is deliberately NESTED (metadata.toml only at depth 2-3),
 so the facet sheet only shows chips once the recursive-index + subtree-facets
 work lands — the sheet at COMEDY level lists 3 subtree artists, at root all 5.
 
@@ -51,7 +51,7 @@ def _metadata_toml(source: str, artist: str, title_jp: str = "テスト作品") 
 
 
 @pytest.fixture(scope="module")
-def facet_downloads(tmp_path_factory) -> Path:
+def facet_library(tmp_path_factory) -> Path:
     """Dedicated NESTED metadata tree for the filter-facet tests.
 
     Anti-flattening shape — scan_tree collapses a folder with no images and
@@ -63,7 +63,7 @@ def facet_downloads(tmp_path_factory) -> Path:
     reaches the browse node ONLY via subtree aggregation — the load-bearing
     case the whole subtree_facets design exists for.
     """
-    root = tmp_path_factory.mktemp("facet_downloads")
+    root = tmp_path_factory.mktemp("facet_library")
 
     def gallery(rel: str, toml: str) -> None:
         folder = root / rel
@@ -101,12 +101,12 @@ def facet_downloads(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def facet_server(facet_downloads: Path):
-    """Dual-lane backend (uvicorn or viewer-rs) against the nested tree."""
+def facet_server(facet_library: Path):
+    """viewer-rs backend against the nested tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=facet_downloads,
+        library_dir=facet_library,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url

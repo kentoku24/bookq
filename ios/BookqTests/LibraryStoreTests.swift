@@ -1,3 +1,4 @@
+import BookqCore
 import XCTest
 @testable import Bookq
 

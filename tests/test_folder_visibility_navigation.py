@@ -239,6 +239,34 @@ def _pin_online(vpage):
         "window.Connectivity && window.Connectivity.reportSuccess()")
 
 
+def _pin_online_boot(vpage):
+    """Same verdict, applied from document start — the visibility GET is
+    issued inside init() after the first loadFolders paint, and an
+    'offline' park during early boot suppresses it entirely ("GET was
+    never issued" flakes #502). The init script polls until
+    window.Connectivity exists, then reportSuccess() pins the state
+    machine before init's chain reaches the fetch. Harmless when a real
+    probe already won — reportSuccess is a no-op verdict."""
+    vpage.add_init_script(
+        "(()=>{const t=setInterval(()=>{"
+        "if(window.Connectivity){window.Connectivity.reportSuccess();"
+        "clearInterval(t);}},50);})()")
+
+
+def _pin_online_boot(vpage):
+    """Same verdict, applied from document start — the visibility GET is
+    issued inside init() after the first loadFolders paint, and an
+    'offline' park during early boot suppresses it entirely ("GET was
+    never issued" flakes #502). The init script polls until
+    window.Connectivity exists, then reportSuccess() pins the state
+    machine before init's chain reaches the fetch. Harmless when a real
+    probe already won — reportSuccess is a no-op verdict."""
+    vpage.add_init_script(
+        "(()=>{const t=setInterval(()=>{"
+        "if(window.Connectivity){window.Connectivity.reportSuccess();"
+        "clearInterval(t);}},50);})()")
+
+
 def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     """While the first visibility GET is outstanding the grid must never
     paint an unfiltered list — release converges to the filtered grid.
@@ -248,6 +276,7 @@ def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     _suppress_embed(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
@@ -273,6 +302,7 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series")
     assert _wait_held(held), "visibility GET was never issued"
@@ -293,6 +323,7 @@ def test_loading_queues_view_url_then_applies(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/view/keep_a?p=0")
     assert _wait_held(held), "visibility GET was never issued"
@@ -352,6 +383,7 @@ def test_embedded_snapshot_filters_first_paint(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
     # NOT the loading gate — the embed supplies a snapshot, so the grid
@@ -376,6 +408,7 @@ def test_pending_browse_restore_keeps_list_mode(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series?v=list")
     assert _wait_held(held), "visibility GET was never issued"
     _pin_online(vpage)
@@ -418,6 +451,7 @@ def test_pending_nav_last_write_wins(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
     _pin_online(vpage)
@@ -437,6 +471,7 @@ def test_pending_nav_last_write_wins_view(vpage, vis_env):
     held = []
     vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     _drop_vis_snapshot(vpage)
+    _pin_online_boot(vpage)
     vpage.reload()
     assert _wait_held(held), "visibility GET was never issued"
     _pin_online(vpage)
