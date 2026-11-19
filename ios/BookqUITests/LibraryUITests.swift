@@ -109,22 +109,22 @@ final class LibraryUITests: XCTestCase {
     }
 
     func testTrailingToolbarSurvivesDrillDown() throws {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60))
+        app.assertExists(tile("Series"), within: 60)
         tile("Series").tap()
-        XCTAssertTrue(tile("Series/vol1").waitForExistence(timeout: 30))
+        app.assertExists(tile("Series/vol1"), within: 30)
         // pair / settings / ⋯menu must stay on pushed levels too —
         // Android and the web client keep the same cluster visible at
         // every depth (pre-fix it was root-only).
-        XCTAssertTrue(app.buttons["pairBtn"].waitForExistence(timeout: 10),
-                      "pairBtn missing on drilled level")
-        XCTAssertTrue(app.buttons["settingsBtn"].waitForExistence(timeout: 10),
-                      "settingsBtn missing on drilled level")
-        XCTAssertTrue(app.buttons["layoutMenuBtn"].waitForExistence(timeout: 10),
-                      "layoutMenuBtn missing on drilled level")
+        app.assertExists(app.buttons["pairBtn"], within: 10,
+                         "pairBtn missing on drilled level")
+        app.assertExists(app.buttons["settingsBtn"], within: 10,
+                         "settingsBtn missing on drilled level")
+        app.assertExists(app.buttons["layoutMenuBtn"], within: 10,
+                         "layoutMenuBtn missing on drilled level")
         // And the menu still functions there — the 表示 picker opens.
         app.buttons["layoutMenuBtn"].tap()
-        XCTAssertTrue(app.buttons["リスト"].waitForExistence(timeout: 10),
-                      "layout menu did not open on drilled level")
+        app.assertExists(app.buttons["リスト"], within: 10,
+                         "layout menu did not open on drilled level")
     }
 
     func testOfflineButtonPresent() throws {
