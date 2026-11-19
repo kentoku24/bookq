@@ -442,6 +442,8 @@ paths:
               schema: {type: string, format: binary}
             application/*:
               schema: {type: string, format: binary}
+            text/*:
+              schema: {type: string}
         "206":
           description: 単一 Range レスポンス
           content:
@@ -449,10 +451,12 @@ paths:
               schema: {type: string, format: binary}
             application/*:
               schema: {type: string, format: binary}
+            text/*:
+              schema: {type: string}
         "304": {description: ETag 一致}
         "400":
           description: |
-            不正な Range ヘッダ等。Starlette の FileResponse Range 処理は
+            不正な Range ヘッダ等。viewer-rs の Range 検証は
             `text/plain` ボディを返す（`{"detail": …}` JSON とは別形式）。
           content:
             application/json:
@@ -461,6 +465,20 @@ paths:
               schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "416":
+          description: |
+            Range がファイル長を超過（`bytes=N-` や `bytes=a-b` で
+            a ≥ size、`bytes=-0` 等の unsatisfiable 指定）
+          content:
+            text/plain:
+              schema: {type: string}
+        "501":
+          description: |
+            抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium
+            無し環境での PDF ページ
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
 
   /thumb/{path}:
     get:
@@ -803,7 +821,10 @@ paths:
 
         リクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。
         ファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する
-        （`invalid_name` / `unsupported_type` / `too_large` / `io_error`）。
+        （`invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+        `conflict` (dedupe 名が尽きた) / `malformed` (multipart が途中で
+        切れた)）。非UTF-8 で復号不能な filename は `name:"?"`、
+        `malformed` は `name:"*"` の sentinel を使う。
         大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の
         分割アップロードを使うこと。
       parameters:
@@ -870,21 +891,6 @@ paths:
               schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
-        "413":
-          description: 単一ファイルが `BOOKQ_UPLOAD_MAX_BYTES` 超過
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Error"}
-        "415":
-          description: |
-            multipart 以外の Content-Type。extractor 拒否時は `text/plain`、
-            拡張子非対応は `{"detail": …}` JSON。
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/Error"}
-            text/plain:
-              schema: {type: string}
-        "422": {$ref: "#/components/responses/ValidationError"}
         "503":
           description: uploads が無効（library 書き込み不可のデプロイ）
           content:
@@ -924,14 +930,10 @@ paths:
                   summary: フォルダ削除（再帰）
                   value: {deleted: "Series/vol1", kind: dir}
         "400":
-          description: |
-            パラメータ不正（空・ルート・`.bookq-uploads` 配下）。query の
-            parse 失敗時は extractor が `text/plain` を返す。
+          description: パラメータ不正（空・ルート・`.bookq-uploads` 配下）
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
-            text/plain:
-              schema: {type: string}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "422": {$ref: "#/components/responses/ValidationError"}
@@ -1130,20 +1132,25 @@ paths:
                   value: {name: "work.rar", path: "Series/work.rar", size: 500000000}
         "404": {$ref: "#/components/responses/NotFound"}
         "409":
-          description: 未完（body の `offset` が現在の受領位置）
+          description: |
+            未完（`code:incomplete`、`offset` が現在の受領位置）または
+            dedupe の空き名枯渇（`conflict`、detail のみ）
           content:
             application/json:
               schema:
                 type: object
-                required: [detail, code, offset]
+                required: [detail]
                 properties:
                   detail: {type: string}
-                  code: {type: string, enum: [incomplete]}
+                  code: {type: string, enum: [incomplete, conflict]}
                   offset: {type: integer, minimum: 0}
               examples:
-                default:
+                incomplete:
                   summary: 未完
                   value: {detail: "upload incomplete", code: "incomplete", offset: 33554432}
+                conflict:
+                  summary: dedupe 枯渇
+                  value: {detail: "no free filename slot"}
         "503":
           description: uploads が無効
           content:
@@ -1706,7 +1713,10 @@ components:
         name: {type: string}
         code:
           type: string
-          description: "invalid_name / unsupported_type / too_large / io_error"
+          description: |
+            `invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+            `conflict` (dedupe で空き名なし) / `malformed` (multipart が
+            途中で切れた — `name` は `"*"` の sentinel)
 
     LibraryUploadInit:
       type: object

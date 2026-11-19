@@ -40,7 +40,13 @@ def lib_root(tmp_path_factory) -> Path:
     root = tmp_path_factory.mktemp("lib-edit")
     (root / "series").mkdir()
     (root / "series" / "work.cbz").write_bytes(_zip_bytes())
+    # Archive whose only member is 0 bytes — the archive Range path.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("empty.png", b"")
+    (root / "series" / "zero-member.cbz").write_bytes(buf.getvalue())
     (root / "plain.txt").write_bytes(b"not an archive")
+    (root / "zero.jpg").write_bytes(b"")  # 0-byte file for the Range path
     (root / "empty").mkdir()
     return root
 
@@ -191,6 +197,8 @@ def test_upload_dir_validation(lib_server):
         ("a/../b", 400),
         ("/abs", 400),
         (UPLOAD_DIR_NAME, 400),   # staging area is off-limits
+        (".BOOKQ-UPLOADS", 400),  # case-variant can't slip past the guard
+        (".hidden", 400),         # dot components are never listable
     ]:
         r = httpx.post(
             f"{lib_server}/api/v1/library/files",
@@ -227,7 +235,9 @@ def test_upload_non_multipart_rejected(lib_server):
         params={"dir": "series"},
         json={"name": "x.cbz"},
     )
-    assert r.status_code in (400, 415)
+    # Non-multipart Content-Type is an extractor rejection → 400 text/plain.
+    # (415 is unreachable — axum's MultipartRejection has no 415 variant.)
+    assert r.status_code == 400
 
 
 # ── DELETE /api/v1/library/files ─────────────────────────────────────────────
@@ -384,6 +394,66 @@ def test_staging_dir_invisible_in_tree(lib_server, lib_root):
     httpx.delete(f"{lib_server}/api/v1/library/uploads/{uid}")
 
 
+def test_staging_unaddressable_on_every_route(lib_server, lib_root):
+    # Dot components are rejected on every request path — listing filters
+    # already hide `.bookq-uploads`, these keep it unreachable directly too
+    # (session ids + in-flight blobs must not leak; Shannon scan repros).
+    uid = _init(lib_server, "hidden.cbz", 10)
+    assert (lib_root / UPLOAD_DIR_NAME / uid / "meta.json").exists()
+
+    # Read paths → 404 (invisible, not 403/400 — the dir shouldn't exist).
+    for url in (
+        f"{lib_server}/image/{UPLOAD_DIR_NAME}/{uid}/meta.json",
+        f"{lib_server}/image/{UPLOAD_DIR_NAME}/{uid}/blob",
+        f"{lib_server}/thumb/{UPLOAD_DIR_NAME}/{uid}/meta.json",
+        f"{lib_server}/view/{UPLOAD_DIR_NAME}/{uid}/meta.json",
+    ):
+        r = httpx.get(url)
+        assert r.status_code == 404, (url, r.status_code)
+    r = httpx.get(
+        f"{lib_server}/api/v1/tree",
+        params={"path": UPLOAD_DIR_NAME, "depth": 1},
+    )
+    assert r.status_code == 404, r.status_code
+    r = httpx.get(
+        f"{lib_server}/api/v1/images",
+        params={"folder": UPLOAD_DIR_NAME},
+    )
+    assert r.status_code == 404, r.status_code
+
+    # Write paths → 400 — incl. case variants that slip the raw string
+    # compare on case-insensitive filesystems (APFS). The dot-component
+    # check runs before any realpath, so the table is FS-portable.
+    for bad in (UPLOAD_DIR_NAME, ".BOOKQ-UPLOADS", f"{UPLOAD_DIR_NAME}/{uid}"):
+        r = httpx.delete(
+            f"{lib_server}/api/v1/library/files", params={"path": bad}
+        )
+        assert r.status_code == 400, (bad, r.status_code)
+
+    httpx.delete(f"{lib_server}/api/v1/library/uploads/{uid}")
+
+
+def test_range_on_empty_targets(lib_server):
+    # `size - 1` underflowed to u64::MAX on empty targets — bogus 206 on
+    # plain files, a 500 slice panic on archive members (Shannon repro).
+    r = httpx.get(f"{lib_server}/image/zero.jpg", headers={"Range": "bytes=-5"})
+    assert r.status_code == 416, (r.status_code, r.headers.get("content-range"))
+    assert r.headers.get("content-range") == "bytes */0"
+
+    # An explicit range on the same file was already 416 — suffix was the hole.
+    r = httpx.get(f"{lib_server}/image/zero.jpg", headers={"Range": "bytes=0-5"})
+    assert r.status_code == 416
+
+    # Archive path: unusable range on a 0-byte member → 200 with the empty
+    # body (that parser's contract), never a 500.
+    r = httpx.get(
+        f"{lib_server}/image/series/zero-member.cbz/empty.png",
+        headers={"Range": "bytes=-5"},
+    )
+    assert r.status_code == 200, r.status_code
+    assert r.content == b""
+
+
 def test_uploaded_file_appears_in_tree_and_is_readable(lib_server):
     r = httpx.post(
         f"{lib_server}/api/v1/library/files",
@@ -518,12 +588,27 @@ def test_upload_contract_rejections(lib_server, lib_root):
     assert r.status_code == 400
 
     # Unparseable multipart is a bad request, not a partial-success report.
+    # Pin the JSON detail so we know it's the handler's saw_malformed 400,
+    # not the extractor's text/plain 400 (missing boundary etc.).
     r = httpx.post(
         f"{lib_server}/api/v1/library/files",
         content=b"--b\r\nContent-Disposition: form-data; name=\"\x0f\xc3\xa4\"\r\n\r\nx\r\n--b--\r\n",
         headers={"Content-Type": "multipart/form-data; boundary=b"},
     )
     assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["detail"] == "malformed multipart body"
+
+    # A filename present in the disposition but undecodable as UTF-8 is an
+    # upload attempt with a bad name — reported per-file at 200, not
+    # silently skipped like a form field.
+    r = httpx.post(
+        f"{lib_server}/api/v1/library/files",
+        content=b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\xff.cbz\"\r\nContent-Type: application/octet-stream\r\n\r\nx\r\n--b--\r\n",
+        headers={"Content-Type": "multipart/form-data; boundary=b"},
+    )
+    assert r.status_code == 200
+    assert r.json()["errors"] == [{"name": "?", "code": "invalid_name"}]
 
     # ...but a schema-valid batch whose entries all fail per-file checks
     # still reports them under `errors` at 200.

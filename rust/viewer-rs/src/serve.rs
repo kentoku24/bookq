@@ -175,6 +175,19 @@ pub(crate) fn is_safe_entry(name: &str) -> bool {
         .any(|p| p.is_empty() || p == "." || p == "..")
 }
 
+/// Any `/`-separated component that is a dot-name — dot-prefixed names are
+/// never listable (`shallow_live`/`is_image_entry` filter them), so request
+/// paths may not name them either. Covers `.bookq-uploads` under every
+/// caller-supplied case/spelling on case-insensitive filesystems, where the
+/// post-realpath staging compare (which preserves the caller's case) can't.
+/// `.`/`..` are traversal syntax, not hidden names — they keep their
+/// existing handling (`folder=.` is a supported root alias, `..` gets 403
+/// from the containment check or 400 from `is_safe_entry` upstream).
+pub(crate) fn has_dot_component(path: &str) -> bool {
+    path.split('/')
+        .any(|c| c.starts_with('.') && c != "." && c != "..")
+}
+
 /// `_is_image_entry`: exposable image inside an archive.
 pub(crate) fn is_image_entry(name: &str) -> bool {
     if !is_safe_entry(name) || name.ends_with('/') {
@@ -357,6 +370,11 @@ fn file_not_modified(headers: &HeaderMap, etag: &str, mtime: f64) -> bool {
 /// `_parse_range` — archive-entry semantics: any invalid/unusable range is
 /// ignored and the caller serves 200 in full.
 fn parse_archive_range(header: &str, size: u64) -> Option<(u64, u64)> {
+    if size == 0 {
+        // `size - 1` below would wrap to u64::MAX — an empty member has no
+        // satisfiable range, and this parser's contract is "unusable → 200".
+        return None;
+    }
     let m = header.trim().strip_prefix("bytes=")?;
     let (s, e) = m.split_once('-')?;
     if s.is_empty() && e.is_empty() {
@@ -496,6 +514,14 @@ fn archive_bytes_response(
 /// `bookq_core::pdf_page_count` (#402); a missing libpdfium only affects
 /// page *rendering* (proxied), never the listing.
 pub fn api_images(library: &Path, folder: &str) -> Response {
+    // Dot-prefixed components are never listable — same invisibility rule
+    // as the media path and the tree API (`.bookq-uploads` stays unprobed).
+    if has_dot_component(folder) {
+        return detail(
+            StatusCode::NOT_FOUND,
+            &format!("Folder not found: {folder}"),
+        );
+    }
     let folder_path = library.join(folder);
     if !is_within(library, &folder_path) {
         return detail(StatusCode::FORBIDDEN, "Forbidden");
@@ -615,6 +641,12 @@ fn json_list(folder: &str, names: Vec<String>) -> Response {
 /// Multi-range is a contract shrink (200 full) on both plain and archive
 /// paths — see `serve_plain_file`.
 pub fn image(library: &Path, path: &str, headers: &HeaderMap) -> Response {
+    // Dot-prefixed components are never listable — `.bookq-uploads` staging
+    // must be unreadable through the media path too (404, not 403: the dir
+    // shouldn't be discoverable at all).
+    if has_dot_component(path) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
     if let Some((archive, inner)) = resolve_archive(library, path) {
         if !is_within(library, &archive) {
             return detail(StatusCode::FORBIDDEN, "Forbidden");
@@ -776,7 +808,9 @@ fn plan_range(headers: &HeaderMap, size: u64) -> RangePlan {
             let Ok(n) = e.parse::<u64>() else {
                 return RangePlan::BadRequest("Range header: range must be requested");
             };
-            if n == 0 {
+            if n == 0 || size == 0 {
+                // Empty target: `size - 1` below would wrap to u64::MAX and
+                // answer a bogus 206 / panic slicing an archive member.
                 return RangePlan::Unsatisfiable;
             }
             ranges.push((size.saturating_sub(n), size - 1));

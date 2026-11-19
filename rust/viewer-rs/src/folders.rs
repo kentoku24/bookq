@@ -771,6 +771,15 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
     // ── Shallow mode (depth >= 1).
     let depth = depth.unwrap();
     let norm = path.trim_end_matches('/').to_string();
+    // Dot-prefixed components are never listable — `.bookq-uploads` live
+    // session ids must not be enumerable through the tree API either (404
+    // keeps the dir invisible, same as the listing filters).
+    if crate::serve::has_dot_component(&norm) {
+        return detail_response(
+            StatusCode::NOT_FOUND,
+            "folder not found",
+        );
+    }
     let target = if norm.is_empty() {
         st.library.clone()
     } else {

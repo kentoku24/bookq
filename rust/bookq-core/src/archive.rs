@@ -223,7 +223,10 @@ fn read_endrec64(f: &mut File, mut offset: i64, e: &mut EndRec) -> Result<(), ()
         return Err(());
     }
     offset -= SIZE_EOCD64 as i64;
-    if reloff as i64 > offset {
+    // reloff is attacker u64 — clamp the domain before any `as i64` so a
+    // value ≥ 2^63 can't wrap past the guard. offset < 0 means the file
+    // was too short to hold the records we already sliced.
+    if offset < 0 || reloff > offset as u64 {
         return Err(());
     }
     let mut data = [0u8; SIZE_EOCD64];
@@ -243,7 +246,9 @@ fn read_endrec64(f: &mut File, mut offset: i64, e: &mut EndRec) -> Result<(), ()
     let sz = u64::from_le_bytes(data[4..12].try_into().unwrap());
     let dirsize = u64::from_le_bytes(data[40..48].try_into().unwrap());
     let diroffset = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    if diroffset + dirsize != reloff || sz + 12 != SIZE_EOCD64 as u64 + extrasz as u64 {
+    if diroffset.checked_add(dirsize) != Some(reloff)
+        || sz.checked_add(12) != Some(SIZE_EOCD64 as u64 + extrasz as u64)
+    {
         return Err(());
     }
     e.size_cd = dirsize;
@@ -378,8 +383,16 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
         Some(e) => e,
         None => return Ok(None),
     };
-    let concat: i64 = endrec.location - endrec.size_cd as i64 - endrec.offset_cd as i64;
-    let start_dir: i64 = endrec.offset_cd as i64 + concat;
+    // zip64 fields are u64 attacker input — `as i64` alone can wrap
+    // negative and `+`/`-` can panic in debug builds. Clamp the casts
+    // and saturate the arithmetic; the `start_dir < 0` check below
+    // still rejects every overflowed value.
+    let clamp = |v: u64| v.min(i64::MAX as u64) as i64;
+    let concat: i64 = endrec
+        .location
+        .saturating_sub(clamp(endrec.size_cd))
+        .saturating_sub(clamp(endrec.offset_cd));
+    let start_dir: i64 = clamp(endrec.offset_cd).saturating_add(concat);
     if start_dir < 0 {
         return Err(());
     }
@@ -462,7 +475,8 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
             crc,
             compress_size,
             file_size,
-            header_offset: header_offset as i64 + concat,
+            header_offset: (header_offset.min(i64::MAX as u64) as i64)
+                .saturating_add(concat),
             end_offset: 0,
         });
         total = total
@@ -525,8 +539,14 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     }
     let fnlen = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
     let extralen = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
-    let data_start = e.header_offset + SIZE_LFH as i64 + fnlen as i64 + extralen as i64;
-    if data_start < 0 || data_start + e.compress_size as i64 > e.end_offset {
+    let data_start = e
+        .header_offset
+        .saturating_add(SIZE_LFH as i64)
+        .saturating_add(fnlen as i64)
+        .saturating_add(extralen as i64);
+    if data_start < 0
+        || data_start.saturating_add(e.compress_size as i64) > e.end_offset
+    {
         return ReadOutcome::Bail; // "Overlapped entries" → BadZipFile
     }
     // `end_offset` only proves header-level consistency — it's the NEXT

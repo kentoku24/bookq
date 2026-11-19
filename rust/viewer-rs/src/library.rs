@@ -121,6 +121,13 @@ pub(crate) fn resolve_upload_dir(
     if !dir.is_empty() && !serve::is_safe_entry(dir) {
         return Err((StatusCode::BAD_REQUEST, "invalid dir"));
     }
+    // Dot components are never listable — refuse them outright. Besides
+    // hiding user dot-dirs uniformly, this blocks `.bookq-uploads` under
+    // every case spelling (the post-realpath name compare below preserves
+    // the caller's case on case-insensitive filesystems).
+    if serve::has_dot_component(dir) {
+        return Err((StatusCode::BAD_REQUEST, "invalid dir"));
+    }
     let cand = if dir.is_empty() {
         library.to_path_buf()
     } else {
@@ -347,6 +354,24 @@ async fn drain_field(field: &mut axum::extract::multipart::Field<'_>) {
     while let Ok(Some(_)) = field.chunk().await {}
 }
 
+/// Does the part's Content-Disposition actually carry a `filename` token
+/// (`filename=` or RFC 5987 `filename*=`)? Checked on the raw bytes —
+/// the whole point is catching names the UTF-8 decode couldn't show us.
+/// Mirrors multer's parameter boundary: the token must start at a `;`
+/// or ASCII whitespace boundary so `myfilename=` can't false-positive.
+/// (Not quote-aware, like multer itself — harmless because this check
+/// is only consulted when multer already failed to decode the name.)
+fn disposition_has_filename(headers: &axum::http::HeaderMap) -> bool {
+    let Some(v) = headers.get(axum::http::header::CONTENT_DISPOSITION) else {
+        return false;
+    };
+    let b = v.as_bytes();
+    (0..b.len()).any(|i| {
+        (i == 0 || matches!(b[i - 1], b';' | b' ' | b'\t'))
+            && (b[i..].starts_with(b"filename=") || b[i..].starts_with(b"filename*="))
+    })
+}
+
 /// `dir` is resolved + validated by the caller. Streams each `file` field to
 /// a `.bq-tmp-*` sibling then renames; per-file failures land in `errors[]`.
 pub(crate) async fn post_files(
@@ -384,10 +409,21 @@ pub(crate) async fn post_files(
         }
         // A `file` part without a filename is a form field, not a file
         // upload — skip it like unknown fields so an all-nonfile request
-        // hits the "no file fields" 400 below instead of a 200.
-        let Some(name) = field.file_name().map(str::to_string) else {
-            drain_field(&mut field).await;
-            continue;
+        // hits the "no file fields" 400 below instead of a 200. But
+        // `file_name()` is also None when the name exists and just isn't
+        // UTF-8 (or is RFC 5987 `filename*=` only) — that IS an upload
+        // attempt, so report it as a per-file error instead of skipping.
+        let name = match field.file_name() {
+            Some(n) => n.to_string(),
+            None if disposition_has_filename(field.headers()) => {
+                drain_field(&mut field).await;
+                errors.push(serde_json::json!({"name": "?", "code": "invalid_name"}));
+                continue;
+            }
+            None => {
+                drain_field(&mut field).await;
+                continue;
+            }
         };
         if let Some(code) = precheck_file(&name) {
             drain_field(&mut field).await;
@@ -495,6 +531,11 @@ pub(crate) async fn delete_file(st: &AppState, path: &str) -> Response {
         return uploads_disabled();
     };
     if path.is_empty() || !serve::is_safe_entry(path) {
+        return state::detail(StatusCode::BAD_REQUEST, "invalid path");
+    }
+    // Dot-prefixed components are never listable — covers `.bookq-uploads`
+    // in any caller-supplied case on case-insensitive filesystems.
+    if serve::has_dot_component(path) {
         return state::detail(StatusCode::BAD_REQUEST, "invalid path");
     }
     if path.split('/').next() == Some(UPLOAD_DIR_NAME) {
@@ -815,7 +856,11 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
     let Some((sess, dir, blob)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
-    if sess.offset != sess.size {
+    // The blob is the authority, not the meta counter — load_session already
+    // reconciles them (shorter = corrupt → None, longer = truncate), so
+    // agreeing here means the file really holds `size` bytes.
+    let blob_len = std::fs::metadata(&blob).map(|m| m.len()).unwrap_or(0);
+    if sess.offset != sess.size || blob_len != sess.size {
         return json(
             StatusCode::CONFLICT,
             serde_json::json!({
