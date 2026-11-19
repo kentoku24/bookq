@@ -1213,4 +1213,38 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ── covered_by_roots (search/facets hidden-root filter, M6) ─────────
+    // Privacy contract: a hidden root covers itself AND everything under
+    // "root/" — but never a sibling sharing only a string prefix.
+
+    #[test]
+    fn covered_by_roots_exact_and_descendants() {
+        let roots = vec!["secret".to_string(), "private/dir".to_string()];
+        assert!(covered_by_roots("secret", &roots));
+        assert!(covered_by_roots("secret/comic", &roots));
+        assert!(covered_by_roots("secret/a/b/c", &roots));
+        assert!(covered_by_roots("private/dir/x", &roots));
+        assert!(covered_by_roots("private/dir", &roots));
+    }
+
+    #[test]
+    fn covered_by_roots_prefix_is_not_substring() {
+        let roots = vec!["sec".to_string()];
+        // "secret" shares the prefix but is NOT under root "sec/"
+        assert!(!covered_by_roots("secret", &roots));
+        assert!(covered_by_roots("sec/x", &roots));
+        // empty path never covered (root listing stays visible)
+        assert!(!covered_by_roots("", &roots));
+        // empty root entries are ignored, not treated as match-all
+        let roots2 = vec!["".to_string()];
+        assert!(!covered_by_roots("anything", &roots2));
+        assert!(!covered_by_roots("", &roots2));
+    }
+
+    #[test]
+    fn covered_by_roots_empty_roots_covers_nothing() {
+        assert!(!covered_by_roots("a/b", &[]));
+        assert!(!covered_by_roots("", &[]));
+    }
 }

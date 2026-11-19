@@ -833,3 +833,132 @@ impl NodeDe {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "bookq-tree-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(base: &Path, rel: &str) {
+        let p = base.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, b"x").unwrap();
+    }
+
+    fn scan(base: &Path) -> Vec<Node> {
+        let mut interner = Interner::default();
+        scan_tree(base, &mut interner).unwrap()
+    }
+
+    fn names(nodes: &[Node]) -> Vec<String> {
+        nodes.iter().map(|n| n.name().to_string()).collect()
+    }
+
+    // ── single-child flatten (AGENTS.md / scanner.py contract) ─────────
+    // A folder with NO own media and exactly ONE subdir is hoisted: its
+    // children move up with "parent/child" names, recursively.
+
+    #[test]
+    fn flatten_collapses_single_child_chain_to_leaf() {
+        let d = tmpdir("chain");
+        touch(&d, "series/vol1/001.png");
+        let nodes = scan(&d);
+        // series → vol1 both flatten; top level gets one image node
+        assert_eq!(names(&nodes), vec!["series/vol1/001.png"]);
+        assert!(matches!(nodes[0], Node::Image { .. }));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn flatten_stops_at_folder_with_own_media() {
+        let d = tmpdir("ownmedia");
+        // series/ has its own image AND one subdir → inside series, vol1
+        // stays a normal folder (series.files non-empty blocks inner flatten).
+        // A second top-level dir keeps base from flattening series away.
+        touch(&d, "series/cover.png");
+        touch(&d, "series/vol1/001.png");
+        touch(&d, "other/002.png");
+        let nodes = scan(&d);
+        assert_eq!(names(&nodes), vec!["other", "series"]);
+        let series = nodes[1].as_folder().unwrap();
+        assert_eq!(names(&series.children), vec!["cover.png", "vol1"]);
+        let vol1 = series.children[1].as_folder().unwrap();
+        assert_eq!(names(&vol1.children), vec!["001.png"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn flatten_promotes_single_subdirs_children() {
+        let d = tmpdir("twosub");
+        // group has no media and TWO subdirs → group itself stays… no:
+        // group has 2 subdirs so group is NOT dissolved; but base has only
+        // group → base flattens group, promoting a/b as "group/a","group/b".
+        touch(&d, "group/a/001.png");
+        touch(&d, "group/b/002.png");
+        let nodes = scan(&d);
+        assert_eq!(names(&nodes), vec!["group/a", "group/b"]);
+        assert!(nodes.iter().all(|n| n.is_folder()));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn flatten_leaves_sibling_content_alone() {
+        let d = tmpdir("sibling");
+        touch(&d, "top.png");
+        touch(&d, "wrap/inner/deep.png");
+        let nodes = scan(&d);
+        // base has a file → wrap stays a normal folder chain? wrap has no
+        // files and 1 subdir → its children hoist to "inner/deep.png" INSIDE
+        // wrap's parent level — but wrap itself is a child of base which has
+        // files, so wrap remains a Folder node containing the flattened leaf.
+        assert_eq!(names(&nodes), vec!["top.png", "wrap"]);
+        let wrap = nodes[1].as_folder().unwrap();
+        assert_eq!(names(&wrap.children), vec!["inner/deep.png"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn scan_ignores_dotdirs_and_non_media() {
+        let d = tmpdir("ignore");
+        touch(&d, ".hidden/001.png");
+        touch(&d, "notes.txt");
+        touch(&d, "ok/001.png");
+        touch(&d, "other/002.png");   // second subdir → no flatten at base
+        let nodes = scan(&d);
+        // .hidden skipped entirely; notes.txt is not media; two real
+        // subdirs keep normal Folder nodes (sorted natural_cmp).
+        assert_eq!(names(&nodes), vec!["ok", "other"]);
+        let ok = nodes[0].as_folder().unwrap();
+        assert_eq!(names(&ok.children), vec!["001.png"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn scan_missing_base_is_empty_tree() {
+        let d = std::env::temp_dir().join(format!(
+            "bookq-tree-test-missing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nodes = scan(&d);
+        assert!(nodes.is_empty());
+    }
+}
