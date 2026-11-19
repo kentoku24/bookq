@@ -20,7 +20,7 @@ mod pdf;
 mod scans;
 
 pub use archive::{
-    epub_raw, open_archive, rar_names, rar_needs_upstream, rar_read_entry, zip_names,
+    epub_raw, open_archive, rar_names, rar_needs_external_7z, rar_read_entry, zip_names,
     zip_read_entry, OpenArchive,
     ZipEntry,
 };

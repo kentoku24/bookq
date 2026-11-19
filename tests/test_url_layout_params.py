@@ -37,7 +37,7 @@ def test_layout_params_restore_from_url(landscape_page, server):
     assert landscape_page.evaluate("window.landscapeSpread") is False
     # Same folder/page, different query only -> same-document navigation
     # (hashchange fires but applyUrlState's st.page===cur.page short-circuits
-    # the reload per the Task 2 note in the brief). A reload simulates the
+    # the reload). A reload simulates the
     # realistic case of opening a shared deep link fresh.
     landscape_page.goto(server + "/#/view/long?p=2&o=1")
     landscape_page.reload()

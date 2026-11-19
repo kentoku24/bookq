@@ -34,7 +34,7 @@ jobs:
               - "api/**"
               - ".spectral.yaml"
               - "scripts/api/**"
-              - "app/static/api/api-types.d.ts"
+              - "web/static/api/api-types.d.ts"
               - ".github/workflows/api-spec-lint.yml"
 
   spectral:
@@ -91,7 +91,7 @@ jobs:
       # alone would miss a new file under api/dist/.
       - name: Fail on drift
         run: |
-          drift="$(git status --porcelain -- api/dist app/static/api/api-types.d.ts)"
+          drift="$(git status --porcelain -- api/dist web/static/api/api-types.d.ts)"
           if [ -n "$drift" ]; then
             echo "$drift"
             echo "::error::derived artifacts are stale — run ./scripts/api/codegen.sh and commit the output"

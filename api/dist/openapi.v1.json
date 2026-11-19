@@ -45,7 +45,7 @@
               "default": {
                 "summary": "経路外アクセス",
                 "value": {
-                  "detail": "path escapes downloads root"
+                  "detail": "path escapes library root"
                 }
               },
               "hidden": {
@@ -278,6 +278,91 @@
         ],
         "type": "object"
       },
+      "LibraryFileEntry": {
+        "properties": {
+          "name": {
+            "description": "採用されたファイル名（衝突時は `name (n).ext` に自動リネーム）",
+            "type": "string"
+          },
+          "path": {
+            "description": "ルート相対パス",
+            "type": "string"
+          },
+          "size": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "size"
+        ],
+        "type": "object"
+      },
+      "LibraryFileError": {
+        "properties": {
+          "code": {
+            "description": "`invalid_name` / `unsupported_type` / `too_large` / `io_error` /\n`conflict` (dedupe で空き名なし) / `malformed` (multipart が\n途中で切れた — `name` は `\"*\"` の sentinel)\n",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "code"
+        ],
+        "type": "object"
+      },
+      "LibraryUploadInit": {
+        "properties": {
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "offset"
+        ],
+        "type": "object"
+      },
+      "LibraryUploadState": {
+        "properties": {
+          "dir": {
+            "description": "保存先（ルート相対、空 = ルート）",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "offset": {
+            "description": "受領済みバイト数（次の追記開始位置）",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "size": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "dir",
+          "name",
+          "size",
+          "offset"
+        ],
+        "type": "object"
+      },
       "ReadingPosition": {
         "properties": {
           "folder": {
@@ -412,7 +497,7 @@
     "contact": {
       "name": "bookq"
     },
-    "description": "bookq サーバ/クライアント間の単一の正 (single source of truth)。\n\nこの spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。\nFastAPI (`app/`) と Rust (`rust/viewer-rs`) の両実装はこの spec に対して\nSchemathesis 契約テストで検証される。Web クライアントの型\n(`app/static/api/api-types.d.ts`) と JSON バンドル (`api/dist/*.json`)\nは `scripts/api/codegen.sh` でこの spec から生成し、iOS クライアントは\n適合テスト (`ios/BookqTests/SpecConformanceTests.swift`) で契約遵守を\n検証する。\n\n## 認証\n\n全 `/api/**`・`/image/**`・`/thumb/**`・`/view/**`・`/ws/**` は認証必須。\n\n- `cookieAuth`: Google OAuth → 署名 session cookie（ブラウザ向け、現行）\n- `bearerAuth`: `POST /api/v1/auth/token` で発行する Bearer token\n  （ネイティブ向け、RFC 8252 PKCE フロー）\n\n## 共通セマンティクス\n\n### パス文字列\n`folder` / `{path}` 系パラメータはすべてダウンロードルート相対の\nPOSIX パス。先頭・末尾 `/` 不可、`..` 不可。URL 埋め込み時は\n**セグメント単位で percent-encode** する（`/` → `%2F` にしない。\n全体 encode は別 URL になりキャッシュ不一致を起こす）。\n\n### 書庫の仮想フォルダ\n`.zip .cbz .rar .cbr .epub` は `type: \"folder\", archive: true` の\nノードとして現れる。書庫内部のパスは longest-prefix 解決:\n`<…>/work.cbz/vol01/page.png` は書庫 `work.cbz` のエントリ\n`vol01/page.png` を指す。`.pdf` は `archive: true, pdf: true`。\n\n### ツリーの flatten\n「画像を持たず子フォルダが1つだけ」のフォルダは親に潰し込まれ、\n子ノードの `name` が `\"parent/child\"` になる。`name` が `/` を\n含むのはこの規約による正常形であり、クライアントはそのまま\nパス連結に使ってよい。\n\n### サムネイル解決\nノードの `thumb` / `thumbs[]` は**フォルダ相対のファイル名**。\nクライアントは `/image/<fullPath>/<thumb>` に解決する\n（`fullPath` = 親パス + `name` の連結）。\n\n### インデックス構築中\nメタデータインデックス構築中は `202 + Retry-After` を返す。\nクライアントは Retry-After 後に同一リクエストを再送する。\n\n### 排他・鮮度\n`generation` はライブラリ世代番号。`since=<generation>` で\n既知世代と一致する場合 304 を返す。メディア endpoint は\n`ETag` / `If-None-Match` と `Range: bytes=` をサポートする。\n\n### 隠しルート（セキュリティ契約）\nhidden roots は**ライブラリ全体で共有**（全認証ユーザーに同一の\nセットが効く）。hidden roots 配下のコンテンツは\n**サーバ側で除外**する。クライアント側フィルタはレスポンス本体に\n該当データを含めてしまうため認めない。`include_hidden=true` は\nこの共有 hidden セットの除外をスキップする（閲覧者個人の\n全表示モード用。一時的・非永続）。\n\n## v0 退役方針（#212 / #407）\n\n`deprecated: true` の v0 互換面（`/api/folders` 等 10 path）は\nviewer (Python) 停止と同時に廃止する（#410 の Python 撤去で\n自然に消える）。viewer-rs は v0 を native 実装しない\n（upstream proxy のまま → v0 停止時に upstream は不要）。\nPWA / iOS / Android と `scripts/prod_monitor.py` は v1 移行済み。\n\n`Deprecation` / `Sunset` 応答ヘッダは送らない。\nPython バックエンドは凍結中（`app/` untouched）のため二重実装の\nコストに見合わず、具体的な退役日の確定は #212 に委ねる。\nそれまでは本 spec の `deprecated: true` + 各 v0 operation の\nSunset 記載を正とする。\n\n## 振る舞いの正本\n\nwire shape に表れない意味論（ETag 世代・positions LWW・\nvisibility owner HMAC・PKCE ライフサイクル・gzip 対象）は\n**`api/v1-semantics.md`** が正本。spec と併せて読むこと。\n",
+    "description": "bookq サーバ/クライアント間の単一の正 (single source of truth)。\n\nこの spec は手入れする正本であり、FastAPI 実装からの自動生成物ではない。\nFastAPI (`app/`) と Rust (`rust/viewer-rs`) の両実装はこの spec に対して\nSchemathesis 契約テストで検証される。Web クライアントの型\n(`web/static/api/api-types.d.ts`) と JSON バンドル (`api/dist/*.json`)\nは `scripts/api/codegen.sh` でこの spec から生成し、iOS クライアントは\n適合テスト (`ios/BookqTests/SpecConformanceTests.swift`) で契約遵守を\n検証する。\n\n## 認証\n\n全 `/api/**`・`/image/**`・`/thumb/**`・`/view/**`・`/ws/**` は認証必須。\n\n- `cookieAuth`: Google OAuth → 署名 session cookie（ブラウザ向け、現行）\n- `bearerAuth`: `POST /api/v1/auth/token` で発行する Bearer token\n  （ネイティブ向け、RFC 8252 PKCE フロー）\n\n## 共通セマンティクス\n\n### パス文字列\n`folder` / `{path}` 系パラメータはすべてダウンロードルート相対の\nPOSIX パス。先頭・末尾 `/` 不可、`..` 不可。URL 埋め込み時は\n**セグメント単位で percent-encode** する（`/` → `%2F` にしない。\n全体 encode は別 URL になりキャッシュ不一致を起こす）。\n\n### 書庫の仮想フォルダ\n`.zip .cbz .rar .cbr .epub` は `type: \"folder\", archive: true` の\nノードとして現れる。書庫内部のパスは longest-prefix 解決:\n`<…>/work.cbz/vol01/page.png` は書庫 `work.cbz` のエントリ\n`vol01/page.png` を指す。`.pdf` は `archive: true, pdf: true`。\n\n### ツリーの flatten\n「画像を持たず子フォルダが1つだけ」のフォルダは親に潰し込まれ、\n子ノードの `name` が `\"parent/child\"` になる。`name` が `/` を\n含むのはこの規約による正常形であり、クライアントはそのまま\nパス連結に使ってよい。\n\n### サムネイル解決\nノードの `thumb` / `thumbs[]` は**フォルダ相対のファイル名**。\nクライアントは `/image/<fullPath>/<thumb>` に解決する\n（`fullPath` = 親パス + `name` の連結）。\n\n### インデックス構築中\nメタデータインデックス構築中は `202 + Retry-After` を返す。\nクライアントは Retry-After 後に同一リクエストを再送する。\n\n### 排他・鮮度\n`generation` はライブラリ世代番号。`since=<generation>` で\n既知世代と一致する場合 304 を返す。メディア endpoint は\n`ETag` / `If-None-Match` と `Range: bytes=` をサポートする。\n\n### 隠しルート（セキュリティ契約）\nhidden roots は**ライブラリ全体で共有**（全認証ユーザーに同一の\nセットが効く）。hidden roots 配下のコンテンツは\n**サーバ側で除外**する。クライアント側フィルタはレスポンス本体に\n該当データを含めてしまうため認めない。`include_hidden=true` は\nこの共有 hidden セットの除外をスキップする（閲覧者個人の\n全表示モード用。一時的・非永続）。\n\n## v0 退役方針（#212 / #407）\n\n`deprecated: true` の v0 互換面（`/api/folders` 等 10 path）は\nviewer (Python) 停止と同時に廃止する（#410 の Python 撤去で\n自然に消える）。viewer-rs は v0 を native 実装しない\n（upstream proxy のまま → v0 停止時に upstream は不要）。\nPWA / iOS / Android と `scripts/prod_monitor.py` は v1 移行済み。\n\n`Deprecation` / `Sunset` 応答ヘッダは送らない。\nPython バックエンドは凍結中（`app/` untouched）のため二重実装の\nコストに見合わず、具体的な退役日の確定は #212 に委ねる。\nそれまでは本 spec の `deprecated: true` + 各 v0 operation の\nSunset 記載を正とする。\n\n## 振る舞いの正本\n\nwire shape に表れない意味論（ETag 世代・positions LWW・\nvisibility owner HMAC・PKCE ライフサイクル・gzip 対象）は\n**`api/v1-semantics.md`** が正本。spec と併せて読むこと。\n",
     "title": "bookq API",
     "version": "1.0.0"
   },
@@ -1567,6 +1652,669 @@
         ]
       }
     },
+    "/api/v1/library/files": {
+      "delete": {
+        "description": "`path`（ルート相対、必須）を削除する。ファイルは単体削除、\nディレクトリは配下ごと再帰削除。ルート（空パス）・\n`.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。\n読書位置やクライアント側オフラインキャッシュは消えない\n（孤立するが無害 — v1-semantics.md §8）。\n",
+        "operationId": "deleteLibraryFile",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "dir": {
+                    "summary": "フォルダ削除（再帰）",
+                    "value": {
+                      "deleted": "Series/vol1",
+                      "kind": "dir"
+                    }
+                  },
+                  "file": {
+                    "summary": "ファイル削除",
+                    "value": {
+                      "deleted": "Series/work.rar",
+                      "kind": "file"
+                    }
+                  }
+                },
+                "schema": {
+                  "properties": {
+                    "deleted": {
+                      "description": "削除したルート相対パス",
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "file",
+                        "dir"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "deleted",
+                    "kind"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "削除完了"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "パラメータ不正（空・ルート・`.bookq-uploads` 配下）"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効（library 書き込み不可のデプロイ）"
+          }
+        },
+        "summary": "作品ファイル / フォルダの削除",
+        "tags": [
+          "library"
+        ]
+      },
+      "post": {
+        "description": "`dir`（ルート相対。省略・空 = ライブラリルート）直下に multipart の\n`file` フィールドを保存する。`dir` は実在ディレクトリ必須\n（書庫ファイルや `.bookq-uploads` 配下は 400、不存在は 404）。\n同名が既にある場合は `name (n).ext` で自動リネームし、採用名を\n`files[].name` で返す。\n\nリクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。\nファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する\n（`invalid_name` / `unsupported_type` / `too_large` / `io_error` /\n`conflict` (dedupe 名が尽きた) / `malformed` (multipart が途中で\n切れた)）。非UTF-8 で復号不能な filename は `name:\"?\"`、\n`malformed` は `name:\"*\"` の sentinel を使う。\n大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の\n分割アップロードを使うこと。\n",
+        "operationId": "uploadLibraryFiles",
+        "parameters": [
+          {
+            "description": "保存先フォルダ（ルート相対、空 = ルート）",
+            "in": "query",
+            "name": "dir",
+            "schema": {
+              "default": "",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "items": {
+                      "format": "binary",
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "全件成功",
+                    "value": {
+                      "errors": [],
+                      "files": [
+                        {
+                          "name": "work.rar",
+                          "path": "Series/work.rar",
+                          "size": 12345678
+                        }
+                      ]
+                    }
+                  },
+                  "partial": {
+                    "summary": "一部失敗",
+                    "value": {
+                      "errors": [
+                        {
+                          "code": "unsupported_type",
+                          "name": "b.txt"
+                        }
+                      ],
+                      "files": [
+                        {
+                          "name": "a.cbz",
+                          "path": "Series/a.cbz",
+                          "size": 1000
+                        }
+                      ]
+                    }
+                  },
+                  "renamed": {
+                    "summary": "衝突で自動リネーム",
+                    "value": {
+                      "errors": [],
+                      "files": [
+                        {
+                          "name": "work (1).rar",
+                          "path": "Series/work (1).rar",
+                          "size": 12345678
+                        }
+                      ]
+                    }
+                  }
+                },
+                "schema": {
+                  "properties": {
+                    "errors": {
+                      "items": {
+                        "$ref": "#/components/schemas/LibraryFileError"
+                      },
+                      "type": "array"
+                    },
+                    "files": {
+                      "items": {
+                        "$ref": "#/components/schemas/LibraryFileEntry"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "files",
+                    "errors"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "受理結果（errors が空なら全件成功）"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は\nextractor がハンドラ到達前に `text/plain` を返す（/image の 400\nと同じ二形式）。\n"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効（library 書き込み不可のデプロイ）"
+          }
+        },
+        "summary": "作品ファイルのアップロード（multipart・1〜複数ファイル）",
+        "tags": [
+          "library"
+        ]
+      }
+    },
+    "/api/v1/library/uploads": {
+      "post": {
+        "description": "再開可能な分割アップロード。init（本 op）→\n`PUT /api/v1/library/uploads/{id}` で `Upload-Offset` 順に chunk を\nappend → `POST .../finalize` でライブラリへ確定。セッションは\n`<library>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。\n`name`/`dir` の検証は `/files` と同一、`size` は確定後の総バイト数。\n",
+        "operationId": "createLibraryUpload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "default": {
+                  "summary": "セッション開始",
+                  "value": {
+                    "dir": "Series",
+                    "name": "work.rar",
+                    "size": 500000000
+                  }
+                }
+              },
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "dir": {
+                    "default": "",
+                    "type": "string"
+                  },
+                  "name": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "size": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "name",
+                  "size"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "offset": 0,
+                      "upload_id": "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryUploadInit"
+                }
+              }
+            },
+            "description": "セッション作成"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "`size` が `BOOKQ_UPLOAD_MAX_BYTES` 超過"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "対応外の拡張子"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効（library 書き込み不可のデプロイ）"
+          }
+        },
+        "summary": "分割アップロードセッション開始",
+        "tags": [
+          "library"
+        ]
+      }
+    },
+    "/api/v1/library/uploads/{id}": {
+      "delete": {
+        "operationId": "cancelLibraryUpload",
+        "responses": {
+          "204": {
+            "description": "破棄完了（本体なし）"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効"
+          }
+        },
+        "summary": "セッション破棄",
+        "tags": [
+          "library"
+        ]
+      },
+      "get": {
+        "operationId": "getLibraryUpload",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "途中状態",
+                    "value": {
+                      "dir": "Series",
+                      "name": "work.rar",
+                      "offset": 134217728,
+                      "size": 500000000,
+                      "upload_id": "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryUploadState"
+                }
+              }
+            },
+            "description": "セッション状態"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効"
+          }
+        },
+        "summary": "セッション状態（再開位置の確認）",
+        "tags": [
+          "library"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "createLibraryUpload が発行した upload_id",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "ボディ（raw octet-stream）を `Upload-Offset` が示す位置から追記する。\n`Upload-Offset` はサーバの現在 `offset` と一致必須 — 不一致は\n**409 + `{offset: <現在値>}`** を返し、クライアントは返された\noffset から送り直す。`offset + len(body) > size` は 400。\n順序外・重複チャンクは offset 不一致で 409 になるため安全に再送できる。\n",
+        "operationId": "appendLibraryUpload",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Upload-Offset",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系",
+                    "value": {
+                      "offset": 167772160
+                    }
+                  }
+                },
+                "schema": {
+                  "properties": {
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "offset"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "追記完了"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "offset 不一致",
+                    "value": {
+                      "code": "offset_mismatch",
+                      "detail": "offset mismatch",
+                      "offset": 33554432
+                    }
+                  }
+                },
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "offset_mismatch"
+                      ],
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "detail",
+                    "code",
+                    "offset"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "offset 不一致（body の `offset` が現在の受領位置）"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "`BOOKQ_UPLOAD_MAX_BYTES` 超過"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効"
+          }
+        },
+        "summary": "チャンクの追記（offset 順）",
+        "tags": [
+          "library"
+        ]
+      }
+    },
+    "/api/v1/library/uploads/{id}/finalize": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "`offset == size` の時のみ受理。blob を fsync してから\n`dir` 内で自動リネームして atomic rename、セッションを掃除し、\n採用名を返す。未完は **409 + `{offset: <現在値>}`**。\n",
+        "operationId": "finalizeLibraryUpload",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "default": {
+                    "summary": "正常系（リネームなし）",
+                    "value": {
+                      "name": "work.rar",
+                      "path": "Series/work.rar",
+                      "size": 500000000
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryFileEntry"
+                }
+              }
+            },
+            "description": "確定完了"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "conflict": {
+                    "summary": "dedupe 枯渇",
+                    "value": {
+                      "detail": "no free filename slot"
+                    }
+                  },
+                  "incomplete": {
+                    "summary": "未完",
+                    "value": {
+                      "code": "incomplete",
+                      "detail": "upload incomplete",
+                      "offset": 33554432
+                    }
+                  }
+                },
+                "schema": {
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "incomplete",
+                        "conflict"
+                      ],
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "未完（`code:incomplete`、`offset` が現在の受領位置）または\ndedupe の空き名枯渇（`conflict`、detail のみ）\n"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "uploads が無効"
+          }
+        },
+        "summary": "セッション確定（ライブラリへ配置）",
+        "tags": [
+          "library"
+        ]
+      }
+    },
     "/api/v1/reading-positions": {
       "delete": {
         "operationId": "deleteReadingPosition",
@@ -2271,9 +3019,20 @@
         "responses": {
           "200": {
             "content": {
+              "application/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "image/*": {
                 "schema": {
                   "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/*": {
+                "schema": {
                   "type": "string"
                 }
               }
@@ -2281,6 +3040,25 @@
             "description": "画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない"
           },
           "206": {
+            "content": {
+              "application/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "image/*": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
+              "text/*": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "description": "単一 Range レスポンス"
           },
           "304": {
@@ -2299,13 +3077,33 @@
                 }
               }
             },
-            "description": "不正な Range ヘッダ等。Starlette の FileResponse Range 処理は\n`text/plain` ボディを返す（`{\"detail\": …}` JSON とは別形式）。\n"
+            "description": "不正な Range ヘッダ等。viewer-rs の Range 検証は\n`text/plain` ボディを返す（`{\"detail\": …}` JSON とは別形式）。\n"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "416": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Range がファイル長を超過（`bytes=N-` や `bytes=a-b` で\na ≥ size、`bytes=-0` 等の unsatisfiable 指定）\n"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium\n無し環境での PDF ページ\n"
           }
         },
         "summary": "画像本体（Range / ETag 対応）",
@@ -2357,6 +3155,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "非画像などネイティブでサムネ生成不能なソース"
           }
         },
         "summary": "リサイズ JPEG サムネイル",
@@ -2399,6 +3207,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "非画像などネイティブで正規化不能なソース"
           }
         },
         "summary": "リーダー用正規化ページ",
@@ -2440,6 +3258,9 @@
     },
     {
       "name": "auth"
+    },
+    {
+      "name": "library"
     }
   ]
 }

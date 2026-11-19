@@ -16,15 +16,33 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 プロジェクトは PBXFileSystemSynchronizedRootGroup（フォルダ自動同期）なので
 `Bookq/` 配下にファイルを置くだけでビルド対象になる。
 
+## ドメイン規則パッケージ (`ios/Packages/BookqCore`)
+
+シミュレータ不要の純粋な規則（`BrowseModel` / `ReaderWork` / `PairModels` /
+`CanonicalJSON` / `ImageURL` / `TreeNode` / `PairJoinCode`）はローカル
+SwiftPM パッケージ `BookqCore` に切り出してある（#282）。Xcode プロジェクト
+は `XCLocalSwiftPackageReference` で参照し、`Bookq` / `BookqTests` ターゲット
+がリンクする。UI に依存しないためシミュレータなしでテストできる：
+
+```bash
+swift test --package-path ios/Packages/BookqCore
+```
+
+ドメインのテストは言語共通テストケース（`api/vectors/*.json`、#280）を
+`TestRepo` 経由の `#filePath` 相対パスで読む。Linux でも通ること
+（CryptoKit/`CGFloat` を使わず純粋 Swift のみ）が条件。
+
 ## 開発用サーバーへの接続
 
 シミュレータは Mac のネットワークを共有するため、ローカルの TEST_MODE
 サーバーには `http://127.0.0.1:8080` で直接届く（ATS は loopback 対象外。`localhost` ではなく IPv4 固定にする — `localhost` が `::1` に解決される環境で別サービスが 8080 を掴んでいると別物に繋がる）:
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
-  uv run --with-requirements requirements-dev.txt \
-  uvicorn app.main:app --port 8080
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+  SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 起動時に `-serverURL` 引数を渡すと URL をプリセットできる
@@ -48,6 +66,19 @@ access JWT（1h）+ refresh（30d、rotation 付き）の pair を 1 Keychain it
 （single-flight coalescing）。API セッションは cookie storage を明示的に無効化
 （Bearer 一本）。identity は JWT claims（`sub`/`name`/`picture`）由来の `AuthUser`
 — `/api/me` のような検証 endpoint は存在しない。
+
+refresh token はサーバープロセスのインメモリのため、サーバー再起動/再デプロイで
+全消去される。アクセストークン期限切れ後の refresh は 400/401 で拒否される —
+これは確定的なセッション死亡として `AuthManager.onSessionExpired` が発火し、
+`AppModel.sessionDidExpire()` が `.ready` → `.login` に遷移する
+（Android `sessionExpired` parity。ネットワーク断・5xx では発火しない）。
+foreground 復帰時は `AppModel.foregrounded()` が refresh を事前行使し、
+再起動で死んだセッションをページをめくる前に検知する。
+リーダー/ペアリーダーのページ画像は失敗時に目立つ ⚠️ +「再読み込み」ボタンを
+表示し、タップでそのページだけ再取得する（グリッドのカバー類はバッジのみ）。
+DEBUG 起動では `-testToken` と併用する `-testRefreshToken <rt>` で refresh
+経路を再現できる — TEST_MODE サーバーが発行していない値を渡すと refresh が
+401 で拒否され、上記の sessionExpired → Login 遷移をそのまま検証できる。
 
 native フローは TEST_MODE でも Google OAuth を通る（`?client=native` は
 `_TEST_MODE` をバイパスしない）。dev 環境でのアプリ側フロー検証には
@@ -238,7 +269,12 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   の Testables に両方登録済みで `xcodebuild test` が両方走る。
 - UI テストは `BookqUITests/UITestSupport.swift` が `-serverURL` /
   `-testToken` 起動引数で TEST_MODE サーバーへ直接接続する（fixture は
-  android.yml と同じ合成木: Series/vol1+vol2, Other）。タップ対象は
+  android.yml と同じ合成木: Series/vol1+vol2, Other）。`-uitestReset`
+  （または `BOOKQ_UI_TEST_RESET`）で起動毎に永続状態を初期化する —
+  ローカルの読書位置・pair-sync・レイアウト設定を init で wipe し、
+  Documents/ 配下のオフラインダウンロードとサーバー側の
+  reading-positions（boot 内の初回 sync 前に DELETE）も初期化する。
+  テスト間の状態持ち越しによるフレーク防止（#551）。タップ対象は
   `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
   `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
   （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。

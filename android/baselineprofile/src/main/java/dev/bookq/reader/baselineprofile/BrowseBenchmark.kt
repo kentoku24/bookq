@@ -13,8 +13,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Gate: tile-grid fling on a large tree — janky < 1 %, p99 < 16 ms
- *  (issue #302 §5). */
+/** Gate: tile-grid fling on a large tree — per-test thresholds live in
+ *  perf-gate.sh's GATES table (issue #302 §5). */
 @RunWith(AndroidJUnit4::class)
 class BrowseBenchmark {
 
@@ -40,11 +40,14 @@ class BrowseBenchmark {
                 error("browse grid never appeared")
             }
             // Root can be a single folder — one free drill inside setup
-            // so the measured level has a large tile list.
+            // so the measured level has a large tile list. A leaf tile
+            // opens the reader instead — back out so the fling still
+            // has a grid to scroll.
             device.findObjects(By.res(java.util.regex.Pattern
                 .compile("tile:.*")).pkg(PACKAGE_NAME))
                 .firstOrNull()?.click()
             device.waitForIdle(1_200)
+            if (inReader()) device.pressBack()
         },
     ) {
         // Alternate direction — repeated DOWN flings hit the end of the

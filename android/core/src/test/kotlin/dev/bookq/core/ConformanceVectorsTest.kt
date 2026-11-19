@@ -5,6 +5,7 @@ import dev.bookq.core.api.ImagePath
 import dev.bookq.core.api.TreeNode
 import dev.bookq.core.browse.BrowseRules
 import dev.bookq.core.reader.PageRef
+import dev.bookq.core.reader.ReaderChapter
 import dev.bookq.core.reader.ReaderPageMode
 import dev.bookq.core.reader.ReaderWork
 import kotlinx.serialization.json.Json
@@ -207,6 +208,73 @@ class ConformanceVectorsTest {
             assertEquals(name, expectSpreads.size, expectStarts.size)
             for (s in expectSpreads.indices) {
                 assertEquals(name, expectStarts[s], built.chapterStartSpread(s))
+            }
+        }
+    }
+
+    // MARK: - chapter-padding
+
+    /** `ReaderWork.assemble` (spacer padding + rebuildSpreads) against
+     *  chapter-padding.json — pins the post-shift pad rule shared with
+     *  web `padChapterSpacers` and iOS `ReaderWork.assemble` (#441). */
+    @Test fun chapterPadding() {
+        val vec = load("chapter-padding.json")
+        assertTrue(vec["languages"]!!.jsonArray.map { it.jsonPrimitive.content }.contains("kotlin"))
+        for (raw in vec["cases"]!!.jsonArray) {
+            val c = raw.jsonObject
+            val name = c["name"]!!.jsonPrimitive.content
+            val chapters = c["chapters"]!!.jsonArray.map { ch ->
+                val cho = ch.jsonObject
+                val folder = cho["folder"]!!.jsonPrimitive.content
+                ReaderChapter(
+                    name = folder,
+                    fullPath = folder,
+                    images = cho["pages"]!!.jsonArray.map {
+                        PageRef(it.jsonPrimitive.content, folder)
+                    },
+                )
+            }
+            val mode = if (c["pageMode"]!!.jsonPrimitive.content == "spread") {
+                ReaderPageMode.SPREAD
+            } else {
+                ReaderPageMode.SINGLE
+            }
+            val offset = c["spreadOffset"]!!.jsonPrimitive.int
+            val work = ReaderWork.assemble(
+                clickedPath = chapters.first().fullPath,
+                chapters = chapters,
+                pageMode = mode,
+                spreadOffset = offset,
+            )
+            val expectImages = c["expectImages"]!!.jsonArray.map { im ->
+                val io = im.jsonObject
+                listOf(
+                    io["folder"]!!.jsonPrimitive.content,
+                    io["name"]!!.jsonPrimitive.content,
+                    io["isSpacer"]?.jsonPrimitive?.booleanOrNull ?: false,
+                )
+            }
+            assertEquals(name, expectImages, work.images.map {
+                listOf(it.folder, it.name, it.isSpacer)
+            })
+            assertEquals(
+                name,
+                c["expectBoundaries"]!!.jsonArray.map { it.jsonPrimitive.int },
+                work.boundaries,
+            )
+            val expectSpreads = c["expectSpreads"]!!.jsonArray.map { row ->
+                row.jsonArray.map { it.jsonPrimitive.int }
+            }
+            assertEquals(name, expectSpreads, work.spreads)
+            assertEquals(
+                name,
+                c["expectIdxToSpread"]!!.jsonArray.map { it.jsonPrimitive.int },
+                work.idxToSpread,
+            )
+            val expectStarts = c["expectChapterStart"]!!.jsonArray.map { it.jsonPrimitive.boolean }
+            assertEquals(name, expectSpreads.size, expectStarts.size)
+            for (s in expectSpreads.indices) {
+                assertEquals(name, expectStarts[s], work.chapterStartSpread(s))
             }
         }
     }

@@ -3,7 +3,7 @@
   // spec response-shape change breaks the typed client (and its typed call
   // sites) at compile time instead of only in Playwright E2E.
   //
-  // Staged rollout (see issue): the composition root `app/static/app.js` and
+  // Staged rollout (see issue): the composition root `web/static/app.js` and
   // the Service Worker (`sw.js`, a separate global scope) stay out for now.
   // `strict` is next — this file starts with checkJs-only so the first green
   // run is reachable; tightening must not silently re-exclude files.
@@ -21,11 +21,11 @@
     "strict": false
   },
   "include": [
-    "app/static/api/**/*",
-    "app/static/progress/**/*",
-    "app/static/browse/visibility.js",
-    "app/static/offline/storeAdapter.js",
-    "app/static/search/facets.js"
+    "web/static/api/**/*",
+    "web/static/progress/**/*",
+    "web/static/browse/visibility.js",
+    "web/static/offline/storeAdapter.js",
+    "web/static/search/facets.js"
   ],
-  "exclude": ["node_modules", "app/static/vendor/**/*"]
+  "exclude": ["node_modules", "web/static/vendor/**/*"]
 }

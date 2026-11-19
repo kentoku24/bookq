@@ -3,11 +3,11 @@
 Reads api/vectors/*.json and drives the real frontend code — never a
 re-implementation:
 
-* encode-path: the shipped app/static/offline-core.js (OfflineCore).
-* solo-spreads: the shipped app/static/viewer/spread.js (rebuildSpreads).
+* encode-path: the shipped web/static/offline-core.js (OfflineCore).
+* solo-spreads: the shipped web/static/viewer/spread.js (rebuildSpreads).
 * work-chapters / path-lookup: findNodeByPath, findParentPath/getParentPath,
   findParentOf and getSiblingLeafFolders extracted verbatim from the shipped
-  app/static/app.js (brace-matched, so a source drift breaks the extraction
+  web/static/app.js (brace-matched, so a source drift breaks the extraction
   instead of silently testing a copy), run against the vector trees.
   This stands in for the catalog/rules.js extraction (#271): once the pure
   functions move, this harness points at the module instead.
@@ -22,9 +22,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VECTORS_DIR = REPO_ROOT / "api" / "vectors"
-APP_JS = REPO_ROOT / "app" / "static" / "app.js"
-OFFLINE_CORE_JS = REPO_ROOT / "app" / "static" / "offline-core.js"
-SPREAD_JS = REPO_ROOT / "app" / "static" / "viewer" / "spread.js"
+APP_JS = REPO_ROOT / "web" / "static" / "app.js"
+OFFLINE_CORE_JS = REPO_ROOT / "web" / "static" / "offline-core.js"
+SPREAD_JS = REPO_ROOT / "web" / "static" / "viewer" / "spread.js"
 
 
 def _load(name):
@@ -104,6 +104,54 @@ def test_solo_spreads_js(any_browser):
             )
             assert [s["pages"] for s in got["spreads"]] == case["expectSpreads"], case["name"]
             assert [s["chapterStart"] for s in got["spreads"]] == case["expectChapterStart"], case["name"]
+            assert list(got["idxToSpread"]) == case["expectIdxToSpread"], case["name"]
+
+
+def test_chapter_padding_js(any_browser):
+    """padChapterSpacers + rebuildSpreads against chapter-padding vectors.
+
+    The chapter->flat-images/boundaries mapping is glue (same shape
+    loadImages builds); the padding rule and spread grouping under test are
+    the shipped spread.js functions.
+    """
+    data = _load("chapter-padding.json")
+    assert "js" in data["languages"]
+    with _page(any_browser) as pg:
+        pg.add_script_tag(path=str(SPREAD_JS))
+        for case in data["cases"]:
+            got = pg.evaluate(
+                """([chapters, mode, offset]) => {
+                     var images = [], boundaries = [];
+                     for (var ch of chapters) {
+                       boundaries.push(images.length);
+                       for (var p of ch.pages) images.push({folder: ch.folder, name: p});
+                     }
+                     window.padChapterSpacers(images, boundaries, mode, offset);
+                     window.images = images;
+                     window.chapterBoundaries = boundaries;
+                     window.pageMode = mode;
+                     window.spreadOffset = offset;
+                     window.anchorSpread = 0;
+                     window.spreadSizeCache = {};
+                     window.rebuildSpreads();
+                     return {
+                       images: images.map(im => [im.folder, im.name, !!im.isSpacer]),
+                       boundaries: boundaries,
+                       spreads: window.spreads.map(s => s.pages),
+                       chapterStart: window.spreads.map(s => !!s.chapterStart),
+                       idxToSpread: Array.from(window.idxToSpread, v => (v === undefined ? -1 : v)),
+                     };
+                   }""",
+                [case["chapters"], case["pageMode"], case["spreadOffset"]],
+            )
+            expect_images = [
+                [e["folder"], e["name"], bool(e.get("isSpacer"))]
+                for e in case["expectImages"]
+            ]
+            assert got["images"] == expect_images, case["name"]
+            assert got["boundaries"] == case["expectBoundaries"], case["name"]
+            assert got["spreads"] == case["expectSpreads"], case["name"]
+            assert got["chapterStart"] == case["expectChapterStart"], case["name"]
             assert list(got["idxToSpread"]) == case["expectIdxToSpread"], case["name"]
 
 

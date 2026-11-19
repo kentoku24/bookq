@@ -1,4 +1,4 @@
-"""Offline E2E tests (Todo 9) — SW registration + Cache API offline.
+"""Offline E2E tests — SW registration + Cache API offline.
 
 All cases use `?offline=1` to enable SW; normal tests without offline=1 are not affected.
 Run:
@@ -69,9 +69,21 @@ def wait_for_sw(page, timeout=15000):
     return False
 
 
+def expect_reader_open(page, expect_pages, timeout=15000):
+    """Wait for the async reader-open to actually finish: `stripImgs[0]`
+    attaches only after the image list resolves (SW/cache scan under
+    offline), after which the counter text is settled render output. A
+    bare 8s counter wait raced that chain under `-n auto` CI load (#477
+    — surfaced when playwright floated to chromium-1255)."""
+    page.wait_for_function(
+        "() => window.stripImgs && !!window.stripImgs[0]", timeout=timeout)
+    expect(page.locator("#counter")).to_have_text(
+        re.compile(rf"^1 / {expect_pages}"))
+
+
 def open_folder_simple(page, path="simple_manga", expect_pages=5):
     page.locator(f'.tile[data-path="{path}"]').click()
-    expect(page.locator("#counter")).to_have_text(f"1 / {expect_pages}", timeout=8000)
+    expect_reader_open(page, expect_pages)
 
 
 # ── ① SW registration ────────────────────────────────────────────────────────
@@ -132,7 +144,7 @@ def test_auto_cache_offline(page, server):
             "() => window.Connectivity && window.Connectivity.state === 'offline'",
             timeout=20000,
         )
-        # Return to browse grid — spec §6: with zero downloads the grid is
+        # Return to browse grid — spec §6: with zero library the grid is
         # empty (auto-cached pages are not "downloaded"), not greyed tiles.
         page.locator("#menu-btn").click()
         expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
@@ -214,7 +226,7 @@ def test_download_offline_viewer(page, server):
             page.locator("#menu-btn").click()
             expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"), timeout=3000)
         page.locator(tile_sel).click()
-        expect(page.locator("#counter")).to_have_text("1 / 5", timeout=8000)
+        expect_reader_open(page, 5)
         # all pages should be reachable; check slider max and navigation
         expect(page.locator("#page-slider")).to_have_attribute("max", "4", timeout=3000)
         # verify at least first page image loaded from cache
@@ -250,7 +262,7 @@ def test_delete_offline(page, server):
     expect(btn).to_be_visible(timeout=5000)
 
     if "state-idle" in (btn.get_attribute("class") or ""):
-        # single tap downloads straight to complete
+        # single tap library straight to complete
         btn.click()
         expect(page.locator(f"{tile_sel} .offline-btn.state-complete").first).to_be_visible(timeout=15000)
 
@@ -488,10 +500,17 @@ def test_offline_restore_archive_inner_names(page, server):
     page.context.set_offline(True)
     try:
         # connecting/offline both count as non-online for the readable gate —
-        # the open must reach the work-cache scan either way.
+        # the open must reach the work-cache scan either way. Wait for the
+        # 'offline' event to demote Connectivity first: while it still reads
+        # "online" the listing fetch's failure re-checks _connOffline(),
+        # finds false, and the open throws instead of falling back to the
+        # work-cache scan (#552 — stripImgs never landed on CI).
+        page.wait_for_function(
+            "() => window.Connectivity && !window.Connectivity.isOnline()",
+            timeout=15000,
+        )
         page.evaluate("() => window.loadImages('arc_work')")
-        expect(page.locator("#counter")).to_have_text(
-            re.compile(r"^1 / 2"), timeout=8000)
+        expect_reader_open(page, 2)
     finally:
         page.context.set_offline(False)
 
@@ -517,9 +536,15 @@ def test_offline_restore_uses_record_listing_order(page, server):
     }""")
     page.context.set_offline(True)
     try:
+        # Same ordering guarantee as the archive-inner-names case above —
+        # the listing fetch must see a non-online Connectivity state to fall
+        # back to the work-cache scan (#552).
+        page.wait_for_function(
+            "() => window.Connectivity && !window.Connectivity.isOnline()",
+            timeout=15000,
+        )
         page.evaluate("() => window.loadImages('epub_work')")
-        expect(page.locator("#counter")).to_have_text(
-            re.compile(r"^1 / 2"), timeout=8000)
+        expect_reader_open(page, 2)
         src = page.evaluate(
             "() => (window.stripImgs && window.stripImgs[0] && window.stripImgs[0].src) || ''")
         assert "z.jpg" in src, \

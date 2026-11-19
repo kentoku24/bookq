@@ -1,5 +1,5 @@
 """Live image bytes + thumbs (#31): first/middle/last image serves, middle
-thumbs, /api/images count matches. Asserts carry hash IDs only."""
+thumbs, /api/v1/images count matches. Asserts carry hash IDs only."""
 import json
 import urllib.error
 import urllib.parse
@@ -46,11 +46,11 @@ def test_live_images_api_count(live_server, live_sample):
     for leaf in live_sample:
         q = urllib.parse.quote(leaf["path"], safe="")
         with urllib.request.urlopen(
-            f"{live_server}/api/images?folder={q}", timeout=60
+            f"{live_server}/api/v1/images?folder={q}", timeout=60
         ) as r:
-            names = json.load(r)
+            names = json.load(r).get("images", [])
         assert len(names) == len(leaf["images"]), (
-            f"api/images={len(names)} tree={len(leaf['images'])} on [{leaf['id']}]"
+            f"api/v1/images={len(names)} tree={len(leaf['images'])} on [{leaf['id']}]"
         )
 
 

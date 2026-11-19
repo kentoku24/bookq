@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Paired-reader surface — the dual-reader equivalent of ReaderView.
@@ -71,7 +72,7 @@ struct PairedReaderView: View {
                 let url = model.api?.pageURL(folder: ref.folder, name: ref.name,
                                              original: model.config.originalImages)
                 ZoomableScrollView(onZoomChange: { z in zoomed = z }) {
-                    RemoteImageView(url: url, contentMode: .fit)
+                    RemoteImageView(url: url, contentMode: .fit, retryable: true)
                         .background(Color.black)
                 }
                 .id("\(ref.folder)|\(ref.name)")   // fresh zoom state per page

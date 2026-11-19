@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate app/static/api/endpoints.js from api/openapi.v1.yaml.
+"""Generate web/static/api/endpoints.js from api/openapi.v1.yaml.
 
-The PWA must not hard-code `/api/v1/...` strings outside `app/static/api/`
+The PWA must not hard-code `/api/v1/...` strings outside `web/static/api/`
 (#236): this file is the single source of truth for endpoint paths, loaded
 by the page (before `api/v1.js`) and by the Service Worker via
 `importScripts` (which cannot see `window.BookqApi`).
@@ -9,7 +9,8 @@ by the page (before `api/v1.js`) and by the Service Worker via
 Sources:
   - v1 paths: `api/openapi.v1.yaml` (`paths:` keys starting with `/api/v1/`)
   - EXTRA (not in the OpenAPI schema on purpose): `/api/v1/pair-report`,
-    the test-only #142 bridge (`app/api_v1.py`, `include_in_schema=False`)
+    the test-only #142 bridge (retired Python `app/api_v1.py`, now viewer-rs native;
+    still `include_in_schema=False` by design)
 
 Usage:
   python3 scripts/gen-api-endpoints.py          # rewrite endpoints.js
@@ -23,7 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC = REPO_ROOT / "api" / "openapi.v1.yaml"
-OUT = REPO_ROOT / "app" / "static" / "api" / "endpoints.js"
+OUT = REPO_ROOT / "web" / "static" / "api" / "endpoints.js"
 
 # Spec path -> BookqApiEndpoints key. An unknown /api/v1/* path in the spec
 # fails the script on purpose: add the mapping here first.
@@ -36,6 +37,10 @@ PATH_TO_KEY = {
     "/api/v1/reading-positions": "readingPositions",
     "/api/v1/folder-visibility": "folderVisibility",
     "/api/v1/index/refresh": "indexRefresh",
+    "/api/v1/library/files": "libraryFiles",
+    "/api/v1/library/uploads": "libraryUploads",
+    "/api/v1/library/uploads/{id}": "libraryUpload",
+    "/api/v1/library/uploads/{id}/finalize": "libraryUploadFinalize",
     "/api/v1/version": "version",
     "/api/v1/health": "health",
     # Native-client only (the PWA never calls it) — listed so the
@@ -45,14 +50,14 @@ PATH_TO_KEY = {
 
 # Deliberately outside the OpenAPI schema (include_in_schema=False).
 EXTRA = {
-    "pairReport": "/api/v1/pair-report",  # test-only #142 bridge (app/api_v1.py)
+    "pairReport": "/api/v1/pair-report",  # test-only #142 bridge (ex-app/api_v1.py, now rs native)
 }
 
 HEADER = """/* bookq api endpoints — shared `/api/v1/...` path constants.
  * GENERATED — do not hand-edit. Regenerate:
  *   python3 scripts/gen-api-endpoints.py
  * Sources: api/openapi.v1.yaml (v1 paths) + test-only pair-report
- * (app/api_v1.py, include_in_schema=False — see script EXTRA).
+ * (ex-app/api_v1.py, now rs native; include_in_schema=False — see script EXTRA).
  * Loads in both the page (before api/v1.js) and the Service Worker via
  * importScripts (no window there) — hence globalThis, no window/document.
  */
