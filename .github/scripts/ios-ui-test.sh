@@ -300,9 +300,40 @@ fi
 # lets app/UserDefaults state leak between suites (ProgressSyncTests
 # fail on leftovers from UI-test runs).
 #
-# Retry ONCE, and only when the log shows an infrastructure signature —
-# real assertion failures must never get a second chance to pass.
+# Retry ONCE, and only when the failure looks infrastructural — real
+# assertion failures must never get a second chance to pass. Console
+# signatures cover transport/clone errors; app.launch() flakes such as
+# "does not have a process ID" are recorded only inside the xcresult,
+# so failure messages there are inspected as a second signal: retry
+# only when EVERY recorded failure is launch/transport-class.
 BUNDLE="$RESULTS/tests.xcresult"
+
+infra_failure() {
+  local log="$1"
+  grep -qE "Failed to clone device|CoreSimulator|remained in Creating|Failed to install|Lost connection|timed out waiting|test runner crashed|encountered an error|died unexpectedly" "$log" && return 0
+  [ -d "$BUNDLE" ] || return 1
+  xcrun xcresulttool get test-results tests --path "$BUNDLE" 2>/dev/null | python3 -c '
+import json, re, sys
+INFRA = re.compile(
+    r"does not have a process ID|[Ff]ailed to launch|[Uu]nable to launch|"
+    r"[Ll]ost connection|[Ff]ailed to install|testmanagerd|"
+    r"process exited", re.I)
+try:
+    root = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+msgs = []
+def walk(n):
+    if n.get("nodeType") == "Failure Message":
+        msgs.append(str(n.get("name", "")))
+    for c in n.get("children", []):
+        walk(c)
+for n in root.get("testNodes", []):
+    walk(n)
+sys.exit(0 if msgs and all(INFRA.search(m) for m in msgs) else 1)
+' 2>/dev/null
+}
+
 for attempt in 1 2; do
   log="$RESULTS/tests.attempt${attempt}.log"
   if xcodebuild test-without-building \
@@ -311,7 +342,7 @@ for attempt in 1 2; do
       -resultBundlePath "$BUNDLE" 2>&1 | tee "$log"; then
     exit 0
   fi
-  if ! grep -qE "Failed to clone device|CoreSimulator|remained in Creating|Failed to install|Lost connection|timed out waiting|test runner crashed|encountered an error|died unexpectedly" "$log"; then
+  if ! infra_failure "$log"; then
     echo "== test failures (not infra) — no retry"
     exit 1
   fi
