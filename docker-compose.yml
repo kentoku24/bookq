@@ -1,109 +1,54 @@
-# bookq — 本番。tailscale サイドカー経由の HTTPS だけが唯一の到達経路。
+# bookq — 本番。既定の到達経路は tailscale サイドカー経由の HTTPS。
+# 独自ドメイン公開時は opt-in の cloudflared (profile `public`) が
+# 第 2 の到達経路になる (#349、docs/deployment.md「独自ドメイン公開」)。
 #
 # 未検証コードの動作確認にこのファイルを使ってはいけない。
 # worktree で `docker compose up` を打つと、ホスト名 bookq を要求する
 # 2 つ目の tailnet ノードが立ち上がって本番と名前を争う。
 # 開発には ./dev.sh（docker-compose.dev.yml）を使う。
 services:
-  viewer:
-    build:
-      context: .
-      args:
-        GIT_SHA: ${GIT_SHA:-}
-        BUILD_DATE: ${BUILD_DATE:-}
-    container_name: bookq-prd-viewer
-    volumes:
-      # 既定値は ./downloads（.env の DOWNLOADS_HOST_DIR で上書き）。
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads"
-      # warmup disk cache の永続化 (issue #259): 既定の /tmp 配下はコンテナ
-      # 再作成で消えるため、BOOKQ_CACHE_DIR を名前付き volume 上の
-      # /var/cache/bookq に向ける。app/warmup_cache.py は env を call time
-      # に読むので、この env + volume の組だけで有効になる（code 変更不要）。
-      - warmup-cache:/var/cache/bookq
-      # thumb/sprite disk cache の永続化 (issue #276、#259 と同型): 既定の
-      # /tmp/bookq-thumbs はコンテナ再作成で消えるため、
-      # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の
-      # /var/cache/bookq-thumbs に向ける。app/thumbs.py cache_root() は
-      # env を call time に読むので、この env + volume の組だけで有効になる
-      #（code 変更不要）。thumbs/ と sprites/ の両 namespace が同 root 配下。
-      - thumb-cache:/var/cache/bookq-thumbs
-      # ユーザー別の永続設定 (folder-visibility): キャッシュではないので
-      # warmup/thumb の cache volume とは別の専用 volume に置く。
-      - user-state:/var/lib/bookq
-    environment:
-      - BOOKQ_ENV=production
-      - BOOKQ_CACHE_DIR=/var/cache/bookq
-      - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
-      - BOOKQ_STATE_DIR=/var/lib/bookq
-      # #320 rs フルネイティブモード: 空=従来どおり index/tree を構築・保持。
-      # 全 index 消費者が native (BOOKQ_RS_NATIVE 全件 or `all`) のとき 1 に
-      # すると、warmup/fill/cover-warm を止めて tree+index (~150-250MB) を
-      # 持たなくなる。index 必要 endpoint への着弾は 503 fail-fast。
-      - BOOKQ_DISABLE_INDEX=${BOOKQ_DISABLE_INDEX:-}
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - SECRET_KEY=${SECRET_KEY}
-      - BASE_URL=${BASE_URL}
-      - ALLOWED_EMAILS=${ALLOWED_EMAILS}
-    # ホストにポートを公開していないので、起動判定はコンテナ内から行うしかない。
-    # イメージに curl は無い。2 秒毎に python interpreter を spawn するコスト
-    # (~10-15MB transient + fork/exec churn) を避けるため、viewer-rs と同型の
-    # bash /dev/tcp probe で /api/health を叩く（prd.sh がこれを待つ）。
-    healthcheck:
-      test:
-        - CMD
-        - bash
-        - -c
-        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200'"
-      interval: 2s
-      timeout: 3s
-      retries: 15
-      start_period: 2s
-    # --workers 0 で hypercorn が単一プロセスになるため、孤児化する
-    # extractor 子孫 (unrar/7z 経由) の reap 用に tini を PID1 に置く。
-    init: true
-    restart: unless-stopped
-
-  # viewer-rs (#163/#211 strangler): profile `rs` で opt-in — 既定の
-  # `prd.sh up` ではコンテナ自体が起動しない。有効化すると全 traffic が
-  # これを通り（tailscale serve → viewer-rs）、BOOKQ_RS_NATIVE に列挙した
-  # endpoint のみ native 処理、残りは viewer へフォールスルーする。
-  # 詳細は docs/deployment.md「viewer-rs strangler 導入」。
+  # viewer-rs (#409, #503, #532): 唯一の本番バックエンド — 全 traffic が
+  # ここを通る（tailscale serve → viewer-rs）。strangler proxy は #532 で
+  # 撤去: 全 route が native 応答し、未知経路は 501・認証不能は 401 を
+  # ローカルで返す。Python viewer / py-rollback profile は #503 で削除 —
+  # rollback は git history からの再 build (docs/deployment.md 参照)。
   viewer-rs:
-    profiles: ["rs"]
     build:
       context: .
       dockerfile: Dockerfile.viewer-rs
     container_name: bookq-prd-viewer-rs
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
-      # folder-visibility SQLite — viewer と同じ user-state volume を共有。
+      # read-write: /api/v1/library/* (upload/delete) writes here.
+      # DOWNLOADS_HOST_DIR は rename 前の変数名 — 旧 .env が残っていても
+      # 解決できるよう nested fallback (新名が優先)。
+      - "${LIBRARY_HOST_DIR:-${DOWNLOADS_HOST_DIR:-./library}}:/app/library:rw"
+      # folder-visibility SQLite — user-state volume に永続化。
       - user-state:/var/lib/bookq
       # thumb/sprite hit-path cache — 共有しないと native thumb は常に
       # container-local miss で proxy 落ちし、media rollout が空転する
       # (#206 gateway-contract CI と同じ構成)。
       - thumb-cache:/var/cache/bookq-thumbs
     environment:
-      - BOOKQ_UPSTREAM=http://viewer:8080
-      - DOWNLOADS_DIR=/app/downloads
+      # #532: strangler proxy 撤去済み — upstream/gate env は存在しない。
+      # 未知経路の着弾は 501 + path WARN、認証不能は 401 で fail-fast する。
+      - LIBRARY_DIR=/app/library
+      # rollback 互換: prebuilt 旧イメージは DOWNLOADS_DIR を読む —
+      # この compose は deploy 対象の新旧どちらにも使われるため、同じ
+      # マウントを旧変数名にも指させる (新バイナリは無視する)。
+      - DOWNLOADS_DIR=/app/library
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
-      # endpoint 単位 rollout: カンマ区切りの native 化リスト。空 = 全 proxy。
-      # 既定は検証済みの全 native 面 (#320): gateway-contract CI が
-      # BOOKQ_RS_NATIVE=all で全件を叩いて等価性を確認済み。py へ残るのは
-      # OAuth/template/static + native 対象外の v0 系のみ。
-      # `all` ではなく列挙に留める — 将来追加される native route が
-      # 未検証のまま自動有効化されるのを防ぐため。新規 native route は
-      # この既定リストへの追加で有効化する。
-      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync}
-      # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC —
-      # viewer と同じ値が必須。ずれるとブラウザ利用が全て proxy に落ちる。
+      # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC。
       - SECRET_KEY=${SECRET_KEY}
       - BOOKQ_GIT_SHA=${GIT_SHA:-}
       - ALLOWED_EMAILS=${ALLOWED_EMAILS}
+      # OAuth 一式 (#400): /auth/* + /api/v1/auth/token に必須。未設定の
+      # ままでは surface は 501 を返す（起動時 WARN）。
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - BASE_URL=${BASE_URL}
     # イメージは debian-slim + バイナリのみ (curl/wget/python なし) —
-    # bash の /dev/tcp で /api/v1/health を叩く。BOOKQ_RS_NATIVE 空の全
-    # proxy 時も py 側が同パスを応答するのでどちらでも 200 が返る。
+    # bash の /dev/tcp で /api/v1/health を叩く。
     healthcheck:
       test:
         - CMD
@@ -115,9 +60,6 @@ services:
       retries: 15
       start_period: 2s
     restart: unless-stopped
-    depends_on:
-      viewer:
-        condition: service_healthy
 
   tailscale:
     build: ./tailscale
@@ -129,17 +71,37 @@ services:
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_HOSTNAME=bookq
-      # 未設定 → viewer 直結（従来どおり）。http://viewer-rs:8080 で gateway
-      # 経由に切替。空文字 = serve を外部管理（entrypoint の escape hatch）。
-      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer:8080}
+      # 既定 → viewer-rs。空文字 = serve を外部管理（entrypoint の escape hatch）。
+      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer-rs:8080}
+      # 1 で serve を funnel (public internet 公開) に切替 (#353)。
+      # tailnet policy の nodeAttrs `funnel` 許可が前提。未設定 = tailnet 内
+      # のみ（従来どおり）。
+      - TS_FUNNEL=${TS_FUNNEL:-}
     volumes:
       - tailscale-state:/var/lib/tailscale
     restart: unless-stopped
     depends_on:
-      - viewer
+      - viewer-rs
+
+  # Cloudflare Tunnel (#349): 独自ドメイン公開用の opt-in ingress。
+  # profile `public` でのみ起動 — CLOUDFLARE_TUNNEL_TOKEN が .env にある
+  # とき rebuild.sh prd deploy が profile を有効化する。cloudflared が
+  # 外向きに Cloudflare edge へ接続を張るだけなので、受信ポート開放も
+  # グローバル IP も不要 (CGNAT でも動く)。公開 hostname → service
+  # (http://viewer-rs:8080) の対応は Cloudflare ダッシュボード側で管理する。
+  cloudflared:
+    profiles: ["public"]
+    image: cloudflare/cloudflared:2026.10.4
+    container_name: bookq-prd-cloudflared
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    restart: unless-stopped
+    depends_on:
+      viewer-rs:
+        condition: service_healthy
 
 volumes:
   tailscale-state:
-  warmup-cache:
   thumb-cache:
   user-state:

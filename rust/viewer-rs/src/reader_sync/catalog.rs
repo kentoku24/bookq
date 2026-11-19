@@ -3,7 +3,7 @@
 //! Enumeration is the SAME code path the solo viewer uses: the cached
 //! scan_tree behind IndexState and the shared /api/images enumeration
 //! (`_list_folder_images`). PageRef = {folder, name} — folder is the
-//! downloads-relative serving path, name the entry name verbatim.
+//! library-relative serving path, name the entry name verbatim.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ const CONTENT_KEYS: &[&str] = &[
 
 // ── tree predicates ────────────────────────────────────────────────────────
 
-fn has_only_images(node: &tree::FolderNode) -> bool {
+pub(crate) fn has_only_images(node: &tree::FolderNode) -> bool {
     !node.children.is_empty()
         && node
             .children
@@ -74,7 +74,7 @@ fn has_only_images(node: &tree::FolderNode) -> bool {
             .all(|c| matches!(c, tree::Node::Image { .. }))
 }
 
-fn has_images(node: &tree::FolderNode) -> bool {
+pub(crate) fn has_images(node: &tree::FolderNode) -> bool {
     node.children
         .iter()
         .any(|c| matches!(c, tree::Node::Image { .. }))
@@ -98,7 +98,7 @@ fn norm_path(path: &str) -> String {
 
 /// `(siblings_list, parent_path)` whose list holds `target` — structural
 /// parent lookup mirroring `findParentOf` (names are never split on "/").
-fn find_container<'a>(
+pub(crate) fn find_container<'a>(
     nodes: &'a [tree::Node],
     target: &str,
     path: &str,
@@ -121,7 +121,7 @@ fn find_container<'a>(
 
 /// Port of `getSiblingLeafFolders`: ordered chapter-folder full paths
 /// when the sibling run applies, else None (single chapter).
-fn sibling_leaf_folders(tree: &[tree::Node], folder: &str) -> Option<Vec<String>> {
+pub(crate) fn sibling_leaf_folders(tree: &[tree::Node], folder: &str) -> Option<Vec<String>> {
     if folder.matches('/').count() < SIBLING_MIN_DEPTH {
         return None;
     }
@@ -145,12 +145,12 @@ fn sibling_leaf_folders(tree: &[tree::Node], folder: &str) -> Option<Vec<String>
 
 /// The archive/PDF file behind `folder` — the file itself, or the longest
 /// ancestor that is one (inner-prefix paths).
-fn archive_source(downloads: &Path, folder: &str) -> Option<PathBuf> {
-    let file_path = downloads.join(folder);
+fn archive_source(library: &Path, folder: &str) -> Option<PathBuf> {
+    let file_path = library.join(folder);
     if serve::is_archive_file(&file_path) || serve::is_pdf_file(&file_path) {
         return Some(file_path);
     }
-    serve::resolve_archive(downloads, folder).map(|(arc, _)| arc)
+    serve::resolve_archive(library, folder).map(|(arc, _)| arc)
 }
 
 /// Cheap "is this really its claimed container type" check — distinguishes
@@ -211,9 +211,9 @@ enum ListErr {
 }
 
 /// `_list_folder_images` — the shared /api/images enumeration core.
-fn list_folder_images(downloads: &Path, folder: &str) -> Result<Vec<String>, ListErr> {
-    let folder_path = downloads.join(folder);
-    if !serve::is_within(downloads, &folder_path) {
+fn list_folder_images(library: &Path, folder: &str) -> Result<Vec<String>, ListErr> {
+    let folder_path = library.join(folder);
+    if !serve::is_within(library, &folder_path) {
         return Err(ListErr::Http(403, "Forbidden".into()));
     }
     // Non-strict resolve — missing components pass through.
@@ -225,8 +225,8 @@ fn list_folder_images(downloads: &Path, folder: &str) -> Result<Vec<String>, Lis
         let count = bookq_core::pdf_page_count(&resolved);
         return Ok((0..count).map(|i| format!("p{:03}.png", i + 1)).collect());
     }
-    if let Some((archive, inner)) = serve::resolve_archive(downloads, folder) {
-        if !serve::is_within(downloads, &archive) {
+    if let Some((archive, inner)) = serve::resolve_archive(library, folder) {
+        if !serve::is_within(library, &archive) {
             return Err(ListErr::Http(403, "Forbidden".into()));
         }
         let archive_res = serve::realpath(&archive).unwrap_or(archive);
@@ -248,7 +248,7 @@ fn list_folder_images(downloads: &Path, folder: &str) -> Result<Vec<String>, Lis
 /// Page names for one chapter — identical precedence to loadImages:
 /// tree leaf children, then mixed-folder direct images, then enumeration.
 fn chapter_pages(
-    downloads: &Path,
+    library: &Path,
     tree: &[tree::Node],
     folder: &str,
 ) -> Result<Vec<String>, ManifestError> {
@@ -274,13 +274,13 @@ fn chapter_pages(
                 .collect());
         }
     }
-    match list_folder_images(downloads, folder) {
+    match list_folder_images(library, folder) {
         Ok(v) => Ok(v),
         Err(ListErr::Http(403, _)) => merr(ERR_FORBIDDEN, "Forbidden"),
         Err(ListErr::Http(404, detail)) => {
             // A path under (or pointing at) an unreadable archive reports
             // broken, not "not found".
-            match archive_source(downloads, folder) {
+            match archive_source(library, folder) {
                 Some(arc) if !container_intact(&arc) => merr(
                     ERR_BROKEN_ARCHIVE,
                     format!("unreadable archive for {folder:?}"),
@@ -298,15 +298,15 @@ fn chapter_pages(
 
 /// Resolve `folder` into the shared manifest (content fields + digest).
 pub fn build_manifest_core(
-    downloads: &Path,
+    library: &Path,
     tree: &[tree::Node],
     folder: &str,
     offset: i64,
 ) -> Result<Value, ManifestError> {
-    if !serve::is_within(downloads, &downloads.join(folder)) {
+    if !serve::is_within(library, &library.join(folder)) {
         return merr(
             ERR_FORBIDDEN,
-            format!("path outside downloads dir: {folder:?}"),
+            format!("path outside library dir: {folder:?}"),
         );
     }
     let node = if folder.is_empty() {
@@ -325,7 +325,7 @@ pub fn build_manifest_core(
     let mut chapters = Vec::new();
     let mut page_refs = Vec::new();
     for cf in &chapter_folders {
-        let names = chapter_pages(downloads, tree, cf)?;
+        let names = chapter_pages(library, tree, cf)?;
         let cnode = tree::find_tree_node(tree, cf, "");
         let cname = if in_tree_names && cnode.is_some() {
             cnode.map(|n| n.name().to_string()).unwrap_or_default()
@@ -350,7 +350,7 @@ pub fn build_manifest_core(
     }
 
     if page_refs.is_empty() {
-        match archive_source(downloads, folder) {
+        match archive_source(library, folder) {
             Some(arc) if !container_intact(&arc) => {
                 return merr(
                     ERR_BROKEN_ARCHIVE,

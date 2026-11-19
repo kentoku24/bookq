@@ -92,11 +92,9 @@ class ReaderWorkTest {
     }
 
     @Test fun crossChapterOffset1Chapter0GetsLeadingSpacer() {
-        // Intentional divergence from web (not a quirk port): app.js
-        // double-counts earlier spacers in its startIdx, so offset=1
-        // leaves c0 unpadded and can park later chapters on odd
-        // boundaries. Here every boundary aligns post-shift — chapters
-        // always open on their own right page (iOS agrees).
+        // Padding contract (#441, web parity): every boundary aligns
+        // post-shift — chapters always open on their own right page
+        // (iOS agrees).
         val w = ReaderWork.assemble("w/01",
             listOf(chapter("01", "w/01", 3), chapter("02", "w/02", 2)),
             ReaderPageMode.SPREAD, 1)
@@ -108,6 +106,42 @@ class ReaderWorkTest {
         // groups: [0]=spacer dropped, (1,2), (3,4)→4 spacer→[3], (5,6)
         assertEquals(listOf(listOf(1, 2), listOf(3), listOf(5, 6)), w.spreads)
         assertEquals(setOf(2), w.chapterStartSpreads)
+    }
+
+    @Test fun crossChapterThreeChaptersCumulativePadsOffset0() {
+        // #441: cumulative pads (3/3/2 pages, offset 0) — the old web
+        // double-count dropped the second spacer (boundaries [0,4,7]).
+        // Contract: spacers before c1 and c2 → boundaries [0,4,8].
+        val w = ReaderWork.assemble("w/01",
+            listOf(chapter("01", "w/01", 3), chapter("02", "w/02", 3),
+                chapter("03", "w/03", 2)),
+            ReaderPageMode.SPREAD, 0)
+        assertEquals(listOf(0, 4, 8), w.boundaries)
+        assertTrue(w.images[3].isSpacer)
+        assertTrue(w.images[7].isSpacer)
+        assertEquals(10, w.images.size)
+        assertEquals(
+            listOf(listOf(0, 1), listOf(2), listOf(4, 5), listOf(6), listOf(8, 9)),
+            w.spreads)
+        assertEquals(setOf(2, 4), w.chapterStartSpreads)
+    }
+
+    @Test fun crossChapterThreeChaptersCumulativePadsOffset1() {
+        // #441: cumulative pads (3/3/2 pages, offset 1) — leading spacer
+        // plus spacers before c1 and c2 → boundaries [1,5,9].
+        val w = ReaderWork.assemble("w/01",
+            listOf(chapter("01", "w/01", 3), chapter("02", "w/02", 3),
+                chapter("03", "w/03", 2)),
+            ReaderPageMode.SPREAD, 1)
+        assertEquals(listOf(1, 5, 9), w.boundaries)
+        assertTrue(w.images[0].isSpacer)
+        assertTrue(w.images[4].isSpacer)
+        assertTrue(w.images[8].isSpacer)
+        assertEquals(11, w.images.size)
+        assertEquals(
+            listOf(listOf(1, 2), listOf(3), listOf(5, 6), listOf(7), listOf(9, 10)),
+            w.spreads)
+        assertEquals(setOf(2, 4), w.chapterStartSpreads)
     }
 
     @Test fun chapterInfoLocalIndex() {

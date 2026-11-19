@@ -241,7 +241,7 @@ def test_huge_book_windows_imgs_but_keeps_full_scroll(ios_page, server):
     assert win["lo"] <= cur <= win["hi"]
 
 
-# ── Task 7: pinch entry (fire / drift / FLIP) and exit (crossfade / pinch-out) ──
+# ── Pinch entry (fire / drift / FLIP) and exit (crossfade / pinch-out) ──
 
 
 def test_pinch_in_to_half_opens_overview_once_with_hysteresis(ios_page, server, touch):

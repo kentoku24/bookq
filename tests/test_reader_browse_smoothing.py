@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PAIR_SYNC_JS = REPO_ROOT / "app" / "static" / "browse" / "pairSync.js"
+PAIR_SYNC_JS = REPO_ROOT / "web" / "static" / "browse" / "pairSync.js"
 
 _SC = "document.getElementById('sidebar-scroll')"
 

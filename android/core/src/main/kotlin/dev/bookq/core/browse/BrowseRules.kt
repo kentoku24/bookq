@@ -3,8 +3,8 @@ package dev.bookq.core.browse
 import dev.bookq.core.api.TreeNode
 
 /**
- * Pure browse/lookup rules mirroring `app/static/browse/render.js` and
- * `app/static/offline-core.js` (port of iOS `BrowseModel.swift`).
+ * Pure browse/lookup rules mirroring `web/static/browse/render.js` and
+ * `web/static/offline-core.js` (port of iOS `BrowseModel.swift`).
  * All functions are free of UI state.
  */
 object BrowseRules {

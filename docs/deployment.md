@@ -9,7 +9,7 @@
 | tailnet ノード | `bookq` | `dev-01`〜`dev-10`（固定 10 個を使い回し） |
 | URL | `https://bookq.your-tailnet.ts.net` | `https://dev-XX.your-tailnet.ts.net`（XX=01..10） |
 | 認証 | Google OAuth + メール許可リスト | なし（`BOOKQ_TEST_MODE=true`） |
-| 画像ツリー | 読み書き可でマウント | **読み取り専用** (`:ro`) |
+| 画像ツリー | 読み書き可でマウント (`:rw`) | 既定 read-only (`:ro`) — `BOOKQ_TEST_MODE=true` で認証を抜くため実ライブラリへの書き込みは opt-in (`./dev.sh up --writable-library`)。`--fixture` の合成ツリーは常に rw |
 | 起動/停止方法 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、Freeプランでノード再利用） |
 
 ---
@@ -65,8 +65,8 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 ```
 
 - 既定は `http://127.0.0.1:8080`。2つ目の同時環境は `--port 1024-65535` で別ポートを指定する（使用中ポートはビルド前に fail fast する）。
-- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（プール通常環境と同じ）。画像ツリーは読み取り専用。
-- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の読み取り専用ツリーを晒すので、検証用 LAN でのみ使うこと。
+- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（プール通常環境と同じ）。画像ツリーは既定 read-only — upload/delete を試すなら `--fixture`（使い捨て合成ツリー、常に rw）か `--writable-library`（実ライブラリを rw、明示 opt-in）。
+- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証のツリーを晒す（`--writable-library` 併用時は upload/delete も誰でも使える）ので、検証用 LAN でのみ使うこと。
 - Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `app/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
 - iOS Simulator からもそのまま開ける（host network 共有）: `./scripts/open-simulator.sh http://127.0.0.1:<port>`。helper は `https://` と loopback `http://` のみ受理し、`http://<lan-ip>` は Secure Context でないため拒否する。手順は `.claude/skills/ios-simulator/references/overview.md: Local mode`。
 - 10スロットプールを共有する。ローカル環境も `find_free_slot` の割当に数えられ、10/10 枯渇時は通常環境と同じく `pool exhausted (10/10)` で失敗する（仕様として許容）。
@@ -175,10 +175,54 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 
 ### 唯一の到達経路
 
-viewer は**ホストにポートを公開していない**。`tailscale serve` が :443 で HTTPS を終端し、compose ネットワーク内の `http://viewer:8080` にプロキシする。つまり:
+viewer は**ホストにポートを公開していない**。既定では `tailscale serve` が :443 で HTTPS を終端し、compose ネットワーク内の `http://viewer:8080` にプロキシする。独自ドメイン公開を有効化した場合はこれに `cloudflared` 経由の第 2 の経路が加わる（下記「独自ドメイン公開」）。つまり:
 
 - ホストから `http://localhost:8080` は叩けない。ヘルスチェックはコンテナ内から行うしかない（`docker-compose.yml` の `healthcheck` がそれ）。
 - **viewer が compose ネットワークにいないと 502 になる。** 実際に一度これが起きている（下記）。
+
+### 独自ドメイン公開（Cloudflare Tunnel, #349）— 推奨
+
+独自ドメインでの公開は opt-in の `cloudflared` コンテナ (compose profile `public`) で行う。cloudflared が外向きに Cloudflare edge へ接続を張る方式なので、**CGNAT・ポート開放不可の回線でも動く**（受信側にグローバル IP は不要）。TLS は Cloudflare edge が終端する。
+
+```
+ブラウザ → Cloudflare edge (TLS 終端) → トンネル → cloudflared → http://viewer:8080
+```
+
+`CLOUDFLARE_TUNNEL_TOKEN` が `.env`（またはシェル環境）にあると `rebuild.sh prd deploy` が自動で `--profile public` を付けて `docker compose up` する — つまり **token を置けば次の `prd.sh up` から cloudflared が起動する**。未設定なら従来どおり tailscale serve のみ。
+
+#### セットアップ手順
+
+1. Cloudflare にサイトを追加し、ドメインのネームサーバーを Cloudflare 指定の 2 台に変更（レジストラ側で操作）。**ドメインをメール等他用途で使っている場合は、既存の MX/TXT/A レコードを全て Cloudflare DNS に再現してから切り替えること** — NS 切替で既存レコードは全て無効になる。
+2. Zero Trust ダッシュボード → Networks → Tunnels → Create a tunnel → cloudflared。発行された token を `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定。
+3. 同じダッシュボードで Public Hostname を登録: `<host>.<domain>` → service `HTTP` `viewer-rs:8080`（#409 以降 viewer-rs が本体）。
+4. `.env` の `BASE_URL` を `https://<host>.<domain>` に変更。
+5. Google Cloud Console で `https://<host>.<domain>/auth/callback` を承認済み redirect URI に追加。**OAuth consent screen が "Testing" の場合は `ALLOWED_EMAILS` の各アドレスを Test users に登録必須**（未登録だと本人もログインできない）。
+6. `./prd.sh up` — cloudflared も起動し、`verify_url` が独自ドメイン経由の `/api/v1/health` を叩くのでトンネル疎通まで確認できる。`docker logs bookq-prd-cloudflared` で `Registered tunnel connection` ×4 が見えれば接続確立。
+
+#### 運用上の注意
+
+- `BASE_URL` が ts.net 以外になると、`prd deploy` の tailnet 登録名整合チェック (`heal_fqdn_collision`) は自動でスキップされる（無関係なため）。
+- `*.ts.net` 側は引き続きコンテンツを返すが、OAuth ログインは `BASE_URL`（独自ドメイン）へ遷移する — cookie はドメイン別のため、実質独自ドメインが canonical になる。tailscale sidecar はそのまま残してよい。
+- `ALLOWED_EMAILS` は据え置き前提。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
+- **認証付きメディア endpoint (`/image/`, `/thumb/`, `/view/`, `/api/thumb-sprite`) は `Cache-Control: private` で応答する** — `public` だと Cloudflare edge が応答をキャッシュし、未認証リクエストにも画像バイトが返る認証バイパスになる。保険として Cloudflare 側で当該 hostname に Cache Rule「Bypass cache」を張ってもよい。
+- Security → Bots の **Bot Fight Mode は OFF 推奨** — API クライアントや native アプリ (`Authorization: Bearer`) を bot 判定で弾きうる。
+- Cloudflare 無料プランの TOS §2.8 は画像主体コンテンツの proxy 配信を制限する条項がある。個人利用なら実害はほぼない想定だが、転送量で問題化した場合の fallback は VPS リレー等の別方式。
+- token を消したい場合は `.env` から `CLOUDFLARE_TUNNEL_TOKEN` を削除して `./prd.sh up` — profile が外れて cloudflared は作られない（既存コンテナは `up` で `--remove-orphans` していないと残ることがあるので `docker rm -f bookq-prd-cloudflared` で掃除）。
+
+### 一般公開（Tailscale Funnel, #353）— 非推奨（帯域上限で画像配信不可）
+
+`TS_FUNNEL=1` を `.env` に設定すると、sidecar が `tailscale serve` ではなく `tailscale funnel` を張る。これにより **`https://bookq.<tailnet>.ts.net` が tailnet 外の public internet からも到達できる**（funnel は public :443 をノードへ中継し、TLS は従来どおり sidecar 内で終端。tailnet 内アクセスも継続）。**ただし公式に変更不可の帯域上限があり、実測 ~数十KB/s/接続のため画像ビューア用途では実用上使い物にならない** — 公開には Cloudflare Tunnel を使うこと。本節は経路の記録として残す。
+
+- 前提: tailnet policy file (admin console → ACL) の `nodeAttrs` に funnel 許可が必要:
+  ```json
+  "nodeAttrs": [{"target": ["*"], "attr": ["funnel"]}]
+  ```
+- 設定後は `./prd.sh up` で有効化。`verify_url` は deploy ホスト (tailnet メンバー) から `BASE_URL/api/v1/health` を叩くため **tailnet 経路**の疎通確認になる。公開経路そのものの確認は tailnet 外端末で行う
+- `BASE_URL`・Google OAuth redirect URI は変更不要（ホスト名が変わらないため）
+- 停止は `TS_FUNNEL` を外して `./prd.sh up` — entrypoint が `funnel --https=443 off` を明示して公開を確実に閉じる
+- funnel 未許可のままだと `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無くサイト全体 (tailnet 経路も) 停止するが、sidecar コンテナは healthcheck 無しで Up のまま — restart loop にはならず自動検知もされない (実測で承認待ち ~106 秒)。復旧は承認リンク (`login.tailscale.com/f/funnel?node=...`) を踏むか `TS_FUNNEL` を外して `prd.sh up`。`funnel` コマンド自体が非ゼロ終了した場合のみ restart loop になる
+- Tailscale Funnel は beta で調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。`*.ts.net` 証明書は CT log に記録されるため funnel 公開により tailnet 名は公開情報になる
+- 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）
 
 ### やってはいけないこと
 
@@ -193,8 +237,8 @@ viewer は**ホストにポートを公開していない**。`tailscale serve` 
 切り分け:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://bookq.your-tailnet.ts.net/api/health
-docker inspect $(docker compose ps -q viewer) --format '{{json .NetworkSettings.Networks}}'
+curl -s -o /dev/null -w '%{http_code}\n' https://bookq.your-tailnet.ts.net/api/v1/health
+docker inspect $(docker compose ps -q viewer-rs) --format '{{json .NetworkSettings.Networks}}'
 ```
 
 viewer が `bookq_default` にいて `viewer` エイリアスを持っていれば正常。復旧は迷子のコンテナを消し、`./rebuild.sh prd build <sha>` でビルドしたイメージで `./rebuild.sh prd deploy`（または `./prd.sh up --ref <ref>`）から作り直す。素の `docker compose up -d --build viewer` は作業ツリーの dirty からビルドするため使わないこと:
@@ -206,72 +250,77 @@ docker rm -f <迷子のコンテナ名>
 
 `./rebuild.sh prd build` / `./rebuild.sh prd deploy` は最後に公開 URL を叩くので、この障害を自動で検出する。
 
-### viewer-rs strangler 導入（#163/#211）
+### 本番監視（prod-monitor）
 
-本番への viewer-rs 導入は **compose profile `rs` + `TS_SERVE_TARGET` の 2 段**に分けてある。既定の `./prd.sh up` では viewer-rs コンテナは**起動しない**（profile 外なので `docker compose up` の対象にすらならない）ため、通常運用への影響はゼロ。
+`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン `https://bookq.mats.dpdns.org` の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
+
+プローブ本体は `scripts/prod_monitor.py`（stdlib + `gh` CLI のみ）。7 つの check（#407 で v1 のみに整理 — v0 は viewer 停止と同時廃止のため監視対象外）:
+
+| check | path | 意味 |
+|---|---|---|
+| `v1_health` | `/api/v1/health` | edge→tunnel→app の生存 |
+| `v1_version_gate` | `/api/v1/version` | 認証ゲートが 401 を返すこと（200 = バージョン情報漏洩で最重要。#359 の回帰監視を兼ねる。sha 記録は v1 が認証必須のため廃止） |
+| `root` | `/` | ログインページ shell の配信 |
+| `auth_login` | `/auth/login` | OAuth 開始リダイレクト（302 → accounts.google.com） |
+| `tree_gate` | `/api/v1/tree` | 認証ゲートが 401 を返すこと（200 = 認証バイパスで最重要） |
+| `static_sw` / `static_app` | `/static/sw.js`, `/static/app.js` | SW・メインバンドルの配信健全性 |
+
+失敗は層別に分類される: `unreachable`（transport 不能 = ホスト/回線/DNS）、`cf_tunnel`（CF 520-530 系 or CF ブランドの 502/504 = tunnel/origin 到達不能）、`app_error`（app の JSON 5xx）、`contract_break`（200 だが内容不一致）、`auth_bypass`（認証ゲート喪失）、`probe_error`（監視スクリプト自体の故障 — 盲点化を防ぐため fail として issue 化）。
+
+**issue ライフサイクル**: FAIL 検知で `monitor` ラベル付き issue を作成（本文に全 check の HTTP/latency/cf-ray・分類・run URL を収録）。同じ signature の継続障害は 60 分毎のハートビートコメントのみ、signature 変更時は即コメント＋再分析。全 check 回復で復旧コメントを残して自動 close。解析ジョブは新規検知・signature 変更時のみ `opencode run` を実行し、層の切り分けと最有力原因を issue にコメントする（`GITHUB_TOKEN` 製 issue は sender が `github-actions[bot]` で opencode-auto の bot ゲートを通らないため、この workflow 内で完結させている）。
+
+**カバレッジ外（既知の隙間）**: tailnet 経路 `*.ts.net`（serve/viewer-rs 側だけの障害は拾えない）、認証付き API のコンテンツ正しさ（folders 一覧・画像・検索は無認証では 401 確認まで）、ホスト指標（disk/memory/docker events）。認証面まで監視するには monitor token 付き `/api/monitor/*` endpoint の新設が必要。検知遅延は cron 間隔 + GH スケジューラ遅延で実質 ~10-20 分。
+
+無効化したい場合は workflow の `schedule` を消して merge、または Actions UI で workflow を disable する。
+
+### viewer-rs が本体（#409 cutover 完了形）
+
+`docker compose up` の既定で起動するバックエンドは **viewer-rs** のみ (#503 で Python `viewer` / `py-rollback` profile を削除)。到達経路は `tailscale serve → viewer-rs:8080`（`TS_SERVE_TARGET` 既定）と opt-in cloudflared（ingress はダッシュボード管理、`http://viewer-rs:8080`）の 2 系統。
 
 構成:
 
-- `docker-compose.yml` の `viewer-rs` サービスは `profiles: ["rs"]` — opt-in 専用。`user-state` volume と downloads（ro）を viewer と共有し、`BOOKQ_UPSTREAM=http://viewer:8080` で未実装パスをフォールスルーする。
-- `tailscale` サービスの `TS_SERVE_TARGET`（未設定 = `http://viewer:8080`、空文字 = serve を外部管理、は entrypoint と同じ `${VAR-default}` セマンティクス）が唯一の traffic 切替点。
-- `./prd.sh up`（= `rebuild.sh prd build`）はその ref に `Dockerfile.viewer-rs` があれば `bookq-prd-viewer-rs:<sha12>` もビルドする — 無い ref への rollback を壊さないための条件付き。
+- `viewer-rs` は全 route を native に serve する（#532 で strangler proxy を撤去 — `BOOKQ_UPSTREAM` / `BOOKQ_RS_NATIVE` / `BOOKQ_RS_NO_UPSTREAM` / `_STRICT` は廃止）。未知経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエストは **401** をローカルで返す。v0 `/api/*` は全て 501。
+- OAuth 一式の欠落時は `/auth/*` + `/api/v1/auth/token` が 501 を返す（起動時 WARN）。
+- Python `viewer` は #503 で削除（`app/`・`Dockerfile`・`requirements.txt` と共に source tree から除去）。`user-state`/`thumb-cache` volume は viewer-rs が使用する。
+- `tailscale.depends_on` / `cloudflared.depends_on` は viewer-rs を指す（profile service への depends_on は profile を auto-enable してしまうため、viewer への依存は残さない）。
+- `./prd.sh up` は `bookq-prd-viewer-rs`/`tailscale` 2 イメージをビルドし、deploy は `ps -q viewer-rs` の healthcheck + `viewer-rs` image タグの sha 照合で検証する（`/api/v1/version` は認証必須のため HTTP 照合は不可）。
 
-#### 有効化手順
+#### auth gate の cutover 注意
 
-前提: #199 の gateway-contract CI が対象 ref で green であること（全 endpoint の応答形状が契約検証済み）。
+`auth` が native 化された時点で、Python 側発行済みの **refresh token は全て 401** になる（code/refresh はプロセス内メモリ）。native クライアントは一度再ログインが必要（session cookie と access JWT は `SECRET_KEY` 共用のため影響しない）。切替は再ログイン許容タイミングで。
 
-```bash
-./prd.sh up --ref <ref>                      # 通常デプロイ（rs イメージも同時ビルド）
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml \
-    --profile rs up -d --no-build viewer-rs  # viewer-rs 起動（まだ traffic は来ない）
-# .env に TS_SERVE_TARGET=http://viewer-rs:8080 を設定
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-```
+#### rollback (#503 以降)
 
-serve の向き替えは tailscale コンテナの再作成を伴うため、数秒の断はある。切替後の確認:
+Python 実装は source tree から削除済みのため、`py-rollback` profile による
+即時切戻しは廃止。障害時の復旧は git history からの再 build:
 
 ```bash
-curl -s https://bookq.<tailnet>.ts.net/api/health        # 200（viewer-rs 経由で proxy→viewer）
-docker compose --profile rs logs -f viewer-rs          # proxy/native の振分ログ
-docker compose ps -q tailscale | xargs docker exec tailscale serve status
+# 旧 ref の viewer-rs イメージを再 build して deploy
+./prd.sh up --ref <安定動作していた ref>
 ```
 
-#### endpoint 単位 rollout
+`user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。
+なお #503 以前の ref には Python `viewer` + `py-rollback` profile が残るため、
+当時の手順書どおりの切戻しも可能（古い ref からの再 build で `py-rollback`
+image が復活する）。
 
-`.env` の `BOOKQ_RS_NATIVE` に native 化する endpoint 名をカンマ区切りで追加し、`docker compose --profile rs up -d viewer-rs` で再作成する。空 = 全 proxy（traffic-shape のみ検証する段階）。1 endpoint ずつ増やし、各段階で公開 URL + 実画面を確認する。native 側が契約外を返した場合は該当 endpoint だけリストから外して戻せる。
+#### 新規 route の追加 (#532 以降)
 
-既定値は検証済みの全 native 面を列挙 (#320): `health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync`。`all` ではなく列挙に留めてあり、将来追加される native route はこの既定リストへの追加をもって有効化とする。
+全 route が無条件 native のため gate への追加は不要。追加の前提は従来どおり:
 
-#### フルネイティブモード (#320): py の index/tree を持たない運用
+| 条件 | 確認方法 |
+|---|---|
+| 契約テストが正本として存在 | `api/*cases.json` / schemathesis / 共有 vectors |
+| `cargo test --workspace` が通る | `rust/`（CI `rust.yml` の `test`） |
+| gateway-contract が該当 endpoint を native で通る | CI `rust.yml` の `gateway-contract` |
 
-`BOOKQ_RS_NATIVE` が全 index 消費者をカバーする状態で、viewer 側に
-`BOOKQ_DISABLE_INDEX=1` を `.env` へ設定すると、py が起動時 warmup・
-`_background_fill`・`_warm_covers`・TTL refresh をすべて skip し、
-`metadata_index_cache` を一切構築しない。tree+index は実データ
-(152k images) で ~150-250MB のヒープ最大ブロックなので、常駐メモリが
-import 基盤 (~120MB) まで下がる。
+#### 検証済みの運用ポイント
 
-- index 必要 endpoint (`/api/folders`・`/api/v1/tree` 全量、`/api/v1/search`・
-  `/api/v1/facets`・`/api/v1/index/refresh`・`/ws/reader-sync`・visibility PUT)
-  への着弾は **503 fail-fast** — 誤設定時に lazy build でヒープが静かに
-  復活するのを防ぐ。shallow (`depth=1`)・`/api/images`・`/image`・`/thumb`・
-  `/view`・health など index 非依存の経路は従来どおり動く。
-- 設定は必ず **`BOOKQ_RS_NATIVE` (全 index 消費者) と対で**行うこと。
-  片方だけだと py に native 未処理の index 要求が届き 503 になる。
-- rollback: `BOOKQ_DISABLE_INDEX` を空に戻して viewer 再作成。コード差し戻し不要。
+- `verify_url` は `/api/v1/health`（公開）を叩く。v0 `/api/health` は 501。
+- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health`。
+- 未知経路の観測: fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。残るはずのない 501 が継続していたら contract 漏れの兆候。
 
-#### rollback
-
-完全切り戻しは設定のみで完結する（コード・イメージの変更は不要）:
-
-```bash
-# .env の TS_SERVE_TARGET を削除（または http://viewer:8080 に戻す）
-docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d tailscale
-# 任意: viewer-rs 自体も止める場合
-docker compose --profile rs stop viewer-rs
-```
-
-切り戻し後も `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions は per-process で揮発**（py 側も in-memory dict で再起動で消える既存仕様）のため、切替/切戻しの瞬間に「どこまで読んだか」は失われる — ユーザー影響として許容する判断（最終ページは手動で戻れる、永続破壊ではない）。
+`user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 
 ---
 
@@ -285,9 +334,9 @@ Service Worker は Secure Context（HTTPS）でのみ登録されます。本番
 
 ### オフライン検証ハーネス `/static/offline-harness.html`
 
-`app/static/offline-harness.html` は Service Worker と同じ `app/static` 配下に置かれ、`app/main.py:28` の `StaticFiles` マウントで配信されます。dev では常時リンク表示の対象ですが、本番ではリンクのみ gated です。`?harness=1` クエリか `localStorage.bookq_harness` か `BOOKQ_TEST_MODE` が真のときだけ `#harness-link` が表示され、それ以外ではリンクが隠れます。ファイル自体は tailnet の信頼境界で保護された `StaticFiles` の素の GET で常に 200 を返します。リンクを隠すだけで 404 にしないのが仕様です。
+`web/static/offline-harness.html` は Service Worker と同じ `web/static` 配下に置かれ、viewer-rs の static 配信で配信されます。dev では常時リンク表示の対象ですが、本番ではリンクのみ gated です。`?harness=1` クエリか `localStorage.bookq_harness` か `BOOKQ_TEST_MODE` が真のときだけ `#harness-link` が表示され、それ以外ではリンクが隠れます。ファイル自体は tailnet の信頼境界で保護された `StaticFiles` の素の GET で常に 200 を返します。リンクを隠すだけで 404 にしないのが仕様です。
 
-`.dockerignore` は `*.md` と `docs/` と `tests/` を除外しますが、`app/static` は除外しません。`! grep -q "app/static" .dockerignore` が通ることで除外漏れが無いことを担保します。`Dockerfile:10` の `COPY app/ ./app/` で `app/static/offline-harness.html` は `sw.js` や `manifest.json` と同じくイメージに必ず含まれます。`grep "COPY app" Dockerfile` で確認できます。ホストポートの追加や Workbox の導入は不要です。
+`.dockerignore` は `*.md` と `docs/` と `tests/` を除外しますが、`web/static` は除外しません。`! grep -q "web/static" .dockerignore` が通ることで除外漏れが無いことを担保します。`Dockerfile.viewer-rs` の `COPY web/` で `web/static/offline-harness.html` は `sw.js` や `manifest.json` と同じくイメージに必ず含まれます。ホストポートの追加や Workbox の導入は不要です。
 
 ```bash
 # 配信確認 (ポートは毎回ランダムなので fixture の URL を使う)

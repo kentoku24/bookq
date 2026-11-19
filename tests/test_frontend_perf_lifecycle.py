@@ -5,12 +5,14 @@ from urllib.request import urlopen
 
 import pytest
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
 BASE = Path(__file__).resolve().parent.parent
-APP_JS = BASE / "app" / "static" / "app.js"
-CORE_JS = BASE / "app" / "static" / "offline-core.js"
-PREFETCH_JS = BASE / "app" / "static" / "thumbs" / "prefetch.js"
-SW_JS = BASE / "app" / "static" / "sw.js"
-WRITER_JS = BASE / "app" / "static" / "offline" / "tree-writer.js"
+APP_JS = BASE / "web" / "static" / "app.js"
+CORE_JS = BASE / "web" / "static" / "offline-core.js"
+PREFETCH_JS = BASE / "web" / "static" / "thumbs" / "prefetch.js"
+SW_JS = BASE / "web" / "static" / "sw.js"
+WRITER_JS = BASE / "web" / "static" / "offline" / "tree-writer.js"
 
 
 def _new_page(browser, width=1280, height=800):
@@ -36,6 +38,36 @@ def _folder_entries(page):
 
 def _stop_fill_poll(page):
     page.evaluate("() => { try { window.FillPoll.stop(); } catch(e){} }")
+
+
+def _wait_dom_quiet(page, quiet_ms=400, timeout_ms=8000):
+    """Wait for #tile-grid mutation silence, then zero the spy counter —
+    slower environments (CI Safari) can still be filling tiles when the
+    revalidate spy is installed, and those background mutations are noise
+    against the 'no re-render' assertion."""
+    page.evaluate(
+        """() => {
+            window.__q = {last: Date.now()};
+            window.__qmo = new MutationObserver(() => { window.__q.last = Date.now(); });
+            window.__qmo.observe(document.getElementById('tile-grid'), {childList: true, subtree: true});
+        }"""
+    )
+    try:
+        page.wait_for_function(
+            f"() => Date.now() - window.__q.last >= {quiet_ms}",
+            timeout=timeout_ms,
+        )
+    finally:
+        # Zero the tallies, not the spy itself — reinstalling the spy would
+        # double-wrap window.fetch. Background activity during the quiet
+        # window (tile fill fetches calling .json(), stray tree requests)
+        # must not count against the revalidate under test.
+        page.evaluate(
+            "() => { try { window.__qmo.disconnect(); } catch(e){}"
+            " if (window.__perf) { window.__perf.domMuts = 0;"
+            " window.__perf.jsonCalls = 0; window.__perf.textCalls = 0;"
+            " window.__perf.foldersReqs.length = 0; } }"
+        )
 
 
 def _flush_frames(page):
@@ -110,6 +142,7 @@ def test_warm_revalidate_coalesced_conditional_304_no_render(browser, server):
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
         page.evaluate(CLOCK_ADVANCE_JS)
         page.evaluate(
             "() => Promise.all([window.revalidateFoldersForOnline(), "
@@ -135,6 +168,7 @@ def test_revalidate_without_etag_falls_back_to_tree_compare(browser, server):
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         _stop_fill_poll(page)
         page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
         page.evaluate(CLOCK_ADVANCE_JS)
         page.evaluate("() => window.__BOOKQ_DEBUG.etagByKey.delete(':full')")
         page.evaluate("() => window.revalidateFoldersForOnline()")
@@ -167,10 +201,16 @@ def test_failed_revalidate_stays_retryable(browser, server):
                 window.__failFolders = true;
             }"""
         )
-        page.evaluate("() => window.revalidateFoldersForOnline()")
+        # deps.fetch bypasses Connectivity.fetch: a rejected cfetch demotes
+        # online→connecting and the probe's reconnect legitimately fires its
+        # own ungated revalidate — a real second /api/v1/tree that raced this
+        # assertion on CI (#552). Retryability is the property under test;
+        # the connectivity reconnect loop is covered elsewhere.
+        raw = "{fetch: (u, i) => window.fetch(u, i)}"
+        page.evaluate(f"() => window.revalidateFoldersForOnline({raw})")
         assert page.evaluate("() => window.__perf.foldersReqs.length") == 0
         page.evaluate("() => { window.__failFolders = false; }")
-        page.evaluate("() => window.revalidateFoldersForOnline()")
+        page.evaluate(f"() => window.revalidateFoldersForOnline({raw})")
         reqs = page.evaluate("() => window.__perf.foldersReqs")
         assert len(reqs) == 1, f"failed revalidate must stay retryable: {reqs}"
     finally:
@@ -760,11 +800,24 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
+        _ensure_sw_interception(page)
+        # safaridriver can leave .controller unset even while the SW is
+        # already intercepting (the probe above just proved it) — accept a
+        # resolved .ready as the equivalent "active SW" signal (#552).
+        page.evaluate(
+            "() => { navigator.serviceWorker && navigator.serviceWorker.ready"
+            ".then(() => { window.__swReady = true; }); }"
+        )
         page.wait_for_function(
-            "() => navigator.serviceWorker && navigator.serviceWorker.controller",
+            "() => navigator.serviceWorker && "
+            "(navigator.serviceWorker.controller || window.__swReady)",
             timeout=15000,
         )
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        # spec §8: offline browse only surfaces download-bearing folders —
+        # give the restored tree a downloaded leaf so the grid and the
+        # viewer deep link have content under the new contract.
+        page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
         n = page.evaluate(
             """async () => {
                 for (let i = 0; i < 100; i++) {
@@ -781,23 +834,7 @@ def test_offline_reload_restores_tree_and_viewer_deep_link(browser, server):
             page.reload()
             page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
             page.wait_for_selector("#tile-grid .tile", timeout=8000)
-            leaf = page.evaluate(
-                """() => {
-                    let found = null;
-                    (function walk(list, pp){
-                        for (const node of list || []) {
-                            const fp = pp ? pp + '/' + node.name : node.name;
-                            if (!found && node.type === 'folder' && node.children &&
-                                node.children.length &&
-                                node.children.every(c => c.type === 'image'))
-                                found = fp;
-                            if (node.children) walk(node.children, fp);
-                        }
-                    })(window.__BOOKQ_DEBUG.getTree(), '');
-                    return found;
-                }"""
-            )
-            assert leaf, "no leaf folder found in restored tree"
+            leaf = "simple_manga"
             page.evaluate(
                 "(fp) => { location.hash = window.viewerHash(fp, 0); }", leaf
             )
@@ -1172,21 +1209,44 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/?offline=1")
+        _ensure_sw_interception(page)
+        # safaridriver can leave .controller unset even while the SW is
+        # already intercepting (the probe above just proved it) — accept a
+        # resolved .ready as the equivalent "active SW" signal (#552).
+        page.evaluate(
+            "() => { navigator.serviceWorker && navigator.serviceWorker.ready"
+            ".then(() => { window.__swReady = true; }); }"
+        )
         page.wait_for_function(
-            "() => navigator.serviceWorker && navigator.serviceWorker.controller",
+            "() => navigator.serviceWorker && "
+            "(navigator.serviceWorker.controller || window.__swReady)",
             timeout=15000,
         )
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
-        # Warm the SW API cache snapshot (full tree) before going offline.
-        page.wait_for_function(
+        # Warm the SW API cache snapshot (full tree) before going offline —
+        # the reconnect revalidation's If-None-Match is seeded from this
+        # entry's ETag (restoreOfflineFirst reads it into etagByKey).
+        # page.evaluate awaits the promise, so the assert below is real —
+        # a wait_for_function async predicate would resolve immediately on
+        # the promise object's truthiness and never actually check.
+        page.evaluate(
+            """async () => {
+                const r = await fetch('/api/v1/tree', {credentials: 'same-origin'});
+                await r.text();   // consume the body so the SW put() settles
+                return r.ok;
+            }"""
+        )
+        assert page.evaluate(
             """async () => {
                 try {
                     const c = await caches.open('bookq-api-v1');
                     return !!(await c.match('/api/v1/tree'));
                 } catch (e) { return false; }
-            }""",
-            timeout=10000,
-        )
+            }"""
+        ), "SW api cache never captured /api/v1/tree"
+        # spec §8: offline browse only surfaces download-bearing folders —
+        # record a download so the reloaded grid has a tile to find.
+        page.evaluate("async () => { await window.downloadWork('simple_manga'); }")
         context.set_offline(True)
         try:
             page.reload()
@@ -1550,5 +1610,444 @@ def test_stale_recovery_cannot_mark_newer_load_ready(browser, server):
         )
         assert out["final"] == ["tB"], out
         assert out["loaded"] is True, "the newer load must complete and mark ready"
+    finally:
+        context.close()
+
+
+# ── #396: offline→online reconnect races ────────────────────────────────
+# A slow response from the previous connection must never continue over the
+# new connection's state: no ETag write-back, no tree/render/stamp overwrite.
+# The revalidation waits for an in-flight full load instead of racing it,
+# and the in-flight slot cleanup is identity-guarded so a settling stale
+# request cannot clear a newer slot.
+
+def test_reconnect_stale_response_must_not_commit_etag(browser, server):
+    """Old-connection 200 arriving after offline→online must not stage its
+    ETag: the next revalidation would otherwise 304 against a tree it never
+    received (the refresh is silently lost)."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                const dbg = window.__BOOKQ_DEBUG;
+                const before = dbg.etagByKey.get(':full');
+                const namesBefore = dbg.getTree().map(n => n.name);
+                const of = window.fetch.bind(window);
+                let release;
+                const gate = new Promise(r => { release = r; });
+                let heldOnce = false;
+                window.fetch = (u, i) => {
+                    const url = typeof u === 'string' ? u : (u && u.url) || '';
+                    const inm = i && i.headers && i.headers['If-None-Match'];
+                    if (!heldOnce && url === '/api/v1/tree' && inm) {
+                        heldOnce = true;
+                        window.__heldReval = true;
+                        return gate.then(() => new Response(
+                            '[{"name":"STALE","type":"folder",'
+                            + '"children":[{"name":"s.png","type":"image"}]}]',
+                            {status: 200, headers: {'Content-Type': 'application/json',
+                                                    'ETag': '"STALE-396"'}}));
+                    }
+                    return of(u, i);
+                };
+                const rn = Date.now.bind(Date);
+                Date.now = () => rn() + 300001;
+                const p = window.revalidateFoldersForOnline();
+                await new Promise(res => {
+                    const t = setInterval(() => {
+                        if (window.__heldReval) { clearInterval(t); res(); }
+                    }, 5);
+                });
+                // Reconnect while the old response is still in flight.
+                window.dispatchEvent(new Event('offline'));
+                await new Promise(r => setTimeout(r, 50));
+                release();
+                await p;
+                await new Promise(r => setTimeout(r, 300));
+                window.fetch = of;
+                return {
+                    before,
+                    after: dbg.etagByKey.get(':full'),
+                    namesBefore,
+                    namesAfter: dbg.getTree().map(n => n.name),
+                };
+            }"""
+        )
+        assert out["before"], "startup must seed a warm full-tree ETag"
+        assert out["after"] == out["before"], (
+            f"stale response must not rewrite the warm ETag: {out['before']} -> {out['after']}"
+        )
+        assert out["namesAfter"] == out["namesBefore"], (
+            f"stale response must not replace the tree: {out}"
+        )
+    finally:
+        context.close()
+
+
+def test_reconnect_stale_continuation_must_not_apply(browser, server):
+    """The stale continuation (index build, render, stamp) must not run
+    after a reconnect: the grid keeps the live tree with zero redraws."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        page.evaluate(REVALIDATE_SPY_JS)
+        _wait_dom_quiet(page)
+        out = page.evaluate(
+            """async () => {
+                const tilePaths = () => Array.from(
+                    document.querySelectorAll('#tile-grid .tile[data-path]'),
+                    el => el.getAttribute('data-path')).sort();
+                const dbg = window.__BOOKQ_DEBUG;
+                const namesBefore = dbg.getTree().map(n => n.name);
+                const tilesBefore = tilePaths();
+                const of = window.fetch.bind(window);
+                let release;
+                const gate = new Promise(r => { release = r; });
+                let heldOnce = false;
+                window.fetch = (u, i) => {
+                    const url = typeof u === 'string' ? u : (u && u.url) || '';
+                    const inm = i && i.headers && i.headers['If-None-Match'];
+                    if (!heldOnce && url === '/api/v1/tree' && inm) {
+                        heldOnce = true;
+                        window.__heldReval2 = true;
+                        return gate.then(() => new Response(
+                            '[{"name":"STALE2","type":"folder",'
+                            + '"children":[{"name":"s2.png","type":"image"}]}]',
+                            {status: 200, headers: {'Content-Type': 'application/json',
+                                                    'ETag': '"STALE2-396"'}}));
+                    }
+                    return of(u, i);
+                };
+                const rn = Date.now.bind(Date);
+                Date.now = () => rn() + 300001;
+                const p = window.revalidateFoldersForOnline();
+                await new Promise(res => {
+                    const t = setInterval(() => {
+                        if (window.__heldReval2) { clearInterval(t); res(); }
+                    }, 5);
+                });
+                window.dispatchEvent(new Event('offline'));
+                await new Promise(r => setTimeout(r, 50));
+                release();
+                await p;
+                await new Promise(r => setTimeout(r, 300));
+                window.fetch = of;
+                return {
+                    namesBefore,
+                    namesAfter: dbg.getTree().map(n => n.name),
+                    tilesBefore,
+                    tilesAfter: tilePaths(),
+                };
+            }"""
+        )
+        assert out["namesAfter"] == out["namesBefore"], (
+            f"stale continuation must not replace the live tree: {out}"
+        )
+        assert out["tilesAfter"] == out["tilesBefore"], (
+            "stale continuation must not redraw the grid with a stale tree: "
+            f"{out['tilesBefore']} -> {out['tilesAfter']}"
+        )
+    finally:
+        context.close()
+
+
+def test_revalidate_waits_for_inflight_full_load(browser, server):
+    """A revalidation starting while a full load is in flight must wait for
+    it instead of racing it for index/tree ownership: its own fetch fires
+    only after the load settles, and the published index tracks the tree."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                const order = [];
+                const of = window.fetch.bind(window);
+                let releaseFull;
+                const fullGate = new Promise(r => { releaseFull = r; });
+                let fullHeld = false;
+                window.fetch = (u, i) => {
+                    const url = typeof u === 'string' ? u : (u && u.url) || '';
+                    if (url === '/api/v1/tree?depth=1') return of(u, i);
+                    if (url === '/api/v1/tree') {
+                        const inm = i && i.headers && i.headers['If-None-Match'];
+                        if (inm) { order.push('revalidate-fetch'); return of(u, i); }
+                        if (!fullHeld) {
+                            fullHeld = true;
+                            order.push('full-fetch');
+                            return fullGate.then(() => {
+                                order.push('full-released');
+                                return of(u, i);
+                            });
+                        }
+                        return of(u, i);
+                    }
+                    return of(u, i);
+                };
+                const lp = window.loadFolders({}).then(() => { order.push('load-done'); });
+                await new Promise(res => {
+                    const t = setInterval(() => {
+                        if (fullHeld) { clearInterval(t); res(); }
+                    }, 5);
+                });
+                const rn = Date.now.bind(Date);
+                Date.now = () => rn() + 300001;
+                const rp = window.revalidateFoldersForOnline();
+                await new Promise(r => setTimeout(r, 200));
+                releaseFull();
+                await lp;
+                await rp;
+                await new Promise(r => setTimeout(r, 200));
+                window.fetch = of;
+                return {
+                    order,
+                    treeOk: window.__BOOKQ_DEBUG.getTree()
+                        === (window.__cc_thumbIndex || {}).tree,
+                };
+            }"""
+        )
+        assert out["order"].index("revalidate-fetch") > out["order"].index(
+            "full-released"
+        ), (
+            "revalidation must fetch only after the in-flight full load's "
+            f"response is released: {out['order']}"
+        )
+        assert out["treeOk"], (
+            "published thumb index must track the live tree after the race"
+        )
+    finally:
+        context.close()
+
+
+def test_revalidate_slot_survives_stale_settle(browser, server):
+    """After a reconnect the new revalidation owns the slot: the old
+    request settling late must neither clear the slot nor apply its payload,
+    and the new request must run its own fetch to completion."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        _stop_fill_poll(page)
+        out = page.evaluate(
+            """async () => {
+                const dbg = window.__BOOKQ_DEBUG;
+                const etagBefore = dbg.etagByKey.get(':full');
+                const namesBefore = dbg.getTree().map(n => n.name);
+                const of = window.fetch.bind(window);
+                let releaseStale;
+                const staleGate = new Promise(r => { releaseStale = r; });
+                let staleHeld = false;
+                let fetchCount = 0;
+                window.fetch = (u, i) => {
+                    const url = typeof u === 'string' ? u : (u && u.url) || '';
+                    const inm = i && i.headers && i.headers['If-None-Match'];
+                    if (url === '/api/v1/tree' && inm) {
+                        fetchCount++;
+                        if (!staleHeld) {
+                            staleHeld = true;
+                            return staleGate.then(() => new Response(
+                                '[{"name":"STALE4","type":"folder",'
+                                + '"children":[{"name":"s4.png","type":"image"}]}]',
+                                {status: 200, headers: {'Content-Type': 'application/json',
+                                                        'ETag': '"STALE4-396"'}}));
+                        }
+                    }
+                    return of(u, i);
+                };
+                const rn = Date.now.bind(Date);
+                Date.now = () => rn() + 300001;
+                const pOld = window.revalidateFoldersForOnline();
+                await new Promise(res => {
+                    const t = setInterval(() => {
+                        if (staleHeld) { clearInterval(t); res(); }
+                    }, 5);
+                });
+                // Reconnect: the old slot belongs to the previous connection.
+                window.dispatchEvent(new Event('offline'));
+                await new Promise(r => setTimeout(r, 30));
+                const pNew = window.revalidateFoldersForOnline();
+                await new Promise(r => setTimeout(r, 500));
+                const secondFetchFired = fetchCount >= 2;
+                releaseStale();
+                await pOld.catch(() => {});
+                await pNew.catch(() => {});
+                await new Promise(r => setTimeout(r, 300));
+                window.fetch = of;
+                return {
+                    secondFetchFired, fetchCount,
+                    etagAfter: dbg.etagByKey.get(':full'),
+                    etagClean: dbg.etagByKey.get(':full') !== '"STALE4-396"',
+                    namesSame: JSON.stringify(dbg.getTree().map(n => n.name))
+                        === JSON.stringify(namesBefore),
+                };
+            }"""
+        )
+        assert out["secondFetchFired"], (
+            "a reconnect must start its own revalidation instead of "
+            f"coalescing onto the stale slot: {out}"
+        )
+        assert out["etagClean"], f"stale ETag must never land: {out}"
+        assert out["namesSame"], f"stale tree must never land: {out}"
+    finally:
+        context.close()
+
+
+# ── #396: writer no-op inputs must not cancel ────────────────────────────
+
+def test_noop_writer_inputs_must_not_cancel_pending_write(browser, server):
+    """putTree / putJson no-op inputs (non-array, empty string) must return
+    without touching the pending snapshot write — previously they cancelled
+    it via _cancelTreeWrites() before validating the input."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        out = page.evaluate(
+            """async () => {
+                const held = [];
+                const origRIC = window.requestIdleCallback;
+                window.requestIdleCallback = (fn) => { held.push(fn); return held.length; };
+                try {
+                    await window.OfflineTree.delTree();
+                    held.length = 0;
+                    const mk = n => JSON.stringify([{name:n, type:'folder', children:[]}]);
+                    const pA = window.OfflineTree.putJson(mk('A'), {defer:true});
+                    let settledA = false;
+                    pA.then(() => { settledA = true; }, () => { settledA = true; });
+                    await window.OfflineTree.putTree(null);
+                    await window.OfflineTree.putTree('x');
+                    await window.OfflineTree.putTree({not: 'array'});
+                    await window.OfflineTree.putJson('');
+                    await window.OfflineTree.putJson(null);
+                    await window.OfflineTree.putJson('   '.slice(3));
+                    const midSettled = settledA;
+                    const queued = held.length;
+                    held.splice(0).forEach(f => f());
+                    await pA;
+                    const t = await window.OfflineTree.getTree();
+                    return {midSettled, queued, names: t && t.map(n => n.name)};
+                } finally { window.requestIdleCallback = origRIC; }
+            }"""
+        )
+        assert out["midSettled"] is False, (
+            "no-op writer inputs must not settle the pending deferred write"
+        )
+        assert out["queued"] >= 1, "deferred write must stay queued on rIC"
+        assert out["names"] == ["A"], out
+    finally:
+        context.close()
+
+
+def test_noop_writer_inputs_resolve_without_overwrite(browser, server):
+    """No-op writer inputs resolve quietly and leave a stored snapshot
+    untouched (direct, non-deferred path)."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        out = page.evaluate(
+            """async () => {
+                const keep = [{name:'KEEP396', type:'folder', children:[]}];
+                await window.OfflineTree.putJson(JSON.stringify(keep));
+                await window.OfflineTree.putTree(null);
+                await window.OfflineTree.putTree(undefined);
+                await window.OfflineTree.putTree('nope');
+                await window.OfflineTree.putJson('');
+                const t = await window.OfflineTree.getTree();
+                return {names: t && t.map(n => n.name)};
+            }"""
+        )
+        assert out["names"] == ["KEEP396"], out
+    finally:
+        context.close()
+
+
+def test_tree_writer_slot_has_no_stale_worker_handle(server):
+    """The writer slot tracks only the live slot: the unused
+    _treeWriterWorker handle must be gone, and no-op inputs must return
+    before _cancelTreeWrites() can run."""
+    src = CORE_JS.read_text(encoding="utf-8")
+    assert "_treeWriterWorker" not in src, (
+        "unused worker handle must be removed from the writer slot"
+    )
+    m = re.search(r"function putTree\(data, opts\) \{(.*?)\n    \}", src, re.S)
+    assert m, "putTree body not found"
+    body = m.group(1)
+    assert body.index("Array.isArray(data)") < body.index("_cancelTreeWrites()"), (
+        "putTree must validate the input before cancelling pending writes"
+    )
+    m = re.search(r"function putJson\(jsonText, opts\) \{(.*?)\n    \}", src, re.S)
+    assert m, "putJson body not found"
+    body = m.group(1)
+    assert body.index("typeof jsonText") < body.index("_cancelTreeWrites()"), (
+        "putJson must validate the input before cancelling pending writes"
+    )
+
+
+def test_putjson_envelope_roundtrip_through_worker(browser, server):
+    """Envelope putJson still routes through the tree-writer worker and the
+    parsed tree lands in IDB (worker round-trip, not the fallback)."""
+    context, page = _new_page(browser)
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        out = page.evaluate(
+            """async () => {
+                const OrigWorker = window.Worker;
+                window.__workerUsed = false;
+                window.Worker = class extends OrigWorker {
+                    constructor(...a){ window.__workerUsed = true; super(...a); }
+                };
+                try {
+                    const env = JSON.stringify({tree: [{name:'ENV396', type:'folder',
+                        children:[{name:'e.png', type:'image'}]}], generation: 7});
+                    await window.OfflineTree.putJson(env, {treeEnvelope: true});
+                    const r = await window.OfflineTree.getTree();
+                    return {used: window.__workerUsed,
+                            names: r && r.map(n => n.name)};
+                } finally { window.Worker = OrigWorker; }
+            }"""
+        )
+        assert out["used"], "envelope putJson must route through the worker"
+        assert out["names"] == ["ENV396"], out
+    finally:
+        context.close()
+
+
+def test_putjson_hanging_worker_times_out_to_fallback(browser, server):
+    """A worker that never answers must fall back to the main-thread parse
+    after the writer timeout and still persist the snapshot."""
+    context = browser.new_context(viewport={"width": 1280, "height": 800})
+    page = context.new_page()
+    page.add_init_script(
+        """window.Worker = class {
+            constructor(){ this.onmessage = null; this.onerror = null; }
+            postMessage(){}   // hang forever: never calls back
+            terminate(){}
+        };"""
+    )
+    try:
+        page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        out = page.evaluate(
+            """async () => {
+                const t0 = Date.now();
+                await window.OfflineTree.putJson(JSON.stringify(
+                    [{name:'HANG396', type:'folder',
+                      children:[{name:'h.png', type:'image'}]}]));
+                const r = await window.OfflineTree.getTree();
+                return {elapsed: Date.now() - t0, names: r && r.map(n => n.name)};
+            }"""
+        )
+        assert out["names"] == ["HANG396"], out
+        assert out["elapsed"] >= 9000, (
+            f"must wait out the writer timeout before falling back, got {out['elapsed']}ms"
+        )
     finally:
         context.close()

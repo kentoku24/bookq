@@ -28,7 +28,7 @@ tailscale の無い host（`.env` 無し / `tailscale status` 失敗）では st
 
 helper は `https://…` と loopback の `http://127.0.0.1|localhost` だけ受け付ける。初回表示の「0 folders」は初回スキャン待ちなので reload する（詳細: `overview.md: Local mode`）。
 
-`--fixture` は `tests/fixtures/uiux_tree.py` が生成する合成ツリー（9フォルダ + `metadata.toml` 3件: `simple_manga` / `series` / `mixed_ar`）を `/tmp/bookq-fixture-<name>/downloads` にマウントする。`README.md: 開発環境` と整合。
+`--fixture` は `tests/fixtures/uiux_tree.py` が生成する合成ツリー（9フォルダ + `metadata.toml` 3件: `simple_manga` / `series` / `mixed_ar`）を `/tmp/bookq-fixture-<name>/library` にマウントする。`README.md: 開発環境` と整合。
 
 ピンチズーム・ページ送り・エピソード境界の目視 QA には `zoom_episodes/series/ep-1..3` を使う（単色ページは拡大しても差が見えない）。
 720x1080 のページに 40px グリッド、巨大な `EP<n>` / `P<i>/<n>`、初頁 `START` / 末頁 `END` バッジ、`L`/`R` ラベル、拡大時のみ読める細字が入っている。
