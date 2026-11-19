@@ -1,3 +1,17 @@
--r requirements.txt
-uvicorn[standard]>=0.54.0
+# #503 rs-only: pytest lane deps only. The Python app runtime
+# (fastapi/uvicorn/hypercorn/starlette/authlib/itsdangerous/httpx/jinja2/
+# pypdfium/rarfile via the deleted requirements.txt) is gone — viewer-rs
+# is the sole backend. Kept: parallel/retry plugins, fixture builders
+# (pillow), live HTTP asserts (httpx), forged session cookies
+# (itsdangerous, tests/test_reader_ws.py), spec lint (pyyaml), and the
+# pre-existing selenium/websocket-client entries.
+pillow>=13.0.0
+httpx>=0.28.1
+itsdangerous>=2.2
 pytest-xdist>=3.8.0
+pytest-split>=0.10.0
+pytest-rerunfailures>=16.7
+pyyaml>=6.0.3  # tests/test_api_breaking_check.py + scripts/api_breaking_check.py (#232)
+selenium>=4.52.0,<5
+websocket-client>=1.9.2,<2
+websockets>=17.4,<18

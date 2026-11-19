@@ -37,7 +37,7 @@ def test_layout_params_restore_from_url(landscape_page, server):
     assert landscape_page.evaluate("window.landscapeSpread") is False
     # Same folder/page, different query only -> same-document navigation
     # (hashchange fires but applyUrlState's st.page===cur.page short-circuits
-    # the reload per the Task 2 note in the brief). A reload simulates the
+    # the reload). A reload simulates the
     # realistic case of opening a shared deep link fresh.
     landscape_page.goto(server + "/#/view/long?p=2&o=1")
     landscape_page.reload()
@@ -68,8 +68,11 @@ def test_no_localstorage_for_layout(landscape_page, server):
     keys = landscape_page.evaluate("Object.keys(localStorage)")
     # bookq.folderVisibility.v1.<owner> は仕様上のowner別snapshot cache
     # (offline起動用) — レイアウト状態ではないため許可する。
+    # bookq_progress(:<email>)? は読書進捗 — アカウントスコープ化 (#375) 後は
+    # `bookq_progress:<email>` 形式も許可する。
     assert all(
-        k in ("bookq_progress", "bookq_persist_toast")
+        k == "bookq_progress" or k.startswith("bookq_progress:")
+        or k == "bookq_persist_toast"
         or k.startswith("bookq.folderVisibility.v1.")
         for k in keys
     ), keys

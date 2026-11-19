@@ -1,7 +1,9 @@
-"""ビューア磨き込み（監査 V3/V4/V5）。"""
+"""ビューア磨き込み。"""
 import io
 import re
+import time
 
+import pytest
 from PIL import Image
 from playwright.sync_api import expect
 
@@ -10,7 +12,7 @@ DARK_MAX = 40  # 背景 #0d0d0d 近傍とみなす RGB 上限
 # The anchor spread's own <img>s live inside the .spread-container positioned
 # at left:0 (spreadLeft(anchorSpread) is always 0 — see spread.js:spreadLeft).
 # Any <img> outside that container must not intersect the viewport
-# horizontally: with gapBefore() widened (Task 4 / 監査 V3), a narrower
+# horizontally: with gapBefore() widened, a narrower
 # (solo/odd) spread's leftover margin must never be filled by the *next*
 # spread's real page content peeking in.
 _FIND_NEIGHBOUR_PEEK_JS = """
@@ -33,39 +35,72 @@ _FIND_NEIGHBOUR_PEEK_JS = """
 }
 """
 
-
 def _px(page, x, y):
     img = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
     return img.getpixel((int(x), int(y)))
 
 
 def _assert_no_neighbour_peek_and_dark_margins(page):
-    bad = page.evaluate(_FIND_NEIGHBOUR_PEEK_JS)
-    assert bad == [], bad
-    w, h = page.viewport_size["width"], page.viewport_size["height"]
-    for x in (w * 0.05, w * 0.95):
-        r, g, b = _px(page, x, h / 2)
-        assert max(r, g, b) <= DARK_MAX, ((x, h / 2), (r, g, b))
+    """The final layout lands on a later frame — snapTo's rebase runs inside
+    rAF even for non-animated snaps (spread.js), so a click's relayout can
+    lag several frames under CI load. Instead of a fixed sleep (the #326
+    flake) the condition itself is polled: two consecutive clean samples
+    150ms apart mean the state held across a frame where a pending rebase
+    would have dirtied it; a peek that never resolves still fails."""
+    last = "no observation"
+    clean_streak = 0
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if page.evaluate("window.sliding === true"):
+            clean_streak = 0
+            page.wait_for_timeout(150)
+            continue
+        bad = page.evaluate(_FIND_NEIGHBOUR_PEEK_JS)
+        if bad:
+            clean_streak = 0
+            last = f"peek: {bad}"
+            page.wait_for_timeout(150)
+            continue
+        w, h = page.viewport_size["width"], page.viewport_size["height"]
+        bright = None
+        for x in (w * 0.05, w * 0.95):
+            px = _px(page, x, h / 2)
+            if max(px) > DARK_MAX:
+                bright = ((x, h / 2), px)
+                break
+        if bright is None:
+            clean_streak += 1
+            if clean_streak >= 2:
+                return
+        else:
+            clean_streak = 0
+            last = f"bright margin: {bright}"
+        page.wait_for_timeout(150)
+    pytest.fail(f"spread margins never settled: {last}")
 
 
 def test_solo_cover_partner_side_is_dark_not_neighbour_page(landscape_page, server):
     landscape_page.goto(server + "/#/view/long?p=0")
     landscape_page.wait_for_selector("#img-track img")
+    # Gate on the intent committing (spreadOffset flips) — asserting before
+    # that can observe the untouched pre-click layout and pass vacuously.
+    prev = landscape_page.evaluate("window.spreadOffset || 0")
     landscape_page.locator("#spread-shift").click()  # 表紙ソロ化
-    landscape_page.wait_for_timeout(500)
+    landscape_page.wait_for_function("(o) => window.spreadOffset === o", arg=1 - prev)
     _assert_no_neighbour_peek_and_dark_margins(landscape_page)
 
 
 def test_odd_trailing_page_does_not_show_neighbour(landscape_page, server):
     landscape_page.goto(server + "/#/view/long?p=29")
     landscape_page.wait_for_selector("#img-track img")
+    prev = landscape_page.evaluate("window.spreadOffset || 0")
     landscape_page.locator("#spread-shift").click()  # 末尾ページをソロ化
-    landscape_page.wait_for_timeout(500)
+    landscape_page.wait_for_function("(o) => window.spreadOffset === o", arg=1 - prev)
     _assert_no_neighbour_peek_and_dark_margins(landscape_page)
 
 
 def test_chapter_start_spread_does_not_show_previous_chapter(landscape_page, server):
-    """監査 V3: a chapter-start spread (vol2's solo spread, 1 page) used to use a
+    """A chapter-start spread (vol2's solo spread, 1 page) used to use a
     fixed CHAPTER_GAP_PX=20 seam regardless of leftover, so the previous
     chapter's spread (vol1, 2 pages) peeked ~230px into view at 900x600.
     gapBefore() now treats CHAPTER_GAP_PX as a floor under the same
@@ -76,7 +111,6 @@ def test_chapter_start_spread_does_not_show_previous_chapter(landscape_page, ser
     """
     landscape_page.goto(server + "/#/view/group/deep_series/vol2?p=0")
     landscape_page.wait_for_selector("#img-track img")
-    landscape_page.wait_for_timeout(500)
     _assert_no_neighbour_peek_and_dark_margins(landscape_page)
 
 
@@ -93,14 +127,14 @@ def test_slider_hit_area_44px_but_thin_track(page, server):
     runnable-track') is not usable here: -webkit-appearance:none on the host
     makes Chromium stop rendering/exposing that pseudo-element, so the call
     silently falls back to the *host's* computed height (44px, not the
-    authored 8px — confirmed empirically, see task-5-report.md). Instead:
+    authored 8px — confirmed empirically). Instead:
     the host background must be transparent (so only the pseudo-element's
     #333 track paints anything inside the 44px box), and the actual
     rendered band is measured with a real screenshot pixel scan.
 
     #toolbar's own backdrop-filter is neutralized for this measurement only
-    (via an injected <style>, not touching app/static/style.css). Empirically
-    (see task-5-report.md), Playwright's headless Chromium fails to rasterize
+    (via an injected <style>, not touching web/static/style.css). Empirically,
+    Playwright's headless Chromium fails to rasterize
     the ::-webkit-slider-runnable-track pseudo-element at all when the
     ancestor #toolbar has an active backdrop-filter — confirmed both with a
     minimal isolated reproduction (passes) and a real, non-headless Chrome

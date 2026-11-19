@@ -79,9 +79,9 @@ cmd_up() {
     local subject
     subject="$(git log -1 --format='%s (%ci)' "$sha")"
 
-    # 切替後の復旧情報用に、現在動いている viewer の image を控える（読取のみ）。
+    # 切替後の復旧情報用に、現在動いているフロント (viewer-rs) の image を控える（読取のみ）。
     local prev_image
-    prev_image="$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q viewer 2>/dev/null)" 2>/dev/null || true)"
+    prev_image="$(docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q viewer-rs 2>/dev/null)" 2>/dev/null || true)"
 
     echo "🚀 本番に $ref ($sha12) をデプロイします（作業ツリーの dirty は含みません）"
     echo "   $subject"
@@ -110,17 +110,17 @@ cmd_up() {
     # worktree ガードはこのスクリプト（prd.sh）の責務で、上の case で済ませている。
     # 二段化が必須: read ... <<< "$(...)" の一発形は、コマンド置換の失敗が
     # read の成功にマスクされ set -e が発火しない。
-    local out viewer_tag sidecar_tag
+    local out rs_tag sidecar_tag
     out="$("$SCRIPT_DIR/rebuild.sh" prd build "$sha")" || die "prd build に失敗しました（ref=${ref}）"
-    read viewer_tag sidecar_tag <<< "$out"
-    export PRD_VIEWER_IMAGE="$viewer_tag" PRD_TAILSCALE_IMAGE="$sidecar_tag" PRD_EXPECT_SHA="${sha:0:12}"
+    read rs_tag sidecar_tag <<< "$out"
+    export PRD_RS_IMAGE="$rs_tag" PRD_TAILSCALE_IMAGE="$sidecar_tag" PRD_EXPECT_SHA="${sha:0:12}"
     "$SCRIPT_DIR/rebuild.sh" prd deploy
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "✅ bookq (本番) が動いています"
     echo "   $(base_url)"
-    echo "   今回: $viewer_tag / $sidecar_tag ($sha12)"
+    echo "   今回: $rs_tag / $sidecar_tag ($sha12)"
     echo "   前回: ${prev_image:-（なし・初回デプロイの可能性）}"
     echo ""
     echo "戻す場合（自動ロールバックはしません）:"

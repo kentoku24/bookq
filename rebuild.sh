@@ -27,20 +27,20 @@ usage() {
 # ============================================================ 共通: healthcheck
 # viewer はホストにポートを公開していないので localhost は叩けない。
 # docker-compose.yml / docker-compose.dev.yml の healthcheck（コンテナ内から
-# /api/health）をコンテナ側から待つ。
+# health endpoint）をコンテナ側から待つ。
 wait_healthy() {
     local cid="$1" status=""
     echo ""
-    echo "⏳ viewer コンテナの healthcheck を待っています..."
+    echo "⏳ コンテナの healthcheck を待っています..."
     for _ in $(seq 1 60); do
         status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || true)"
         case "$status" in
-            healthy) echo "✅ viewer は healthy です"; return 0 ;;
+            healthy) echo "✅ healthy です"; return 0 ;;
             none)    echo "⚠️  healthcheck が定義されていません。待機をスキップします"; return 0 ;;
             *)       sleep 1 ;;
         esac
     done
-    die "viewer が healthy になりませんでした (status=${status:-なし})"
+    die "コンテナが healthy になりませんでした (status=${status:-なし})"
 }
 
 # ============================================================ 共通: URL 検証
@@ -54,7 +54,8 @@ verify_url() {
     # （成功すればすぐ抜ける。dev 環境の初回は tailnet 参加と証明書発行で
     # ここに時間がかかることがある。本番は従来どおり早い）。
     for _ in $(seq 1 30); do
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/api/health" || true)"
+        # v1 health — #409 以降 v0 /api/health は upstream 不在で 501。
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/api/v1/health" || true)"
         [ "$code" = "200" ] && break
         sleep 2
     done
@@ -287,21 +288,20 @@ for d in devs:
 
 # ============================================================ 本番
 # prd build: sha のコミット済み内容だけを git archive で取り出し、決定論タグの
-# prod image（viewer＋sidecar）をビルドする。作業ツリーは一切見ない。
+# prod image（viewer-rs＋sidecar）をビルドする。作業ツリーは一切見ない。
 # dev_build の git archive パターンと同型。同 sha＝同内容のため、既存タグは
-# docker image inspect で再利用する。出力は "VIEWER_TAG SIDECAR_TAG"。
+# docker image inspect で再利用する。出力は "RS_TAG SIDECAR_TAG"。
+# #503 rs-only: Python viewer は削除 — viewer-rs のみ build する。
 prd_build_image() {
     [ -n "${1:-}" ] || { usage >&2; die "prd build には sha が必要です: rebuild.sh prd build <sha>"; }
-    local sha="$1" sha12 tmp build_date viewer_tag sidecar_tag
+    local sha="$1" sha12 tmp sidecar_tag rs_tag
     sha12="${sha:0:12}"
 
     tmp="$(mktemp -d)"
     trap "rm -rf \"$tmp\"" EXIT
     git archive --format=tar "$sha" | tar -x -C "$tmp" \
         || die "sha '$sha' を archive できません。git fetch が必要かもしれません。"
-    [ -f "$tmp/Dockerfile" ] || die "archive に Dockerfile がありません (sha=$sha)。"
-    [ -f "$tmp/requirements.txt" ] || die "archive に requirements.txt がありません (sha=$sha)。"
-    [ -d "$tmp/app" ] || die "archive に app/ がありません (sha=$sha)。"
+    [ -f "$tmp/Dockerfile.viewer-rs" ] || die "archive に Dockerfile.viewer-rs がありません (sha=$sha)。"
     # compose の build: ./tailscale は context 内の既定名 Dockerfile を使う。
     [ -f "$tmp/tailscale/Dockerfile" ] || die "archive に tailscale/Dockerfile がありません (sha=$sha)。"
     # sidecar は別 context のため、親参照（../）があると壊れる。存在確認と同時に検査する。
@@ -309,57 +309,56 @@ prd_build_image() {
         die "tailscale context に親参照（COPY ../）があります (sha=$sha)。"
     fi
 
-    viewer_tag="bookq-prd-viewer:${sha12}"
+    rs_tag="bookq-prd-viewer-rs:${sha12}"
     sidecar_tag="bookq-prd-tailscale:${sha12}"
-    if docker image inspect "$viewer_tag" >/dev/null 2>&1 \
+    if docker image inspect "$rs_tag" >/dev/null 2>&1 \
         && docker image inspect "$sidecar_tag" >/dev/null 2>&1; then
-        info "イメージ再利用: $viewer_tag $sidecar_tag (${sha12})"
+        info "イメージ再利用: $rs_tag $sidecar_tag (${sha12})"
     else
-        build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        info "ビルド中: ${sha12} → $viewer_tag $sidecar_tag"
-        docker build -q --build-arg "GIT_SHA=${sha12}" --build-arg "BUILD_DATE=${build_date}" \
-            -t "$viewer_tag" "$tmp" >/dev/null \
-            || die "viewer のビルドに失敗しました (sha=$sha)"
+        info "ビルド中: ${sha12} → $rs_tag $sidecar_tag"
+        docker build -q -f "$tmp/Dockerfile.viewer-rs" -t "$rs_tag" "$tmp" >/dev/null \
+            || die "viewer-rs のビルドに失敗しました (sha=$sha)"
         docker build -q -t "$sidecar_tag" "$tmp/tailscale" >/dev/null \
             || die "sidecar のビルドに失敗しました (sha=$sha)"
     fi
-    printf '%s %s' "$viewer_tag" "$sidecar_tag"
+    printf '%s %s' "$rs_tag" "$sidecar_tag"
 }
 
-# prd deploy の事後検証: /api/version の sha が期待 sha と一致すること。
-# version 側の sha 桁数が不明なため双方向 prefix 比較。空文字に対する
-# startswith は常に True になるため、先に空値 die する。
+# prd deploy の事後検証: デプロイした viewer-rs コンテナの image タグ
+# (bookq-prd-viewer-rs:<sha12>) が期待 sha と一致すること。#409 以降
+# /api/version は upstream 不在で 501、/api/v1/version は認証必須で
+# 未認証照合が使えない — image タグ自体が sha なのでこれで等価検証。
 verify_prd_version() {
     local expected="${1:?verify_prd_version には期待 sha が必要です}"
-    local base_url actual
-    base_url="${BASE_URL:-$(grep -E '^BASE_URL=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'\''' | tr -d '[:space:]' || true)}"
-    [ -n "$base_url" ] || die "BASE_URL が分からないため version 照合ができません。"
-    actual="$(curl -s --max-time 10 "$base_url/api/version" 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha") or "")' 2>/dev/null || true)"
-    [ -n "$actual" ] && [ -n "$expected" ] \
-        || die "version の sha が空です (expected=${expected:-空} actual=${actual:-空})。空文字に対する startswith は常に True になるため検証できません。"
-    case "$expected" in
-        "$actual"*) ;;
-        *)
-            case "$actual" in
-                "$expected"*) ;;
-                *) die "デプロイされた version の sha が一致しません (expected=$expected actual=$actual)。" ;;
-            esac
-            ;;
+    [ -n "$expected" ] || die "expected sha が空です。"
+    local actual
+    actual="$(docker inspect --format '{{.Config.Image}}' \
+        "$(docker compose ps -q viewer-rs 2>/dev/null)" 2>/dev/null || true)"
+    case "$actual" in
+        *:"$expected") ;;
+        *) die "デプロイされた viewer-rs の image sha が一致しません (expected=$expected actual=${actual:-取得失敗})。" ;;
     esac
-    echo "✅ version の sha が一致しています ($actual)"
+    echo "✅ viewer-rs image の sha が一致しています ($actual)"
 }
 
 deploy_prd() {
-    : "${PRD_VIEWER_IMAGE:?PRD_VIEWER_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
+    : "${PRD_RS_IMAGE:?PRD_RS_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     : "${PRD_TAILSCALE_IMAGE:?PRD_TAILSCALE_IMAGE が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     : "${PRD_EXPECT_SHA:?PRD_EXPECT_SHA が未設定です。rebuild.sh prd build <sha> でビルドしてください。}"
     echo "🚀 本番コンテナを prebuilt image で起動します..."
-    docker compose -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build
+    # Cloudflare Tunnel (#349): CLOUDFLARE_TUNNEL_TOKEN があるときだけ
+    # profile `public` を有効化して cloudflared も起動する。無ければ
+    # 従来どおり tailscale serve のみが到達経路（後方互換）。
+    local profiles=()
+    if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-$(dotenv_value CLOUDFLARE_TUNNEL_TOKEN || true)}" ]; then
+        profiles=(--profile public)
+        info "CLOUDFLARE_TUNNEL_TOKEN 検出 — profile 'public' で cloudflared も起動します"
+    fi
+    docker compose "${profiles[@]}" -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build
 
     local cid
-    cid="$(docker compose ps -q viewer)"
-    [ -n "$cid" ] || die "viewer コンテナが見つかりません。"
+    cid="$(docker compose ps -q viewer-rs)"
+    [ -n "$cid" ] || die "viewer-rs コンテナが見つかりません。"
     wait_healthy "$cid"
 
     # クォート付きの値（compose の補間では有効）でも curl できるよう剥がす
@@ -372,12 +371,21 @@ deploy_prd() {
 
     # tailnet 登録名が BASE_URL とずれている（= 同名ゴースト残存で -1 付与）と
     # BASE_URL は offline ノードを指すので、verify_url 前に自動復旧を試みる。
+    # BASE_URL が独自ドメイン (ts.net 以外) のときは tailnet 登録名とは無関係
+    # なので、このチェック自体をスキップする（#349）。
     local expected_fqdn sidecar
     expected_fqdn="$(printf '%s' "$base_url" | sed -E 's#^https?://##; s#/.*$##; s#:[0-9]+$##')"
-    sidecar="$(docker compose -f docker-compose.yml -f docker-compose.prd-image.yml ps -q tailscale 2>/dev/null || true)"
-    if [ -n "$sidecar" ]; then
-        heal_fqdn_collision "$sidecar" "$expected_fqdn" || true
-    fi
+    case "$expected_fqdn" in
+        *.ts.net)
+            sidecar="$(docker compose -f docker-compose.yml -f docker-compose.prd-image.yml ps -q tailscale 2>/dev/null || true)"
+            if [ -n "$sidecar" ]; then
+                heal_fqdn_collision "$sidecar" "$expected_fqdn" || true
+            fi
+            ;;
+        *)
+            info "BASE_URL ($expected_fqdn) は ts.net 以外 — tailnet 登録名の整合チェックをスキップします"
+            ;;
+    esac
 
     verify_url "$base_url"
     verify_prd_version "$PRD_EXPECT_SHA"
@@ -393,9 +401,11 @@ deploy_prd() {
 #       イメージはたかだか 1 枚。
 #   ・純 hex SHA / detached など不変参照 → 従来どおりコミット専用タグ
 #     bookq-dev:<sha12>。存在すれば再利用（同じ内容 = 常に同じ ID）。
-# 出力は "TAG SHORT_SHA"（dev.sh がラベルと表示に使う）。
+# 出力は "TAG SHORT_SHA RS_TAG"（dev.sh 互換のため 3 フィールド維持。
+# #532: viewer 自体が viewer-rs のため RS_TAG は常に空）。
 dev_build() {
     local name="${1:?dev build には環境名が必要です}" ref="${2:-}" tag sha sym slug
+    local rs_tag=""
 
     # dev.sh:84-91 slugify() と同一規則のローカル複製。スタンドアロン 2 スクリプト
     # の前提を崩さないため export しない — 規則を変えるときは必ず両側を同期する。
@@ -422,7 +432,7 @@ dev_build() {
                 tag="bookq-dev:ref-${slug}"
                 info "ビルド中（エイリアスタグ上書き）: ${ref} = ${sha:0:12} → $tag"
                 git archive --format=tar "$sha" \
-                    | docker build -q --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
+                    | docker build -q -f Dockerfile.viewer-rs --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
                     || die "ビルドに失敗しました (ref=$ref)"
                 ;;
             *)
@@ -435,19 +445,19 @@ dev_build() {
                 else
                     info "ビルド中: ${ref} = ${sha:0:12}"
                     git archive --format=tar "$sha" \
-                        | docker build -q --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
+                        | docker build -q -f Dockerfile.viewer-rs --label com.bookq.dev-image=1 -t "$tag" - >/dev/null \
                         || die "ビルドに失敗しました (ref=$ref)"
                 fi
                 ;;
         esac
-        printf '%s %s' "$tag" "${sha:0:12}"
+        printf '%s %s %s' "$tag" "${sha:0:12}" "$rs_tag"
     else
         tag="bookq-dev:wt-${name}"
         info "ビルド中: 現在の作業ツリー"
-        docker build -q --label com.bookq.dev-image=1 -t "$tag" "$SCRIPT_DIR" >/dev/null \
+        docker build -q -f "$SCRIPT_DIR/Dockerfile.viewer-rs" --label com.bookq.dev-image=1 -t "$tag" "$SCRIPT_DIR" >/dev/null \
             || die "ビルドに失敗しました"
         sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-        printf '%s %s' "$tag" "${sha:0:12}"
+        printf '%s %s %s' "$tag" "${sha:0:12}" "$rs_tag"
     fi
 }
 

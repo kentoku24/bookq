@@ -63,15 +63,19 @@ issue タイトルからスラッグを生成する:
 
 ## 7. bookq 固有の注意
 
+### Python 実装の削除済み (#410 Phase 3b: #503)
+
+- **本番バックエンドは viewer-rs (Rust) のみ** (#409)。Python `viewer` / `py-rollback` profile、`app/`、`Dockerfile`、`requirements.txt` は #503 で source tree から削除済み — rollback は git history からの再 build。修正は `rust/` 側に行う。以下に残る `app/` パス言及は Rust 側の port 元を示す歴史参照（例: `rust/viewer-rs/src/folders.rs` の `Ports app/routes.py` コメント）。
+
 ### フォルダツリー / scanner
 
-- `app/scanner.py:92` `scan_tree` — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`app/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `app/static/app.js:1308` で構築)。prefix を付与しないこと。
-- 変更時は `app/templates/index.html` のサムネ参照と整合させること。`thumbs` (2+ サブフォルダに thumb がある時のみ) による multi-thumb グリッド分岐がある。
+- `rust/viewer-rs/src/tree.rs` `scan_tree` (ex-`app/scanner.py:92`) — 単一子フォルダの flatten: 画像がなく子が 1 つだけのフォルダは親にホイストされ `name` のみが `parent/child` に書き換わる。`thumb`/`thumbs` は書き換え不要 — フォルダ相対のためフロントが `/image/<_fullPath>/<thumb>` として解決する (`web/static/thumbs/resolveCover.js:11-16`, `_fullPath` は `web/static/app.js:1308` で構築)。prefix を付与しないこと。
+- 変更時は `web/templates/index.html` のサムネ参照と整合させること。`thumbs` (2+ サブフォルダに thumb がある時のみ) による multi-thumb グリッド分岐がある。
 
 ### URL ハッシュ状態 / Viewer
 
-- `app/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`app/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
-- `app/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `app/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (`app/routes.py:26` の global `_jinja_env = Environment(auto_reload=True, cache_size=0)` が `get_template` をキャッシュしつつ即時反映)。
+- `web/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`web/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
+- `web/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `web/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (viewer-rs が `BOOKQ_WEB_DIR` を直接 serve し、template 変更を即時反映)。
 
 ### テスト
 
@@ -79,21 +83,36 @@ issue タイトルからスラッグを生成する:
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
 ```
 
-- `BOOKQ_TEST_MODE=true` が必須 — `app/auth.py` の `_TEST_MODE` は import 時に一度だけ読まれ、OAuth をバイパスして mock user を返す。
-- `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
-- `uvicorn[standard]` は `requirements-dev.txt` 側のみに存在 (runtime `requirements.txt` は hypercorn)。`--with-requirements requirements-dev.txt` の付与を省略しないこと。
-- 隠しルート機能は `app/folder_visibility*.py` + `app/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
+- `BOOKQ_TEST_MODE=true` が必須 — viewer-rs が起動時に読み、OAuth をバイパスして mock user を返す。
+- `LIBRARY_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
+- `--with-requirements requirements-dev.txt` の付与を省略しないこと (pillow/httpx 等の fixture 依存が入る)。
+- pytest 起動時に `scripts/test-preflight.sh` が conftest `pytest_sessionstart` から自動実行される。repo があるボリュームの空きが `BOOKQ_MIN_FREE_GB` (既定 25GiB, `disk-guard --check` と同一) を下回ると、安全な残骸 (stale/マージ済み他worktreeの `rust/target`・`ios/build`・android ビルド出力、`.worktrees/` の孤児dir、uv cache、古い `pytest-*` tmp、`ms-playwright` 旧バージョン) を回収してから再チェックし、それでも不足なら容疑者リスト付きで abort する。`BOOKQ_WARN_FREE_GB` (既定 40GiB) 未満は警告のみ。`--dry-run` で対象列挙、`--clean` で任意タイミングの回収、緊急回避は `BOOKQ_SKIP_PREFLIGHT=1`。CI (`CI` env) ではスキップ — 残留物が世代を跨がない ephemeral runner では閾値未満が正常のため。削除は「stale (> `BOOKQ_STALE_DAYS` 既定7日) or マージ済み」かつ「使用中プロセスの cwd が無い」ものに限定され、自分の worktree は対象外。
+- `rs_spawn` の `cargo build` 出力先は `BOOKQ_TARGET_DIR` / `CARGO_TARGET_DIR_BASE` / `CARGO_TARGET_DIR` で外付けボリュームに移転できる (worktree ごと ~1.5GB が内蔵SSDを埋めない)。値は「ルート」で、その下に checkout 名のサブdirが作られる (並行 worktree 同士で target を共有しない)。`/Volumes/` 配下の実マウントのみ有効 — 未接続や内部パスは `rust/target` にフォールバック。例: `export CARGO_TARGET_DIR_BASE=/Volumes/Sabrent2T/cargo-target`。
+- 隠しルート機能は viewer-rs (`rust/viewer-rs/src/` visibility/state) + `web/static/browse/visibility.js` (root = 先頭パスセグメント、書庫も対象)。**ライブラリ全体で共有** — 全行が `GLOBAL_USER_KEY` (`"*"`) 配下に保存される。owner HMAC は stale タブ対策として per-user のまま。hide/unhide を書くテストは専用 tmp `BOOKQ_STATE_DIR` を使うこと (conftest が sandbox 済み、共有 server fixture は使わない)。
 
 ### デプロイ / ネットワーク
 
-- viewer はホストポートを公開しない。唯一の到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer:8080)。`viewer` が `bookq_default` ネットワーク外だと 502 になる。
+- viewer-rs はホストポートを公開しない。到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer-rs:8080)。一般公開は opt-in の cloudflared (compose profile `public`、`CLOUDFLARE_TUNNEL_TOKEN` 設定で `rebuild.sh prd deploy` が有効化) が第 2 の経路になる (#349)。`TS_FUNNEL=1` の Tailscale Funnel (#353) も存在するが、公式の変更不可な帯域上限 (実測 ~数十KB/s/接続) で画像配信には使えない — 公開には使わないこと。`viewer-rs` が `bookq_default` ネットワーク外だと 502 になる。
 - 開発環境は `./dev.sh up` で管理 (10スロットプール、project `bookq-dev-pool-XX` 形式。真実は docker label `com.bookq.name` / `com.bookq.pool_slot` のみ)。本番 `docker compose up` を worktree で直接叩かないこと。
-- ユーザー設定 (隠しルート等) は `user-state` volume の `/var/lib/bookq` に永続化される。キャッシュではないのでキャッシュ掃除経路で消さないこと。
+- ユーザー設定 (隠しルート等) と読書位置は `user-state` volume の `/var/lib/bookq` (`folder-visibility.sqlite3`、スキーマ v2) に永続化される。隠しルートはユーザー別ではなくライブラリ共有 (グローバル)、読書位置は認証ユーザー別。キャッシュではないのでキャッシュ掃除経路で消さないこと。
 
 ### iOS Simulator / エージェントによる実機確認
 
 - **Source of truth: `.claude/skills/ios-simulator/SKILL.md`**。エージェントはスキル経由で実行。詳細は `references/` を参照。薄い人間向け要約は `docs/ios-simulator.md`。
 - 既定 `iPhone 13`（`SIMULATOR_DEVICE` で変更可）、次は Android 15 1920x1200 Unisoc T620 2.2GHz / Mali-G57。`./scripts/open-simulator.sh <dev-url>` で開く。`simslim` (`brew install mobai-app/tap/simslim`) 導入時は open 時に自動 slim されメモリが ~4x 削減される（`SIMSLIM=0` で無効化）。
+- **検証終了時は必ず `./scripts/sim-teardown.sh` を実行して CPU 監査に合格させること**（sim shutdown + Clone 削除 + 残留 diagnose/idb 整理を一括。`--dev-env <name>` で検証用 dev 環境の down まで）。`simctl shutdown` だけでは孤児化した診断・runtime プロセスが残りホスト CPU を食い潰すことがある。xcodebuild test を使った検証は終了まで poll してから片付けること。詳細: `.claude/skills/ios-simulator/references/teardown.md`。
+- **ネイティブアプリの実機デプロイは `./scripts/ios-device-deploy.sh`**（paired iPhone へ build → install → launch を一括。`--udid`/`--release`/`--no-launch`/`DEVICE_UDID`）。詳細は `.claude/skills/ios-device-deploy/SKILL.md`。`DEVELOPMENT_TEAM` は pbxproj 記載済みで override 不要。
+- **iOS の単体+UI テストは `.github/workflows/ios.yml` が `xcode-27` イメージ（iOS 27 SDK 搭載 preview runner）で実行**（`BookqTests` + `BookqUITests`、TEST_MODE 合成サーバー + シミュレータ）。ローカル再現は `.github/scripts/ios-ui-test.sh`（サーバー起動は各自）。`CODE_SIGNING_ALLOWED=NO` は禁止 — 署名なしアプリは Keychain 書き込みが失敗し AuthManagerTests が落ちる。詳細は `docs/ios-app.md` テスト節。
+- **UI テスト実行前の環境衛生チェック（必須・自動化済み）**: `xcodebuild test` / UI テストを回す前に `scripts/ui-test-preflight.sh` を実行する（`.github/scripts/ios-ui-test.sh` 経由なら自動で走る）。stale なテストサーバーの kill・reading-positions 残存の警告・メモリ/SSD の確認と安全なクリーンまで自動で行い、未解決の問題があれば exit 1。WARN が出た項目のみ手動対処が必要。背景: 2026-11-16 に Python 時代の孤立 uvicorn が :8080 を占有し、stale な読書位置 state で `ReaderUITests` が連続失敗した実例あり — 同種の stale サーバーは preflight が自動で除去する。
+
+### Android (`android/`)
+
+- Kotlin + Compose (M3) ネイティブクライアント。minSdk 35、modules `:core` (純 Kotlin) / `:data` (OkHttp+Keystore) / `:app`。詳細は `docs/android-app.md`。
+- 必須 env: `JAVA_HOME=$(brew --prefix openjdk@21)` `ANDROID_HOME=$HOME/Library/Android/sdk`。`android/local.properties` に `sdk.dir`。
+- テスト+ビルド: `cd android && ./gradlew :core:test :data:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`。
+- UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://10.0.2.2:8080`）。
+- 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
+- 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
 
 ## 8. 並行作業の隔離
 
@@ -101,5 +120,5 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - メインのチェックアウト (リポジトリ直下) は常時 `main` に固定し、直接編集・commit しない (`prd.sh` による本番操作専用)。
 - 作業開始時チェックリスト: `git worktree list` で既存確認 → なければ `git worktree add .worktrees/<name> -b ai/<N>-<slug> origin/main` (plan-track は `-b ai/<slug>`) → その worktree に移動して作業。`origin/main` から切り、ローカル HEAD から切らないこと。
 - 1 worktree = 1 dev 環境名。worktree 作成時に `./dev.sh up <name>` でスロット占有を宣言し、マージ時に `./dev.sh down <name>` + `git worktree remove` で解放する (10スロットプールのため同時10以下を仮定)。
-- 読み取り専用 (調査・レビュー) のみ同居可。`app/static/app.js` の同時編集は直列化すること。
+- 読み取り専用 (調査・レビュー) のみ同居可。`web/static/app.js` の同時編集は直列化すること。
 - 残置掃除は `./scripts/cleanup-worktrees.sh` (既定 dry-run、`--apply` で削除)。マージ済み・clean のみ対象、detached/dirty/dev 環境は手動。

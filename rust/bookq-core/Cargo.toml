@@ -1,0 +1,29 @@
+[package]
+name = "bookq-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Pure-Rust port of bookq's CPU-heavy server logic (issue #163)"
+license = "Proprietary"
+
+[dependencies]
+crc32fast = "1"
+# RARLAB unrar (bundled C source) — the same engine rarfile shells out to,
+# in-process instead of one 7z subprocess per page (#163).
+# Known limit: `Code::from` panics on ERAR_LARGE_DICT (RAR7 dict >4GB);
+# spawn_blocking turns that panic into a JoinError → proxy fallback.
+unrar = "0.5.8"
+# zlib-rs backend: miniz_oxide inflates ~2-3x slower than zlib C; zlib-rs is
+# pure Rust, faster than C zlib, and self-contained (no system zlib needed).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# PNG encode for the pdfium-render bitmap (issue #402). Narrow features —
+# pdfium-render's own `image_latest` pulls the decode side.
+image = { version = "0.25", default-features = false, features = ["png"] }
+lopdf = "0.42"
+# Same PDFium engine as pypdfium2 (issue #402): render + page count parity.
+# Runtime-bound (no link time): a missing libpdfium degrades to proxy.
+pdfium-render = "0.9"
+serde_json = "1"
+roxmltree = "0.20"
+sha2 = "0.10"
+toml = "0.8"

@@ -27,8 +27,6 @@ import http.server
 import os
 import socket
 import struct
-import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -38,8 +36,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 WARNING_MARK = "⚠"
 
@@ -69,37 +65,21 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_server(downloads: Path):
-    """Boot a uvicorn test-mode server against *downloads*; yield base URL."""
-    port = _free_port()
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+def _start_server(library: Path):
+    """Boot a backend against *library* in the current lane; yield its base URL.
+
+    Phase 2c v1 port (#487), #503 rs-only: viewer-rs via rs_spawn.
+    """
+    from rs_spawn import spawn_backend
+
+    proc, base_url = spawn_backend(
+        library_dir=library, state_dir=os.environ["BOOKQ_STATE_DIR"]
     )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("Server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server did not become healthy within 10s")
     try:
         yield base_url
     finally:
         proc.terminate()
-        proc.wait(timeout=5)
+        proc.wait(timeout=10)
 
 
 class _DelayingImageProxy(http.server.ThreadingHTTPServer):
@@ -366,11 +346,11 @@ def test_spinner_visible_during_predecode(slow_page, slow_proxy):
 
 
 @pytest.fixture(scope="module")
-def slow_downloads(tmp_path_factory) -> Path:
+def slow_library(tmp_path_factory) -> Path:
     """Tiny tree for the H7/H8 determinism tests; the slow network comes from
     the image-delaying proxy, not the files. "other" keeps the folders from
     being collapsed by the single-child flattening rule."""
-    root = tmp_path_factory.mktemp("slow_downloads")
+    root = tmp_path_factory.mktemp("slow_library")
     slow = root / "slow"
     slow.mkdir()
     for name in ["p001.png", "p002.png", "p003.png"]:
@@ -386,8 +366,8 @@ def slow_downloads(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def slow_server(slow_downloads: Path):
-    yield from _start_server(slow_downloads)
+def slow_server(slow_library: Path):
+    yield from _start_server(slow_library)
 
 
 @pytest.fixture(scope="module")
@@ -407,11 +387,11 @@ def slow_page(request, slow_proxy):
 
 
 @pytest.fixture(scope="module")
-def search_downloads(tmp_path_factory) -> Path:
-    """Dedicated downloads tree WITH metadata.toml (the shared conftest tree
+def search_library(tmp_path_factory) -> Path:
+    """Dedicated library tree WITH metadata.toml (the shared conftest tree
     has none, so /api/search would return 0 results there). "other" keeps
     "sample" from being collapsed by the single-child flattening rule."""
-    root = tmp_path_factory.mktemp("search_downloads")
+    root = tmp_path_factory.mktemp("search_library")
     folder = root / "sample"
     folder.mkdir()
     for name in ["1.png", "2.png"]:
@@ -436,8 +416,8 @@ def search_downloads(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def search_server(search_downloads: Path):
-    yield from _start_server(search_downloads)
+def search_server(search_library: Path):
+    yield from _start_server(search_library)
 
 
 @pytest.fixture(scope="module")
@@ -459,7 +439,7 @@ def test_search_results_show_thumbnail(search_page):
 
     RED pre-fix (placeholder div), GREEN post-fix (tree-thumb fallback).
     """
-    with search_page.expect_response(lambda r: "/api/search" in r.url):
+    with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
         search_page.locator("#search-input").fill("テスト")
     # .tile-metadata only exists on SEARCH tiles (the root grid's tiles lack
     # it), so this proves the search render — not a stale root tile.
@@ -501,7 +481,7 @@ def test_f_key_close_inerts_resume_pill(page):
     # Seed a reading position so the resume pill is eligible, then reload so
     # the init flow (loadFolders → renderView → updateResumeButton) shows it.
     page.evaluate(
-        """() => localStorage.setItem('bookq_progress', JSON.stringify(
+        """() => localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify(
              {'simple_manga': {page: 1, total: 5, ts: Date.now()}}
            ))"""
     )
@@ -537,7 +517,7 @@ def test_search_cards_show_thumbnail(search_page):
     search_page.locator("#footer-refresh-btn").click()
     search_page.wait_for_selector("#tile-grid.card-mode")
 
-    with search_page.expect_response(lambda r: "/api/search" in r.url):
+    with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
         search_page.locator("#search-input").fill("テスト")
     search_page.wait_for_selector("#tile-grid .card", timeout=5000)
     # Exactly one result ("sample") — the root grid would show 2+ cards, so
@@ -597,13 +577,13 @@ def test_counter_shows_warning_on_current_page_failure(page, server, fail404_pro
 
 @pytest.fixture(scope="module")
 def fail500_proxy(server: str):
-    """Proxy that 500s every /api/images request (any ?folder= query) and
+    """Proxy that 500s every v1 images request (any ?folder= query) and
     forwards everything else to the shared fixture server."""
-    yield from _start_path_fail_proxy(server, {"/api/images": 500})
+    yield from _start_path_fail_proxy(server, {"/api/v1/images": 500})
 
 
 def test_transient_error_resets_chapter_state(page, server, fail500_proxy):
-    """A transient error (HTTP 500 from /api/images) must leave the viewer in
+    """A transient error (HTTP 500 from the v1 images endpoint) must leave the viewer in
     a consistent error state: toast visible, counter empty (not a stale value
     from the previous book), and no crash on further navigation.
 
@@ -618,7 +598,7 @@ def test_transient_error_resets_chapter_state(page, server, fail500_proxy):
     page.wait_for_selector("#img-track img.loaded")
     assert "1 / 30" in (page.text_content("#counter") or "")
 
-    # "group" is a non-leaf node, so loadImages takes the /api/images fetch
+    # "group" is a non-leaf node, so loadImages takes the v1 images fetch
     # path (a leaf folder is served from the tree and never fetches).
     page.goto(fail500_proxy + "/#/view/group?p=0")
     page.wait_for_selector("#toast.visible", timeout=5000)

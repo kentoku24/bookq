@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">bookq</string>
+
+    <string name="onboarding_title">bookq</string>
+    <string name="onboarding_hint">サーバーの URL を入力\n（Tailscale 経由の https アドレス）</string>
+    <string name="onboarding_url_placeholder">https://bookq.tail-xxx.ts.net</string>
+    <string name="onboarding_connect">接続</string>
+    <string name="onboarding_connecting">接続確認中…</string>
+    <string name="onboarding_error_invalid">URL が不正です</string>
+    <string name="onboarding_error_http">http:// は localhost のみ利用できます（認証トークン保護のため https が必要です）</string>
+    <string name="onboarding_error_unreachable">接続できません</string>
+
+    <string name="boot_connecting">接続中…</string>
+    <string name="boot_retry">再試行</string>
+    <string name="boot_change_server">サーバー変更</string>
+
+    <string name="login_title">ログイン</string>
+    <string name="login_google">Google でログイン</string>
+    <string name="login_cancelled">ログインがキャンセルされました</string>
+    <string name="login_no_browser">ブラウザが見つかりません</string>
+
+    <string name="home_title">bookq</string>
+    <string name="home_loading">読み込み中…</string>
+    <string name="home_error">読み込みに失敗しました</string>
+    <string name="home_reload">再読み込み</string>
+
+    <string name="browse_search">絞り込み</string>
+    <string name="browse_filter_hint">この階層を絞り込み</string>
+    <string name="browse_empty">フォルダがありません</string>
+    <string name="browse_hidden_denied">非表示フォルダです</string>
+
+    <string name="reader_root_title">ライブラリ直下</string>
+    <string name="reader_counter">%1$d / %2$d</string>
+    <string name="reader_empty">ページがありません</string>
+    <string name="reader_overview">ページ一覧</string>
+    <string name="reader_spread_toggle">見開き表示</string>
+    <string name="reader_spread_shift">見開きずらし</string>
+    <string name="reader_tap_left_forward">タップ方向：左で進む</string>
+    <string name="reader_tap_right_forward">タップ方向：右で進む</string>
+    <string name="reader_ext_display">外部ディスプレイに出力</string>
+    <string name="back">戻る</string>
+
+    <string name="settings_title">設定</string>
+    <string name="settings_server">サーバー</string>
+    <string name="settings_change">変更</string>
+    <string name="settings_cancel">キャンセル</string>
+    <string name="settings_server_url">サーバー URL</string>
+    <string name="settings_original_images">原本画像を使う（/image）</string>
+    <string name="settings_browse_layout">ブラウズ表示</string>
+    <string name="settings_layout_tile">タイル</string>
+    <string name="settings_layout_list">リスト</string>
+    <string name="settings_layout_card">カード</string>
+    <string name="settings_volume_keys">音量キーでページ送り</string>
+    <string name="settings_dynamic_color">ダイナミックカラー</string>
+    <string name="settings_perf_hud">FPS を表示（デバッグ）</string>
+    <string name="settings_logout">ログアウト</string>
+    <string name="settings_app_version">アプリバージョン</string>
+    <string name="settings_server_version">サーバーバージョン</string>
+    <string name="settings_unknown">不明</string>
+    <string name="settings_user">ユーザー</string>
+    <string name="settings_email">メール</string>
+
+    <string name="offline_badge">オフライン保存</string>
+    <string name="offline_dl_channel">オフライン保存</string>
+    <string name="offline_dl_title">オフライン保存</string>
+    <string name="offline_dl_listing">一覧を取得中…</string>
+    <string name="offline_dl_stop">停止</string>
+    <string name="offline_continue">続きをダウンロード（残り %1$d ページ）</string>
+    <string name="offline_delete_pages">削除（%1$d ページ分の保存データ）</string>
+    <string name="offline_banner">オフライン — 保存済みの作品のみ利用できます</string>
+    <string name="offline_quota_title">保存容量が不足しています</string>
+    <string name="offline_quota_body">最も古い作品『%1$s』（約 %2$s）を削除して続行しますか？</string>
+    <string name="offline_quota_ok">削除して続行</string>
+    <string name="offline_quota_fail">容量を確保できませんでした</string>
+    <string name="settings_offline">オフライン保存</string>
+    <string name="settings_offline_summary">%1$d 作品・%2$s</string>
+    <string name="settings_offline_empty">保存済みの作品はありません</string>
+    <string name="settings_offline_clear">すべて削除</string>
+    <string name="settings_offline_clear_confirm">保存済みのすべての作品を削除しますか？</string>
+    <string name="browse_search_hint">ライブラリを検索</string>
+    <string name="browse_filters">フィルタ</string>
+    <string name="browse_search_close">検索を閉じる</string>
+    <string name="browse_filter_close">絞り込みを解除</string>
+    <string name="reader_menu">リーダーメニュー</string>
+    <string name="search_chip_remove">%1$s を除外</string>
+    <string name="facet_artists">作者</string>
+    <string name="facet_tags">タグ</string>
+    <string name="facet_reset">リセット</string>
+    <string name="facet_apply">適用</string>
+    <string name="vis_badge_hidden">非表示</string>
+    <string name="vis_badge_under">上位が非表示</string>
+    <string name="vis_badge_above">配下に非表示</string>
+    <string name="vis_show">再表示</string>
+    <string name="vis_hide">非表示にする</string>
+    <string name="vis_hide_mode_on">すべて表示（非表示管理）</string>
+    <string name="vis_hide_mode_off">すべて表示を終了</string>
+    <string name="vis_save_failed">非表示設定の保存に失敗しました</string>
+    <string name="vis_save_conflict">別アカウントで更新されました</string>
+    <string name="vis_save_offline">オフラインのため変更できません</string>
+</resources>

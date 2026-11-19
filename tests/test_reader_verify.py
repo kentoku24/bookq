@@ -331,11 +331,12 @@ def test_cli_unsupported_surfaces():
     rc = verify.main(["--driver", "simulator", "--leader-udid", "A",
                       "--follower-udid", "A", "--url", "http://127.0.0.1:1"])
     assert rc == core.EXIT_UNSUPPORTED
-    # ui surface on simulator -> exit 3 today
+    # ui surface on simulator is supported (#142) — it proceeds to
+    # preflight and reports the unreachable URL as env-unavailable.
     rc = verify.main(["--driver", "simulator", "--leader-udid", "A",
                       "--follower-udid", "B", "--surface", "ui",
                       "--url", "http://127.0.0.1:1"])
-    assert rc == core.EXIT_UNSUPPORTED
+    assert rc == core.EXIT_ENV
     # no URL at all -> exit 3
     rc = verify.main(["--driver", "chrome"])
     assert rc == core.EXIT_UNSUPPORTED

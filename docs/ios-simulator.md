@@ -7,7 +7,7 @@
 
 - bookq は PWA。`simctl install` は不要。Safari で `xcrun simctl openurl booted <dev-url>` で開く。
 - Simulator は host ネットワークを共有。host が Tailnet 参加済みなら `https://dev-*.ts.net` に到達できる。
-- booted Simulator は ~160 の背景デーモンで GB 級メモリを消費する。`brew install mobai-app/tap/simslim` を入れておくと `open-simulator.sh` が open 時に自動 slim 化（実測 ~4x 削減、`web` カテゴリは Safari 検証用に残す。`SIMSLIM=0` で無効化）。使い終わったら `xcrun simctl shutdown all` で解放。
+- booted Simulator は ~160 の背景デーモンで GB 級メモリを消費する。`brew install mobai-app/tap/simslim` を入れておくと `open-simulator.sh` が open 時に自動 slim 化（実測 ~4x 削減、`web` カテゴリは Safari 検証用に残す。`SIMSLIM=0` で無効化）。使い終わったら `./scripts/sim-teardown.sh` で解放 + CPU 残留監査まで行う（`xcrun simctl shutdown all` だけでは診断プロセスや Clone デバイスが残り得る）。
 
 ## 起動から確認まで
 

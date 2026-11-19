@@ -314,7 +314,7 @@ def test_boot_resume_waits_for_visibility_ready(request, vis_env):
             "{sessionId:'S', memberId:'M', resumeToken:'T',"
             " role:'leader'}))")
         held = []
-        pg.route("**/api/folder-visibility", lambda r: held.append(r))
+        pg.route("**/api/v1/folder-visibility", lambda r: held.append(r))
         pg.reload()
         pg.wait_for_function("() => document.readyState !== 'loading'")
         assert _wait_held(held), "visibility GET was never issued"
@@ -341,7 +341,7 @@ def test_pending_commit_latest_stashed_and_retried(vpage, vis_env):
     older visible one never reaches the display."""
     vis_put(vis_env, "hide_me", True)
     held = []
-    vpage.route("**/api/folder-visibility", lambda r: held.append(r))
+    vpage.route("**/api/v1/folder-visibility", lambda r: held.append(r))
     # The held GET cannot keep FV 'loading' past its own 3s client-side
     # fetch timeout — the abort then resolves the judgment as 'error'/
     # 'readonly' and the stash window closes mid-test (observed flake).

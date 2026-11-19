@@ -10,5 +10,7 @@ __pycache__/
 # worktree は .claude/worktrees/ 以下に作られる。除外しないと、メインの
 # チェックアウトからビルドしたときに全 worktree が build context に入る。
 .claude/
+.worktrees/
 docs/
 tests/
+rust/target/

@@ -1,0 +1,1257 @@
+package dev.bookq.core.sync
+
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
+import kotlin.random.Random
+
+/** Inbound wire text — the store owns JSON decoding so the stream stays
+ *  lightweight across the transport boundary. */
+sealed interface PairEvent {
+    data object Open : PairEvent
+    data class Frame(val text: String) : PairEvent
+    data class Closed(val code: Int, val reason: String) : PairEvent
+    data class Failed(val message: String) : PairEvent
+}
+
+/** Transport contract — OkHttp implementation lives in :data. */
+interface PairTransport {
+    fun connect(url: String, token: String?): kotlinx.coroutines.flow.Flow<PairEvent>
+    suspend fun send(text: String)
+    suspend fun close()
+}
+
+sealed class PairException(message: String) : Exception(message) {
+    class Rejected(val reason: String, val snapshot: JsonObject?) :
+        PairException("rejected: $reason")
+    class Disconnected : PairException("disconnected")
+    class Malformed(msg: String) : PairException(msg)
+}
+
+/** Result a CREATE/JOIN/etc ACK resolves with (entry replies carry the
+ *  bind fields + optional `ambiguous` MATCH candidates). */
+typealias PairAckData = JsonObject
+
+/** Persisted member credentials — survives process death for RESUME. */
+@kotlinx.serialization.Serializable
+data class PairMember(
+    val sessionId: String,
+    val memberId: String,
+    val role: String,        // "leader" | "follower"
+    val resumeToken: String,
+)
+
+interface PairCredStore {
+    fun load(): PairMember?
+    fun save(member: PairMember?)
+}
+
+/**
+ * Dual-reader sync client — Kotlin port of ios/Bookq/Sync/PairStore.swift
+ * (which ports viewer/pairClient.js + pairController.js; server-ws plane
+ * only, `dataPlane` stays "server-ws").
+ *
+ * Lifecycle: idle → connecting → waiting(leader)/pending(follower) →
+ * paired (phase from STATE drives the reader) → ended. RESUME rebinds a
+ * member within the server's 300s window; nothing is ever replayed.
+ */
+class PairStore(
+    private val scope: CoroutineScope,
+    private val urlProvider: () -> String?,
+    private val tokenProvider: () -> String?,
+    private val transportFactory: () -> PairTransport,
+    private val creds: PairCredStore,
+    private val resumeWindowMs: Long = 300_000,
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
+    private val rng: () -> Int = { Random.nextInt(0, Int.MAX_VALUE) },
+) {
+    sealed interface UiStatus {
+        data object Idle : UiStatus
+        data object Connecting : UiStatus
+        data object Waiting : UiStatus
+        data object Pending : UiStatus
+        data object Paired : UiStatus
+        data class Ended(val reason: String) : UiStatus
+    }
+
+    // MARK: - Published surface
+
+    private val _status = MutableStateFlow<UiStatus>(UiStatus.Idle)
+    val status: StateFlow<UiStatus> = _status
+    private val _member = MutableStateFlow<PairMember?>(null)
+    val member: StateFlow<PairMember?> = _member
+    private val _code = MutableStateFlow<String?>(null)
+    val code: StateFlow<String?> = _code
+    data class JoinRequest(val memberId: String, val name: String)
+
+    /** MATCH outcome — bound straight through or the server saw several
+     *  eligible waiting sessions and handed back opaque pick tokens. */
+    sealed interface MatchResult {
+        data object Paired : MatchResult
+        data class Ambiguous(
+            val candidates: List<MatchCandidate>) : MatchResult
+    }
+
+    data class MatchCandidate(
+        val id: String,          // opaque match_token — pass to match(pick)
+        val leaderName: String,
+        val ageSec: Int,
+    )
+
+    private val _joinRequest = MutableStateFlow<JoinRequest?>(null)
+    val joinRequest: StateFlow<JoinRequest?> = _joinRequest
+    private val _lastState = MutableStateFlow<PairSnapshot?>(null)
+    val lastState: StateFlow<PairSnapshot?> = _lastState
+    private val _manifest = MutableStateFlow<PairManifest?>(null)
+    val manifest: StateFlow<PairManifest?> = _manifest
+    private val _projection = MutableStateFlow<PairProjection?>(null)
+    val projection: StateFlow<PairProjection?> = _projection
+    private val _presence = MutableStateFlow<Map<String, PairPresenceEntry>>(emptyMap())
+    val presence: StateFlow<Map<String, PairPresenceEntry>> = _presence
+    private val _errorText = MutableStateFlow<String?>(null)
+    val errorText: StateFlow<String?> = _errorText
+    private val _endReason = MutableStateFlow<String?>(null)
+    val endReason: StateFlow<String?> = _endReason
+    private val _effPlane = MutableStateFlow("server-ws")
+    /** Effective send plane ("server-ws"|"webrtc-dc") — web 'transport'
+     *  event parity: flips only on an actual send-path change. */
+    val effPlane: StateFlow<String> = _effPlane
+    private val _uiSync =
+        kotlinx.coroutines.flow.MutableSharedFlow<UiSync.Frame>(
+            extraBufferCapacity = 32)
+    /** Inbound UI_SYNC relays (browse scroll mirror). */
+    val uiSync: kotlinx.coroutines.flow.SharedFlow<UiSync.Frame> = _uiSync
+
+    val paired: Boolean
+        get() = _status.value == UiStatus.Paired &&
+            _lastState.value?.phase != PairPhase.waiting
+    val role: PairRole?
+        get() = _member.value?.role?.let { r ->
+            PairRole.entries.firstOrNull { it.name == r } }
+    val phase: PairPhase? get() = _lastState.value?.phase
+    val bound: Boolean
+        get() = _member.value != null &&
+            _status.value != UiStatus.Idle &&
+            _status.value != UiStatus.Connecting
+
+    /** Peer display info (the other member in presence). */
+    val peer: PairPresenceEntry?
+        get() {
+            val m = _member.value ?: return null
+            return _presence.value.entries.firstOrNull { it.key != m.memberId }
+                ?.value
+        }
+
+    // MARK: - Wiring
+
+    /** Leader bootstrap / openWork initial-page resolution. */
+    var openWorkResolver: (suspend (String) -> PairPageRef?)? = null
+    /** Folder a hidden-root check must veto before it reaches the wire. */
+    var visibilityBlocks: ((String) -> Boolean)? = null
+    /** Leader bootstrap: which work to share when paired with no manifest. */
+    var bootstrapWork: (suspend () -> Pair<PairPageRef, String>?)? = null
+    /** WebRTC pc factory — opt into the webrtc-dc upgrade (web
+     *  `enableWebRTC`): signaling starts on the next paired STATE. */
+    var rtcFactory: (() -> RtcPeerConnection)? = null
+        set(v) {
+            field = v
+            scope.launch { lock.withLock { maybeStartDcLocked() } }
+        }
+
+    private val lock = Mutex()
+    private var transport: PairTransport? = null
+    private var eventJob: Job? = null
+    private var linkGen = 0
+    private val pending =
+        LinkedHashMap<String, CompletableDeferred<JsonObject>>()
+    private var ridSeq = 0
+
+    // protocol mirrors (pairClient.js _seen/_applied/_readyFor/_deferredState)
+    private var seen = -1 to -1                     // (epoch, rev)
+    private var applied = -1 to -1
+    private var seenMv = 0
+    private var readyFor: String? = null
+    private var deferredState: JsonObject? = null
+    private var manifestMV: Int? = null
+    private var manifestEpoch: Int? = null
+
+    private class Chunks(
+        val key: String, val digest: String, val count: Int,
+        val epoch: Int, val mv: Int,
+    ) {
+        val parts = arrayOfNulls<String>(count)
+        var got = 0
+    }
+    private var chunks: Chunks? = null
+    private val appliedPending = LinkedHashMap<Int, String>()   // rev -> requestId
+
+    // reconnect machine
+    private var offlineSince: Long? = null
+    private var retryCount = 0
+    private var retryJob: Job? = null
+    private var livenessJob: Job? = null
+
+    // webrtc-dc upgrade (pairClient.js §1517+)
+    private var sig: SignalingPeer? = null
+    private var pc: RtcPeerConnection? = null
+    private var dcChannel: RtcDataChannel? = null
+    private var dcUp = false
+    private var dcEscalated = false
+    private var dcWatchJob: kotlinx.coroutines.Job? = null
+    private var plane = "server-ws"             // server-confirmed plane
+    private var lastRx = Long.MIN_VALUE
+    private var attemptingResume = false
+    private var entryType: String? = null
+    private var entryPayload: JsonObject = JsonObject(emptyMap())
+    private var bootstrapTried = false
+    private var suspended = false
+    private var entryCont: CompletableDeferred<JsonObject>? = null
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    // MARK: - Entry ops
+
+    /** Silent boot resume (web boot()): adopt persisted creds if any. */
+    fun bootResume() {
+        if (_status.value != UiStatus.Idle || creds.load() == null) return
+        scope.launch { runCatching { resume() } }
+    }
+
+    suspend fun create() = entry(Entry.CREATE, "CREATE",
+        JsonObject(emptyMap()), memberOverride = null)
+
+    suspend fun join(code: String) {
+        if (!code.matches(PairProto.JOIN_CODE)) {
+            throw PairException.Malformed("code must be 6 digits")
+        }
+        entry(Entry.JOIN, "JOIN", buildJsonObject { put("code", code) },
+            memberOverride = null)
+    }
+
+    /** `pick` = matched session's opaque token (ambiguous ACK picker). */
+    suspend fun match(pick: String? = null): MatchResult {
+        val p = buildJsonObject { pick?.let { put("pick", it) } }
+        val data = entry(Entry.MATCH, "MATCH", p, memberOverride = null)
+        if ((data["ambiguous"] as? JsonPrimitive)?.booleanOrNull == true) {
+            val cs = (data["candidates"] as? JsonArray).orEmpty()
+                .mapNotNull { c ->
+                    val o = c as? JsonObject ?: return@mapNotNull null
+                    MatchCandidate(
+                        id = (o["id"] as? JsonPrimitive)?.content
+                            ?: return@mapNotNull null,
+                        leaderName = (o["leaderName"] as? JsonPrimitive)
+                            ?.content.orEmpty(),
+                        ageSec = (o["ageSec"] as? JsonPrimitive)?.intOrNull
+                            ?: 0)
+                }
+            return MatchResult.Ambiguous(cs)
+        }
+        return MatchResult.Paired
+    }
+
+    suspend fun resume() {
+        val c = _member.value ?: creds.load()
+            ?: run { finishEnded("credentials_lost"); return }
+        if (offlineSince == null) offlineSince = nowMs()
+        entry(Entry.RESUME, "RESUME", buildJsonObject {
+            put("memberId", c.memberId); put("resumeToken", c.resumeToken)
+        }, memberOverride = c)
+    }
+
+    private enum class Entry { CREATE, JOIN, MATCH, RESUME }
+
+    private suspend fun entry(
+        mode: Entry, type: String, payload: JsonObject,
+        memberOverride: PairMember?,
+    ): JsonObject {
+        // Leave politely first, then reset (web _leaveBound +
+        // _teardownLink). The resume window must survive teardown —
+        // it clears offlineSince/retryCount which reconnect owns.
+        if (bound) {
+            runCatching {
+                sendRequest("LEAVE", JsonObject(emptyMap()))
+            }
+        }
+        lock.withLock {
+            val priorOffline = offlineSince
+            val priorRetry = retryCount
+            val priorSuspended = suspended
+            teardownLocked()
+            offlineSince = priorOffline
+            retryCount = priorRetry
+            suspended = priorSuspended
+            attemptingResume = (mode == Entry.RESUME)
+            if (memberOverride != null) _member.value = memberOverride
+            entryType = type
+            entryPayload = payload
+            _status.value = UiStatus.Connecting
+        }
+        openSocket()
+        val waiter = CompletableDeferred<JsonObject>()
+        lock.withLock { entryCont = waiter }
+        armEntryTimeout()
+        return waiter.await()
+    }
+
+    private fun armEntryTimeout() {
+        scope.launch {
+            delay(10_000)
+            lock.withLock {
+                val c = entryCont ?: return@withLock
+                entryCont = null
+                linkDeadLocked()
+                c.completeExceptionally(PairException.Disconnected())
+            }
+        }
+    }
+
+    // MARK: - Socket lifecycle
+
+    private fun openSocket() {
+        linkGen += 1
+        val url = urlProvider() ?: run {
+            finishEnded("error"); return
+        }
+        val t = transportFactory()
+        transport = t
+        val token = tokenProvider()
+        val gen = linkGen
+        eventJob?.cancel()
+        eventJob = scope.launch {
+            t.connect(url, token).collect { ev -> handle(ev, gen) }
+        }
+    }
+
+    private suspend fun handle(ev: PairEvent, gen: Int) {
+        lock.withLock {
+            if (gen != linkGen) return
+            when (ev) {
+                PairEvent.Open -> Unit
+                is PairEvent.Frame -> {
+                    lastRx = nowMs(); armLivenessLocked()
+                    val f = runCatching {
+                        json.parseToJsonElement(ev.text).jsonObject
+                    }.getOrNull() ?: return   // undecodable — drop
+                    dispatchLocked(f)
+                }
+                is PairEvent.Closed, is PairEvent.Failed -> linkDeadLocked()
+            }
+        }
+    }
+
+    private fun armLivenessLocked() {
+        livenessJob?.cancel()
+        livenessJob = scope.launch {
+            delay(20_000)
+            lock.withLock {
+                // 4 missed server PINGs — treat as a black-holed path.
+                if (nowMs() - lastRx >= 20_000) linkDeadLocked()
+            }
+        }
+    }
+
+    private fun linkDeadLocked() {
+        // Reject all in-flight requests; nothing is replayed (§3.5).
+        val pend = pending.toMap(); pending.clear()
+        for ((_, c) in pend) c.completeExceptionally(PairException.Disconnected())
+        entryCont?.let {
+            entryCont = null
+            it.completeExceptionally(PairException.Disconnected())
+        }
+        if (_member.value != null) {
+            if (offlineSince == null) offlineSince = nowMs()
+            _status.value = UiStatus.Connecting
+            scheduleRetryLocked()
+        } else {
+            _status.value = UiStatus.Idle
+        }
+    }
+
+    private fun scheduleRetryLocked() {
+        retryJob?.cancel()
+        val base = doubleArrayOf(0.5, 1.0, 2.0, 5.0)[retryCount.coerceAtMost(3)]
+        val jitter = Random.nextDouble(0.0, 0.5)
+        retryCount += 1
+        val off = offlineSince
+        if (off != null &&
+            nowMs() - off + ((base + jitter) * 1000).toLong() > resumeWindowMs) {
+            finishEndedLocked("resume_expired"); return
+        }
+        retryJob = scope.launch {
+            delay(((base + jitter) * 1000).toLong())
+            lock.withLock {
+                if (_member.value != null) {
+                    scope.launch { runCatching { resume() } }
+                }
+            }
+        }
+    }
+
+    private fun teardownLocked() {
+        eventJob?.cancel(); eventJob = null
+        livenessJob?.cancel(); livenessJob = null
+        retryJob?.cancel(); retryJob = null
+        sig?.close(); sig = null; pc = null
+        dcChannel?.let { ch ->
+            ch.onOpen = null; ch.onMessage = null; ch.onClose = null
+            runCatching { ch.close() }
+        }
+        dcChannel = null; dcUp = false; dcEscalated = false
+        dcWatchJob?.cancel(); dcWatchJob = null
+        plane = "server-ws"
+        _effPlane.value = "server-ws"
+        val t = transport; transport = null
+        if (t != null) scope.launch { t.close() }
+        for ((_, c) in pending) c.completeExceptionally(PairException.Disconnected())
+        pending.clear()
+        entryCont?.completeExceptionally(PairException.Disconnected())
+        entryCont = null
+        _member.value = null; _code.value = null; _joinRequest.value = null
+        _lastState.value = null; _manifest.value = null; _projection.value = null
+        _presence.value = emptyMap()
+        seen = -1 to -1; applied = -1 to -1; seenMv = 0
+        readyFor = null; deferredState = null
+        manifestMV = null; manifestEpoch = null; chunks = null
+        appliedPending.clear()
+        offlineSince = null; retryCount = 0
+        bootstrapTried = false
+        suspended = false
+        attemptingResume = false
+    }
+
+    // MARK: - Frame dispatch (inbound)
+
+    private fun dispatchLocked(f: JsonObject) {
+        if ((f["v"] as? JsonPrimitive)?.intOrNull != 1) {
+            finishEndedLocked("incompatible"); return
+        }
+        when ((f["type"] as? JsonPrimitive)?.content) {
+            "HELLO" -> onHelloLocked()
+            "PING" -> ctlSendRaw(buildJsonObject {
+                put("v", 1); put("type", "PONG")
+                put("seq", f["seq"] ?: JsonNull) })
+            "PONG" -> Unit
+            "SIGNAL" -> {
+                val kind = (f["kind"] as? JsonPrimitive)?.content ?: ""
+                if (kind == "offer") {
+                    dcWatchJob?.cancel(); dcWatchJob = null
+                    if (dcEscalated) {
+                        // glare — the leader also re-offered: yield to
+                        // its offer on a fresh waiting sig.
+                        sig?.close(); sig = null; pc = null
+                        dcEscalated = false
+                        maybeStartDcLocked()
+                    }
+                }
+                sig?.applySignal(kind, f["data"])
+            }
+            "UI_SYNC" -> UiSync.parse(f)?.let { _uiSync.tryEmit(it) }
+            "TRANSPORT_STATE" -> setPlaneLocked(
+                (f["dataPlane"] as? JsonPrimitive)?.content,
+                (f["revision"] as? JsonPrimitive)?.intOrNull)
+            "ACK" -> onAckLocked(f)
+            "REJECT" -> onRejectLocked(f)
+            "JOIN_REQUEST" -> {
+                _joinRequest.value = JoinRequest(
+                    (f["memberId"] as? JsonPrimitive)?.content ?: "",
+                    (f["name"] as? JsonPrimitive)?.content ?: "")
+                // Auto-approve (pairController parity).
+                scope.launch { runCatching { approve() } }
+            }
+            "JOIN_CANCEL" -> _joinRequest.value = null
+            "STATE" -> onStateLocked(f)
+            "MANIFEST" -> onManifestLocked(f)
+            "APPLIED" -> {
+                val rev = (f["revision"] as? JsonPrimitive)?.intOrNull
+                val rid = (f["requestId"] as? JsonPrimitive)?.content
+                if (rev != null && rid != null) appliedPending[rev] = rid
+            }
+            "END" -> {
+                val r = (f["reason"] as? JsonPrimitive)?.content ?: "session_lost"
+                finishEndedLocked(if (r == "shutdown") "session_lost" else r)
+            }
+            "ERROR" ->
+                _errorText.value =
+                    (f["code"] as? JsonPrimitive)?.content ?: "error"
+            else -> Unit
+        }
+    }
+
+    private fun onHelloLocked() {
+        val cont = entryCont ?: return
+        val type = entryType ?: return
+        val req = envelope(type, entryPayload,
+            sessionId = _member.value?.sessionId)
+        pending[req.requestId] = cont
+        entryCont = null
+        ctlSendReq(req)
+    }
+
+    // MARK: - Requests
+
+    private class OutRequest(val requestId: String, val text: String)
+
+    private fun rid(): String {
+        ridSeq += 1
+        return "r$ridSeq${rng().toString(36)}"
+    }
+
+    private fun envelope(
+        type: String, payload: JsonObject,
+        sessionId: String? = null,
+        workEpoch: Int? = null, baseRevision: Int? = null,
+    ): OutRequest {
+        val requestId = rid()
+        val f = buildJsonObject {
+            put("v", 1); put("requestId", requestId)
+            put("sessionId", (sessionId ?: _member.value?.sessionId)
+                ?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("workEpoch", workEpoch ?: seen.first.coerceAtLeast(0))
+            put("baseRevision", baseRevision ?: seen.second.coerceAtLeast(0))
+            put("type", type)
+            put("payload", payload)
+        }
+        return OutRequest(requestId = requestId, text = f.toString())
+    }
+
+    /** Send a session-bound request; resolves with ACK or throws. */
+    suspend fun sendRequest(
+        type: String, payload: JsonObject,
+        workEpoch: Int? = null, baseRevision: Int? = null,
+    ) {
+        val req = lock.withLock {
+            envelope(type, payload,
+                workEpoch = workEpoch, baseRevision = baseRevision)
+        }
+        val waiter = CompletableDeferred<JsonObject>()
+        lock.withLock { pending[req.requestId] = waiter }
+        scope.launch {
+            try {
+                transport?.send(req.text)
+            } catch (e: Exception) {
+                lock.withLock {
+                    pending.remove(req.requestId)
+                        ?.completeExceptionally(e)
+                }
+            }
+        }
+        waiter.await()
+    }
+
+    /** Tracked request that rides the data plane — web `_dataSend`+
+     *  `_track` parity (READY/APPLIED): the dc hop is follower-only and
+     *  the ACK still arrives on ws where the waiter resolves. */
+    private suspend fun sendDataRequest(
+        type: String, payload: JsonObject,
+        workEpoch: Int? = null, baseRevision: Int? = null,
+    ) {
+        val req = lock.withLock {
+            envelope(type, payload,
+                workEpoch = workEpoch, baseRevision = baseRevision)
+        }
+        val waiter = CompletableDeferred<JsonObject>()
+        lock.withLock { pending[req.requestId] = waiter }
+        dataSendReq(req)
+        waiter.await()
+    }
+
+    private fun onAckLocked(f: JsonObject) {
+        val rid = (f["requestId"] as? JsonPrimitive)?.content ?: return
+        val cont = pending.remove(rid) ?: return
+        val data = (f["data"] as? JsonObject) ?: JsonObject(emptyMap())
+        bindFromAckLocked(data, (f["request"] as? JsonPrimitive)?.content)
+        // MATCH ambiguous: nothing bound — web `_teardownLink`s the
+        // connection; the picker issues a fresh match(pick).
+        if ((data["ambiguous"] as? JsonPrimitive)?.booleanOrNull == true) {
+            teardownLocked()
+        }
+        cont.complete(data)
+    }
+
+    private fun onRejectLocked(f: JsonObject) {
+        val reason = (f["reason"] as? JsonPrimitive)?.content ?: "malformed"
+        val rid = (f["requestId"] as? JsonPrimitive)?.content
+        val cont = rid?.let { pending.remove(it) }
+        val wasEntry = cont != null && _member.value == null && !attemptingResume
+        (f["snapshot"] as? JsonObject)?.let { adoptSnapshotLocked(it) }
+        if (attemptingResume) {
+            when (reason) {
+                "resume_in_use" -> {
+                    cont?.completeExceptionally(
+                        PairException.Rejected(reason, null))
+                    scheduleRetryLocked()
+                }
+                "bad_resume" -> {
+                    cont?.completeExceptionally(
+                        PairException.Rejected(reason, null))
+                    finishEndedLocked("session_lost")
+                }
+                else -> {
+                    cont?.completeExceptionally(
+                        PairException.Rejected(reason, null))
+                    finishEndedLocked(reason)
+                }
+            }
+            return
+        }
+        cont?.completeExceptionally(
+            PairException.Rejected(reason, f["snapshot"] as? JsonObject))
+        if (wasEntry) {
+            // Dead-end entry (bad code etc.) — don't hold the socket.
+            _errorText.value = reason
+            teardownLocked()
+            _status.value = UiStatus.Idle
+        }
+    }
+
+    private fun bindFromAckLocked(d: JsonObject, requestType: String?) {
+        val sid = (d["sessionId"] as? JsonPrimitive)?.content ?: return
+        val mid = (d["memberId"] as? JsonPrimitive)?.content ?: return
+        val role = (d["role"] as? JsonPrimitive)?.content ?: return
+        val tok = (d["resumeToken"] as? JsonPrimitive)?.content ?: return
+        // MATCH ambiguous: no bind fields — caller handles candidates.
+        if ((d["ambiguous"] as? JsonPrimitive)?.booleanOrNull == true) return
+        val m = PairMember(sessionId = sid, memberId = mid,
+            role = role, resumeToken = tok)
+        _member.value = m
+        creds.save(m)
+        (d["code"] as? JsonPrimitive)?.content?.let { _code.value = it }
+        readyFor = null
+        retryCount = 0; offlineSince = null; attemptingResume = false
+        // JOIN binds a *pending* candidate — paired only once the leader's
+        // APPROVE lands and STATE shows both members active.
+        _status.value =
+            if (requestType == "JOIN") UiStatus.Pending else UiStatus.Paired
+        // A resumed member is re-marked 'active' server-side — re-assert a
+        // local suspension so the session doesn't un-pause for nobody.
+        if (requestType == "RESUME" && suspended) setActivity("suspended")
+    }
+
+    // MARK: - STATE / MANIFEST / projection
+
+    private fun adoptSnapshotLocked(snap: JsonObject) {
+        val pseudo = buildJsonObject {
+            put("v", 1); put("type", "STATE")
+            put("sessionId", snap["sessionId"]
+                ?: _member.value?.sessionId?.let { JsonPrimitive(it) }
+                ?: JsonNull)
+            put("revision", snap["revision"] ?: JsonPrimitive(0))
+            put("workEpoch", snap["workEpoch"] ?: JsonPrimitive(0))
+            put("manifestVersion", snap["manifestVersion"] ?: JsonPrimitive(0))
+            put("phase", snap["phase"] ?: JsonPrimitive("waiting"))
+            put("spreadId", snap["spreadId"] ?: JsonNull)
+            put("offset", snap["offset"] ?: JsonPrimitive(0))
+            put("leaderSide", snap["leaderSide"] ?: JsonPrimitive("left"))
+            put("presence", buildJsonObject {
+                for ((k, v) in _presence.value) {
+                    put(k, buildJsonObject {
+                        put("role", v.role.name); put("status", v.status)
+                        put("name", v.name); put("ready", v.ready)
+                    })
+                }
+            })
+            put("dataPlane", snap["dataPlane"] ?: JsonPrimitive("server-ws"))
+        }
+        onStateLocked(pseudo)
+    }
+
+    private fun onStateLocked(f: JsonObject) {
+        val rev = (f["revision"] as? JsonPrimitive)?.intOrNull ?: return
+        val epoch = (f["workEpoch"] as? JsonPrimitive)?.intOrNull ?: return
+        _member.value?.let { m ->
+            val sid = (f["sessionId"] as? JsonPrimitive)?.content
+            if (sid != null && sid != m.sessionId) return
+        }
+        val newer = epoch > seen.first ||
+            (epoch == seen.first && rev > seen.second)
+        if (!newer) return    // dup / out-of-order
+        seen = epoch to rev
+        seenMv = (f["manifestVersion"] as? JsonPrimitive)?.intOrNull ?: 0
+        _errorText.value = null
+        maybeApplyLocked(f)
+    }
+
+    /** _maybeApply — manifest gate + applied dedup + apply. Called for
+     *  fresh STATEs AND deferred replays: a replay skips the seen dedup
+     *  (it already bumped `seen`), matching web `_maybeApply` — replaying
+     *  through the seen-gate would drop the frame iOS-style. */
+    private fun maybeApplyLocked(f: JsonObject) {
+        val rev = (f["revision"] as? JsonPrimitive)?.intOrNull ?: return
+        val epoch = (f["workEpoch"] as? JsonPrimitive)?.intOrNull ?: return
+        _presence.value =
+            (f["presence"] as? JsonObject)?.mapValues { (_, v) ->
+                val d = v as? JsonObject
+                PairPresenceEntry(
+                    role = PairRole.entries.firstOrNull {
+                        it.name == ((d?.get("role")
+                            as? JsonPrimitive)?.content) }
+                        ?: PairRole.follower,
+                    status = (d?.get("status")
+                        as? JsonPrimitive)?.content ?: "",
+                    name = (d?.get("name")
+                        as? JsonPrimitive)?.content ?: "",
+                    ready = (d?.get("ready")
+                        as? JsonPrimitive)?.booleanOrNull ?: false)
+            } ?: emptyMap()
+
+        val snap = PairSnapshot(
+            sessionId = (f["sessionId"] as? JsonPrimitive)?.content,
+            revision = rev, workEpoch = epoch, manifestVersion = seenMv,
+            phase = PairPhase.entries.firstOrNull {
+                it.name == ((f["phase"] as? JsonPrimitive)?.content) }
+                ?: PairPhase.waiting,
+            spreadId = (f["spreadId"] as? JsonPrimitive)?.content,
+            offset = (f["offset"] as? JsonPrimitive)?.intOrNull ?: 0,
+            leaderSide = PairSide.entries.firstOrNull {
+                it.name == ((f["leaderSide"] as? JsonPrimitive)?.content) }
+                ?: PairSide.left,
+            dataPlane = (f["dataPlane"] as? JsonPrimitive)?.content
+                ?: "server-ws")
+        _lastState.value = snap
+        // Server-confirmed plane + dc upgrade hook (web _onState order).
+        setPlaneLocked(snap.dataPlane, rev)
+        maybeStartDcLocked()
+
+        // Status follows the committed phase.
+        if (_member.value != null) {
+            _status.value = when (snap.phase) {
+                PairPhase.waiting -> if (role == PairRole.leader)
+                    UiStatus.Waiting else UiStatus.Pending
+                else -> UiStatus.Paired
+            }
+        }
+
+        // Apply only when we hold the manifest this STATE references.
+        val needMv = snap.manifestVersion
+        val haveManifest = _manifest.value != null &&
+            manifestEpoch == epoch && manifestMV == needMv
+        if (needMv > 0 && !haveManifest) {
+            deferredState = f; return
+        }
+        if (applied.first == epoch && applied.second >= rev) return
+        if (epoch < applied.first) return
+        applied = epoch to rev
+        applyStateLocked(snap)
+        appliedPending.remove(rev)?.let { rid ->
+            dataSendReq(envelope("APPLIED", buildJsonObject {
+                put("requestId", rid) }, workEpoch = epoch, baseRevision = rev))
+        }
+        maybeBootstrapLocked(snap)
+    }
+
+    /** pairedView.apply — project the committed spread onto this device. */
+    private fun applyStateLocked(s: PairSnapshot) {
+        val manifest = _manifest.value
+        val sid = s.spreadId
+        val si = sid?.let { manifest?.spreadIndex(it) }
+        val role = role
+        if ((s.phase != PairPhase.reading &&
+                s.phase != PairPhase.loading &&
+                s.phase != PairPhase.paused) ||
+            manifest == null || sid == null || si == null || role == null) {
+            if (s.phase == PairPhase.selecting) _projection.value = null
+            return
+        }
+        val spread = manifest.spreadTable[si]
+        val (side, ref) = PairModel.project(spread, role, s.leaderSide)
+        val chName = manifest.chapters
+            .firstOrNull { it.folder == spread.chapterFolder }?.name
+            ?: spread.chapterFolder
+        _projection.value = PairProjection(
+            spreadIndex = si, spreadTotal = manifest.spreadTable.size,
+            side = side, ref = ref, anchor = spread.right,
+            chapterName = chName, chapterFolder = spread.chapterFolder)
+    }
+
+    /** Leader bootstrap (pairController._maybeBootstrapWork): a fresh
+     *  pair with no manifest shares the leader's current/last-read work. */
+    private fun maybeBootstrapLocked(s: PairSnapshot) {
+        if (bootstrapTried || role != PairRole.leader ||
+            s.phase != PairPhase.selecting || s.manifestVersion != 0) return
+        bootstrapTried = true
+        scope.launch {
+            val pick = bootstrapWork?.invoke() ?: return@launch
+            lock.withLock {
+                openWork(folder = pick.second, page = pick.first)
+            }
+        }
+    }
+
+    private fun onManifestLocked(f: JsonObject) {
+        val kind = (f["kind"] as? JsonPrimitive)?.content
+        val idx = (f["index"] as? JsonPrimitive)?.intOrNull
+        val count = (f["count"] as? JsonPrimitive)?.intOrNull
+        val data = (f["data"] as? JsonPrimitive)?.content
+        val digest = (f["digest"] as? JsonPrimitive)?.content
+        if (kind != "manifest-chunk" || idx == null || count == null ||
+            count < 1 || idx < 0 || idx >= count || data == null ||
+            digest == null) {
+            _errorText.value = "manifest_error"; return
+        }
+        val epoch = (f["workEpoch"] as? JsonPrimitive)?.intOrNull ?: -1
+        val mv = (f["manifestVersion"] as? JsonPrimitive)?.intOrNull ?: -1
+        // Re-delivery of the held manifest → re-READY (post-RESUME).
+        if (_manifest.value != null && manifestEpoch == epoch &&
+            manifestMV == mv) {
+            sendReady(); return
+        }
+        // Stale delivery — ignore entirely.
+        val haveE = manifestEpoch; val haveM = manifestMV
+        if (haveE != null && haveM != null &&
+            (epoch < haveE || (epoch == haveE && mv < haveM))) return
+        val key = "${(f["sessionId"] as? JsonPrimitive)?.content ?: ""}|$epoch|$mv"
+        if (chunks?.key != key) chunks = Chunks(key, digest, count, epoch, mv)
+        val b = chunks ?: return
+        if (b.digest != digest || b.count != count) {
+            chunks = null; _errorText.value = "manifest_error"; return
+        }
+        if (b.parts[idx] == null) {
+            b.parts[idx] = data; b.got += 1
+        }
+        if (b.got == b.count) finishManifestLocked(b)
+    }
+
+    private fun finishManifestLocked(b: Chunks) {
+        chunks = null
+        val text = b.parts.joinToString("") { it ?: "" }
+        if (text.toByteArray(Charsets.UTF_8).size > 32 * 1024 * 1024) {
+            _errorText.value = "manifest_error"; return
+        }
+        val obj = runCatching {
+            json.parseToJsonElement(text).jsonObject }.getOrNull()
+        if (obj == null ||
+            (obj["digest"] as? JsonPrimitive)?.content != b.digest ||
+            CanonicalJson.manifestDigest(obj) != b.digest) {
+            _errorText.value = "manifest_error"; return
+        }
+        val parsed = PairManifest.parse(obj)
+        if (parsed == null) {
+            _errorText.value = "manifest_error"; return
+        }
+        _manifest.value = parsed
+        manifestEpoch = b.epoch
+        manifestMV = b.mv
+        sendReady()
+        deferredState?.let { d ->
+            deferredState = null
+            maybeApplyLocked(d)
+        }
+    }
+
+    /** READY once per (workEpoch, manifestVersion) — rides the manifest's
+     *  own epoch (the commit STATE may lag the chunks). */
+    private fun sendReady() {
+        if (_member.value == null) return
+        val e = manifestEpoch ?: return
+        val mv = manifestMV ?: return
+        val key = "$e:$mv"
+        if (readyFor == key) return
+        readyFor = key
+        scope.launch {
+            runCatching {
+                sendDataRequest("READY", buildJsonObject {
+                    put("manifestVersion", mv) }, workEpoch = e)
+            }
+        }
+    }
+
+    // MARK: - Session control
+
+    suspend fun approve() {
+        val jr = lock.withLock {
+            val j = _joinRequest.value
+            _joinRequest.value = null
+            j
+        } ?: return
+        sendRequest("APPROVE", buildJsonObject {
+            put("memberId", jr.memberId) })
+    }
+
+    suspend fun rejectJoin() {
+        val jr = lock.withLock {
+            val j = _joinRequest.value
+            _joinRequest.value = null
+            j
+        } ?: return
+        sendRequest("REJECT", buildJsonObject {
+            put("memberId", jr.memberId) })
+    }
+
+    /**
+     * Polite leave — the server ENDs the session for both sides.
+     * Faithful port of web `_leaveBound`: detach the transport so teardown
+     * cannot close it first; wait (bounded) for a pending entry ACK — a
+     * LEAVE sent earlier is rejected NO_SESSION and the peer sits in
+     * peer-away until the resume window ends; then send LEAVE → close,
+     * chained on one task so the close can never overtake the send.
+     */
+    fun leave() {
+        creds.save(null)
+        scope.launch {
+            val t = lock.withLock {
+                val tr = transport
+                transport = null
+                tr
+            } ?: run {
+                finishEnded("left"); return@launch
+            }
+            val deadline = nowMs() + 3_000
+            while (entryAwaitingAck() && nowMs() < deadline) {
+                delay(50)
+            }
+            runCatching { t.send(envelope("LEAVE",
+                JsonObject(emptyMap())).text) }
+            t.close()
+            finishEnded("left")
+        }
+    }
+
+    /** Entry frame sent but its ACK not yet arrived — the server has not
+     *  bound member→link, so LEAVE would be rejected NO_SESSION. A
+     *  reconnect in progress (`offlineSince` set) is NOT this case. */
+    private fun entryAwaitingAck(): Boolean =
+        _status.value == UiStatus.Connecting && entryCont == null &&
+            offlineSince == null
+
+    fun setActivity(state: String) {
+        if (state !in setOf("active", "suspended", "selecting")) return
+        suspended = (state == "suspended")
+        scope.launch {
+            runCatching {
+                sendRequest("SET_ACTIVITY",
+                    buildJsonObject { put("state", state) })
+            }
+        }
+    }
+
+    /** Lifecycle wiring: suspended while backgrounded (web pagehide).
+     *  The local flag tracks even while unbound — during a reconnect
+     *  `bound` is false and skipping the update left the flag stale, so
+     *  the RESUME bind re-asserted "suspended" for an app that was already
+     *  foregrounded, wedging the session paused (#216). */
+    fun onForeground(active: Boolean) {
+        suspended = !active
+        if (!bound) return
+        setActivity(if (active) "active" else "suspended")
+    }
+
+    // MARK: - Reader intents (sendIntent port — gated on phase==reading)
+
+    private val readingGated: Boolean
+        get() = _lastState.value?.phase == PairPhase.reading
+
+    fun turn(delta: Int, crossChapter: Boolean, fromChapter: String?): Boolean {
+        if (!readingGated || (delta != 1 && delta != -1)) return false
+        send("TURN", buildJsonObject {
+            put("delta", delta); put("crossChapter", crossChapter)
+            put("fromChapter",
+                fromChapter?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("manifestVersion", seenMv) })
+        return true
+    }
+
+    fun gotoPage(page: PairPageRef): Boolean {
+        if (!readingGated) return false
+        send("GOTO", buildJsonObject {
+            put("page", buildJsonObject {
+                put("folder", page.folder); put("name", page.name) })
+            put("manifestVersion", seenMv) })
+        return true
+    }
+
+    fun setOffset(offset: Int): Boolean {
+        if (!readingGated || (offset != 0 && offset != 1)) return false
+        send("SET_OFFSET", buildJsonObject {
+            put("offset", offset); put("manifestVersion", seenMv) })
+        return true
+    }
+
+    fun swapSides(): Boolean {
+        val cur = _lastState.value?.leaderSide
+        if (!readingGated || cur == null) return false
+        send("SWAP_SIDES", buildJsonObject {
+            put("leaderSide",
+                if (cur == PairSide.right) "left" else "right")
+            put("manifestVersion", seenMv) })
+        return true
+    }
+
+    /** Leader-only work pick. `page` resolves the initial position; a
+     *  hidden-root veto mirrors the web's `_visBlocksFolder` gate. */
+    fun openWork(folder: String, page: PairPageRef?, offset: Int? = null): Boolean {
+        if (role != PairRole.leader || !paired) return false
+        if (visibilityBlocks?.invoke(folder) == true) return false
+        if (page == null) return false
+        send("OPEN_WORK", buildJsonObject {
+            put("folder", folder)
+            put("page", buildJsonObject {
+                put("folder", page.folder); put("name", page.name) })
+            put("manifestVersion", seenMv)
+            offset?.let { put("offset", it) }
+        })
+        return true
+    }
+
+    /** Leader picking a work through the shared resolver (openWork intent). */
+    suspend fun pickWork(folder: String): Boolean {
+        if (role != PairRole.leader || !paired) return false
+        if (visibilityBlocks?.invoke(folder) == true) return false
+        val page = openWorkResolver?.invoke(folder) ?: return false
+        return openWork(folder = folder, page = page)
+    }
+
+    /** Fire-and-forget data send — rides the dc when the follower holds
+     *  the webrtc-dc plane (web _dataSend), else the ws control channel. */
+    private fun send(type: String, payload: JsonObject) {
+        dataSendReq(envelope(type, payload))
+    }
+
+    /** Control send — always the ws link (web _ctlSend). SIGNAL,
+     *  TRANSPORT_STATE and UI_SYNC never ride the dc: relayed dc frames
+     *  would take a payload.origin stamp they must not carry. */
+    private fun ctlSendReq(req: OutRequest) {
+        val t = transport ?: return
+        scope.launch { runCatching { t.send(req.text) } }
+    }
+
+    private fun ctlSendRaw(frame: JsonObject) {
+        val t = transport ?: return
+        scope.launch { runCatching { t.send(frame.toString()) } }
+    }
+
+    /** Sequenced-op send (web _dataSend): the dc belongs to the follower
+     *  only — the leader is the sequencer and always writes ws. A failed
+     *  dc write marks the channel down and retries on ws so a mid-switch
+     *  frame is never lost. */
+    private fun dataSendReq(req: OutRequest) {
+        val dc = if (plane == "webrtc-dc" && role == PairRole.follower &&
+            dcUp) dcChannel else null
+        val t = transport
+        if (dc != null) {
+            scope.launch {
+                if (runCatching { dc.send(req.text); true }
+                        .getOrDefault(false)) return@launch
+                lock.withLock {
+                    if (dcChannel === dc) { dcUp = false; emitPlaneLocked() }
+                }
+                t?.let { runCatching { it.send(req.text) } }
+            }
+        } else if (t != null) {
+            scope.launch { runCatching { t.send(req.text) } }
+        }
+    }
+
+    // MARK: - Data-channel upgrade (pairClient.js §1517+)
+
+    /** Web `_paired()` — the session carries both members. */
+    private fun pairedEnoughLocked(): Boolean = _presence.value.size >= 2
+
+    private fun maybeStartDcLocked(escalated: Boolean = false) {
+        val factory = rtcFactory ?: return
+        if (_member.value == null || sig != null ||
+            !pairedEnoughLocked()) return
+        val conn = runCatching { factory() }.getOrNull() ?: return
+        pc = conn
+        val initiator = role == PairRole.leader || escalated
+        val peer = SignalingPeer(
+            pc = conn, scope = scope,
+            initiator = initiator,
+            send = { kind, data ->
+                scope.launch {
+                    lock.withLock {
+                        ctlSendReq(envelope("SIGNAL", buildJsonObject {
+                            put("kind", kind); put("data", data) }))
+                    }
+                }
+            },
+            onChannel = { ch ->
+                scope.launch {
+                    lock.withLock { attachDataChannelLocked(ch) }
+                }
+            })
+        sig = peer; dcEscalated = escalated
+        runCatching { peer.start() }.onFailure {
+            sig = null; pc = null; dcEscalated = false; return
+        }
+        // Stale-wait watchdog: the web reference never re-offers once
+        // its sig peer exists, so a follower that (re)joined after the
+        // leader's session spun up waits forever. If no offer lands in
+        // time, escalate — offer as initiator; the stale leader's
+        // existing pc answers and the channel re-forms on both ends.
+        if (!initiator) {
+            dcWatchJob = scope.launch {
+                delay(DC_OFFER_WATCH_MS)
+                lock.withLock {
+                    if (sig === peer && dcChannel == null &&
+                        _member.value != null && pairedEnoughLocked()) {
+                        sig = null; pc = null; dcEscalated = false
+                        maybeStartDcLocked(escalated = true)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Re-run signaling after a mid-session dc drop: the pair/session
+     *  state is untouched — frames keep flowing on server-ws until the
+     *  server confirms the plane flip again (web restartDataChannel). */
+    fun restartDataChannel() {
+        scope.launch {
+            lock.withLock {
+                sig?.close(); sig = null; pc = null
+                dcEscalated = false
+                dcWatchJob?.cancel(); dcWatchJob = null
+                maybeStartDcLocked()
+            }
+        }
+    }
+
+    private fun attachDataChannelLocked(ch: RtcDataChannel) {
+        dcChannel?.let { prev ->
+            if (prev !== ch) {
+                prev.onOpen = null; prev.onMessage = null
+                prev.onClose = null
+                runCatching { prev.close() }
+            }
+        }
+        dcWatchJob?.cancel(); dcWatchJob = null
+        dcChannel = ch; dcUp = false
+        ch.onOpen = {
+            scope.launch { lock.withLock { markDcUpLocked() } }
+        }
+        ch.onMessage = { text ->
+            scope.launch { lock.withLock { onDcFrameLocked(text) } }
+        }
+        ch.onClose = {
+            scope.launch { lock.withLock { onDcDownLocked() } }
+        }
+        if (ch.open) markDcUpLocked()
+    }
+
+    private fun markDcUpLocked() {
+        if (dcChannel == null || dcUp) return
+        dcUp = true; dcEscalated = false
+        ctlSendReq(envelope("TRANSPORT_STATE",
+            buildJsonObject { put("state", "up") }))
+        emitPlaneLocked()
+    }
+
+    private fun onDcFrameLocked(text: String) {
+        val f = runCatching {
+            json.parseToJsonElement(text) as? JsonObject
+        }.getOrNull() ?: return
+        // leader-sequenced plane (§3.4): follower-ordered requests
+        // arriving on the dc are relayed verbatim + payload.origin
+        // through the leader's control channel.
+        if (role == PairRole.leader && plane == "webrtc-dc" &&
+            f["requestId"] is JsonPrimitive && f["type"] is JsonPrimitive &&
+            f["payload"] is JsonObject) {
+            val p = (f["payload"] as JsonObject).toMutableMap()
+            p["origin"] = JsonPrimitive("follower")
+            val fwd = f.toMutableMap(); fwd["payload"] = JsonObject(p)
+            ctlSendRaw(JsonObject(fwd))
+            return
+        }
+        dispatchLocked(f)
+    }
+
+    private fun onDcDownLocked() {
+        val had = dcChannel != null || dcUp
+        dcChannel = null; dcUp = false
+        if (!had) return
+        emitPlaneLocked()
+        if (_member.value != null && transport != null) {
+            ctlSendReq(envelope("TRANSPORT_STATE",
+                buildJsonObject { put("state", "down") }))
+        }
+        // Mid-session drop → re-negotiate while the pair lives on ws:
+        // the leader re-offers; a follower waits briefly, then escalates
+        // to an offer itself to kick a stale leader (web exposes this
+        // only as the manual restartDataChannel API).
+        sig?.close(); sig = null; pc = null; dcEscalated = false
+        maybeStartDcLocked()
+    }
+
+    private fun setPlaneLocked(p: String?, rev: Int?) {
+        plane = if (p == "webrtc-dc") "webrtc-dc" else "server-ws"
+        emitPlaneLocked(rev)
+    }
+
+    private fun emitPlaneLocked(rev: Int? = null) {
+        val e = if (plane == "webrtc-dc" && dcUp) "webrtc-dc"
+            else "server-ws"
+        if (e != _effPlane.value) _effPlane.value = e
+    }
+
+    /** Ephemeral mirrored-UI relay — fire-and-forget on the control
+     *  channel (web sendUiSync): never tracked, never sequenced, and a
+     *  dropped frame just converges on the next send. */
+    fun sendUiSync(
+        path: String?, top: Double, viewH: Double,
+        scrollH: Double?, mode: String?,
+    ): Boolean {
+        if (_member.value == null || _presence.value.size < 2) return false
+        val p = UiSync.payload(path, top, viewH, scrollH, mode)
+            ?: return false
+        scope.launch {
+            lock.withLock {
+                if (_member.value != null) {
+                    ctlSendReq(envelope("UI_SYNC", p))
+                }
+            }
+        }
+        return true
+    }
+
+    // MARK: - Teardown
+
+    /** Synchronous teardown for callers already inside `lock`. */
+    private fun finishEndedLocked(reason: String) {
+        val wasBound = bound || _member.value != null
+        teardownLocked()
+        _status.value = UiStatus.Ended(reason)
+        _endReason.value = reason
+        if (wasBound) creds.save(null)
+    }
+
+    /** Outside-lock entry: schedule the end sequence on the store scope. */
+    private fun finishEnded(reason: String) {
+        scope.launch { lock.withLock { finishEndedLocked(reason) } }
+    }
+
+    /** Stop the session locally without sending LEAVE (connection gone). */
+    fun disconnect() {
+        creds.save(null)
+        scope.launch {
+            lock.withLock {
+                teardownLocked()
+                _status.value = UiStatus.Idle
+            }
+        }
+    }
+
+    private companion object {
+        /* How long a non-initiator sig waits for an offer before the
+         * follower escalates to initiating — the web leader never
+         * re-offers while its (possibly stale) sig peer exists, so
+         * without this a rejoining follower could wait forever. */
+        const val DC_OFFER_WATCH_MS = 4_000L
+    }
+}

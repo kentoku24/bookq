@@ -11,8 +11,12 @@
 # down は通常ボリュームを保持、--full のみで state をリセットする。
 #
 #   ./dev.sh up [name] [--ref REF]   起動（初回は空きスロット 01..10 を割当、既存なら同じスロットを再利用）
-#   ./dev.sh up [name] [--ref REF] [--fixture]   起動（--fixture: 実データの代わりに合成テストツリーをマウント）
-#   ./dev.sh up [name] [--local [--port N] [--lan-allow]] [--fixture]   起動（--local: tailscale 無しで http://127.0.0.1:<port> に公開。2つ目の同時環境には --port が必要）
+#   ./dev.sh up [name] [--ref REF] [--fixture]   起動（--fixture: 実データの代わりに合成テストツリーをマウント、常に rw）
+#   ./dev.sh up [name] [--writable-library]     実ライブラリを read-write でマウント（既定は ro — TEST_MODE で認証が無いため）
+
+#   （#532: --rs は撤去済み。viewer サービス自体が viewer-rs を実行する
+#    rs-only 構成のため、指定があっても無視される）
+#   ./dev.sh up [name] [--local [--port N] [--lan-allow]] [--fixture] [--writable-library]   起動（--local: tailscale 無しで http://127.0.0.1:<port> に公開。2つ目の同時環境には --port が必要）
 #   ./dev.sh down [name] [--full]    停止・削除（--full 無しはボリューム保持でスロット再利用 / --full は state ボリュームまで削除してスロット解放）
 #   ./dev.sh down --all [--full] [--yes] [--no-prune-volumes]   全環境を削除（--all --full は --yes 必須）
 #                                    --full: ボリューム・イメージ・ノード登録まで完全撤去
@@ -169,16 +173,19 @@ pool_hostname_of() {
     printf 'dev-%s' "$slot"
 }
 
+# 環境→プロジェクト/スロットの引きは com.bookq.name（viewer + viewer-rs 両方に
+# 付く）で行う。role=dev だけだと、down 途中で viewer だけ消えた残骸環境の
+# viewer-rs を見失う（down で overlay 未読込 → orphan 残りの経験あり）。
 find_project_for_env() {
     local want="$1"
-    docker ps -a --filter "label=$DEV_LABEL" \
+    docker ps -a --filter "label=com.bookq.name" \
         --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.bookq.name"}}|{{.Label "com.bookq.pool_slot"}}' 2>/dev/null \
         | awk -F'|' -v want="$want" '$2 == want {print $1; exit}'
 }
 
 find_slot_for_env() {
     local want="$1"
-    docker ps -a --filter "label=$DEV_LABEL" \
+    docker ps -a --filter "label=com.bookq.name" \
         --format '{{.Label "com.bookq.name"}}|{{.Label "com.bookq.pool_slot"}}' 2>/dev/null \
         | awk -F'|' -v want="$want" '$1 == want {print $2; exit}'
 }
@@ -188,7 +195,7 @@ find_free_slot() {
     for i in $(seq 1 "$POOL_SIZE"); do
         slot="$(pool_slot_padded "$i")"
         # スロットが空かはラベル pool_slot で判定（プロジェクト名は dev-01-main のようにブランチを含むため、プロジェクト名では判定できない）
-        ids="$(docker ps -a --filter "label=$DEV_LABEL" --filter "label=com.bookq.pool_slot=$slot" --format '{{.ID}}' 2>/dev/null || true)"
+        ids="$(docker ps -a --filter "label=com.bookq.pool_slot=$slot" --format '{{.ID}}' 2>/dev/null || true)"
         if [ -z "$ids" ]; then
             printf '%s' "$slot"
             return 0
@@ -232,14 +239,15 @@ actual_dev_fqdn() {
 }
 
 # ローカル検出はラベル com.bookq.local=true のみ（shell export は
-# 後続プロセスに見えないため labels が唯一の受渡し手段 — Todo 2 契約）。
+# 後続プロセスに見えないため labels が唯一の受渡し手段）。
 # 成功時は http://<bind>:<port> を出力して 0、非ローカル/不在は 1。
 # port/bind 空ラベルは防御既定 8080 / 127.0.0.1。
 local_url_for() {
     local want="$1" row local port bind
-    row="$(docker ps -a --filter "label=$DEV_LABEL" \
+    # name ラベルで拾い、local=true の行を採る。
+    row="$(docker ps -a --filter "label=com.bookq.name" \
         --format '{{.Label "com.bookq.name"}}|{{.Label "com.bookq.local"}}|{{.Label "com.bookq.local_port"}}|{{.Label "com.bookq.local_bind"}}' \
-        2>/dev/null | awk -F'|' -v want="$want" '$1 == want {print; exit}' || true)"
+        2>/dev/null | awk -F'|' -v want="$want" '$1 == want && $2 == "true" {print; exit}' || true)"
     [ -n "$row" ] || return 1
     local="${row#*|}"; local="${local%%|*}"
     [ "$local" = "true" ] || return 1
@@ -265,17 +273,22 @@ compose_env_defaults() {
             || die "不正な DEV_POOL_SLOT: ${DEV_POOL_SLOT}（./dev.sh down $DEV_NAME --full で作り直してください）" ;;
     esac
     DEV_HOSTNAME="${DEV_HOSTNAME:-dev-$DEV_POOL_SLOT}"
-    export DEV_IMAGE DEV_NAME DEV_ENV_NAME DEV_POOL_SLOT DEV_HOSTNAME
+    # ro が既定 — TEST_MODE で認証を抜く dev が本番ライブラリを rw で
+    # マウントする組み合わせを暗黙に許さない (up --fixture / --writable-library
+    # で rw になる)。
+    DEV_LIBRARY_MODE="${DEV_LIBRARY_MODE:-ro}"
+    export DEV_IMAGE DEV_NAME DEV_ENV_NAME DEV_POOL_SLOT DEV_HOSTNAME DEV_LIBRARY_MODE
     # compose の補間はカレントの .env しか見ないため、worktree から実行すると
-    # DOWNLOADS_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
+    # LIBRARY_HOST_DIR が既定値に落ちてしまう。TS_AUTHKEY と同様に
     # メインのチェックアウトの .env からも解決して渡す。
-    if [ -z "${DOWNLOADS_HOST_DIR:-}" ]; then
-        DOWNLOADS_HOST_DIR="$(dotenv_value DOWNLOADS_HOST_DIR || true)"
+    if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
+        # rename 前の変数名にもフォールバック（旧 .env のまま動く）。
+        LIBRARY_HOST_DIR="$(dotenv_value LIBRARY_HOST_DIR || dotenv_value DOWNLOADS_HOST_DIR || true)"
     fi
-    if [ -z "${DOWNLOADS_HOST_DIR:-}" ]; then
-        DOWNLOADS_HOST_DIR="$SCRIPT_DIR/downloads"
+    if [ -z "${LIBRARY_HOST_DIR:-}" ]; then
+        LIBRARY_HOST_DIR="$SCRIPT_DIR/library"
     fi
-    [ -z "${DOWNLOADS_HOST_DIR:-}" ] || export DOWNLOADS_HOST_DIR
+    [ -z "${LIBRARY_HOST_DIR:-}" ] || export LIBRARY_HOST_DIR
     if [ -z "${TS_AUTHKEY:-}" ]; then
         TS_AUTHKEY="$(find_authkey || true)"
     fi
@@ -289,7 +302,7 @@ compose() {
 }
 
 # ローカル専用: viewer だけを起動する追加フラグメント付き。tailscale サービスは
-# 決して作らない（up -d viewer で明示）。labels のみが Todo 3 への受渡し手段。
+# 決して作らない（up -d viewer で明示）。labels のみが後続処理への受渡し手段。
 compose_local() {
     local project="$1"; shift
     compose_env_defaults
@@ -402,12 +415,14 @@ prune_volumes_from_list() {
 cmd_up() {
     require_repo_root
 
-    local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow=""
+    local name="" ref="" fixture="" local_mode="" local_port="8080" local_port_set="" lan_allow="" writable=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --ref)  [ $# -ge 2 ] || die "--ref には値が必要です";  ref="$2";  shift 2 ;;
             --ref=*)  ref="${1#--ref=}";  shift ;;
             --fixture) fixture=1; shift ;;
+            --writable-library) writable=1; shift ;;
+            --rs) warn "--rs は #532 で撤去済み（rs-only のため無視）"; shift ;;
             --local) local_mode=1; shift ;;
             --lan-allow) lan_allow=1; shift ;;
             --port) [ $# -ge 2 ] || die "--port には値が必要です"; local_port="$2"; local_port_set=1; shift 2 ;;
@@ -444,16 +459,23 @@ cmd_up() {
     fi
 
     # --fixture: 実データの代わりに合成テストツリー（tests/fixtures/uiux_tree.py）を
-    # マウントする。DOWNLOADS_HOST_DIR に export するので compose のマウントが
-    # そのまま /tmp/bookq-fixture-<name>/downloads を指す（.env の値より優先）。
+    # マウントする。LIBRARY_HOST_DIR に export するので compose のマウントが
+    # そのまま /tmp/bookq-fixture-<name>/library を指す（.env の値より優先）。
+    # 使い捨ての生成物なので書き込み検証の正規経路として常に rw にする —
+    # 実ライブラリへの rw は --writable-library のみが開ける。
     if [ -n "$fixture" ]; then
         local fixture_dir="/tmp/bookq-fixture-$name"
-        printf '🧪 テストフィクスチャツリーを生成します: %s/downloads\n' "$fixture_dir"
+        printf '🧪 テストフィクスチャツリーを生成します: %s/library\n' "$fixture_dir"
         mkdir -p "$fixture_dir"
-        uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/tests/fixtures/uiux_tree.py" "$fixture_dir/downloads" >/dev/null \
+        uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/tests/fixtures/uiux_tree.py" "$fixture_dir/library" >/dev/null \
             || die "フィクスチャツリーの生成に失敗しました (tests/fixtures/uiux_tree.py)"
-        DOWNLOADS_HOST_DIR="$fixture_dir/downloads"
-        export DOWNLOADS_HOST_DIR
+        LIBRARY_HOST_DIR="$fixture_dir/library"
+        export LIBRARY_HOST_DIR
+        writable=1
+    fi
+    if [ -n "$writable" ]; then
+        DEV_LIBRARY_MODE="rw"
+        export DEV_LIBRARY_MODE
     fi
 
     # プール割当: 既存なら再利用（冪等）、無ければ空きスロットを取得
@@ -533,9 +555,9 @@ cmd_up() {
     fi
 
     # ビルド（時間がかかるが、他の環境と競合しない）。
-    local built tag sha
+    local built tag sha _rs_tag=""
     built="$("$SCRIPT_DIR/rebuild.sh" dev build "$name" "$ref")"
-    tag="${built%% *}"; sha="${built##* }"
+    read -r tag sha _rs_tag <<< "$built"
 
     printf '🔧 開発環境 "%s" を起動します (project=%s, slot=%s, hostname=%s, ref=%s)\n\n' \
         "$name" "$project" "$slot" "$hostname" "${ref:-作業ツリー}"
@@ -560,7 +582,7 @@ cmd_up() {
         export LOCAL_BIND="$local_bind"
     fi
 
-    # DOWNLOADS_HOST_DIR / TS_AUTHKEY をメインの .env から解決して export する
+    # LIBRARY_HOST_DIR / TS_AUTHKEY をメインの .env から解決して export する
     # （rebuild.sh は compose を直接叩くので、ここでの解決が必須）。
     compose_env_defaults
 
@@ -596,7 +618,11 @@ cmd_up() {
     cmd_gc || warn "gc の自動実行に失敗しました（up 自体には影響ありません）。"
 
     printf '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'
-    printf '✅ 開発環境 "%s" が起動しました（認証なし / データは読み取り専用）\n' "$name"
+    if [ -n "$writable" ]; then
+        printf '✅ 開発環境 "%s" が起動しました（認証なし / ライブラリ書き込み可 — upload/delete 有効）\n' "$name"
+    else
+        printf '✅ 開発環境 "%s" が起動しました（認証なし / ライブラリ read-only — 書き込み検証は --fixture か --writable-library）\n' "$name"
+    fi
     printf '   %s @ %s\n\n' "${ref:-作業ツリー}" "$sha"
     if [ -n "$local_mode" ]; then
         printf '   http://127.0.0.1:%s\n' "$local_port"
@@ -1111,12 +1137,13 @@ cmd_gc() {
     # 全 dev コンテナ（稼働・停止両方）が参照するイメージ ID の集合 R。
     # コンテナ側 {{.Image}} は sha256:<64hex>、docker images の {{.ID}} は 12 桁の
     # 短縮 ID — 前方一致で照合する。
+    # com.bookq.name で拾う（停止環境のイメージ誤回収防止）。
     ref_ids=" "
     while IFS= read -r cid; do
         [ -n "$cid" ] || continue
         img="$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null || true)"
         [ -n "$img" ] && ref_ids="$ref_ids${img#sha256:} "
-    done < <(docker ps -aq --filter "label=$DEV_LABEL")
+    done < <(docker ps -aq --filter "label=com.bookq.name")
 
     # 候補は bookq-dev リポジトリのタグ付きイメージのみ（dangling は手順 1/2）。
     # 削除は ID ではなく「その ID の持つ bookq-dev タグ」に対して行う:

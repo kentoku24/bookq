@@ -1,6 +1,6 @@
-"""Task 1+3 (offline-ux-refinements) — single-tap start/stop + anchored popover E2E.
+"""Single-tap start/stop + anchored popover E2E (offline UX).
 
-Spec (plan Todo 1):
+Spec — tap/abort:
   ① IDLE single tap -> downloadWork starts immediately (no intermediate confirm)
   ② delayed image stub, first image recorded, single tap -> immediate abort -> final .state-partial
   ③ listing loop (0 records, /api/images delayed), single tap -> immediate abort -> final .state-idle
@@ -8,7 +8,7 @@ Spec (plan Todo 1):
   ④ STOPPING transient asserted via window._stoppingSet (DOM class window can be <100ms)
   ⑤ title attribute == aria-label on every .offline-btn
   regression: COMPLETE -> CONFIRM_DELETE (red trash, 2 taps) -> DELETING lock intact
-Spec (plan Todo 3, T3):
+Spec — partial popover:
   ⑦ PARTIAL tap -> anchored labeled popover .ux-pop below the button
      (「続きをダウンロード」+残りNページ / 「削除」+保存済みMページ),
      single-open invariant, toggle, Esc/outside-tap close (sidebar stays open),
@@ -45,6 +45,9 @@ def goto_offline(page, server):
     page.wait_for_selector(".tile", timeout=10000)
 
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
+
 def wait_for_sw(page, timeout=15000):
     for _ in range(2):
         try:
@@ -53,6 +56,7 @@ def wait_for_sw(page, timeout=15000):
                     "() => navigator.serviceWorker && navigator.serviceWorker.controller !== null",
                     timeout=4000,
                 )
+                _ensure_sw_interception(page)
                 return True
             except Exception:
                 pass
@@ -65,6 +69,7 @@ def wait_for_sw(page, timeout=15000):
                 "async () => { try { const r = await navigator.serviceWorker.ready; return !!r; } catch { return !!navigator.serviceWorker.controller; } }"
             )
             if ok:
+                _ensure_sw_interception(page)
                 return True
         except Exception as e:
             if "Execution context was destroyed" in str(e):
@@ -104,9 +109,15 @@ def test_01_offline_btn_visible_6_modes(page, server):
         expect(btn).to_be_visible(timeout=5000)
         cls = btn.get_attribute("class") or ""
         assert "offline-btn" in cls, f"{msg} class missing offline-btn: {cls}"
-        # check right-top via computed style (position absolute, top ~4px right ~4px)
-        pos = btn.evaluate("el => getComputedStyle(el).position")
-        assert pos == "absolute", f"{msg} position should be absolute got {pos}"
+        # check right-top via computed style (position absolute, top ~4px
+        # right ~4px) — poll it: an async re-render can detach the resolved
+        # node between to_be_visible and the style read (detached nodes
+        # compute to ''), so a one-shot evaluate races under load.
+        page.wait_for_function(
+            "() => { const b = document.querySelector('.offline-btn');"
+            " return !!b && getComputedStyle(b).position === 'absolute'; }",
+            timeout=5000,
+        )
         # check via evaluate getOfflineBtnState
         state = page.evaluate("() => typeof getOfflineBtnState==='function' ? getOfflineBtnState('simple_manga') : 'unknown'")
         assert state in ("idle", "downloading", "stopping", "complete", "deleting", "partial"), f"{msg} state {state}"
@@ -143,7 +154,7 @@ def test_01_offline_btn_visible_6_modes(page, server):
             window._origFetchSearch = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/search')) {
+                if (u.includes('/api/v1/search')) {
                     const payload = {query:'simple', total:2, results:[{folder_path:'simple_manga', folder_name:'simple_manga', has_metadata:false, artist:[], tags:[]},{folder_path:'group/episodes/ch-1', folder_name:'ch-1', has_metadata:false, artist:[], tags:[]}]};
                     return new Response(JSON.stringify(payload), {status:200, headers:{'Content-Type':'application/json'}});
                 }
@@ -187,7 +198,7 @@ def test_01_offline_btn_visible_6_modes(page, server):
     finally:
         page.evaluate("() => { try { if(window._origFetchSearch) window.fetch = window._origFetchSearch; } catch {} }")
         try:
-            page.unroute("**/api/search**")
+            page.unroute("**/api/v1/search**")
         except Exception:
             pass
         # clear search
@@ -299,7 +310,7 @@ def test_03_single_tap_stop_leaves_partial(page, server):
     # stopping after the second page lands always leaves 2 < total cached.
     # (The first page URL doubles as the folder thumb and may already be
     # cached from grid render, so the stop precondition keys on the second.)
-    files_dl3 = page.evaluate("async () => { const r = await fetch('/api/images?folder=' + encodeURIComponent('simple_manga')); return await r.json(); }")
+    files_dl3 = page.evaluate("async () => { const r = await fetch('/api/v1/images?folder=' + encodeURIComponent('simple_manga')); return (await r.json()).images; }")
     first_file, second_file = files_dl3[0], files_dl3[1]
     page.evaluate(
         """(first) => {
@@ -406,7 +417,7 @@ def test_03_single_tap_stop_leaves_partial(page, server):
         # proven put-ok entries can later read absent there (no delete runs),
         # so the record (IDB, authoritative) plus a non-empty coherent cache
         # carry the contract instead of exact key equality.
-        files = page.evaluate("async () => { const r=await fetch('/api/images?folder='+encodeURIComponent('simple_manga')); return await r.json(); }")
+        files = page.evaluate("async () => { const r=await fetch('/api/v1/images?folder='+encodeURIComponent('simple_manga')); return (await r.json()).images; }")
         assert isinstance(files, list) and len(files) == 5, f"files {files}"
         first_url = page.evaluate("(f) => window.OfflineCore.imageUrl('simple_manga', f)", files[0])
         second_url = page.evaluate("(f) => window.OfflineCore.imageUrl('simple_manga', f)", files[1])
@@ -471,7 +482,7 @@ def test_04_listing_abort_returns_idle_and_is_listing(page, server):
             window._origFetchDL4 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 800)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 800)); }
                 return window._origFetchDL4(input, init);
             };
         }"""
@@ -507,7 +518,7 @@ def test_04_listing_abort_returns_idle_and_is_listing(page, server):
     finally:
         page.evaluate("() => { try { if(window._origFetchDL4) window.fetch = window._origFetchDL4; } catch {} }")
         try:
-            page.unroute("**/api/images**")
+            page.unroute("**/api/v1/images**")
         except Exception:
             pass
         try:
@@ -620,7 +631,7 @@ def test_06_complete_delete_confirm_regression(page, server):
             pass
 
 
-# ── T3: anchored labeled popover (.ux-pop) replaces the full-screen overlay ──
+# ── Anchored labeled popover (.ux-pop) replaces the full-screen overlay ──
 
 TASK3_EVIDENCE = REPO_ROOT / ".omo" / "evidence"
 
@@ -911,10 +922,10 @@ def test_09_popover_esc_sidebar_single_open_toggle_flip(page, server):
         pass
 
 
-# ── T2: visual feedback layer (donut ring / listing spinner / transitions) ──
+# ── Visual feedback layer (donut ring / listing spinner / transitions) ──
 
 
-STYLE_CSS = REPO_ROOT / "app" / "static" / "style.css"
+STYLE_CSS = REPO_ROOT / "web" / "static" / "style.css"
 
 
 def test_08_visual_layer_computed_styles(page, server):
@@ -931,7 +942,7 @@ def test_08_visual_layer_computed_styles(page, server):
             window._origFetchDL8 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 3000)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 3000)); }
                 return window._origFetchDL8(input, init);
             };
         }"""
@@ -955,7 +966,8 @@ def test_08_visual_layer_computed_styles(page, server):
                     iconContent: getComputedStyle(icon, '::before').content,
                     transitionProperty: getComputedStyle(btnEl).transitionProperty,
                     animationName: rs.animationName,
-                    backgroundImage: rs.backgroundImage
+                    backgroundImage: rs.backgroundImage,
+                    reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches
                 };
             }"""
         )
@@ -965,8 +977,15 @@ def test_08_visual_layer_computed_styles(page, server):
         # DOWNLOADING (the old opaque ring hid its absence; the donut exposes it)
         assert styles["iconContent"] == '"↓"', \
             f"downloading icon ::before content must be the ↓ glyph got {styles['iconContent']!r}"
-        assert "background-color" in styles["transitionProperty"], f"btn transition-property {styles['transitionProperty']!r}"
-        assert styles["animationName"] == "spinArc", f"listing spinner animationName {styles['animationName']!r}"
+        if styles["reducedMotion"]:
+            # CI Safari reports prefers-reduced-motion — style.css then
+            # intentionally kills the button transition and the listing
+            # spinner animation; assert the reduced-motion contract instead.
+            assert styles["transitionProperty"] == "none", f"reduced-motion btn transition {styles['transitionProperty']!r}"
+            assert styles["animationName"] == "none", f"reduced-motion spinner animation {styles['animationName']!r}"
+        else:
+            assert "background-color" in styles["transitionProperty"], f"btn transition-property {styles['transitionProperty']!r}"
+            assert styles["animationName"] == "spinArc", f"listing spinner animationName {styles['animationName']!r}"
         assert "conic-gradient" in styles["backgroundImage"], f"spinner arc bg {styles['backgroundImage']!r}"
 
         try:
@@ -1000,7 +1019,7 @@ def test_09_reduced_motion_stops_spinner_keeps_arc(page, server):
             window._origFetchDL9 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 3000)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 3000)); }
                 return window._origFetchDL9(input, init);
             };
         }"""
@@ -1063,7 +1082,7 @@ def test_10_style_css_static_gates():
         "confirm-delete 🗑 needs the whitening filter for contrast on red"
 
 
-# ── T4: keyboard activation of .offline-btn / .ux-pop buttons ────────────────
+# ── Keyboard activation of .offline-btn / .ux-pop buttons ────────────────
 # Regression: both live inside the tile, so the grid keydown handler's
 # closest(".tile,.card,.item") used to match and Enter navigated to the viewer
 # instead of natively activating the focused button. Tile-name Enter navigation
@@ -1174,7 +1193,7 @@ def test_keyboard_activation_of_offline_button(page, server):
             pass
 
 
-# ── T5: toast variants — success neutral (.ok), error red (.err) ────────────
+# ── Toast variants — success neutral (.ok), error red (.err) ────────────
 
 
 def _toast_state(page):
@@ -1272,7 +1291,7 @@ def test_toast_error_red_on_dl_failure(page, server):
             pass
 
 
-# ── T6: quota-exceeded in-app modal (showQuotaConfirm) ──────────────────────
+# ── Quota-exceeded in-app modal (showQuotaConfirm) ──────────────────────
 
 
 TASK6_EVIDENCE = REPO_ROOT / ".omo" / "evidence"
@@ -1423,7 +1442,7 @@ def test_11_progress_ring_advances_in_file_phase(page, server):
             window._origFetchDL11 = window.fetch;
             window.fetch = async (input, init) => {
                 const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/images')) { await new Promise(r=>setTimeout(r, 800)); }
+                if (u.includes('/api/v1/images')) { await new Promise(r=>setTimeout(r, 800)); }
                 if (u.includes('/image/simple_manga/')) { await new Promise(r=>setTimeout(r, 600)); }
                 return window._origFetchDL11(input, init);
             };

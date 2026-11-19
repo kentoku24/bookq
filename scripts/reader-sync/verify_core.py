@@ -9,7 +9,7 @@ exercise every code path here without a browser or a device. The pieces:
 - result-JSON builder with the spec-mandated required keys
 - evidence writer + self-check (verify.py inspects its own required files)
 - URL classification, secret redaction for traces/evidence
-- synthetic-work spread-table builder (delegates to app.reader_sync.model)
+- synthetic-work spread-table builder (pure-Python S01 pairing, ex-app.reader_sync.model)
 - deterministic marker palette + PNG region check (PIL imported lazily)
 """
 from __future__ import annotations
@@ -363,9 +363,13 @@ def _validate_op(name: str, j: int, op: dict) -> None:
             raise ScenarioError(
                 f"scenario {name} op[{j}]: burst needs int count >= 1")
     elif t == "pair":
-        if op.get("via") not in (None, "taps"):
+        # 'taps' = fixture DOM taps (simulator); 'match'/'code' select the
+        # production-UI gesture on the ui surface (one-tap connect vs the
+        # code-entry view) — 'match' is also the ui default when absent.
+        if op.get("via") not in (None, "taps", "match", "code"):
             raise ScenarioError(
-                f"scenario {name} op[{j}]: pair via must be 'taps' or absent")
+                f"scenario {name} op[{j}]: pair via must be 'taps', "
+                "'match', 'code', or absent")
     elif t == "latency":
         if op.get("samples", 8) < 1:
             raise ScenarioError(
@@ -676,22 +680,47 @@ def self_check(evidence: EvidenceWriter, result: dict,
 # ── synthetic work -> shared spread table ───────────────────────────
 
 
-def _model():
-    sys.path.insert(0, str(REPO_ROOT))
-    from app.reader_sync import model  # noqa: PLC0415
-    return model
-
-
 def build_spread_table(work: dict) -> list[dict]:
-    """The real S01 table builder applied to a synthetic declaration —
-    the same pairing logic the production server will use."""
-    model = _model()
-    chapters = []
-    for ch in work["chapters"]:
-        pages = [{"folder": ch["folder"], "name": n} for n in ch["pages"]]
-        chapters.append({"folder": ch["folder"], "pages": pages})
-    plan = model.build_spread_plan(chapters, int(work.get("offset", 0)))
-    return [model.serialize_spread(s) for s in plan]
+    """The S01 table builder applied to a synthetic declaration —
+    the same pairing logic the production server uses.
+
+    Pure-Python port of the retired app/reader_sync/model.py
+    (build_spread_plan + serialize_spread, #503): offset=0 pairs
+    (p1 R, p2 L)…, offset=1 leads with (p1 R, blank). Chapters never
+    share a spread.
+    """
+    offset = int(work.get("offset", 0))
+    if offset not in (0, 1):
+        raise ValueError(f"offset must be 0 or 1, got {offset!r}")
+    table: list[dict] = []
+    for ci, ch in enumerate(work["chapters"]):
+        folder = ch["folder"]
+        pages = ch["pages"]
+        n = len(pages)
+        si = 0
+        i = 0
+        if offset == 1:
+            if n >= 1:
+                table.append({
+                    "id": f"c{ci}:s0",
+                    "chapterFolder": folder,
+                    "right": {"folder": folder, "name": pages[0]},
+                    "left": None,
+                })
+                si = 1
+            i = 1
+        while i < n:
+            right = {"folder": folder, "name": pages[i]}
+            left = {"folder": folder, "name": pages[i + 1]} if i + 1 < n else None
+            table.append({
+                "id": f"c{ci}:s{si}",
+                "chapterFolder": folder,
+                "right": right,
+                "left": left,
+            })
+            si += 1
+            i += 2
+    return table
 
 
 def expected_marker(table: list[dict], index: int, role: str,

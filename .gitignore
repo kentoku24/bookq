@@ -1,4 +1,5 @@
 downloads/
+library/
 .DS_Store
 .omo/
 .omc/
@@ -20,3 +21,19 @@ dev_fixture/
 .env.backup
 *.pem
 .claude/settings.local.json
+.schemathesis/
+
+# Rust build artifacts (docker -v mounts can create this locally)
+rust/target/
+
+# Android ネイティブクライアント (`android/`)
+android/**/build/
+android/.gradle/
+android/.kotlin/
+android/local.properties
+*.jks
+*.keystore
+
+# SwiftPM (BookqCore ローカルパッケージ + Xcode DerivedData)
+.build/
+ios/build/

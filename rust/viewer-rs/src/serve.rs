@@ -1,0 +1,1321 @@
+//! Native read-path endpoints for viewer-rs — issue #163, parallel-backend R1.
+//!
+//! Ports of `app/routes.py`'s `/api/images` and `/image/{path}` with
+//! byte-level response parity against the Python backend. Anything this
+//! module cannot serve with *proven* identical semantics is answered
+//! locally (#532: the strangler proxy is retired, so there is no upstream
+//! fall-through anymore):
+//!
+//!   - PDF pages whose render needs a missing `libpdfium` answer 501;
+//!     with the library present they render in-process via `pdfium-render`,
+//!     the same PDFium engine as pypdfium2 — issue #402)
+//!   - RAR/CBR multipart sets beyond store-concat answer 501 (compressed
+//!     members, missing volumes — the bundled unrar aborts on some
+//!     compressed multipart, never chained there, #403)
+//!   - multi-range requests are served as 200 full (contract shrink —
+//!     OpenAPI documents single `Range: bytes=` only; archive entries
+//!     already ignore multi-range → 200, so plain files match, #403)
+//!
+//! Auth: every route is served natively; callers are resolved in main.rs
+//! (`BOOKQ_TEST_MODE=true` mock user or Bearer/session).
+
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    ffi::OsString,
+    io,
+    io::Write,
+    path::{Component, Path, PathBuf},
+    sync::{LazyLock, Mutex},
+};
+
+use axum::{
+    body::{Body, HttpBody},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::Response,
+};
+use sha1::{Digest, Sha1};
+
+/// Contract-invalid inputs (bad param types, missing required params) are
+/// answered locally with FastAPI's exact 422 (#465). The body keeps
+/// FastAPI's issue-array `detail` shape that the spec's `ValidationError`
+/// declares.
+pub fn unprocessable(param: &str, ty: &str, msg: &str) -> Response {
+    let body = serde_json::json!({
+        "detail": [{"loc": ["query", param], "msg": msg, "type": ty}]
+    })
+    .to_string();
+    let mut r = response(StatusCode::UNPROCESSABLE_ENTITY, Body::from(body));
+    set_header(&mut r, header::CONTENT_TYPE, "application/json");
+    r
+}
+
+// ── Suffix/extension tables (mirror app/scanner.py + app/archive.py) ──────────
+
+pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
+    ".avif", ".webp", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg",
+];
+pub(crate) const ARCHIVE_EXTENSIONS: &[&str] = &[".zip", ".cbz", ".rar", ".cbr", ".epub"];
+pub(crate) const PDF_EXTENSIONS: &[&str] = &[".pdf"];
+const MAX_ARCHIVE_ENTRIES: usize = 2000;
+
+pub(crate) fn suffix_lower(p: &Path) -> String {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_lowercase()))
+        .unwrap_or_default()
+}
+
+pub(crate) fn is_archive_file(p: &Path) -> bool {
+    p.is_file() && ARCHIVE_EXTENSIONS.contains(&suffix_lower(p).as_str())
+}
+
+pub(crate) fn is_pdf_file(p: &Path) -> bool {
+    p.is_file() && PDF_EXTENSIONS.contains(&suffix_lower(p).as_str())
+}
+
+pub(crate) fn is_rar_path(p: &Path) -> bool {
+    matches!(suffix_lower(p).as_str(), ".rar" | ".cbr")
+}
+
+// ── Path resolution (port of pathlib resolve/realpath, non-strict) ────────────
+
+/// Lexical + symlink resolution matching Python's `Path.resolve(strict=False)`:
+/// symlinks are followed (including dangling targets, lexically), `..` pops the
+/// resolved prefix, missing components pass through. Errors only on symlink
+/// loops / cwd failure — which `_is_within` maps to "outside" like Python's
+/// OSError/RuntimeError catch.
+pub(crate) fn realpath(path: &Path) -> io::Result<PathBuf> {
+    let mut out = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        std::env::current_dir()?
+    };
+    let mut pending: Vec<OsString> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_os_string()),
+            Component::ParentDir => Some(OsString::from("..")),
+            _ => None,
+        })
+        .collect();
+    pending.reverse(); // pop() pulls from the front logically
+    let mut depth = 0;
+    while let Some(comp) = pending.pop() {
+        if comp == ".." {
+            out.pop();
+            continue;
+        }
+        out.push(&comp);
+        if let Ok(target) = std::fs::read_link(&out) {
+            out.pop();
+            let mut splice: Vec<OsString> = target
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(s) => Some(s.to_os_string()),
+                    Component::ParentDir => Some(OsString::from("..")),
+                    _ => None,
+                })
+                .collect();
+            if target.is_absolute() {
+                out = PathBuf::from("/");
+            }
+            splice.extend(pending.iter().rev().cloned());
+            splice.reverse();
+            pending = splice;
+            depth += 1;
+            if depth > 40 {
+                return Err(io::Error::from_raw_os_error(40));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `_is_within`: target inside base after resolving both.
+/// `base` must already be canonical — `AppState` canonicalizes `library`
+/// once at startup. Only `target` pays a per-call realpath (required for
+/// symlink-escape safety); canonicalizing `base` per request was a
+/// stat-walk on every hot-path call.
+pub(crate) fn is_within(base: &Path, target: &Path) -> bool {
+    match realpath(target) {
+        Ok(t) => t.starts_with(base),
+        _ => false,
+    }
+}
+
+/// `_resolve_archive`: longest prefix of `rel` that resolves to an
+/// archive/PDF file → `(archive_path, inner_path)`. `.` and empty components
+/// are dropped; any `..` rejects the whole path.
+pub(crate) fn resolve_archive(library: &Path, rel: &str) -> Option<(PathBuf, String)> {
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+    if parts.iter().any(|p| *p == "..") {
+        return None;
+    }
+    // `range(len(parts) - 1, 0, -1)` — the inner entry is mandatory: a bare
+    // archive filename is an ordinary file (plain-file branch downstream).
+    for i in (1..parts.len()).rev() {
+        let cand = library.join(parts[..i].join("/"));
+        if is_archive_file(&cand) || is_pdf_file(&cand) {
+            return Some((cand, parts[i..].join("/")));
+        }
+    }
+    None
+}
+
+// ── Archive listing (port of app/archive.py) ──────────────────────────────────
+
+/// `_is_safe_entry`: no drive-letter / absolute / unsafe components.
+pub(crate) fn is_safe_entry(name: &str) -> bool {
+    if name.len() >= 2 && name.as_bytes()[1] == b':' {
+        return false;
+    }
+    !name
+        .replace('\\', "/")
+        .split('/')
+        .any(|p| p.is_empty() || p == "." || p == "..")
+}
+
+/// Any `/`-separated component that is a dot-name — dot-prefixed names are
+/// never listable (`shallow_live`/`is_image_entry` filter them), so request
+/// paths may not name them either. Covers `.bookq-uploads` under every
+/// caller-supplied case/spelling on case-insensitive filesystems, where the
+/// post-realpath staging compare (which preserves the caller's case) can't.
+/// `.`/`..` are traversal syntax, not hidden names — they keep their
+/// existing handling (`folder=.` is a supported root alias, `..` gets 403
+/// from the containment check or 400 from `is_safe_entry` upstream).
+pub(crate) fn has_dot_component(path: &str) -> bool {
+    path.split('/')
+        .any(|c| c.starts_with('.') && c != "." && c != "..")
+}
+
+/// `_is_image_entry`: exposable image inside an archive.
+pub(crate) fn is_image_entry(name: &str) -> bool {
+    if !is_safe_entry(name) || name.ends_with('/') {
+        return false;
+    }
+    let base = name.rsplit('/').next().unwrap_or("");
+    if base.is_empty() || base.starts_with('.') {
+        return false;
+    }
+    if name.starts_with("__MACOSX/") || name.contains("/__MACOSX/") {
+        return false;
+    }
+    IMAGE_EXTENSIONS.contains(&suffix_lower(Path::new(base)).as_str())
+}
+
+/// `_finalize`: image filter + first-wins dedupe + natural sort + 2000 cap.
+fn finalize(names: impl IntoIterator<Item = String>, keep_order: bool) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut unique = Vec::new();
+    for n in names {
+        if !seen.contains(&n) && is_image_entry(&n) {
+            seen.insert(n.clone());
+            unique.push(n);
+        }
+    }
+    if !keep_order {
+        unique.sort_by(|a, b| bookq_core::natural_cmp(a, b));
+    }
+    unique.truncate(MAX_ARCHIVE_ENTRIES);
+    unique
+}
+
+/// `list_archive_entries` without the disk cache (read-path parity only;
+/// the warm cache is a performance layer whose output is identical).
+/// Unreadable archives yield `[]`, matching Python's never-raise contract.
+///
+/// Header parsing rides `bookq_core::open_archive` (#217 port): a memoized
+/// parsed archive answers repeat listings/reads without re-walking the
+/// headers — same object the entry-read path shares.
+pub(crate) fn list_archive_entries(path: &Path) -> Vec<String> {
+    let memo = bookq_core::open_archive(path);
+    match suffix_lower(path).as_str() {
+        ".rar" | ".cbr" => finalize(
+            memo.and_then(|a| a.rar_names())
+                .or_else(|| bookq_core::rar_names(path))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, is_dir)| !is_dir)
+                .map(|(n, _)| n),
+            false,
+        ),
+        ".epub" => {
+            let (raw, spine) = memo
+                .and_then(|a| a.epub_raw())
+                .or_else(|| bookq_core::epub_raw(path))
+                .unwrap_or_default();
+            let present: HashSet<&String> = raw.iter().collect();
+            let ordered = finalize(spine.into_iter().filter(|n| present.contains(n)), true);
+            if !ordered.is_empty() {
+                return ordered;
+            }
+            finalize(raw, false)
+        }
+        _ => finalize(
+            memo.and_then(|a| a.zip_names())
+                .or_else(|| bookq_core::zip_names(path))
+                .unwrap_or_default(),
+            false,
+        ),
+    }
+}
+
+/// unrar allocates the decompress window per extraction (RAR5 dict sizes
+/// run 32MB–4GB); spawn_blocking's ≤512 threads could otherwise stack
+/// enough concurrent windows to OOM the gateway. Cap concurrent
+/// in-process rar extraction at the CPU count — zip reads stay unbounded.
+static RAR_EXTRACT: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| {
+        tokio::sync::Semaphore::new(
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+    });
+
+/// `read_archive_entry` read path (#217 port): the memoized open archive
+/// answers repeat page reads without re-parsing the central directory.
+/// `None` covers every non-proven read exactly like `zip_read_entry` —
+/// unstat'able paths fall through to the uncached one-shot open, and a
+/// failed parse yields `None` just as Python propagates the open failure.
+pub(crate) fn archive_read_entry(archive: &Path, inner: &str) -> Option<Vec<u8>> {
+    let _permit = if is_rar_path(archive) {
+        Some(RAR_EXTRACT.blocking_acquire().ok()?)
+    } else {
+        None
+    };
+    match bookq_core::open_archive(archive) {
+        Some(oa) => oa.read_entry(archive, inner),
+        // Uncached one-shot fallback — `rar_read_entry` resolves the
+        // member by ordinal inside `rar_names`, so it reads only what the
+        // ported listing can name (None → 404 when the listing fails,
+        // matching Python's open-failure path).
+        None => {
+            if is_rar_path(archive) {
+                bookq_core::rar_read_entry(archive, inner)
+            } else {
+                bookq_core::zip_read_entry(archive, inner)
+            }
+        }
+    }
+}
+
+/// `_list_archive_prefix`: entries under an inner prefix, relative to it.
+pub(crate) fn list_archive_prefix(archive: &Path, inner: &str) -> Vec<String> {
+    let prefix = inner.trim_matches('/');
+    if prefix.is_empty()
+        || prefix == "."
+        || prefix == ".."
+        || prefix.split('/').any(|p| p == "..")
+    {
+        return Vec::new();
+    }
+    let head = format!("{prefix}/");
+    list_archive_entries(archive)
+        .into_iter()
+        .filter(|e| e.starts_with(&head))
+        .map(|e| e[head.len()..].to_string())
+        .collect()
+}
+
+// ── HTTP primitives (dates, etags, conditional, ranges, mime) ─────────────────
+
+pub(crate) fn fmt_mtime(mtime: f64) -> String {
+    format!("{mtime:.0}")
+}
+
+pub(crate) fn http_date(secs_f64: f64) -> String {
+    httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs_f64.max(0.0)))
+}
+
+/// `_not_modified` for archive entries (`int(mtime)` truncation).
+pub(crate) fn archive_not_modified(headers: &HeaderMap, etag: &str, mtime: f64) -> bool {
+    if let Some(v) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+        if v == etag {
+            return true;
+        }
+    }
+    if let Some(v) = headers.get(header::IF_MODIFIED_SINCE).and_then(|v| v.to_str().ok()) {
+        if let Ok(t) = httpdate::parse_http_date(v) {
+            let ts = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            if (mtime as i64) as f64 <= ts {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The `/image` plain-file conditional (`st_mtime <= ts` — float, no truncation).
+fn file_not_modified(headers: &HeaderMap, etag: &str, mtime: f64) -> bool {
+    if let Some(v) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+        if v == etag {
+            return true;
+        }
+    }
+    if let Some(v) = headers.get(header::IF_MODIFIED_SINCE).and_then(|v| v.to_str().ok()) {
+        if let Ok(t) = httpdate::parse_http_date(v) {
+            let ts = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            if mtime <= ts {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `_parse_range` — archive-entry semantics: any invalid/unusable range is
+/// ignored and the caller serves 200 in full.
+fn parse_archive_range(header: &str, size: u64) -> Option<(u64, u64)> {
+    if size == 0 {
+        // `size - 1` below would wrap to u64::MAX — an empty member has no
+        // satisfiable range, and this parser's contract is "unusable → 200".
+        return None;
+    }
+    let m = header.trim().strip_prefix("bytes=")?;
+    let (s, e) = m.split_once('-')?;
+    if s.is_empty() && e.is_empty() {
+        return None;
+    }
+    if s.is_empty() {
+        let n: u64 = e.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        return Some((size.saturating_sub(n), size - 1));
+    }
+    let start: u64 = s.parse().ok()?;
+    let end: u64 = if e.is_empty() { size - 1 } else { e.parse().ok()? };
+    if start >= size || end < start {
+        return None;
+    }
+    Some((start, end.min(size - 1)))
+}
+
+/// Minimal `mimetypes.guess_type` for the extensions this app serves.
+pub(crate) fn guess_type(name: &str) -> &'static str {
+    match suffix_lower(Path::new(name)).as_str() {
+        ".jpg" | ".jpeg" => "image/jpeg",
+        ".png" => "image/png",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".avif" => "image/avif",
+        ".bmp" => "image/bmp",
+        ".svg" | ".svgz" => "image/svg+xml",
+        ".tif" | ".tiff" => "image/tiff",
+        ".ico" => "image/vnd.microsoft.icon",
+        ".pdf" => "application/pdf",
+        ".zip" => "application/zip",
+        ".epub" => "application/epub+zip",
+        ".rar" => "application/vnd.rar",
+        ".json" => "application/json",
+        ".txt" => "text/plain",
+        ".html" | ".htm" => "text/html",
+        ".css" => "text/css",
+        ".js" => "application/javascript",
+        _ => "application/octet-stream",
+    }
+}
+
+// ── Response builders ─────────────────────────────────────────────────────────
+
+fn response(status: StatusCode, body: Body) -> Response {
+    let mut r = Response::new(body);
+    *r.status_mut() = status;
+    r
+}
+
+fn set_header(r: &mut Response, name: header::HeaderName, value: &str) {
+    if let Ok(v) = HeaderValue::from_str(value) {
+        r.headers_mut().insert(name, v);
+    }
+}
+
+/// #62: media bodies come from library files (and, since #556, uploads) —
+/// `nosniff` stops a crafted type from being sniffed into HTML, and the
+/// one decodable text format that can execute (SVG) gets the sandbox CSP
+/// the thumb pipeline already applies.
+fn set_media_headers(r: &mut Response, media: &str) {
+    set_header(r, header::CONTENT_TYPE, media);
+    set_header(r, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    if media == "image/svg+xml" {
+        set_header(
+            r,
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        );
+    }
+}
+
+fn detail(status: StatusCode, msg: &str) -> Response {
+    let body = serde_json::json!({"detail": msg}).to_string();
+    let mut r = response(status, Body::from(body));
+    set_header(&mut r, header::CONTENT_TYPE, "application/json");
+    r
+}
+
+/// Former `Serve::Proxy` sites answer 501 now that the strangler proxy is
+/// retired (#532) — the same status the no-upstream `proxy()` fallback
+/// already produced in production.
+pub(crate) fn not_implemented(msg: &str) -> Response {
+    detail(StatusCode::NOT_IMPLEMENTED, msg)
+}
+
+pub(crate) fn not_modified() -> Response {
+    // 304s carry no body, but the revalidated object is a media entry —
+    // keep the nosniff on the validation too (#62).
+    let mut r = response(StatusCode::NOT_MODIFIED, Body::empty());
+    set_header(&mut r, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+    r
+}
+
+/// `_archive_bytes_response`: in-memory bytes with conditional/Range support.
+fn archive_bytes_response(
+    headers: &HeaderMap,
+    data: Vec<u8>,
+    media: &str,
+    etag: &str,
+    last_modified: &str,
+    mtime: f64,
+) -> Response {
+    if archive_not_modified(headers, etag, mtime) {
+        return not_modified();
+    }
+    let mut r = response(StatusCode::OK, Body::empty());
+    set_header(&mut r, header::CACHE_CONTROL, "private, max-age=3600");
+    set_header(&mut r, header::ETAG, etag);
+    set_header(&mut r, header::LAST_MODIFIED, last_modified);
+    set_header(&mut r, header::ACCEPT_RANGES, "bytes");
+    set_media_headers(&mut r, media);
+    if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        if let Some((start, end)) = parse_archive_range(range_header, data.len() as u64) {
+            *r.status_mut() = StatusCode::PARTIAL_CONTENT;
+            set_header(
+                &mut r,
+                header::CONTENT_RANGE,
+                &format!("bytes {start}-{end}/{}", data.len()),
+            );
+            *r.body_mut() = Body::from(data[start as usize..=end as usize].to_vec());
+            return r;
+        }
+    }
+    *r.body_mut() = Body::from(data);
+    r
+}
+
+// ── /api/images ───────────────────────────────────────────────────────────────
+
+/// `_list_folder_images` + the v1 route's response shaping.
+/// Success = `{"folder": <raw query>, "images": [...]}`; errors keep the
+/// shared `{detail}` shape unwrapped. PDF folders list natively via
+/// `bookq_core::pdf_page_count` (#402); a missing libpdfium only affects
+/// page *rendering* (proxied), never the listing.
+pub fn api_images(library: &Path, folder: &str) -> Response {
+    // Dot-prefixed components are never listable — same invisibility rule
+    // as the media path and the tree API (`.bookq-uploads` stays unprobed).
+    if has_dot_component(folder) {
+        return detail(
+            StatusCode::NOT_FOUND,
+            &format!("Folder not found: {folder}"),
+        );
+    }
+    let folder_path = library.join(folder);
+    if !is_within(library, &folder_path) {
+        return detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    let resolved = match realpath(&folder_path) {
+        Ok(p) => p,
+        Err(_) => return detail(StatusCode::FORBIDDEN, "Forbidden"),
+    };
+    if is_archive_file(&resolved) {
+        let names = list_archive_entries(&resolved);
+        return json_list(folder, names);
+    }
+    if is_pdf_file(&resolved) {
+        let count = bookq_core::pdf_page_count(&resolved);
+        let names = (0..count).map(bookq_core::pdf_page_name).collect();
+        return json_list(folder, names);
+    }
+    if let Some((archive, inner)) = resolve_archive(library, folder) {
+        if !is_within(library, &archive) {
+            return detail(StatusCode::FORBIDDEN, "Forbidden");
+        }
+        // PDFs have no inner prefixes: their virtual children are the flat
+        // `pNNN.png` page list, so any `pdf/inner` path 404s exactly like
+        // Python's empty `_list_archive_prefix`.
+        let archive_resolved = match realpath(&archive) {
+            Ok(p) => p,
+            Err(_) => return detail(StatusCode::FORBIDDEN, "Forbidden"),
+        };
+        let scoped = list_archive_prefix(&archive_resolved, &inner);
+        if scoped.is_empty() {
+            return detail(
+                StatusCode::NOT_FOUND,
+                &format!("Folder not found: {folder}"),
+            );
+        }
+        return json_list(folder, scoped);
+    }
+    if !resolved.is_dir() {
+        return detail(
+            StatusCode::NOT_FOUND,
+            &format!("Folder not found: {folder}"),
+        );
+    }
+    json_list(folder, dir_images_cached(&resolved))
+}
+
+/// Directory image-listing memo keyed on dir mtime — a readdir of a large
+/// folder on a slow volume costs tens of ms, while a single metadata call
+/// costs ~µs. Dir mtime changes on add/remove/rename (file-content edits
+/// do not affect the name list, so they need no invalidation).
+static DIR_IMAGES_MEMO: LazyLock<Mutex<DirImagesMemo>> = LazyLock::new(|| {
+    Mutex::new(DirImagesMemo {
+        map: HashMap::new(),
+        lru: VecDeque::new(),
+    })
+});
+const DIR_IMAGES_MEMO_CAP: usize = 128;
+
+struct DirImagesMemo {
+    map: HashMap<PathBuf, (u128, Vec<String>)>,
+    lru: VecDeque<PathBuf>,
+}
+
+fn dir_mtime_key(dir: &Path) -> Option<u128> {
+    dir.metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+}
+
+fn dir_images_cached(dir: &Path) -> Vec<String> {
+    let mt = dir_mtime_key(dir);
+    if let Some(mt) = mt {
+        if let Ok(g) = DIR_IMAGES_MEMO.lock() {
+            if let Some((k, names)) = g.map.get(dir) {
+                if *k == mt {
+                    return names.clone();
+                }
+            }
+        }
+    }
+    let names = bookq_core::list_images(dir).unwrap_or_default();
+    if let Some(mt) = mt {
+        if let Ok(mut g) = DIR_IMAGES_MEMO.lock() {
+            g.map.insert(dir.to_path_buf(), (mt, names.clone()));
+            g.lru.push_back(dir.to_path_buf());
+            while g.map.len() > DIR_IMAGES_MEMO_CAP {
+                if let Some(old) = g.lru.pop_front() {
+                    g.map.remove(&old);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Compact JSON list matching Starlette's `json.dumps(..., separators=(",",":"))`.
+/// v1 images envelope — `{"folder": folder, "images": [...]}` compact JSON.
+fn json_list(folder: &str, names: Vec<String>) -> Response {
+    let body = serde_json::json!({"folder": folder, "images": names});
+    let mut r = response(
+        StatusCode::OK,
+        Body::from(serde_json::to_string(&body).unwrap()),
+    );
+    set_header(&mut r, header::CONTENT_TYPE, "application/json");
+    r
+}
+
+// ── /image/{path} ─────────────────────────────────────────────────────────────
+
+/// `serve_image` — archive-entry reads and plain-file serving.
+/// RAR/CBR store entries (incl. multipart store-concat) extract
+/// in-process; compressed multipart answers 501. PDF pages
+/// render in-process via pdfium-render (#402, same PDFium engine as
+/// pypdfium2) and answer 501 when `libpdfium` is unavailable.
+/// Multi-range is a contract shrink (200 full) on both plain and archive
+/// paths — see `serve_plain_file`.
+pub fn image(library: &Path, path: &str, headers: &HeaderMap) -> Response {
+    // Dot-prefixed components are never listable — `.bookq-uploads` staging
+    // must be unreadable through the media path too (404, not 403: the dir
+    // shouldn't be discoverable at all).
+    if has_dot_component(path) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
+            return detail(StatusCode::FORBIDDEN, "Forbidden");
+        }
+        let archive_resolved = match realpath(&archive) {
+            Ok(p) => p,
+            Err(_) => return detail(StatusCode::NOT_FOUND, "File not found"),
+        };
+        if is_pdf_file(&archive_resolved) {
+            return serve_pdf_page(&archive_resolved, &inner, headers);
+        }
+        return serve_archive_entry(&archive_resolved, &inner, headers);
+    }
+
+    // Lexical guards come after archive resolution, exactly like Python.
+    if path.starts_with('/') || path.ends_with('/') {
+        return detail(StatusCode::BAD_REQUEST, "Invalid image path");
+    }
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
+        return detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    let file_path = match realpath(&file_path) {
+        Ok(p) => p,
+        Err(_) => return detail(StatusCode::NOT_FOUND, "File not found"),
+    };
+    let stat = match file_path.metadata().ok().filter(|m| m.is_file()) {
+        Some(m) => m,
+        None => return detail(StatusCode::NOT_FOUND, "File not found"),
+    };
+    let mtime = stat
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let size = stat.len();
+    let etag = format!("\"{}-{size}\"", fmt_mtime(mtime));
+    let last_modified = http_date(mtime);
+    if file_not_modified(headers, &etag, mtime) {
+        return not_modified();
+    }
+    serve_plain_file(&file_path, size, &etag, &last_modified, headers)
+}
+
+/// `_serve_archive_entry` for a rendered PDF page (#402).
+///
+/// Port of the `is_pdf_file(archive)` branch of `_serve_archive_entry`:
+/// `pNNN.png` names map through the page count, the ETag is
+/// `"{mtime:.0f}-{size}-pdf{idx}"` (0-based `idx`), and the body is the
+/// `render(scale=2.0)` PNG. A render failure (missing `libpdfium`, corrupt
+/// page) answers 501 — never a native 500.
+fn serve_pdf_page(archive: &Path, inner: &str, headers: &HeaderMap) -> Response {
+    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+        return detail(StatusCode::BAD_REQUEST, "Invalid image path");
+    }
+    let stat = match archive.metadata() {
+        Ok(m) => m,
+        Err(_) => return detail(StatusCode::NOT_FOUND, "File not found"),
+    };
+    let mtime = stat
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let last_modified = http_date(mtime);
+    let count = bookq_core::pdf_page_count(archive);
+    let Some(idx) = bookq_core::parse_pdf_page_name(inner, count) else {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    };
+    let etag = format!("\"{}-{}-pdf{idx}\"", fmt_mtime(mtime), stat.len());
+    if archive_not_modified(headers, &etag, mtime) {
+        return not_modified();
+    }
+    let data = match bookq_core::render_pdf_page(archive, idx, 2.0) {
+        Some(d) => d,
+        None => return not_implemented("PDF rendering unavailable"),
+    };
+    archive_bytes_response(
+        headers,
+        data,
+        "image/png",
+        &etag,
+        &last_modified,
+        mtime,
+    )
+}
+
+/// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR.
+fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Response {
+    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+        return detail(StatusCode::BAD_REQUEST, "Invalid image path");
+    }
+    let stat = match archive.metadata() {
+        Ok(m) => m,
+        Err(_) => return detail(StatusCode::NOT_FOUND, "File not found"),
+    };
+    let mtime = stat
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let last_modified = http_date(mtime);
+    if !is_image_entry(inner) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
+    let digest = format!("{:x}", Sha1::digest(inner.as_bytes()));
+    let etag = format!("\"{}-{}-{}\"", fmt_mtime(mtime), stat.len(), &digest[..16]);
+    if archive_not_modified(headers, &etag, mtime) {
+        return not_modified();
+    }
+    let multipart = is_rar_path(archive) && bookq_core::rar_needs_external_7z(archive);
+    let data = match archive_read_entry(archive, inner) {
+        Some(d) => d,
+        // #403: multipart store sets read native; a miss (compressed,
+        // missing volumes) answers 501 without an external 7z.
+        None if multipart => return not_implemented("multipart RAR extraction unavailable"),
+        None => return detail(StatusCode::NOT_FOUND, "File not found"),
+    };
+    archive_bytes_response(
+        headers,
+        data,
+        guess_type(inner),
+        &etag,
+        &last_modified,
+        mtime,
+    )
+}
+
+// ── Plain-file response with hypercorn `pathsend` Range semantics ─────────────
+
+enum RangePlan {
+    Full,
+    Single(u64, u64),
+    Multi,
+    BadRequest(&'static str),
+    Unsatisfiable,
+}
+
+/// hypercorn's `Range` grammar: `bytes=` + comma list of `start-end|start-|-N`.
+fn plan_range(headers: &HeaderMap, size: u64) -> RangePlan {
+    let Some(h) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) else {
+        return RangePlan::Full;
+    };
+    let Some(spec) = h.trim().strip_prefix("bytes=") else {
+        return RangePlan::BadRequest("Only support bytes range");
+    };
+    let mut ranges = Vec::new();
+    for part in spec.split(',') {
+        let Some((s, e)) = part.trim().split_once('-') else {
+            return RangePlan::BadRequest("Range header: range must be requested");
+        };
+        if s.is_empty() && e.is_empty() {
+            return RangePlan::BadRequest("Range header: range must be requested");
+        }
+        if s.is_empty() {
+            let Ok(n) = e.parse::<u64>() else {
+                return RangePlan::BadRequest("Range header: range must be requested");
+            };
+            if n == 0 || size == 0 {
+                // Empty target: `size - 1` below would wrap to u64::MAX and
+                // answer a bogus 206 / panic slicing an archive member.
+                return RangePlan::Unsatisfiable;
+            }
+            ranges.push((size.saturating_sub(n), size - 1));
+            continue;
+        }
+        let Ok(start) = s.parse::<u64>() else {
+            return RangePlan::BadRequest("Range header: range must be requested");
+        };
+        // Explicit end: "start must be less than end" rejects before the
+        // satisfiability check (hypercorn order). Open-ended (`start-`) skips
+        // that check — a beyond-EOF start answers 416, not 400.
+        if !e.is_empty() {
+            let Ok(raw_end) = e.parse::<u64>() else {
+                return RangePlan::BadRequest("Range header: range must be requested");
+            };
+            if start > raw_end {
+                return RangePlan::BadRequest("Range header: start must be less than end");
+            }
+            if start >= size {
+                return RangePlan::Unsatisfiable;
+            }
+            ranges.push((start, raw_end.min(size - 1)));
+            continue;
+        }
+        if start >= size {
+            return RangePlan::Unsatisfiable;
+        }
+        ranges.push((start, size - 1));
+    }
+    match ranges.len() {
+        0 => RangePlan::BadRequest("Range header: range must be requested"),
+        1 => {
+            let (s, e) = ranges[0];
+            RangePlan::Single(s, e)
+        }
+        _ => RangePlan::Multi,
+    }
+}
+
+fn serve_plain_file(path: &Path, size: u64, etag: &str, last_modified: &str, headers: &HeaderMap) -> Response {
+    let mut r = response(StatusCode::OK, Body::empty());
+    set_header(&mut r, header::CACHE_CONTROL, "private, max-age=3600");
+    set_header(&mut r, header::ETAG, etag);
+    set_header(&mut r, header::LAST_MODIFIED, last_modified);
+    set_media_headers(&mut r, guess_type(&path.to_string_lossy()));
+    set_header(&mut r, header::ACCEPT_RANGES, "bytes");
+    match plan_range(headers, size) {
+        RangePlan::Full => match std::fs::read(path) {
+            // Whole-buffer read: ReaderStream's 8KB chunks pay a per-chunk
+            // wake through the spawn_blocking → Body stream bridge — ~1ms
+            // per chunk vs hypercorn's sendfile — so a single memcpy is
+            // cheaper at typical page sizes (100KB–a few MB).
+            Ok(bytes) => {
+                set_header(&mut r, header::CONTENT_LENGTH, &size.to_string());
+                *r.body_mut() = Body::from(bytes);
+                r
+            }
+            Err(_) => detail(StatusCode::NOT_FOUND, "File not found"),
+        },
+        RangePlan::Single(start, end) => {
+            *r.status_mut() = StatusCode::PARTIAL_CONTENT;
+            set_header(&mut r, header::CONTENT_RANGE, &format!("bytes {start}-{end}/{size}"));
+            set_header(&mut r, header::CONTENT_LENGTH, &(end - start + 1).to_string());
+            match std::fs::File::open(path) {
+                Ok(mut f) => {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let n = (end - start + 1) as usize;
+                    let mut buf = vec![0u8; n];
+                    let ok = f
+                        .seek(SeekFrom::Start(start))
+                        .and_then(|_| f.read_exact(&mut buf));
+                    match ok {
+                        Ok(()) => {
+                            *r.body_mut() = Body::from(buf);
+                            r
+                        }
+                        Err(_) => detail(StatusCode::NOT_FOUND, "File not found"),
+                    }
+                }
+                Err(_) => detail(StatusCode::NOT_FOUND, "File not found"),
+            }
+        }
+        // #403 contract shrink: multi-range is served as 200 full.
+        // OpenAPI documents single `Range: bytes=` only. Archive entries
+        // already ignore multi-range → 200 (`parse_archive_range`), so
+        // plain files match by doing the same.
+        RangePlan::Multi => match std::fs::read(path) {
+            Ok(bytes) => {
+                set_header(&mut r, header::CONTENT_LENGTH, &size.to_string());
+                *r.body_mut() = Body::from(bytes);
+                r
+            }
+            Err(_) => detail(StatusCode::NOT_FOUND, "File not found"),
+        },
+        RangePlan::BadRequest(msg) => {
+            let mut r = response(StatusCode::BAD_REQUEST, Body::from(msg.to_string()));
+            set_header(&mut r, header::CONTENT_TYPE, "text/plain; charset=utf-8");
+            r
+        }
+        RangePlan::Unsatisfiable => {
+            let mut r = response(StatusCode::RANGE_NOT_SATISFIABLE, Body::empty());
+            set_header(&mut r, header::CONTENT_RANGE, &format!("bytes */{size}"));
+            set_header(&mut r, header::CONTENT_LENGTH, "0");
+            set_header(&mut r, header::CONTENT_TYPE, "text/plain; charset=utf-8");
+            r
+        }
+    }
+}
+
+// ── gzip (ApiGZipMiddleware parity for native /api/* responses) ───────────────
+
+/// Apply the path-scoped gzip policy observed from Python: bodies ≥1024B on
+/// compressed prefixes carry `vary: Accept-Encoding`; they are gzipped (level
+/// 6 = starlette's default) only when the client advertises gzip.
+pub async fn maybe_gzip(req_headers: &HeaderMap, res: Response, compressible: bool) -> Response {
+    // GZipResponder partial_response: 206 passes through untouched —
+    // no compression AND no Vary (range semantics must stay intact).
+    if !compressible || res.status() == StatusCode::PARTIAL_CONTENT {
+        return res;
+    }
+    // Upstream tests `"gzip" in Accept-Encoding` — a substring check on
+    // the raw header value, not a token match.
+    let wants_gzip = req_headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"));
+    if res.body().size_hint().exact().is_none_or(|l| l < 1024) {
+        return res;
+    }
+    let (mut parts, body) = res.into_parts();
+    parts.headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    if !wants_gzip {
+        return Response::from_parts(parts, body);
+    }
+    use http_body_util::BodyExt;
+    let Ok(collected) = body.collect().await else {
+        return Response::from_parts(parts, Body::empty());
+    };
+    let bytes = collected.to_bytes();
+    // OS byte 3 (Unix) — zlib's gzip.compress sets it from the platform;
+    // flate2's default header writes 255 which differs on the wire.
+    let mut enc = flate2::GzBuilder::new()
+        .operating_system(3)
+        .write(Vec::new(), flate2::Compression::new(6));
+    if enc.write_all(&bytes).is_err() {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    match enc.finish() {
+        Ok(gz) => {
+            parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            if let Ok(v) = HeaderValue::from_str(&gz.len().to_string()) {
+                parts.headers.insert(header::CONTENT_LENGTH, v);
+            }
+            Response::from_parts(parts, Body::from(gz))
+        }
+        Err(_) => Response::from_parts(parts, Body::from(bytes)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(
+                header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        m
+    }
+
+    #[test]
+    fn range_parsing_matches_hypercorn() {
+        let h = |v| hdrs(&[("range", v)]);
+        assert!(matches!(plan_range(&hdrs(&[]), 100), RangePlan::Full));
+        assert!(matches!(plan_range(&h("bytes=0-99"), 100), RangePlan::Single(0, 99)));
+        assert!(matches!(plan_range(&h("bytes=50-"), 100), RangePlan::Single(50, 99)));
+        assert!(matches!(plan_range(&h("bytes=-20"), 100), RangePlan::Single(80, 99)));
+        assert!(matches!(plan_range(&h("bytes=0-500"), 100), RangePlan::Single(0, 99)));
+        assert!(matches!(plan_range(&h("bytes=abc"), 100), RangePlan::BadRequest(_)));
+        assert!(matches!(plan_range(&h("items=0-10"), 100), RangePlan::BadRequest(_)));
+        assert!(matches!(plan_range(&h("bytes=50-40"), 100), RangePlan::BadRequest(_)));
+        assert!(matches!(plan_range(&h("bytes=-"), 100), RangePlan::BadRequest(_)));
+        // open-ended past EOF → 416, not 400 (the fix verified against hypercorn)
+        assert!(matches!(plan_range(&h("bytes=100-"), 100), RangePlan::Unsatisfiable));
+        assert!(matches!(plan_range(&h("bytes=999999999999-"), 100), RangePlan::Unsatisfiable));
+        assert!(matches!(plan_range(&h("bytes=-0"), 100), RangePlan::Unsatisfiable));
+        assert!(matches!(plan_range(&h("bytes=0-1,5-9"), 100), RangePlan::Multi));
+    }
+
+    /// #403 contract shrink: multi-range on plain files serves 200 full
+    /// natively (matching the archive path's ignore → 200).
+    #[test]
+    fn multi_range_serves_200_full() {
+        let dir = std::env::temp_dir().join(format!(
+            "bq-multirange-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.bin");
+        let payload: Vec<u8> = (0..100u8).collect();
+        std::fs::write(&p, &payload).unwrap();
+        let h = hdrs(&[("range", "bytes=0-9,20-29")]);
+        let r = serve_plain_file(&p, 100, "\"etag\"", "Thu, 01 Jan 1970 00:00:00 GMT", &h);
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers().get(header::ACCEPT_RANGES).unwrap(), "bytes");
+        assert!(r.headers().get(header::CONTENT_RANGE).is_none());
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn archive_range_ignores_invalid() {
+        assert_eq!(parse_archive_range("bytes=0-9", 100), Some((0, 9)));
+        assert_eq!(parse_archive_range("bytes=-10", 100), Some((90, 99)));
+        assert_eq!(parse_archive_range("bytes=10-", 100), Some((10, 99)));
+        assert_eq!(parse_archive_range("bytes=0-9999", 100), Some((0, 99)));
+        assert_eq!(parse_archive_range("bytes=abc", 100), None);
+        assert_eq!(parse_archive_range("bytes=0-1,5-9", 100), None);
+        assert_eq!(parse_archive_range("bytes=200-", 100), None);
+        assert_eq!(parse_archive_range("bytes=50-40", 100), None);
+        assert_eq!(parse_archive_range("items=0-9", 100), None);
+    }
+
+    #[test]
+    fn image_entry_filter() {
+        assert!(is_image_entry("a/b/01.jpg"));
+        assert!(is_image_entry("01.PNG"));
+        assert!(!is_image_entry(".hidden.jpg"));
+        assert!(!is_image_entry("__MACOSX/x.jpg"));
+        assert!(!is_image_entry("a/../b.jpg"));
+        assert!(!is_image_entry("C:/x.jpg"));
+        assert!(!is_image_entry("dir/"));
+        assert!(!is_image_entry("a//b.jpg"));
+        assert!(!is_image_entry("x.txt"));
+    }
+
+    #[test]
+    fn etag_and_304() {
+        let h = hdrs(&[("if-none-match", "\"1-2-abc\"")]);
+        assert!(archive_not_modified(&h, "\"1-2-abc\"", 1000.0));
+        assert!(!archive_not_modified(&h, "\"1-2-abd\"", 1000.0));
+        let h2 = hdrs(&[("if-modified-since", "Sat, 31 Oct 2026 02:00:00 GMT")]);
+        assert!(archive_not_modified(&h2, "\"x\"", 1_700_000_000.9)); // int(mtime) <= ts
+        assert!(!archive_not_modified(&h2, "\"x\"", 1_800_000_000.9)); // mtime after header
+    }
+
+    /// #62: every media response carries `nosniff`; `image/svg+xml` also
+    /// gets the thumb pipeline's sandbox CSP so a planted SVG can't run
+    /// script on the viewer origin.
+    #[test]
+    fn media_headers_nosniff_and_svg_sandbox() {
+        let lm = "Thu, 01 Jan 1970 00:00:00 GMT";
+        let r = archive_bytes_response(&hdrs(&[]), b"x".to_vec(), "image/jpeg", "\"e\"", lm, 0.0);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert!(r.headers().get(header::CONTENT_SECURITY_POLICY).is_none());
+
+        let r = archive_bytes_response(
+            &hdrs(&[]),
+            b"<svg/>".to_vec(),
+            "image/svg+xml",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+
+        // 206 keeps them — the headers are set on the shared response.
+        let r = archive_bytes_response(
+            &hdrs(&[("range", "bytes=0-0")]),
+            b"<svg/>".to_vec(),
+            "image/svg+xml",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+
+        // …and the 304 validation carries nosniff.
+        let r = archive_bytes_response(
+            &hdrs(&[("if-none-match", "\"e\"")]),
+            b"x".to_vec(),
+            "image/png",
+            "\"e\"",
+            lm,
+            0.0,
+        );
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+
+        // Loose files go through set_media_headers via guess_type.
+        let dir = std::env::temp_dir().join(format!(
+            "bq-svg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.svg");
+        std::fs::write(&p, b"<svg/>").unwrap();
+        let r = serve_plain_file(&p, 6, "\"e\"", lm, &hdrs(&[]));
+        assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            r.headers()["content-security-policy"],
+            "default-src 'none'; sandbox"
+        );
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn maybe_gzip_passes_206_untouched() {
+        // GZipResponder partial_response: 206 → no compression, no Vary.
+        let body = vec![b'x'; 2048];
+        let mut res = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .body(Body::from(body.clone()))
+            .unwrap();
+        res.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_static("bytes 0-2047/4096"),
+        );
+        let out = maybe_gzip(&hdrs(&[("accept-encoding", "gzip")]), res, true).await;
+        assert_eq!(out.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(out.headers().get(header::CONTENT_ENCODING).is_none());
+        assert!(out.headers().get(header::VARY).is_none());
+        assert_eq!(out.headers()["content-range"], "bytes 0-2047/4096");
+    }
+
+    #[tokio::test]
+    async fn maybe_gzip_substring_matches_upstream() {
+        // py tests `"gzip" in Accept-Encoding` — substring, not tokens.
+        let big = vec![b'x'; 2048];
+        let res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from(big))
+            .unwrap();
+        let out = maybe_gzip(&hdrs(&[("accept-encoding", "br, xgzip")]), res, true).await;
+        assert_eq!(out.headers().get(header::CONTENT_ENCODING).unwrap(), "gzip");
+    }
+
+    // ── native PDF read-path (#402) ──────────────────────────────────────────
+
+    /// Minimal 2-page PDF with a valid xref (lopdf-parseable, like real files).
+    fn write_test_pdf(path: &std::path::Path) {
+        let mut objs = vec![
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 5 0 R >>\nendobj\n".to_string(),
+            "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 6 0 R >>\nendobj\n".to_string(),
+            "5 0 obj\n<< /Length 17 >>\nstream\nBT 10 90 Td (P1) Tj ET\nendstream\nendobj\n".to_string(),
+            "6 0 obj\n<< /Length 17 >>\nstream\nBT 10 90 Td (P2) Tj ET\nendstream\nendobj\n".to_string(),
+        ];
+        let _ = objs.len();
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for obj in &objs {
+            offsets.push(out.len());
+            out.extend(obj.as_bytes());
+        }
+        let xref_at = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+        for off in &offsets {
+            out.extend(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF",
+                offsets.len() + 1
+            )
+            .as_bytes(),
+        );
+        std::fs::write(path, out).unwrap();
+    }
+
+    fn pdf_library(tag: &str) -> std::path::PathBuf {
+        let dl = std::env::temp_dir().join(format!(
+            "bq-serve-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dl).unwrap();
+        write_test_pdf(&dl.join("doc.pdf"));
+        dl.canonicalize().unwrap()
+    }
+
+    fn body_bytes(r: Response) -> Vec<u8> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+            r.into_body().collect().await.unwrap().to_bytes().to_vec()
+        })
+    }
+
+    /// #465 follow-up: a local 422 keeps FastAPI's issue-array `detail`
+    /// the spec's `ValidationError` declares — not a bare string (ST108).
+    #[test]
+    fn unprocessable_issue_array() {
+        let r = unprocessable("depth", "value_error", "invalid depth");
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes(r)).unwrap();
+        let detail = v["detail"].as_array().expect("detail must be an array");
+        assert_eq!(detail[0]["loc"], serde_json::json!(["query", "depth"]));
+        assert_eq!(detail[0]["type"], "value_error");
+    }
+
+    #[test]
+    fn pdf_api_images_lists_pages_natively() {
+        let dl = pdf_library("ai");
+        let res = api_images(&dl, "doc.pdf");
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_bytes(res);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["folder"], "doc.pdf");
+        assert_eq!(v["images"], serde_json::json!(["p001.png", "p002.png"]));
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    #[test]
+    fn pdf_inner_prefix_is_404_like_python() {
+        // PDFs have no inner prefixes — Python's empty `_list_archive_prefix`
+        // answers 404, never a listing.
+        let dl = pdf_library("aip");
+        let res = api_images(&dl, "doc.pdf/sub");
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    #[test]
+    fn pdf_image_page_contract() {
+        let dl = pdf_library("ip");
+        // Out-of-range and misshapen names 404 natively (count-gated).
+        for bad in ["doc.pdf/p009.png", "doc.pdf/x.png", "doc.pdf/p000.png"] {
+            let res = image(&dl, bad, &HeaderMap::new());
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{bad}");
+        }
+        // A valid page is native when libpdfium is present (image/png
+        // with the Python ETag shape) and 501 otherwise (#532: no proxy).
+        let rendered = bookq_core::render_pdf_page(&dl.join("doc.pdf"), 0, 2.0).is_some();
+        let res = image(&dl, "doc.pdf/p001.png", &HeaderMap::new());
+        if rendered {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()["content-type"], "image/png");
+            let st = std::fs::metadata(dl.join("doc.pdf")).unwrap();
+            let mtime = st
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
+            let expected = format!("\"{}-{}-pdf0\"", fmt_mtime(mtime), st.len());
+            assert_eq!(res.headers()["etag"], expected.as_str());
+        } else {
+            assert_eq!(
+                res.status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "without libpdfium the page must answer 501"
+            );
+        }
+        std::fs::remove_dir_all(&dl).ok();
+    }
+
+    #[test]
+    fn pdf_image_page_304() {
+        // Conditional revalidation matches Python's int(mtime) semantics.
+        let dl = pdf_library("i304");
+        if bookq_core::render_pdf_page(&dl.join("doc.pdf"), 0, 2.0).is_none() {
+            std::fs::remove_dir_all(&dl).ok();
+            return; // no libpdfium here — covered by pdf_image_page_contract
+        }
+        let res = image(&dl, "doc.pdf/p001.png", &HeaderMap::new());
+        let etag = res.headers()["etag"].to_str().unwrap().to_string();
+        let h = hdrs(&[("if-none-match", etag.as_str())]);
+        let res2 = image(&dl, "doc.pdf/p001.png", &h);
+        assert_eq!(res2.status(), StatusCode::NOT_MODIFIED);
+        std::fs::remove_dir_all(&dl).ok();
+    }
+}
+
+pub(crate) fn suffix_is_epub(name: &str) -> bool {
+    name.rsplit('.').next().is_some_and(|e| e.eq_ignore_ascii_case("epub"))
+}
+
