@@ -151,6 +151,13 @@ fn unixtime_ok(secs: i64) -> bool {
     (-62135596800..=253402300799).contains(&secs)
 }
 
+/// Upper bound for one extracted archive entry's bytes. Every size field
+/// in ZIP/RAR headers is attacker-controlled and drives an allocation or
+/// a decompression buffer below — a real page/EPUB member is orders of
+/// magnitude smaller, so anything past this is treated as malformed.
+/// (Library uploads make these paths remotely plantable — #556 review.)
+const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+
 // ══════════════════════════════════════════════════════════════════════════
 // ZIP / CBZ — port of zipfile._EndRecData/_EndRecData64/_RealGetContents
 // ══════════════════════════════════════════════════════════════════════════
@@ -169,6 +176,12 @@ const ZIP_MAX_COMMENT: usize = 65535;
 const MASK_UTF_FILENAME: u16 = 1 << 11;
 const MASK_ENCRYPTED: u16 = 1;
 const MAX_EXTRACT_VERSION: u8 = 63;
+/// The central directory is buffered whole for parsing — cap both its
+/// declared size and the parsed entry count so a crafted EOCD can't drive
+/// a file-size-proportional allocation (≥46B per CD record → ~5.7M
+/// entries at the cap, far past any real archive).
+const MAX_CD_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_CD_ENTRIES: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 pub struct ZipEntry {
@@ -210,7 +223,10 @@ fn read_endrec64(f: &mut File, mut offset: i64, e: &mut EndRec) -> Result<(), ()
         return Err(());
     }
     offset -= SIZE_EOCD64 as i64;
-    if reloff as i64 > offset {
+    // reloff is attacker u64 — clamp the domain before any `as i64` so a
+    // value ≥ 2^63 can't wrap past the guard. offset < 0 means the file
+    // was too short to hold the records we already sliced.
+    if offset < 0 || reloff > offset as u64 {
         return Err(());
     }
     let mut data = [0u8; SIZE_EOCD64];
@@ -230,7 +246,9 @@ fn read_endrec64(f: &mut File, mut offset: i64, e: &mut EndRec) -> Result<(), ()
     let sz = u64::from_le_bytes(data[4..12].try_into().unwrap());
     let dirsize = u64::from_le_bytes(data[40..48].try_into().unwrap());
     let diroffset = u64::from_le_bytes(data[48..56].try_into().unwrap());
-    if diroffset + dirsize != reloff || sz + 12 != SIZE_EOCD64 as u64 + extrasz as u64 {
+    if diroffset.checked_add(dirsize) != Some(reloff)
+        || sz.checked_add(12) != Some(SIZE_EOCD64 as u64 + extrasz as u64)
+    {
         return Err(());
     }
     e.size_cd = dirsize;
@@ -365,9 +383,23 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
         Some(e) => e,
         None => return Ok(None),
     };
-    let concat: i64 = endrec.location - endrec.size_cd as i64 - endrec.offset_cd as i64;
-    let start_dir: i64 = endrec.offset_cd as i64 + concat;
+    // zip64 fields are u64 attacker input — `as i64` alone can wrap
+    // negative and `+`/`-` can panic in debug builds. Clamp the casts
+    // and saturate the arithmetic; the `start_dir < 0` check below
+    // still rejects every overflowed value.
+    let clamp = |v: u64| v.min(i64::MAX as u64) as i64;
+    let concat: i64 = endrec
+        .location
+        .saturating_sub(clamp(endrec.size_cd))
+        .saturating_sub(clamp(endrec.offset_cd));
+    let start_dir: i64 = clamp(endrec.offset_cd).saturating_add(concat);
     if start_dir < 0 {
+        return Err(());
+    }
+    // `start_dir == location - size_cd`, so the check above already keeps
+    // the CD inside the file — but a declared CD of e.g. 4GB inside a
+    // 4GB file still allocates the declaration. Bound it absolutely.
+    if endrec.size_cd > MAX_CD_BYTES {
         return Err(());
     }
     if f.seek(SeekFrom::Start(start_dir as u64)).is_err() {
@@ -433,6 +465,9 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
             &mut filename,
             filename_crc,
         )?;
+        if entries.len() >= MAX_CD_ENTRIES {
+            return Err(());
+        }
         entries.push(ZipEntry {
             filename,
             flag_bits,
@@ -440,7 +475,8 @@ fn read_cd(f: &mut File) -> Result<Option<Vec<ZipEntry>>, ()> {
             crc,
             compress_size,
             file_size,
-            header_offset: header_offset as i64 + concat,
+            header_offset: (header_offset.min(i64::MAX as u64) as i64)
+                .saturating_add(concat),
             end_offset: 0,
         });
         total = total
@@ -483,6 +519,12 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     if e.filename.ends_with('/') {
         return ReadOutcome::Bail; // directory entry → Python decides
     }
+    // The declared uncompressed size is attacker input and sizes the
+    // output buffer — refuse anything above the entry cap before it can
+    // allocate. (zip64 extras can claim u64::MAX.)
+    if e.file_size > MAX_ENTRY_BYTES {
+        return ReadOutcome::Bail;
+    }
     if e.header_offset < 0 {
         return ReadOutcome::Bail;
     }
@@ -497,9 +539,27 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     }
     let fnlen = u16::from_le_bytes(lfh[26..28].try_into().unwrap()) as u64;
     let extralen = u16::from_le_bytes(lfh[28..30].try_into().unwrap()) as u64;
-    let data_start = e.header_offset + SIZE_LFH as i64 + fnlen as i64 + extralen as i64;
-    if data_start < 0 || data_start + e.compress_size as i64 > e.end_offset {
+    let data_start = e
+        .header_offset
+        .saturating_add(SIZE_LFH as i64)
+        .saturating_add(fnlen as i64)
+        .saturating_add(extralen as i64);
+    if data_start < 0
+        || data_start.saturating_add(e.compress_size as i64) > e.end_offset
+    {
         return ReadOutcome::Bail; // "Overlapped entries" → BadZipFile
+    }
+    // `end_offset` only proves header-level consistency — it's the NEXT
+    // entry's header_offset, another CD-supplied value, so it can't bound
+    // the alloc by real bytes. `compress_size` must fit inside the file:
+    // the read below can't succeed past EOF, so refuse the declaration
+    // before it sizes the buffer (same posture as read_store_parts).
+    let avail = f
+        .metadata()
+        .map(|m| m.len().saturating_sub(data_start as u64))
+        .unwrap_or(0);
+    if e.compress_size > avail {
+        return ReadOutcome::Bail;
     }
     let mut comp = vec![0u8; e.compress_size as usize];
     if f.seek(SeekFrom::Start(data_start as u64)).is_err()
@@ -510,10 +570,14 @@ fn zip_read_data(f: &mut File, e: &ZipEntry) -> ReadOutcome {
     let out: Vec<u8> = match e.compress_type {
         0 => comp, // stored
         8 => {
-            use flate2::{Decompress, FlushDecompress};
-            let mut d = Decompress::new(false); // raw deflate
-            let mut out = Vec::with_capacity(e.file_size as usize);
-            match d.decompress_vec(&comp, &mut out, FlushDecompress::Finish) {
+            // Bound the inflation itself: `decompress_vec` expands the
+            // output unbounded, so a ~1000:1 bomb OOMs before the size
+            // check below could run. `take` caps the decoded stream; the
+            // exact-length check then rejects both over- and undersize.
+            let mut out = Vec::with_capacity(e.file_size.min(64 << 20) as usize);
+            let mut d =
+                flate2::read::DeflateDecoder::new(&comp[..]).take(MAX_ENTRY_BYTES + 1);
+            match d.read_to_end(&mut out) {
                 Ok(_) => out,
                 Err(_) => return ReadOutcome::Bail,
             }
@@ -1637,6 +1701,12 @@ fn r5_parse_block_header(fd: &mut Fd, enc: &mut bool) -> RResult<Option<R5Header
         return Err(RarErr::Partial); // EOF → _set_error → stop
     }
     while *start.last().unwrap() & 0x80 != 0 {
+        // The hdrlen vint is ≤11 bytes (load_vint); an 0x80-padded file
+        // would grow `start` byte-at-a-time past any header bound before
+        // load_vint could reject it.
+        if start.len() >= 16 {
+            return Err(RarErr::Partial);
+        }
         let b = fd.read(1).map_err(|_| RarErr::Partial)?;
         if b.is_empty() {
             return Err(RarErr::Partial);
@@ -2029,14 +2099,317 @@ fn rar5_names(path: &Path, sfx_offset: u64) -> RResult<(Vec<Entry>, bool)> {
     Ok((entries, needs_upstream))
 }
 
+// ── #403 multipart store-concat ──────────────────────────────────────────
+//
+// `store` (uncompressed) members split across volumes concatenate raw:
+// rarfile's DirectReader does exactly this in pure Python, so bytes are
+// identical without touching the unrar dll (whose UCM_CHANGEVOLUME path
+// CRC-fails our minimal synthetic headers but chains real `rar` output
+// fine — the ordinal path below still covers compressed members).
+// Returns `Some` only for proven-identical store reads; anything else is
+// `None` so callers fall through to unrar-ordinal → upstream proxy.
+
+/// One raw data part of a store member: (volume file, data offset, length).
+struct StorePart {
+    volfile: PathBuf,
+    offset: u64,
+    len: u64,
+}
+
+fn read_store_parts(parts: &[StorePart], total: u64, crc: u32) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    // `total`/`p.len` come from archive headers and size both `out` and
+    // each part buffer — bound them before they can allocate.
+    if total > MAX_ENTRY_BYTES {
+        return None;
+    }
+    let mut out = Vec::with_capacity(total.min(64 << 20) as usize);
+    for p in parts {
+        let mut f = std::fs::File::open(&p.volfile).ok()?;
+        // A part longer than the bytes left in its own volume can never
+        // satisfy read_exact — refuse it before it sizes the buffer.
+        let avail = f.metadata().ok()?.len().saturating_sub(p.offset);
+        if p.len > avail {
+            return None;
+        }
+        f.seek(SeekFrom::Start(p.offset)).ok()?;
+        let mut buf = vec![0u8; p.len as usize];
+        f.read_exact(&mut buf).ok()?;
+        out.extend_from_slice(&buf);
+    }
+    if out.len() as u64 != total {
+        return None;
+    }
+    if crc != 0 && crc32fast::hash(&out) != crc {
+        return None;
+    }
+    Some(out)
+}
+
+/// RAR5 multipart store read for `inner`: walks volumes like `rar5_names`,
+/// collecting raw parts. `None` = not found / not store / inconsistent —
+/// caller falls through to unrar-ordinal.
+fn rar5_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>> {
+    let mut fd = Fd::open(path).ok()?;
+    fd.seek(sfx_offset).ok()?;
+    let sig = fd.read(8).ok()?;
+    if sig.as_slice() != RAR5_ID {
+        return None;
+    }
+    let mut parts: Vec<StorePart> = Vec::new();
+    let mut want_size: Option<u64> = None;
+    let mut want_crc: u32 = 0;
+    let mut volume = 0u32;
+    let mut more_vols = false;
+    let mut endarc = false;
+    let mut volfile = path.to_path_buf();
+    let mut main_seen = false;
+    let mut enc = false;
+    let mut raise_need_first_vol = false;
+
+    loop {
+        let h: Option<R5Header> = if endarc {
+            None
+        } else {
+            match r5_parse_block_header(&mut fd, &mut enc) {
+                Ok(v) => v,
+                Err(RarErr::Partial) => None,
+                Err(RarErr::Fatal) => return None,
+            }
+        };
+        let h = match h {
+            Some(h) => h,
+            None => {
+                if raise_need_first_vol {
+                    return None; // opened mid-set for a split file
+                }
+                if more_vols {
+                    volume += 1;
+                    if !main_seen {
+                        return None;
+                    }
+                    let next = next_newvol(volfile.to_str()?).ok()?;
+                    let np = PathBuf::from(&next);
+                    match Fd::open(&np) {
+                        Ok(mut nfd) => {
+                            let s = nfd.read(8).ok()?;
+                            if s.as_slice() != RAR5_ID {
+                                break;
+                            }
+                            fd = nfd;
+                            volfile = np;
+                            more_vols = false;
+                            endarc = false;
+                            main_seen = false;
+                            enc = false;
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                break;
+            }
+        };
+        match h.block_type {
+            RAR5_BLOCK_MAIN if !main_seen => {
+                main_seen = true;
+                if volume == 0 && h.main_has_volnr && h.main_volnr > 0 {
+                    return None;
+                }
+                if h.flags & RAR_MAIN_PASSWORD != 0 {
+                    break;
+                }
+            }
+            RAR5_BLOCK_ENDARC => {
+                if h.endarc_next_vol {
+                    more_vols = true;
+                }
+                endarc = true;
+            }
+            RAR5_BLOCK_FILE => {
+                if h.block_flags & RAR5_BF_SPLIT_AFTER != 0 {
+                    more_vols = true;
+                }
+                if volume == 0 && h.block_flags & RAR5_BF_SPLIT_BEFORE != 0 {
+                    raise_need_first_vol = true;
+                }
+            }
+            _ => {}
+        }
+        if h.block_type == RAR5_BLOCK_FILE && h.filename == inner {
+            if h.is_dir || h.file_version || h.file_encrypted || h.file_redir.is_some() {
+                return None;
+            }
+            if h.compress_type != RAR_M0 {
+                return None; // compressed → unrar-ordinal path
+            }
+            match want_size {
+                Some(ws) if ws != h.file_size || want_crc != h.file_crc => return None,
+                _ => {}
+            }
+            want_size = Some(h.file_size);
+            want_crc = h.file_crc;
+            parts.push(StorePart { volfile: volfile.clone(), offset: h.data_offset, len: h.add_size });
+        }
+        if h.add_size > 0 {
+            // saturating: crafted near-u64::MAX offsets must not wrap in
+            // debug builds — the seek just fails later either way.
+            fd.seek(h.data_offset.saturating_add(h.add_size)).ok()?;
+        }
+    }
+    let total = want_size?;
+    // Duplicates without split flags are separate files (last wins per
+    // rarfile `_info_map`); splits concatenate. A single non-split part
+    // reads directly; split parts must be >1 (a lone SPLIT_AFTER with a
+    // missing continuation volume fails the size check below).
+    if parts.len() == 1 {
+        // If the lone header carries a split flag, its counterpart volume
+        // is missing → size mismatch → None.
+        read_store_parts(&parts, total, want_crc)
+    } else if parts.is_empty() {
+        None
+    } else {
+        read_store_parts(&parts, total, want_crc)
+    }
+}
+
+/// RAR3 multipart store read for `inner`: same contract as RAR5 above.
+fn rar3_read_store(path: &Path, sfx_offset: u64, inner: &str) -> Option<Vec<u8>> {
+    let mut fd = Fd::open(path).ok()?;
+    fd.seek(sfx_offset).ok()?;
+    let sig = fd.read(7).ok()?;
+    if sig.as_slice() != RAR_ID {
+        return None;
+    }
+    let mut parts: Vec<StorePart> = Vec::new();
+    let mut want_size: Option<u64> = None;
+    let mut want_crc: u32 = 0;
+    let mut volume = 0u32;
+    let mut more_vols = false;
+    let mut endarc = false;
+    let mut volfile = path.to_path_buf();
+    let mut main_flags: Option<u16> = None;
+    let mut raise_need_first_vol = false;
+
+    loop {
+        let h: Option<R3Header> = if endarc {
+            None
+        } else if main_flags.map(|f| f & RAR_MAIN_PASSWORD != 0).unwrap_or(false) {
+            None
+        } else {
+            match r3_parse_block_header(&mut fd) {
+                Ok(v) => v,
+                Err(RarErr::Partial) => None,
+                Err(RarErr::Fatal) => return None,
+            }
+        };
+        let h = match h {
+            Some(h) => h,
+            None => {
+                if raise_need_first_vol {
+                    return None;
+                }
+                if more_vols {
+                    volume += 1;
+                    let next = match main_flags {
+                        None => return None,
+                        Some(f) if f & RAR_MAIN_NEWNUMBERING != 0 => {
+                            next_newvol(volfile.to_str()?).ok()?
+                        }
+                        _ => next_oldvol(volfile.to_str()?),
+                    };
+                    let np = PathBuf::from(&next);
+                    match Fd::open(&np) {
+                        Ok(mut nfd) => {
+                            let s = nfd.read(7).ok()?;
+                            if s.as_slice() != RAR_ID {
+                                break;
+                            }
+                            fd = nfd;
+                            volfile = np;
+                            more_vols = false;
+                            endarc = false;
+                            main_flags = None;
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                break;
+            }
+        };
+        match h.btype {
+            RAR_BLOCK_MAIN if main_flags.is_none() => {
+                main_flags = Some(h.flags);
+                if volume == 0
+                    && (h.flags & RAR_MAIN_NEWNUMBERING) != 0
+                    && (h.flags & RAR_MAIN_FIRSTVOLUME) == 0
+                {
+                    raise_need_first_vol = true;
+                }
+                if h.flags & RAR_MAIN_PASSWORD != 0 {
+                    break;
+                }
+            }
+            RAR_BLOCK_ENDARC => {
+                if h.flags & RAR_ENDARC_NEXT_VOLUME != 0 {
+                    more_vols = true;
+                }
+                endarc = true;
+                if raise_need_first_vol && h.flags & RAR_ENDARC_VOLNR != 0 {
+                    return None;
+                }
+            }
+            RAR_BLOCK_FILE => {
+                if h.flags & RAR_FILE_SPLIT_AFTER != 0 {
+                    more_vols = true;
+                }
+                if volume == 0 && h.flags & RAR_FILE_SPLIT_BEFORE != 0 {
+                    raise_need_first_vol = true;
+                }
+            }
+            _ => {}
+        }
+        if h.btype == RAR_BLOCK_FILE && h.filename == inner {
+            if h.is_dir {
+                return None;
+            }
+            if h.flags & RAR_FILE_PASSWORD != 0 {
+                return None;
+            }
+            if h.flags & RAR_FILE_VERSION != 0 {
+                continue; // version-marked `name;N` — not servable, like listing
+            }
+            if h.compress_type != RAR_M0 {
+                return None; // compressed → unrar-ordinal path
+            }
+            match want_size {
+                Some(ws) if ws != h.file_size || want_crc != h.file_crc => return None,
+                _ => {}
+            }
+            want_size = Some(h.file_size);
+            want_crc = h.file_crc;
+            parts.push(StorePart { volfile: volfile.clone(), offset: h.data_offset, len: h.add_size });
+        }
+        // SUB "CMT" payloads don't affect store reads — skip data area.
+        if h.add_size > 0 {
+            fd.seek(h.data_offset.saturating_add(h.add_size)).ok()?;
+        }
+    }
+    let total = want_size?;
+    if parts.is_empty() {
+        None
+    } else {
+        read_store_parts(&parts, total, want_crc)
+    }
+}
+
 /// Full member listing with the extraction-side metadata — crc/size for
 /// the misalignment check, `hdr_idx` (the ordinal unrar's walk uses), and
-/// `needs_upstream`: the bundled unrar crate answers every
-/// UCM_CHANGEVOLUME with "stop" (open_archive.rs always returns -1 for
-/// RAR_VOL_ASK), so a multipart set's split member — and every member
-/// after it, since RAR_SKIP on the split header dies at the volume ask —
-/// cannot extract in-process. Those archives decline native reads so the
-/// route can proxy to rarfile+7z, which walks volumes fine.
+/// `needs_upstream`: a multipart set whose store members are all present
+/// reads natively via store-concat (#403); compressed members and sets
+/// with missing volumes need upstream 7z (the bundled unrar aborts on
+/// some compressed multipart — never chained for multipart).
 /// `None` → Python fallback (rarfile decides).
 fn rar_entries(path: &Path) -> Option<(Vec<Entry>, bool)> {
     let (ver, ofs) = match find_sfx(path) {
@@ -2062,11 +2435,13 @@ pub fn rar_names(path: &Path) -> Option<Vec<(String, bool)>> {
         .map(|(es, _)| es.into_iter().map(|e| (e.filename, e.is_dir)).collect())
 }
 
-/// `true` when the archive is a multipart set — native reads decline so
-/// the route proxies to rarfile+7z (see `rar_entries`).
-pub fn rar_needs_upstream(path: &Path) -> bool {
+/// `true` when the archive is a multipart set — store reads go native
+/// (#403 store-concat); anything else declines on miss so routes
+/// answer 501 (compressed multipart is never sent to the bundled
+/// unrar — process-abort risk). #532: no upstream exists anymore.
+pub fn rar_needs_external_7z(path: &Path) -> bool {
     match open_archive(path) {
-        Some(oa) => oa.rar_needs_upstream(),
+        Some(oa) => oa.rar_needs_external_7z(),
         None => rar_entries(path).map(|(_, nu)| nu).unwrap_or(false),
     }
 }
@@ -2080,7 +2455,24 @@ pub fn rar_needs_upstream(path: &Path) -> bool {
 pub fn rar_read_entry(path: &Path, inner: &str) -> Option<Vec<u8>> {
     let (entries, needs_upstream) = rar_entries(path)?;
     if needs_upstream {
-        return None; // routes proxy multipart sets to upstream 7z
+        // #403: multipart store members concat raw parts (DirectReader
+        // parity). Anything else (compressed/encrypted/missing volumes)
+        // returns None so routes proxy to upstream 7z — the bundled
+        // unrar's UCM_CHANGEVOLUME path aborts the process on some
+        // compressed multipart sets (unrar.rs from_ptr_truncate UB), so
+        // the ordinal chain is never attempted for multipart.
+        if let Ok((ver, ofs)) = find_sfx(path) {
+            let store = match ver {
+                5 => rar5_read_store(path, ofs, inner),
+                3 => rar3_read_store(path, ofs, inner),
+                _ => None,
+            };
+            if store.is_some() {
+                return store;
+            }
+        }
+        let _ = entries;
+        return None;
     }
     let e = entries.iter().rposition(|e| e.filename == inner && !e.is_dir)?;
     let want = &entries[e];
@@ -2125,6 +2517,13 @@ fn rar_read_ordinal(
                 return None;
             }
             if e.is_directory() || e.is_encrypted() {
+                return None;
+            }
+            // Bound the in-process decode the same way the ZIP/RAR5 paths
+            // do. This screens only the *declared* size — a stream that
+            // expands past it inside unrar needs the extractor-isolation
+            // follow-up (unrar upgrade/subprocess, tracked separately).
+            if want.unpacked_size > MAX_ENTRY_BYTES {
                 return None;
             }
             let (data, _rest) = header.read().ok()?;
@@ -2252,7 +2651,20 @@ impl OpenArchive {
                 needs_upstream,
             } => {
                 if *needs_upstream {
-                    return None; // routes proxy multipart sets to upstream 7z
+                    // #403: same contract as `rar_read_entry` — store-concat
+                    // only, never the unrar ordinal chain (process-abort
+                    // risk on compressed multipart).
+                    if let Ok((ver, ofs)) = find_sfx(path) {
+                        let store = match ver {
+                            5 => rar5_read_store(path, ofs, inner),
+                            3 => rar3_read_store(path, ofs, inner),
+                            _ => None,
+                        };
+                        if store.is_some() {
+                            return store;
+                        }
+                    }
+                    return None;
                 }
                 let e = entries.iter().rposition(|e| e.filename == inner && !e.is_dir)?;
                 let want = &entries[e];
@@ -2280,8 +2692,8 @@ impl OpenArchive {
     }
 
     /// `true` when this RAR is a multipart set — native reads decline so
-    /// routes can proxy (bundled unrar cannot chain volumes).
-    pub fn rar_needs_upstream(&self) -> bool {
+    /// routes answer 501 (bundled unrar cannot chain volumes).
+    pub fn rar_needs_external_7z(&self) -> bool {
         matches!(self.parsed, Parsed::Rar { needs_upstream: true, .. })
     }
 }
@@ -2923,7 +3335,8 @@ mod memo_tests {
     /// data continues in the next volume (only `head` bytes land here);
     /// `split_before` is its continuation header in the following volume
     /// carrying the `tail` bytes. Both headers repeat the whole-file
-    /// size/crc like real multipart sets.
+    /// size/crc like real multipart sets. MAIN carries ISVOL (#403 —
+    /// without it 7z/rarfile treat vol1 as single-volume and never chain).
     fn make_rar5_vol(
         path: &Path,
         volnr: u64,
@@ -2975,8 +3388,13 @@ mod memo_tests {
         let mut main = Vec::new();
         vint(1, &mut main);
         vint(0, &mut main);
-        vint(0x02, &mut main); // HAS_VOLNR
-        vint(volnr, &mut main);
+        if volnr == 0 {
+            // First volume: ISVOL without VOLNR (FIRSTVOLUME).
+            vint(0x01, &mut main);
+        } else {
+            vint(0x03, &mut main); // ISVOL | HAS_VOLNR
+            vint(volnr, &mut main);
+        }
         out.extend(header(&main));
         for (name, data) in members {
             out.extend(file_block(name, data, data, 0));
@@ -2995,14 +3413,13 @@ mod memo_tests {
         std::fs::write(path, out).unwrap();
     }
 
-    /// Multipart contract: the ported walk still lists every member
-    /// across the volume boundary, but the set is flagged
-    /// `needs_upstream` — the bundled unrar answers UCM_CHANGEVOLUME with
-    /// "stop", so the split member and (because RAR_SKIP on it dies at
-    /// the volume ask) every later member cannot extract in-process.
-    /// Routes proxy the whole set to rarfile+7z; `read_entry` declines
-    /// rather than 404-ing members Python could serve. Also covers the
-    /// volnr>0 first-volume rule that lets a numbered part1 list at all.
+    /// Multipart contract (#403): the ported walk lists every member
+    /// across the volume boundary; the set stays flagged `needs_upstream`
+    /// so routes proxy on a native miss (missing volumes, compressed
+    /// members) instead of 404-ing. Store members — split or whole —
+    /// read natively via store-concat (DirectReader parity); compressed
+    /// members chain via the bundled unrar. Also covers the volnr>0
+    /// first-volume rule that lets a numbered part1 list at all.
     #[test]
     fn rar5_multipart_continuation_keeps_ordinals() {
         let _g = serial();
@@ -3016,8 +3433,8 @@ mod memo_tests {
                 .as_nanos()
         ));
         std::fs::create_dir(&dir).unwrap();
-        let p1 = dir.join("work.part1.rar");
-        let p2 = dir.join("work.part2.rar");
+        let p1 = dir.join("work.part01.rar");
+        let p2 = dir.join("work.part02.rar");
         make_rar5_vol(
             &p1,
             0,
@@ -3043,12 +3460,15 @@ mod memo_tests {
             .map(|(n, _)| n)
             .collect();
         assert_eq!(names, vec!["001.png", "002.png", "003.png"]);
-        assert!(a.rar_needs_upstream(), "multipart set must flag upstream");
-        assert!(rar_needs_upstream(&p1));
-        assert_eq!(a.read_entry(&p1, "001.png"), None, "declines → proxy");
-        assert_eq!(a.read_entry(&p1, "002.png"), None, "declines → proxy");
-        assert_eq!(a.read_entry(&p1, "003.png"), None, "declines → proxy");
-        assert_eq!(rar_read_entry(&p1, "001.png"), None);
+        assert!(a.rar_needs_external_7z(), "multipart set must flag upstream");
+        assert!(rar_needs_external_7z(&p1));
+        // #403 native store-concat: whole + split members read in-process.
+        assert_eq!(a.read_entry(&p1, "001.png").unwrap(), b"page1");
+        assert_eq!(a.read_entry(&p1, "002.png").unwrap(), b"helloworld");
+        assert_eq!(a.read_entry(&p1, "003.png").unwrap(), b"page3");
+        assert_eq!(rar_read_entry(&p1, "001.png").unwrap(), b"page1");
+        assert_eq!(rar_read_entry(&p1, "002.png").unwrap(), b"helloworld");
+        assert_eq!(rar_read_entry(&p1, "003.png").unwrap(), b"page3");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3158,6 +3578,250 @@ mod memo_tests {
                 .unwrap(),
             b"aaa-data"
         );
+        std::fs::remove_file(&p).ok();
+    }
+
+    // ── #556 review: crafted-archive allocation/decompression bounds ──────
+
+    /// Emit a zip holding one member with caller-chosen CD size fields —
+    /// make_zip can't lie, and lying is the point here. `data` is the
+    /// stored (compressed) byte stream; `crc_data` is what the CD crc is
+    /// computed over (the uncompressed bytes — zip checksums plaintext).
+    fn crafted_zip(
+        method: u16,
+        name: &str,
+        data: &[u8],
+        csize: u32,
+        fsize: u32,
+        crc_data: &[u8],
+    ) -> Vec<u8> {
+        let crc = crc32fast::hash(crc_data);
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(method));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(csize));
+        out.extend_from_slice(&le32(fsize));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+
+        let cd_off = out.len() as u32;
+        out.extend_from_slice(&le32(0x0201_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(method));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(csize));
+        out.extend_from_slice(&le32(fsize));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(0));
+        out.extend_from_slice(&le32(0));
+        out.extend_from_slice(name.as_bytes());
+        let cd_len = out.len() as u32 - cd_off;
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(1));
+        out.extend_from_slice(&le16(1));
+        out.extend_from_slice(&le32(cd_len));
+        out.extend_from_slice(&le32(cd_off));
+        out.extend_from_slice(&le16(0));
+        out
+    }
+
+    #[test]
+    fn zip_oversized_declared_entry_is_none() {
+        // file_size declares > MAX_ENTRY_BYTES — the pre-read bound must
+        // refuse before it sizes a buffer.
+        let p = tmp_cbz("big-decl");
+        std::fs::write(
+            &p,
+            crafted_zip(0, "a.png", b"tiny", 4, 0xFFFF_FFFE, b"tiny"),
+        )
+        .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn zip_deflate_roundtrip_and_overexpansion() {
+        use std::io::Write;
+        let raw = vec![7u8; 2 * 1024 * 1024];
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(&raw).unwrap();
+        let comp = enc.finish().unwrap();
+        assert!(comp.len() < raw.len());
+
+        // Honest declaration → the bounded decoder still serves it.
+        let p = tmp_cbz("defl-ok");
+        std::fs::write(
+            &p,
+            crafted_zip(8, "a.png", &comp, comp.len() as u32, raw.len() as u32, &raw),
+        )
+        .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png").unwrap(), raw);
+        std::fs::remove_file(&p).ok();
+
+        // Declared 1MiB, expands 2MiB — the stream is capped and the
+        // length check must reject, not serve a truncated prefix.
+        let p = tmp_cbz("defl-bomb");
+        std::fs::write(
+            &p,
+            crafted_zip(8, "a.png", &comp, comp.len() as u32, 1024 * 1024, &raw),
+        )
+        .unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// Two-CD-entry variant: entry A's `end_offset` is entry B's
+    /// `header_offset`, so a fake B makes A's overlap check pass while the
+    /// claimed data far exceeds the file — the compress_size alloc must
+    /// refuse on real bytes, not header consistency.
+    fn crafted_zip_pair() -> Vec<u8> {
+        let name = "a.png";
+        let data = b"tiny";
+        let crc = crc32fast::hash(data);
+        let mut out = Vec::new();
+        out.extend_from_slice(&le32(0x0403_4b50));
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0)); // stored
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le32(crc));
+        out.extend_from_slice(&le32(4));
+        out.extend_from_slice(&le32(4));
+        out.extend_from_slice(&le16(name.len() as u16));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        let cd_off = out.len() as u32;
+        // A: real LFH at 0, compress_size lied to ~4GiB.
+        let mut cd_entry = |name: &str, csize: u32, fsize: u32, off: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&le32(0x0201_4b50));
+            e.extend_from_slice(&le16(20));
+            e.extend_from_slice(&le16(20));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le32(crc));
+            e.extend_from_slice(&le32(csize));
+            e.extend_from_slice(&le32(fsize));
+            e.extend_from_slice(&le16(name.len() as u16));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le16(0));
+            e.extend_from_slice(&le32(0));
+            e.extend_from_slice(&le32(off));
+            e.extend_from_slice(name.as_bytes());
+            e
+        };
+        let a = cd_entry("a.png", 0xFFFF_F000, 4, 0);
+        let b = cd_entry("b.png", 0, 0, 0xFFFF_FF00);
+        out.extend_from_slice(&a);
+        out.extend_from_slice(&b);
+        let cd_len = out.len() as u32 - cd_off;
+        out.extend_from_slice(&le32(0x0605_4b50));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(&le16(2));
+        out.extend_from_slice(&le16(2));
+        out.extend_from_slice(&le32(cd_len));
+        out.extend_from_slice(&le32(cd_off));
+        out.extend_from_slice(&le16(0));
+        out
+    }
+
+    #[test]
+    fn zip_oversized_compress_size_is_none() {
+        // compress_size passes the end_offset overlap check (set by fake
+        // entry B) but exceeds the real file — refuse before the alloc.
+        let p = tmp_cbz("big-comp");
+        std::fs::write(&p, crafted_zip_pair()).unwrap();
+        assert_eq!(zip_read_entry(&p, "a.png"), None);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn zip_huge_cd_declaration_fails_fast() {
+        // Sparse 300MB file ending in an EOCD that declares a >cap CD:
+        // size_cd stays inside the file (start_dir ≥ 0), so only the
+        // absolute MAX_CD_BYTES bound stops the pre-parse allocation.
+        let p = tmp_cbz("huge-cd");
+        {
+            let f = std::fs::File::create(&p).unwrap();
+            f.set_len(300 * 1024 * 1024).unwrap();
+        }
+        use std::io::{Seek, Write};
+        let mut f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+        f.seek(std::io::SeekFrom::End(-22)).unwrap();
+        let mut eocd = Vec::new();
+        eocd.extend_from_slice(&le32(0x0605_4b50));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le16(0));
+        eocd.extend_from_slice(&le32(280 * 1024 * 1024)); // size_cd > MAX_CD_BYTES
+        eocd.extend_from_slice(&le32(0));
+        eocd.extend_from_slice(&le16(0));
+        f.write_all(&eocd).unwrap();
+        drop(f);
+        assert!(zip_names(&p).is_none());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn store_parts_refuse_oversized_declarations() {
+        let p = tmp_cbz("store");
+        std::fs::write(&p, b"0123456789").unwrap();
+        // A part larger than its own volume: declared add_size must not
+        // allocate — refuse before the buffer exists.
+        let parts = [StorePart {
+            volfile: p.clone(),
+            offset: 0,
+            len: u64::MAX / 2,
+        }];
+        assert!(read_store_parts(&parts, 4, 0).is_none());
+        // A total beyond the entry cap is refused up front.
+        let parts = [StorePart {
+            volfile: p.clone(),
+            offset: 0,
+            len: 1,
+        }];
+        assert!(read_store_parts(&parts, MAX_ENTRY_BYTES + 1, 0).is_none());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn r5_header_prefix_padding_is_bounded() {
+        // 0x80 continuation bytes must not grow the header-prefix buffer
+        // unbounded — the hdrlen vint is ≤11 bytes so the prefix stops
+        // well before this 1KB pad could.
+        let p = tmp_cbz("r5-pad");
+        let mut bytes = RAR5_ID.to_vec();
+        bytes.extend_from_slice(&[0x80u8; 1024]);
+        std::fs::write(&p, bytes).unwrap();
+        let mut fd = Fd::open(&p).ok().unwrap();
+        fd.seek(RAR5_ID.len() as u64).ok().unwrap();
+        let mut enc = false;
+        assert!(r5_parse_block_header(&mut fd, &mut enc).is_err());
         std::fs::remove_file(&p).ok();
     }
 }

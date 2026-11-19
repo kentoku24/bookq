@@ -615,6 +615,15 @@ def test_shell_watchdog_marks_healthy_and_stale(browser, server):
             "        const r = window.__shellStale();"
             "        window.BOOKQ_UI_SYNC_V2 = b; return r; }"
         ) is True
+        # spread.js is SWR like the rest of the shell — a stale copy under
+        # new app.js lacks padChapterSpacers and loadImages would throw on
+        # any cross-chapter open (#441 review).
+        assert pg.evaluate(
+            "() => { const f = window.padChapterSpacers;"
+            "        delete window.padChapterSpacers;"
+            "        const r = window.__shellStale();"
+            "        window.padChapterSpacers = f; return r; }"
+        ) is True
         # everything restored — back to healthy
         assert pg.evaluate("() => window.__shellStale()") is False
 

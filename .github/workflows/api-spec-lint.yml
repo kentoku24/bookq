@@ -1,21 +1,45 @@
 # Lint the API contract files (single source of truth for server/client).
 # Spectral validates OpenAPI + AsyncAPI shape and hygiene rules from
-# .spectral.yaml. Runs on any PR touching api/ or this workflow.
+# .spectral.yaml. codegen-drift regenerates derived artifacts via
+# scripts/api/codegen.sh and fails the PR when they are stale.
+# Runs on any PR touching api/, the generated artifacts, the codegen
+# scripts, or this workflow.
 name: api-spec-lint
 
 on:
   pull_request:
-    paths:
-      - "api/**"
-      - ".spectral.yaml"
-      - ".github/workflows/api-spec-lint.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 jobs:
+  # Job-level path gating so every PR reports this check name — see
+  # android.yml changes-android for why workflow-level paths: would
+  # deadlock required status checks (#382).
+  changes-api-spec-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            run:
+              - "api/**"
+              - ".spectral.yaml"
+              - "scripts/api/**"
+              - "web/static/api/api-types.d.ts"
+              - ".github/workflows/api-spec-lint.yml"
+
   spectral:
+    needs: changes-api-spec-lint
+    if: github.event_name == 'workflow_dispatch' || needs.changes-api-spec-lint.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -27,5 +51,49 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: astral-sh/setup-uv@v7
+
       - name: Lint API specs
         run: npx --yes @stoplight/spectral-cli lint --ruleset .spectral.yaml --fail-severity error api/openapi.v1.yaml api/asyncapi.yaml
+
+      # Every `examples:` body must satisfy its response schema — the
+      # bundle is the single fixture source for client-only tests (#237).
+      # Bundle freshness itself is covered by the codegen-drift job
+      # (codegen.sh now includes extract-examples.py).
+      - name: Validate spec examples against schemas (#237)
+        run: |
+          uv run --with pyyaml --with jsonschema \
+            python scripts/api/validate-examples.py --spec api/openapi.v1.yaml
+
+  # Regenerate every derived artifact (api-types.d.ts + api/dist/*.json)
+  # and fail if the working tree differs — editing a spec without
+  # re-running codegen.sh breaks the PR.
+  codegen-drift:
+    needs: changes-api-spec-lint
+    if: github.event_name == 'workflow_dispatch' || needs.changes-api-spec-lint.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Regenerate derived artifacts
+        run: ./scripts/api/codegen.sh
+
+      # porcelain catches untracked files too — `git diff --exit-code`
+      # alone would miss a new file under api/dist/.
+      - name: Fail on drift
+        run: |
+          drift="$(git status --porcelain -- api/dist web/static/api/api-types.d.ts)"
+          if [ -n "$drift" ]; then
+            echo "$drift"
+            echo "::error::derived artifacts are stale — run ./scripts/api/codegen.sh and commit the output"
+            exit 1
+          fi

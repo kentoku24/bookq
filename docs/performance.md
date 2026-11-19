@@ -72,7 +72,7 @@ iOS Simulator の Safari（WebKit）でも同じ `app/perf/thumbnail-probe.js` �
 
 ## root-folder-perf-under-5s after-state（2026-09-27、合成 localhost・A_iphone 390x844 DPR3）
 
-plan-track `.omo/plans/root-folder-perf-under-5s.md` Todos 2–6 適用後の合成計測
+表示高速化一式（shallow-first + thumb endpoint + 単一カバー優先）適用後の合成計測
 （uiux_tree 24 tiles / 68 imgs、既存 KPI 行は不変・本ブロックのみ追加）。
 実機 cold 中央値の合否は未測定 — runbook 実施後に本ブロックへ追記する。
 

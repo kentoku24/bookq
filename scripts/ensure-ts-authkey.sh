@@ -142,8 +142,12 @@ fi
 [ -n "$FORCE" ] && NEEDS_RENEW=1
 
 # TS_API_KEY は OAuth 設定後は不要になるため、設定されている場合だけ期限を見る。
+# OAuth client 設定済みなら admin API は bearer token が優先され TS_API_KEY は
+# 未使用のため、期限警告ではなく削除を促す info に留める。
 if [ -n "$API_KEY" ]; then
-    if [ -z "$API_EXP" ]; then
+    if [ -n "$OAUTH_ID" ] && [ -n "$OAUTH_SECRET" ]; then
+        info "TS_API_KEY は OAuth client 設定済みのため未使用です（.env から削除可能）。"
+    elif [ -z "$API_EXP" ]; then
         warn "TS_API_KEY_EXPIRES が未記録です。.env に TS_API_KEY_EXPIRES=YYYY-MM-DD を追記してください。"
     else
         days="$(days_until "$API_EXP")" || days=""

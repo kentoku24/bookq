@@ -1,18 +1,18 @@
-"""Offline harness E2E — 10 failure modes via harness (Todo 3).
+"""Offline harness E2E — 10 failure modes via harness.
 
 Uses the server fixture's dynamic port (never a fixed 8080/18080) with the ?offline=1 gate.
 Each test clears IndexedDB/caches via evaluate and is independent.
 
 Covers:
  ① navigate ignoreSearch — caches.match("/?offline=1",{ignoreSearch:true}) hit
- ② /api/folders cache hit — first non-controlled then offline fetch len==online len
+ ② tree v1 cache hit — first non-controlled then offline fetch len==online len
  ③ parent-only download not 0 — getLeafPathsFor('group/episodes') >0
  ④ group/episodes flatten proxy — getLeafPathsFor('group/episodes').length>1
  ⑤ double-count / delete leak — dedup sum == raw/2 when parent exists and delete returns to 0
  ⑥ await race — storage-text updates within 800ms after badge
  ⑦ iOS 0/0 + Content-Length missing — mock navigator.storage.estimate returns {usage:0,quota:0} + blob fallback
  ⑧ MB/GB rounding — fmt(50_000_000) -> "50.0 MB", fmt(1_500_000_000) -> "1.5 GB"
- ⑨ VPN split health abort — page.route('/api/health*', lambda route: route.abort('failed')) → ○オフライン
+ ⑨ VPN split health abort — page.route('…/api/v1/health*', lambda route: route.abort('failed')) → ○オフライン
  ⑩ clone consumption order — sizeClone.blob existence + bytes>0 without Content-Length + quota mock via caches.put QuotaExceededError
 """
 
@@ -42,6 +42,9 @@ def goto_harness(page, server):
     page.wait_for_selector("#harness-status", timeout=10000)
 
 
+from tests.safari.sw import ensure_sw_interception as _ensure_sw_interception
+
+
 def wait_for_sw(page, timeout=15000):
     for _ in range(2):
         try:
@@ -50,6 +53,7 @@ def wait_for_sw(page, timeout=15000):
                     "() => navigator.serviceWorker && navigator.serviceWorker.controller !== null",
                     timeout=4000,
                 )
+                _ensure_sw_interception(page)
                 return True
             except Exception:
                 pass
@@ -62,6 +66,7 @@ def wait_for_sw(page, timeout=15000):
                 "async () => { try { const r = await navigator.serviceWorker.ready; return !!r; } catch { return !!navigator.serviceWorker.controller; } }"
             )
             if ok:
+                _ensure_sw_interception(page)
                 return True
         except Exception as e:
             if "Execution context was destroyed" in str(e):
@@ -154,7 +159,7 @@ def test_01_navigate_ignore_search(page, server):
     assert sw_has, "sw.js should match navigations with {ignoreSearch:true}"
 
 
-# ── ② /api/folders cache hit ─────────────────────────────────────────────────
+# ── ② tree v1 cache hit ─────────────────────────────────────────────────
 def test_02_api_folders_cache_hit(page, server):
     clear_all(page)
     goto_offline(page, server)
@@ -174,7 +179,7 @@ def test_02_api_folders_cache_hit(page, server):
                 wait_for_sw(page)
                 continue
             raise
-    assert online_len is not None and online_len > 0, f"online /api/folders len {online_len}"
+    assert online_len is not None and online_len > 0, f"online tree len {online_len}"
     page.context.set_offline(True)
     try:
         offline_len = None
@@ -213,7 +218,7 @@ def test_02_api_folders_cache_hit(page, server):
                     if offline_len != -2:
                         break
                     page.wait_for_selector(".tile", timeout=2400)
-        assert offline_len is not None and offline_len > 0, f"offline /api/folders fallback failed {offline_len}"
+        assert offline_len is not None and offline_len > 0, f"offline tree fallback failed {offline_len}"
         assert offline_len == online_len, f"offline len {offline_len} != online {online_len} (API NetworkFirst fallback)"
     finally:
         page.context.set_offline(False)
@@ -540,19 +545,18 @@ def test_09_vpn_split_health_abort(page, server):
     wait_for_sw(page)
     page.route("**/api/v1/health*", lambda route: route.abort("failed"))
     try:
+        # spec §5: health-only failure is NOT offline while other requests
+        # still answer — any real response is success evidence. Reject all
+        # fetches to model true unreachability.
         page.evaluate(
             """() => {
                 const orig = window.fetch;
                 window._origFetchHealth = orig;
-                window.fetch = (input, init) => {
-                    const u = typeof input === 'string' ? input : (input && input.url) || '';
-                    if (u.includes('/api/v1/health')) return Promise.reject(new Error('failed'));
-                    return orig(input, init);
-                };
+                window.fetch = (input, init) => Promise.reject(new Error('failed'));
             }"""
         )
         page.evaluate("() => window.updateOnlineStatus && window.updateOnlineStatus()")
-        page.wait_for_function("() => document.getElementById('offline-status') && document.getElementById('offline-status').textContent.includes('オフライン')", timeout=5000)
+        page.wait_for_function("() => document.getElementById('offline-status') && document.getElementById('offline-status').textContent.includes('オフライン')", timeout=8000)
         status = page.locator("#offline-status").text_content() or ""
         assert "オフライン" in status, f"health abort should show ○オフライン, got {status!r}"
         assert "○オフライン" in status, f"expected ○オフライン, got {status!r}"
