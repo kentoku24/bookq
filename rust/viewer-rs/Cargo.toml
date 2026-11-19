@@ -11,7 +11,10 @@ bookq-core = { path = "../bookq-core" }
 crc32fast = "1"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 base64 = "0.22"
-flate2 = { version = "1", features = ["zlib"] }
+# zlib-rs (not "zlib"): the distroless runtime has no system libz.so.1, and
+# bookq-core already uses the same backend — the binary keeps zero C
+# compression deps (#573).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
 http-body-util = "0.1"
