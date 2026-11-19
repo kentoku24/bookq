@@ -66,6 +66,18 @@ checks.positive_data_acceptance.expected-statuses = [
   "2xx", "3xx", "400", "401", "403", "404", "409", "429", "5xx",
 ]
 
+# T03 (spec-first, #519): `visibility` on GET /api/v1/tree is contract-only
+# until #522 implements it — the current server ignores the param, so a
+# schema-violating value (e.g. `visibility=bogus`) is accepted with 200.
+# Allow 2xx here; T05 removes this allowance when the server validates the
+# enum (invalid value -> 422 per api/v1-semantics.md section 1).
+
+[[operations]]
+include-name = "GET /api/v1/tree"
+checks.negative_data_rejection.expected-statuses = [
+  "2xx", "3xx", "400", "401", "403", "404", "405", "406", "409", "415", "422", "428", "429", "5xx",
+]
+
 # thumb-sprite's `folder`/`names` carry semantic constraints the schema can't
 # express (folder must exist as dir or archive; names must yield ≥1 non-empty
 # entry), so schema-valid-but-unusable input legitimately 400s.
