@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import encodePathVectors from '../../../api/vectors/encode-path.json';
 
 // offline-core.js — the single source for URL builders, cache naming,
@@ -253,5 +253,100 @@ describe('progress keys (#375)', () => {
     localStorage.setItem('bookq_progress', '{"p":1}');
     OC.migrateProgress();
     expect(localStorage.getItem('bookq_progress')).toBe('{"p":1}');
+  });
+});
+
+describe('wipeTargets / wipeClientData (account data hygiene)', () => {
+  // Minimal CacheStorage stub — happy-dom does not provide `caches`.
+  // name -> array of entry keys; delete() removes the whole cache.
+  let cacheStore;
+  let realCaches;
+  beforeEach(() => {
+    cacheStore = new Map();
+    realCaches = globalThis.caches;
+    globalThis.caches = {
+      keys: async () => [...cacheStore.keys()],
+      open: async (name) => ({ keys: async () => [...(cacheStore.get(name) || [])] }),
+      delete: async (name) => cacheStore.delete(name),
+    };
+    localStorage.clear();
+    sessionStorage.clear();
+    delete globalThis.__BOOKQ_PROGRESS_USER__;
+    delete globalThis.ProgressSync;
+  });
+  afterEach(() => {
+    globalThis.caches = realCaches;
+    delete globalThis.__BOOKQ_PROGRESS_USER__;
+    delete globalThis.ProgressSync;
+  });
+
+  function seedCaches() {
+    cacheStore.set('bookq-shell-abc', ['/', '/offline.html', '/static/app.js']);
+    cacheStore.set('bookq-work-w1-v1', ['rec1', 'rec2']);
+    cacheStore.set('bookq-api-x', ['api1']);
+    cacheStore.set('bookq-images-y', ['img1', 'img2', 'img3']);
+    cacheStore.set('unrelated-cache', ['z']);
+  }
+
+  it('wipeTargets reports data caches + storage keys, ignores shell/foreign', async () => {
+    seedCaches();
+    localStorage.setItem('bookq_progress', '{}');
+    localStorage.setItem('bookq_progress:a@b.c', '{}');
+    localStorage.setItem('bookq_persist_toast', '1');
+    localStorage.setItem('bookq_harness', 'keep');
+    const report = await OC.wipeTargets();
+    const names = report.caches.map((c) => c.name).sort();
+    expect(names).toEqual(['bookq-api-x', 'bookq-images-y', 'bookq-work-w1-v1']);
+    expect(report.entries).toBe(2 + 1 + 3);
+    expect(report.keys.sort()).toEqual(
+      ['bookq_persist_toast', 'bookq_progress', 'bookq_progress:a@b.c']);
+  });
+
+  it('wipeClientData removes data caches + progress/session keys, keeps shell + harness', async () => {
+    seedCaches();
+    localStorage.setItem('bookq_progress', '{"p":1}');
+    localStorage.setItem('bookq_progress:a@b.c', '{"p":2}');
+    localStorage.setItem('bookq_persist_toast', 'shown');
+    localStorage.setItem('bookq_harness', 'keep-me');
+    sessionStorage.setItem('bookq_auto_sync_done', '1');
+    sessionStorage.setItem('bookq_return_hash', '#/view/x');
+    sessionStorage.setItem('other_session', 'keep');
+
+    const deleted = await OC.wipeClientData();
+
+    // caches: all three data caches gone, shell + unrelated survive
+    expect([...cacheStore.keys()].sort())
+      .toEqual(['bookq-shell-abc', 'unrelated-cache']);
+    expect(deleted.caches.sort()).toEqual(
+      ['bookq-api-x', 'bookq-images-y', 'bookq-work-w1-v1']);
+    expect(deleted.entries).toBe(6);
+
+    // storage: every progress variant + wipe keys gone; harness survives
+    expect(localStorage.getItem('bookq_progress')).toBeNull();
+    expect(localStorage.getItem('bookq_progress:a@b.c')).toBeNull();
+    expect(localStorage.getItem('bookq_persist_toast')).toBeNull();
+    expect(localStorage.getItem('bookq_harness')).toBe('keep-me');
+    expect(sessionStorage.getItem('bookq_auto_sync_done')).toBeNull();
+    expect(sessionStorage.getItem('bookq_return_hash')).toBeNull();
+    expect(sessionStorage.getItem('other_session')).toBe('keep');
+    expect(deleted.keys).toContain('bookq_progress');
+    expect(deleted.keys).toContain('bookq_progress:a@b.c');
+    expect(deleted.keys).toContain('bookq_persist_toast');
+    expect(deleted.keys).toContain('bookq_auto_sync_done');
+    expect(deleted.keys).toContain('bookq_return_hash');
+  });
+
+  it('wipeClientData calls ProgressSync.remove for the server resume point', async () => {
+    const remove = vi.fn(async () => ({ removed: true }));
+    globalThis.ProgressSync = { remove };
+    await OC.wipeClientData();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('wipeTargets is empty-safe (no caches API entries, no storage)', async () => {
+    const report = await OC.wipeTargets();
+    expect(report.caches).toEqual([]);
+    expect(report.entries).toBe(0);
+    expect(report.keys).toEqual([]);
   });
 });

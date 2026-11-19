@@ -346,3 +346,58 @@ describe('renderSearchList / renderSearchCards', () => {
     expect(document.getElementById('tile-grid').innerHTML).toContain('Work 1');
   });
 });
+
+describe('visibility filtering across renderers (privacy)', () => {
+  beforeEach(() => {
+    stubRenderDeps();
+    window.searchResults = [
+      { folder_path: 'lib/public', folder_name: 'Public', has_metadata: false },
+      { folder_path: 'secret/hidden', folder_name: 'Hidden', has_metadata: false },
+    ];
+    window.searchMode = true;
+  });
+
+  function fv(visible, showAll = false) {
+    return {
+      showAll,
+      isVisible: (p) => visible.includes(p),
+      uiPresentation: () => null,
+      blockedGridHtml: () => null,
+    };
+  }
+
+  it('list + card renderers also drop invisible paths', () => {
+    window.FolderVisibility = fv(['lib/public']);
+    SF.renderSearchList();
+    expect(document.getElementById('tile-grid').innerHTML).toContain('lib/public');
+    expect(document.getElementById('tile-grid').innerHTML).not.toContain('secret/hidden');
+    SF.renderSearchCards();
+    expect(document.getElementById('tile-grid').innerHTML).not.toContain('secret/hidden');
+    expect(document.getElementById('folder-count').textContent).toBe('1 件');
+  });
+
+  it('showAll bypasses isVisible — hidden works reappear with badges path', () => {
+    window.FolderVisibility = fv([], true);   // showAll: isVisible not consulted
+    SF.renderSearchTiles();
+    const html = document.getElementById('tile-grid').innerHTML;
+    expect(html).toContain('lib/public');
+    expect(html).toContain('secret/hidden');
+    expect(document.getElementById('folder-count').textContent).toBe('2 件');
+  });
+
+  it('uiPresentation className/badgeHtml are applied per result', () => {
+    window.FolderVisibility = {
+      showAll: false,
+      isVisible: () => true,
+      uiPresentation: (p) => p === 'secret/hidden'
+        ? { className: 'vis-hidden', badgeHtml: '<i class="hid">H</i>', buttonHtml: '<button class="vis-toggle">x</button>' }
+        : null,
+      blockedGridHtml: () => null,
+    };
+    SF.renderSearchTiles();
+    const html = document.getElementById('tile-grid').innerHTML;
+    expect(html).toContain('vis-hidden');
+    expect(html).toContain('class="hid"');
+    expect(html).toContain('vis-toggle');
+  });
+});

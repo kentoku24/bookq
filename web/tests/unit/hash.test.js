@@ -257,3 +257,47 @@ describe('applyUrlState (hashchange listener)', () => {
     expect(window.viewMode).toBe('list');
   });
 });
+
+describe('applyUrlState — dead links & guards (UX/risk)', () => {
+  function fireHash() {
+    window.dispatchEvent(new Event('hashchange'));
+  }
+
+  it('dead browse path clears the hash back to canonical root', () => {
+    window.treeLoaded = true;
+    window.viewMode = 'tile';
+    window.getNodeAt = () => null;            // path does not resolve
+    window.updateBrowseHeader = vi.fn();
+    window.renderView = vi.fn();
+    setHash('#/browse/ghost-folder?v=list');
+    fireHash();
+    // "a dead or empty folder clears the hash" — unconditional, ?v= too
+    expect(location.hash).toBe('');
+    expect(window.currentBrowsePath).toBeNull();
+  });
+
+  it('viewer hash loads the DECODED folder via loadImages', () => {
+    window.treeLoaded = true;
+    window.PairedView = undefined;
+    const load = vi.fn();
+    window.loadImages = load;
+    window.FolderVisibility = { guardPath: () => 'ok', showAll: false };
+    setHash('#/view/a%20b%2Fc?p=2');
+    fireHash();
+    expect(load).toHaveBeenCalledWith('a b/c');
+  });
+
+  it('hidden folder guard redirects to top instead of loading', () => {
+    window.treeLoaded = true;
+    const load = vi.fn();
+    const redirect = vi.fn();
+    window.loadImages = load;
+    window.redirectHiddenToTop = redirect;
+    window.FolderVisibility = { guardPath: () => 'hidden', showAll: false };
+    setHash('#/view/secret/p=0'.replace('p=0','') + '?p=0');
+    setHash('#/view/secret?p=0');
+    fireHash();
+    expect(redirect).toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+  });
+});
