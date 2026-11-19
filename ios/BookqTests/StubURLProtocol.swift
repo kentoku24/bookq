@@ -16,10 +16,20 @@ final class StubURLProtocol: URLProtocol {
     }
 
     nonisolated(unsafe) static var handler: ((URLRequest) -> Response)?
+    /// Optional async responder — when set, the request is answered from
+    /// a detached Task so tests can interleave state changes while the
+    /// request is in flight (e.g. logout during a refresh exchange).
+    nonisolated(unsafe) static var asyncHandler: (@Sendable (URLRequest) async -> Response)?
+    /// When set, every request fails with this URLError code instead of
+    /// reaching `handler` — the only way to exercise "no response" paths
+    /// (URLError, never an HTTP status) under a URLProtocol stub.
+    nonisolated(unsafe) static var failWith: URLError.Code?
     nonisolated(unsafe) static var requests: [Rec] = []
 
     static func reset() {
         handler = nil
+        asyncHandler = nil
+        failWith = nil
         requests = []
     }
 
@@ -28,15 +38,33 @@ final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         Self.requests.append(Rec(request: request, body: Self.body(of: request)))
-        let r = Self.handler?(request)
-            ?? Response(status: 500, body: Data("no stub".utf8))
-        let http = HTTPURLResponse(url: request.url!, statusCode: r.status,
+        if let code = Self.failWith {
+            client?.urlProtocol(self, didFailWithError: URLError(code))
+            return
+        }
+        if let h = Self.asyncHandler {
+            let req = request
+            nonisolated(unsafe) let proto = self
+            Task {
+                let r = await h(req)
+                proto.deliver(r, for: req)
+            }
+            return
+        }
+        deliver(Self.handler?(request)
+            ?? Response(status: 500, body: Data("no stub".utf8)),
+                for: request)
+    }
+    override func stopLoading() {}
+
+    /// URLProtocolClient callbacks are thread-safe off the loading thread.
+    private func deliver(_ r: Response, for req: URLRequest) {
+        let http = HTTPURLResponse(url: req.url!, statusCode: r.status,
                                    httpVersion: nil, headerFields: r.headers)!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: r.body)
         client?.urlProtocolDidFinishLoading(self)
     }
-    override func stopLoading() {}
 
     /// URLSession hands bodies over as a stream — flatten for assertions.
     private static func body(of req: URLRequest) -> Data? {

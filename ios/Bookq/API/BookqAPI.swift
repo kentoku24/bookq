@@ -1,7 +1,17 @@
+import BookqCore
 import Foundation
 
 /// HTTP client for the bookq API. Attaches `Authorization: Bearer` when a
 /// token is present and handles the `/api/v1/tree` 202 rebuild handshake.
+/// Connectivity verdict hook (docs/offline-spec.md §5 iOS): `send`
+/// classifies every request outcome and reports it here. 2xx → success;
+/// unreachable URLErrors and 502/503/504 → fail; anything else (4xx,
+/// 500, decode errors, cancellations) is neutral — the server answered.
+struct ConnectivityReporter: Sendable {
+    var success: @Sendable () -> Void
+    var unreachable: @Sendable () -> Void
+}
+
 final class BookqAPI: Sendable {
     let baseURL: URL
     private let session: URLSession
@@ -9,14 +19,18 @@ final class BookqAPI: Sendable {
     /// 401 recovery: refresh the access token and return the new Bearer.
     /// Nil return = refresh failed → the 401 propagates (→ re-login).
     private let tokenRefresher: (@Sendable () async -> String?)?
+    /// Verdict sink — nil in tests/harnesses that don't own a state machine.
+    private let reporter: ConnectivityReporter?
 
     init(baseURL: URL, session: URLSession = .shared,
          tokenProvider: @escaping @Sendable () -> String?,
-         tokenRefresher: (@Sendable () async -> String?)? = nil) {
+         tokenRefresher: (@Sendable () async -> String?)? = nil,
+         reporter: ConnectivityReporter? = nil) {
         self.baseURL = baseURL
         self.session = session
         self.tokenProvider = tokenProvider
         self.tokenRefresher = tokenRefresher
+        self.reporter = reporter
     }
 
     /// `ws(s)://<host>/ws/reader-sync` — the dual-reader sync endpoint.
@@ -37,6 +51,30 @@ final class BookqAPI: Sendable {
 
     // MARK: - Requests
 
+    /// Query-value charset: RFC 3986 unreserved only. `URLQueryItem` leaves
+    /// "+" literal and form-decoders (Starlette parse_qsl) read it as a
+    /// space — folder paths containing "+" must arrive as %2B (web parity:
+    /// encodeURIComponent). `percentEncodedQuery` takes the string
+    /// verbatim, so encode once here; assigning `query` would re-encode %.
+    private static let queryValueAllowed: CharacterSet = {
+        var s = CharacterSet.alphanumerics
+        s.insert(charactersIn: "-._~")
+        return s
+    }()
+
+    /// Serialize query items with strict percent-encoding.
+    private func applyQuery(_ comps: inout URLComponents, _ items: [URLQueryItem]) {
+        guard !items.isEmpty else { return }
+        comps.percentEncodedQuery = items.map { item in
+            let name = item.name.addingPercentEncoding(
+                withAllowedCharacters: Self.queryValueAllowed) ?? item.name
+            guard let value = item.value else { return name }
+            let v = value.addingPercentEncoding(
+                withAllowedCharacters: Self.queryValueAllowed) ?? value
+            return "\(name)=\(v)"
+        }.joined(separator: "&")
+    }
+
     private func makeRequest(path: String,
                              query: [URLQueryItem] = [],
                              method: String = "GET",
@@ -44,7 +82,7 @@ final class BookqAPI: Sendable {
         var comps = URLComponents(
             url: baseURL.appendingPathComponent(path),
             resolvingAgainstBaseURL: false)!
-        if !query.isEmpty { comps.queryItems = query }
+        applyQuery(&comps, query)
         var req = URLRequest(url: comps.url!)
         req.httpMethod = method
         // Bearer-authed JSON must never replay from URLCache — RFC 7231
@@ -59,7 +97,7 @@ final class BookqAPI: Sendable {
     }
 
     private func send(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        var (data, resp) = try await session.data(for: req)
+        var (data, resp) = try await sendOnce(req)
         guard var http = resp as? HTTPURLResponse else {
             throw APIError.protocolError
         }
@@ -70,13 +108,47 @@ final class BookqAPI: Sendable {
            let fresh = await tokenRefresher() {
             var retry = req
             retry.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
-            (data, resp) = try await session.data(for: retry)
+            (data, resp) = try await sendOnce(retry)
             guard let h2 = resp as? HTTPURLResponse else {
                 throw APIError.protocolError
             }
             http = h2
         }
         return (data, http)
+    }
+
+    /// One network leg + spec §5 verdict reporting. The classification is
+    /// per *outcome*: an unreachable URLError or a proxy-band 5xx means
+    /// the server did not answer; any other status is a real response
+    /// (neutral), and 2xx proves reachability.
+    private func sendOnce(_ req: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            let (data, resp) = try await session.data(for: req)
+            if let http = resp as? HTTPURLResponse {
+                if (200..<300).contains(http.statusCode) {
+                    reporter?.success()
+                } else if [502, 503, 504].contains(http.statusCode) {
+                    reporter?.unreachable()
+                }
+            }
+            return (data, resp)
+        } catch let e as URLError {
+            if Self.isUnreachable(e) { reporter?.unreachable() }
+            throw e
+        }
+    }
+
+    /// spec §5 iOS: the no-response error set (parity with web TypeError /
+    /// SW `Response.error()`). `.cancelled` is intentionally absent —
+    /// aborts are caller-driven, never connectivity evidence.
+    static func isUnreachable(_ e: URLError) -> Bool {
+        switch e.code {
+        case .notConnectedToInternet, .timedOut, .cannotConnectToHost,
+             .networkConnectionLost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Decode JSON or map a non-2xx status to APIError.
@@ -184,7 +256,7 @@ final class BookqAPI: Sendable {
         var base = comps.percentEncodedPath
         if base == "/" { base = "" }
         comps.percentEncodedPath = base + "/" + encodedPath
-        if !query.isEmpty { comps.queryItems = query }
+        applyQuery(&comps, query)
         return comps.url!
     }
 
@@ -202,12 +274,12 @@ final class BookqAPI: Sendable {
             url: baseURL.appendingPathComponent("api/v1/thumb-sprite"),
             resolvingAgainstBaseURL: false)!
         let encodedNames = names.map(ImageURL.encodeSegment).joined(separator: ",")
-        comps.queryItems = [
+        applyQuery(&comps, [
             URLQueryItem(name: "folder", value: folder),
             URLQueryItem(name: "w", value: String(w)),
             URLQueryItem(name: "v", value: "2"),
             URLQueryItem(name: "rows", value: rows.map(String.init).joined(separator: ",")),
-        ]
+        ])
         // names must be percent-encoded *inside* the query manually because
         // URLQueryItem would encode "," too.
         var s = comps.url!.absoluteString
@@ -234,10 +306,14 @@ final class BookqAPI: Sendable {
         encodedURL(encodedPath, query: query)
     }
 
-    /// Authenticated image fetch used by `RemoteImageView`.
+    /// Authenticated image fetch used by `RemoteImageView` and the
+    /// offline downloader. Reader pages and archive entries can be tens of
+    /// MB, and solid-RAR page extraction decompresses every preceding entry
+    /// server-side — far beyond the 60s default request timeout.
     func imageData(url: URL) async throws -> Data {
         var req = URLRequest(url: url)
         req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.timeoutInterval = 300
         if let token = tokenProvider() {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

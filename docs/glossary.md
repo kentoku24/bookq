@@ -350,11 +350,11 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 
 ### フォルダツリースキャン (Folder Tree Scan)
 - **根拠**: `scan_tree()` / `list_images()` (app/scanner.py) （拡張子8種・ドットファイル除外・thumb/thumbs 最大9件）
-- **説明**: downloads 配下を走査して {name, type, children} のツリーを組み立てる。
+- **説明**: library 配下を走査して {name, type, children} のツリーを組み立てる。
 
 ### パス閉じ込め (Path Containment)
 - **根拠**: `serve_image()` / `api_images()` （resolve後の前方一致チェック）
-- **説明**: リクエストパスが downloads_dir 内に収まることを確認し、逸脱は403にする。
+- **説明**: リクエストパスが library_dir 内に収まることを確認し、逸脱は403にする。
 
 ## 5. オフライン・PWA (Offline & PWA)
 

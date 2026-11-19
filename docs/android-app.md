@@ -58,7 +58,7 @@ adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity \
 
 - `dev.bookq.reader.debug`（debug は applicationId suffix `.debug`）。
 - 実機からの接続には **Tailscale アプリ**が必要（サーバーは tailnet 限定）。
-- ホストの TEST_MODE uvicorn には `adb reverse tcp:8080 tcp:8080` →
+- ホストの TEST_MODE viewer-rs には `adb reverse tcp:8080 tcp:8080` →
   `http://localhost:8080` で到達（debug の network security config は
   localhost / 10.0.2.2 のみ cleartext 許可）。
 
@@ -187,7 +187,8 @@ BOOKQ_KEY_PASSWORD` を読み、未設定なら unsigned のままビルドは�
 
 `.github/workflows/android.yml` — `unit`（JVM テスト + lint + APK artifact）と
 `ui`（reactivecircus/android-emulator-runner API 35 x86_64 + KVM。
-TEST_MODE uvicorn を job 内で起動し `10.0.2.2:8080` 経由で接続）。
+TEST_MODE viewer-rs を job 内で起動し、`adb reverse` 経由の
+`127.0.0.1:8080` で接続）。
 `ui` は `:app` の androidTest に加え `:data` の androidTest
 （`KeystoreTokenStoreTest`。self-instrumenting でサーバー不要のため
 同一エミュレータで先に1回実行）も `am instrument` で回す。

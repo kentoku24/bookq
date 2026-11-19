@@ -6,6 +6,13 @@
 # environment flake from #326, where all connected tests failed identically
 # when the emulator could not reach the host-side bookq:
 #
+#  0. adb reverse instead of the guest NAT — #481 was the same class as
+#     #326 but mid-run: slirp's 10.0.2.2 bridge intermittently drops
+#     established connections, failing one test while the suite's other
+#     requests recover. With `adb reverse tcp:PORT tcp:PORT` the app's
+#     loopback connection rides the adb transport channel instead of the
+#     emulator NAT, so the unstable leg is gone entirely (loopback URLs
+#     only; remote/serverless URLs still go through their normal route).
 #  1. Build once, probe per attempt — `assemble*` runs before the first
 #     probe so a NAT bridge that dies during the ~4min Gradle build is
 #     caught by the gate instead of surfacing as a mid-suite network error.
@@ -18,7 +25,10 @@
 #     the APK is picked by the emulator's `ro.product.cpu.abi` with the
 #     universal APK as fallback.
 #  3. One in-session retry — the second attempt reuses the already-booted
-#     emulator, so it costs seconds rather than a fresh boot.
+#     emulator, so it costs seconds rather than a fresh boot. The reverse
+#     forward is re-established first: an adb transport reconnect wipes
+#     forwards, and `wait_for_server`'s probe is the only check that
+#     exercises the tunnel end-to-end.
 #
 # The :data library androidTest (KeystoreTokenStoreTest) rides the same
 # emulator: its APK is self-instrumenting (the library is compiled into the
@@ -30,7 +40,7 @@
 # Usage: android-ui-test.sh [server_url] [expected_folder]
 set -u
 
-SERVER_URL="${1:-http://10.0.2.2:8080}"
+SERVER_URL="${1:-http://127.0.0.1:8080}"
 EXPECTED_FOLDER="${2:-Other}"
 PROBE_URL="$SERVER_URL/api/v1/health"
 PROBE_ATTEMPTS="${PROBE_ATTEMPTS:-60}"
@@ -59,7 +69,20 @@ probe() {
     || adb shell "toybox nc -w 3 '$HOST' '$PORT' </dev/null >/dev/null 2>&1"
 }
 
+# For loopback server URLs the guest reaches the host through
+# `adb reverse`, not the 10.0.2.2 slirp NAT — the transport that dropped
+# mid-suite in #326/#481. Re-run before every probe gate: the command is
+# idempotent, and an adb transport reconnect silently wipes forwards.
+setup_reverse() {
+  case "$HOST" in
+    127.0.0.1|localhost)
+      adb reverse "tcp:$PORT" "tcp:$PORT"
+      ;;
+  esac
+}
+
 wait_for_server() {
+  setup_reverse || return 1
   for i in $(seq 1 "$PROBE_ATTEMPTS"); do
     if probe; then
       echo "emulator reached server after $i probe(s)"
@@ -172,8 +195,8 @@ echo "== install APKs"
 wait_for_adb || exit 1
 install_apks || exit 1
 
-# :data androidTest is server-independent — run it once up front so a NAT
-# bridge flake can't hide its result or burn a retry attempt on it.
+# :data androidTest is server-independent — run it once up front so a
+# connectivity flake can't hide its result or burn a retry attempt on it.
 echo "== instrumented tests: :data androidTest"
 DATA_OK=0
 run_data_tests || DATA_OK=1

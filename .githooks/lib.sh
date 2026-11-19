@@ -7,8 +7,8 @@
 # 再ビルドが必要になるパス
 REBUILD_PATTERNS=(
     "app/.*\.py$"
-    "app/templates/.*"
-    "app/static/.*"
+    "web/templates/.*"
+    "web/static/.*"
     "requirements\.txt$"
     "Dockerfile$"
 )

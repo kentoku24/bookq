@@ -1,4 +1,4 @@
-"""Regression tests for PWA icon unification (Todo 6).
+"""Regression tests for PWA icon unification.
 
 Covers:
   (a) manifest valid JSON with 192 any, 512 any, 512 maskable, theme #0f172a, no display_override
@@ -8,7 +8,7 @@ Covers:
   (e) all assets 200
 
 Uses the server fixture from conftest.py (BOOKQ_TEST_MODE=true, random port,
-DOWNLOADS_DIR tmp). Pure stdlib + urllib – no extra deps.
+LIBRARY_DIR tmp). Pure stdlib + urllib – no extra deps.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_pwa_icons.py -q
@@ -140,7 +140,7 @@ def test_index_head_viewer(server):
 
 def test_index_template_both_branches_contain_head():
     """File-level check: both login {% if not user %} and viewer {% else %} branches have the head set."""
-    tpl = (REPO_ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+    tpl = (REPO_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     # split at {% else %} to get login vs viewer branches
     assert "{% if not user %}" in tpl and "{% else %}" in tpl and "{% endif %}" in tpl
     login_part, rest = tpl.split("{% else %}", 1)
@@ -174,7 +174,7 @@ def test_offline_html_head(server):
     assert "<script" not in html.lower() or html.lower().count("<script") == 0, "offline.html should not contain script tags"
 
     # file-level also
-    offline_file = (REPO_ROOT / "app" / "static" / "offline.html").read_text(encoding="utf-8")
+    offline_file = (REPO_ROOT / "web" / "static" / "offline.html").read_text(encoding="utf-8")
     assert 'apple-touch-icon' in offline_file
     assert 'sizes="180x180"' in offline_file
     assert 'rel="manifest"' in offline_file
