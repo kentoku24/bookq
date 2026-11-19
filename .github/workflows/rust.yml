@@ -53,8 +53,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: System deps (zlib for flate2)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
+      - name: System deps (zlib for flate2, dav1d for avif-native #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config libdav1d-dev
 
       # libpdfium (PDFium engine for the native PDF pipeline, #402) — must
       # track pdfium-render's `pdfium_latest` bindings (8125 at 0.9.5).

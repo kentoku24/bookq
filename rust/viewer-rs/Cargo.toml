@@ -25,9 +25,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 # default-features off: default pulls ~40 unused crates (ravif/rav1e AVIF
-# encoder, exr, tiff, qoi, moxcms, rayon). Min = locked version, which is
-# what we build/test (ImageDecoder::orientation landed in 0.25.5).
-image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+# encoder, exr, tiff, qoi, moxcms, rayon). `avif-native` is decode-only
+# (mp4parse + dav1d C lib) — the encoder deps stay out (#563). Min =
+# locked version, which is what we build/test (ImageDecoder::orientation
+# landed in 0.25.5).
+image = { version = "0.25.10", default-features = false, features = ["avif-native", "bmp", "gif", "jpeg", "png", "webp"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"

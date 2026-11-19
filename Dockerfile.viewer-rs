@@ -7,7 +7,32 @@
 # GLIBCXX/CXXABI symbol versions bookworm's libstdc++6 can't satisfy.
 FROM rust:1-slim-bookworm AS rsbuilder
 # g++ compiles the bundled RARLAB unrar C++ (bookq-core `unrar` dep).
-RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev g++ && rm -rf /var/lib/apt/lists/*
+# dav1d-sys (image `avif-native`, #563) requires dav1d >=1.3 at
+# build time via pkg-config; bookworm ships only 1.0 (backports has
+# none), so build dav1d 1.5.0 static into /usr/local from the GitHub
+# mirror tarball — the crate's own vendored path clones code.videolan.org
+# at build time, which is flaky under Docker NAT (observed TLS failure).
+# Static .a means the runtime stage needs no dav1d package. nasm is x86
+# asm only (aarch64 uses gas; no nasm package exists for it). The tarball
+# is sha256-pinned — GitHub regenerates archives deterministically.
+# -Dlibdir=lib: meson's amd64 default is lib64, which lands dav1d.pc in
+# /usr/local/lib64/pkgconfig — outside pkg-config's search path.
+ARG DAV1D_SHA256=78b15d9954b513ea92d27f39362535ded2243e1b0924fde39f37a31ebed5f76b
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      zlib1g-dev g++ git pkg-config meson ninja-build curl ca-certificates \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+         apt-get install -y --no-install-recommends nasm; \
+       fi \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://github.com/videolan/dav1d/archive/refs/tags/1.5.0.tar.gz \
+       -o /tmp/dav1d.tgz \
+    && echo "$DAV1D_SHA256  /tmp/dav1d.tgz" | sha256sum -c - \
+    && tar xzf /tmp/dav1d.tgz -C /tmp \
+    && meson setup -Ddefault_library=static -Dlibdir=lib --prefix=/usr/local \
+         /tmp/dav1d-1.5.0/build /tmp/dav1d-1.5.0 \
+    && ninja -C /tmp/dav1d-1.5.0/build \
+    && meson install -C /tmp/dav1d-1.5.0/build \
+    && rm -rf /tmp/dav1d-1.5.0 /tmp/dav1d.tgz
 WORKDIR /src
 
 # Dependency layer (#380): manifests + stub sources so this `cargo build`
