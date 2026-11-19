@@ -8,7 +8,7 @@ from playwright.sync_api import expect
 def test_flattened_tile_shows_leaf_and_parent(page, server):
     # "wrap" has a single child ("inner"), so scanner.py flattens it away and
     # its grandchildren (vol1/vol2) surface as tiles named "inner/vol1" etc.
-    # once you drill into "wrap" -- see conftest.py's downloads_tree docstring.
+    # once you drill into "wrap" -- see conftest.py's library_tree docstring.
     # There is no standalone "wrap/inner" tile; the flattened name only shows
     # up on the leaf tiles themselves.
     page.goto(server + "/")

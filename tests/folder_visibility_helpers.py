@@ -1,7 +1,7 @@
 """Shared helpers for folder-visibility tests that mutate state.
 
 Each test file builds its own synthetic library + its own BOOKQ_STATE_DIR +
-its own viewer-rs — the shared conftest `server`/`downloads_tree` fixtures keep
+its own viewer-rs — the shared conftest `server`/`library_tree` fixtures keep
 their exact root count and never see a hidden flag. Never reuse the session
 server for hide/unhide writes.
 """
@@ -147,7 +147,7 @@ def spawn_vis_server(tree: Path, state_dir: Path) -> tuple:
     """Same shape as conftest's server fixture but with a dedicated state dir."""
     from rs_spawn import spawn_backend
 
-    return spawn_backend(downloads_dir=tree, state_dir=state_dir)
+    return spawn_backend(library_dir=tree, state_dir=state_dir)
 
 
 def _vis_path() -> str:

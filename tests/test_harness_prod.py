@@ -1,4 +1,4 @@
-"""Task 8: version/link/wipe — tests-after.
+"""Harness version/link/wipe — tests-after.
 
 Three tests:
   - test_api_version            — /api/version keys + Cache-Control + health unchanged
@@ -138,7 +138,6 @@ def test_harness_wipe_logic(page, server):
 
     # Attempt live Playwright wipe verification (best-effort, tolerance)
     base = _base(server)
-    # Navigate to harness
     try:
         page.goto(base + "/static/offline-harness.html?harness=1", timeout=15000)
         page.wait_for_selector("#harness-status", timeout=10000)
@@ -179,7 +178,6 @@ def test_harness_wipe_logic(page, server):
             }"""
         )
         page.wait_for_timeout(800)
-        # Verify seeded
         pre = page.evaluate(
             """async () => {
                 const all = await window.OfflineStore.getAll();
@@ -242,9 +240,8 @@ def test_harness_wipe_logic(page, server):
     assert result["prog"] is None, f"bookq_progress should be removed, got {result['prog']!r}"
     assert result["persistToast"] is None, f"bookq_persist_toast should be removed, got {result['persistToast']!r}"
     assert result["autoSync"] is None, f"bookq_auto_sync_done should be removed, got {result['autoSync']!r}"
-    # harness keep not removed (SHEL-like keep)
+    # harness keep not removed (SHELL-like keep)
     # This is optional tolerance — if harness key was cleared, still pass if SHELL kept, but spec says keep
-    # Assert keep when present
     if result.get("harnessKeep") is not None:
         assert result["harnessKeep"] == "1", f"bookq_harness should be kept, got {result['harnessKeep']!r}"
 
@@ -261,7 +258,6 @@ def test_harness_wipe_logic(page, server):
             }"""
         )
         page.wait_for_timeout(500)
-        # Click wipe all -> modal -> confirm
         page.click("#btn-wipe-all", timeout=5000)
         page.wait_for_selector("#harness-wipe-modal", timeout=5000)
         # modal should be visible (display flex)

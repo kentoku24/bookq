@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Root browse screen: NavigationStack of FolderLevelViews + reader modal.

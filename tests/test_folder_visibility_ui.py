@@ -1,6 +1,6 @@
 """E2E for the hidden-roots UI (tile/list/card × browse/search, mode toggle).
 
-Dedicated synthetic library + dedicated BOOKQ_STATE_DIR + own uvicorn via
+Dedicated synthetic library + dedicated BOOKQ_STATE_DIR + own viewer-rs via
 tests/folder_visibility_helpers.py — the shared conftest server/tree keep
 their exact root count and never see a hidden flag.
 """

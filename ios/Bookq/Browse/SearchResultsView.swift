@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Global search results — `renderSearchTiles/List/Cards` equivalent.

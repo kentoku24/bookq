@@ -1,4 +1,4 @@
-"""T4 PWA/Offline on ios_page 390x844 — WebKit narrow check (Cache/estimate only)."""
+"""PWA/Offline on ios_page 390x844 — WebKit narrow check (Cache/estimate only)."""
 
 import re
 
@@ -19,7 +19,7 @@ def test_ios_offline_sw_cache_offline(ios_page, server):
     expect(page.locator("#img-track .page-cell img").first).to_have_class(re.compile(r"\bloaded\b"), timeout=8000)
     page.wait_for_timeout(1200)
     assert page.evaluate("async () => { const ks = await caches.keys(); return ks.some(k=>k.startsWith('bookq-work-')); }"), "no bookq-work-* cache"
-    # spec §8: offline browse only surfaces recorded downloads — the reader's
+    # spec §8: offline browse only surfaces recorded library — the reader's
     # opportunistic page cache alone has no works record, so an explicit
     # download is required for the tile to remain visible/usable offline.
     page.evaluate("async () => { await window.downloadWork('simple_manga'); }")

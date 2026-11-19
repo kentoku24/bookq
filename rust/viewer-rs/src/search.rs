@@ -18,7 +18,6 @@ use serde_json::Value;
 use bookq_core::ComicRec;
 
 use crate::folders::{ensure_tree_and_index, CacheData, Ensure};
-use crate::serve::Serve;
 use crate::state::{covered_by_roots, VisibilityStore, GLOBAL_USER_KEY};
 use crate::tree;
 use crate::AppState;
@@ -227,7 +226,7 @@ async fn index_and_hidden(
     st: &AppState,
     include_hidden: bool,
 ) -> Result<(Arc<CacheData>, Vec<String>), Response> {
-    let data = match ensure_tree_and_index(&st.index, &st.downloads).await {
+    let data = match ensure_tree_and_index(&st.index, &st.library).await {
         Ensure::Fresh(d) | Ensure::Stale(d) => d,
         Ensure::Building => return Err(building()),
         Ensure::Failed => return Err(detail(StatusCode::INTERNAL_SERVER_ERROR, "index build failed")),
@@ -248,20 +247,18 @@ async fn index_and_hidden(
     Ok((data, hidden))
 }
 
-/// `GET /api/v1/search` — `_search_impl`. `sort` is `Literal["relevance"]`
-/// upstream: any other value falls through to keep FastAPI's 422.
-pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
+/// `GET /api/v1/search` — `_search_impl`. `sort` is `Literal["relevance"]`;
+/// any other value answers FastAPI's 422 locally.
+pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Response {
     if q.get("sort").map(|s| s.as_str()).unwrap_or("relevance") != "relevance" {
-        return crate::serve::unprocessable_or_proxy(
-            st.has_upstream(),
+        return crate::serve::unprocessable(
             "sort",
             "value_error",
             "invalid sort",
         );
     }
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
-        return crate::serve::unprocessable_or_proxy(
-            st.has_upstream(),
+        return crate::serve::unprocessable(
             "include_hidden",
             "value_error",
             "invalid include_hidden",
@@ -269,7 +266,7 @@ pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
     };
     let (data, hidden) = match index_and_hidden(st, include_hidden.unwrap()).await {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     };
     let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
     let artist = q.get("artist").map(|s| s.as_str()).unwrap_or("");
@@ -289,7 +286,7 @@ pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
     }
     let qv = q.get("q").map(|s| s.as_str()).unwrap_or("");
     let results = search_index(&data, qv, &filters, &hidden);
-    Serve::Done(json_response(
+    json_response(
         StatusCode::OK,
         serde_json::to_string(&serde_json::json!({
             "query": qv,
@@ -298,15 +295,14 @@ pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Serve {
         }))
         .unwrap()
         .into_bytes(),
-    ))
+    )
 }
 
 /// `GET /api/v1/facets` — `_facets_impl`. `path` is a raw string filter
-/// (no traversal check upstream — a non-matching value just empties the set).
-pub async fn api_facets(st: &AppState, q: &HashMap<String, String>) -> Serve {
+/// (no traversal check — a non-matching value just empties the set).
+pub async fn api_facets(st: &AppState, q: &HashMap<String, String>) -> Response {
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
-        return crate::serve::unprocessable_or_proxy(
-            st.has_upstream(),
+        return crate::serve::unprocessable(
             "include_hidden",
             "value_error",
             "invalid include_hidden",
@@ -314,13 +310,13 @@ pub async fn api_facets(st: &AppState, q: &HashMap<String, String>) -> Serve {
     };
     let (data, hidden) = match index_and_hidden(st, include_hidden.unwrap()).await {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     };
     let path = q.get("path").map(|s| s.as_str()).unwrap_or("");
-    Serve::Done(json_response(
+    json_response(
         StatusCode::OK,
         serde_json::to_string(&facets_for(&data, path, &hidden))
             .unwrap()
             .into_bytes(),
-    ))
+    )
 }
