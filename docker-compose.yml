@@ -91,7 +91,7 @@ services:
   # (http://viewer-rs:8080) の対応は Cloudflare ダッシュボード側で管理する。
   cloudflared:
     profiles: ["public"]
-    image: cloudflare/cloudflared:2026.10.4
+    image: cloudflare/cloudflared:2026.11.1
     container_name: bookq-prd-cloudflared
     command: tunnel --no-autoupdate run
     environment:
