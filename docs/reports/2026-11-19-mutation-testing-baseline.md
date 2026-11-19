@@ -47,31 +47,64 @@ spec は `.omo/plans/mutation-testing.md`。
 - 設定: `rust/.cargo/mutants.toml`、実行は `scripts/mutation/rust.sh`
   (TMPDIR symlink 必須 — `docs/mutation-testing.md` 参照)
 - baseline: `cargo test` 全パス確認済み (123s build + 34s test)
-- **実行中** (2026-11-19 00:38 開始、-j4)。`rust/mutants.out/mutants.out/outcomes.json`
-  に逐次書き込まれる。完了後に本節を確定値で更新する。
+- 実行: `cargo mutants -j4`、**5 時間**で全量完了 (2026-11-19 00:38–05:38 JST)
+- 結果: `rust/mutants.out/mutants.out/` (gitignore、`outcomes.json` +
+  `missed.txt`/`caught.txt`/`timeout.txt`/`unviable.txt` + mutant ごとの log/diff)
 
-### 途中経過 (~52% 時点、暫定)
+### スコア
 
-| file | missed | caught | timeout |
-|---|---|---|---|
-| bookq-core/src/archive.rs | 740 | 463 | 15 |
-| bookq-core/src/scans.rs | 65 | 4 | 0 |
-| bookq-core/src/meta.rs | 49 | 5 | 0 |
-| bookq-core/src/pdf.rs | 39 | 58 | 2 |
-| bookq-core/src/lib.rs | 11 | 53 | 5 |
-| viewer-rs/src/main.rs | 100 | 3 | 0 |
-| viewer-rs/src/library.rs | 101 | 52 | 0 |
-| viewer-rs/src/folders.rs | 80 | 21 | 0 |
-| viewer-rs/src/auth.rs | 15 | 72 | 0 |
-| viewer-rs/src/oauth.rs | 2 | 0 | 0 |
+| | 件数 |
+|---|---|
+| total mutants | 3,972 |
+| caught | 1,675 |
+| missed | 2,066 |
+| timeout | 31 |
+| unviable | 200 |
+| **score** (caught+timeout / caught+missed+timeout) | **45.2%** |
 
-暫定 decided=1955, missed=1202, caught=731, timeout=22 →
-**暫定 score ≈ 38.5%** (残りファイル: thumbs.rs, reader_sync, serve.rs,
-shell.rs, state.rs, tree.rs 等 — 大物がこれから処理される)
+### ファイル別 (missed / caught / timeout)
 
-観察: `archive.rs` (RAR/ZIP パーサ) と `scans.rs`/`meta.rs` は単体テストが
-ほぼ効いていない。`viewer-rs/src/main.rs` のルートハンドラも同様。
-`auth.rs` は良く固定されている。大きなサムネイル/配信系ファイルの結果待ち。
+| file | missed | caught | timeout | 備考 |
+|---|---|---|---|---|
+| bookq-core/src/archive.rs | 740 | 463 | 15 | RAR/ZIP パーサ。最大の穴 |
+| viewer-rs/src/reader_sync/mod.rs | 139 | 131 | 2 | |
+| viewer-rs/src/thumbs.rs | 127 | 222 | 4 | 最も mutant が多いが kill 率はまずまず |
+| viewer-rs/src/library.rs | 101 | 52 | 0 | |
+| viewer-rs/src/main.rs | 100 | 3 | 0 | ルートハンドラがほぼ無防備 |
+| viewer-rs/src/serve.rs | 89 | 119 | 0 | |
+| viewer-rs/src/folders.rs | 80 | 21 | 0 | |
+| viewer-rs/src/reader_sync/catalog.rs | 71 | 53 | 0 | |
+| viewer-rs/src/tree.rs | 70 | 7 | 0 | scan_tree の flatten 規則が未固定 |
+| bookq-core/src/scans.rs | 65 | 4 | 0 | |
+| viewer-rs/src/state.rs | 93 | 64 | 0 | |
+| viewer-rs/src/search.rs | 64 | 0 | 0 | **全滅 — テスト皆無** |
+| viewer-rs/src/shell.rs | 56 | 122 | 0 | |
+| viewer-rs/src/reader_sync/protocol.rs | 53 | 43 | 0 | |
+| bookq-core/src/meta.rs | 49 | 5 | 0 | |
+| viewer-rs/src/reader_sync/state.rs | 41 | 43 | 0 | |
+| viewer-rs/src/oauth.rs | 36 | 57 | 0 | |
+| bookq-core/src/pdf.rs | 39 | 58 | 2 | |
+| bookq-core/src/lib.rs | 11 | 53 | 5 | kanji_digit/kanji_unit の match arm 欠落が目立つ |
+| viewer-rs/src/auth.rs | 15 | 72 | 0 | 良好 |
+| viewer-rs/src/reader_sync/model.rs | 25 | 62 | 3 | |
+| viewer-rs/src/pair_report.rs | 2 | 21 | 0 | |
+
+missed の genre 内訳: BinaryOperator 1203, FnValue 461, MatchArm 166,
+UnaryOperator 147, MatchArmGuard 87 — 比較演算子・関数戻り値・match arm の
+削除系が中心で、「分岐を通るが結果を見ていない」テストの典型。
+
+### 観察
+
+- **archive.rs が突出** (missed 740): 圧縮アーカイブのエッジケースを
+  unit test がほとんど踏んでいない。結合テスト経由のカバレッジと思われる。
+- **search.rs は caught 0**: 実装はあるが単体テストが存在しない。
+- **main.rs / folders.rs / tree.rs / scans.rs / meta.rs**: ルート層と
+  スキャン系は振る舞い固定が薄い。`tree.rs` の flatten 規則は
+  AGENTS.md 記載の重要仕様なので優先度高。
+- **auth.rs / shell.rs / thumbs.rs / pair_report.rs** は健全。
+- timeout 31 件は大半 archive.rs — 大きなアーカイブ fixture の
+  パース時間が延びる mutant で、実質 kill に近いが遅いテストが原因の
+  可能性もあり個別確認要。
 
 ## トリアージ方針 (次アクション候補)
 
@@ -83,4 +116,8 @@ shell.rs, state.rs, tree.rs 等 — 大物がこれから処理される)
 3. `offline-core.js`/`spread.js`/`hash.js` の no-coverage 領域は
    DOM/ストレージ結合が主 — unit 拡張か Playwright 側強化かを
    領域ごとに判断。
-4. Rust 側は完了後に missed 上位ファイルを同じ 3 分類で評価。
+4. Rust は `search.rs` (caught 0) → `tree.rs` (flatten 規則) →
+   `scans.rs`/`meta.rs`/`main.rs` の順で単体テスト追加が効く。
+   `archive.rs` は fixture ベースの境界テストが必要で別タスク級。
+5. 増分確認は `scripts/mutation/rust.sh --in-diff` または
+   `-f <file>` で数十分に収まる。全量は四半期棚卸し用途。
