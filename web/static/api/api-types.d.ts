@@ -28,7 +28,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** サーババージョン */
+        /**
+         * サーババージョン
+         * @description 認証必須 (#359)。未認証は 401。sha/build_date の公開面漏洩を防ぐため
+         *     health と異なり `security: []` を付けない (全体既定の認証を継承)。
+         */
         get: operations["getVersion"];
         put?: never;
         post?: never;
@@ -835,6 +839,13 @@ export interface operations {
                         build_date: string;
                     };
                 };
+            };
+            /** @description 未認証 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

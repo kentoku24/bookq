@@ -126,6 +126,9 @@ paths:
       tags: [meta]
       operationId: getVersion
       summary: サーババージョン
+      description: |
+        認証必須 (#359)。未認証は 401。sha/build_date の公開面漏洩を防ぐため
+        health と異なり `security: []` を付けない (全体既定の認証を継承)。
       responses:
         "200":
           description: "バージョン情報。`Cache-Control: no-store`"
@@ -145,6 +148,7 @@ paths:
                     version: "1.0.0"
                     sha: "abc1234"
                     build_date: "2026-05-01T00:00:00Z"
+        "401": {description: 未認証}
 
   /api/v1/tree:
     get:
