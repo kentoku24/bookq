@@ -58,23 +58,40 @@
   <div id="sidebar-header">
     <h1 id="browse-header"><span id="browse-root-icon">📁</span> フォルダ</h1>
     <button id="pair-btn" type="button" title="2台で見開き" aria-label="2台で見開き">🔗</button>
-    <button id="filter-btn" title="絞り込み" aria-label="フィルタ">🔽</button>
-    <a id="offline-status" href="/static/offline-harness.html?harness=1">○オフライン</a>
-  </div>
-  <div id="visibility-status" role="status"></div>
-  <div id="sidebar-scroll">
-    <div id="search"><input type="text" id="search-input" placeholder="検索…" autocomplete="off"></div>
-    <div id="filter-chips" class="hidden"></div>
-    <div id="tile-grid">
+    <button id="header-menu-btn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="header-menu" title="メニュー" aria-label="メニュー">⋯</button>
+    <div id="header-menu" role="menu" aria-labelledby="header-menu-btn" hidden>
+      <button id="filter-btn" type="button" role="menuitem" title="絞り込み" aria-label="フィルタ">🔽 絞り込み</button>
+      <button id="lib-edit-btn" type="button" role="menuitem" title="ライブラリ編集" aria-label="ライブラリ編集" aria-pressed="false">✏️ ライブラリ編集</button>
+      <hr role="separator">
+      <button id="menu-view-tile" type="button" role="menuitemradio" aria-checked="true">タイル</button>
+      <button id="menu-view-list" type="button" role="menuitemradio" aria-checked="false">リスト</button>
+      <button id="menu-view-card" type="button" role="menuitemradio" aria-checked="false">カード</button>
+      <button id="menu-reload" type="button" role="menuitem">↻ 再読み込み</button>
+      <hr role="separator">
+      <a id="harness-link" role="menuitem" href="/static/offline-harness.html?harness=1">🧪 ハーネス</a>
+      <a href="/auth/logout" id="logout-btn" role="menuitem" title="ログアウト" aria-label="ログアウト">🚪 ログアウト</a>
     </div>
   </div>
+  <div id="visibility-status" role="status"></div>
+  <div id="sidebar-body">
+    <div id="sidebar-scroll">
+      <div id="search"><input type="text" id="search-input" placeholder="検索…" autocomplete="off"></div>
+      <div id="lib-edit-bar" hidden>
+        <button id="lib-upload-btn" type="button">📤 アップロード</button>
+        <input type="file" id="lib-upload-input" multiple accept=".zip,.cbz,.rar,.cbr,.epub,.pdf" hidden>
+        <span id="lib-edit-status"></span>
+        <button id="lib-edit-done" type="button">完了</button>
+      </div>
+      <div id="filter-chips" class="hidden"></div>
+      <div id="tile-grid">
+      </div>
+    </div>
+    <a id="offline-status" href="/static/offline-harness.html?harness=1">○オフライン</a>
+  </div>
   <div id="sidebar-footer">
-    <button id="footer-refresh-btn" title="表示切替" aria-label="表示切替">📋</button>
     <span class="footer-right" id="folder-count">0 件</span>
     <span id="storage-text"></span>
-    <a id="harness-link" href="/static/offline-harness.html?harness=1">🧪 ハーネス</a>
     <span id="app-version" class="mono hint" style="font-size:11px;color:#888;margin-left:8px"></span>
-    <a href="/auth/logout" id="logout-btn" title="ログアウト" aria-label="ログアウト">🚪</a>
   </div>
 </aside>
 
@@ -177,6 +194,7 @@
 <script src="/static/viewer/pairController.js" defer></script>
 <script src="/static/browse/pairSync.js" defer></script>
 <script src="/static/progress/sync.js" defer></script>
+<script src="/static/library/edit.js" defer></script>
 <script src="/static/app.js" defer></script>
 <script>
 /* Deploy-consistency watchdog: this document is served NetworkFirst (always

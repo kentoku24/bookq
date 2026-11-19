@@ -1,4 +1,4 @@
-"""Shared fixtures: a synthetic downloads/ tree, a live viewer-rs server (test mode),
+"""Shared fixtures: a synthetic library/ tree, a live viewer-rs server (test mode),
 and Playwright browser contexts (portrait / landscape).
 
 Run:
@@ -198,7 +198,7 @@ def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) 
 
 
 @pytest.fixture(scope="session")
-def downloads_tree(tmp_path_factory) -> Path:
+def library_tree(tmp_path_factory) -> Path:
     """Build the fixture folder layout the tests rely on.
 
     Note: thumb_grid_* (9 folders for multi-thumb grid 2..9) are NOT generated
@@ -239,7 +239,7 @@ def downloads_tree(tmp_path_factory) -> Path:
                             "inner/aa" under nest/wrap — its _fullPath
                             "nest/wrap/inner/aa" has no live textual parent)
     """
-    root = tmp_path_factory.mktemp("downloads")
+    root = tmp_path_factory.mktemp("library")
 
     simple = root / "simple_manga"
     simple.mkdir()
@@ -423,7 +423,7 @@ def root_folder_names(server: str) -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def server(downloads_tree: Path) -> str:
+def server(library_tree: Path) -> str:
     """Start viewer-rs in test mode against the fixture tree; yield its base URL.
 
     The suite oracles the production backend's contract (#503).
@@ -431,7 +431,7 @@ def server(downloads_tree: Path) -> str:
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=downloads_tree,
+        library_dir=library_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url

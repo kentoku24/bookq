@@ -15,6 +15,7 @@ import os
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -68,8 +69,8 @@ def _viewer_rs_binary() -> Path:
     return bin_path
 
 
-def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
-    """Spawn the test backend against *downloads_dir*; returns (proc, base_url).
+def spawn_backend(*, library_dir: Path, state_dir: str | Path) -> tuple:
+    """Spawn the test backend against *library_dir*; returns (proc, base_url).
 
     Free port, env, then a 30s health probe. Cold Rust boots are fast but
     the same headroom covers a loaded machine — and `cargo build` runs
@@ -82,7 +83,7 @@ def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
 
     env = os.environ.copy()
     env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads_dir)
+    env["LIBRARY_DIR"] = str(library_dir)
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env.update(
         {
@@ -121,4 +122,27 @@ def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
     else:
         proc.terminate()
         raise RuntimeError("test backend did not become healthy within 30s")
+    # Health answers before the metadata index finishes building — the tree
+    # endpoint keeps returning 202 + Retry-After until then, and a browser
+    # test that loads inside that window makes the client's own 202-retry
+    # loop emit an extra bare /api/v1/tree fetch (flaked
+    # test_startup_fetches_folders_exactly_twice_and_seeds_etag). Wait for
+    # the first non-202 so session-scoped fixtures hand tests a settled
+    # backend. Bounded: a wedged build degrades to the old behavior rather
+    # than hanging the whole suite.
+    tree_deadline = time.time() + 30
+    while time.time() < tree_deadline:
+        if proc.poll() is not None:
+            raise RuntimeError("test backend exited early")
+        try:
+            resp = urllib.request.urlopen(base_url + "/api/v1/tree", timeout=2)
+            resp.close()
+            if resp.status != 202:
+                break
+        except urllib.error.HTTPError as e:
+            if e.code != 202:
+                break
+        except OSError:
+            pass
+        time.sleep(0.25)
     return proc, base_url

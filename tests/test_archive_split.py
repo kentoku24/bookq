@@ -120,20 +120,20 @@ def _make_png(path: Path) -> None:
 
 
 @pytest.fixture(scope="module", autouse=True)
-def split_lib(server, downloads_tree: Path):
+def split_lib(server, library_tree: Path):
     """Stage the split-shape archives in the shared tree and publish."""
-    work = downloads_tree / "_aport_split_work"
+    work = library_tree / "_aport_split_work"
     work.mkdir(exist_ok=True)
     _make_png(work / "src.png")
-    with zipfile.ZipFile(downloads_tree / "aport_multi.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "aport_multi.zip", "w") as zf:
         zf.write(work / "src.png", "v01/a.png")
         zf.write(work / "src.png", "v01/b.png")
         zf.write(work / "src.png", "v02/c.png")
         zf.write(work / "src.png", "v02/d.png")
-    with zipfile.ZipFile(downloads_tree / "aport_single.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "aport_single.zip", "w") as zf:
         zf.write(work / "src.png", "ch1/1.png")
         zf.write(work / "src.png", "ch1/2.png")
-    with zipfile.ZipFile(downloads_tree / "aport_mixed.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "aport_mixed.zip", "w") as zf:
         zf.write(work / "src.png", "loose.png")
         zf.write(work / "src.png", "v01/a.png")
         zf.write(work / "src.png", "v02/b.png")
@@ -145,7 +145,7 @@ def split_lib(server, downloads_tree: Path):
     import shutil
 
     for name in ("aport_multi.zip", "aport_single.zip", "aport_mixed.zip"):
-        (downloads_tree / name).unlink(missing_ok=True)
+        (library_tree / name).unlink(missing_ok=True)
     _post(server, "/api/v1/index/refresh")
 
 

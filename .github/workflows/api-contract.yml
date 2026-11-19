@@ -58,8 +58,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: System deps (zlib for flate2)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
+      - name: System deps (zlib for flate2, dav1d for avif-native #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config libdav1d-dev
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -67,7 +67,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/bookq-state
           uv run --with pillow python - <<'EOF'
@@ -84,7 +84,7 @@ jobs:
       # strict startup validation — a missing gate exits before serving.
       - name: Start viewer-rs (no upstream, all native, strict)
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
             BOOKQ_BIND=127.0.0.1:8080 \
             GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
             BASE_URL=http://127.0.0.1:8080 \

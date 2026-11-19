@@ -18,7 +18,10 @@ services:
       dockerfile: Dockerfile.viewer-rs
     container_name: bookq-prd-viewer-rs
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      # read-write: /api/v1/library/* (upload/delete) writes here.
+      # DOWNLOADS_HOST_DIR は rename 前の変数名 — 旧 .env が残っていても
+      # 解決できるよう nested fallback (新名が優先)。
+      - "${LIBRARY_HOST_DIR:-${DOWNLOADS_HOST_DIR:-./library}}:/app/library:rw"
       # folder-visibility SQLite — user-state volume に永続化。
       - user-state:/var/lib/bookq
       # thumb/sprite hit-path cache — 共有しないと native thumb は常に
@@ -28,7 +31,11 @@ services:
     environment:
       # #532: strangler proxy 撤去済み — upstream/gate env は存在しない。
       # 未知経路の着弾は 501 + path WARN、認証不能は 401 で fail-fast する。
-      - DOWNLOADS_DIR=/app/downloads
+      - LIBRARY_DIR=/app/library
+      # rollback 互換: prebuilt 旧イメージは DOWNLOADS_DIR を読む —
+      # この compose は deploy 対象の新旧どちらにも使われるため、同じ
+      # マウントを旧変数名にも指させる (新バイナリは無視する)。
+      - DOWNLOADS_DIR=/app/library
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC。
@@ -84,7 +91,7 @@ services:
   # (http://viewer-rs:8080) の対応は Cloudflare ダッシュボード側で管理する。
   cloudflared:
     profiles: ["public"]
-    image: cloudflare/cloudflared:2026.10.4
+    image: cloudflare/cloudflared:2026.11.1
     container_name: bookq-prd-cloudflared
     command: tunnel --no-autoupdate run
     environment:

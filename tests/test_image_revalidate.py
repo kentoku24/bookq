@@ -124,32 +124,32 @@ def prime(page, url):
     assert cached(page, url), f"the page image must be cached before the swap: {url}"
 
 
-def open_work(page, downloads_tree):
+def open_work(page, library_tree):
     """Open simple_manga and return (image url, on-disk path, <img> locator)."""
     img = open_simple_manga(page)
     url = img.evaluate("e => e.src")
-    target = downloads_tree / "simple_manga" / url.rsplit("/", 1)[-1]
+    target = library_tree / "simple_manga" / url.rsplit("/", 1)[-1]
     assert target.is_file(), f"fixture image missing: {target}"
     return url, target, img
 
 
 @pytest.fixture(autouse=True)
-def _restore_page1(downloads_tree):
+def _restore_page1(library_tree):
     """Put the mutated fixture page back so the shared tree stays pristine.
 
-    ``downloads_tree`` is session-scoped and every other module reads the same
+    ``library_tree`` is session-scoped and every other module reads the same
     ``simple_manga/1.png`` (40x60 red), so a replacement here must not leak.
     """
-    target = downloads_tree / "simple_manga" / "1.png"
+    target = library_tree / "simple_manga" / "1.png"
     original = target.read_bytes()
     yield
     target.write_bytes(original)
 
 
-def test_replaced_image_bytes_reach_the_client(page, server, downloads_tree):
+def test_replaced_image_bytes_reach_the_client(page, server, library_tree):
     goto_offline(page, server)
     assert wait_for_sw(page), "SW did not take control"
-    url, target, _img = open_work(page, downloads_tree)
+    url, target, _img = open_work(page, library_tree)
 
     prime(page, url)
     before = fetch_sha256(page, url)
@@ -167,11 +167,11 @@ def test_replaced_image_bytes_reach_the_client(page, server, downloads_tree):
     assert cached(page, url), "the refreshed bytes must be stored back into Cache storage"
 
 
-def test_refreshed_bytes_reach_the_viewer(page, server, downloads_tree):
+def test_refreshed_bytes_reach_the_viewer(page, server, library_tree):
     """The user-visible path: the painted <img> must pick up the replaced file."""
     goto_offline(page, server)
     assert wait_for_sw(page), "SW did not take control"
-    url, target, img = open_work(page, downloads_tree)
+    url, target, img = open_work(page, library_tree)
     prime(page, url)
     assert img.evaluate("e => e.naturalWidth") == 40  # fixture page 1 is 40x60
 
@@ -185,10 +185,10 @@ def test_refreshed_bytes_reach_the_viewer(page, server, downloads_tree):
     )
 
 
-def test_deleted_image_falls_back_to_the_cached_copy(page, server, downloads_tree):
+def test_deleted_image_falls_back_to_the_cached_copy(page, server, library_tree):
     goto_offline(page, server)
     assert wait_for_sw(page), "SW did not take control"
-    url, target, _img = open_work(page, downloads_tree)
+    url, target, _img = open_work(page, library_tree)
     prime(page, url)
     cached_digest = fetch_sha256(page, url)
 
@@ -201,10 +201,10 @@ def test_deleted_image_falls_back_to_the_cached_copy(page, server, downloads_tre
         _make_png(target, w=40, h=60, rgb=(200, 60, 60))
 
 
-def test_offline_still_serves_the_cached_copy(page, server, downloads_tree):
+def test_offline_still_serves_the_cached_copy(page, server, library_tree):
     goto_offline(page, server)
     assert wait_for_sw(page), "SW did not take control"
-    url, target, _img = open_work(page, downloads_tree)
+    url, target, _img = open_work(page, library_tree)
     prime(page, url)
     cached_digest = fetch_sha256(page, url)
 
@@ -297,7 +297,7 @@ def recording_proxy(server):
         httpd.server_close()
 
 
-def test_nocors_image_load_revalidates_with_validators(page, recording_proxy, downloads_tree):
+def test_nocors_image_load_revalidates_with_validators(page, recording_proxy, library_tree):
     """An ``<img>``-shaped (no-cors) hit must revalidate with If-None-Match.
 
     The viewer loads pages with ``<img>``, i.e. mode:"no-cors". Re-deriving a
@@ -310,7 +310,7 @@ def test_nocors_image_load_revalidates_with_validators(page, recording_proxy, do
     base_url, received = recording_proxy
     goto_offline(page, base_url)
     assert wait_for_sw(page), "SW did not take control"
-    url, _target, _img = open_work(page, downloads_tree)
+    url, _target, _img = open_work(page, library_tree)
     path = urllib.parse.urlsplit(url).path
     prime(page, url)
 
@@ -328,7 +328,7 @@ def test_nocors_image_load_revalidates_with_validators(page, recording_proxy, do
     )
 
 
-def test_cover_thumb_is_cached_with_the_work(page, server, downloads_tree):
+def test_cover_thumb_is_cached_with_the_work(page, server, library_tree):
     """A cover thumb belongs in the same per-work cache prefetch.js writes.
 
     ``cacheNameFor(folder)`` is where prefetch puts covers and where

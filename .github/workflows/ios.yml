@@ -133,13 +133,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.sdk.outputs.ok == 'true'
 
+      # dav1d-sys (image avif-native, #563) probes system dav1d via
+      # pkg-config — brew satisfies it (dav1d >=1.3 required).
+      - name: System deps (dav1d for avif-native, #563)
+        if: steps.sdk.outputs.ok == 'true'
+        run: brew install dav1d pkg-config || brew upgrade dav1d pkg-config || true
+
+      # rust-cache restores dav1d-sys's build-script output, which bakes
+      # the Cellar version path into -L — stale after a brew version bump
+      # (observed on safari-gate: ld searched Cellar/dav1d/1.5.4 vs 1.5.5).
+      - name: Drop stale dav1d-sys build cache
+        if: steps.sdk.outputs.ok == 'true'
+        run: cargo clean --manifest-path rust/Cargo.toml -p dav1d-sys
+
       - name: Build viewer-rs
         if: steps.sdk.outputs.ok == 'true'
         run: cargo build --manifest-path rust/Cargo.toml -p viewer-rs
 
       # Same synthetic tree as android.yml, plus Series/vol2 so the iOS
       # drill-down test sees two volumes under Series/.
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         if: steps.sdk.outputs.ok == 'true'
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Series/vol2 /tmp/dl/Other /tmp/bookq-state
@@ -155,7 +168,7 @@ jobs:
       - name: Start bookq (test mode)
         if: steps.sdk.outputs.ok == 'true'
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
             BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-ios-ci-server.log 2>&1 &
           for i in $(seq 1 60); do

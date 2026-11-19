@@ -70,14 +70,65 @@ def test_low_contrast_colors_updated(page):
     ) == PLACEHOLDER_COLOR
 
 
+def test_header_menu_scrollable_in_short_landscape(browser, server):
+    """667x375 landscape: the ⋯menu must fit the viewport and scroll so the
+    last item (logout) is reachable — the fixed page can't scroll for it."""
+    context = browser.new_context(
+        viewport={"width": 667, "height": 375}, is_mobile=True, has_touch=True
+    )
+    pg = context.new_page()
+    try:
+        pg.goto(server)
+        pg.wait_for_selector(".tile")
+        pg.click("#header-menu-btn")
+        pg.wait_for_selector("#header-menu:not([hidden])")
+        menu = pg.evaluate(
+            """() => {
+                const m = document.getElementById('header-menu');
+                const r = m.getBoundingClientRect();
+                return {bottom: r.bottom, overflowY: getComputedStyle(m).overflowY};
+            }"""
+        )
+        assert menu["bottom"] <= 375, (
+            f"menu bottom {menu['bottom']}px overflows 375px viewport"
+        )
+        assert menu["overflowY"] in ("auto", "scroll"), (
+            f"#header-menu overflowY is {menu['overflowY']!r} — needs scroll"
+        )
+        # The menu's own scroll reaches the last item.
+        pg.evaluate(
+            "const m = document.getElementById('header-menu');"
+            "m.scrollTop = m.scrollHeight"
+        )
+        logout_bottom = pg.evaluate(
+            "document.getElementById('logout-btn').getBoundingClientRect().bottom"
+        )
+        assert 0 < logout_bottom <= 375, (
+            f"#logout-btn bottom {logout_bottom}px not reachable at 375px"
+        )
+    finally:
+        context.close()
+
+
 def test_touch_targets_min_44px(page, landscape_page):
     # Sidebar / toolbar controls (portrait viewport).
-    for sel in ["#menu-btn", "#logout-btn", "#footer-refresh-btn", "#search-input", "#filter-btn", "#offline-status", "#harness-link"]:
+    for sel in ["#menu-btn", "#header-menu-btn", "#pair-btn", "#search-input", "#offline-status"]:
         rect = _rect(page, sel)
         assert rect is not None, f"{sel} not found in the DOM"
         assert rect["w"] >= MIN_TARGET and rect["h"] >= MIN_TARGET, (
             f"{sel} is {rect['w']:.1f}x{rect['h']:.1f} (< {MIN_TARGET}px)"
         )
+
+    # ⋯menu items are full-width rows — measured with the menu open.
+    page.locator("#header-menu-btn").click()
+    page.wait_for_selector("#header-menu:not([hidden])")
+    for sel in ["#filter-btn", "#lib-edit-btn", "#menu-view-list", "#menu-reload", "#harness-link", "#logout-btn"]:
+        rect = _rect(page, sel)
+        assert rect is not None, f"{sel} not found in the DOM"
+        assert rect["w"] >= MIN_TARGET and rect["h"] >= MIN_TARGET, (
+            f"{sel} is {rect['w']:.1f}x{rect['h']:.1f} (< {MIN_TARGET}px)"
+        )
+    page.keyboard.press("Escape")
 
     # Overlay spread controls (landscape viewport; default 2P mode shows both).
     for sel in ["#spread-toggle", "#spread-shift"]:
@@ -116,7 +167,7 @@ def test_resume_btn_clears_footer(page):
     """
     # Seed reading progress (shape per web/static/app.js:403-408
     # {page, total, ts}); simple_manga is a leaf in the conftest fixture
-    # tree (tests/conftest.py downloads_tree) and in
+    # tree (tests/conftest.py library_tree) and in
     # tests/fixtures/uiux_tree.py, so no dynamic resolution is needed.
     page.evaluate("localStorage.setItem(window.OfflineCore.progressKey(), JSON.stringify({'simple_manga':{page:4,total:10,ts:Date.now()}}))")
     page.reload()
@@ -137,13 +188,20 @@ def test_resume_btn_clears_footer(page):
         f"overlaps #sidebar-footer top {footer_box['y']:.1f}px (need 8px+ gap)"
     )
 
-    # Clickability proof 1: footer-refresh center click toggles view mode
-    # (tile -> list); sidebar stays open.
-    refresh_box = page.locator("#footer-refresh-btn").bounding_box()
-    assert refresh_box is not None, "#footer-refresh-btn has no bounding box"
+    # Clickability proof 1: header ⋯menu center click opens the menu and a
+    # view pick still toggles the grid (tile -> list); sidebar stays open.
+    menu_btn_box = page.locator("#header-menu-btn").bounding_box()
+    assert menu_btn_box is not None, "#header-menu-btn has no bounding box"
     page.mouse.click(
-        refresh_box["x"] + refresh_box["width"] / 2,
-        refresh_box["y"] + refresh_box["height"] / 2,
+        menu_btn_box["x"] + menu_btn_box["width"] / 2,
+        menu_btn_box["y"] + menu_btn_box["height"] / 2,
+    )
+    page.wait_for_selector("#header-menu:not([hidden])", timeout=5000)
+    list_box = page.locator("#menu-view-list").bounding_box()
+    assert list_box is not None, "#menu-view-list has no bounding box"
+    page.mouse.click(
+        list_box["x"] + list_box["width"] / 2,
+        list_box["y"] + list_box["height"] / 2,
     )
     page.wait_for_selector("#tile-grid.list-mode", timeout=5000)
 

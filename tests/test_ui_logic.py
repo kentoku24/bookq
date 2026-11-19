@@ -37,6 +37,8 @@ from urllib.parse import urlparse
 
 import pytest
 
+from browse_header_helpers import open_header_menu
+
 WARNING_MARK = "⚠"
 
 
@@ -65,15 +67,15 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _start_server(downloads: Path):
-    """Boot a backend against *downloads* in the current lane; yield its base URL.
+def _start_server(library: Path):
+    """Boot a backend against *library* in the current lane; yield its base URL.
 
     Phase 2c v1 port (#487), #503 rs-only: viewer-rs via rs_spawn.
     """
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=downloads, state_dir=os.environ["BOOKQ_STATE_DIR"]
+        library_dir=library, state_dir=os.environ["BOOKQ_STATE_DIR"]
     )
     try:
         yield base_url
@@ -346,11 +348,11 @@ def test_spinner_visible_during_predecode(slow_page, slow_proxy):
 
 
 @pytest.fixture(scope="module")
-def slow_downloads(tmp_path_factory) -> Path:
+def slow_library(tmp_path_factory) -> Path:
     """Tiny tree for the H7/H8 determinism tests; the slow network comes from
     the image-delaying proxy, not the files. "other" keeps the folders from
     being collapsed by the single-child flattening rule."""
-    root = tmp_path_factory.mktemp("slow_downloads")
+    root = tmp_path_factory.mktemp("slow_library")
     slow = root / "slow"
     slow.mkdir()
     for name in ["p001.png", "p002.png", "p003.png"]:
@@ -366,8 +368,8 @@ def slow_downloads(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def slow_server(slow_downloads: Path):
-    yield from _start_server(slow_downloads)
+def slow_server(slow_library: Path):
+    yield from _start_server(slow_library)
 
 
 @pytest.fixture(scope="module")
@@ -387,11 +389,11 @@ def slow_page(request, slow_proxy):
 
 
 @pytest.fixture(scope="module")
-def search_downloads(tmp_path_factory) -> Path:
-    """Dedicated downloads tree WITH metadata.toml (the shared conftest tree
+def search_library(tmp_path_factory) -> Path:
+    """Dedicated library tree WITH metadata.toml (the shared conftest tree
     has none, so /api/search would return 0 results there). "other" keeps
     "sample" from being collapsed by the single-child flattening rule."""
-    root = tmp_path_factory.mktemp("search_downloads")
+    root = tmp_path_factory.mktemp("search_library")
     folder = root / "sample"
     folder.mkdir()
     for name in ["1.png", "2.png"]:
@@ -416,8 +418,8 @@ def search_downloads(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def search_server(search_downloads: Path):
-    yield from _start_server(search_downloads)
+def search_server(search_library: Path):
+    yield from _start_server(search_library)
 
 
 @pytest.fixture(scope="module")
@@ -512,9 +514,9 @@ def test_search_cards_show_thumbnail(search_page):
 
     RED pre-fix (placeholder div only), GREEN post-fix.
     """
-    # tile → list → card (two clicks from the tile default).
-    search_page.locator("#footer-refresh-btn").click()
-    search_page.locator("#footer-refresh-btn").click()
+    # ⋯menu → カード (direct pick; no more cycling).
+    open_header_menu(search_page)
+    search_page.locator("#menu-view-card").click()
     search_page.wait_for_selector("#tile-grid.card-mode")
 
     with search_page.expect_response(lambda r: "/api/v1/search" in r.url):

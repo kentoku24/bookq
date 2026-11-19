@@ -84,7 +84,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 ```
 
 - `BOOKQ_TEST_MODE=true` が必須 — viewer-rs が起動時に読み、OAuth をバイパスして mock user を返す。
-- `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
+- `LIBRARY_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
 - `--with-requirements requirements-dev.txt` の付与を省略しないこと (pillow/httpx 等の fixture 依存が入る)。
 - pytest 起動時に `scripts/test-preflight.sh` が conftest `pytest_sessionstart` から自動実行される。repo があるボリュームの空きが `BOOKQ_MIN_FREE_GB` (既定 25GiB, `disk-guard --check` と同一) を下回ると、安全な残骸 (stale/マージ済み他worktreeの `rust/target`・`ios/build`・android ビルド出力、`.worktrees/` の孤児dir、uv cache、古い `pytest-*` tmp、`ms-playwright` 旧バージョン) を回収してから再チェックし、それでも不足なら容疑者リスト付きで abort する。`BOOKQ_WARN_FREE_GB` (既定 40GiB) 未満は警告のみ。`--dry-run` で対象列挙、`--clean` で任意タイミングの回収、緊急回避は `BOOKQ_SKIP_PREFLIGHT=1`。CI (`CI` env) ではスキップ — 残留物が世代を跨がない ephemeral runner では閾値未満が正常のため。削除は「stale (> `BOOKQ_STALE_DAYS` 既定7日) or マージ済み」かつ「使用中プロセスの cwd が無い」ものに限定され、自分の worktree は対象外。
 - `rs_spawn` の `cargo build` 出力先は `BOOKQ_TARGET_DIR` / `CARGO_TARGET_DIR_BASE` / `CARGO_TARGET_DIR` で外付けボリュームに移転できる (worktree ごと ~1.5GB が内蔵SSDを埋めない)。値は「ルート」で、その下に checkout 名のサブdirが作られる (並行 worktree 同士で target を共有しない)。`/Volumes/` 配下の実マウントのみ有効 — 未接続や内部パスは `rust/target` にフォールバック。例: `export CARGO_TARGET_DIR_BASE=/Volumes/Sabrent2T/cargo-target`。
@@ -110,8 +110,9 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - Kotlin + Compose (M3) ネイティブクライアント。minSdk 35、modules `:core` (純 Kotlin) / `:data` (OkHttp+Keystore) / `:app`。詳細は `docs/android-app.md`。
 - 必須 env: `JAVA_HOME=$(brew --prefix openjdk@21)` `ANDROID_HOME=$HOME/Library/Android/sdk`。`android/local.properties` に `sdk.dir`。
 - テスト+ビルド: `cd android && ./gradlew :core:test :data:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`。
-- UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://10.0.2.2:8080`）。
+- UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://127.0.0.1:8080` を `adb reverse` でホストへ転送。素のエミュレータからは `http://10.0.2.2:8080`）。`:data` の androidTest（KeystoreTokenStoreTest、self-instrumenting でサーバー不要）は `./gradlew :data:connectedDebugAndroidTest` — CI の `ui` ジョブでも `am instrument` で実行される。
 - 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
+- **エミュレータ標準フローは `.claude/skills/android-emulator/SKILL.md`**。AVD (`bookq_tab`) は ~9GB・Gradle/Kotlin daemon は 2〜4GB を常駐させるため、検証終了時・テスト合間に必ず `adb -s <serial> emu kill` / `./gradlew --stop` で止めること。自分が起動したプロセスだけを止め、他セッションの環境を殺さない (停止前に `adb devices` / `docker ps` / `ps` で所有確認)。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
 
 ## 8. 並行作業の隔離

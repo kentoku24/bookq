@@ -37,6 +37,10 @@ PATH_TO_KEY = {
     "/api/v1/reading-positions": "readingPositions",
     "/api/v1/folder-visibility": "folderVisibility",
     "/api/v1/index/refresh": "indexRefresh",
+    "/api/v1/library/files": "libraryFiles",
+    "/api/v1/library/uploads": "libraryUploads",
+    "/api/v1/library/uploads/{id}": "libraryUpload",
+    "/api/v1/library/uploads/{id}/finalize": "libraryUploadFinalize",
     "/api/v1/version": "version",
     "/api/v1/health": "health",
     # Native-client only (the PWA never calls it) — listed so the

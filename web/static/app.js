@@ -41,7 +41,7 @@
     const s = document.createElement('script'); s.src = '/static/touch-indicator.js'; document.head.appendChild(s);
   }
 
-  // ── Service Worker registration (Todo 2) ──
+  // ── Service Worker registration ──
   // TEST_MODE gate: skip registration unless ?offline=1 or localStorage flag.
   (function registerSW(){
     if (!('serviceWorker' in navigator)) return;
@@ -236,7 +236,7 @@
   // instead of racing it for index/tree ownership.
   let _loadFoldersInFlight = null;
   let _revalidateInFlightGen = -1;
-  // Todo 5: warm-only conditional fetch. Keys mirror the server
+  // Warm-only conditional fetch. Keys mirror the server
   // _folders_response cache keys (path,depth): root full vs shallow1.
   // Cold first fetch (loadFolders stages) stays unconditional — ETag never
   // claims cold savings. Only fetchLatestFolders/revalidateFoldersForOnline
@@ -388,7 +388,7 @@
       // IDB is the sole offline tree source (IDB-only since 8aacd57): persist
       // the revalidated tree alongside Cache, otherwise the next offline
       // reload would serve the stale snapshot. Full-only, background, never
-      // blocking the redraw (Todo2 contract; shallow never reaches here).
+      // blocking the redraw (shallow never reaches here).
       _persistTreeSnapshot(data, {defer:true});
       updateBrowseHeader();
       renderView();
@@ -555,7 +555,7 @@
   // second document-level dismiss here or popovers render twice per keypress.
 
   // ── ReadingProgress: localStorage-backed persistence ──
-  // Todo 4: renders must batch-parse ONCE per render (see browse/render.js
+  // Renders must batch-parse ONCE per render (see browse/render.js
   // _buildRenderCtx) — never call get() per tile. getAllSafe/pick are the
   // one-shot path; corrupt values degrade to {} so the grid never falls.
   const ReadingProgress = {
@@ -627,7 +627,7 @@
     Object.defineProperty(window, 'urlRestoreGen', {get(){return urlRestoreGen;}, set(v){urlRestoreGen=v;}, configurable:true});
     Object.defineProperty(window, 'urlSyncPaused', {get(){return urlSyncPaused;}, set(v){urlSyncPaused=v;}, configurable:true});
   } catch(e) { console.warn(e); }
-  // ── two-stage first paint (Todo2: shallow depth=1 → full) ──
+  // ── two-stage first paint (shallow depth=1 → full) ──
   // _shallowMode is true between the shallow first paint and the full-tree
   // arrival. While true: facet filtering stays off (shallow nodes carry no
   // subtree_facets), treeLoaded stays false (no prefetch/applyUrlState leak),
@@ -665,7 +665,6 @@
   // and neutralize the track's transition/transform. Shared by loadImages and
   // resetToTop — keep the two in sync (any change to strip teardown goes here).
   function resetStrip() {
-    // Reset strip
     for (const k of Object.keys(stripImgs)){
       const img = stripImgs[k];
       const cell = stripCells[k];
@@ -674,7 +673,6 @@
       delete stripImgs[k];
       delete stripCells[k];
     }
-    // Reset chapter labels
     for (const label of chapterLabels) label.remove();
     chapterLabels = [];
     for (const k of Object.keys(spreadEls)) spreadEls[k].remove();
@@ -996,7 +994,7 @@
   function getChapterLocalRealIdx(globalIdx){
     return globalIdx - chapterBoundaries[getCurrentChapterInfo(globalIdx).chapterIdx];
   }
-  // ── chapter-local slider sync: central max/value write point (wired up by later tasks) ──
+  // ── chapter-local slider sync: central max/value write point ──
   function syncChapterSlider(globalIdx, opts){
     const resetMax = !!(opts && opts.resetMax === true);
     let info;
@@ -1152,7 +1150,7 @@
   }
   function hideResumeBtn(){ resumeBtn.classList.add("hidden"); setInert(resumeBtn, true); sidebar.classList.remove("has-resume"); }
   function showResumeBtn(){ resumeBtn.classList.remove("hidden"); setInert(resumeBtn, false); sidebar.classList.add("has-resume"); }
-  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); syncSidebarA11y(); }
+  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); closeHeaderMenu({focus:false}); syncSidebarA11y(); }
   try { window.closeSidebar = closeSidebar; window.setInert = setInert; window.syncSidebarA11y = syncSidebarA11y; } catch(e) { console.warn(e); }
   // The visual side of opening the drawer — shared with browse/pairSync.js
   // (paired scroll-mirror opens the follower's sidebar without a nav intent).
@@ -1186,6 +1184,9 @@
   });
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape") return;
+    // The header ⋯menu is the topmost layer while open — Escape closes it
+    // (and returns focus to its button) rather than the sidebar behind it.
+    if (closeHeaderMenu()) return;
     // H4(c): the filter sheet is a real dialog (role=dialog aria-modal=true)
     // now — Escape must dismiss IT first, not the sidebar behind it.
     if (bottomSheet.classList.contains("open")) { closeFilterSheet(); return; }
@@ -1201,7 +1202,7 @@
     }
   }
 
-  // Todo 5: single-traversal index. One walk assigns _fullPath, builds the
+  // Single-traversal index. One walk assigns _fullPath, builds the
   // nodeMap, and emits both thumb lists matching OfflineThumb.collect —
   // singles via {singleOnly:true} (device cover width, the same string
   // resolveCoverSingle requests), full via the default path (singles at the
@@ -1628,7 +1629,7 @@
   // thumbs/resolveCover.js owns the cover fallback chain (thumb → thumbs[0] → null).
   function _coverUrl(node, w){ return window.ThumbResolve.resolveCover(node, w); }
   function buildNodeMap(){
-    // Todo 5: the map is built by setFullPathsAndIndex on every restoreTree;
+    // The map is built by setFullPathsAndIndex on every restoreTree;
     // return the cache when it tracks the live tree, rebuild (one walk) only
     // when an out-of-band mutation replaced the reference. The repair walk
     // uses the non-superseding helper — a pending async full-index build
@@ -1638,7 +1639,7 @@
     // authoritative topLevel 公開のふりをしないよう引き継ぐ。
     return _buildIndexSync(tree, _indexProvisional);
   }
-  // Todo 4: single delegated #tile-grid listener + closest() — replaces the
+  // Single delegated #tile-grid listener + closest() — replaces the
   // per-tile addEventListener loops (N listeners → 1). The selector arg is
   // kept for caller compat; the handler matches the browse union
   // (.tile/.item[data-path]/.card) and no-ops while searchMode (search tiles
@@ -1891,7 +1892,7 @@
       // of being eaten by the freshness gate.
       if (!window.Connectivity || window.Connectivity.isOnline()) _onlineRevalidateLast = Date.now();
       _persistTreeSnapshot(data, {defer:true});
-      // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
+      // Shallow-warmup idle fill: hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
       // a reload. The filled tree re-enters via restoreTree (existing path).
       try {
@@ -2131,6 +2132,9 @@
     });
     filterBtn.classList.toggle('active',
       activeFilters.artist.length > 0 || activeFilters.tag.length > 0);
+    // the ⋯menu button mirrors the active state — it's the only always-
+    // visible hint now that the funnel lives inside the menu.
+    if (headerMenuBtn) headerMenuBtn.classList.toggle('active', filterBtn.classList.contains('active'));
   }
 
   function openFilterSheet() {
@@ -2147,7 +2151,7 @@
     sheetOverlay.classList.remove("hidden");
     sheetOverlay.classList.add("visible");
     bottomSheet.classList.remove("hidden");
-    // Trigger layout then slide in
+    // Unhide must commit a frame before .open or the slide-in never runs
     requestAnimationFrame(() => {
       bottomSheet.classList.add("open");
       sheetCloseBtn.focus();
@@ -2162,7 +2166,13 @@
     // Restore whatever inert state the sidebar's own open/closed class
     // implies (it was forced inert in openFilterSheet regardless of that).
     syncSidebarA11y();
-    filterBtn.focus();
+    // 起動元の filterBtn は ⋯メニュー内にあり、シートが閉じる頃には
+    // display:none 配下なので focus() が効かない。常時表示の ⋯ボタンへ
+    // 戻す。メニュー無しの旧シェルでは表示中の filterBtn にフォールバック。
+    const menuBtn = document.getElementById("header-menu-btn");
+    const focusTarget = (menuBtn && menuBtn.offsetParent !== null) ? menuBtn
+      : (filterBtn && filterBtn.offsetParent !== null) ? filterBtn : null;
+    if (focusTarget) focusTarget.focus();
     sheetOverlay.classList.remove("visible");
     setTimeout(() => {
       bottomSheet.classList.add("hidden");
@@ -2266,7 +2276,7 @@
     return undefined;
   }
 
-  // Physical directory depth of a folder relative to the downloads root,
+  // Physical directory depth of a folder relative to the library root,
   // counted from the raw path rather than the post-flatten tree: scanner.py's
   // single-child flattening merges wrapper folders into a node's name (e.g.
   // "wrap/inner/vol1"), so a real multi-chapter series can end up looking
@@ -2291,7 +2301,6 @@
 
     const parentNode = findParentOf(tree, fullPath, null);
 
-    // If no parent (root level), return only current folder
     if (!parentNode) {
       const parts = fullPath.split("/");
       return [{ name: parts[parts.length - 1], fullPath }];
@@ -2705,8 +2714,8 @@
     }
     // Chapter divider labels sit centred in the gap to the right of the
     // spread that opens the chapter (manga RTL: the previous chapter is to
-    // the right). The gap itself may be wider than CHAPTER_GAP_PX (監査 V3
-    // — gapBefore() widens it so neither neighbour peeks), so centre on the
+    // the right). The gap itself may be wider than CHAPTER_GAP_PX
+    // (gapBefore() widens it so neither neighbour peeks), so centre on the
     // actual computed gap, not the CHAPTER_GAP_PX floor. Labels are windowed
     // (ensureChapterLabels), so iterate the live set via its chapter index.
     for (const el of chapterLabels) {
@@ -4094,6 +4103,10 @@
     const u = sidebar.cloneNode(true);
     u.style.transform = '';          // never inherit a mid-gesture translate
     u.style.transition = 'none';     // per-rAF parallax writes must not lag
+    // The clone is a static snapshot: never freeze an open ⋯menu into it,
+    // and the floating connectivity pill belongs to the live panel only.
+    const _hm = u.querySelector('#header-menu'); if (_hm) _hm.hidden = true;
+    const _os = u.querySelector('#offline-status'); if (_os) _os.remove();
     if (patch) { try { patch(u); } catch(e) { console.warn(e); } }
     navUnderlaySlot.appendChild(u);
     navUnderlay = host;
@@ -4146,6 +4159,7 @@
     const header = document.getElementById('sidebar-header');
     if (header) {
       const hc = header.cloneNode(true);
+      const _hcMenu = hc.querySelector('#header-menu'); if (_hcMenu) _hcMenu.hidden = true;
       const h = hc.querySelector('#browse-header');
       if (h) {
         if (!parent) h.innerHTML = '<span id="browse-root-icon">\uD83D\uDCC1</span> フォルダ';
@@ -4701,7 +4715,7 @@
 
   imgContainer.addEventListener("touchstart", e => {
     if (!images.length) return;
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     const act = window.ViewerGesture.activeTouches(e);
     // A second finger landed mid-swipe: the reader is starting a pinch, not
     // continuing the drag. Abort it here rather than leaving dragActive true.
@@ -4720,7 +4734,7 @@
   }, {passive: true});
 
   imgContainer.addEventListener("touchmove", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive) {
       // Late arming: the lone edge-started touch has moved ARM_PX and stopped
       // being a palm — with no touchstart of its own. Measure the drag from
@@ -4780,7 +4794,7 @@
   }, {passive: false});
 
   imgContainer.addEventListener("touchend", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive){
       // A never-promoted edge touch lifting: forget it, or the NEXT edge-started
       // touch could not register as pending. (Its tap still reaches the zones
@@ -4898,7 +4912,7 @@
   });
 
   imgContainer.addEventListener("touchcancel", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive) {
       if (pendingPalmId !== null && findTouch(e.changedTouches, pendingPalmId)) pendingPalmId = null;
       return;
@@ -4912,24 +4926,96 @@
     if (dragDecided) snapTo(currentIdx);
   });
 
-  // ── footer: toggle tile ↔ list ↔ card ──
-  const footerBtn = document.getElementById("footer-refresh-btn");
-  function updateFooterBtn(){
-    const labels = { tile: "🎨", list: "📋", card: "🃏" };
-    footerBtn.textContent = labels[viewMode] || "🎨";
-    footerBtn.title = "表示: " + ({tile:"タイル",list:"リスト",card:"カード"}[viewMode] || viewMode);
+  // ── header ⋯menu: filter / edit / view / reload / harness / logout ──
+  // The view-mode radios are the successor of the old footer cycle button —
+  // URL restore still pokes window.updateViewMenu (hash.js) to resync them.
+  const headerMenuBtn = document.getElementById("header-menu-btn");
+  const headerMenu = document.getElementById("header-menu");
+  function updateViewMenu(){
+    const ids = { tile: "menu-view-tile", list: "menu-view-list", card: "menu-view-card" };
+    for (const [mode, id] of Object.entries(ids)) {
+      const el = document.getElementById(id);
+      if (el) el.setAttribute("aria-checked", viewMode === mode ? "true" : "false");
+    }
   }
-  try { window.updateFooterBtn = updateFooterBtn; } catch(e) { console.warn(e); }
-  footerBtn.addEventListener("click", async () => {
-    const modes = ["tile", "list", "card"];
-    const idx = modes.indexOf(viewMode);
-    viewMode = modes[(idx + 1) % modes.length];
-    updateFooterBtn();
+  try { window.updateViewMenu = updateViewMenu; } catch(e) { console.warn(e); }
+  // Returns true when it actually closed an open menu — the global Escape
+  // chain and closeSidebar use that to tell "menu ate the event" apart.
+  function closeHeaderMenu(opts){
+    if (!headerMenu || headerMenu.hidden) return false;
+    headerMenu.hidden = true;
+    headerMenuBtn.setAttribute("aria-expanded", "false");
+    if (!opts || opts.focus !== false) headerMenuBtn.focus();
+    return true;
+  }
+  try { window.closeHeaderMenu = closeHeaderMenu; } catch(e) { console.warn(e); }
+  function openHeaderMenu(){
+    headerMenu.hidden = false;
+    headerMenuBtn.setAttribute("aria-expanded", "true");
+    const first = headerMenu.querySelector("[role=menuitem]:not([disabled]),[role=menuitemradio]");
+    if (first) first.focus();
+  }
+  if (headerMenuBtn && headerMenu){
+    headerMenuBtn.addEventListener("click", e => {
+      e.stopPropagation();   // #sidebar-header's delegated close must not see it
+      if (headerMenu.hidden) openHeaderMenu(); else closeHeaderMenu();
+    });
+    // Capture: the menu hides BEFORE the item's own action runs — e.g.
+    // #filter-btn's listener stopPropagations at target, which a bubble
+    // closer would never survive. Dispatch continues to the (now hidden)
+    // item either way since the path is already computed.
+    headerMenu.addEventListener("click", e => {
+      if (e.target.closest("[role=menuitem],[role=menuitemradio]")) closeHeaderMenu();
+    }, true);
+    headerMenu.addEventListener("click", e => { e.stopPropagation(); });
+    headerMenu.addEventListener("keydown", e => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+      const items = Array.from(headerMenu.querySelectorAll("[role=menuitem],[role=menuitemradio]")).filter(el => !el.disabled);
+      if (!items.length) return;
+      e.preventDefault(); e.stopPropagation();
+      let i = items.indexOf(document.activeElement);
+      if (e.key === "Home") i = 0;
+      else if (e.key === "End") i = items.length - 1;
+      else i = (i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[i].focus();
+    });
+    document.addEventListener("click", e => {
+      if (headerMenu.hidden) return;
+      if (e.target.closest("#header-menu") || e.target.closest("#header-menu-btn")) return;
+      closeHeaderMenu({focus:false});
+    });
+  }
+  async function setViewMode(mode){
+    if (["tile", "list", "card"].indexOf(mode) < 0) return;
+    viewMode = mode;
+    updateViewMenu();
     try { await refreshOfflineMap(); } catch(e) { console.warn(e); }
     renderView();
     window.HashRouter.writeBrowseStateReplace();
+  }
+  for (const mode of ["tile", "list", "card"]) {
+    const el = document.getElementById("menu-view-" + mode);
+    if (el) el.addEventListener("click", () => { setViewMode(mode); });
+  }
+  const menuReload = document.getElementById("menu-reload");
+  if (menuReload) menuReload.addEventListener("click", async () => {
+    // iOS library.refresh() parity: rescan the index, then reload the tree
+    // keeping the current folder.
+    try {
+      const res = await _connFetch()(globalThis.BookqApi.endpoints.indexRefresh, {method: "POST"});
+      if (!res.ok) throw new Error("http " + res.status);
+      await loadFolders({preservePath: true});
+      // 検索中はツリー更新だけでは searchResults が古いままなので、
+      // 現クエリ+フィルタで取り直す（visibility切替時と同じ再検索経路）。
+      if (searchMode && typeof doSearch === "function") {
+        try { await doSearch(); } catch(e2) { console.warn(e2); }
+      }
+    } catch(e) {
+      console.warn(e);
+      try { showErrorToast("再読み込みに失敗しました"); } catch(e2) { console.warn(e2); }
+    }
   });
-  updateFooterBtn();
+  updateViewMenu();
 
   // ── continue-reading button ──
   function updateResumeButton() {

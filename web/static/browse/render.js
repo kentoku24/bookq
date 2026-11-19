@@ -9,6 +9,8 @@
   var _folderHasImages = window.OfflineCore.folderHasImages;
   var _readChildLabel = "このフォルダを読む";
   function _offlineControlsHtml(p){ var fn=window.offlineControlsHtml; return fn?fn(p):''; }
+  // 編集モードの削除バッジ (library/edit.js)。OFF では空文字 — DOM を汚さない。
+  function _delBadge(){ var LE=window.LibraryEdit; return (LE&&LE.delBadgeHtml)?LE.delBadgeHtml():''; }
   function _progressBarHtml(saved){ var fn=window.progressBarHtml; return fn?fn(saved):{barHtml:'',inlineBarHtml:''}; }
   function _coverUrl(node, w){
     if (window._coverUrl) return window._coverUrl(node, w);
@@ -84,7 +86,7 @@
   function _getCurrentBrowsePath(){ try { return window.currentBrowsePath || null; } catch(e){ return null; } }
   function _emptyBrowseMessage(){ return window.emptyBrowseMessage ? window.emptyBrowseMessage() : "フォルダが見つかりません"; }
 
-  // Todo 4 one-shot render ctx: ONE localStorage parse + ONE offlineMap snapshot
+  // One-shot render ctx: ONE localStorage parse + ONE offlineMap snapshot
   // + memoized leafPaths per visible folder, built once per render call.
   // Per-tile code does map lookups only (no per-tile getPartialProgress walks,
   // no per-tile ReadingProgress.get parses). Corrupt localStorage degrades to
@@ -202,7 +204,7 @@
     return el;
   }
   function _handleBrowseClick(e, el){
-    if(e.target.closest('.offline-btn')||e.target.closest('.ux-pop')||e.target.closest('.visibility-toggle')) return;
+    if(e.target.closest('.offline-btn')||e.target.closest('.ux-pop')||e.target.closest('.visibility-toggle')||e.target.closest('.lib-del')) return;
     var path=el.dataset.path;
     if(el.dataset.readChild==="1"||el.dataset.readSelf==="1"){ window.currentFolder=path; if(window.closeSidebar) window.closeSidebar(); if(window.loadImages) window.loadImages(path); return; }
     var liveNode = window.getNodeAt ? window.getNodeAt(path) : null;
@@ -239,7 +241,7 @@
     _ensureBrowseDelegated();
   }
 
-  // Todo 3 single-cover-first: while window.__cc_singleCoverFirst===true
+  // Single-cover-first: while window.__cc_singleCoverFirst===true
   // (shallow window; set by app.js restoreTree, consumed here — never
   // re-derived), tiles emit ONLY the single cover at the device cover
   // width via window.resolveCoverSingle, with onerror matching
@@ -432,7 +434,7 @@
       return r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
     } catch(e){ return true; }
   }
-  // Lazy multi hydration (Todo 3): on idle after full arrival, upgrade any
+  // Lazy multi hydration: on idle after full arrival, upgrade any
   // remaining single-first tiles (img[data-cc-single]) to the multi-grid,
   // visible-first. No-op when the full render already replaced them (normal
   // path) or while the flag is still true (shallow window / full failed).
@@ -463,7 +465,7 @@
     if (typeof requestIdleCallback === 'function') requestIdleCallback(fn);
     else setTimeout(fn, 0);
   }
-  // Shallow-warmup idle fill poll (plan T4): after the first full
+  // Shallow-warmup idle fill poll: after the first full
   // /api/folders load, app.js hands the response ETag to noteFullLoad and
   // the poll loop takes over. Each idle tick fetches
   // GET /api/folders?since=<gen> (bare /api/folders while the generation is
@@ -613,7 +615,7 @@
       var offlineHtml = _offlineHtmlFor(ctx, f._fullPath);
       var unavail = _offUnavail(ctx, f._fullPath, ctx.hasOnlyMap[f._fullPath]);
       if (unavail) cls += " off-unavail";
-      html += '<div class="' + cls + '" data-path="' + _escapeHtml(f._fullPath) + '" data-type="folder" tabindex="0" role="button"' + (unavail ? ' aria-disabled="true"' : '') + '>' + _offBadge(unavail) + (vis?vis.buttonHtml:"") + imgHtml + '<div class="tile-name">' + (vis?vis.badgeHtml:"") + progress.barHtml + nameHtml(f.name) + '</div>' + offlineHtml + '</div>';
+      html += '<div class="' + cls + '" data-path="' + _escapeHtml(f._fullPath) + '" data-type="folder" tabindex="0" role="button"' + (unavail ? ' aria-disabled="true"' : '') + '>' + _offBadge(unavail) + (vis?vis.buttonHtml:"") + _delBadge() + imgHtml + '<div class="tile-name">' + (vis?vis.badgeHtml:"") + progress.barHtml + nameHtml(f.name) + '</div>' + offlineHtml + '</div>';
     }
     // Parent-level images-tiles come AFTER the folder tiles (folders first,
     // then images-tiles). Cover is the child itself; progress/offline reuse
@@ -665,7 +667,7 @@
       var thumbHtml=url?'<img class="thumb" src="'+_escapeHtml(url)+'" loading="lazy" decoding="async">':"";
       var progress=_progressFor(ctx, path);
       var badge=progress.inlineBarHtml;
-      html+='<div class="'+cls.join(" ")+'" data-path="'+_escapeHtml(path)+'" data-type="folder" tabindex="0" role="button"'+(unavail?' aria-disabled="true"':'')+'><span class="icon">\uD83D\uDCC1</span>'+(lvis?lvis.buttonHtml:"")+'<span class="name">'+_escapeHtml(node.name)+badge+(lvis?lvis.badgeHtml:"")+(unavail?' <span class="off-note" style="color:#8f9aa8;font-size:11px">オフライン</span>':'')+'</span>'+thumbHtml+_offlineHtmlFor(ctx, path)+'</div>';
+      html+='<div class="'+cls.join(" ")+'" data-path="'+_escapeHtml(path)+'" data-type="folder" tabindex="0" role="button"'+(unavail?' aria-disabled="true"':'')+'><span class="icon">\uD83D\uDCC1</span>'+(lvis?lvis.buttonHtml:"")+_delBadge()+'<span class="name">'+_escapeHtml(node.name)+badge+(lvis?lvis.badgeHtml:"")+(unavail?' <span class="off-note" style="color:#8f9aa8;font-size:11px">オフライン</span>':'')+'</span>'+thumbHtml+_offlineHtmlFor(ctx, path)+'</div>';
     }
     // Parent-level images-tiles come AFTER the folder tiles (folders first,
     // then images-tiles) — list-mode mirror of the tile grid above.
@@ -717,7 +719,7 @@
       var progress=_progressFor(ctx, f._fullPath);
       var offlineHtml=_offlineHtmlFor(ctx, f._fullPath);
       var cUnavail=_offUnavail(ctx, f._fullPath, ctx.hasOnlyMap[f._fullPath]);
-      html+='<div class="card '+(isActive?'active':'')+((cvis&&cvis.className)?" "+cvis.className:"")+(cUnavail?' off-unavail':'')+'" data-path="'+_escapeHtml(f._fullPath)+'" tabindex="0" role="button"'+(cUnavail?' aria-disabled="true"':'')+'>'+_offBadge(cUnavail)+(cvis?cvis.buttonHtml:"")+imgHtml+'<div class="card-content"><div class="card-title">'+(cvis?cvis.badgeHtml:"")+progress.barHtml+'<span class="card-title-text">'+_escapeHtml(f.name)+'</span></div><div class="card-meta">'+metaRows+'</div></div>'+offlineHtml+'</div>';
+      html+='<div class="card '+(isActive?'active':'')+((cvis&&cvis.className)?" "+cvis.className:"")+(cUnavail?' off-unavail':'')+'" data-path="'+_escapeHtml(f._fullPath)+'" tabindex="0" role="button"'+(cUnavail?' aria-disabled="true"':'')+'>'+_offBadge(cUnavail)+(cvis?cvis.buttonHtml:"")+_delBadge()+imgHtml+'<div class="card-content"><div class="card-title">'+(cvis?cvis.badgeHtml:"")+progress.barHtml+'<span class="card-title-text">'+_escapeHtml(f.name)+'</span></div><div class="card-meta">'+metaRows+'</div></div>'+offlineHtml+'</div>';
     }
     // Parent-level images-tiles come AFTER the folder tiles (folders first,
     // then images-tiles) — card-mode mirror of the tile grid above.

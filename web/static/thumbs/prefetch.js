@@ -1,7 +1,7 @@
 /* bookq thumbs/prefetch — thumb URL collection & background prefetch.
  * Plain global script (no build): defines window.collectThumbPrefetchUrls,
  * window.prefetchThumbs, window.scheduleThumbPrefetch. Load before app.js.
- * Cache policy (Todo 4): /thumb entries are INCLUDED in the per-work cache
+ * Cache policy: /thumb entries are INCLUDED in the per-work cache
  * (same cacheNameFor(dir) as /image downloads). match + put below use the
  * exact same URL string, so no orphan entries; SW caches.match is global and
  * hits either home. storeAdapter downloads stay on /image (untouched).
@@ -12,7 +12,7 @@
 
   var _warnedNoThumbApi = false;
 
-  // Todo 3: opts passthrough to OfflineThumb.collect — {singleOnly:true}
+  // Opts passthrough to OfflineThumb.collect — {singleOnly:true}
   // while window.__cc_singleCoverFirst so idle prefetch emits exactly the
   // widths the single-first DOM requests (w=200 singles).
   function collectThumbPrefetchUrls(nodes, out, seen, opts) {
@@ -80,7 +80,7 @@
     }
     return null;
   }
-  // Visible-first ordering (Todo 3): DOM-visible folders' thumbs fetch
+  // Visible-first ordering: DOM-visible folders' thumbs fetch
   // first so follow-up bytes land where seen. Cap-50 / concurrency-3 /
   // caches.match skip below are unchanged.
   function _eligibleTargets(){
@@ -137,10 +137,10 @@
     if (!_sidebarOpen()) return;
     // Also try closure-exposed via window proxy (app.js defines window.tree getter)
     // Fallback: try window.getTree if app exposes getter
-    // Todo 3: while the single-first flag holds, collect ONLY the w=200
+    // While the single-first flag holds, collect ONLY the w=200
     // singles the DOM requests (no double-fetch, no orphan cache entries —
     // caches.match below hits exact URLs).
-    // Todo 5: reuse the list setFullPathsAndIndex built in the same pass
+    // Reuse the list setFullPathsAndIndex built in the same pass
     // as _fullPath/nodeMap (window.__cc_thumbIndex) — no second full walk.
     // Missing or stale cache (different tree reference) falls back to the
     // collect walk below, so behavior is identical either way.
@@ -199,7 +199,7 @@
   var _observersInstalled = false;
 
   function scheduleThumbPrefetch() {
-    // Todo 3: same idle slot also schedules the DOM-side multi hydration
+    // The same idle slot also schedules the DOM-side multi hydration
     // (render.js scheduleMultiHydration upgrades leftover single-first tiles,
     // visible-first; no-op when the full render already replaced them).
     if (_idlePending) return;
