@@ -268,9 +268,10 @@ jobs:
         with:
           workspaces: rust
 
+      # macOS runner — brew, not apt (#563). `|| true` keeps the step
+      # green when dav1d is already installed at a newer version.
       - name: System deps (dav1d for avif-native, #563)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
-
+        run: brew install dav1d pkg-config || brew upgrade dav1d pkg-config || true
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
