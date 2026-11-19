@@ -25,6 +25,8 @@ mod auth;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+// #573: `--healthcheck` — the image has no shell for a compose probe.
+mod healthcheck;
 mod library;
 mod oauth;
 mod pair_report;
@@ -1063,6 +1065,13 @@ impl axum::serve::Listener for NoDelayListener {
 
 #[tokio::main]
 async fn main() {
+    // #573: distroless has no shell/curl, so the compose healthcheck runs
+    // this binary with `--healthcheck` instead of a `bash -c` one-liner.
+    // Handled before any tracing/runtime work so the probe stays quiet.
+    if std::env::args().skip(1).any(|a| a == "--healthcheck") {
+        std::process::exit(healthcheck::run());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
