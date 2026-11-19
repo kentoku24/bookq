@@ -312,6 +312,16 @@ fn validate_ui_sync(p: &Map<String, Value>) -> Result<(), ProtocolError> {
             return fail(ERR_RANGE, "UI_SYNC.mode must be tile|list|card");
         }
     }
+    if let Some(pr) = p.get("pred") {
+        if !pr.is_null() {
+            let ok = pr
+                .as_f64()
+                .is_some_and(|v| v.is_finite() && v >= 0.0 && v <= 100000000.0);
+            if !ok {
+                return fail(ERR_RANGE, "UI_SYNC.pred must be finite 0<=v<=1e8");
+            }
+        }
+    }
     Ok(())
 }
 

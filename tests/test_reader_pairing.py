@@ -245,7 +245,7 @@ def test_transport_switch_at_revision_boundary(server):
 
 def _ui_payload(**kw):
     p = {"view": "browse", "path": "group/episodes", "top": 120.5,
-         "viewH": 600, "scrollH": 4200, "mode": "tile"}
+         "viewH": 600, "scrollH": 4200, "pred": 900.0, "mode": "tile"}
     p.update(kw)
     return p
 

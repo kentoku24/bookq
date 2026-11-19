@@ -1326,6 +1326,11 @@
       var sh = payload.scrollH;
       if (typeof sh === 'number' && isFinite(sh) && sh > 0 && sh <= 1e8)
         p.scrollH = sh;
+      // pred も任意フィールド — sender の fling 終端予測 px。同じく
+      // 不正値は削って送る（#262: ここで落ちると受信側は実測追従に退化）。
+      var pr = payload.pred;
+      if (typeof pr === 'number' && isFinite(pr) && pr >= 0 && pr <= 1e8)
+        p.pred = pr;
       return _ctlSend(_req('UI_SYNC', p));
     }
 
