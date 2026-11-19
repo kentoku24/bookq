@@ -426,7 +426,13 @@
     if (bottomSheet) bottomSheet.classList.remove("open");
     if (bottomSheet) setInert(bottomSheet, true);
     syncSidebarA11y();
-    if (filterBtn) filterBtn.focus();
+    // 起動元の filterBtn は ⋯メニュー内（閉店時 display:none 配下）なので
+    // 常時表示の ⋯ボタンへフォーカスを戻す。旧シェルでは表示中の
+    // filterBtn にフォールバック。
+    var menuBtn = document.getElementById("header-menu-btn");
+    var focusTarget = (menuBtn && menuBtn.offsetParent !== null) ? menuBtn
+      : (filterBtn && filterBtn.offsetParent !== null) ? filterBtn : null;
+    if (focusTarget) focusTarget.focus();
     if (sheetOverlay) sheetOverlay.classList.remove("visible");
     setTimeout(function(){
       if (bottomSheet) bottomSheet.classList.add("hidden");

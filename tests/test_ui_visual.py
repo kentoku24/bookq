@@ -70,6 +70,46 @@ def test_low_contrast_colors_updated(page):
     ) == PLACEHOLDER_COLOR
 
 
+def test_header_menu_scrollable_in_short_landscape(browser, server):
+    """667x375 landscape: the ⋯menu must fit the viewport and scroll so the
+    last item (logout) is reachable — the fixed page can't scroll for it."""
+    context = browser.new_context(
+        viewport={"width": 667, "height": 375}, is_mobile=True, has_touch=True
+    )
+    pg = context.new_page()
+    try:
+        pg.goto(server)
+        pg.wait_for_selector(".tile")
+        pg.click("#header-menu-btn")
+        pg.wait_for_selector("#header-menu:not([hidden])")
+        menu = pg.evaluate(
+            """() => {
+                const m = document.getElementById('header-menu');
+                const r = m.getBoundingClientRect();
+                return {bottom: r.bottom, overflowY: getComputedStyle(m).overflowY};
+            }"""
+        )
+        assert menu["bottom"] <= 375, (
+            f"menu bottom {menu['bottom']}px overflows 375px viewport"
+        )
+        assert menu["overflowY"] in ("auto", "scroll"), (
+            f"#header-menu overflowY is {menu['overflowY']!r} — needs scroll"
+        )
+        # The menu's own scroll reaches the last item.
+        pg.evaluate(
+            "const m = document.getElementById('header-menu');"
+            "m.scrollTop = m.scrollHeight"
+        )
+        logout_bottom = pg.evaluate(
+            "document.getElementById('logout-btn').getBoundingClientRect().bottom"
+        )
+        assert 0 < logout_bottom <= 375, (
+            f"#logout-btn bottom {logout_bottom}px not reachable at 375px"
+        )
+    finally:
+        context.close()
+
+
 def test_touch_targets_min_44px(page, landscape_page):
     # Sidebar / toolbar controls (portrait viewport).
     for sel in ["#menu-btn", "#header-menu-btn", "#pair-btn", "#search-input", "#offline-status"]:

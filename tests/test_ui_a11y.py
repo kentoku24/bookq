@@ -77,6 +77,11 @@ def test_hidden_controls_not_focusable(page):
     # Close it again: inert must come back.
     page.click("#bottom-sheet-close")
     assert page.evaluate(sheet_inert), "closed #bottom-sheet must be inert again"
+    # Focus returns to the always-visible ⋯button — the opener (#filter-btn)
+    # is inside the already-hidden menu, so focusing it would be a no-op.
+    assert page.evaluate(
+        "document.activeElement && document.activeElement.id"
+    ) == "header-menu-btn", "sheet close must move focus back to #header-menu-btn"
 
 
 def test_sidebar_inert_when_closed(page):

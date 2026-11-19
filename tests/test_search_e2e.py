@@ -43,6 +43,35 @@ def test_search_filters_local_folders(page):
     expect(page.locator("#folder-count")).to_have_text("18 件")
 
 
+def test_reload_reruns_active_search(page):
+    """⋯再読み込み during an active search must re-run the query — the index
+    refresh + tree reload alone would leave stale searchResults on screen."""
+    page.locator("#search-input").fill("nonexistent")
+    expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+
+    hits = {"search": 0, "refresh": 0}
+    def _handler(route):
+        url = route.request.url
+        if "/api/v1/search" in url:
+            hits["search"] += 1
+        if "/api/v1/index/refresh" in url:
+            hits["refresh"] += 1
+        route.continue_()
+    page.route("**/api/v1/**", _handler)
+    try:
+        open_header_menu(page)
+        page.locator("#menu-reload").click()
+        page.wait_for_timeout(1500)  # refresh POST + tree + debounced re-search
+        assert hits["refresh"] >= 1, "index/refresh POST did not fire"
+        assert hits["search"] >= 1, (
+            "active search was not re-run after reload — results would stay stale"
+        )
+        # Search view is still up (empty-state for this query).
+        expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+    finally:
+        page.unroute("**/api/v1/**")
+
+
 # ── filter bottom sheet ─────────────────────────────────────────────────────────
 
 

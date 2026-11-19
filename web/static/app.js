@@ -2166,7 +2166,13 @@
     // Restore whatever inert state the sidebar's own open/closed class
     // implies (it was forced inert in openFilterSheet regardless of that).
     syncSidebarA11y();
-    filterBtn.focus();
+    // 起動元の filterBtn は ⋯メニュー内にあり、シートが閉じる頃には
+    // display:none 配下なので focus() が効かない。常時表示の ⋯ボタンへ
+    // 戻す。メニュー無しの旧シェルでは表示中の filterBtn にフォールバック。
+    const menuBtn = document.getElementById("header-menu-btn");
+    const focusTarget = (menuBtn && menuBtn.offsetParent !== null) ? menuBtn
+      : (filterBtn && filterBtn.offsetParent !== null) ? filterBtn : null;
+    if (focusTarget) focusTarget.focus();
     sheetOverlay.classList.remove("visible");
     setTimeout(() => {
       bottomSheet.classList.add("hidden");
@@ -4999,6 +5005,11 @@
       const res = await _connFetch()(globalThis.BookqApi.endpoints.indexRefresh, {method: "POST"});
       if (!res.ok) throw new Error("http " + res.status);
       await loadFolders({preservePath: true});
+      // 検索中はツリー更新だけでは searchResults が古いままなので、
+      // 現クエリ+フィルタで取り直す（visibility切替時と同じ再検索経路）。
+      if (searchMode && typeof doSearch === "function") {
+        try { await doSearch(); } catch(e2) { console.warn(e2); }
+      }
     } catch(e) {
       console.warn(e);
       try { showErrorToast("再読み込みに失敗しました"); } catch(e2) { console.warn(e2); }

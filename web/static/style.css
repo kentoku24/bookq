@@ -41,7 +41,7 @@ body{position:fixed;inset:0}
 		#header-menu-btn:hover{background:rgba(255,255,255,0.08);color:#aaa}
 		#header-menu-btn:active{background:rgba(255,255,255,0.15);transform:scale(0.95)}
 		#header-menu-btn.active{color:#8ab4f8}
-		#header-menu{position:absolute;top:100%;right:8px;z-index:56;min-width:200px;background:#1b212b;border:1px solid #39414f;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.5);overflow:hidden;padding:4px;animation:popIn .15s ease}
+		#header-menu{position:absolute;top:100%;right:8px;z-index:56;min-width:200px;max-height:calc(100vh - 64px);max-height:calc(100dvh - 64px);overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-y;background:#1b212b;border:1px solid #39414f;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.5);padding:4px;animation:popIn .15s ease}
 		#header-menu[hidden]{display:none}
 		#header-menu button,#header-menu a{display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;min-height:44px;background:none;border:none;color:#dfe5ee;font-size:13.5px;cursor:pointer;text-align:left;font-family:inherit;line-height:1.35;text-decoration:none;border-radius:8px}
 		#header-menu button:hover,#header-menu a:hover{background:rgba(255,255,255,.06)}
