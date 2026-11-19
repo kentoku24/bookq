@@ -998,7 +998,7 @@ pub async fn put_folder_visibility(
         };
         if !snap.hidden_roots.iter().any(|r| r == root) {
             // wait=True: no 202 available for a PUT — ride the build.
-            let data = ensure_tree_and_index_wait(&st.index, &st.downloads).await;
+            let data = ensure_tree_and_index_wait(&st.index, &st.library).await;
             let Some(data) = data else {
                 return vis_detail(StatusCode::SERVICE_UNAVAILABLE, "library tree unavailable");
             };

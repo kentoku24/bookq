@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Top-level app state machine: configure server → authenticate → browse.
@@ -5,7 +6,6 @@ import SwiftUI
 final class AppModel: ObservableObject {
     enum Phase {
         case onboarding     // no server URL yet
-        case booting        // checking /api/v1/version
         case login          // server demands auth, no valid token
         case ready          // authenticated (or TEST_MODE server)
     }
@@ -73,6 +73,10 @@ final class AppModel: ObservableObject {
             config.serverURLString = injected
         }
         auth.restore()
+        // Definitive session death (refresh rejected 400/401) — Android
+        // AppModel.sessionExpired parity: a live Ready session drops to
+        // Login; AuthManager already ran logout().
+        auth.onSessionExpired = { [weak self] in self?.sessionDidExpire() }
         #if DEBUG
         // `BOOKQ_TEST_TOKEN` env or `-testToken <jwt>` argv seeds a dummy
         // pair for simulator/dev runs against BOOKQ_TEST_MODE servers,
@@ -84,7 +88,18 @@ final class AppModel: ObservableObject {
             print("[bookq] test token injected")
             auth.testSeed(TokenPair(TokenPairResponse(
                 access_token: token, token_type: "Bearer",
-                expires_in: 3600, refresh_token: "")))
+                expires_in: 3600,
+                refresh_token: Self.injectedTestRefreshToken() ?? "")))
+        }
+        // `-uitestReset` / `BOOKQ_UI_TEST_RESET` — UI tests set this so
+        // every launch starts from clean persisted state. Local keys are
+        // wiped here, before configureAPI() lazily initialises the
+        // stores that read them; server-side positions are deleted in
+        // boot() ahead of the first syncWithServer().
+        if Self.uitestResetRequested() {
+            Self.wipeUITestState()
+            Self.wipeUITestOfflineDownloads()
+            print("[bookq] uitest reset: local state wiped")
         }
         #endif
         if config.baseURL != nil {
@@ -118,6 +133,61 @@ final class AppModel: ObservableObject {
         }
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-testToken"), i + 1 < args.count
+        else { return nil }
+        let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return v.isEmpty ? nil : v
+    }
+
+    /// `-uitestReset` argv flag or `BOOKQ_UI_TEST_RESET` env var.
+    static func uitestResetRequested() -> Bool {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_UI_TEST_RESET"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+            return true
+        }
+        return ProcessInfo.processInfo.arguments.contains("-uitestReset")
+    }
+
+    /// Removes every UserDefaults key that can leak state between UI
+    /// test methods — reading positions (all account scopes), pair-sync
+    /// snapshots, and layout prefs. `serverURL` is kept: it is
+    /// re-injected via `-serverURL` on every test launch anyway.
+    static func wipeUITestState(in defaults: UserDefaults = .standard) {
+        for key in defaults.dictionaryRepresentation().keys {
+            if key.hasPrefix("bookq_progress_v1") || key.hasPrefix("bookq.pairSync")
+                || key == "originalImages" || key == "browseLayout" {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
+
+    /// Offline downloads live under `Documents/<scope>/` (`works.json`
+    /// + image files) — file-backed, outside UserDefaults. Documents
+    /// holds nothing else in this app, so its contents are wiped
+    /// wholesale; per-item `try?` keeps a single failure from aborting
+    /// the rest.
+    static func wipeUITestOfflineDownloads(
+        in directory: URL? = nil,
+        fm: FileManager = .default) {
+        let docs = directory ?? fm
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for item in (try? fm.contentsOfDirectory(
+            at: docs, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: item)
+        }
+    }
+
+    /// `BOOKQ_TEST_REFRESH_TOKEN` env var or `-testRefreshToken <rt>` argv
+    /// pair, or nil. Pair with `-testToken` to drive the refresh path —
+    /// a TEST_MODE server only honours refresh tokens it issued, so a
+    /// bogus value deterministically lands on the 401 → sessionExpired
+    /// route (the in-memory store wipe a redeploy causes).
+    static func injectedTestRefreshToken() -> String? {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_TEST_REFRESH_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+            return e
+        }
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-testRefreshToken"), i + 1 < args.count
         else { return nil }
         let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
         return v.isEmpty ? nil : v
@@ -243,6 +313,13 @@ final class AppModel: ObservableObject {
             visibility.accountChanged(knownOwner: auth.user?.email)
             offline.scopeChanged()
             progress.scopeChanged()
+            #if DEBUG
+            if Self.uitestResetRequested() {
+                // Positions live server-side too — wipe before the sync
+                // below repopulates local entries from remote.
+                try? await api.deleteReadingPosition()
+            }
+            #endif
             Task { await progress.syncWithServer() }
             pair.bootResume()
             print("[bookq] boot: probe ok")
@@ -301,6 +378,25 @@ final class AppModel: ObservableObject {
         offline.scopeChanged()
         progress.scopeChanged()
         Task { await boot() }
+    }
+
+    /// Definitive session death — only a live Ready session drops to
+    /// Login (mid-boot/onboarding states are untouched). `openReader` and
+    /// `navPath` are kept: re-login returns `phase` to `.ready` and the
+    /// still-set `openReader` re-presents the reader at its saved page.
+    func sessionDidExpire() {
+        guard phase == .ready else { return }
+        phase = .login
+    }
+
+    /// Foreground session keepalive — proactively exercises the refresh
+    /// token so a server restart that wiped the in-memory refresh store
+    /// surfaces at resume (sessionExpired → .login) instead of as dead
+    /// pages mid-read. Reactive 401s cover the same path during use;
+    /// transient refresh failures are ignored (nil → nothing happens).
+    func foregrounded() {
+        guard phase == .ready else { return }
+        Task { _ = await auth.refreshAccessToken() }
     }
 
     func didLogin() {

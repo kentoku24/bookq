@@ -419,7 +419,7 @@ pub struct Registry {
     pub inner: Mutex<Inner>,
     pub wake: Arc<Notify>,
     pub index: Arc<IndexState>,
-    pub downloads: PathBuf,
+    pub library: PathBuf,
     pub manifest_cache: Mutex<catalog::ManifestCache>,
     /// Test-only work-resolver override (golden-frame harness, #210):
     /// replaces `resolve_work` wholesale, like py's `work_resolver` param.
@@ -447,7 +447,7 @@ pub struct Inner {
 }
 
 impl Registry {
-    pub fn new(index: Arc<IndexState>, downloads: PathBuf) -> Arc<Self> {
+    pub fn new(index: Arc<IndexState>, library: PathBuf) -> Arc<Self> {
         let wake = Arc::new(Notify::new());
         Arc::new(Self {
             inner: Mutex::new(Inner {
@@ -461,7 +461,7 @@ impl Registry {
             }),
             wake,
             index,
-            downloads,
+            library,
             manifest_cache: Mutex::new(catalog::ManifestCache::new()),
             #[cfg(test)]
             test_resolver: std::sync::Mutex::new(None),
@@ -518,6 +518,7 @@ impl Registry {
     }
 
     /// Live session count (gateway tests assert reset empties the registry).
+    #[cfg(test)]
     pub async fn session_count(&self) -> usize {
         self.inner.lock().await.sessions.len()
     }
@@ -553,7 +554,7 @@ impl Registry {
         let (folder, pref) =
             catalog::validate_args(&Value::String(job.folder.clone()), &job.page, &job.offset)?;
         let cache =
-            match crate::folders::ensure_tree_and_index_wait(&self.index, &self.downloads).await {
+            match crate::folders::ensure_tree_and_index_wait(&self.index, &self.library).await {
                 Some(c) => c,
                 None => {
                     return Err(catalog::ManifestError {
@@ -575,14 +576,14 @@ impl Registry {
         let core = match hit {
             Some(c) => c,
             None => {
-                let downloads = self.downloads.clone();
+                let library = self.library.clone();
                 // #322: move the Arc'd cache into the task — cloning
                 // `cache.tree` used to deep-copy the whole node DOM per
                 // manifest build.
                 let cache_c = cache.clone();
                 let folder_c = folder.clone();
                 let built = tokio::task::spawn_blocking(move || {
-                    catalog::build_manifest_core(&downloads, &cache_c.tree, &folder_c, offset_i64)
+                    catalog::build_manifest_core(&library, &cache_c.tree, &folder_c, offset_i64)
                 })
                 .await;
                 let built = match built {

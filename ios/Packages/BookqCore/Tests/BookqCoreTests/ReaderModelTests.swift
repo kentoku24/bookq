@@ -1,5 +1,5 @@
 import XCTest
-@testable import Bookq
+@testable import BookqCore
 
 /// Mirrors the spread/chapter semantics of app.js + spread.js.
 final class ReaderModelTests: XCTestCase {

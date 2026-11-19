@@ -1,4 +1,4 @@
-"""Todo 8 — Pure unit tests for OfflineCore helpers with deps injection.
+"""Pure unit tests for OfflineCore helpers with deps injection.
 
 Covers fmt, cacheNameFor, dedupedBytes/rawBytes, getLeafPathsFor without Playwright or SW.
 

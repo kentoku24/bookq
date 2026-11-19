@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// A single browse tile/row/card for a folder. Cover = `/thumb/` single
