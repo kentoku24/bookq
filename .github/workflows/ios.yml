@@ -134,10 +134,10 @@ jobs:
         if: steps.sdk.outputs.ok == 'true'
 
       # dav1d-sys (image avif-native, #563) probes system dav1d via
-      # pkg-config — brew satisfies it so no meson/ninja fallback runs.
+      # pkg-config — brew satisfies it (dav1d >=1.3 required).
       - name: System deps (dav1d for avif-native, #563)
         if: steps.sdk.outputs.ok == 'true'
-        run: brew install dav1d pkg-config || brew upgrade dav1d pkg-config || true
+        run: brew install dav1d pkg-config
 
       - name: Build viewer-rs
         if: steps.sdk.outputs.ok == 'true'

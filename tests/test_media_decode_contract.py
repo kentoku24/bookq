@@ -183,7 +183,7 @@ def test_python_only_tiff_501_thumb_and_view(decode_server: str, decode_tree: Pa
 
 
 @pytest.mark.parametrize("name", ["bad.heic", "bad.avif"])
-def test_unsupported_returns_404_not_500(decode_server: str, name: str):
+def test_unsupported_returns_501_not_500(decode_server: str, name: str):
     """unsupported / 破損バイトは 500 ではない。
 
     rs は拡張子ゲート (heic) または decode 失敗 (corrupt avif — #563 で
