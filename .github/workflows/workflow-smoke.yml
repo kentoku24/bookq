@@ -242,10 +242,12 @@ jobs:
   # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
   # session globally, so a shard can never parallelize — the suite is split
   # across runners with --num-shards/--shard-id instead of pytest -n.
-  # 4 shards, not 8 (#552): the account's macOS concurrency is ~4 runners,
-  # so an 8-leg matrix left half its legs queued 20-25min until the platform
-  # cancelled them. 4 legs fit the observed window; each shard runs ~2x the
-  # tests (~10min) — well inside the 60min timeout.
+  # 3 shards: the account's macOS concurrency is ~4 runners and ios-test
+  # (xcode-27) consumes one more on the same PR, so N+1 must stay within the
+  # pool. 4 safari legs + ios-test = 5 left one leg queued ~15min until the
+  # platform cancelled it (#558 hit this repeatedly — rerun loops cost far
+  # more than the extra ~1.5min a third split adds per leg). Each shard runs
+  # ~4x/3 the tests (~13min) — still inside the 60min timeout.
   safari-gate:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
@@ -254,7 +256,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -286,8 +288,8 @@ jobs:
       - name: Enable safaridriver
         run: sudo safaridriver --enable
 
-      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/4)
-        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 4 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/3)
+        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 3 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
 
   # Required-check anchor for the safari matrix (#540): matrix legs report
   # `safari-gate (N)` when they run but a single bare `safari-gate` when the

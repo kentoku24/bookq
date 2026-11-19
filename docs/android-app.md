@@ -104,8 +104,8 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
 
 - §5 ゲート一括実行: `android/scripts/perf-gate.sh <dev-url> [--generate]`
   — benchmark variant をインストール → 全 Macrobenchmark を実行 →
-  `benchmarkData.json` を閾値（タップ median <60ms、fling janky <1%・
-  p99 <16ms、コールド TTFD <1.5s、readerOpen <400ms、各 n≥10）と比較し
+  `benchmarkData.json` をスクリプト内 GATES 表の閾値（テスト毎、
+  90 Hz 実測フロア + ~25% に再校正済み — 下表「ゲート」列）と比較し
   非ゼロ終了。
 - 計測点: `bookq.pageTurn`（`turn()` → 対象スプレッド初描画）、
   `bookq.readerOpen`（reader 遷移 → 初 spread）、
@@ -125,6 +125,13 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
 4. `reportFullyDrawn` は `withFrameNanos` でフレームコールバック
    内に着地（StartupTimingQuery はマーカー後に終了する doFrame を
    要求するため）。
+
+注: TEST_MODE では OAuth を通らないため `auth.user` が立たず、
+`hasOfflineSnapshot()` は常に false — ベンチのコールド起動は
+snapshot-first ではなく probe 経路を通る。下表 TTFD 827ms は
+probe 経路の実測値（ログの `PerfBoot: boot snap=false` で確認可）。
+ログイン済み実ユーザーの再起動は snapshot-first なので実測は
+これより速い。
 
 ### 計測結果（CP08-J1 / release + Baseline Profile）
 
