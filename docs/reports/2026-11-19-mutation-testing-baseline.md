@@ -121,3 +121,11 @@ UnaryOperator 147, MatchArmGuard 87 — 比較演算子・関数戻り値・matc
    `archive.rs` は fixture ベースの境界テストが必要で別タスク級。
 5. 増分確認は `scripts/mutation/rust.sh --in-diff` または
    `-f <file>` で数十分に収まる。全量は四半期棚卸し用途。
+
+## 後続: リスク重点テスト補完
+
+UX/リスク優先で search.rs/tree.rs/state.rs (Rust) と
+offline-core/facets/hash (JS) に単体テストを追加し、スコープ付き
+mutation 再測定を実施。結果は
+`docs/reports/2026-11-19-mutation-testing-risk-supplement.md` を参照
+(search.rs 0%→81.2%、offline-core 28.0%→37.3% など)。
