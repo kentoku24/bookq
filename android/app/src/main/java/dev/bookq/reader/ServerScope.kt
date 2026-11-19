@@ -149,13 +149,13 @@ class ServerScope(
      *  swaps in the full tree off the critical path. */
     fun warmShallow() {
         val ok = tree.restoreShallow()
-        PerfTunables.mark("scope.shallow ok=$ok")
+        PerfTunables.mark { "scope.shallow ok=$ok" }
     }
 
     /** Boot the scope — snapshot paint, two-stage tree, visibility, progress. */
     suspend fun start() {
         val snap = tree.restoreSnapshot(treePrewarm?.await())
-        PerfTunables.mark("scope.start snapshot=$snap")
+        PerfTunables.mark { "scope.start snapshot=$snap" }
         tree.load()
         tree.startPolling()
         visibility.refresh()
