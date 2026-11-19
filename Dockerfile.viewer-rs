@@ -1,10 +1,11 @@
 # viewer-rs — Rust backend (issue #163, parallel-backend track).
-# Two-stage: cargo build → slim runtime. The context is the repo root;
-# only rust/ is needed.
+# Three stages: cargo build → pdfium/deps prep → distroless runtime (#573).
+# The context is the repo root; only rust/ is needed.
 
-# Pinned to bookworm: the runtime stage is bookworm-slim, and unrar's
-# bundled C++ compiled under a newer builder (trixie g++14) would emit
-# GLIBCXX/CXXABI symbol versions bookworm's libstdc++6 can't satisfy.
+# Pinned to bookworm: the runtime stage is Debian 12 based (distroless
+# cc-debian12), and unrar's bundled C++ compiled under a newer builder
+# (trixie g++14) would emit GLIBCXX/CXXABI symbol versions bookworm's
+# libstdc++6 can't satisfy.
 FROM rust:1-slim-bookworm AS rsbuilder
 # g++ compiles the bundled RARLAB unrar C++ (bookq-core `unrar` dep).
 RUN apt-get update && apt-get install -y --no-install-recommends zlib1g-dev g++ && rm -rf /var/lib/apt/lists/*
@@ -38,30 +39,49 @@ RUN find rust api -type f -not -path '*/target/*' -exec touch {} + \
     && cargo build --release --manifest-path rust/Cargo.toml -p viewer-rs \
     && cp rust/target/release/viewer-rs /viewer-rs-bin
 
-FROM debian:bookworm-slim
-# libstdc++6 carries the unrar C++ runtime the binary links against.
-# libpdfium carries the native PDF pipeline (#402): pdfium-render binds it
-# at runtime (dlopen — no build-time link), the same PDFium engine as
-# pypdfium2. Prebuilt: bblanchon/pdfium-binaries, pinned to the
-# pdfium-render `pdfium_latest` release (8125). Size: tarball ~3.8MB,
-# installed libpdfium.so ~7.7MB.
+# ── stage 2: native runtime payload (apt + curl live only here) ───────────
+# The final image has no package manager and no shell, so the PDF engine is
+# fetched and staged here and copied in below. libpdfium is the native PDF
+# pipeline (#402): pdfium-render binds it at runtime (dlopen — no build-time
+# link), the same PDFium engine as pypdfium2. Prebuilt:
+# bblanchon/pdfium-binaries, pinned to the pdfium-render `pdfium_latest`
+# release (8125). Size: tarball ~3.8MB, installed libpdfium.so ~7.7MB.
+FROM debian:bookworm-slim AS rsprep
 ARG PDFIUM_VERSION=8125
 # TARGETARCH: buildx のビルドプラットフォーム（prod ホストは ARM64 — x64
 # 固定だと bind 不能で render が proxy 落ちする latent bug だった #456）。
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends zlib1g libstdc++6 ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
          amd64) pdfium_arch=x64 ;; \
          arm64) pdfium_arch=arm64 ;; \
          *) echo "unsupported arch for pdfium: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
        esac \
     && curl -sSL -o /tmp/pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/${PDFIUM_VERSION}/pdfium-linux-${pdfium_arch}.tgz" \
-    && mkdir -p /tmp/pdfium && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium \
-    && cp /tmp/pdfium/lib/libpdfium.so /usr/local/lib/ && ldconfig \
-    && rm -rf /tmp/pdfium.tgz /tmp/pdfium \
-    && apt-get purge -y curl && apt-get autoremove -y --purge \
-    && rm -rf /var/lib/apt/lists/*
+    && mkdir -p /tmp/pdfium /opt/pdfium && tar xzf /tmp/pdfium.tgz -C /tmp/pdfium \
+    && cp /tmp/pdfium/lib/libpdfium.so /opt/pdfium/ \
+    && rm -rf /tmp/pdfium.tgz /tmp/pdfium /var/lib/apt/lists/*
+# libpdfium is self-contained apart from glibc/libgcc (verified with ldd on
+# both amd64 and arm64 builds): no zlib, freetype or fontconfig packages.
+
+# ── stage 3: distroless runtime (#573) ────────────────────────────────────
+# `cc` (not `static`): the binary is glibc-linked, and the bundled unrar C++
+# needs libstdc++/libgcc — exactly what cc adds on top of base.
+#
+# Why distroless: the bookworm-slim runtime carried 91 Debian packages and 245
+# scanner findings, ~170 of them in userland the server never touches
+# (util-linux/mount 64, gnutls 9, pam 8, perl, coreutils, gzip, tar). Dropping
+# them leaves 8 packages / 78 findings and — more importantly — removes the
+# shell, apt and curl an exploit would use to pivot. glibc/libssl CVEs remain
+# and are not "fixed" by this change; keep the digest fresh (Renovate).
+#
+# Root by default (the plain tag, not `:nonroot`): `user-state`, `thumb-cache`
+# and the `library` bind mount are host/root-owned today. Moving to
+# 65532 is a separate change (needs a one-time chown of those mounts).
+FROM gcr.io/distroless/cc-debian12
+
 COPY --from=rsbuilder /viewer-rs-bin /usr/local/bin/viewer-rs
+COPY --from=rsprep /opt/pdfium/libpdfium.so /usr/local/lib/libpdfium.so
 
 # #401 native shell/static: only the three payload trees the Rust server
 # reads — Python sources intentionally stay out of the Rust image.
@@ -74,6 +94,11 @@ COPY web/perf /web/perf
 ENV BOOKQ_BIND=0.0.0.0:8080
 # #401 shell/static payload root (the /app tree copied above).
 ENV BOOKQ_WEB_DIR=/web
+# distroless has no ldconfig, so the old `ldconfig` registration of
+# /usr/local/lib does not happen. Point the loader at the library directly
+# (bookq-core/src/pdf.rs reads this first); without it PDF pages silently
+# degrade to 501 instead of rendering.
+ENV PDFIUM_LIB_PATH=/usr/local/lib/libpdfium.so
 
 # Same build-arg contract as Dockerfile — /api/v1/version reports these.
 ARG GIT_SHA=""
