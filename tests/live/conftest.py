@@ -45,7 +45,7 @@ def live_server(live_root, tmp_path_factory):
     base = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
     env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(live_root)
+    env["LIBRARY_DIR"] = str(live_root)
     env["BOOKQ_THUMB_CACHE_DIR"] = str(cache / "thumbs")
     env["BOOKQ_STATE_DIR"] = str(cache / "state")
     env["BOOKQ_BIND"] = f"127.0.0.1:{port}"

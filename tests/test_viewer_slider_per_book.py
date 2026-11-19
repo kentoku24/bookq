@@ -1,6 +1,6 @@
-"""Per-book (chapter-local) slider behavior (viewer-slider-per-book Task 9, #476 v1 port).
+"""Per-book (chapter-local) slider behavior (#476 v1 port).
 
-Proves the T1-T8 wiring: the page slider's ``max``/``value`` and the counter
+Proves the wiring: the page slider's ``max``/``value`` and the counter
 are scoped to the opened chapter, slider input / swipe / keyboard clamp inside
 the chapter, and only the tap zones (``goNext``/``goPrev`` with
 ``crossChapter:true``) cross into the sibling book.
@@ -50,7 +50,7 @@ def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) 
 
 @pytest.fixture(scope="module")
 def slider_tree(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("slider_downloads")
+    root = tmp_path_factory.mktemp("slider_library")
     for ch, count in [("chA", 5), ("chB", 3)]:
         d = root / "slidergroup" / "sliderseries" / ch
         d.mkdir(parents=True)
@@ -64,11 +64,11 @@ def slider_tree(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def slider_server(slider_tree: Path) -> str:
-    """Dual-lane backend (uvicorn or viewer-rs) against the slider tree."""
+    """viewer-rs backend against the slider tree."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
-        downloads_dir=slider_tree,
+        library_dir=slider_tree,
         state_dir=os.environ["BOOKQ_STATE_DIR"],
     )
     yield base_url

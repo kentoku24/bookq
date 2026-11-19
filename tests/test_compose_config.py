@@ -80,8 +80,17 @@ def test_dev_compose_mounts_user_state_volume():
     assert re.search(r"^volumes:\n(?:\s+\S.*\n)*\s{2}user-state:", DEV_COMPOSE, re.M)
 
 
-def test_dev_compose_downloads_stay_readonly():
-    assert ":/app/downloads:ro" in DEV_COMPOSE
+def test_dev_compose_library_stay_writable():
+    # Library editing (upload/delete via /api/v1/library/*) writes into the
+    # library tree — prod stays rw.
+    assert ":/app/library:rw" in PROD_COMPOSE
+
+
+def test_dev_compose_library_defaults_readonly():
+    # Dev runs BOOKQ_TEST_MODE=true (auth bypass), so a writable mount of the
+    # real library is opt-in: the mode interpolates to ro unless
+    # DEV_LIBRARY_MODE is set (dev.sh --fixture / --writable-library → rw).
+    assert ":/app/library:${DEV_LIBRARY_MODE:-ro}" in DEV_COMPOSE
 
 
 def test_user_state_is_not_a_cache_mount():

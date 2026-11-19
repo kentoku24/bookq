@@ -5,12 +5,14 @@
  * Controller interface (parent issue #75 §3.3/§3.5):
  *   { create(), join(code), connect(pick?), approve(), reject(), leave(),
  *     swapSides(), subscribe(cb) -> unsubscribe, state }
- * connect() is the one-tap MATCH op: tap the launcher while idle and the
- * server binds this device as follower of a fresh waiting session or as a
- * new waiting leader. It resolves {ambiguous, candidates} when several
- * sessions wait (picker → connect(candidate.id)) and {unsupported} on a
- * pre-MATCH server (classic choice remains). Controllers without
- * connect() keep the legacy 開始/参加 choice on launcher tap.
+ * connect() is the one-tap MATCH op: 「近くの相手とつながる」 binds this
+ * device as follower of a fresh waiting session or as a new waiting
+ * leader. It resolves {ambiguous, candidates} when several sessions wait
+ * (picker → connect(candidate.id)) and {unsupported} on a pre-MATCH
+ * server (the choice demotes to the classic 開始/参加 pair). The idle
+ * launcher tap only opens the panel — MATCH and code-join are explicit
+ * choices there (#160); controllers without connect() always get the
+ * legacy 開始/参加 choice.
  * state shape this UI renders (all fields optional except status):
  *   status : 'idle' | 'connecting' | 'connected' | 'reconnecting'
  *          | 'peer-away' | 'loading' | 'error' | 'ended'
@@ -25,10 +27,10 @@
  * Injection: set window.PairController before this script evaluates
  * (defer order), or call window.PairUI.init({controller}) / .attach(c).
  * With no controller the UI still opens and shows 未接続; controller calls
- * no-op. The idle launcher tap IS the pairing gesture — it fires
- * connect() immediately; open/close beyond that never call the
- * controller, and pairing-UI gestures are stopped before they can reach
- * the viewer's page-turn / toolbar / keyboard paths.
+ * no-op. Open/close alone never calls the controller — the pairing
+ * gesture is the explicit つながる/参加 choice inside the panel — and
+ * pairing-UI gestures are stopped before they can reach the viewer's
+ * page-turn / toolbar / keyboard paths.
  */
 (function () {
   'use strict';
@@ -127,6 +129,16 @@
   // the code form can show it inline instead of losing it on 解除.
   let lastJoinError = null;   // mapped message from the latest error state
   let joinNoticeShown = false; // one-shot: already surfaced in the join form
+  let openedAt = 0;            // backdrop dismiss is muted this long (#160)
+  let connectUnsupported = false; // connect() answered {unsupported} →
+                                  // the choice falls back to 開始/参加
+  let connectPending = false;   // a connect() call is in flight — the
+                                // つながる pick must not double-fire
+  /* A rapid second launcher tap lands on the freshly-shown overlay as a
+   * backdrop click and instantly closes the panel while the session keeps
+   * connecting (#160-A). Swallow backdrop dismissals for a short grace —
+   * a deliberate tap outside the panel still closes it after the window. */
+  const DISMISS_GRACE_MS = 350;
 
   function st() {
     return (ctl && ctl.state) || { status: 'idle' };
@@ -143,10 +155,14 @@
       '</div>' +
       '<div class="pair-body">' +
         '<div id="pair-sec-choice" class="pair-sec">' +
-          '<button id="pair-create" type="button" class="pair-action">開始' +
-            '<span class="pair-sub">この端末が leader になりコードを発行</span></button>' +
-          '<button id="pair-join-open" type="button" class="pair-action">参加' +
-            '<span class="pair-sub">相手のコードを入力</span></button>' +
+          '<button id="pair-create" type="button" class="pair-action">' +
+            '<span id="pair-create-label">開始</span>' +
+            '<span class="pair-sub" id="pair-create-sub">' +
+              'この端末が leader になりコードを発行</span></button>' +
+          '<button id="pair-join-open" type="button" class="pair-action">' +
+            '<span id="pair-join-open-label">参加</span>' +
+            '<span class="pair-sub" id="pair-join-open-sub">' +
+              '相手のコードを入力</span></button>' +
         '</div>' +
         '<div id="pair-sec-join" class="pair-sec" hidden>' +
           '<video id="pair-scan-video" playsinline muted autoplay hidden></video>' +
@@ -211,8 +227,10 @@
       (_el('sidebar-header') || document.body).appendChild(btn);
     }
 
-    // Persistent status chip — THE state indicator. role=status makes it the
-    // aria-live region for every state change (polite, atomic).
+    // Persistent status chip — THE state indicator. The wrapper stays the
+    // aria-live region (role=status, polite/atomic) while the inner
+    // <button> is the operable control: Tab reaches it and Enter/Space
+    // open the panel natively, with a 44px target (#159).
     const status = document.createElement('div');
     status.id = 'pair-status';
     status.dataset.status = 'idle';
@@ -220,10 +238,16 @@
     status.setAttribute('aria-live', 'polite');
     status.setAttribute('aria-atomic', 'true');
     status.innerHTML =
-      '<span id="pair-status-text">未接続</span>' +
-      '<span id="pair-side" hidden></span>' +
-      '<span id="pair-transport" hidden></span>';
-    document.body.appendChild(status);
+      '<button id="pair-status-btn" type="button" aria-haspopup="dialog" ' +
+        'aria-expanded="false">' +
+        '<span id="pair-status-text">未接続</span>' +
+        '<span id="pair-side" hidden></span>' +
+        '<span id="pair-transport" hidden></span>' +
+      '</button>';
+    // Inside #toolbar the strip rides existing chrome and can never float
+    // over page content (#159); the fixed overlay is only the fallback
+    // for toolbar-less shells.
+    (_el('toolbar') || document.body).appendChild(status);
 
     const overlay = document.createElement('div');
     overlay.id = 'pair-overlay';
@@ -234,6 +258,7 @@
     els = {
       btn: btn,
       status: status,
+      statusBtn: _el('pair-status-btn'),
       statusText: _el('pair-status-text'),
       side: _el('pair-side'),
       transport: _el('pair-transport'),
@@ -241,6 +266,10 @@
       panel: _el('pair-panel'),
       close: _el('pair-close'),
       secChoice: _el('pair-sec-choice'),
+      createLabel: _el('pair-create-label'),
+      createSub: _el('pair-create-sub'),
+      joinOpenLabel: _el('pair-join-open-label'),
+      joinOpenSub: _el('pair-join-open-sub'),
       secJoin: _el('pair-sec-join'),
       secLeader: _el('pair-sec-leader'),
       secWaiting: _el('pair-sec-waiting'),
@@ -272,6 +301,39 @@
       errorLeave: _el('pair-error-leave'),
     };
     wireEvents();
+    syncStripA11y();
+    watchStripA11y();
+  }
+
+  /* The strip must leave the a11y tree whenever chrome hides it — the
+   * .hidden fade, the [hidden] collapse and the overview-open veil all
+   * leave an invisible-but-focusable control behind otherwise (#159).
+   * Ancestors are checked, not only the strip's own flags: a strip
+   * (re)built while the toolbar is already .hidden, or a hide path that
+   * skips the app.js mirror, must not resurrect the trap. */
+  let hideObs = null;
+  function syncStripA11y() {
+    if (!els.statusBtn) return;
+    const gone = !!els.status.closest('.hidden, [hidden]') ||
+      document.body.classList.contains('overview-open');
+    els.status.setAttribute('aria-hidden', gone ? 'true' : 'false');
+    els.statusBtn.tabIndex = gone ? -1 : 0;
+    // Focus may not stay on a control that just left the a11y tree.
+    const ae = document.activeElement;
+    if (gone && ae && els.status.contains(ae)) ae.blur();
+  }
+  function watchStripA11y() {
+    if (hideObs || typeof MutationObserver !== 'function') return;
+    hideObs = new MutationObserver(syncStripA11y);
+    hideObs.observe(els.status,
+      {attributes: true, attributeFilter: ['class', 'hidden']});
+    if (els.status.parentElement) {
+      // the toolbar's own .hidden — mirrored or not
+      hideObs.observe(els.status.parentElement,
+        {attributes: true, attributeFilter: ['class', 'hidden']});
+    }
+    hideObs.observe(document.body,
+      {attributes: true, attributeFilter: ['class']});
   }
 
   // ── render: state → indicators + section visibility ──
@@ -319,9 +381,27 @@
     els.transport.textContent = trText;
     els.transport.hidden = !(trText && inSession);
 
+    /* The idle choice follows controller capability (#160): a MATCH-aware
+     * client offers 「近くの相手とつながる / コードで参加」; a legacy
+     * client — or one whose connect() answered {unsupported} — keeps the
+     * classic 開始/参加 pair. */
+    const matchable = !!(ctl && typeof ctl.connect === 'function' &&
+                         !connectUnsupported);
+    els.createLabel.textContent = matchable ? '近くの相手とつながる' : '開始';
+    els.createSub.textContent = matchable
+      ? '自動でマッチング（なければ待機開始）'
+      : 'この端末が leader になりコードを発行';
+    els.joinOpenLabel.textContent = matchable ? 'コードで参加' : '参加';
+    els.joinOpenSub.textContent = matchable
+      ? '相手の6桁コードを入力' : '相手のコードを入力';
+
     let sec;
     if (status === 'idle' || status === 'ended') {
-      sec = pickList ? els.secPicker : (joinView ? els.secJoin : els.secChoice);
+      // joinView wins: a slow {ambiguous} resolving while the code form
+      // is open must not steal the section mid-entry — the picker waits
+      // for the user to back out (#160).
+      sec = joinView ? els.secJoin
+                     : (pickList ? els.secPicker : els.secChoice);
     } else if (status === 'connecting') {
       sec = role === 'leader' ? els.secLeader : els.secWaiting;
     } else if (status === 'error') {
@@ -432,7 +512,9 @@
   function open() {
     if (open_) return;
     open_ = true;
+    openedAt = Date.now();
     lastFocus = document.activeElement;
+    if (els.statusBtn) els.statusBtn.setAttribute('aria-expanded', 'true');
     els.overlay.classList.remove('hidden');
     // aria-modal promises the background is unreachable: put the two other
     // top-level regions inert (snapshot their prior state for restore).
@@ -453,21 +535,28 @@
     pickList = null;
     stopScan();
     els.overlay.classList.add('hidden');
+    if (els.statusBtn) els.statusBtn.setAttribute('aria-expanded', 'false');
     if (inertSnapshot) {
       for (const [el, was] of inertSnapshot) {
         if (!was) el.removeAttribute('inert');
       }
       inertSnapshot = null;
     }
-    // Restore focus to where it came from; if that element is gone or sits
-    // in an inert subtree (e.g. a now-closed sidebar), the launcher is the
-    // safe landing spot.
+    // Restore focus to where it came from; if that element is gone or
+    // hidden/inert, land on a real control — the visible strip first,
+    // then the launcher, then the menu button — never BODY (#159).
+    const usable = el => el && document.contains(el) &&
+      typeof el.focus === 'function' && !el.closest('[inert]') &&
+      !el.closest('[hidden]');
     let back = lastFocus;
     lastFocus = null;
-    if (!back || !document.contains(back) || back.closest('[inert]')) {
-      back = els.btn;
+    if (!usable(back)) {
+      back = (els.status && !els.status.hidden &&
+              !els.status.classList.contains('hidden')) ? els.statusBtn : null;
     }
-    if (back && typeof back.focus === 'function') back.focus();
+    if (!usable(back)) back = els.btn;
+    if (!usable(back)) back = _el('menu-btn');
+    if (usable(back)) back.focus();
   }
 
   // ── code input ──
@@ -611,40 +700,25 @@
   // ── events ──
 
   function wireEvents() {
-    // The idle launcher tap is the whole pairing gesture: fire connect()
-    // (server-side MATCH) and show the panel tracking its outcome. A
-    // controller without connect() gets the legacy 開始/参加 choice.
+    /* The idle launcher tap used to fire connect() itself — a quick
+     * second tap then closed the panel mid-MATCH, and anyone holding a
+     * 6-digit code had to become a waiting leader first (#160). The tap
+     * now only opens the panel; the choice section offers 「近くの相手と
+     * つながる」 (connect) and 「コードで参加」 (join form) explicitly. */
     els.btn.addEventListener('click', e => {
       e.stopPropagation();
-      const s = st();
-      if ((s.status !== 'idle' && s.status !== 'ended') ||
-          !ctl || typeof ctl.connect !== 'function') {
-        open();
-        return;
-      }
       open();
-      let res;
-      try { res = ctl.connect(); } catch (err) { res = null; }
-      if (res && typeof res.then === 'function') {
-        res.then(r => {
-          if (r && r.ambiguous && Array.isArray(r.candidates) &&
-              r.candidates.length) {
-            pickList = r.candidates;
-            if (open_) render(); else open();
-          } else if (open_) {
-            render();
-          }
-        }).catch(() => {});
-      }
     });
     els.status.addEventListener('click', e => { e.stopPropagation(); open(); });
     els.close.addEventListener('click', close);
     els.errorClose.addEventListener('click', close);
     els.errorLeave.addEventListener('click', () => { if (ctl) ctl.leave(); });
     // Backdrop tap dismisses like the other sheets do; a tap that lands on
-    // the panel itself never reaches this branch.
+    // the panel itself never reaches this branch. Right after open() the
+    // double-tap grace swallows the stray second launcher tap (#160).
     els.overlay.addEventListener('click', e => {
-      if (e.target === els.overlay) close();
+      if (e.target === els.overlay &&
+          Date.now() - openedAt > DISMISS_GRACE_MS) close();
     });
     // Pairing-UI gestures must never reach the viewer's page-turn paths
     // (zone clicks live on sibling elements, touch handlers on #img-container,
@@ -673,7 +747,38 @@
       if (e.key === 'Escape') { e.preventDefault(); close(); }
     }, true);
 
-    els.create.addEventListener('click', () => { if (ctl) ctl.create(); });
+    /* 「近くの相手とつながる」 — the explicit MATCH trigger (#160-B).
+     * connect() joins a nearby waiting session or becomes the waiting
+     * leader; {ambiguous} lists candidates, {unsupported} demotes the
+     * choice back to the legacy 開始/参加 pair. */
+    function fireConnect() {
+      if (!ctl || typeof ctl.connect !== 'function' || connectPending) {
+        return;
+      }
+      let res;
+      try { res = ctl.connect(); } catch (err) { res = null; }
+      if (res && typeof res.then === 'function') {
+        connectPending = true;
+        res.then(r => {
+          connectPending = false;
+          if (r && r.ambiguous && Array.isArray(r.candidates) &&
+              r.candidates.length) {
+            pickList = r.candidates;
+            if (open_) render(); else open();
+          } else {
+            if (r && r.unsupported) connectUnsupported = true;
+            if (open_) render();
+          }
+        }).catch(() => { connectPending = false; });
+      }
+    }
+    els.create.addEventListener('click', () => {
+      if (ctl && typeof ctl.connect === 'function' && !connectUnsupported) {
+        fireConnect();
+      } else if (ctl) {
+        ctl.create();
+      }
+    });
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
       joinPending = false;
@@ -733,6 +838,8 @@
       unsubscribe = null;
     }
     ctl = controller || null;
+    connectUnsupported = false;
+    connectPending = false;
     if (ctl && typeof ctl.subscribe === 'function') {
       unsubscribe = ctl.subscribe(() => render());
     }

@@ -46,7 +46,7 @@ def _viewer_rs_binary() -> Path:
     return bin_path
 
 
-def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
+def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     """Live viewer-rs WITHOUT test-mode: real signed-cookie session auth.
 
     Same shape as conftest's server fixture but with a custom env — spawns
@@ -58,7 +58,7 @@ def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
         port = s.getsockname()[1]
     env = os.environ.copy()
     env.pop("BOOKQ_TEST_MODE", None)
-    env["DOWNLOADS_DIR"] = str(downloads_tree)
+    env["LIBRARY_DIR"] = str(library_tree)
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env["SECRET_KEY"] = AUTH_SECRET
     env["ALLOWED_EMAILS"] = f"{ALICE['email']},{BOB['email']}"
@@ -93,10 +93,10 @@ def _spawn_server(downloads_tree: Path, state_dir: Path) -> tuple:
 
 
 @pytest.fixture(scope="module")
-def auth_server(downloads_tree, tmp_path_factory):
+def auth_server(library_tree, tmp_path_factory):
     """Live server WITHOUT test-mode: real signed-cookie session auth."""
     state_dir = tmp_path_factory.mktemp("reader-ws-auth-state")
-    proc, base_url = _spawn_server(downloads_tree, state_dir)
+    proc, base_url = _spawn_server(library_tree, state_dir)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)

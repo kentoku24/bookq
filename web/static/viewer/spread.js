@@ -158,14 +158,14 @@
     return (_getViewW()-spreadMetrics(s).width)/2 - spreadLeft(s);
   }
 
-  // EFFECTIVE PATH (Task 4 analysis): index.html loads spread.js BEFORE app.js
+  // EFFECTIVE PATH: index.html loads spread.js BEFORE app.js
   // (both defer, so document order wins). app.js never overwrites window.sliderMax/
   // window.snapTo — its sliderMax/idxToSlider/sliderToIdx/snapTo are IIFE-locals and
   // every live call site (slider input, open-folder, keys, drag, hash restore) uses
   // those locals. So the app.js locals WIN at runtime; the functions below are the
   // dormant twin (reached only via window.snapTo/goNext/goPrev/updateOrientation,
   // whose resize listener is disabled). Formulas are kept character-identical to
-  // app.js:648-653 on purpose — T3 (chapter-local swap) replaces the app.js locals
+  // app.js:648-653 on purpose — a chapter-local swap replaces the app.js locals
   // AND syncSliderValue below in one step; do not invent new semantics here.
   // slider helpers: one slider step == one spread
   function sliderMax(){ return Math.max(0, (window.spreads||[]).length-1); }
@@ -462,8 +462,7 @@
     if(window.updateShiftButtonStyle) window.updateShiftButtonStyle();
   }
   window.updateOrientation=updateOrientation;
-  // window.addEventListener('resize', updateOrientation); // disabled - app handles
-  // window.addEventListener('orientationchange', function(){ setTimeout(updateOrientation,150); }); // disabled // disabled function(){ setTimeout(updateOrientation,150); });
+  // No resize/orientationchange listeners here — app.js owns orientation.
 
   // viewer swipe drag is owned by app.js — no duplicate handler here
 })();

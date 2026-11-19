@@ -6,7 +6,6 @@ import SwiftUI
 final class AppModel: ObservableObject {
     enum Phase {
         case onboarding     // no server URL yet
-        case booting        // checking /api/v1/version
         case login          // server demands auth, no valid token
         case ready          // authenticated (or TEST_MODE server)
     }
@@ -92,6 +91,16 @@ final class AppModel: ObservableObject {
                 expires_in: 3600,
                 refresh_token: Self.injectedTestRefreshToken() ?? "")))
         }
+        // `-uitestReset` / `BOOKQ_UI_TEST_RESET` — UI tests set this so
+        // every launch starts from clean persisted state. Local keys are
+        // wiped here, before configureAPI() lazily initialises the
+        // stores that read them; server-side positions are deleted in
+        // boot() ahead of the first syncWithServer().
+        if Self.uitestResetRequested() {
+            Self.wipeUITestState()
+            Self.wipeUITestOfflineDownloads()
+            print("[bookq] uitest reset: local state wiped")
+        }
         #endif
         if config.baseURL != nil {
             configureAPI()
@@ -127,6 +136,44 @@ final class AppModel: ObservableObject {
         else { return nil }
         let v = args[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
         return v.isEmpty ? nil : v
+    }
+
+    /// `-uitestReset` argv flag or `BOOKQ_UI_TEST_RESET` env var.
+    static func uitestResetRequested() -> Bool {
+        if let e = ProcessInfo.processInfo.environment["BOOKQ_UI_TEST_RESET"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+            return true
+        }
+        return ProcessInfo.processInfo.arguments.contains("-uitestReset")
+    }
+
+    /// Removes every UserDefaults key that can leak state between UI
+    /// test methods — reading positions (all account scopes), pair-sync
+    /// snapshots, and layout prefs. `serverURL` is kept: it is
+    /// re-injected via `-serverURL` on every test launch anyway.
+    static func wipeUITestState(in defaults: UserDefaults = .standard) {
+        for key in defaults.dictionaryRepresentation().keys {
+            if key.hasPrefix("bookq_progress_v1") || key.hasPrefix("bookq.pairSync")
+                || key == "originalImages" || key == "browseLayout" {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
+
+    /// Offline downloads live under `Documents/<scope>/` (`works.json`
+    /// + image files) — file-backed, outside UserDefaults. Documents
+    /// holds nothing else in this app, so its contents are wiped
+    /// wholesale; per-item `try?` keeps a single failure from aborting
+    /// the rest.
+    static func wipeUITestOfflineDownloads(
+        in directory: URL? = nil,
+        fm: FileManager = .default) {
+        let docs = directory ?? fm
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for item in (try? fm.contentsOfDirectory(
+            at: docs, includingPropertiesForKeys: nil)) ?? [] {
+            try? fm.removeItem(at: item)
+        }
     }
 
     /// `BOOKQ_TEST_REFRESH_TOKEN` env var or `-testRefreshToken <rt>` argv
@@ -266,6 +313,13 @@ final class AppModel: ObservableObject {
             visibility.accountChanged(knownOwner: auth.user?.email)
             offline.scopeChanged()
             progress.scopeChanged()
+            #if DEBUG
+            if Self.uitestResetRequested() {
+                // Positions live server-side too — wipe before the sync
+                // below repopulates local entries from remote.
+                try? await api.deleteReadingPosition()
+            }
+            #endif
             Task { await progress.syncWithServer() }
             pair.bootResume()
             print("[bookq] boot: probe ok")

@@ -1,4 +1,4 @@
-"""iOS viewport fixtures + viewer/responsive + gesture/hash (T1-T3) — PWA exhaustive in test_ios_pwa.py."""
+"""iOS viewport fixtures + viewer/responsive + gesture/hash — PWA exhaustive in test_ios_pwa.py."""
 
 import re
 
@@ -23,7 +23,7 @@ def test_ios_fixture_viewport(ios_page):
     assert "iPhone" in ios_page.evaluate("navigator.userAgent")
 
 
-# ── T2: iPad spread + responsive ──────────────────────────────────────────
+# ── iPad spread + responsive ──────────────────────────────────────────
 def test_ipad_spread_geometry(ipad_landscape_page):
     page = ipad_landscape_page
     assert page.viewport_size == {"width": 1180, "height": 820}
@@ -104,7 +104,7 @@ def test_ios_grid_adaptive(ios_page):
     expect(page.locator(".tile").first).to_be_visible()
 
 
-# ── T3: gesture / history ─────────────────────────────────────────────────
+# ── Gesture / history ─────────────────────────────────────────────────
 def test_ios_tap_zone(ios_page):
     page = ios_page
     dims = page.evaluate("""() => {
@@ -183,7 +183,7 @@ def test_ios_hash_history_delta(ios_page):
     assert after - before <= 1, f"scheduleUrlSync burst grew history: {before}->{after}"
 
 
-# ── T4 minimal smoke for -k test_ios_offline in this file ────────────────
+# ── Minimal smoke for -k test_ios_offline in this file ────────────────
 def test_ios_offline_viewport_smoke(ios_page, server):
     """viewport no user-scalable=no + offline-btn 44px + SW smoke (exhaustive in test_ios_pwa.py)."""
     page = ios_page

@@ -21,10 +21,13 @@ services:
     image: "${DEV_IMAGE:?DEV_IMAGE is required — use ./dev.sh up}"
     container_name: "bookq-dev-viewer-dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}"
 
-    # 本番と同じ画像ツリーを *読み取り専用* でマウント。
-    # cache volume は read-write のまま（downloads の :ro とは無関係）。
+    # 本番と同じ画像ツリーをマウントするが既定は read-only — dev は
+    # BOOKQ_TEST_MODE=true で認証をバイパスするため、rw 既定だと到達可能な
+    # 誰でも本番ライブラリを upload/delete で改変できてしまう。書き込み
+    # 検証は使い捨ての合成ツリー (--fixture、常に rw) か、明示 opt-in の
+    # DEV_LIBRARY_MODE=rw / ./dev.sh up --writable-library で。
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      - "${LIBRARY_HOST_DIR:-${DOWNLOADS_HOST_DIR:-./library}}:/app/library:${DEV_LIBRARY_MODE:-ro}"
       # thumb/sprite disk cache の永続化 (issue #276、本番と同値): 既定
       # /tmp/bookq-thumbs はコンテナ再作成で消えるため
       # BOOKQ_THUMB_CACHE_DIR を名前付き volume 上の
@@ -45,7 +48,7 @@ services:
       - ALLOWED_EMAILS=test@example.com
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       - BOOKQ_STATE_DIR=/var/lib/bookq
-      - BOOKQ_WEB_DIR=/app/web
+      - BOOKQ_WEB_DIR=/web
       - SECRET_KEY=dev-not-a-secret
 
     # dev.sh はこのラベルだけを情報源にする（状態ファイルを持たない）。
@@ -92,6 +95,9 @@ services:
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_HOSTNAME=${DEV_HOSTNAME:-dev-${DEV_POOL_SLOT}}
+      # dev のサービス名は viewer — entrypoint の既定は prod 名 viewer-rs
+      # で、未指定だと serve が解決不能になって 502 になる。
+      - TS_SERVE_TARGET=${TS_SERVE_TARGET-http://viewer:8080}
     volumes:
       - tailscale-state:/var/lib/tailscale
     restart: unless-stopped

@@ -1,4 +1,4 @@
-"""Task 7 baseline + failing-first proof.
+"""Baseline + failing-first proof.
 
 Baseline pins existing harness displays must stay.
 Failing proof asserts new displays (thumb hit, tree v1 cached with ignoreSearch, SHELL hit counts)
@@ -56,7 +56,7 @@ def test_baseline_existing_harness_still_present(page, server):
     assert "getLeafPathsFor" in harness_html
 
 def test_failing_new_displays_thumb_api_shell(page, server):
-    """Failing-first proof: new displays must exist after Task 7."""
+    """Failing-first proof: the new displays must exist."""
     clear_all(page)
     goto_harness(page, server)
     # wait for harness tree + refresh within 800ms (similar to test_06 expectation)

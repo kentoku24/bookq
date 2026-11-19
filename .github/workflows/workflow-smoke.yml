@@ -95,7 +95,15 @@ jobs:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    # ~272s single-runner suite (the PR-gate critical path, #331) —
+    # pytest-split shards it across 3 runners. Until a committed
+    # `.test_durations` exists the split is even-by-count; each shard
+    # stores its own durations file as an artifact for a follow-up merge.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -132,7 +140,17 @@ jobs:
         run: uv run --with playwright playwright install --with-deps chromium
 
       - name: Run non-browser test suite against viewer-rs
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --reruns 1 --reruns-delay 2
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --splits 3 --group ${{ matrix.shard }} --store-durations --reruns 1 --reruns-delay 2
+
+      # Feeds the follow-up balanced-split merge (#331): upload each
+      # shard's durations so a complete `.test_durations` can be committed.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-durations-${{ matrix.shard }}
+          path: .test_durations
+          if-no-files-found: ignore
+          retention-days: 7
 
   pytest-rs-browser:
     needs: changes-workflow-smoke
@@ -218,6 +236,12 @@ jobs:
   # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
   # session globally, so a shard can never parallelize — the suite is split
   # across runners with --num-shards/--shard-id instead of pytest -n.
+  # 3 shards: the account's macOS concurrency is ~4 runners and ios-test
+  # (xcode-27) consumes one more on the same PR, so N+1 must stay within the
+  # pool. 4 safari legs + ios-test = 5 left one leg queued ~15min until the
+  # platform cancelled it (#558 hit this repeatedly — rerun loops cost far
+  # more than the extra ~1.5min a third split adds per leg). Each shard runs
+  # ~4x/3 the tests (~13min) — still inside the 60min timeout.
   safari-gate:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
@@ -226,7 +250,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -249,8 +273,8 @@ jobs:
       - name: Enable safaridriver
         run: sudo safaridriver --enable
 
-      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/8)
-        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 8 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/3)
+        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 3 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
 
   # Required-check anchor for the safari matrix (#540): matrix legs report
   # `safari-gate (N)` when they run but a single bare `safari-gate` when the

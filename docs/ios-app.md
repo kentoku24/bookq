@@ -38,7 +38,7 @@ swift test --package-path ios/Packages/BookqCore
 サーバーには `http://127.0.0.1:8080` で直接届く（ATS は loopback 対象外。`localhost` ではなく IPv4 固定にする — `localhost` が `::1` に解決される環境で別サービスが 8080 を掴んでいると別物に繋がる）:
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
   SECRET_KEY=dev-not-a-secret \
   ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
@@ -261,7 +261,12 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   の Testables に両方登録済みで `xcodebuild test` が両方走る。
 - UI テストは `BookqUITests/UITestSupport.swift` が `-serverURL` /
   `-testToken` 起動引数で TEST_MODE サーバーへ直接接続する（fixture は
-  android.yml と同じ合成木: Series/vol1+vol2, Other）。タップ対象は
+  android.yml と同じ合成木: Series/vol1+vol2, Other）。`-uitestReset`
+  （または `BOOKQ_UI_TEST_RESET`）で起動毎に永続状態を初期化する —
+  ローカルの読書位置・pair-sync・レイアウト設定を init で wipe し、
+  Documents/ 配下のオフラインダウンロードとサーバー側の
+  reading-positions（boot 内の初回 sync 前に DELETE）も初期化する。
+  テスト間の状態持ち越しによるフレーク防止（#551）。タップ対象は
   `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
   `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
   （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。

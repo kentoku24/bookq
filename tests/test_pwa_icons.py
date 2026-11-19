@@ -1,4 +1,4 @@
-"""Regression tests for PWA icon unification (Todo 6).
+"""Regression tests for PWA icon unification.
 
 Covers:
   (a) manifest valid JSON with 192 any, 512 any, 512 maskable, theme #0f172a, no display_override
@@ -8,7 +8,7 @@ Covers:
   (e) all assets 200
 
 Uses the server fixture from conftest.py (BOOKQ_TEST_MODE=true, random port,
-DOWNLOADS_DIR tmp). Pure stdlib + urllib – no extra deps.
+LIBRARY_DIR tmp). Pure stdlib + urllib – no extra deps.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_pwa_icons.py -q

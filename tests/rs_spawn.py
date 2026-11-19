@@ -136,8 +136,8 @@ def _viewer_rs_binary() -> Path:
     return _stable_binary(target / "debug" / "viewer-rs")
 
 
-def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
-    """Spawn the test backend against *downloads_dir*; returns (proc, base_url).
+def spawn_backend(*, library_dir: Path, state_dir: str | Path) -> tuple:
+    """Spawn the test backend against *library_dir*; returns (proc, base_url).
 
     Free port, env, then a 30s health probe. Cold Rust boots are fast but
     the same headroom covers a loaded machine — and `cargo build` runs
@@ -150,7 +150,7 @@ def spawn_backend(*, downloads_dir: Path, state_dir: str | Path) -> tuple:
 
     env = os.environ.copy()
     env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads_dir)
+    env["LIBRARY_DIR"] = str(library_dir)
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env.update(
         {

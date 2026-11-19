@@ -141,10 +141,10 @@ fn cache_file_path() -> PathBuf {
     PathBuf::from(base).join(DISK_CACHE_FILENAME)
 }
 
-/// `cache_key(downloads_root, path)` — DOWNLOADS-relative `r:` key when the
+/// `cache_key(library_root, path)` — LIBRARY-relative `r:` key when the
 /// target sits under the root, abspath `a:` fallback otherwise (same repr as
 /// Python: `rel\\x00mtime_ns\\x00size`). `None` when the path cannot be stated.
-fn disk_cache_key(downloads_root: &str, path: &Path) -> Option<String> {
+fn disk_cache_key(library_root: &str, path: &Path) -> Option<String> {
     let st = path.metadata().ok()?;
     let mtime_ns = st
         .modified()
@@ -153,8 +153,8 @@ fn disk_cache_key(downloads_root: &str, path: &Path) -> Option<String> {
         .ok()?
         .as_nanos() as u64;
     let size = st.len();
-        if !downloads_root.is_empty() {
-            let root = Path::new(downloads_root);
+        if !library_root.is_empty() {
+            let root = Path::new(library_root);
             if let Ok(rel) = path.strip_prefix(root) {
                 return Some(format!(
                     "r:{}\x00{}\x00{}",
@@ -179,7 +179,7 @@ fn disk_cache_key(downloads_root: &str, path: &Path) -> Option<String> {
 }
 
 fn disk_key_for_path(path: &Path) -> Option<String> {
-    let root = std::env::var("DOWNLOADS_DIR").unwrap_or_default();
+    let root = std::env::var("LIBRARY_DIR").unwrap_or_default();
     disk_cache_key(&root, path)
 }
 
@@ -479,7 +479,7 @@ mod tests {
         // the developer's real cache.
         let cache_dir = dir.join("cache");
         std::env::set_var("BOOKQ_CACHE_DIR", &cache_dir);
-        std::env::set_var("DOWNLOADS_DIR", &dir);
+        std::env::set_var("LIBRARY_DIR", &dir);
         assert_eq!(pdf_page_count(&pdf), 2);
         let (hits, misses) = pdf_memo_stats();
         assert_eq!((hits, misses), (0, 1));
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(pdf_page_count(&pdf), 2);
         assert!(cache_dir.join(DISK_CACHE_FILENAME).is_file());
         std::env::remove_var("BOOKQ_CACHE_DIR");
-        std::env::remove_var("DOWNLOADS_DIR");
+        std::env::remove_var("LIBRARY_DIR");
         std::fs::remove_dir_all(&dir).ok();
     }
     /// Rendering without libpdfium must fall back to None (proxy), never panic.

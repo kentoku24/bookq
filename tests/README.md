@@ -1,6 +1,6 @@
 # UI テスト
 
-FastAPI アプリを合成フィクスチャ（`conftest.py` が生成する downloads ツリー）に対して起動し、Playwright（headless Chromium）でブラウザ操作して UI の挙動を検証する。
+viewer-rs を合成フィクスチャ（`conftest.py` が生成する library ツリー）に対して起動し、Playwright（headless Chromium）でブラウザ操作して UI の挙動を検証する。
 
 ## 実行
 
@@ -8,7 +8,7 @@ FastAPI アプリを合成フィクスチャ（`conftest.py` が生成する dow
 # 初回のみ: Chromium が未取得なら
 uv run --with playwright playwright install chromium
 
-# テスト実行（server フィクスチャが uvicorn を起動するため requirements-dev.txt が必須）
+# テスト実行（server フィクスチャが viewer-rs を起動するため requirements-dev.txt が必須）
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q
 ```
 

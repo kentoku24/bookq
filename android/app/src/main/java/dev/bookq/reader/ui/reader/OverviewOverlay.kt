@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyGridPrefetchStrategy
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -142,8 +141,9 @@ fun OverviewOverlay(
 
     // Prefetch off-screen cells during scroll slack — page thumbs
     // otherwise subcompose mid-fling (90 Hz budget is 11 ms).
-    val gridState = rememberLazyGridState(
-        prefetchStrategy = LazyGridPrefetchStrategy(nestedPrefetchItemCount = 6))
+    // Default strategy: `nestedPrefetchItemCount` only governs lazy
+    // layouts nested INSIDE a cell — on this flat grid it is a no-op.
+    val gridState = rememberLazyGridState()
     LaunchedEffect(huge) {
         if (!huge) return@LaunchedEffect
         snapshotFlow {

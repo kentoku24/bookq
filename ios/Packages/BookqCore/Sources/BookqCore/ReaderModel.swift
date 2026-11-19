@@ -29,14 +29,14 @@ public struct ReaderChapter: Equatable {
     }
 }
 
-public enum ReaderPageMode: String, Equatable {
+@frozen public enum ReaderPageMode: String, Equatable {
     case single, spread
 }
 
 /// Tap-zone verdict — `zoneActionAt` (web/static/app.js).
 /// Edge 30% zones turn pages in the direction `tapForwardLeft` selects
 /// (web default: left = forward), the center band toggles chrome.
-public enum ZoneAction: Equatable {
+@frozen public enum ZoneAction: Equatable {
     case turn(Int)      // +1 forward, -1 back
     case toggleChrome
 }

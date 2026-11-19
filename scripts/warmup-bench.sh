@@ -30,7 +30,7 @@
 #   6. ALWAYS `./dev.sh down <env>` on exit (trap EXIT, success or failure),
 #      then proves the slot is freed via `./dev.sh list`.
 #
-# EXPECTED REAL-DATA SIGNATURE (post-fix, /Volumes/<disk>/library -> /app/downloads):
+# EXPECTED REAL-DATA SIGNATURE (post-fix, /Volumes/<disk>/library -> /app/library):
 #   cold ~12.6s, warm ~5.0s, cache 85/85 all `r:` (84 archive + 1 pdf).
 #
 # FAILS LOUD (no silent fallbacks) on: dirty tree, wrong branch, fixture mount,
@@ -120,8 +120,8 @@ echo "✅ container: $CONTAINER"
 MOUNTS="$(docker inspect "$CONTAINER" --format '{{json .Mounts}}')"
 echo "mounts: $MOUNTS"
 case "$MOUNTS" in
-    *"/app/downloads"*) : ;;
-    *) die "no /app/downloads mount found: $MOUNTS" ;;
+    *"/app/library"*) : ;;
+    *) die "no /app/library mount found: $MOUNTS" ;;
 esac
 case "$MOUNTS" in
     *fixture*|*/tmp/bookq-fixture-*)

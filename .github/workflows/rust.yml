@@ -56,12 +56,24 @@ jobs:
       - name: System deps (zlib for flate2)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
 
+      # libpdfium (PDFium engine for the native PDF pipeline, #402) — must
+      # track pdfium-render's `pdfium_latest` bindings (8125 at 0.9.5).
+      # Without it the render tests degrade to the 501-decline asserts.
+      - name: libpdfium for native PDF tests
+        run: |
+          mkdir -p /tmp/pdfium-test/lib
+          curl -fsSL -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8125/pdfium-linux-x64.tgz
+          tar xzf /tmp/pdfium.tgz -C /tmp/pdfium-test
+          ls -la /tmp/pdfium-test/lib/
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
       - name: cargo test
         working-directory: rust
+        env:
+          PDFIUM_DYNAMIC_LIB_PATH: /tmp/pdfium-test/lib
         run: cargo test --workspace
 
   # Builds the viewer-rs image once and runs the gateway contract suite
@@ -87,7 +99,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
 
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p .ci-dl/Series/vol1 .ci-dl/Manga
           uv run --with pillow python - <<'EOF'
@@ -101,6 +113,10 @@ jobs:
                   b = io.BytesIO()
                   Image.new("RGB", (80, 120), (0, 0, i * 60)).save(b, "JPEG")
                   z.writestr(f"{i+1:02d}.jpg", b.getvalue())
+          # 2-page PDF for the native PDF pipeline (#402): PIL embeds one
+          # image per page, PDFium renders both.
+          pages = [Image.new("RGB", (80, 120), (i * 60, 60, 0)) for i in range(2)]
+          pages[0].save(".ci-dl/Series/vol1/doc.pdf", save_all=True, append_images=pages[1:])
           EOF
 
       # type=gha layer cache: unchanged Cargo.lock/deps rebuild in seconds
@@ -127,9 +143,9 @@ jobs:
             -e GOOGLE_CLIENT_ID=ci-dummy -e GOOGLE_CLIENT_SECRET=ci-dummy \
             -e BASE_URL=http://127.0.0.1:8080 \
             -e ALLOWED_EMAILS=test@example.com -e SECRET_KEY=ci-not-a-secret \
-            -e DOWNLOADS_DIR=/app/downloads -e BOOKQ_STATE_DIR=/var/lib/bookq \
+            -e LIBRARY_DIR=/app/library -e BOOKQ_STATE_DIR=/var/lib/bookq \
             -e BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs \
-            -v "$PWD/.ci-dl:/app/downloads:ro" \
+            -v "$PWD/.ci-dl:/app/library" \
             -v bookq-ci-state:/var/lib/bookq -v bookq-ci-thumbs:/var/cache/bookq-thumbs \
             bookq-ci:viewer-rs
           for i in $(seq 1 90); do
@@ -156,6 +172,38 @@ jobs:
             --exclude-checks ignored_auth,allow_header_conformance \
             --exclude-deprecated
 
+      # Schemathesis fuzzes POST/DELETE against the rw-mounted library, so
+      # it may delete canonical fixtures or leave uploads behind — the
+      # 200-check below hits fixture paths and would flake. Empty the
+      # mount *contents* only (the dir itself is the bind inode), rebuild,
+      # and force an index refresh. The delete runs inside the container:
+      # .bookq-uploads/ session dirs are written by viewer-rs as root, so
+      # the host runner gets EACCES unlinking them.
+      - name: Regenerate fuzzed library fixtures
+        run: |
+          docker exec viewer-rs find /app/library -mindepth 1 -delete
+          mkdir -p .ci-dl/Series/vol1 .ci-dl/Manga
+          uv run --with pillow python - <<'EOF'
+          from PIL import Image
+          import io, zipfile
+          for i in range(3):
+              Image.new("RGB", (80, 120), (i * 60, 0, 0)).save(f".ci-dl/Series/vol1/p{i:02d}.jpg")
+          Image.new("RGB", (80, 120), (0, 60, 0)).save(".ci-dl/Series/vol1/cover.png")
+          with zipfile.ZipFile(".ci-dl/Manga/pack.zip", "w") as z:
+              for i in range(3):
+                  b = io.BytesIO()
+                  Image.new("RGB", (80, 120), (0, 0, i * 60)).save(b, "JPEG")
+                  z.writestr(f"{i+1:02d}.jpg", b.getvalue())
+          pages = [Image.new("RGB", (80, 120), (i * 60, 60, 0)) for i in range(2)]
+          pages[0].save(".ci-dl/Series/vol1/doc.pdf", save_all=True, append_images=pages[1:])
+          EOF
+          curl -sf -X POST http://127.0.0.1:8080/api/v1/index/refresh >/dev/null || true
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/tree)
+            [ "$code" = "200" ] && break || sleep 1
+          done
+          [ "$code" = "200" ] || { docker logs viewer-rs || true; echo "tree never re-warmed"; exit 1; }
+
       # With no upstream there is no proxy to hide behind: a 200 on a v1
       # path is native by construction, and any silent fall-through shows
       # up as a "fallback answered 501" WARN. Request each path twice —
@@ -179,13 +227,17 @@ jobs:
               "/api/v1/health", "/api/v1/version",
               "/api/v1/tree", "/api/v1/tree?depth=1",
               "/api/v1/images?folder=Series/vol1",
+              "/api/v1/images?folder=Series%2Fvol1%2Fdoc.pdf",
               "/api/v1/search?q=p", "/api/v1/facets",
               "/api/v1/reading-positions", "/api/v1/folder-visibility",
               "/image/Series/vol1/p00.jpg", "/image/Manga/pack.zip/01.jpg",
+              "/image/Series/vol1/doc.pdf/p001.png",
               "/view/Series/vol1/p00.jpg",
+              "/view/Series/vol1/doc.pdf/p001.png",
               # ?w= fast-tier must stay native too (#440).
               "/view/Series/vol1/p00.jpg?w=400",
               "/thumb/Series/vol1/p00.jpg?w=200",
+              "/thumb/Series/vol1/doc.pdf/p001.png?w=200",
               "/api/v1/thumb-sprite?folder=Manga%2Fpack.zip&names=01.jpg,02.jpg",
           ]
           failed = []
@@ -222,6 +274,37 @@ jobs:
           for p, st in failed:
               print(f"FAIL {p}: status={st} (expected 501)", file=sys.stderr)
           sys.exit(1 if failed else 0)
+          EOF
+
+      # PDF byte contract (#402): the native render must be a PNG at
+      # pypdfium2's scale-2.0 dimensions, listed as p001.png/p002.png, with
+      # a working etag→304 round-trip — all answered natively.
+      - name: PDF render contract is native and well-formed
+        run: |
+          uv run --with pillow python - <<'EOF'
+          import json, sys, urllib.request, urllib.error
+          B = "http://127.0.0.1:8080"
+          def get(p, headers=None):
+              try:
+                  r = urllib.request.urlopen(urllib.request.Request(B + p, headers=headers or {}))
+                  return r.status, r.headers, r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, e.headers, e.read()
+          st, h, body = get("/image/Series/vol1/doc.pdf/p001.png")
+          assert st == 200, st
+          assert h.get_content_type() == "image/png", h.get_content_type()
+          assert body[:8] == b"\x89PNG\r\n\x1a\n", body[:8]
+          from PIL import Image
+          import io as _io
+          assert Image.open(_io.BytesIO(body)).size == (160, 240), "scale-2.0 dims"
+          st, h, body = get("/api/v1/images?folder=Series%2Fvol1%2Fdoc.pdf")
+          assert st == 200, st
+          assert json.loads(body)["images"] == ["p001.png", "p002.png"], body[:200]
+          st, h, body = get("/image/Series/vol1/doc.pdf/p001.png")
+          etag = h.get("ETag")
+          st2, _, _ = get("/image/Series/vol1/doc.pdf/p001.png", {"If-None-Match": etag})
+          assert st2 == 304, st2
+          print("pdf contract ok:", etag)
           EOF
 
   # Required-check anchor: the gateway contract suite runs inside

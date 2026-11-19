@@ -41,7 +41,7 @@
     const s = document.createElement('script'); s.src = '/static/touch-indicator.js'; document.head.appendChild(s);
   }
 
-  // ── Service Worker registration (Todo 2) ──
+  // ── Service Worker registration ──
   // TEST_MODE gate: skip registration unless ?offline=1 or localStorage flag.
   (function registerSW(){
     if (!('serviceWorker' in navigator)) return;
@@ -236,7 +236,7 @@
   // instead of racing it for index/tree ownership.
   let _loadFoldersInFlight = null;
   let _revalidateInFlightGen = -1;
-  // Todo 5: warm-only conditional fetch. Keys mirror the server
+  // Warm-only conditional fetch. Keys mirror the server
   // _folders_response cache keys (path,depth): root full vs shallow1.
   // Cold first fetch (loadFolders stages) stays unconditional — ETag never
   // claims cold savings. Only fetchLatestFolders/revalidateFoldersForOnline
@@ -388,7 +388,7 @@
       // IDB is the sole offline tree source (IDB-only since 8aacd57): persist
       // the revalidated tree alongside Cache, otherwise the next offline
       // reload would serve the stale snapshot. Full-only, background, never
-      // blocking the redraw (Todo2 contract; shallow never reaches here).
+      // blocking the redraw (shallow never reaches here).
       _persistTreeSnapshot(data, {defer:true});
       updateBrowseHeader();
       renderView();
@@ -555,7 +555,7 @@
   // second document-level dismiss here or popovers render twice per keypress.
 
   // ── ReadingProgress: localStorage-backed persistence ──
-  // Todo 4: renders must batch-parse ONCE per render (see browse/render.js
+  // Renders must batch-parse ONCE per render (see browse/render.js
   // _buildRenderCtx) — never call get() per tile. getAllSafe/pick are the
   // one-shot path; corrupt values degrade to {} so the grid never falls.
   const ReadingProgress = {
@@ -627,7 +627,7 @@
     Object.defineProperty(window, 'urlRestoreGen', {get(){return urlRestoreGen;}, set(v){urlRestoreGen=v;}, configurable:true});
     Object.defineProperty(window, 'urlSyncPaused', {get(){return urlSyncPaused;}, set(v){urlSyncPaused=v;}, configurable:true});
   } catch(e) { console.warn(e); }
-  // ── two-stage first paint (Todo2: shallow depth=1 → full) ──
+  // ── two-stage first paint (shallow depth=1 → full) ──
   // _shallowMode is true between the shallow first paint and the full-tree
   // arrival. While true: facet filtering stays off (shallow nodes carry no
   // subtree_facets), treeLoaded stays false (no prefetch/applyUrlState leak),
@@ -665,7 +665,6 @@
   // and neutralize the track's transition/transform. Shared by loadImages and
   // resetToTop — keep the two in sync (any change to strip teardown goes here).
   function resetStrip() {
-    // Reset strip
     for (const k of Object.keys(stripImgs)){
       const img = stripImgs[k];
       const cell = stripCells[k];
@@ -674,7 +673,6 @@
       delete stripImgs[k];
       delete stripCells[k];
     }
-    // Reset chapter labels
     for (const label of chapterLabels) label.remove();
     chapterLabels = [];
     for (const k of Object.keys(spreadEls)) spreadEls[k].remove();
@@ -996,7 +994,7 @@
   function getChapterLocalRealIdx(globalIdx){
     return globalIdx - chapterBoundaries[getCurrentChapterInfo(globalIdx).chapterIdx];
   }
-  // ── chapter-local slider sync: central max/value write point (wired up by later tasks) ──
+  // ── chapter-local slider sync: central max/value write point ──
   function syncChapterSlider(globalIdx, opts){
     const resetMax = !!(opts && opts.resetMax === true);
     let info;
@@ -1201,7 +1199,7 @@
     }
   }
 
-  // Todo 5: single-traversal index. One walk assigns _fullPath, builds the
+  // Single-traversal index. One walk assigns _fullPath, builds the
   // nodeMap, and emits both thumb lists matching OfflineThumb.collect —
   // singles via {singleOnly:true} (device cover width, the same string
   // resolveCoverSingle requests), full via the default path (singles at the
@@ -1628,7 +1626,7 @@
   // thumbs/resolveCover.js owns the cover fallback chain (thumb → thumbs[0] → null).
   function _coverUrl(node, w){ return window.ThumbResolve.resolveCover(node, w); }
   function buildNodeMap(){
-    // Todo 5: the map is built by setFullPathsAndIndex on every restoreTree;
+    // The map is built by setFullPathsAndIndex on every restoreTree;
     // return the cache when it tracks the live tree, rebuild (one walk) only
     // when an out-of-band mutation replaced the reference. The repair walk
     // uses the non-superseding helper — a pending async full-index build
@@ -1638,7 +1636,7 @@
     // authoritative topLevel 公開のふりをしないよう引き継ぐ。
     return _buildIndexSync(tree, _indexProvisional);
   }
-  // Todo 4: single delegated #tile-grid listener + closest() — replaces the
+  // Single delegated #tile-grid listener + closest() — replaces the
   // per-tile addEventListener loops (N listeners → 1). The selector arg is
   // kept for caller compat; the handler matches the browse union
   // (.tile/.item[data-path]/.card) and no-ops while searchMode (search tiles
@@ -1891,7 +1889,7 @@
       // of being eaten by the freshness gate.
       if (!window.Connectivity || window.Connectivity.isOnline()) _onlineRevalidateLast = Date.now();
       _persistTreeSnapshot(data, {defer:true});
-      // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
+      // Shallow-warmup idle fill: hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
       // a reload. The filled tree re-enters via restoreTree (existing path).
       try {
@@ -2147,7 +2145,7 @@
     sheetOverlay.classList.remove("hidden");
     sheetOverlay.classList.add("visible");
     bottomSheet.classList.remove("hidden");
-    // Trigger layout then slide in
+    // Unhide must commit a frame before .open or the slide-in never runs
     requestAnimationFrame(() => {
       bottomSheet.classList.add("open");
       sheetCloseBtn.focus();
@@ -2266,7 +2264,7 @@
     return undefined;
   }
 
-  // Physical directory depth of a folder relative to the downloads root,
+  // Physical directory depth of a folder relative to the library root,
   // counted from the raw path rather than the post-flatten tree: scanner.py's
   // single-child flattening merges wrapper folders into a node's name (e.g.
   // "wrap/inner/vol1"), so a real multi-chapter series can end up looking
@@ -2291,7 +2289,6 @@
 
     const parentNode = findParentOf(tree, fullPath, null);
 
-    // If no parent (root level), return only current folder
     if (!parentNode) {
       const parts = fullPath.split("/");
       return [{ name: parts[parts.length - 1], fullPath }];
@@ -2705,8 +2702,8 @@
     }
     // Chapter divider labels sit centred in the gap to the right of the
     // spread that opens the chapter (manga RTL: the previous chapter is to
-    // the right). The gap itself may be wider than CHAPTER_GAP_PX (監査 V3
-    // — gapBefore() widens it so neither neighbour peeks), so centre on the
+    // the right). The gap itself may be wider than CHAPTER_GAP_PX
+    // (gapBefore() widens it so neither neighbour peeks), so centre on the
     // actual computed gap, not the CHAPTER_GAP_PX floor. Labels are windowed
     // (ensureChapterLabels), so iterate the live set via its chapter index.
     for (const el of chapterLabels) {
@@ -4701,7 +4698,7 @@
 
   imgContainer.addEventListener("touchstart", e => {
     if (!images.length) return;
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     const act = window.ViewerGesture.activeTouches(e);
     // A second finger landed mid-swipe: the reader is starting a pinch, not
     // continuing the drag. Abort it here rather than leaving dragActive true.
@@ -4720,7 +4717,7 @@
   }, {passive: true});
 
   imgContainer.addEventListener("touchmove", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive) {
       // Late arming: the lone edge-started touch has moved ARM_PX and stopped
       // being a palm — with no touchstart of its own. Measure the drag from
@@ -4780,7 +4777,7 @@
   }, {passive: false});
 
   imgContainer.addEventListener("touchend", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive){
       // A never-promoted edge touch lifting: forget it, or the NEXT edge-started
       // touch could not register as pending. (Its tap still reaches the zones
@@ -4898,7 +4895,7 @@
   });
 
   imgContainer.addEventListener("touchcancel", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive) {
       if (pendingPalmId !== null && findTouch(e.changedTouches, pendingPalmId)) pendingPalmId = null;
       return;

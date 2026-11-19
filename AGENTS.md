@@ -84,7 +84,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 ```
 
 - `BOOKQ_TEST_MODE=true` が必須 — viewer-rs が起動時に読み、OAuth をバイパスして mock user を返す。
-- `DOWNLOADS_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
+- `LIBRARY_DIR` を一時ディレクトリに向ける (`tests/conftest.py` が合成ツリーを生成)。
 - `--with-requirements requirements-dev.txt` の付与を省略しないこと (pillow/httpx 等の fixture 依存が入る)。
 - pytest 起動時に `scripts/test-preflight.sh` が conftest `pytest_sessionstart` から自動実行される。repo があるボリュームの空きが `BOOKQ_MIN_FREE_GB` (既定 25GiB, `disk-guard --check` と同一) を下回ると、安全な残骸 (stale/マージ済み他worktreeの `rust/target`・`ios/build`・android ビルド出力、`.worktrees/` の孤児dir、uv cache、古い `pytest-*` tmp、`ms-playwright` 旧バージョン) を回収してから再チェックし、それでも不足なら容疑者リスト付きで abort する。`BOOKQ_WARN_FREE_GB` (既定 40GiB) 未満は警告のみ。`--dry-run` で対象列挙、`--clean` で任意タイミングの回収、緊急回避は `BOOKQ_SKIP_PREFLIGHT=1`。CI (`CI` env) ではスキップ — 残留物が世代を跨がない ephemeral runner では閾値未満が正常のため。削除は「stale (> `BOOKQ_STALE_DAYS` 既定7日) or マージ済み」かつ「使用中プロセスの cwd が無い」ものに限定され、自分の worktree は対象外。
 - `rust/target` は外付け SSD の**共有** target dir (`BOOKQ_SHARED_TARGET_DIR` で指定、マシン固有パスを repo に持ち込まないため既定値なし) への symlink — worktree ごと ~1.5GB が内蔵SSDを埋めないよう全 worktree で依存成果物を共有する。symlink は `scripts/ensure-cargo-target.sh` が作り、`dev.sh up` と `rs_spawn` の build 前に自動で呼ばれる (gitignore 済みで untracked)。共有先が `/Volumes/` 実マウント外なら従来通り内蔵 `rust/target` を使う。共有のため `cargo clean` は他 worktree のキャッシュも消す点に注意。rs_spawn は毎回 `cargo build` したうえで `deps/viewer_rs-<hash>` の実体パスで spawn する (共有 dir の `debug/viewer-rs` は他 worktree のビルドに上書きされ得るため)。per-checkout 隔離に戻したい場合は `BOOKQ_TARGET_DIR` / `CARGO_TARGET_DIR_BASE` / `CARGO_TARGET_DIR` を `/Volumes/` 配下に設定する — 値は「ルート」で checkout 名のサブdirが付く (#542)。
@@ -103,6 +103,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - **検証終了時は必ず `./scripts/sim-teardown.sh` を実行して CPU 監査に合格させること**（sim shutdown + Clone 削除 + 残留 diagnose/idb 整理を一括。`--dev-env <name>` で検証用 dev 環境の down まで）。`simctl shutdown` だけでは孤児化した診断・runtime プロセスが残りホスト CPU を食い潰すことがある。xcodebuild test を使った検証は終了まで poll してから片付けること。詳細: `.claude/skills/ios-simulator/references/teardown.md`。
 - **ネイティブアプリの実機デプロイは `./scripts/ios-device-deploy.sh`**（paired iPhone へ build → install → launch を一括。`--udid`/`--release`/`--no-launch`/`DEVICE_UDID`）。詳細は `.claude/skills/ios-device-deploy/SKILL.md`。`DEVELOPMENT_TEAM` は pbxproj 記載済みで override 不要。
 - **iOS の単体+UI テストは `.github/workflows/ios.yml` が `xcode-27` イメージ（iOS 27 SDK 搭載 preview runner）で実行**（`BookqTests` + `BookqUITests`、TEST_MODE 合成サーバー + シミュレータ）。ローカル再現は `.github/scripts/ios-ui-test.sh`（サーバー起動は各自）。`CODE_SIGNING_ALLOWED=NO` は禁止 — 署名なしアプリは Keychain 書き込みが失敗し AuthManagerTests が落ちる。詳細は `docs/ios-app.md` テスト節。
+- **UI テスト実行前の環境衛生チェック（必須・自動化済み）**: `xcodebuild test` / UI テストを回す前に `scripts/ui-test-preflight.sh` を実行する（`.github/scripts/ios-ui-test.sh` 経由なら自動で走る）。stale なテストサーバーの kill・reading-positions 残存の警告・メモリ/SSD の確認と安全なクリーンまで自動で行い、未解決の問題があれば exit 1。WARN が出た項目のみ手動対処が必要。背景: 2026-11-16 に Python 時代の孤立 uvicorn が :8080 を占有し、stale な読書位置 state で `ReaderUITests` が連続失敗した実例あり — 同種の stale サーバーは preflight が自動で除去する。
 
 ### Android (`android/`)
 
@@ -111,6 +112,7 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - テスト+ビルド: `cd android && ./gradlew :core:test :data:testDebugUnitTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug`。
 - UI テスト: `./gradlew :app:connectedDebugAndroidTest`（実機 or CI エミュレータ API 35。`bookqServerUrl` instrumentation arg、既定 `http://10.0.2.2:8080`）。
 - 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
+- **エミュレータ標準フローは `.claude/skills/android-emulator/SKILL.md`**。AVD (`bookq_tab`) は ~9GB・Gradle/Kotlin daemon は 2〜4GB を常駐させるため、検証終了時・テスト合間に必ず `adb -s <serial> emu kill` / `./gradlew --stop` で止めること。自分が起動したプロセスだけを止め、他セッションの環境を殺さない (停止前に `adb devices` / `docker ps` / `ps` で所有確認)。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
 
 ## 8. 並行作業の隔離
