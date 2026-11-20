@@ -98,7 +98,7 @@ public enum PageTurnMath {
     /// edge instead of the page edge (where it would show the whole
     /// mate page, not a peek). Averaging the pair's two widths keeps
     /// peek → strip → peek seamless when the mates' aspects differ.
-    static func stripPitch(viewWidth: CGFloat, pageWidth: CGFloat) -> CGFloat {
+    public static func stripPitch(viewWidth: CGFloat, pageWidth: CGFloat) -> CGFloat {
         max((viewWidth + pageWidth) / 2 - 1, 0)
     }
 
@@ -107,7 +107,7 @@ public enum PageTurnMath {
     /// pages of one spread pair slide past each other (strip layout)
     /// instead of the stack reveal. Integer `pos` is a rest state and
     /// always false here; the rest peek is handled separately.
-    static func inStripInterval(_ pos: CGFloat,
+    public static func inStripInterval(_ pos: CGFloat,
                                 intraIntervals: Set<Int>) -> Bool {
         let j = Int(floor(pos))
         return pos != CGFloat(j) && intraIntervals.contains(j)
