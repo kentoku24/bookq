@@ -1719,6 +1719,26 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::CONFLICT);
+        // same-length tampered owner (two chars swapped) and truncated owner → 409.
+        // The constant-time compare must reject these, not just different lengths.
+        let ob = owner.as_bytes();
+        let (i, j) = (0..ob.len())
+            .find_map(|i| (i + 1..ob.len()).find_map(|j| (ob[i] != ob[j]).then_some((i, j))))
+            .expect("owner token has at least two distinct chars");
+        let mut swapped = owner.clone().into_bytes();
+        swapped.swap(i, j);
+        let swapped = String::from_utf8(swapped).unwrap();
+        for bad in [swapped, owner[..owner.len() - 1].to_string()] {
+            let (s, _) = resp_json(
+                put(
+                    vis_headers(Some(&bad), Some("application/json")),
+                    br#"{"root":"a","hidden":false}"#,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(s, StatusCode::CONFLICT, "owner {bad:?}");
+        }
         // wrong content type → 415
         let (s, _) = resp_json(
             put(
@@ -1797,6 +1817,10 @@ mod tests {
         // re-hide skips the membership check entirely → still 200
         let res = put(br#"{"root":"secret","hidden":true}"#).await;
         assert_eq!(res.status(), StatusCode::OK);
+        // with a non-empty hidden set, hiding a root outside the tree still → 404
+        // (the membership check must not be skipped just because other roots are hidden)
+        let (s, _) = resp_json(put(br#"{"root":"nosuch","hidden":true}"#).await).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
         // unhide → 200, root leaves the set
         let res = put(br#"{"root":"secret","hidden":false}"#).await;
         assert_eq!(res.status(), StatusCode::OK);
