@@ -134,7 +134,12 @@ jobs:
         with:
           toolchain: stable
 
+      # Cargo.toml lives under rust/ — without `workspaces` the action
+      # runs `cargo metadata` at the repo root and fails hard (v2 now
+      # treats a missing manifest as fatal).
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - uses: actions/setup-java@v6
         with:
