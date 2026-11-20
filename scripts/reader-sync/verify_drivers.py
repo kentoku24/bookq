@@ -34,6 +34,99 @@ from verify_core import (
 )
 
 
+# Simulator ownership (#596): simulator UDIDs are a global pool shared by
+# every agent on the machine — two concurrent verify runs on the same
+# UDID would tap each other's screens, and a bare sim-teardown.sh kills
+# ALL booted sims. Each run claims /tmp/bookq-sim-owners/<udid>.json
+# {pid,label,acquired_at} for the UDIDs it drives; a live owner pid blocks
+# acquisition (fail fast instead of silently sharing the device), a dead
+# pid is stale and stealable. sim-teardown.sh reads the same files to
+# skip sims owned by a live run.
+_SIM_OWNER_DIR = Path("/tmp/bookq-sim-owners")
+
+
+def _sim_owner_path(udid: str) -> Path:
+    return _SIM_OWNER_DIR / f"{udid}.json"
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True     # exists, owned by another user — treat as alive
+    except OSError:
+        return False
+    return True
+
+
+def _read_sim_owner(path: Path) -> dict | None:
+    try:
+        d = json.loads(path.read_text())
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _claim_sim_owner(udid: str, label: str) -> None:
+    """Claim the owner file atomically — link(2) publishes the COMPLETE
+    payload or fails EEXIST, so a racing acquirer never observes an
+    empty/partial file and misreads it as stale. A live owner pid blocks
+    acquisition; a dead one is stale and stealable."""
+    _SIM_OWNER_DIR.mkdir(parents=True, exist_ok=True)
+    path = _sim_owner_path(udid)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({
+        "pid": os.getpid(),
+        "label": label,
+        "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }))
+    try:
+        for _ in range(4):
+            try:
+                os.link(tmp, path)
+                return
+            except FileExistsError:
+                owner = _read_sim_owner(path)
+                pid = (owner or {}).get("pid")
+                if _pid_alive(pid):
+                    raise EnvError(
+                        f"simulator {udid} is owned by live run "
+                        f"pid={pid} label={(owner or {}).get('label')!r} — "
+                        "choose different --leader-udid/--follower-udid "
+                        "or wait for that run to finish")
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+        raise EnvError(f"simulator {udid}: ownership claim kept racing")
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _release_sim_owner(udid: str) -> None:
+    """Remove the owner file only when it still names THIS process —
+    a stolen/recreated file belongs to someone else. An unreadable file
+    is left for the next acquirer's stale-steal path."""
+    path = _sim_owner_path(udid)
+    owner = _read_sim_owner(path)
+    if owner is not None and owner.get("pid") == os.getpid():
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class ClientSpec:
     def __init__(self, client_id: str, role: str):
         self.id = client_id
@@ -239,10 +332,14 @@ class SimulatorDriver:
     SPRINGBOARD = "com.apple.springboard"
     PREFS = "com.apple.Preferences"
 
-    def __init__(self, leader_udid: str, follower_udid: str):
+    def __init__(self, leader_udid: str, follower_udid: str,
+                 label: str = ""):
         self.udids = {"leader": leader_udid, "follower": follower_udid}
+        self._label = label
         self._pre_booted: set[str] = set()
+        self._booted_by_us: set[str] = set()
         self._recorders: dict[str, subprocess.Popen] = {}
+        self._owned: list[str] = []
 
     # -- capability / preflight -------------------------------------
 
@@ -286,12 +383,28 @@ class SimulatorDriver:
         raise EnvError(f"simulator {udid} did not boot in {timeout}s")
 
     def launch(self, clients: dict, urls: dict, fx=None) -> None:
+        # Claim the UDIDs before touching any device — a concurrent run
+        # holding them fails fast here instead of interleaving Safari
+        # wipes / taps on the same screens (#596).
+        try:
+            for udid in self.udids.values():
+                _claim_sim_owner(udid, self._label)
+                self._owned.append(udid)
+        except EnvError:
+            self.release_owners()
+            raise
         for cid, spec in clients.items():
             udid = self.udids[spec.role]
             spec.udid = udid
             spec.launch_url = urls[cid]
             if udid not in self._pre_booted:
-                _simctl("boot", udid, check=False)   # already-booted → rc!=0
+                out = _simctl("boot", udid, check=False)
+                # rc==0 → WE booted it (stop() may shut it down). rc!=0 →
+                # already booted — possibly by a concurrent run that raced
+                # us between preflight and launch; like _pre_booted it
+                # must be left running (#596).
+                if out.returncode == 0:
+                    self._booted_by_us.add(udid)
             self._wait_booted(udid)
         for cid, spec in clients.items():
             if spec.kind != "safari":
@@ -326,12 +439,24 @@ class SimulatorDriver:
                         f"pwa client {cid}: relaunched page is not "
                         "standalone (webclip did not take over)")
 
+    def release_owners(self) -> None:
+        """Drop this run's sim-ownership claims. Called by stop() and by
+        verify.py's finally even under --keep (the RUN ended; the sims
+        staying booted for debugging does not extend ownership)."""
+        for udid in self._owned:
+            _release_sim_owner(udid)
+        self._owned = []
+
     def stop(self) -> None:
         for udid, proc in list(self._recorders.items()):
             self.stop_video(udid)
-        for udid in self.udids.values():
-            if udid not in self._pre_booted:
-                _simctl("shutdown", udid, check=False)
+        # Only devices THIS run actually booted (simctl boot rc==0) are
+        # ours to shut down — pre-booted devices and devices a concurrent
+        # run booted mid-launch are left running (#596).
+        for udid in self._booted_by_us:
+            _simctl("shutdown", udid, check=False)
+        self._booted_by_us = set()
+        self.release_owners()
 
     # -- evidence / input -------------------------------------------
 

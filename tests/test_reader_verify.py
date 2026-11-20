@@ -837,3 +837,49 @@ def test_peer_latency_needs_table_and_fixture():
     ctx.surface = "ui"
     with pytest.raises(core.UnsupportedError):
         ops_mod.op_peer_latency(ctx, {"op": "peer_latency"})
+
+
+# ── #596 — simulator ownership markers ────────────────────────────────
+
+def test_sim_owner_claim_blocks_live_and_releases(tmp_path, monkeypatch):
+    """A live owner pid blocks a second claim; release frees the UDID."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    udid = "TEST-UDID-596"
+    drivers_mod._claim_sim_owner(udid, "run-a")
+    path = drivers_mod._sim_owner_path(udid)
+    owner = json.loads(path.read_text())
+    assert owner["pid"] == os.getpid() and owner["label"] == "run-a"
+    # even the SAME process cannot double-claim — ownership is per-run
+    with pytest.raises(core.EnvError, match="owned by live run"):
+        drivers_mod._claim_sim_owner(udid, "run-b")
+    drivers_mod._release_sim_owner(udid)
+    assert not path.exists()
+    drivers_mod._claim_sim_owner(udid, "run-b")
+    assert json.loads(path.read_text())["label"] == "run-b"
+    drivers_mod._release_sim_owner(udid)
+    assert not path.exists()
+
+
+def test_sim_owner_steals_dead_pid(tmp_path, monkeypatch):
+    """A owner file naming a dead pid is stale — claim steals it."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    udid = "TEST-UDID-596B"
+    path = drivers_mod._sim_owner_path(udid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"pid": 999999, "label": "ghost"}))
+    drivers_mod._claim_sim_owner(udid, "run-c")
+    assert json.loads(path.read_text())["label"] == "run-c"
+    drivers_mod._release_sim_owner(udid)
+
+
+def test_sim_owner_release_keeps_foreign_file(tmp_path, monkeypatch):
+    """release must not unlink a file that was recreated under another
+    pid between claim and release."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    udid = "TEST-UDID-596C"
+    drivers_mod._claim_sim_owner(udid, "run-d")
+    path = drivers_mod._sim_owner_path(udid)
+    path.write_text(json.dumps({"pid": 1, "label": "other"}))
+    drivers_mod._release_sim_owner(udid)
+    assert path.exists()
+    path.unlink()
