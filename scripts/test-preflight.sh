@@ -75,7 +75,9 @@ is_stale() {
   [ -z "$(find "$1" -type f -mtime -"$STALE_DAYS" -print -quit 2>/dev/null)" ]
 }
 
-# ビルド/テスト系プロセスの cwd が worktree 配下なら「使用中」— その worktree には触らない
+# ビルド/テスト系プロセスの cwd が worktree 配下なら「使用中」— その worktree には触らない。
+# reader-sync の verify.py / simctl recordVideo 等も対象 — sim 検証だけを
+# 走らせている worktree が「プロセスなし」と誤判定されて target を消されるのを防ぐ (#596)。
 worktree_in_use() {
   local wt="$1" pid cwd
   # 判定ツールが無い環境では「使用中扱い」に倒す — 保護が無言で外れて
@@ -89,7 +91,7 @@ worktree_in_use() {
       "$MAIN_TOP"/.worktrees/*) : ;;                # 子 worktree 側のプロセス (メインを誤判定しない)
       "$wt" | "$wt"/*) return 0 ;;
     esac
-  done < <(pgrep -f 'cargo (build|test|run)|rustc|viewer-rs|pytest|xcodebuild|gradlew|ios-ui-test' 2>/dev/null)
+  done < <(pgrep -f 'cargo (build|test|run)|rustc|viewer-rs|pytest|xcodebuild|gradlew|ios-ui-test|verify\.py|reader-sync|seq_probe|ws_probe|simctl' 2>/dev/null)
   return 1
 }
 
