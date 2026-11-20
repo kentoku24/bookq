@@ -52,8 +52,10 @@ fi
 live_xcodebuild=$(pgrep -f "xcodebuild.*test" | head -1 || true)
 
 # /tmp/bookq-sim-owners/<udid>.json — verify.py の SimulatorDriver が run 中に
-# 取得する所有権マーカー (#596)。記録された pid が生存していれば他エージェントの
-# 検証中とみなし、shutdown / companion kill の対象から外す。--force で無視可。
+# 取得する所有権マーカー (#596)。実際の排他は <udid>.lock の flock(2) が担い、
+# .json は {pid,label} の情報ファイル (teardown はこれを読む)。記録された pid が
+# 生存していれば他エージェントの検証中とみなし、shutdown / companion kill の
+# 対象から外す。--force で無視可。
 SIM_OWNER_DIR="/tmp/bookq-sim-owners"
 SIM_OWNER_DESC=""
 sim_live_owner() {
@@ -63,8 +65,13 @@ sim_live_owner() {
   pid=$(python3 -c 'import json,sys
 try: print(json.load(open(sys.argv[1])).get("pid") or "")
 except Exception: print("")' "$f" 2>/dev/null)
-  [ -n "$pid" ] || return 1
-  if kill -0 "$pid" 2>/dev/null; then
+  # pid は正の整数のみ有効 — 0/-1 は kill -0 でプロセスグループ全体に
+  # 効いてしまい「常に生存」誤判定になる
+  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 0 ] || return 1
+  # kill -0 は他ユーザー所有プロセスで EPERM 失敗し得る — 生きているのに
+  # 「死んでいる」と誤判定して殺す方向に倒れるので、ps (cross-user で生存
+  # 確認可) をフォールバックに使う。python 側の PermissionError→alive と同じ倒し。
+  if kill -0 "$pid" 2>/dev/null || ps -p "$pid" -o pid= >/dev/null 2>&1; then
     SIM_OWNER_DESC="pid=$pid"
     return 0
   fi
@@ -116,6 +123,10 @@ for devs in d.get("devices",{}).values():
       echo "  skip: Clone $u (xcodebuild test 実行中 pid $live_xcodebuild)"
       continue
     fi
+    if [ "$FORCE" = 0 ] && sim_live_owner "$u"; then
+      echo "  skip: Clone $u (sim owner ${SIM_OWNER_DESC} — 他エージェントの検証中; --force で強制)"
+      continue
+    fi
     xcrun simctl shutdown "$u" 2>/dev/null || true
     xcrun simctl delete "$u" && echo "  deleted Clone $u"
   done
@@ -142,6 +153,8 @@ if [ "$SKIP_PROC_KILLS" = 0 ] && [ "$KEEP_IDB" = 0 ]; then
   # companion を UDID 単位で整理 — 生存 owner のいる sim の companion は残す。
   # companion を殺すと相手の idb AX/tap が dtuhid 断絶で死ぬ (#587 調査済み)。
   # --force 時は従来通り全 companion を停止。
+  # パターンは "idb_companion" と "--udid" の両方を要求 — `tail -f
+  # idb_companion.log` のような無関係プロセスを巻き込まない。
   idb_killed=0
   idb_kept=0
   while read -r cpid ccmd; do
@@ -152,7 +165,7 @@ if [ "$SKIP_PROC_KILLS" = 0 ] && [ "$KEEP_IDB" = 0 ]; then
       continue
     fi
     kill "$cpid" 2>/dev/null && idb_killed=$((idb_killed + 1)) || true
-  done < <(pgrep -fl "idb_companion" 2>/dev/null || true)
+  done < <(pgrep -fl "idb_companion.*--udid" 2>/dev/null || true)
   [ "$idb_killed" -gt 0 ] && echo "== idb_companion 停止 ($idb_killed 件)" || true
   [ "$idb_kept" -gt 0 ] && echo "== idb_companion 保持 ($idb_kept 件 — 生存 owner の sim)" || true
 fi

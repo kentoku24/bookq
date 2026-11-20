@@ -88,8 +88,20 @@ worktree_in_use() {
     [ -n "$pid" ] || continue
     cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
     case "$cwd" in
-      "$MAIN_TOP"/.worktrees/*) : ;;                # 子 worktree 側のプロセス (メインを誤判定しない)
-      "$wt" | "$wt"/*) return 0 ;;
+      "$wt" | "$wt"/*)
+        # wt がメイン checkout の時だけ .worktrees/ 配下を「メインの
+        # 使用中」から除外する (子 worktree のプロセスをメインに誤帰属
+        # しない)。wt 自体が .worktrees/ 配下なら、その配下は全て使用中 —
+        # 先に .worktrees/* を評価すると wt 内の cwd が全てそちらに
+        # 吸われてこの関数が常に「未使用」を返す (#596)。
+        if [ "$wt" != "$MAIN_TOP" ]; then
+          return 0
+        fi
+        case "$cwd" in
+          "$MAIN_TOP"/.worktrees/*) : ;;
+          *) return 0 ;;
+        esac
+        ;;
     esac
   done < <(pgrep -f 'cargo (build|test|run)|rustc|viewer-rs|pytest|xcodebuild|gradlew|ios-ui-test|verify\.py|reader-sync|seq_probe|ws_probe|simctl' 2>/dev/null)
   return 1
