@@ -23,7 +23,6 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -97,7 +96,9 @@ def _claim_sim_owner(udid: str, label: str) -> int:
     # Lock held — publish owner info atomically. link(2) gives readers
     # complete-or-absent; a stale .json may exist but only we can be in
     # this section (the flock excludes every other claimant), so
-    # unlink+link cannot race a live owner.
+    # unlink+link cannot race a live owner. Without the .json, teardown
+    # would see the sim as unowned and could kill it mid-run — so a
+    # publish failure releases the lock and fails the claim outright.
     json_path = _sim_owner_json(udid)
     tmp = json_path.with_name(f"{json_path.name}.{os.getpid()}.tmp")
     payload = json.dumps({
@@ -118,11 +119,10 @@ def _claim_sim_owner(udid: str, label: str) -> int:
                     pass
         else:
             raise EnvError(f"simulator {udid}: ownership publish kept racing")
-    except OSError as e:
-        # Info file is best-effort — teardown falls back to "no owner"
-        # which is the pre-#596 behavior, never a wrong kill of OUR sim.
-        print(f"[verify] sim owner publish failed for {udid}: {e}",
-              file=sys.stderr)
+    except (OSError, EnvError) as e:
+        os.close(fd)
+        raise EnvError(
+            f"simulator {udid}: owner publish failed: {e}") from e
     finally:
         try:
             tmp.unlink()
