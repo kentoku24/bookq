@@ -1948,7 +1948,19 @@ mod tests {
             ]);
             let out = thumb_sprite(&dl, &cache, &q, &qs, &HeaderMap::new());
             let body = sprite_body(out);
-            assert_eq!(jpeg_dims(&body), expect, "w={w}");
+            let (sw, sh) = expect;
+            assert_eq!((sw, sh), jpeg_dims(&body), "w={w}");
+            // Row-major cell colors: r,g on row 0; b,p on row 1. Dims-only
+            // asserts let compose_grid coordinate mutants survive (#582).
+            let (cw, rh) = (sw / 2, sh / 2);
+            assert_cell_color(sprite_px(&body, cw / 2, rh / 2), [255, 0, 0], "cell r");
+            assert_cell_color(sprite_px(&body, cw + cw / 2, rh / 2), [0, 255, 0], "cell g");
+            assert_cell_color(sprite_px(&body, cw / 2, rh + rh / 2), [0, 0, 255], "cell b");
+            assert_cell_color(
+                sprite_px(&body, cw + cw / 2, rh + rh / 2),
+                [255, 0, 255],
+                "cell p",
+            );
             std::fs::remove_dir_all(dl.parent().unwrap()).ok();
         }
     }
@@ -1973,6 +1985,8 @@ mod tests {
             &HeaderMap::new(),
         ));
         assert_eq!(jpeg_dims(&body), (400, 150));
+        // Decoded cell keeps its color; the missing entry stays gray.
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "r.png cell");
         // Gray cell: right slot center is ~(128,128,128) ± JPEG tolerance.
         let dec = image::load_from_memory(&body).unwrap().to_rgb8();
         let px = dec.get_pixel(300, 75);
@@ -2002,7 +2016,15 @@ mod tests {
         let q = sprite_q(&[("folder", "."), ("names", "r.png,p.avif")]);
         let out = thumb_sprite(&dl, &cache, &q, "names=r.png,p.avif", &HeaderMap::new());
         assert_eq!(status(&out), StatusCode::OK);
-        assert_eq!(jpeg_dims(&sprite_body(out)), (400, 150));
+        let body = sprite_body(out);
+        assert_eq!(jpeg_dims(&body), (400, 150));
+        // The fixture is solid (200,61,59) at 48x64 — never upscaled, so
+        // the thumb occupies only x∈[200,248), y∈[0,64) of its 200px
+        // slot; everything else stays SPRITE_GRAY.
+        assert_cell_color(sprite_px(&body, 224, 30), [200, 61, 59], "avif cell");
+        assert_gray_cell(sprite_px(&body, 300, 30), "avif cell right of thumb");
+        assert_gray_cell(sprite_px(&body, 224, 120), "avif cell below thumb");
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "png cell");
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
@@ -2021,7 +2043,13 @@ mod tests {
         let q = sprite_q(&[("folder", "work.zip"), ("names", "p.avif,r.png")]);
         let out = thumb_sprite(&dl, &cache, &q, "names=p.avif,r.png", &HeaderMap::new());
         assert_eq!(status(&out), StatusCode::OK);
-        assert_eq!(jpeg_dims(&sprite_body(out)), (400, 150));
+        let body = sprite_body(out);
+        assert_eq!(jpeg_dims(&body), (400, 150));
+        // avif thumb is 48x64 at the slot's top-left; the rest is gray.
+        assert_cell_color(sprite_px(&body, 24, 30), [200, 61, 59], "avif cell");
+        assert_gray_cell(sprite_px(&body, 100, 30), "avif cell right of thumb");
+        assert_gray_cell(sprite_px(&body, 24, 120), "avif cell below thumb");
+        assert_cell_color(sprite_px(&body, 300, 75), [255, 0, 0], "png cell");
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
@@ -2044,5 +2072,287 @@ mod tests {
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
+    // ── #582: mutation-survivor coverage ──────────────────────────────
 
+    /// Sprite JPEG pixel probe — callers pick cell-interior coordinates.
+    fn sprite_px(body: &[u8], x: u32, y: u32) -> [u8; 3] {
+        let d = image::load_from_memory(body).unwrap().to_rgb8();
+        let p = d.get_pixel(x, y).0;
+        [p[0], p[1], p[2]]
+    }
+
+    /// ±40 per channel: uniform fills survive JPEG q75 easily, and the
+    /// test colors differ by ≥127 so cells still discriminate.
+    fn assert_cell_color(px: [u8; 3], want: [u8; 3], what: &str) {
+        for (got, exp) in px.iter().zip(want.iter()) {
+            assert!(
+                (*got as i32 - *exp as i32).abs() <= 40,
+                "{what}: got {px:?}, want ~{want:?}"
+            );
+        }
+    }
+
+    /// SPRITE_GRAY fallback cell (JPEG drift around 128).
+    fn assert_gray_cell(px: [u8; 3], what: &str) {
+        assert!(
+            px.iter().all(|v| (110..=146).contains(v)),
+            "{what}: got {px:?}, want SPRITE_GRAY ~128"
+        );
+    }
+
+    /// Left/right two-tone PNG — `cover_fit` crop asserts need a
+    /// non-uniform source; solid fills hide crop-offset mutants.
+    fn png_split_lr(w: u32, h: u32, split: u32, left: [u8; 3], right: [u8; 3]) -> Vec<u8> {
+        let mut im = image::RgbImage::new(w, h);
+        for (x, _, p) in im.enumerate_pixels_mut() {
+            *p = image::Rgb(if x < split { left } else { right });
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(im)
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    /// Strip cells land left→right in `names` order, each keeping its
+    /// source color — dims-only asserts let `compose_strip` coordinate
+    /// mutants survive.
+    #[test]
+    fn sprite_strip_cells_keep_their_colors() {
+        let (dl, cache) = tmp_dirs("sc1");
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), png_rgb(400, 300, [0, 255, 0])).unwrap();
+        std::fs::write(dl.join("b.png"), png_rgb(400, 300, [0, 0, 255])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,g.png,b.png")]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q,
+            "names=r.png,g.png,b.png",
+            &HeaderMap::new(),
+        ));
+        assert_eq!(jpeg_dims(&body), (600, 150));
+        // 200px slots, 150px tall: sample each cell center.
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "cell0 red");
+        assert_cell_color(sprite_px(&body, 300, 75), [0, 255, 0], "cell1 green");
+        assert_cell_color(sprite_px(&body, 500, 75), [0, 0, 255], "cell2 blue");
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `cover_fit` center-crops: a left/right split source must show red
+    /// left-of-center and blue right-of-center inside each grid cell.
+    /// rows="2" → one row, two 240x720 cells on a 480x720 sheet.
+    #[test]
+    fn sprite_grid_center_crops_cells() {
+        let (dl, cache) = tmp_dirs("sgc");
+        // 400x300 split at x=200 → cover_fit scales to 960x720 and crops
+        // x∈[360,600); the source boundary lands at cell dx=120.
+        std::fs::write(
+            dl.join("split.png"),
+            png_split_lr(400, 300, 200, [255, 0, 0], [0, 0, 255]),
+        )
+        .unwrap();
+        let q = sprite_q(&[
+            ("folder", "."),
+            ("names", "split.png,split.png"),
+            ("rows", "2"),
+        ]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q,
+            "names=split.png,split.png&rows=2",
+            &HeaderMap::new(),
+        ));
+        assert_eq!(jpeg_dims(&body), (480, 720));
+        // Both cells: dx=60 → source x≈175 (red), dx=180 → ≈225 (blue).
+        for (x0, tag) in [(0u32, "cell0"), (240u32, "cell1")] {
+            assert_cell_color(sprite_px(&body, x0 + 60, 360), [255, 0, 0], tag);
+            assert_cell_color(sprite_px(&body, x0 + 180, 360), [0, 0, 255], tag);
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `.svg` cells gray like Python (no rasterizer) — the `!= ".svg"`
+    /// exemption must not flip to `==`, which would 501 the whole sheet.
+    #[test]
+    fn sprite_svg_cell_grays_in_dir_and_archive() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec();
+        for (tag, archive) in [("dir", false), ("zip", true)] {
+            let (dl, cache) = tmp_dirs(&format!("ssvg{tag}"));
+            std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+            let (folder, names) = if archive {
+                let entries: Vec<(&str, Vec<u8>)> = vec![
+                    ("r.png", png_rgb(400, 300, [255, 0, 0])),
+                    ("icon.svg", svg.clone()),
+                ];
+                write_zip(&dl.join("work.zip"), &entries);
+                ("work.zip", "r.png,icon.svg")
+            } else {
+                std::fs::write(dl.join("icon.svg"), &svg).unwrap();
+                (".", "r.png,icon.svg")
+            };
+            let q = sprite_q(&[("folder", folder), ("names", names)]);
+            let body = sprite_body(thumb_sprite(
+                &dl,
+                &cache,
+                &q,
+                &format!("names={names}"),
+                &HeaderMap::new(),
+            ));
+            assert_eq!(jpeg_dims(&body), (400, 150), "{tag}");
+            assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], tag);
+            assert_gray_cell(sprite_px(&body, 300, 75), tag);
+            std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+        }
+    }
+
+    /// Present-but-corrupt cells count toward the all-fail 404 — the
+    /// `failed` tally mutants (`*=`/`-=`) would paint an all-gray sheet.
+    #[test]
+    fn sprite_strip_corrupt_cells_count_toward_404() {
+        let (dl, cache) = tmp_dirs("scc");
+        std::fs::write(dl.join("bad1.png"), b"not a png").unwrap();
+        std::fs::write(dl.join("bad2.png"), b"still not").unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "bad1.png,bad2.png")]);
+        assert_eq!(
+            status(&thumb_sprite(
+                &dl,
+                &cache,
+                &q,
+                "names=bad1.png,bad2.png",
+                &HeaderMap::new()
+            )),
+            StatusCode::NOT_FOUND
+        );
+        // Mixed: one good + one corrupt → 200, corrupt slot stays gray.
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        let q2 = sprite_q(&[("folder", "."), ("names", "r.png,bad1.png")]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q2,
+            "names=r.png,bad1.png",
+            &HeaderMap::new(),
+        ));
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "good cell");
+        assert_gray_cell(sprite_px(&body, 300, 75), "corrupt cell");
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Folder/names validation matrix — every `||`→`&&` weakening must
+    /// still 400 (or 404 for a missing path), not fall through to 403.
+    #[test]
+    fn sprite_folder_validation_matrix() {
+        let (dl, cache) = tmp_dirs("sval");
+        std::fs::write(dl.join("plain.txt"), b"x").unwrap();
+        for (folder, qs, want) in [
+            ("", "names=a.png", StatusCode::BAD_REQUEST),
+            ("/abs", "names=a.png", StatusCode::BAD_REQUEST),
+            ("trail/", "names=a.png", StatusCode::BAD_REQUEST),
+            ("a\0b", "names=a.png", StatusCode::BAD_REQUEST),
+            ("a/../b", "names=a.png", StatusCode::BAD_REQUEST),
+            (".hidden", "names=a.png", StatusCode::BAD_REQUEST),
+            ("..", "names=a.png", StatusCode::BAD_REQUEST),
+            // Exists but is neither archive nor directory.
+            ("plain.txt", "names=a.png", StatusCode::BAD_REQUEST),
+            ("nope", "names=a.png", StatusCode::NOT_FOUND),
+            // `names` is read from the raw query string, not the map.
+            (".", "folder=.", StatusCode::BAD_REQUEST),
+            (".", "names=", StatusCode::BAD_REQUEST),
+        ] {
+            let q = sprite_q(&[("folder", folder)]);
+            assert_eq!(
+                status(&thumb_sprite(&dl, &cache, &q, qs, &HeaderMap::new())),
+                want,
+                "folder={folder:?} qs={qs:?}"
+            );
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Out-of-range `rows` falls back to the strip path — the
+    /// `1..=9`/`len ≤ 3` bounds mutants must not accept them as grids.
+    #[test]
+    fn sprite_rows_out_of_range_falls_back_to_strip() {
+        let (dl, cache) = tmp_dirs("srows");
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), png_rgb(400, 300, [0, 255, 0])).unwrap();
+        for rows in ["0", "10", "1,1,1,1", "2,0"] {
+            let q = sprite_q(&[
+                ("folder", "."),
+                ("names", "r.png,g.png"),
+                ("rows", rows),
+            ]);
+            let body = sprite_body(thumb_sprite(
+                &dl,
+                &cache,
+                &q,
+                &format!("names=r.png,g.png&rows={rows}"),
+                &HeaderMap::new(),
+            ));
+            assert_eq!(jpeg_dims(&body), (400, 150), "rows={rows}");
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `flatten_on_white` blends by the actual alpha — α=128-only coverage
+    /// let `255-a`→`255+a` and `/255`→`*255` mutants survive (#582).
+    #[test]
+    fn flatten_on_white_blends_by_alpha() {
+        let mut im = image::RgbaImage::new(4, 1);
+        for (p, v) in im.pixels_mut().zip([
+            [200u8, 100, 50, 64],
+            [10, 20, 30, 128],
+            [255, 0, 0, 255],
+            [0, 0, 0, 0],
+        ]) {
+            *p = image::Rgba(v);
+        }
+        let flat = flatten_on_white(&image::DynamicImage::ImageRgba8(im));
+        let got: Vec<[u8; 3]> = flat.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+        // (p*a + 255*(255-a))/255, computed independently of the impl.
+        assert_eq!(got[0], [241, 216, 203]); // a=64
+        assert_eq!(got[1], [132, 137, 142]); // a=128
+        assert_eq!(got[2], [255, 0, 0]); // a=255 → passthrough
+        assert_eq!(got[3], [255, 255, 255]); // a=0 → white
+    }
+
+    /// `jpeg_encode` keeps L-mode sources grayscale — the Luma8/Luma16
+    /// arms must not fall through to the RGB encoder.
+    #[test]
+    fn jpeg_encode_luma_stays_grayscale() {
+        let l8 = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            8,
+            8,
+            image::Luma([77]),
+        ));
+        let jpg = jpeg_encode(&l8, 75).unwrap();
+        assert_eq!(
+            image::load_from_memory(&jpg).unwrap().color(),
+            image::ColorType::L8
+        );
+        let l16buf: image::ImageBuffer<image::Luma<u16>, Vec<u16>> =
+            image::ImageBuffer::from_pixel(8, 8, image::Luma([30000u16]));
+        let l16 = image::DynamicImage::ImageLuma16(l16buf);
+        let jpg16 = jpeg_encode(&l16, 75).unwrap();
+        assert_eq!(jpeg_dims(&jpg16), (8, 8));
+        assert_eq!(
+            image::load_from_memory(&jpg16).unwrap().color(),
+            image::ColorType::L8
+        );
+    }
+
+    /// `thumbnail_box` passes through when the image already fits the
+    /// box — an exact-fit source must not be re-resampled.
+    #[test]
+    fn thumbnail_box_exact_fit_passthrough() {
+        let im = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            200,
+            100,
+            image::Rgb([1, 2, 3]),
+        ));
+        let out = thumbnail_box(im, 200, 800);
+        assert_eq!((out.width(), out.height()), (200, 100));
+    }
 }

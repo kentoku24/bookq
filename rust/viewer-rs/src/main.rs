@@ -1537,4 +1537,46 @@ mod handler_tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!({"ended": 0}));
     }
+
+    /// `/api/v1/thumb-sprite` — the only HTTP-level coverage of the
+    /// handler: method gate, auth, query plumbing into `thumb_sprite`,
+    /// and the image/* gzip exclusion (#582).
+    #[tokio::test]
+    async fn thumb_sprite_route_serves_sheet() {
+        let mut st = hook_state(true);
+        std::fs::create_dir_all(&st.library).unwrap();
+        std::fs::create_dir_all(&st.thumb_cache).unwrap();
+        // /var → /private/var on macOS: is_within compares canonical paths.
+        st.library = st.library.canonicalize().unwrap();
+        st.thumb_cache = st.thumb_cache.canonicalize().unwrap();
+        std::fs::write(
+            st.library.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        // GET with Accept-Encoding: gzip — image/* must stay identity.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/thumb-sprite?folder=.&names=p.avif")
+            .header("accept-encoding", "gzip")
+            .body(Body::from(""))
+            .unwrap();
+        let res = api_thumb_sprite(State(st.clone()), req).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
+        // Method gate → 405; bad folder → 400 through the same plumbing.
+        let res = api_thumb_sprite(
+            State(st.clone()),
+            http_req("POST", "/api/v1/thumb-sprite?folder=.&names=p.avif", ""),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let res = api_thumb_sprite(
+            State(st),
+            http_req("GET", "/api/v1/thumb-sprite?folder=/x&names=p.avif", ""),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
 }
