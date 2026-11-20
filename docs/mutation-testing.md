@@ -22,7 +22,7 @@
 cargo mutants --version    # 27.x
 
 # JS 側 (worktree ごとに 1 回)
-npm install                # ルート package.json — node >= 20 推奨
+npm install                # ルート package.json — node ^22.12 || ^24 || >=26 (vitest 5 の engines に一致)
 ```
 
 ## Rust: cargo-mutants
