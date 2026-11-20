@@ -3824,4 +3824,363 @@ mod memo_tests {
         assert!(r5_parse_block_header(&mut fd, &mut enc).is_err());
         std::fs::remove_file(&p).ok();
     }
+
+    // ── path/url helpers (EPUB + zip name handling) ─────────────────────
+    // These port Python's posixpath/urllib semantics verbatim — drift here
+    // silently breaks spine resolution and archive member lookup.
+
+    #[test]
+    fn unquote_decodes_pct_and_keeps_literal_chars() {
+        assert_eq!(unquote("a%20b"), "a b");
+        assert_eq!(unquote("%E3%81%82"), "あ");
+        assert_eq!(unquote("100%25"), "100%");
+        assert_eq!(unquote("%41%42"), "AB");
+        // '+' is literal in paths (unquote, not unquote_plus)
+        assert_eq!(unquote("a+b"), "a+b");
+        // malformed escapes stay literal
+        assert_eq!(unquote("%zz"), "%zz");
+        assert_eq!(unquote("%"), "%");
+        assert_eq!(unquote("%2"), "%2");
+        assert_eq!(unquote("%2g"), "%2g");
+        // invalid UTF-8 → U+FFFD, never panic
+        assert_eq!(unquote("%FF"), "\u{FFFD}");
+        assert_eq!(unquote("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn posix_normpath_matches_python() {
+        assert_eq!(posix_normpath(""), ".");
+        assert_eq!(posix_normpath("/"), "/");
+        assert_eq!(posix_normpath("//"), "//"); // POSIX keeps exactly //
+        assert_eq!(posix_normpath("///"), "/");
+        assert_eq!(posix_normpath("a/b/c"), "a/b/c");
+        assert_eq!(posix_normpath("a//b"), "a/b");
+        assert_eq!(posix_normpath("a/./b"), "a/b");
+        assert_eq!(posix_normpath("./a"), "a");
+        assert_eq!(posix_normpath("a/../b"), "b");
+        assert_eq!(posix_normpath("../a"), "../a"); // leading .. kept relative
+        assert_eq!(posix_normpath("a/../../b"), "../b");
+        assert_eq!(posix_normpath("/a/../b"), "/b"); // .. can't escape root
+        assert_eq!(posix_normpath("a/b/"), "a/b");
+        assert_eq!(posix_normpath(".."), "..");
+    }
+
+    #[test]
+    fn posix_dirname_edges() {
+        assert_eq!(posix_dirname("a/b/c"), "a/b");
+        assert_eq!(posix_dirname("a"), "");
+        assert_eq!(posix_dirname("/a"), "/");
+        assert_eq!(posix_dirname("//a"), "//"); // all-slash head kept verbatim
+        assert_eq!(posix_dirname("a/b/"), "a/b");
+        assert_eq!(posix_dirname("/"), "/");
+        assert_eq!(posix_dirname("a/b"), "a");
+    }
+
+    #[test]
+    fn urlsplit_path_strips_scheme_query_fragment() {
+        assert_eq!(urlsplit_path("http://h/p?q#f"), "/p");
+        assert_eq!(urlsplit_path("a/b?x=1"), "a/b");
+        assert_eq!(urlsplit_path("a#frag"), "a");
+        assert_eq!(urlsplit_path("scheme:rel/path"), "rel/path");
+        assert_eq!(urlsplit_path("//host/dir/f"), "/dir/f");
+        assert_eq!(urlsplit_path("dir/file"), "dir/file");
+        // scheme must start with an ASCII letter
+        assert_eq!(urlsplit_path("1abc:x"), "1abc:x");
+        assert_eq!(urlsplit_path(""), "");
+    }
+
+    #[test]
+    fn epub_resolve_join_and_normalize() {
+        assert_eq!(epub_resolve("", "img/p.png"), "img/p.png");
+        assert_eq!(epub_resolve("OEBPS", "img/p.png"), "OEBPS/img/p.png");
+        assert_eq!(epub_resolve("OEBPS/", "img/p.png"), "OEBPS/img/p.png");
+        assert_eq!(epub_resolve("OEBPS", "/abs/p.png"), "/abs/p.png");
+        assert_eq!(epub_resolve("OEBPS", "../shared/p.png"), "shared/p.png");
+        assert_eq!(epub_resolve("OEBPS", "a%20b.png"), "OEBPS/a b.png");
+        assert_eq!(epub_resolve("OEBPS", "p.png?x#y"), "OEBPS/p.png");
+        assert_eq!(epub_resolve("OEBPS", ""), "");
+    }
+
+    #[test]
+    fn splitext_posix_rules() {
+        assert_eq!(splitext("a.tar.gz"), ("a.tar", ".gz"));
+        assert_eq!(splitext("noext"), ("noext", ""));
+        assert_eq!(splitext(".hidden"), (".hidden", "")); // leading dot ≠ ext
+        assert_eq!(splitext("dir/.h"), ("dir/.h", ""));
+        assert_eq!(splitext("dir/a.b/c"), ("dir/a.b/c", "")); // dot before sep
+        assert_eq!(splitext("a."), ("a", "."));
+        assert_eq!(splitext("archive.RAR"), ("archive", ".RAR"));
+    }
+
+    #[test]
+    fn next_newvol_and_oldvol_naming() {
+        // new-style: increment last digit run, carry left
+        assert_eq!(next_newvol("vol1.rar").ok().unwrap(), "vol2.rar");
+        assert_eq!(next_newvol("vol9.rar").ok().unwrap(), "vol10.rar");
+        assert_eq!(next_newvol("v01.part1.rar").ok().unwrap(), "v01.part2.rar");
+        // no digit before a '/' boundary or at all → Fatal
+        assert!(next_newvol("nodigits.rar").is_err());
+        // old-style: .r00 → .r01, non-numeric ext → .r00
+        assert_eq!(next_oldvol("a.r00"), "a.r01");
+        assert_eq!(next_oldvol("a.rar"), "a.r00");
+        assert_eq!(next_oldvol("a"), "a.r00");
+    }
+
+    // ── ZIP extra fields (decode_extra) ─────────────────────────────────
+
+    fn extra_field(tp: u16, data: &[u8]) -> Vec<u8> {
+        let mut v = tp.to_le_bytes().to_vec();
+        v.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    #[test]
+    fn decode_extra_zip64_pulls_only_sentinel_fields() {
+        // All three sentinels → three u64s consumed in fixed order.
+        let mut d = Vec::new();
+        d.extend_from_slice(&111u64.to_le_bytes());
+        d.extend_from_slice(&222u64.to_le_bytes());
+        d.extend_from_slice(&333u64.to_le_bytes());
+        let extra = extra_field(0x0001, &d);
+        let (mut fs, mut cs, mut ho, mut name) = (
+            u64::MAX,
+            u32::MAX as u64,
+            u32::MAX as u64,
+            "raw".to_string(),
+        );
+        decode_extra(&extra, &mut fs, &mut cs, &mut ho, &mut name, 0).unwrap();
+        assert_eq!((fs, cs, ho), (111, 222, 333));
+
+        // Only compress_size sentinel → first u64 goes to compress_size;
+        // header_offset is a normal value so nothing else is pulled.
+        let mut d2 = Vec::new();
+        d2.extend_from_slice(&777u64.to_le_bytes());
+        let extra2 = extra_field(0x0001, &d2);
+        let (mut fs2, mut cs2, mut ho2, mut n2) = (
+            55u64,
+            u32::MAX as u64,
+            42u64,
+            "x".to_string(),
+        );
+        decode_extra(&extra2, &mut fs2, &mut cs2, &mut ho2, &mut n2, 0).unwrap();
+        assert_eq!(fs2, 55); // untouched
+        assert_eq!(cs2, 777);
+        assert_eq!(ho2, 42); // untouched
+    }
+
+    #[test]
+    fn decode_extra_zip64_truncated_is_err() {
+        // Declared ln=8 but only 4 bytes present → whole CD must fail.
+        let mut bad = 0x0001u16.to_le_bytes().to_vec();
+        bad.extend_from_slice(&8u16.to_le_bytes());
+        bad.extend_from_slice(&[0u8; 4]);
+        let (mut fs, mut cs, mut ho, mut n) =
+            (u64::MAX, 0u64, 0u64, "x".to_string());
+        assert!(decode_extra(&bad, &mut fs, &mut cs, &mut ho, &mut n, 0).is_err());
+        // ln=0 with a sentinel field → Err (no data to pull)
+        let empty_zip64 = extra_field(0x0001, &[]);
+        let (mut fs2, mut cs2, mut ho2, mut n2) =
+            (u64::MAX, 0u64, 0u64, "x".to_string());
+        assert!(decode_extra(&empty_zip64, &mut fs2, &mut cs2, &mut ho2, &mut n2, 0).is_err());
+    }
+
+    #[test]
+    fn decode_extra_unicode_path_replaces_only_on_crc_match() {
+        let raw = "readme.txt";
+        let crc = crc32fast::hash(raw.as_bytes());
+        // version 1 + matching crc + UTF-8 name → filename replaced
+        let mut d = vec![0x01u8];
+        d.extend_from_slice(&crc.to_le_bytes());
+        d.extend_from_slice("リードミー.txt".as_bytes());
+        let extra = extra_field(0x7075, &d);
+        let (mut fs, mut cs, mut ho, mut name) =
+            (1u64, 2u64, 3u64, raw.to_string());
+        decode_extra(&extra, &mut fs, &mut cs, &mut ho, &mut name, crc).unwrap();
+        assert_eq!(name, "リードミー.txt");
+        // crc mismatch → original kept
+        let (mut fs2, mut cs2, mut ho2, mut name2) =
+            (1u64, 2u64, 3u64, raw.to_string());
+        decode_extra(&extra, &mut fs2, &mut cs2, &mut ho2, &mut name2, crc ^ 1).unwrap();
+        assert_eq!(name2, "readme.txt");
+        // version != 1 → ignored
+        let mut d3 = vec![0x02u8];
+        d3.extend_from_slice(&crc.to_le_bytes());
+        d3.extend_from_slice("other.txt".as_bytes());
+        let extra3 = extra_field(0x7075, &d3);
+        let (mut fs3, mut cs3, mut ho3, mut name3) =
+            (1u64, 2u64, 3u64, raw.to_string());
+        decode_extra(&extra3, &mut fs3, &mut cs3, &mut ho3, &mut name3, crc).unwrap();
+        assert_eq!(name3, "readme.txt");
+        // invalid UTF-8 in the unicode name → Err (BadZipFile equivalent)
+        let mut d4 = vec![0x01u8];
+        d4.extend_from_slice(&crc.to_le_bytes());
+        d4.extend_from_slice(&[0xFF, 0xFE]);
+        let extra4 = extra_field(0x7075, &d4);
+        let (mut fs4, mut cs4, mut ho4, mut name4) =
+            (1u64, 2u64, 3u64, raw.to_string());
+        assert!(decode_extra(&extra4, &mut fs4, &mut cs4, &mut ho4, &mut name4, crc).is_err());
+    }
+
+    // ── RAR3 UnicodeFilename decompression ──────────────────────────────
+    // encdata[0] = default high byte; then 2-bit symbols per flag byte:
+    // 0→(lo,0)  1→(lo,hi)  2→(lo,h)  3→run from std_name (n+2, or
+    // (n&0x7f)+2 with +c wrap when n&0x80).
+
+    #[test]
+    fn unicode_filename_basic_symbol_types() {
+        // empty encdata → empty name, failed flag set by first enc_byte
+        let mut u = UnicodeFilename::new(b"", &[]);
+        assert_eq!(u.decode(), "");
+        assert!(u.failed);
+        // type 0: char = raw byte (ASCII)
+        let mut u = UnicodeFilename::new(b"", &[0x00, 0x00, 0x41]);
+        assert_eq!(u.decode(), "A");
+        // type 1: char = lo | hi<<8 → codepoint 0x3041
+        let mut u = UnicodeFilename::new(b"", &[0x30, 0x40, 0x41]);
+        assert_eq!(u.decode().chars().next().unwrap() as u32, 0x3041);
+        // type 2: full 16-bit → codepoint 0x3042
+        let mut u = UnicodeFilename::new(b"", &[0x00, 0x80, 0x42, 0x30]);
+        assert_eq!(u.decode().chars().next().unwrap() as u32, 0x3042);
+        // four type-0 symbols share one flag byte (2 bits each)
+        let mut u = UnicodeFilename::new(b"", &[0x00, 0x00, 0x41, 0x42, 0x43, 0x44]);
+        assert_eq!(u.decode(), "ABCD");
+    }
+
+    #[test]
+    fn unicode_filename_type3_runs_from_std_name() {
+        // n=1 → 3 chars from std_name, high byte 0 → ASCII
+        let mut u = UnicodeFilename::new(b"abc", &[0x00, 0xC0, 0x01]);
+        assert_eq!(u.decode(), "abc");
+        // n=0x81 → (0x81&0x7f)+2 = 3 chars, each std_byte + c (wrap), hi
+        let mut u = UnicodeFilename::new(b"abc", &[0x00, 0xC0, 0x81, 0x01]);
+        assert_eq!(u.decode(), "bcd");
+        // std_name exhausted → '?' fill + failed flag (n+2 = 7 reps)
+        let mut u = UnicodeFilename::new(b"a", &[0x00, 0xC0, 0x05]);
+        let out = u.decode();
+        assert_eq!(out, "a??????");
+        assert!(u.failed);
+    }
+
+    // ── truncation / malformed fixtures: never panic, fail closed ───────
+
+    #[test]
+    fn zip_names_on_truncated_file_never_panics() {
+        let p = tmp_cbz("trunc");
+        make_zip(&p, &[("001.png", b"data"), ("002.png", b"more")]);
+        let full = std::fs::read(&p).unwrap();
+        // EOCD is exactly the last 22 bytes — removing it must yield None.
+        std::fs::write(&p, &full[..full.len() - 22]).unwrap();
+        assert!(zip_names(&p).is_none());
+        // Mid-file cuts: whatever comes back must be a clean None or a
+        // consistent listing — the contract is "no panic, no garbage".
+        for cut in [8usize, full.len() / 3, full.len() / 2] {
+            std::fs::write(&p, &full[..cut]).unwrap();
+            let _ = zip_names(&p);
+            let _ = zip_read_entry(&p, "001.png");
+        }
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn rar_names_on_truncated_and_empty_files() {
+        let p = tmp_rar("empty");
+        // Nonexistent path → None (fd-level failure → Python decides).
+        assert!(rar_names(&p).is_none());
+        // NotRarFile contract: garbage/empty input lists as [] — the
+        // caller keys off the .rar/.cbr extension, not this result.
+        std::fs::write(&p, b"not a rar at all").unwrap();
+        assert_eq!(rar_names(&p), Some(vec![]));
+        std::fs::write(&p, b"").unwrap();
+        assert_eq!(rar_names(&p), Some(vec![]));
+        // Truncated mid-archive: Partial semantics keep already-parsed
+        // names or fail — both acceptable, panic is not.
+        make_rar3_store(&p, &[(b"a.png".to_vec(), b"1", 0), (b"b.png".to_vec(), b"22", 0)]);
+        let full = std::fs::read(&p).unwrap();
+        std::fs::write(&p, &full[..full.len() - 8]).unwrap();
+        let _ = rar_names(&p);
+        std::fs::remove_file(&p).ok();
+    }
+
+    // ── EPUB spine resolution (epub_raw_with) ───────────────────────────
+
+    #[test]
+    fn epub_spine_resolves_images_in_document_order() {
+        let p = tmp_cbz("epub");
+        make_zip(
+            &p,
+            &[
+                (
+                    "META-INF/container.xml",
+                    br#"<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles>
+</container>"#,
+                ),
+                (
+                    "OEBPS/content.opf",
+                    br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="p1" href="page1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="p2" href="page2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="p1"/>
+    <itemref idref="p2"/>
+    <itemref idref="missing"/>
+  </spine>
+</package>"#,
+                ),
+                (
+                    "OEBPS/page1.xhtml",
+                    br#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink">
+<body>
+  <img src="img/p1.png"/>
+  <image xlink:href="img/p2.png"/>
+  <image href="img/p3.png"/>
+</body>
+</html>"#,
+                ),
+                (
+                    "OEBPS/page2.xhtml",
+                    br#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body><img src="../shared/p9.png"/></body>
+</html>"#,
+                ),
+                ("OEBPS/img/p1.png", b"1"),
+                ("OEBPS/img/p2.png", b"2"),
+                ("OEBPS/img/p3.png", b"3"),
+            ],
+        );
+        let (raw, spine) = epub_raw(&p).expect("epub must parse");
+        // raw = every zip member name
+        assert!(raw.iter().any(|n| n == "OEBPS/page1.xhtml"));
+        // spine = resolved image paths in document order; the dangling
+        // itemref ("missing") contributes nothing; ../ escapes opf_dir.
+        assert_eq!(
+            spine,
+            vec![
+                "OEBPS/img/p1.png".to_string(),
+                "OEBPS/img/p2.png".to_string(),
+                "OEBPS/img/p3.png".to_string(),
+                "shared/p9.png".to_string(),
+            ]
+        );
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn epub_raw_without_container_yields_empty_spine() {
+        // Any spine-level failure falls back to "natural order of raw" —
+        // the contract is Some((raw, [])), never a panic or None-for-zip.
+        let p = tmp_cbz("epub-bad");
+        make_zip(&p, &[("random.txt", b"no xml here")]);
+        let (raw, spine) = epub_raw(&p).expect("valid zip still lists raw");
+        assert_eq!(raw, vec!["random.txt".to_string()]);
+        assert!(spine.is_empty());
+        std::fs::remove_file(&p).ok();
+    }
 }
