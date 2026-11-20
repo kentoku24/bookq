@@ -714,6 +714,7 @@ def test_status_strip_is_a_keyboard_operable_button(page, server):
     assert btn.evaluate("el => el.tagName") == "BUTTON"
     assert btn.get_attribute("type") == "button"
     assert btn.get_attribute("aria-haspopup") == "dialog"
+    assert btn.get_attribute("aria-controls") == "pair-panel"
     # rides inside the toolbar chrome — never floats over page content
     assert page.evaluate(
         "document.getElementById('pair-status').parentElement.id"
@@ -772,7 +773,11 @@ def test_status_strip_inert_under_hidden_toolbar_ancestor(page, server):
         ".classList.remove('hidden')")
     assert page.locator("#pair-status").get_attribute("aria-hidden") == "true"
     assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
-    # and a re-render that clears the strip's own [hidden] changes nothing
+    # a real hide→show cycle ([hidden] set then cleared) fires the
+    # observer on actual attribute mutations — still inert while the
+    # toolbar ancestor stays .hidden (#586: the old connected→connected
+    # re-emit mutated nothing and asserted trivially)
+    _emit(page, "{status:'idle'}")
     _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
     assert page.locator("#pair-status-btn").get_attribute("tabindex") == "-1"
     page.evaluate("() => window.__toggleToolbarZone()")
@@ -787,7 +792,79 @@ def test_status_strip_not_focusable_when_idle(page, server):
     assert page.locator("#pair-status-btn").get_attribute("tabindex") == "0"
 
 
+def test_close_never_restores_focus_to_body(page, server):
+    """#586: Safari/iOS taps never focus the opener, so lastFocus is
+    BODY — the old usable() accepted it and body.focus() no-op'd,
+    stranding focus on BODY (the #159 symptom). BODY must be rejected
+    so the fallback chain engages."""
+    _with_mock(page)
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    # open() with nothing focused — lastFocus records BODY, like a
+    # pointer-driven open on Safari; open() itself moves focus into the
+    # panel, so activeElement is in-dialog here
+    page.evaluate("window.PairUI.open()")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator("#pair-overlay")).to_be_hidden()
+    # usable() must reject BODY -> fallback lands on the visible strip
+    assert page.evaluate("document.activeElement.id") == "pair-status-btn"
+
+
+def test_close_skips_offcanvas_launcher_falls_to_menu(page, server):
+    """#586: with the sidebar closed (#sidebar translateX(-100%)) the
+    launcher is off-canvas — focusing it would land on an invisible
+    control. The strip is [hidden] at idle, so the chain must reach
+    #menu-btn instead."""
+    _with_mock(page)
+    # sidebar shut → #pair-btn rides translateX(-100%) off-screen
+    page.evaluate(
+        """() => {
+          document.getElementById('sidebar').classList.remove('open');
+          document.getElementById('viewer').classList.remove('sidebar-open');
+        }""")
+    page.wait_for_timeout(500)   # let the slide transition settle
+    page.evaluate("window.PairUI.open()")
+    expect(page.locator("#pair-overlay")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator("#pair-overlay")).to_be_hidden()
+    ae = page.evaluate("document.activeElement.id")
+    assert ae != "pair-btn", "focus must not land on the off-canvas launcher"
+    assert ae == "menu-btn"
+
+
 # ── 320px layout ──
+
+
+def _chrome_overlap(page):
+    """Selectors the pair strip/launcher must never cover — the strip
+    must stay inside the toolbar band, and neither control may overlap
+    existing chrome."""
+    return page.evaluate(
+        """() => {
+          const inter = (a, b) => a && b && a.width > 0 && b.width > 0 &&
+            !(a.right <= b.left || b.right <= a.left ||
+              a.bottom <= b.top || b.bottom <= a.top);
+          const rect = sel => {
+            const el = document.querySelector(sel);
+            return el ? el.getBoundingClientRect() : null;
+          };
+          const status = rect('#pair-status');
+          const toolbar = rect('#toolbar');
+          const covered = [];
+          if (status && toolbar &&
+              (status.top < toolbar.top - 1 ||
+               status.bottom > toolbar.bottom + 1))
+            covered.push('status-outside-toolbar');
+          for (const sel of ['#spread-controls',
+                             '#tapmode-controls', '#overview-close',
+                             '#menu-btn', '#overview-btn', '#counter'])
+            if (inter(status, rect(sel))) covered.push(sel);
+          const btn = rect('#pair-btn');
+          for (const sel of ['#menu-btn', '#overview-btn', '#counter'])
+            if (inter(btn, rect(sel))) covered.push('btn:' + sel);
+          return covered;
+        }"""
+    )
 
 
 def test_controls_fit_320px_no_overlap(browser, server):
@@ -806,32 +883,24 @@ def test_controls_fit_320px_no_overlap(browser, server):
         # persistent affordance must not cover existing chrome — and the
         # strip now rides INSIDE #toolbar (#159), so it must stay within
         # the toolbar's own band instead of floating over the page.
-        overlaps = page.evaluate(
-            """() => {
-              const inter = (a, b) => a && b && a.width > 0 && b.width > 0 &&
-                !(a.right <= b.left || b.right <= a.left ||
-                  a.bottom <= b.top || b.bottom <= a.top);
-              const rect = sel => {
-                const el = document.querySelector(sel);
-                return el ? el.getBoundingClientRect() : null;
-              };
-              const status = rect('#pair-status');
-              const toolbar = rect('#toolbar');
-              const covered = [];
-              if (status && toolbar &&
-                  (status.top < toolbar.top - 1 ||
-                   status.bottom > toolbar.bottom + 1))
-                covered.push('status-outside-toolbar');
-              for (const sel of ['#spread-controls',
-                                 '#tapmode-controls', '#overview-close',
-                                 '#menu-btn', '#overview-btn', '#counter'])
-                if (inter(status, rect(sel))) covered.push(sel);
-              const btn = rect('#pair-btn');
-              for (const sel of ['#menu-btn', '#overview-btn', '#counter'])
-                if (inter(btn, rect(sel))) covered.push('btn:' + sel);
-              return covered;
-            }"""
-        )
+        overlaps = _chrome_overlap(page)
+        assert overlaps == [], f"pair UI overlaps existing chrome: {overlaps}"
+    finally:
+        ctx.close()
+
+
+def test_controls_fit_568x320_landscape_no_overlap(browser, server):
+    """#159 reported the strip floating over page content in landscape
+    (568×320) as well as portrait — same toolbar-band assertion."""
+    ctx = browser.new_context(viewport={"width": 568, "height": 320})
+    page = ctx.new_page()
+    try:
+        page.add_init_script(MOCK_JS)
+        page.goto(server)
+        page.wait_for_selector("#pair-btn")
+        _open_ui(page)
+        _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+        overlaps = _chrome_overlap(page)
         assert overlaps == [], f"pair UI overlaps existing chrome: {overlaps}"
     finally:
         ctx.close()
