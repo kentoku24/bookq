@@ -810,6 +810,11 @@ async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return method_not_allowed("GET, HEAD");
     }
+    // #373: a cross-site initiation must not write the `bookq_oauth` tx
+    // cookie (login CSRF plants an attacker PKCE challenge).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
     let Some(flow) = st.auth_flow.clone() else {
         return auth_unconfigured();
     };
@@ -845,6 +850,11 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return method_not_allowed("GET, HEAD");
+    }
+    // #373: logout is a state-changing GET — refuse cross-site
+    // initiations (forced logout CSRF).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let Some(flow) = st.auth_flow.clone() else {
         return auth_unconfigured();
