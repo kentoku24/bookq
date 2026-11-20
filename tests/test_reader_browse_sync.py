@@ -803,19 +803,20 @@ def test_ui_sync_pred_reaches_the_wire(browser, server):
     """#262: pairSync produces `pred` (fling-endpoint estimate) but the old
     sendUiSync whitelist dropped it, so the peer never saw it — production
     silently degraded to measured-only follow while unit fakes passed.
-    Drive the REAL sendUiSync on a paired leader and assert pred arrives
-    in the peer's inbound frame."""
+    Drive the REAL sendUiSync on a paired leader and assert pred appears
+    in its outbound WS frame (the __wsLog send-spy records egress, so this
+    IS the wire; relay forwarding is verbatim — pairing suite)."""
     ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
     try:
         _open(pl, "long", "p005.png")
         _pair_now(pl, pf)
         _start_browse(pl, pf)
-        n0 = pf.evaluate("() => window.__wsLog.length")
+        n0 = pl.evaluate("() => window.__wsLog.length")
         ok = pl.evaluate(
             "() => window.PairController.sendUiSync("
             "  {view: 'browse', path: null, top: 300, viewH: 460, pred: 900})")
         assert ok is True
-        pf.wait_for_function(
+        pl.wait_for_function(
             f"() => window.__wsLog.slice({n0}).some("
             "  f => f.type === 'UI_SYNC' && f.payload && f.payload.pred === 900)",
             timeout=5000)
