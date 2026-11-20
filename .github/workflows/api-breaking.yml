@@ -1,0 +1,82 @@
+# Breaking-change guard for the public API contracts (#232).
+#
+# `breaking` diffs api/openapi.v1.yaml + api/asyncapi.yaml against the PR
+# base revision and fails on breaking findings. Apply the `api-breaking`
+# label to report-only instead — labeling re-triggers the check because
+# `types` below includes labeled/unlabeled.
+name: api-breaking
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes-api-breaking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            run:
+              - "api/**"
+              - "scripts/api_breaking_check.py"
+              - "tests/test_api_breaking_check.py"
+              - ".github/workflows/api-breaking.yml"
+
+  breaking:
+    needs: changes-api-breaking
+    if: github.event_name == 'workflow_dispatch' || needs.changes-api-breaking.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Diff specs against base revision
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ALLOW_BREAKING: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'api-breaking') }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_SHA}" ]; then
+            BASE_REF="${BASE_SHA}"
+          else
+            # fetch-depth: 0 already fetched origin/main; a bare `git fetch`
+            # would fail here — persist-credentials: false leaves git
+            # without credentials on a private repo.
+            BASE_REF="origin/main"
+          fi
+          mkdir -p /tmp/api-breaking-base
+          for spec in openapi.v1.yaml asyncapi.yaml; do
+            if git cat-file -e "${BASE_REF}:api/${spec}" 2>/dev/null; then
+              git show "${BASE_REF}:api/${spec}" > "/tmp/api-breaking-base/${spec}"
+            else
+              echo "base revision has no api/${spec}; skipping that pair"
+            fi
+          done
+          args=()
+          if [ -f /tmp/api-breaking-base/openapi.v1.yaml ]; then
+            args+=(--base-openapi /tmp/api-breaking-base/openapi.v1.yaml --head-openapi api/openapi.v1.yaml)
+          fi
+          if [ -f /tmp/api-breaking-base/asyncapi.yaml ]; then
+            args+=(--base-asyncapi /tmp/api-breaking-base/asyncapi.yaml --head-asyncapi api/asyncapi.yaml)
+          fi
+          if [ "${ALLOW_BREAKING}" = "true" ]; then
+            args+=(--allow-breaking)
+            echo "PR carries the \`api-breaking\` label: findings are reported, not failed."
+          fi
+          uv run --with pyyaml python scripts/api_breaking_check.py "${args[@]}"

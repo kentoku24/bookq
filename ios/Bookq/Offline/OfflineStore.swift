@@ -38,6 +38,10 @@ final class OfflineStore: ObservableObject {
     private let apiProvider: () -> BookqAPI?
     private let originalImages: () -> Bool
     private var api: BookqAPI? { apiProvider() }
+    /// spec §6: a download may only START while online — AppModel wires
+    /// this to `online.isOnline`. Defaults permissive for harnesses with
+    /// no connectivity machine.
+    var onlineProvider: () -> Bool = { true }
     private var tasks: [String: Task<Void, Never>] = [:]
     private var stopRequested: Set<String> = []
     private var toastTask: Task<Void, Never>?
@@ -271,8 +275,12 @@ final class OfflineStore: ObservableObject {
     // MARK: - Download
 
     /// `downloadWork` equivalent. Sequential per leaf and per file; abort
-    /// keeps what landed as a partial record.
+    /// keeps what landed as a partial record. Download start requires
+    /// online (spec §6) — offline taps surface the toast instead.
     func download(path: String, leaves: [String]) {
+        guard onlineProvider() else {
+            showToast("オフラインのため開始できません"); return
+        }
         guard tasks[path] == nil, api != nil else { return }
         downloading.insert(path)
         listing.insert(path)

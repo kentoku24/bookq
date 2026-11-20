@@ -1,105 +1,61 @@
 //! viewer-rs — Rust backend for bookq (issue #163, parallel-backend track).
 //!
-//! Runs on its own hostname/slot next to the untouched Python `viewer`.
-//! Requests hit a routing table of natively implemented endpoints; everything
-//! not yet ported is proxied to `BOOKQ_UPSTREAM` (the Python viewer) byte-
-//! transparently, including WebSocket upgrades — so the backend is usable from
-//! day one and endpoints migrate one at a time.
+//! The sole production backend (#409, #503): every route is served natively
+//! (#532 retired the strangler proxy — there is no `BOOKQ_UPSTREAM`
+//! fall-through anymore, so a misconfigured upstream can no longer receive
+//! unauthenticated requests).
 
 use axum::{
     body::Body,
-    extract::{FromRequestParts, Query, Request, State},
-    http::{header, HeaderValue, StatusCode, Uri},
+    extract::{FromRequest, FromRequestParts, Path as AxumPath, Query, Request, State},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
     Router,
 };
 use percent_encoding::percent_decode_str;
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::{TokioExecutor, TokioIo},
-};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-// v1 retarget (issue #163 M3+): only /api/v1/* endpoints get native
-// handlers — v0 routes are deprecated upstream and must always proxy.
 // serve/tree/folders hold the contract-independent core (archive listing,
-// path containment, tree assembly, index cache) that M4–M7 wire onto the
-// v1 envelopes; until then their exports are intentionally unused.
+// path containment, tree assembly, index cache) that the v1 envelopes
+// are wired onto. v0 routes are deprecated and answer 501 via the fallback.
 mod auth;
+#[cfg(test)]
+mod conformance_vectors;
 mod folders;
+// #573: `--healthcheck` — the image has no shell for a compose probe.
+mod healthcheck;
+mod library;
+mod oauth;
+mod pair_report;
 mod reader_sync;
 mod search;
 mod serve;
+mod shell;
 mod state;
 mod thumbs;
 mod tree;
 
 #[derive(Clone)]
-struct Upstream {
-    client: Client<HttpConnector, Body>,
-    authority: hyper::http::uri::Authority,
-}
-
-/// Which native surfaces are live. `BOOKQ_TEST_MODE=true` enables every
-/// native route with the mock user (unchanged dev/test posture). Outside
-/// test mode, `BOOKQ_RS_NATIVE` is a comma-separated list of endpoint ids
-/// (`positions`, `visibility`, `image`, `tree`, …); `all`/`1`/`true`/`*`
-/// enables the full native surface. Anything not enabled, plus any
-/// request we cannot positively identify (no verifiable session cookie,
-/// missing/bad Bearer), falls through to upstream — production rollout
-/// is per endpoint via config only.
-pub(crate) struct Native {
-    pub(crate) test_mode: bool,
-    all: bool,
-    set: std::collections::HashSet<String>,
-}
-
-impl Native {
-    fn from_env() -> Self {
-        let test_mode = std::env::var("BOOKQ_TEST_MODE")
-            .unwrap_or_default()
-            .eq_ignore_ascii_case("true");
-        let mut all = test_mode;
-        let mut set = std::collections::HashSet::new();
-        for tok in std::env::var("BOOKQ_RS_NATIVE")
-            .unwrap_or_default()
-            .split(',')
-            .map(|t| t.trim().to_lowercase())
-            .filter(|t| !t.is_empty())
-        {
-            match tok.as_str() {
-                "1" | "true" | "all" | "*" => all = true,
-                other => {
-                    set.insert(other.to_string());
-                }
-            }
-        }
-        Self { test_mode, all, set }
-    }
-
-    pub(crate) fn enabled(&self, ep: &str) -> bool {
-        self.all || self.set.contains(ep)
-    }
-}
-
-#[derive(Clone)]
 pub(crate) struct AppState {
-    upstream: Upstream,
     /// Downloads root, resolved once (symlinks collapsed like the Python side).
-    pub(crate) downloads: PathBuf,
-    /// Native-surface gate — see `Native`.
-    pub(crate) native: std::sync::Arc<Native>,
+    pub(crate) library: PathBuf,
+    /// `BOOKQ_TEST_MODE` — mock-user posture for dev/test.
+    pub(crate) test_mode: bool,
     /// `ALLOWED_EMAILS` (trim+lowercase) — Bearer allowlist, fail-closed.
     pub(crate) allowed_emails: std::sync::Arc<std::collections::HashSet<String>>,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
-    /// M4: per-process reading positions (`app.state.reading_positions`).
-    pub(crate) positions: std::sync::Arc<state::Positions>,
+    /// M4+375: per-user reading positions in the shared user-state SQLite
+    /// store (`ReadingPositionStore`).
+    pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
+    /// #400: the whole auth surface (`/auth/*` + `/api/v1/auth/token`).
+    /// `Some` iff the OAuth config is complete, else the surface answers 501.
+    pub(crate) auth_flow: Option<std::sync::Arc<oauth::AuthFlow>>,
     /// `SECRET_KEY` — Bearer JWT verify + visibility owner HMAC.
     pub(crate) secret_key: String,
     /// Session-cookie signing key derived once from `secret_key` (`None`
@@ -112,95 +68,44 @@ pub(crate) struct AppState {
     pub(crate) build_date: String,
     /// M8: dual-reader session registry (`app.state.reader_sync`).
     pub(crate) registry: std::sync::Arc<reader_sync::Registry>,
+    /// #401: shell/static root (`BOOKQ_WEB_DIR`) holding `static/`,
+    /// `templates/`, `perf/`.
+    pub(crate) web_dir: PathBuf,
+    /// TEST_MODE-only pair-report store (`app/api_v1.py::_PAIR_REPORTS`).
+    pub(crate) pair_reports: std::sync::Arc<pair_report::PairReports>,
+    /// `<library>/.bookq-uploads` — `Some` when the probe at startup
+    /// proved the library writable, else `None` and `/api/v1/library/*`
+    /// answers 503 (read-only deploys stay fully functional).
+    pub(crate) upload_root: Option<PathBuf>,
+    /// Serializes the dedupe+rename placement critical section — without it
+    /// two same-name uploads pick the same free slot and `rename` clobbers
+    /// the first (Unix rename replaces the destination).
+    pub(crate) place_lock: std::sync::Arc<std::sync::Mutex<()>>,
+    /// Serializes upload-session mutations (append/finalize/cancel) —
+    /// the load→verify→write cycle races otherwise and corrupts the
+    /// blob/offset pair.
+    pub(crate) session_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
-/// RFC 7230 hop-by-hop headers, minus `upgrade`/`connection` which the upgrade
-/// path handles separately.
-const HOP_BY_HOP: [header::HeaderName; 7] = [
-    header::HeaderName::from_static("keep-alive"),
-    header::PROXY_AUTHENTICATE,
-    header::PROXY_AUTHORIZATION,
-    header::TE,
-    header::TRAILER,
-    header::TRANSFER_ENCODING,
-    header::HeaderName::from_static("proxy-connection"),
-];
-
-fn strip_hop_by_hop(headers: &mut axum::http::HeaderMap) {
-    for h in HOP_BY_HOP {
-        headers.remove(h);
+/// A local 405 carries the RFC 9110 `Allow` header.
+pub(crate) fn method_not_allowed(allow: &'static str) -> Response {
+    let mut r = state::detail(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+    if let Ok(v) = HeaderValue::from_str(allow) {
+        r.headers_mut().insert(header::ALLOW, v);
     }
+    r
 }
 
-/// `Connection: upgrade` + `Upgrade: <proto>` → the client wants a protocol
-/// switch (WebSocket in bookq's case: `/ws/reader-sync`).
-fn is_upgrade(req: &Request) -> bool {
-    let wants = req
-        .headers()
-        .get(header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("upgrade")));
-    wants && req.headers().contains_key(header::UPGRADE)
+/// Unverifiable caller (no session, no/invalid Bearer) answers 401 locally.
+fn unauthenticated() -> Response {
+    state::detail(StatusCode::UNAUTHORIZED, "authentication required")
 }
 
-fn bad_gateway(err: impl std::fmt::Display) -> Response {
-    (StatusCode::BAD_GATEWAY, format!("upstream error: {err}\n")).into_response()
-}
-
-/// Forward `req` (already rewritten to the upstream authority) and map the
-/// response back. For upgrade requests, splice the two sockets once the
-/// upstream agrees (101) so frames flow transparently both ways.
-async fn forward(mut req: Request<Body>, st: &Upstream) -> Response {
-    let upgrade = is_upgrade(&req);
-    let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
-
-    if !upgrade {
-        strip_hop_by_hop(req.headers_mut());
-    }
-    let mut res = match st.client.request(req).await {
-        Ok(res) => res,
-        Err(e) => return bad_gateway(e),
-    };
-
-    // Grab the upstream upgrade token before consuming the response head.
-    let server_upgrade = upgrade.then(|| hyper::upgrade::on(&mut res));
-
-    let (mut parts, body) = res.into_parts();
-    strip_hop_by_hop(&mut parts.headers);
-    let out = Response::from_parts(parts, Body::new(body));
-
-    if upgrade && out.status() == StatusCode::SWITCHING_PROTOCOLS {
-        tokio::spawn(async move {
-            if let (Some(client_upgrade), Some(server_upgrade)) = (client_upgrade, server_upgrade) {
-                if let (Ok(client), Ok(server)) = (client_upgrade.await, server_upgrade.await) {
-                    let mut client = TokioIo::new(client);
-                    let mut server = TokioIo::new(server);
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-                }
-            }
-        });
-    }
-    out
-}
-
-async fn proxy(st: &Upstream, mut req: Request<Body>) -> Response {
-    let mut parts = req.uri().clone().into_parts();
-    parts.scheme = Some("http".parse().expect("static scheme"));
-    parts.authority = Some(st.authority.clone());
-    match Uri::from_parts(parts) {
-        Ok(uri) => *req.uri_mut() = uri,
-        Err(e) => return bad_gateway(e),
-    }
-    forward(req, st).await
-}
-
-/// Resolve the caller for a native route: unidentified requests (no
-/// verifiable session cookie, no/invalid Bearer) always proxy upstream,
-/// which applies its own cookie → Bearer → 401 chain.
-fn caller_or_proxy(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
+/// Resolve the caller for a route: `None` means unauthenticated.
+fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
     match auth::resolve(
         headers,
-        st.native.test_mode,
+        st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
         &st.allowed_emails,
@@ -222,12 +127,10 @@ fn vary_lists_cookie(h: &axum::http::HeaderMap) -> bool {
 
 /// `Vary: Cookie` parity with starlette's SessionMiddleware: it appends
 /// the header to every response when the request's session cookie loaded
-/// (valid signature, any payload). Now that cookie-authenticated
-/// requests are served natively, a shared HTTP cache must still key on
+/// (valid signature, any payload). A shared HTTP cache must still key on
 /// the cookie or one user's cached page could answer another's — this
-/// matters most once per-user surfaces (positions, visibility, search)
-/// are enabled. Proxied responses carry upstream's own Vary, which
-/// `vary_lists_cookie` dedupes.
+/// matters most for the per-user surfaces (positions, visibility, search).
+/// `vary_lists_cookie` dedupes a Vary the handler already set.
 async fn vary_session_cookie(
     State(st): State<AppState>,
     req: Request<Body>,
@@ -237,25 +140,39 @@ async fn vary_session_cookie(
         auth::session_lookup(req.headers(), st.session_key.as_ref()),
         auth::SessionLookup::Absent
     );
+    // starlette only emits `Vary: Cookie` when the route touches
+    // `request.session`. The public static/shell assets never do, so a
+    // signed-in browser's static fetches carry no Vary —
+    // mirror that or every such response would wrongly advertise one.
+    let path = req.uri().path();
+    let session_free = path == "/sw.js"
+        || path == "/favicon.ico"
+        || path == "/static"
+        || path.starts_with("/static/");
     let mut res = next.run(req).await;
-    if signed && !vary_lists_cookie(res.headers()) {
+    if signed && !session_free && !vary_lists_cookie(res.headers()) {
         res.headers_mut()
             .append(header::VARY, HeaderValue::from_static("Cookie"));
     }
     res
 }
 
-/// `/api/v1/reading-positions` — M4: per-folder LWW + tombstones, fully
-/// native (positions are per-process ephemeral upstream as well).
+/// `/api/v1/reading-positions` — M4+375: per-folder LWW + tombstones,
+/// native on the shared user-state SQLite store (same rows the Python
+/// viewer reads/writes, so py/rs cannot diverge — #263 resolved).
 async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("positions") {
-        return proxy(&st.upstream, req).await;
-    }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+    let Some(user) = caller(&st, req.headers()) else {
+        return unauthenticated();
     };
-    // `_position_user_key`: str(email or "unknown").lower()
-    let key = user.email.to_lowercase();
+    // `user_key_for_email`: strip().lower() — an empty key is a 403, never
+    // a shared bucket (same posture as the Python `_position_user_key`).
+    let key = user.email.trim().to_lowercase();
+    if key.is_empty() {
+        return state::detail(
+            axum::http::StatusCode::FORBIDDEN,
+            "session has no usable identity",
+        );
+    }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
@@ -263,38 +180,46 @@ async fn reading_positions(State(st): State<AppState>, req: Request<Body>) -> Re
     match *req.method() {
         axum::http::Method::GET => {
             let folder = q.get("folder").map(|s| s.as_str());
-            serve::maybe_gzip(&headers, state::list_positions(&st.positions, &key, folder), true)
-                .await
+            let res = state::list_positions(
+                st.position_store.clone(),
+                &key,
+                folder.map(|s| s.to_string()),
+            )
+            .await;
+            serve::maybe_gzip(&headers, res, true).await
         }
         axum::http::Method::PUT => {
-            // `folder` is required → missing keeps FastAPI's 422 upstream.
+            // `folder` is required → missing keeps FastAPI's 422.
             let Some(folder) = q.get("folder").cloned() else {
-                return proxy(&st.upstream, req).await;
+                return state::unprocessable("folder", "missing", "Field required");
             };
-            let (parts, body) = req.into_parts();
+            let (_parts, body) = req.into_parts();
             let body = match http_body_util::BodyExt::collect(body).await {
                 Ok(c) => c.to_bytes(),
                 Err(_) => {
-                    return proxy(&st.upstream, Request::from_parts(parts, Body::empty()))
-                        .await
+                    return state::detail(StatusCode::BAD_REQUEST, "invalid body");
                 }
             };
-            state::put_position(&st.positions, &key, &folder, &body)
+            state::put_position(st.position_store.clone(), &key, &folder, &body).await
         }
         axum::http::Method::DELETE => {
-            state::delete_positions(&st.positions, &key, q.get("folder").map(|s| s.as_str()))
+            state::delete_positions(
+                st.position_store.clone(),
+                &key,
+                q.get("folder").map(|s| s.as_str()),
+            )
+            .await
         }
-        _ => return proxy(&st.upstream, req).await,
+        _ => {
+            return method_not_allowed("GET, PUT, DELETE");
+        }
     }
 }
 
 /// `/api/v1/folder-visibility` — M4: shared SQLite store + owner HMAC.
 async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("visibility") {
-        return proxy(&st.upstream, req).await;
-    }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+    let Some(user) = caller(&st, req.headers()) else {
+        return unauthenticated();
     };
     // `user_key_for_email`: email.strip().lower()
     let key = user.email.trim().to_lowercase();
@@ -304,109 +229,277 @@ async fn folder_visibility(State(st): State<AppState>, req: Request<Body>) -> Re
             serve::maybe_gzip(&headers, state::get_folder_visibility(&st, &key).await, true).await
         }
         axum::http::Method::PUT => {
-            let (parts, body) = req.into_parts();
+            let (_parts, body) = req.into_parts();
             let body = match http_body_util::BodyExt::collect(body).await {
                 Ok(c) => c.to_bytes(),
                 Err(_) => {
-                    return proxy(&st.upstream, Request::from_parts(parts, Body::empty()))
-                        .await
+                    return state::detail(StatusCode::BAD_REQUEST, "invalid body");
                 }
             };
             state::put_folder_visibility(&st, &key, &headers, &body).await
         }
-        _ => return proxy(&st.upstream, req).await,
+        _ => {
+            return method_not_allowed("GET, PUT");
+        }
     }
+}
+
+/// TEST_MODE-only `?hard=1` equivalent — drop the mock user's whole
+/// position slot (tombstones too) so the harness's per-test reset starts
+/// clean (#469). Always 404 outside test mode, never part of the contract.
+async fn test_positions_reset(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !st.test_mode || *req.method() != axum::http::Method::DELETE {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
+    state::delete_user_positions(st.position_store.clone(), auth::TEST_USER_EMAIL).await
 }
 
 /// `/api/v1/tree` — the v1 envelope `{kind, nodes, generation}` over the
 /// shared index cache (`_folder_tree(v1=True)`).
 async fn api_tree(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("tree") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match folders::api_tree(&st, &headers, q).await {
-        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-    }
+    let res = folders::api_tree(&st, &headers, q).await;
+    serve::maybe_gzip(&headers, res, true).await
 }
 
 /// `/api/v1/images` — `{folder, images[]}` over `_list_folder_images`.
 async fn api_images(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("images") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
-    // `folder` is a required Query param upstream → missing keeps the 422.
+    // `folder` is a required Query param → missing keeps the 422.
     let Some(folder) = q.get("folder").cloned() else {
-        return proxy(&st.upstream, req).await;
+        return state::unprocessable("folder", "missing", "Field required");
     };
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
-    let out = tokio::task::spawn_blocking(move || serve::api_images(&downloads, &folder))
+    let library = st.library.clone();
+    let res = tokio::task::spawn_blocking(move || serve::api_images(&library, &folder))
         .await
-        .unwrap_or(serve::Serve::Proxy);
-    match out {
-        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-    }
+        .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"));
+    serve::maybe_gzip(&headers, res, true).await
 }
 
 /// `/api/v1/search` — relevance + filters over the shared index; hidden
 /// roots applied server-side (fail-closed).
 async fn api_search(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("search") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+    // Hidden roots are library-global; auth still gates the caller.
+    let Some(_user) = caller(&st, req.headers()) else {
+        return unauthenticated();
     };
-    let key = user.email.trim().to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match search::api_search(&st, &key, &q).await {
-        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-    }
+    let res = search::api_search(&st, &q).await;
+    serve::maybe_gzip(&headers, res, true).await
 }
 
 /// `/api/v1/facets` — `{artists, tags}` scoped to `path`'s subtree; hidden
 /// roots applied server-side (fail-closed).
 async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("facets") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    let Some(user) = caller_or_proxy(&st, req.headers()) else {
-        return proxy(&st.upstream, req).await;
+    // Hidden roots are library-global; auth still gates the caller.
+    let Some(_user) = caller(&st, req.headers()) else {
+        return unauthenticated();
     };
-    let key = user.email.trim().to_lowercase();
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    match search::api_facets(&st, &key, &q).await {
-        serve::Serve::Done(res) => serve::maybe_gzip(&headers, res, true).await,
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
+    let res = search::api_facets(&st, &q).await;
+    serve::maybe_gzip(&headers, res, true).await
+}
+
+// ── #401: shell + static ───────────────────────────────────────────────────
+
+/// A signed session cookie whose payload is not a session dict — Python's
+/// SessionMiddleware raises on `json.loads` (500) before any route runs,
+/// so corrupt sessions answer 500 locally.
+fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    matches!(
+        auth::session_lookup(headers, st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    )
+}
+
+/// `GET /` — the Jinja shell: viewer page for identified callers, the
+/// login page for everyone else (200, not a redirect).
+async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed("GET, HEAD");
     }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    let thumb_perf = st.test_mode
+        && shell::first_query_param(req.uri(), "thumb_perf").as_deref() == Some("1");
+    let user = shell::index_caller(
+        st.test_mode,
+        &st.secret_key,
+        st.session_key.as_ref(),
+        &st.allowed_emails,
+        &headers,
+    );
+    // '/' is outside the gzip prefixes.
+    let st2 = st.clone();
+    tokio::task::spawn_blocking(move || {
+        shell::index(
+            &st2.web_dir,
+            st2.test_mode,
+            &st2.secret_key,
+            &st2.visibility,
+            &user,
+            &headers,
+            thumb_perf,
+            head,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
+}
+
+/// `GET|HEAD /sw.js` — public FileResponse with `Service-Worker-Allowed: /`.
+async fn serve_sw(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if corrupt_session(&st, req.headers()) {
+        return state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid session",
+        );
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed("GET, HEAD");
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    let req_headers = headers.clone();
+    let st2 = st.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        shell::named_file(
+            &st2.web_dir.join("static").join("sw.js"),
+            "application/javascript",
+            shell::SW_HEADERS,
+            "sw.js not found",
+            &headers,
+            head,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"));
+    // '/sw.js' is a gzip prefix; application/javascript is not excluded.
+    serve::maybe_gzip(&req_headers, res, true).await
+}
+
+/// `GET|HEAD /favicon.ico` — public FileResponse, day-long cache.
+async fn serve_favicon(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if corrupt_session(&st, req.headers()) {
+        return state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid session",
+        );
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed("GET, HEAD");
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    let st2 = st.clone();
+    // '/favicon.ico' is outside the gzip prefixes.
+    tokio::task::spawn_blocking(move || {
+        shell::named_file(
+            &st2.web_dir.join("static").join("favicon.ico"),
+            "image/x-icon",
+            shell::FAVICON_HEADERS,
+            "favicon.ico not found",
+            &headers,
+            head,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
+}
+
+/// `GET|HEAD /static/{*path}` (and bare `/static`) — public
+/// NoCacheStaticFiles: realpath containment, no-cache, 304 + range.
+async fn serve_static(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if corrupt_session(&st, req.headers()) {
+        return state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid session",
+        );
+    }
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed("GET, HEAD");
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let rel = match req.uri().path() {
+        "/static" => String::new(),
+        p => match p.strip_prefix("/static/") {
+            Some(raw) => match percent_decode_str(raw).decode_utf8() {
+                Ok(d) => d.into_owned(),
+                Err(_) => {
+                    return state::detail(StatusCode::BAD_REQUEST, "invalid path");
+                }
+            },
+            None => return state::detail(StatusCode::NOT_FOUND, "Not Found"),
+        },
+    };
+    let headers = req.headers().clone();
+    let req_headers = headers.clone();
+    let st2 = st.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        shell::static_file(&st2.web_dir.join("static"), &rel, &headers, head)
+    })
+    .await
+    .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"));
+    // '/static/' is a gzip prefix; compression still skips the
+    // excluded content types (image/png, font/woff2, video/*, …).
+    let compressible = !res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(shell::gzip_excluded);
+    serve::maybe_gzip(&req_headers, res, compressible).await
 }
 
 /// `/api/v1/health` — public (`security: []`); `{status:"ok"}`.
-async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("health") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+async fn api_health(State(_st): State<AppState>, req: Request<Body>) -> Response {
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
     let headers = req.headers().clone();
     let mut res = Response::builder()
@@ -422,11 +515,11 @@ async fn api_health(State(st): State<AppState>, req: Request<Body>) -> Response 
 
 /// `/api/v1/version` — authed; `{version,sha,build_date}` + `no-store`.
 async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("version") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     // Key order is the wire contract: version, sha, build_date.
     let body = format!(
@@ -450,17 +543,108 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
     serve::maybe_gzip(&headers, res, true).await
 }
 
+/// `/api/v1/library/files` — POST multipart upload / DELETE file-or-dir.
+/// `dir` (upload) and `path` (delete) are query params; the body streams.
+async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    match *req.method() {
+        axum::http::Method::POST => {
+            let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+                .map(|q| q.0)
+                .unwrap_or_default();
+            let dir = q.get("dir").cloned().unwrap_or_default();
+            let mp = match axum::extract::Multipart::from_request(req, &st).await {
+                Ok(mp) => mp,
+                Err(e) => return e.into_response(),
+            };
+            library::post_files(&st, &dir, mp).await
+        }
+        axum::http::Method::DELETE => {
+            let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+                .map(|q| q.0)
+                .unwrap_or_default();
+            let Some(path) = q.get("path").cloned() else {
+                return state::unprocessable("path", "missing", "Field required");
+            };
+            library::delete_file(&st, &path).await
+        }
+        _ => method_not_allowed("POST, DELETE"),
+    }
+}
+
+/// `/api/v1/library/uploads` — POST init a chunked upload session.
+/// Init is a tiny JSON; the route-level `DefaultBodyLimit::disable` (the
+/// file routes need streaming bodies) removes axum's cap here too, so
+/// bound the `collect` explicitly or a fat body buffers unbounded.
+const LIBRARY_INIT_BODY_MAX: usize = 64 * 1024;
+
+async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    let (_parts, body) = req.into_parts();
+    let body = http_body_util::Limited::new(body, LIBRARY_INIT_BODY_MAX);
+    let body = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return state::detail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        }
+    };
+    library::uploads_init(&st, &body).await
+}
+
+/// `/api/v1/library/uploads/{id}` — GET state / PUT chunk / DELETE cancel.
+async fn library_upload(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    match *req.method() {
+        axum::http::Method::GET => library::upload_get(&st, &id).await,
+        axum::http::Method::PUT => {
+            let headers = req.headers().clone();
+            let (_parts, body) = req.into_parts();
+            library::upload_append(&st, &id, &headers, body).await
+        }
+        axum::http::Method::DELETE => library::upload_cancel(&st, &id).await,
+        _ => method_not_allowed("GET, PUT, DELETE"),
+    }
+}
+
+/// `/api/v1/library/uploads/{id}/finalize` — POST commit into the library.
+async fn library_upload_finalize(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
+    }
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    library::upload_finalize(&st, &id).await
+}
+
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
 /// same swap semantics as the background gate, `{status,folders}`.
 async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("refresh") || req.method() != axum::http::Method::POST {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     let headers = req.headers().clone();
-    match folders::force_rebuild(&st.index, &st.downloads).await {
+    match folders::force_rebuild(&st.index, &st.library).await {
         Some(folders) => {
             let mut res = Response::builder()
                 .status(StatusCode::OK)
@@ -472,114 +656,113 @@ async fn api_refresh(State(st): State<AppState>, req: Request<Body>) -> Response
             );
             serve::maybe_gzip(&headers, res, true).await
         }
-        // Build failure propagates upstream in Python — proxy for parity.
-        None => proxy(&st.upstream, req).await,
+        None => state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "index build failed",
+        ),
     }
 }
 
-/// `/image/{*path}` — a v1 contract path (media is not versioned): native
-/// for plain files and ZIP/CBZ/EPUB/RAR/CBR entries.
-/// PDF pages and multi-range requests proxy upstream.
+/// `/image/{*path}` — a v1 contract path (media is not versioned) for plain
+/// files, ZIP/CBZ/EPUB/RAR/CBR entries, and PDF pages (#402 — pdfium-render;
+/// a missing `libpdfium` answers 501).
+/// Multi-range is a 200-full contract shrink.
 async fn serve_image(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("image") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    // /image requires auth upstream too — only positively identified
-    // callers may be served natively.
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    // /image requires auth — only positively identified callers are served.
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     // The URI path is still percent-encoded; decode per-segment like
     // Starlette does (`%2F` inside a segment becomes "/" and is handled by
     // the same traversal guards downstream).
     let Some(raw) = req.uri().path().strip_prefix("/image/") else {
-        return proxy(&st.upstream, req).await;
+        return state::detail(StatusCode::NOT_FOUND, "Not Found");
     };
     let Ok(path) = percent_decode_str(raw).decode_utf8() else {
-        return proxy(&st.upstream, req).await;
+        return state::detail(StatusCode::BAD_REQUEST, "invalid path");
     };
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let path = path.into_owned();
-    let out = tokio::task::spawn_blocking(move || serve::image(&downloads, &path, &headers))
+    // /image is outside the gzip prefixes.
+    tokio::task::spawn_blocking(move || serve::image(&library, &path, &headers))
         .await
-        .unwrap_or(serve::Serve::Proxy);
-    match out {
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-        serve::Serve::Done(res) => res, // /image is outside the gzip prefixes
-    }
+        .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
 }
 
-/// `/thumb/{*path}` — v1 contract path. Native answers validation, the
+/// `/thumb/{*path}` — v1 contract path. Answers validation, the
 /// 304 fast path and shared-cache hits; misses render in-process (image
-/// crate) with upstream fallback for sources/decodes it can't reach.
+/// crate), unreconstructable sources answer 501.
 async fn serve_thumb(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("thumb") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     let Some(raw) = req.uri().path().strip_prefix("/thumb/") else {
-        return proxy(&st.upstream, req).await;
+        return state::detail(StatusCode::NOT_FOUND, "Not Found");
     };
     let Ok(path) = percent_decode_str(raw).decode_utf8() else {
-        return proxy(&st.upstream, req).await;
+        return state::detail(StatusCode::BAD_REQUEST, "invalid path");
     };
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let cache = st.thumb_cache.clone();
     let path = path.into_owned();
-    let out =
-        tokio::task::spawn_blocking(move || thumbs::thumb(&downloads, &cache, &path, q.get("w"), &headers))
-            .await
-            .unwrap_or(serve::Serve::Proxy);
-    match out {
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-        serve::Serve::Done(res) => res, // /thumb is outside the gzip prefixes
-    }
+    // /thumb is outside the gzip prefixes.
+    tokio::task::spawn_blocking(move || thumbs::thumb(&library, &cache, &path, q.get("w"), &headers))
+        .await
+        .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
 }
 
 /// `/view/{*path}` — passthrough formats serve natively; normalized
 /// formats answer shared-cache hits and render misses in-process;
-/// undecodable/unreachable sources still proxy.
+/// unreconstructable sources answer 501. `?w=<px>` opts into the
+/// normalized fast-tier branch at that width (#440).
 async fn serve_view(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("view") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     let Some(raw) = req.uri().path().strip_prefix("/view/") else {
-        return proxy(&st.upstream, req).await;
+        return state::detail(StatusCode::NOT_FOUND, "Not Found");
     };
     let Ok(path) = percent_decode_str(raw).decode_utf8() else {
-        return proxy(&st.upstream, req).await;
+        return state::detail(StatusCode::BAD_REQUEST, "invalid path");
     };
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
     let headers = req.headers().clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let cache = st.thumb_cache.clone();
     let path = path.into_owned();
-    let out = tokio::task::spawn_blocking(move || thumbs::view(&downloads, &cache, &path, &headers))
-        .await
-        .unwrap_or(serve::Serve::Proxy);
-    match out {
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-        serve::Serve::Done(res) => res, // /view is outside the gzip prefixes
-    }
+    // /view is outside the gzip prefixes.
+    tokio::task::spawn_blocking(move || {
+        thumbs::view(&library, &cache, &path, q.get("w"), &headers)
+    })
+    .await
+    .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"))
 }
 
-/// `/api/v1/thumb-sprite` — v1 contract (v0 `/api/thumb-sprite` proxies).
-/// Native answers validation, 304s and shared-cache hits; misses proxy.
+/// `/api/v1/thumb-sprite` — v1 contract.
+/// Answers validation, 304s and shared-cache hits; misses compose
+/// in-process (9-cell strip + `rows` grid) into the shared `sprites/` cache.
 async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("thumb-sprite") || req.method() != axum::http::Method::GET {
-        return proxy(&st.upstream, req).await;
+    if req.method() != axum::http::Method::GET {
+        return method_not_allowed("GET");
     }
-    if caller_or_proxy(&st, req.headers()).is_none() {
-        return proxy(&st.upstream, req).await;
+    if caller(&st, req.headers()).is_none() {
+        return unauthenticated();
     }
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
@@ -587,39 +770,138 @@ async fn api_thumb_sprite(State(st): State<AppState>, req: Request<Body>) -> Res
     let query_string = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
     let headers2 = headers.clone();
-    let downloads = st.downloads.clone();
+    let library = st.library.clone();
     let cache = st.thumb_cache.clone();
-    let out = tokio::task::spawn_blocking(move || {
-        thumbs::thumb_sprite(&downloads, &cache, &q, &query_string, &headers2)
+    let res = tokio::task::spawn_blocking(move || {
+        thumbs::thumb_sprite(&library, &cache, &q, &query_string, &headers2)
     })
     .await
-    .unwrap_or(serve::Serve::Proxy);
-    match out {
-        serve::Serve::Proxy => proxy(&st.upstream, req).await,
-        // image/* responses are excluded from ApiGZipMiddleware by content type.
-        serve::Serve::Done(res) => {
-            let compressible = !res
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|ct| ct.starts_with("image/"));
-            serve::maybe_gzip(&headers, res, compressible).await
-        }
+    .unwrap_or_else(|_| state::detail(StatusCode::INTERNAL_SERVER_ERROR, "task failed"));
+    // image/* responses are excluded from ApiGZipMiddleware by content type.
+    let compressible = !res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("image/"));
+    serve::maybe_gzip(&headers, res, compressible).await
+}
+
+// ── #400: /auth/* + /api/v1/auth/token ─────────────────────────────────────
+//
+// The callback mints the one-time codes the token endpoint redeems.
+// `auth_flow` is `Some` iff the OAuth config is complete, else the surface
+// answers 501. A signed session cookie whose payload won't parse gets
+// starlette's middleware-level 500, answered locally too.
+
+/// Missing OAuth config answers 501 (no upstream fallback exists anymore).
+fn auth_unconfigured() -> Response {
+    state::detail(
+        StatusCode::NOT_IMPLEMENTED,
+        "oauth not configured",
+    )
+}
+
+/// A corrupt session cookie answers 500 like starlette's middleware.
+fn corrupt_session_response() -> Response {
+    state::detail(StatusCode::INTERNAL_SERVER_ERROR, "invalid session")
+}
+
+async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return method_not_allowed("GET, HEAD");
     }
+    // #373: a cross-site initiation must not write the `bookq_oauth` tx
+    // cookie (login CSRF plants an attacker PKCE challenge).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return auth_unconfigured();
+    };
+    if matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    ) {
+        return corrupt_session_response();
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    oauth::login(&flow, &q)
+}
+
+async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return method_not_allowed("GET, HEAD");
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return auth_unconfigured();
+    };
+    let lookup = auth::session_lookup(req.headers(), st.session_key.as_ref());
+    if matches!(lookup, auth::SessionLookup::Corrupt) {
+        return corrupt_session_response();
+    }
+    let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .map(|q| q.0)
+        .unwrap_or_default();
+    oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await
+}
+
+async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return method_not_allowed("GET, HEAD");
+    }
+    // #373: logout is a state-changing GET — refuse cross-site
+    // initiations (forced logout CSRF).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return auth_unconfigured();
+    };
+    let lookup = auth::session_lookup(req.headers(), st.session_key.as_ref());
+    if matches!(lookup, auth::SessionLookup::Corrupt) {
+        return corrupt_session_response();
+    }
+    oauth::logout(&flow, &lookup)
+}
+
+async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    let Some(flow) = st.auth_flow.clone() else {
+        return auth_unconfigured();
+    };
+    // starlette loads the session cookie before routing — a corrupt one
+    // 500s there, answered locally here too.
+    if matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    ) {
+        return corrupt_session_response();
+    }
+    let headers = req.headers().clone();
+    let (_parts, body) = req.into_parts();
+    let body = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return state::detail(StatusCode::BAD_REQUEST, "invalid body");
+        }
+    };
+    let res = oauth::token(&flow, &body);
+    serve::maybe_gzip(&headers, res, true).await
 }
 
 // ── M8: /ws/reader-sync ────────────────────────────────────────────────────
 
-/// Native `/ws/reader-sync` — gated by "reader-sync"; a non-upgrade or
-/// gated-out request goes upstream so Python's own socket serves it.
-/// Unauthenticated handshakes get starlette's pre-accept close → HTTP 403.
+/// `/ws/reader-sync` — non-upgrade requests fall through to the
+/// `WebSocketUpgrade` extractor's rejection; unauthenticated handshakes
+/// answer HTTP 403.
 async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !st.native.enabled("reader-sync") || !is_upgrade(&req) {
-        return proxy(&st.upstream, req).await;
-    }
     let Some(user) = auth::resolve_ws_user(
         req.headers(),
-        st.native.test_mode,
+        st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
         &st.allowed_emails,
@@ -793,6 +1075,13 @@ impl axum::serve::Listener for NoDelayListener {
 
 #[tokio::main]
 async fn main() {
+    // #573: distroless has no shell/curl, so the compose healthcheck runs
+    // this binary with `--healthcheck` instead of a `bash -c` one-liner.
+    // Handled before any tracing/runtime work so the probe stays quiet.
+    if std::env::args().skip(1).any(|a| a == "--healthcheck") {
+        std::process::exit(healthcheck::run());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -800,28 +1089,39 @@ async fn main() {
         )
         .init();
 
-    let upstream = std::env::var("BOOKQ_UPSTREAM").unwrap_or_else(|_| "http://viewer:8080".into());
     let bind = std::env::var("BOOKQ_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let authority: hyper::http::uri::Authority = upstream
-        .strip_prefix("http://")
-        .unwrap_or(&upstream)
-        .parse()
-        .expect("BOOKQ_UPSTREAM must be http://host[:port]");
-    let downloads = PathBuf::from(std::env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "/app/downloads".into()));
+    let library = PathBuf::from(std::env::var("LIBRARY_DIR").unwrap_or_else(|_| "/app/library".into()));
     // Canonicalize once — `is_within` treats this as the canonical base so
     // per-request checks canonicalize only the target path.
-    let downloads = std::fs::canonicalize(&downloads).unwrap_or(downloads);
+    let library = std::fs::canonicalize(&library).unwrap_or(library);
     // Same once-at-startup semantics as app/auth.py's _TEST_MODE.
-    let native = Native::from_env();
-    let allowed_emails: std::collections::HashSet<String> = std::env::var("ALLOWED_EMAILS")
+    let test_mode = std::env::var("BOOKQ_TEST_MODE")
         .unwrap_or_default()
-        .split(',')
-        .map(|e| e.trim().to_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect();
+        .eq_ignore_ascii_case("true");
+    let allowed_emails: std::sync::Arc<std::collections::HashSet<String>> =
+        std::sync::Arc::new(
+            std::env::var("ALLOWED_EMAILS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect(),
+        );
+    // #400: the auth surface needs the full OAuth config — missing config
+    // answers 501 (warned at startup).
+    let auth_flow = match oauth::AuthFlow::from_env(allowed_emails.clone()) {
+        oauth::Configured::Ready(flow) => Some(std::sync::Arc::new(flow)),
+        oauth::Configured::Missing(missing) => {
+            tracing::warn!(
+                missing = ?missing,
+                "OAuth config missing — /auth/* and /api/v1/auth/token answer 501"
+            );
+            None
+        }
+    };
 
     let index = std::sync::Arc::new(folders::IndexState::new());
-    let registry = reader_sync::Registry::new(index.clone(), downloads.clone());
+    let registry = reader_sync::Registry::new(index.clone(), library.clone());
     {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
@@ -830,19 +1130,19 @@ async fn main() {
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
     let st = AppState {
-        upstream: Upstream {
-            client: Client::builder(TokioExecutor::new()).build(HttpConnector::new()),
-            authority,
-        },
-        downloads: downloads.clone(),
-        native: std::sync::Arc::new(native),
-        allowed_emails: std::sync::Arc::new(allowed_emails),
+        library: library.clone(),
+        test_mode,
+        allowed_emails,
+        auth_flow,
         index: index.clone(),
-        positions: std::sync::Arc::new(state::Positions::default()),
+        position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
+        pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
+            std::collections::HashMap::new(),
+        )),
         thumb_cache: PathBuf::from(
             std::env::var("BOOKQ_THUMB_CACHE_DIR").unwrap_or_else(|_| "/tmp/bookq-thumbs".into()),
         ),
@@ -850,22 +1150,33 @@ async fn main() {
         // ARG ""→ENV path yields "" — same two-state contract.
         git_sha: std::env::var("BOOKQ_GIT_SHA").unwrap_or_else(|_| "unknown".into()),
         build_date: std::env::var("BOOKQ_BUILD_DATE").unwrap_or_else(|_| "unknown".into()),
+        // #401: the image ships `web/{static,templates,perf}` at /web; dev
+        // points this at the worktree's `web/` for live asset edits.
+        web_dir: PathBuf::from(
+            std::env::var("BOOKQ_WEB_DIR").unwrap_or_else(|_| "/web".into()),
+        ),
+        // Library write surface: probe once — a read-only deploy keeps every
+        // read route but `/api/v1/library/*` answers 503.
+        upload_root: library::probe_upload_root(&library),
+        place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+        session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
-    if st.native.enabled("visibility") || st.native.enabled("tree") {
-        // warmup_metadata_index — lifespan kicks the same cold-miss path.
-        index.spawn_warmup(downloads.clone());
-    }
+    // warmup_metadata_index — lifespan kicks the same cold-miss path.
+    index.spawn_warmup(library.clone());
     tracing::info!(
-        test_mode = st.native.test_mode,
-        native_all = st.native.all,
-        native_set = ?st.native.set,
-        downloads = %st.downloads.display(),
-        "read-path endpoints"
+        test_mode = st.test_mode,
+        library = %st.library.display(),
+        "all routes native"
     );
 
     let app = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
-        // M3 skeleton: no v1 native handlers yet — everything proxies.
+        // #401: shell + static surfaces — public.
+        .route("/", any(shell_index))
+        .route("/sw.js", any(serve_sw))
+        .route("/favicon.ico", any(serve_favicon))
+        .route("/static", any(serve_static))
+        .route("/static/{*path}", any(serve_static))
         // /image/{*path} is a v1 contract path (media, not versioned).
         .route("/image/{*path}", any(serve_image))
         .route("/thumb/{*path}", any(serve_thumb))
@@ -880,15 +1191,41 @@ async fn main() {
         .route("/api/v1/health", any(api_health))
         .route("/api/v1/version", any(api_version))
         .route("/api/v1/index/refresh", any(api_refresh))
-        // M8: dual-reader sync socket — native under "reader-sync" gate;
-        // otherwise the upgrade is spliced to Python unchanged.
+        // #400: the auth surface moves as one unit — the callback's
+        // one-time codes are redeemed by the token endpoint in the same
+        // process. `auth_flow.is_none()` answers 501 (unconfigured).
+        .route("/auth/login", any(auth_login))
+        .route("/auth/callback", any(auth_callback))
+        .route("/auth/logout", any(auth_logout))
+        .route("/api/v1/auth/token", any(auth_token))
+        // TEST_MODE-only dual-reader verification hooks (#405) — always
+        // 404 outside test mode, never part of the OpenAPI contract.
+        .route("/api/v1/pair-report", any(pair_report::handle_report))
+        .route("/api/v1/pair-reset", any(pair_report::handle_reset))
+        // #469: TEST_MODE-only `?hard=1` equivalent — wipe the mock user's
+        // whole position slot incl. tombstones (harness per-test reset).
+        .route("/api/v1/test-positions-reset", any(test_positions_reset))
+        // M8: dual-reader sync socket.
         .route("/ws/reader-sync", any(reader_sync_ws))
-        // /api/v1/auth/token is proxy-only by design: its auth-code and
-        // refresh stores are written by the OAuth callback in app/auth.py
-        // (app.state); sharing them natively would require touching the
-        // Python backend, which is out of bounds.
-        .fallback(axum::routing::any(|State(st): State<AppState>, req: Request<Body>| async move {
-            proxy(&st.upstream, req).await
+        // Library edit: multipart upload + delete, chunked upload sessions.
+        // `Multipart::from_request` calls `with_limited_body`, which honors
+        // the 2MiB DefaultBodyLimit even for manual extractor calls — the
+        // disable must be a route_layer scoped to these four routes, or
+        // uploads >2MiB answer 413.
+        .merge(
+            Router::new()
+                .route("/api/v1/library/files", any(library_files))
+                .route("/api/v1/library/uploads", any(library_uploads))
+                .route("/api/v1/library/uploads/{id}", any(library_upload))
+                .route(
+                    "/api/v1/library/uploads/{id}/finalize",
+                    any(library_upload_finalize),
+                )
+                .route_layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .fallback(axum::routing::any(|State(_st): State<AppState>, req: Request<Body>| async move {
+            tracing::warn!(path = %req.uri().path(), "unknown route: answered 501");
+            state::detail(StatusCode::NOT_IMPLEMENTED, "not found")
         }))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),
@@ -897,7 +1234,7 @@ async fn main() {
         .with_state(st);
 
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");
-    tracing::info!(%addr, %upstream, "viewer-rs listening");
+    tracing::info!(%addr, "viewer-rs listening (all routes native)");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
     axum::serve(NoDelayListener(listener), app)
         .with_graceful_shutdown(async {
@@ -905,4 +1242,299 @@ async fn main() {
         })
         .await
         .expect("serve failed");
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// #465 follow-up: a local 405 must carry the RFC 9110 `Allow` header
+    /// naming the endpoint's declared methods (schemathesis ST204).
+    #[test]
+    fn method_not_allowed_carries_allow() {
+        let res = method_not_allowed("GET, PUT, DELETE");
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            res.headers().get(header::ALLOW).unwrap().to_str().unwrap(),
+            "GET, PUT, DELETE"
+        );
+    }
+
+    /// Unverifiable callers answer 401 locally (#532: no upstream chain left).
+    #[test]
+    fn unauthenticated_answers_401() {
+        assert_eq!(
+            unauthenticated().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Missing OAuth config answers 501 locally (#532: no proxy fallback).
+    #[test]
+    fn auth_unconfigured_answers_501() {
+        assert_eq!(
+            auth_unconfigured().status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    /// #359: `/api/v1/version` requires auth; health stays public.
+    #[tokio::test]
+    async fn version_requires_auth_health_stays_public() {
+        // Unauthenticated version is 401 — sha/build_date must not leak.
+        let st = hook_state(false);
+        let (status, body) = body_json(
+            api_version(State(st.clone()), http_req("GET", "/api/v1/version", "")).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, serde_json::json!({"detail": "authentication required"}));
+        // Health stays public for uptime probes.
+        let (status, body) =
+            body_json(api_health(State(st), http_req("GET", "/api/v1/health", "")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"status": "ok"}));
+        // Authed (test-mode mock user) version is 200 with no-store.
+        let st = hook_state(true);
+        let res = api_version(State(st), http_req("GET", "/api/v1/version", "")).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-store"
+        );
+        let (status, body) = body_json(res).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["version"], serde_json::json!("2.0.0"));
+        assert!(body.get("sha").is_some());
+        assert!(body.get("build_date").is_some());
+    }
+
+    /// Minimal AppState for the test-hook handlers: nothing here touches
+    /// the network (pair-report/reset are served from memory/the registry)
+    /// or the filesystem (the SQLite stores are never consulted).
+    fn hook_state(test_mode: bool) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "bookq-pair-hook-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let index = std::sync::Arc::new(folders::IndexState::new());
+        let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
+        AppState {
+            library: dir.join("dl"),
+            test_mode,
+            allowed_emails: std::sync::Arc::new(HashSet::new()),
+            index,
+            position_store: std::sync::Arc::new(state::PositionStore::new(&dir)),
+            visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
+            session_key: None,
+            secret_key: "test-secret".into(),
+            auth_flow: None,
+            registry,
+            web_dir: dir.join("web"),
+            thumb_cache: dir.join("thumbs"),
+            git_sha: "test".into(),
+            build_date: "test".into(),
+            pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
+                std::collections::HashMap::new(),
+            )),
+            upload_root: None,
+            place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn http_req(method: &str, uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn body_json(res: Response) -> (StatusCode, serde_json::Value) {
+        let status = res.status();
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn pair_report_roundtrip_native_in_test_mode() {
+        let st = hook_state(true);
+        // POST stores (id stripped, received_at stamped) …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req(
+                    "POST",
+                    "/api/v1/pair-report",
+                    r#"{"id":"pytest-bridge","gen":1,"pc":{"phase":"reading"},"pv":{"left":"1"}}"#,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true}));
+        // … GET reads it back …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req("GET", "/api/v1/pair-report?id=pytest-bridge", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"]["pc"], serde_json::json!({"phase": "reading"}));
+        assert_eq!(body["state"]["pv"], serde_json::json!({"left": "1"}));
+        assert!(body["state"].get("id").is_none());
+        assert!(body["state"]["received_at"].as_f64().unwrap() > 0.0);
+        // … a stale gen from a parked tab drops …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req(
+                    "POST",
+                    "/api/v1/pair-report",
+                    r#"{"id":"pytest-bridge","gen":0,"pc":{"phase":"stale"}}"#,
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ok": true, "dropped": true}));
+        // … unknown ids read back null …
+        let (status, body) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req("GET", "/api/v1/pair-report?id=never-posted", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"state": null}));
+        // … and a missing id is a 400 like the Python router.
+        let (status, _) = body_json(
+            pair_report::handle_report(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-report", r#"{"pc":{}}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn pair_hooks_404_outside_test_mode() {
+        let st = hook_state(false);
+        for (handler, req) in [
+            (
+                "report-post",
+                http_req("POST", "/api/v1/pair-report", r#"{"id":"x"}"#),
+            ),
+            ("report-get", http_req("GET", "/api/v1/pair-report?id=x", "")),
+        ] {
+            let (status, body) =
+                body_json(pair_report::handle_report(State(st.clone()), req).await).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{handler}");
+            assert_eq!(body, serde_json::json!({"detail": "Not Found"}), "{handler}");
+        }
+        let (status, body) = body_json(
+            pair_report::handle_reset(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-reset", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, serde_json::json!({"detail": "Not Found"}));
+    }
+
+    #[tokio::test]
+    async fn pair_reset_ends_live_session_through_handler() {
+        let st = hook_state(true);
+        // One live session behind a registered link.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<reader_sync::OutItem>(st.registry.send_queue_max());
+        let (close_tx, _close_rx) = tokio::sync::watch::channel(None);
+        let link = reader_sync::Link::new(
+            tx,
+            close_tx,
+            None,
+            std::time::Instant::now(),
+            st.registry.heartbeat_interval(),
+        );
+        let lid = st
+            .registry
+            .inner
+            .lock()
+            .await
+            .register_link(link, st.registry.heartbeat_interval());
+        let create = reader_sync::protocol::encode_frame(&reader_sync::protocol::frame(&[
+            (
+                "v",
+                serde_json::Value::from(reader_sync::protocol::PROTOCOL_VERSION),
+            ),
+            ("type", serde_json::Value::String("CREATE".into())),
+            ("requestId", serde_json::Value::String("r1".into())),
+            ("sessionId", serde_json::Value::String(String::new())),
+            ("workEpoch", serde_json::Value::from(0)),
+            ("baseRevision", serde_json::Value::from(0)),
+            ("payload", serde_json::Value::Object(serde_json::Map::new())),
+        ]))
+        .unwrap();
+        st.registry.handle_raw(&lid, create.as_bytes()).await;
+        // The handler ends it with "reset" …
+        let (status, body) = body_json(
+            pair_report::handle_reset(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-reset", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ended": 1}));
+        // … and the member link observes the END frame …
+        let mut saw_end = false;
+        while let Ok(item) = rx.try_recv() {
+            if let reader_sync::OutItem::Text(raw) = item {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if v["type"] == "END" {
+                    assert_eq!(v["reason"], "reset");
+                    saw_end = true;
+                }
+            }
+        }
+        assert!(saw_end);
+        assert_eq!(st.registry.session_count().await, 0);
+        // … a second reset ends nothing.
+        let (status, body) = body_json(
+            pair_report::handle_reset(
+                State(st.clone()),
+                http_req("POST", "/api/v1/pair-reset", ""),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"ended": 0}));
+    }
 }

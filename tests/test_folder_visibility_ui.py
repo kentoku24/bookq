@@ -1,6 +1,6 @@
 """E2E for the hidden-roots UI (tile/list/card × browse/search, mode toggle).
 
-Dedicated synthetic library + dedicated BOOKQ_STATE_DIR + own uvicorn via
+Dedicated synthetic library + dedicated BOOKQ_STATE_DIR + own viewer-rs via
 tests/folder_visibility_helpers.py — the shared conftest server/tree keep
 their exact root count and never see a hidden flag.
 """
@@ -23,6 +23,7 @@ from folder_visibility_helpers import (  # noqa: E402
     vis_put,
     vis_reset,
 )
+from browse_header_helpers import open_header_menu, set_view_mode  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -171,6 +172,7 @@ def test_hidden_filtered_from_search_in_all_modes(vpage, vis_env):
     vpage.reload()
     vpage.wait_for_selector(".tile")
     for _mode in ("tile", "list", "card"):
+        set_view_mode(vpage, _mode)
         vpage.fill("#search-input", "hide")
         vpage.wait_for_timeout(700)  # 300ms debounce + fetch
         paths = _paths(vpage, "#tile-grid .tile,#tile-grid .item,#tile-grid .card")
@@ -180,7 +182,6 @@ def test_hidden_filtered_from_search_in_all_modes(vpage, vis_env):
         assert "hide_mixed" in paths
         n = len(paths)
         assert vpage.locator("#folder-count").inner_text() == f"{n} 件"
-        vpage.click("#footer-refresh-btn")  # tile→list→card
     # 全表示: hidden results return but carry badges, no per-child buttons
     _show_all(vpage)
     vpage.fill("#search-input", "hide")
@@ -195,10 +196,10 @@ def test_folder_count_visible_in_all_modes(vpage, vis_env):
     vis_put(vis_env, "hide_me", True)
     vpage.reload()
     vpage.wait_for_selector(".tile")
-    for _ in range(3):
+    for _mode in ("tile", "list", "card"):
+        set_view_mode(vpage, _mode)
         tiles = _paths(vpage, "#tile-grid .tile,#tile-grid .item,#tile-grid .card")
         assert vpage.locator("#folder-count").inner_text() == f"{len(tiles)} 件"
-        vpage.click("#footer-refresh-btn")
 
 
 def test_keyboard_toggle_no_viewer_no_double_put(vpage):
@@ -225,6 +226,12 @@ def test_keyboard_toggle_no_viewer_no_double_put(vpage):
 
 
 def test_identical_refresh_does_not_rerender(vpage):
+    # vpage only waits for .tile — since the index build went nonblocking the
+    # first visibility GET can still be in flight. Gate on 'ready' so the
+    # probe measures the explicit refresh alone, not the loading→ready
+    # status edge that legitimately re-renders once.
+    vpage.wait_for_function(
+        "() => window.FolderVisibility.readyState === 'ready'")
     vpage.evaluate(
         "window.__muts=0;new MutationObserver(()=>window.__muts++)"
         ".observe(document.getElementById('tile-grid'),{childList:true,subtree:true})"
@@ -462,6 +469,12 @@ def test_shallow_window_filters_hidden_ancestor_tile(fvpage, flat_vis_env):
             held_full.append(route)
 
     fvpage.route("**/api/v1/tree*", _route)
+    # Cold boot only: a warm IDB snapshot makes _onOnline take the revalidate
+    # path (full GET only, no depth=1 stage), so `shallow` would never be set.
+    # Delete the snapshot to force the loadFolders shallow→full path.
+    fvpage.evaluate(
+        "async () => { if (window.OfflineTree) await window.OfflineTree.delTree(); }"
+    )
     fvpage.reload()
     fvpage.wait_for_function(
         "window.FolderVisibility && "
@@ -567,10 +580,7 @@ def _cs(el, prop):
 
 
 def _set_view_mode(vpage, mode):
-    for _ in range(3):
-        if vpage.evaluate("window.viewMode") == mode:
-            break
-        vpage.click("#footer-refresh-btn")
+    set_view_mode(vpage, mode)
     assert vpage.evaluate("window.viewMode") == mode
     vpage.wait_for_function(
         "() => {const c=document.getElementById('tile-grid').classList;"

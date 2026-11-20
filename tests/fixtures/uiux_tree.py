@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the synthetic downloads tree for dev environments (./dev.sh up --fixture) and the UI/UX audit.
+"""Build the synthetic library tree for dev environments (./dev.sh up --fixture) and the UI/UX audit.
 Deterministic, dependency-free (pure stdlib PNG writer). Color-coded solid
 pages so vision-model screenshots can distinguish folders, with a per-page
 lightness gradient within each folder's hue family so page turns are visible
@@ -8,7 +8,7 @@ exception: real-size 720x1080 pages with a grid, huge EP/page labels, START/END
 badges and fine print, so pinch-zoom, page turns and episode seams can be judged
 by eye in the Simulator or on a device (solid pages look identical when zoomed).
 Usage:  uv run python .omo/scripts/uiux_tree.py [target_dir]
-Default target: /tmp/bookq-uiux/downloads
+Default target: /tmp/bookq-uiux/library
 """
 import colorsys, struct, sys, zlib
 from pathlib import Path
@@ -275,7 +275,7 @@ def build(root: Path) -> None:
                 METADATA_TMPL.format(title=title), encoding="utf-8")
 
 if __name__ == "__main__":
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/tmp/bookq-uiux/downloads")
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/tmp/bookq-uiux/library")
     build(target)
     pngs = list(target.rglob("*.png"))
     print(f"tree built at {target} ({len(pngs)} pngs)")

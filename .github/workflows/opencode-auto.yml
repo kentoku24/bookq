@@ -133,10 +133,26 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@9bbb8ce18c80f099e0e448775f59d965ead40a21
+      # OPENCODE_ZEN_API_KEY (static secret) expired — exchange the job's OIDC
+      # token for a 1h OpenCode API key instead (client_id is a public cred id).
+      - name: Sign in to OpenCode
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
+      - name: Run opencode (official action)
+        uses: anomalyco/opencode/github@fedc6f208aa2bd54c1019227214568083f6380ad
+        env:
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
         with:
           model: opencode-go/muse-spark-1.3-contributor
           prompt: |
@@ -146,6 +162,20 @@ jobs:
             - Small incremental commits with conventional-commit messages.
             - Open a PR titled "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})" whose body references
               #${{ github.event.issue.number || github.event.client_payload.issue_number }} and includes testing considerations.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -163,7 +193,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Swap label to ✅ done
@@ -206,10 +236,26 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@9bbb8ce18c80f099e0e448775f59d965ead40a21
+      # OPENCODE_ZEN_API_KEY (static secret) expired — exchange the job's OIDC
+      # token for a 1h OpenCode API key instead (client_id is a public cred id).
+      - name: Sign in to OpenCode
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
+      - name: Run opencode (official action)
+        uses: anomalyco/opencode/github@fedc6f208aa2bd54c1019227214568083f6380ad
+        env:
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
         with:
           model: opencode-go/muse-spark-1.3-contributor
           prompt: |
@@ -220,6 +266,20 @@ jobs:
                AGENTS.md rule (lowercase, hyphens, alphanumeric only, <=50 chars) and open a PR
                containing that file with title "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})"
                referencing #${{ github.event.issue.number || github.event.client_payload.issue_number }} in the body.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -237,7 +297,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Swap label to ✅ done
@@ -308,11 +368,39 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
+      - name: Sign in to OpenCode
+        env:
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
       - name: Run opencode CLI
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -330,7 +418,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Branch, commit, push, open PR
@@ -357,14 +445,29 @@ jobs:
           rm -f prompt.txt
           git add -A
           git commit -m "feat(ai): resolve issue #${ISSUE_NUMBER}" || echo "nothing to commit"
-          git push origin "$branch"
+          # The agent may have committed + opened the PR from a branch other
+          # than the one this step checked out (it can stay on main/HEAD).
+          # Count any open PR whose title references the issue as served —
+          # otherwise we push an empty branch and `gh pr create` fails with
+          # "No commits between main and ..." (#426).
           if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             echo "PR for $branch already open (created by the agent)"
-          else
-            gh pr create --repo "$REPO" --base main --head "$branch" \
-              --title "feat(ai): resolve issue #${ISSUE_NUMBER}" \
-              --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
+            exit 0
           fi
+          if [ "$(gh pr list --repo "$REPO" --state open --search "in:title \"#${ISSUE_NUMBER}\"" --json number --jq 'length')" -gt 0 ]; then
+            echo "an open PR already references #${ISSUE_NUMBER}"
+            exit 0
+          fi
+          if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+            # Nothing pushed and no PR anywhere — the agent produced no
+            # output. Fail here instead of leaving a junk empty branch.
+            echo "::error::no commits and no PR for #${ISSUE_NUMBER} — agent produced nothing"
+            exit 1
+          fi
+          git push origin "$branch"
+          gh pr create --repo "$REPO" --base main --head "$branch" \
+            --title "feat(ai): resolve issue #${ISSUE_NUMBER}" \
+            --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
 
       - name: Success label transition
         if: success()
@@ -431,11 +534,39 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
+      - name: Sign in to OpenCode
+        env:
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
       - name: Run opencode CLI
         env:
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -453,7 +584,7 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
+      - name: Run bookq test gate (full suite, viewer-rs)
         run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
 
       - name: Branch, commit, push, open PR
@@ -477,14 +608,24 @@ jobs:
           rm -f prompt.txt
           git add -A
           git commit -m "docs(ai): research report for issue #${ISSUE_NUMBER}" || echo "nothing to commit"
-          git push origin "$branch"
+          # Same guard as implement-direct (#426): an open PR whose title
+          # references the issue counts as served; never push an empty branch.
           if [ -n "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             echo "PR for $branch already open (created by the agent)"
-          else
-            gh pr create --repo "$REPO" --base main --head "$branch" \
-              --title "docs(ai): research report for issue #${ISSUE_NUMBER}" \
-              --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
+            exit 0
           fi
+          if [ "$(gh pr list --repo "$REPO" --state open --search "in:title \"#${ISSUE_NUMBER}\"" --json number --jq 'length')" -gt 0 ]; then
+            echo "an open PR already references #${ISSUE_NUMBER}"
+            exit 0
+          fi
+          if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+            echo "::error::no commits and no PR for #${ISSUE_NUMBER} — agent produced nothing"
+            exit 1
+          fi
+          git push origin "$branch"
+          gh pr create --repo "$REPO" --base main --head "$branch" \
+            --title "docs(ai): research report for issue #${ISSUE_NUMBER}" \
+            --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
 
       - name: Success label transition
         if: success()

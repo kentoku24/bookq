@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// ペアリング sheet — pairUI.js equivalent: create (code+QR) / join (6桁) /

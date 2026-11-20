@@ -1,6 +1,9 @@
-"""E2E tests for the search / filter / view-mode UI.
+"""E2E tests for the search / filter / view-mode UI (#476 v1 port).
 Covers: search input, filter bottom sheet, view-mode cycling (tile↔list↔card),
 pull-to-refresh, and graceful rendering without metadata.
+
+The UI calls the v1 surface (GET /api/v1/tree, /api/v1/search, /api/v1/facets),
+so route watches assert on v1 URL patterns.
 
 Run:
     uv run --with pytest --with playwright pytest tests/test_search_e2e.py -v
@@ -8,6 +11,8 @@ Run:
 
 import re
 from playwright.sync_api import expect
+
+from browse_header_helpers import open_header_menu, set_view_mode
 
 # ── search input ────────────────────────────────────────────────────────────────
 
@@ -18,7 +23,7 @@ def test_search_input_exists(page):
 
 
 def test_search_filters_local_folders(page):
-    """Search calls the /api/search endpoint.
+    """Search calls the /api/v1/search endpoint.
     With no metadata.toml files in the fixture the API returns 0 results,
     so the grid shows an empty-state message.
     """
@@ -38,11 +43,42 @@ def test_search_filters_local_folders(page):
     expect(page.locator("#folder-count")).to_have_text("18 件")
 
 
+def test_reload_reruns_active_search(page):
+    """⋯再読み込み during an active search must re-run the query — the index
+    refresh + tree reload alone would leave stale searchResults on screen."""
+    page.locator("#search-input").fill("nonexistent")
+    expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+
+    hits = {"search": 0, "refresh": 0}
+    def _handler(route):
+        url = route.request.url
+        if "/api/v1/search" in url:
+            hits["search"] += 1
+        if "/api/v1/index/refresh" in url:
+            hits["refresh"] += 1
+        route.continue_()
+    page.route("**/api/v1/**", _handler)
+    try:
+        open_header_menu(page)
+        page.locator("#menu-reload").click()
+        page.wait_for_timeout(1500)  # refresh POST + tree + debounced re-search
+        assert hits["refresh"] >= 1, "index/refresh POST did not fire"
+        assert hits["search"] >= 1, (
+            "active search was not re-run after reload — results would stay stale"
+        )
+        # Search view is still up (empty-state for this query).
+        expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+    finally:
+        page.unroute("**/api/v1/**")
+
+
 # ── filter bottom sheet ─────────────────────────────────────────────────────────
 
 
 def test_filter_button_exists(page):
-    """Filter button is present in the sidebar header."""
+    """Filter item lives in the header ⋯menu — hidden until it opens."""
+    expect(page.locator("#filter-btn")).not_to_be_visible()
+    open_header_menu(page)
     expect(page.locator("#filter-btn")).to_be_visible()
 
 
@@ -96,34 +132,37 @@ def _current_view_modes(tile_grid):
     return modes
 
 
-def test_view_mode_cycles_through_three_modes(page):
-    """Footer button cycles tile → list → card → tile."""
-    btn = page.locator("#footer-refresh-btn")
+def test_view_mode_picked_from_menu(page):
+    """The ⋯menu's view radios pick a mode directly and stay aria-checked in sync."""
     grid = page.locator("#tile-grid")
 
     # --- initial: tile ---
     assert _current_view_modes(grid) == set(), f"Expected tile mode, got {_current_view_modes(grid)}"
     expect(page.locator(".tile").first).to_be_visible()
+    expect(page.locator("#menu-view-tile")).to_have_attribute("aria-checked", "true")
 
-    # --- 1st click → list ---
-    btn.click()
+    # --- pick list ---
+    set_view_mode(page, "list")
     page.wait_for_timeout(100)
     expect(grid).to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".item.folder").first).to_be_visible()
+    expect(page.locator("#menu-view-list")).to_have_attribute("aria-checked", "true")
 
-    # --- 2nd click → card ---
-    btn.click()
+    # --- pick card ---
+    set_view_mode(page, "card")
     page.wait_for_timeout(100)
     expect(grid).to_have_class(re.compile(r"\bcard-mode\b"))
     expect(grid).not_to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".card").first).to_be_visible()
+    expect(page.locator("#menu-view-card")).to_have_attribute("aria-checked", "true")
 
-    # --- 3rd click → back to tile ---
-    btn.click()
+    # --- back to tile ---
+    set_view_mode(page, "tile")
     page.wait_for_timeout(100)
     assert _current_view_modes(grid) == set(), f"Expected tile mode, got {_current_view_modes(grid)}"
     expect(page.locator(".tile").first).to_be_visible()
     expect(page.locator("#folder-count")).to_have_text("18 件")
+    expect(page.locator("#menu-view-tile")).to_have_attribute("aria-checked", "true")
 
 
 # ── pull-to-refresh delegated to Safari native (custom top reload removed) ──
@@ -178,10 +217,10 @@ def test_ptr_top_drag_does_not_trigger_custom_reload(page):
     page.wait_for_timeout(100)
     fetch_count = {"n": 0}
     def _handler(route):
-        if "/api/folders" in route.request.url:
+        if "/api/v1/tree" in route.request.url:
             fetch_count["n"] += 1
         route.continue_()
-    page.route("**/api/folders*", _handler)
+    page.route("**/api/v1/tree*", _handler)
     try:
         _ptr_fire(page, [
             ("touchstart", 20, True),
@@ -196,7 +235,7 @@ def test_ptr_top_drag_does_not_trigger_custom_reload(page):
         b = page.evaluate("window.__ptrDebug ? window.__ptrDebug.bVisual : 0")
         assert b == 0
     finally:
-        page.unroute("**/api/folders*")
+        page.unroute("**/api/v1/tree*")
 
 
 def test_ptr_touchcancel_resets(page):
@@ -249,7 +288,6 @@ def test_ptr_touchcancel_resets(page):
 
 def test_pull_bottom_resistance_no_refresh(page):
     """At bottom, dragging up 80 shows ~15px resistance and triggers no fetch."""
-    # Scroll to bottom
     page.evaluate("""() => {
         const s = document.getElementById('sidebar-scroll');
         s.scrollTop = s.scrollHeight;
@@ -259,10 +297,10 @@ def test_pull_bottom_resistance_no_refresh(page):
     assert at_bottom, "not at bottom"
     fetch_count = {"n": 0}
     def _handler(route):
-        if "/api/folders" in route.request.url:
+        if "/api/v1/tree" in route.request.url:
             fetch_count["n"] += 1
         route.continue_()
-    page.route("**/api/folders*", _handler)
+    page.route("**/api/v1/tree*", _handler)
     try:
         page.evaluate("""() => {
             const scroll = document.getElementById('sidebar-scroll');
@@ -318,7 +356,7 @@ def test_pull_bottom_resistance_no_refresh(page):
         b_after = page.evaluate("window.__ptrDebug ? window.__ptrDebug.bVisual : 0")
         assert b_after == 0
     finally:
-        page.unroute("**/api/folders*")
+        page.unroute("**/api/v1/tree*")
         # reset scroll to top for next tests
         page.evaluate("document.getElementById('sidebar-scroll').scrollTop = 0")
 
@@ -338,11 +376,7 @@ def test_header_shows_correct_title(page):
 
 def test_card_mode_renders_folders_without_metadata(page):
     """Card mode gracefully shows folders even when no metadata.toml exists."""
-    btn = page.locator("#footer-refresh-btn")
-
-    # cycle to list → card
-    btn.click()  # list
-    btn.click()  # card
+    set_view_mode(page, "card")
     page.wait_for_timeout(100)
 
     # Cards are rendered

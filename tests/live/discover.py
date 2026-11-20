@@ -28,13 +28,31 @@ def census(root: str) -> tuple[int, int]:
 
 
 def get_tree(base: str, deadline_s: float = 600.0):
-    """Poll /api/folders until non-empty: a cold server serves stale-empty
-    while the first full scan rebuilds in the background."""
+    """Poll /api/v1/tree until non-empty: a cold server answers 202 while
+    the first full scan rebuilds in the background."""
+    import urllib.error
+
     deadline = time.time() + deadline_s
     while True:
-        with urllib.request.urlopen(base + "/api/folders", timeout=300) as r:
-            assert r.status == 200
-            tree = json.load(r)
+        status = None
+        body = None
+        try:
+            with urllib.request.urlopen(base + "/api/v1/tree", timeout=300) as r:
+                status = r.status
+                if status == 200:
+                    body = json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code == 202:
+                status = 202
+            else:
+                raise
+        # urllib treats 202 as success (no HTTPError) — a cold index polls
+        # here, not in the except branch (dead code before #563).
+        if status != 200:
+            assert time.time() < deadline, "tree stayed cold"
+            time.sleep(5)
+            continue
+        tree = body.get("nodes", body) if isinstance(body, dict) else body
         if tree:
             return tree
         assert time.time() < deadline, "folders stayed empty"

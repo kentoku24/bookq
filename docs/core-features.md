@@ -16,7 +16,7 @@ Docker Compose で2コンテナを起動する。viewer はホストへのポー
 | `viewer` | `python:3.13-slim` | 画像ビューア + API。`viewer.py` のみを COPY し、`--bind 0.0.0.0 --port 8080` で起動する |
 | `tailscale` | `tailscale/tailscale:latest` | Tailscale ノード。userspace networking で `tailscaled` を起動し、`tailscale serve --bg http://viewer:8080` で HTTPS(443) 公開する |
 
-画像の実体はホスト側の画像フォルダ（`DOWNLOADS_HOST_DIR`、既定は `./downloads`）を `/app/downloads` にマウントして参照する。Tailscale の認証状態は `tailscale-state` ボリュームに永続化され、再起動時は authkey を使わず hostname の更新だけを行う。
+画像の実体はホスト側の画像フォルダ（`LIBRARY_HOST_DIR`、既定は `./library`）を `/app/library` にマウントして参照する。Tailscale の認証状態は `tailscale-state` ボリュームに永続化され、再起動時は authkey を使わず hostname の更新だけを行う。
 
 ## サーバー仕様（viewer.py）
 
@@ -25,27 +25,27 @@ Docker Compose で2コンテナを起動する。viewer はホストへのポー
 | オプション | 意味 | 既定値 |
 | --- | --- | --- |
 | `-p, --port` | 待ち受けポート | 8080 |
-| `-d, --downloads` | 画像ルートディレクトリ | スクリプトと同階層の `downloads/` |
+| `-d, --library` | 画像ルートディレクトリ | スクリプトと同階層の `library/` |
 | `-b, --bind` | バインドアドレス | `127.0.0.1`（Docker では `0.0.0.0` を指定） |
 
-起動時に downloads ディレクトリの存在を確認し、なければ exit 1 する。サーバーは `ThreadingMixIn` を混ぜた HTTPServer（デーモンスレッド、`request_queue_size=128`）で、リクエストごとにスレッドを立てる。同時リクエストで 502 が出た問題への対処として導入された（コミット `38cd9b7`）。
+起動時に library ディレクトリの存在を確認し、なければ exit 1 する。サーバーは `ThreadingMixIn` を混ぜた HTTPServer（デーモンスレッド、`request_queue_size=128`）で、リクエストごとにスレッドを立てる。同時リクエストで 502 が出た問題への対処として導入された（コミット `38cd9b7`）。
 
 ### HTTP API
 
 | エンドポイント | 応答 |
 | --- | --- |
 | `GET /api/health` | `{"status": "ok"}` |
-| `GET /api/folders` | downloads 直下から再帰走査したフォルダツリー（JSON、構造は後述） |
+| `GET /api/folders` | library 直下から再帰走査したフォルダツリー（JSON、構造は後述） |
 | `GET /api/images?folder=<path>` | 指定フォルダ直下の画像ファイル名の配列。`folder` 欠落は 400、範囲外パスは 403、非ディレクトリは 404 |
 | `GET /image/<folder>/<file>` | 画像ファイル本体。最後の `/` でフォルダとファイル名に分割する |
 | `GET /` `/index.html` | ビューア HTML（`INDEX_HTML` 定数に埋め込まれた単一ページ） |
-| その他のパス | `SimpleHTTPRequestHandler` にフォールバックし、downloads 配下を静的配信する |
+| その他のパス | `SimpleHTTPRequestHandler` にフォールバックし、library 配下を静的配信する |
 
 HTML と API は `Cache-Control: no-cache`、画像は `public, max-age=3600` を返す。全応答に `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: strict-origin-when-cross-origin` を付ける。アクセスログは 200 以外のみ stderr に出す。
 
 ### フォルダツリーの生成規則（scan_tree）
 
-`/api/folders` はリクエストのたびに downloads をフルスキャンする（キャッシュなし）。ノードは `{"name", "type": "folder"|"image", "children"}` で、folder ノードには `thumb`（サブツリー内で最初に見つかる画像の相対パス）と、条件を満たす場合のみ `thumbs`（直下サブフォルダの thumb を最大9件。2件以上あるときだけ付く）が加わる。
+`/api/folders` はリクエストのたびに library をフルスキャンする（キャッシュなし）。ノードは `{"name", "type": "folder"|"image", "children"}` で、folder ノードには `thumb`（サブツリー内で最初に見つかる画像の相対パス）と、条件を満たす場合のみ `thumbs`（直下サブフォルダの thumb を最大9件。2件以上あるときだけ付く）が加わる。
 
 走査には次の規則がある。
 
@@ -55,12 +55,12 @@ HTML と API は `Cache-Control: no-cache`、画像は `public, max-age=3600` �
 - アーカイブ（`.zip`/`.cbz`/`.rar`/`.cbr`/`.epub`）は仮想フォルダとして扱い、`MAX_ARCHIVE_ENTRIES=2000`（`app/archive.py:28-29`）を超えるエントリは一覧から切り捨てられる
 - 2000件超の書庫は巻ごとに分割して配置する（例）:
   `7z x big.rar -obig && 7z a vol1.zip big/vol1 && 7z a vol2.zip big/vol2`
-  分割後のzipをdownloads配下に置く（マルチボリュームrarのまま置かない）
+  分割後のzipをlibrary配下に置く（マルチボリュームrarのまま置かない）
 - 分割はスキャン/応答の高速化にも効く。`/api/folders`は毎回フル再列挙し、`/api/images`のprefix指定も都度`list_archive_entries`を呼び直す（`app/routes.py:500`）
 
 ### 画像配信
 
-`/image/` は `resolve()` 後のパスが downloads ルート配下にあることを文字列前方一致で検査し、外れていれば 403 を返す（`/api/images` も同じ検査を行う）。Content-Type は `mimetypes` で拡張子から推定し、不明なら `application/octet-stream` にする。ファイルは全量を read してから書き出す方式で、Range リクエストやストリーミングには対応しない。
+`/image/` は `resolve()` 後のパスが library ルート配下にあることを文字列前方一致で検査し、外れていれば 403 を返す（`/api/images` も同じ検査を行う）。Content-Type は `mimetypes` で拡張子から推定し、不明なら `application/octet-stream` にする。ファイルは全量を read してから書き出す方式で、Range リクエストやストリーミングには対応しない。
 
 ## ビューア UI（単一ページ、vanilla JS）
 
@@ -109,8 +109,8 @@ HTML と API は `Cache-Control: no-cache`、画像は `public, max-age=3600` �
 ## 制約・注意点
 
 - 認証・認可はアプリ自体には一切なく、Tailnet 内からしか到達できないことだけが防御線になる。`TS_AUTHKEY` の管理がそのままアクセス制御を意味する
-- フォールバックの静的配信により、downloads 配下であれば画像以外のファイルやディレクトリリスティングも配信される
-- パス検査は `resolve()` 後の文字列前方一致で、区切り文字を含めない比較のため、ルートと同じ接頭辞を持つ兄弟ディレクトリ（例: `downloads2`）があれば通過しうる。Docker 運用ではマウント構成上、実害の出る配置になっていない
+- フォールバックの静的配信により、library 配下であれば画像以外のファイルやディレクトリリスティングも配信される
+- パス検査は `resolve()` 後の文字列前方一致で、区切り文字を含めない比較のため、ルートと同じ接頭辞を持つ兄弟ディレクトリ（例: `library2`）があれば通過しうる。Docker 運用ではマウント構成上、実害の出る配置になっていない
 - 画像とサブフォルダが混在するフォルダでは、フォルダ内の一覧にはサブフォルダのみが表示され、直下の画像は一つ上の階層にそのフォルダ用の images-tile（このフォルダを読む）1 枚として表示される。images-tile をクリックするとそのフォルダの直下画像のみをビューアで開く。例外としてルート直下の画像には親階層が存在しないため、ルートの一覧にのみ self-tile（同じ文言）が表示される
 - `/api/folders` は毎回フルスキャンするため、フォルダ数が増えると応答時間が伸びる
 - docker-compose.yml のマウント元パスはハードコードされており、他ホストで使う場合は書き換えが必要になる
