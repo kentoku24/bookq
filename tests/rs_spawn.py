@@ -3,14 +3,25 @@
 Spawns the `viewer-rs` binary: same synthetic tree, same contract surface,
 exactly as production does (all routes native, no upstream).
 
-Builds the binary with `cargo build -p viewer-rs` on first use when
-`rust/target/debug/viewer-rs` is missing. Set BOOKQ_TARGET_DIR (or
-CARGO_TARGET_DIR / CARGO_TARGET_DIR_BASE) to a directory on an external
-volume to keep the ~1.5GB target dir off the internal SSD — the value is
-a root; a per-checkout subdir is appended so parallel worktrees never
-share one target dir.
+Runs `cargo build -p viewer-rs` before every spawn — cheap when fresh —
+because the binary at target/debug/viewer-rs can be another worktree's
+build when the target dir is shared. The spawned path is resolved to the
+fingerprint-hashed deps/viewer_rs-<hash> so a concurrent build in another
+worktree cannot swap the binary underneath us.
+
+`rust/target` is normally a symlink to one shared target dir on an
+external volume (BOOKQ_SHARED_TARGET_DIR, no default — machine-specific
+paths stay out of the repo) so parallel worktrees reuse each other's dep
+artifacts instead of each writing ~1.5GB to the internal SSD. The symlink
+is created here / by scripts/ensure-cargo-target.sh / by dev.sh up.
+
+Set BOOKQ_TARGET_DIR (or CARGO_TARGET_DIR / CARGO_TARGET_DIR_BASE) to a
+directory on an external volume to opt back into the #542 layout instead:
+the value is a root; a per-checkout subdir is appended so parallel
+worktrees never share one target dir.
 """
 
+import filecmp
 import os
 import socket
 import subprocess
@@ -56,17 +67,74 @@ def _target_dir() -> Path:
     return REPO_ROOT / "rust" / "target"
 
 
+def _ensure_shared_target() -> None:
+    """Point rust/target at the shared external target dir via symlink.
+
+    No-op when rust/target already exists (link or real dir — a real dir is
+    left alone so nothing is ever deleted here) or when the shared root is
+    not on a mounted external volume. Kept in sync with
+    scripts/ensure-cargo-target.sh.
+    """
+    target = REPO_ROOT / "rust" / "target"
+    if target.is_symlink() or target.exists():
+        return
+    root = os.environ.get("BOOKQ_SHARED_TARGET_DIR")
+    if not root:
+        return
+    shared = Path(root).expanduser()
+    if not _external_root_ok(shared.parent):
+        return
+    try:
+        shared.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(shared)
+    except OSError:
+        pass
+
+
+def _stable_binary(bin_path: Path) -> Path:
+    """Resolve `debug/viewer-rs` to the identical `deps/viewer_rs-<hash>`.
+
+    The debug/ path is a single name per target dir — a build in another
+    worktree sharing the dir replaces it. The deps/ artifact's name carries
+    the build fingerprint, so it survives other worktrees' builds. Cargo
+    serializes builds on the shared dir, so right after our build returns
+    bin_path still holds *our* bytes; we find the deps file with identical
+    content (inode comparison is unreliable — APFS clonefile gives the
+    copy a new inode). Falls back to bin_path when no match is found.
+    """
+    try:
+        size = bin_path.stat().st_size
+    except OSError:
+        return bin_path
+    try:
+        candidates = sorted(
+            (p for p in (bin_path.parent / "deps").iterdir()
+             if p.name.startswith("viewer_rs-") and p.suffix == ""),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return bin_path
+    for p in candidates:
+        try:
+            if p.stat().st_size == size and filecmp.cmp(bin_path, p, shallow=False):
+                return p
+        except OSError:
+            continue
+    return bin_path
+
+
 def _viewer_rs_binary() -> Path:
     target = _target_dir()
-    bin_path = target / "debug" / "viewer-rs"
-    if not bin_path.exists():
-        subprocess.run(
-            ["cargo", "build", "-p", "viewer-rs"],
-            cwd=REPO_ROOT / "rust",
-            env={**os.environ, "CARGO_TARGET_DIR": str(target)},
-            check=True,
-        )
-    return bin_path
+    if target == REPO_ROOT / "rust" / "target":
+        _ensure_shared_target()
+    subprocess.run(
+        ["cargo", "build", "-p", "viewer-rs"],
+        cwd=REPO_ROOT / "rust",
+        env={**os.environ, "CARGO_TARGET_DIR": str(target)},
+        check=True,
+    )
+    return _stable_binary(target / "debug" / "viewer-rs")
 
 
 def spawn_backend(*, library_dir: Path, state_dir: str | Path) -> tuple:

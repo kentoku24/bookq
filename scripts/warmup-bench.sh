@@ -30,7 +30,7 @@
 #   6. ALWAYS `./dev.sh down <env>` on exit (trap EXIT, success or failure),
 #      then proves the slot is freed via `./dev.sh list`.
 #
-# EXPECTED REAL-DATA SIGNATURE (post-fix, /Volumes/San500g/books -> /app/library):
+# EXPECTED REAL-DATA SIGNATURE (post-fix, /Volumes/<disk>/library -> /app/library):
 #   cold ~12.6s, warm ~5.0s, cache 85/85 all `r:` (84 archive + 1 pdf).
 #
 # FAILS LOUD (no silent fallbacks) on: dirty tree, wrong branch, fixture mount,

@@ -53,7 +53,7 @@ class QrDecodeTest {
 
     @Test
     fun decodesJoinUrlToCode() {
-        val url = "https://dev-01.javanese-goblin.ts.net/#/join/468211"
+        val url = "https://dev-01.example.ts.net/#/join/468211"
         val raw = decode(url)
         assertEquals(url, raw)
         assertNotNull(raw)

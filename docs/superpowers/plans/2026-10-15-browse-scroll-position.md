@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 作業ディレクトリ: `/Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position`（branch `ai/browse-scroll-position`）。**リポジトリ直下（main）では編集・commit しない**（AGENTS.md §8）。
+- 作業ディレクトリ: `<repo>/.worktrees/browse-scroll-position`（branch `ai/browse-scroll-position`）。**リポジトリ直下（main）では編集・commit しない**（AGENTS.md §8）。
 - テスト実行（必須の形。`--with-requirements requirements-dev.txt` を省略しない）:
   - `uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q`
   - 単一ファイル: 末尾に `tests/test_browse_scroll_target.py -q -s`
@@ -53,7 +53,7 @@
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 git branch --show-current && git log --oneline -2
 ```
 Expected: `ai/browse-scroll-position` と `docs(ai): フォルダ一覧の表示位置（スクロールアンカー）設計を追加` が見える。
@@ -62,7 +62,7 @@ Expected: `ai/browse-scroll-position` と `docs(ai): フォルダ一覧の表示
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 ./dev.sh up browse-scroll-position --local --port 8090
 ./dev.sh url browse-scroll-position
 ```
@@ -72,7 +72,7 @@ Expected: `http://127.0.0.1:8090` が出力され、`docker ps` に `com.bookq.n
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_sidebar_scroll.py -q
 ```
 Expected: `2 passed`（既存のベースライン。ここで赤ければ環境要因なので先に解決する。`BrowserType.launch: Executable doesn't exist` が出たら `uv run --with playwright playwright install chromium`）。
@@ -369,7 +369,7 @@ def test_apply_geometry_in_list_and_card(small, mode, clicks):
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_browse_scroll_target.py -q 2>&1 | tail -20
 ```
@@ -563,7 +563,7 @@ git commit -m "test(ai): フォルダ一覧の表示位置（アンカー）のR
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_sw_offline_contract.py tests/test_browse_scroll_target.py -q 2>&1 | tail -15
 ```
@@ -642,7 +642,7 @@ git commit -m "feat(ai): browse/scroll モジュール（一覧アンカーの�
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_browse_url_state.py tests/test_sidebar_scroll.py tests/test_ui.py tests/test_traversal.py -q 2>&1 | tail -10
 ```
@@ -695,7 +695,7 @@ git commit -m "feat(ai): renderView にスクロールアンカーを受け渡�
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_browse_scroll_target.py -q 2>&1 | tail -12
 ```
@@ -795,7 +795,7 @@ git commit -m "feat(ai): フォルダを開いたときの位置を最大既読�
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_browse_scroll_target.py -q 2>&1 | tail -12
 ```
@@ -805,7 +805,7 @@ Expected: `test_viewer_return_anchors_displayed_episode_beats_progress` / `test_
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_sidebar_scroll.py tests/test_browse_url_state.py tests/test_url_state.py tests/test_url_layout_params.py tests/test_offline_full_browse.py -q 2>&1 | tail -10
 ```
@@ -857,7 +857,7 @@ git commit -m "feat(ai): ビューア復帰で表示していたエピソード�
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_browse_scroll_target.py -q 2>&1 | tail -8
 ```
@@ -880,7 +880,7 @@ git commit -m "feat(ai): ルート復帰・ビューア開放でアンカー文�
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 BROWSER=webkit uv run --with pytest --with playwright --with-requirements requirements-dev.txt \
   pytest tests/test_browse_scroll_target.py -q 2>&1 | tail -10
 ```
@@ -890,7 +890,7 @@ Expected: 全パス。`Executable doesn't exist` が出たら `uv run --with pla
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q 2>&1 | tail -15
 ```
 Expected: 全パス（既知の flaky を除く）。失敗したテストは「本変更が scrollTop を書く経路（フォルダを開く / ビューア復帰 / 保存位置なし restore / ルート復帰）」に依存していないか確認する。もし `#sidebar-scroll` の位置を前提にしているテストが落ちたら、そのテストの前提を（アンカーが働く場面かどうかを切り分けて）修正する。
@@ -930,7 +930,7 @@ Expected: 全パス（既知の flaky を除く）。失敗したテストは「
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 git diff --stat
 grep -n "browse/scroll" CLAUDE.md AGENTS.md docs/core-features.md app/templates/index.html app/static/sw.js
 ```
@@ -953,7 +953,7 @@ git commit -m "docs(ai): 一覧スクロールアンカーの仕様とモジュ�
 
 Run（Task 0 で起動済みのはず。落ちていれば再実行）:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 ./dev.sh url browse-scroll-position
 ```
 Expected: `http://127.0.0.1:8090`。
@@ -975,7 +975,7 @@ Expected: `http://127.0.0.1:8090`。
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q 2>&1 | tail -10
 ```
 Expected: 全パス。
@@ -984,7 +984,7 @@ Expected: 全パス。
 
 Run:
 ```bash
-cd /Users/kentokumatsunami/Documents/GitHub/bookq/.worktrees/browse-scroll-position
+cd <repo>/.worktrees/browse-scroll-position
 git log --oneline origin/main..HEAD
 git diff origin/main --stat
 ```

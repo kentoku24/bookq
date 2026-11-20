@@ -157,6 +157,9 @@ reclaim() {
     fi
     for sub in rust/target ios/build android/app/build android/build android/.gradle .pytest_cache; do
       t="$wt/$sub"
+      # symlink は中身を追わない・回収容量も無いので対象外 (rust/target は
+      # 共有外付け target へのリンクになり得る — ensure-cargo-target.sh)
+      [ -L "$t" ] && continue
       [ -e "$t" ] || continue
       if is_stale "$t" || worktree_merged "$wt"; then
         maybe_rm "$t"
