@@ -593,22 +593,33 @@ def runner_git_sha(repo_root: Path = REPO_ROOT) -> str:
 
 
 def target_git_sha(base_url: str, timeout: float = 5.0) -> str:
-    """The deployed build sha reported by the target env's /api/version."""
-    try:
-        with urllib.request.urlopen(
-                base_url.rstrip("/") + "/api/version", timeout=timeout) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        return str(data.get("sha") or "")
-    except Exception:
-        return ""
+    """The deployed build sha reported by the target env's version API."""
+    for path in ("/api/v1/version", "/api/version"):
+        try:
+            with urllib.request.urlopen(
+                    base_url.rstrip("/") + path, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            return str(data.get("sha") or "")
+        except Exception:
+            continue
+    return ""
 
 
 def check_url_reachable(base_url: str, timeout: float = 8.0) -> dict:
+    # viewer-rs serves the v1 routes; the pre-#503 Python backend used the
+    # unversioned ones — accept either, then fall back to a bare 200.
+    for path in ("/api/v1/health", "/api/health"):
+        try:
+            with urllib.request.urlopen(
+                    base_url.rstrip("/") + path, timeout=timeout) as r:
+                body = json.loads(r.read().decode("utf-8"))
+            return {"ok": body.get("status") == "ok"}
+        except Exception:
+            continue
     try:
-        with urllib.request.urlopen(
-                base_url.rstrip("/") + "/api/health", timeout=timeout) as r:
-            body = json.loads(r.read().decode("utf-8"))
-        return {"ok": body.get("status") == "ok"}
+        with urllib.request.urlopen(base_url.rstrip("/") + "/",
+                                    timeout=timeout) as r:
+            return {"ok": r.status == 200}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
