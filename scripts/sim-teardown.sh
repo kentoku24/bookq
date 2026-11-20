@@ -1,13 +1,18 @@
 #!/bin/bash
 set -euo pipefail
-# Usage: ./scripts/sim-teardown.sh [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills] [--audit-only]
+# Usage: ./scripts/sim-teardown.sh [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills] [--audit-only] [--force]
 #   --audit-only: 停止・削除・kill を一切行わず診断レポート + CPU 監査のみ
+#   --force: sim ownership を無視して全 booted sim / 全 idb_companion を対象にする
+#     (他エージェントの検証が本当に無いと確信できる時だけ使う)
 # sim を使った検証の終了時に必須実行する片付け+CPU監査 (冪等)。
 #   1. --dev-env 指定の dev 環境を down (user-state volume は保持)
 #   2. booted sim を shutdown (--udid 指定時はその1台のみ)
+#      /tmp/bookq-sim-owners/<udid>.json に生存 pid の owner がいる sim は
+#      他エージェントの検証中とみなしてスキップ (#596)。--force で無視可。
 #   3. xcodebuild テスト Clone デバイスを delete (--keep-clones で保持)
 #   4. ~/Library/Developer/XCTestDevices の残留データを削除
-#   5. idb_companion 停止 (次回使用時に自動再接続)
+#   5. idb_companion 停止 — 生存 owner のいる sim の companion は残す
+#      (次回使用時に自動再接続)
 #   6. 残留 simctl diagnose / 孤児 spindump を kill
 #   7. sim 関連プロセスの CPU 残留を監査 — 残っていれば非0終了
 # 他セッション所有の xcodebuild / dev 環境は kill せず報告のみ。
@@ -18,6 +23,7 @@ KEEP_CLONES=0
 KEEP_IDB=0
 SKIP_PROC_KILLS=0
 AUDIT_ONLY=0
+FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dev-env) DEV_ENV=$2; shift 2 ;;
@@ -26,7 +32,8 @@ while [ $# -gt 0 ]; do
     --keep-idb) KEEP_IDB=1; shift ;;
     --skip-process-kills) SKIP_PROC_KILLS=1; shift ;;
     --audit-only) AUDIT_ONLY=1; shift ;;
-    *) echo "Usage: $0 [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills] [--audit-only]" >&2; exit 2 ;;
+    --force) FORCE=1; shift ;;
+    *) echo "Usage: $0 [--dev-env <name>] [--udid <u>] [--keep-clones] [--keep-idb] [--skip-process-kills] [--audit-only] [--force]" >&2; exit 2 ;;
   esac
 done
 
@@ -44,13 +51,38 @@ fi
 # テスト資産として shutdown/delete 対象から外す (殺すと他セッションのテストが死ぬ)
 live_xcodebuild=$(pgrep -f "xcodebuild.*test" | head -1 || true)
 
+# /tmp/bookq-sim-owners/<udid>.json — verify.py の SimulatorDriver が run 中に
+# 取得する所有権マーカー (#596)。記録された pid が生存していれば他エージェントの
+# 検証中とみなし、shutdown / companion kill の対象から外す。--force で無視可。
+SIM_OWNER_DIR="/tmp/bookq-sim-owners"
+SIM_OWNER_DESC=""
+sim_live_owner() {
+  local f="$SIM_OWNER_DIR/$1.json" pid
+  SIM_OWNER_DESC=""
+  [ -f "$f" ] || return 1
+  pid=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("pid") or "")
+except Exception: print("")' "$f" 2>/dev/null)
+  [ -n "$pid" ] || return 1
+  if kill -0 "$pid" 2>/dev/null; then
+    SIM_OWNER_DESC="pid=$pid"
+    return 0
+  fi
+  return 1
+}
+
 if [ "$AUDIT_ONLY" = 0 ]; then
 
 echo "== sim shutdown"
 if [ -n "$TARGET_UDID" ]; then
-  xcrun simctl shutdown "$TARGET_UDID" 2>/dev/null || true
+  if [ "$FORCE" = 0 ] && sim_live_owner "$TARGET_UDID"; then
+    echo "  skip: $TARGET_UDID (sim owner ${SIM_OWNER_DESC} — 他エージェントの検証中; --force で強制)"
+  else
+    xcrun simctl shutdown "$TARGET_UDID" 2>/dev/null || true
+  fi
 else
-  # booted デバイスを列挙: Clone かつ xcodebuild 生存中ならスキップ、それ以外を shutdown
+  # booted デバイスを列挙: Clone かつ xcodebuild 生存中ならスキップ、
+  # 生存 owner のいる sim もスキップ、それ以外を shutdown
   xcrun simctl list devices booted -j 2>/dev/null | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -61,6 +93,8 @@ for devs in d.get("devices",{}).values():
 ' | while IFS=$'\t' read -r u name; do
     if [ -n "$live_xcodebuild" ] && [ "${name#Clone }" != "$name" ]; then
       echo "  skip: $name (xcodebuild test 実行中 pid $live_xcodebuild — 他セッション所有の可能性)"
+    elif [ "$FORCE" = 0 ] && sim_live_owner "$u"; then
+      echo "  skip: $name (sim owner ${SIM_OWNER_DESC} — 他エージェントの検証中; --force で強制)"
     else
       xcrun simctl shutdown "$u" 2>/dev/null && echo "  shutdown: $name" || true
     fi
@@ -105,7 +139,22 @@ fi
 # 並走する他セッションの検証 (idb 接続や simctl diagnose ログ収集) を
 # 止めないよう global なプロセス kill を省略する。CPU 監査は常に行う。
 if [ "$SKIP_PROC_KILLS" = 0 ] && [ "$KEEP_IDB" = 0 ]; then
-  pkill -f "idb_companion" 2>/dev/null && echo "== idb_companion 停止" || true
+  # companion を UDID 単位で整理 — 生存 owner のいる sim の companion は残す。
+  # companion を殺すと相手の idb AX/tap が dtuhid 断絶で死ぬ (#587 調査済み)。
+  # --force 時は従来通り全 companion を停止。
+  idb_killed=0
+  idb_kept=0
+  while read -r cpid ccmd; do
+    [ -n "$cpid" ] || continue
+    cudid=$(printf '%s' "$ccmd" | sed -n 's/.*--udid \([A-Za-z0-9-]*\).*/\1/p')
+    if [ "$FORCE" = 0 ] && [ -n "$cudid" ] && sim_live_owner "$cudid"; then
+      idb_kept=$((idb_kept + 1))
+      continue
+    fi
+    kill "$cpid" 2>/dev/null && idb_killed=$((idb_killed + 1)) || true
+  done < <(pgrep -fl "idb_companion" 2>/dev/null || true)
+  [ "$idb_killed" -gt 0 ] && echo "== idb_companion 停止 ($idb_killed 件)" || true
+  [ "$idb_kept" -gt 0 ] && echo "== idb_companion 保持 ($idb_kept 件 — 生存 owner の sim)" || true
 fi
 
 if [ "$SKIP_PROC_KILLS" = 0 ]; then
