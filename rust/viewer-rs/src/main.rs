@@ -1279,6 +1279,41 @@ mod handler_tests {
         );
     }
 
+    /// #359: `/api/v1/version` requires auth; health stays public.
+    #[tokio::test]
+    async fn version_requires_auth_health_stays_public() {
+        // Unauthenticated version is 401 — sha/build_date must not leak.
+        let st = hook_state(false);
+        let (status, body) = body_json(
+            api_version(State(st.clone()), http_req("GET", "/api/v1/version", "")).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, serde_json::json!({"detail": "authentication required"}));
+        // Health stays public for uptime probes.
+        let (status, body) =
+            body_json(api_health(State(st), http_req("GET", "/api/v1/health", "")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"status": "ok"}));
+        // Authed (test-mode mock user) version is 200 with no-store.
+        let st = hook_state(true);
+        let res = api_version(State(st), http_req("GET", "/api/v1/version", "")).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-store"
+        );
+        let (status, body) = body_json(res).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["version"], serde_json::json!("2.0.0"));
+        assert!(body.get("sha").is_some());
+        assert!(body.get("build_date").is_some());
+    }
+
     /// Minimal AppState for the test-hook handlers: nothing here touches
     /// the network (pair-report/reset are served from memory/the registry)
     /// or the filesystem (the SQLite stores are never consulted).
