@@ -59,15 +59,19 @@
    * records {sessionId,memberId,resumeToken,at}; the next 'online' event,
    * pageshow, or fresh client boot replays RESUME+LEAVE on a throwaway
    * link so the peer is freed instead of sitting peer-away until the
-   * resume window lapses (#157). Single-slot like PERSIST_KEY — one
-   * session per browser profile. */
+   * resume window lapses (#157). SessionId-keyed map (#585): localStorage
+   * is shared by every tab but a pair session belongs to one tab, so two
+   * tabs can each owe a different peer its LEAVE. */
   var LEAVE_TOMBSTONE_KEY = 'bookq.readerSync.leaveTombstone.v1';
   /* Flush retry on resume_in_use: the rejected member may still own a
    * dead link the server has not reaped yet (~15s of heartbeat silence),
    * so a few retries cover that reap window — RESUME_REJECT_END already
-   * models resume_in_use as transient for the member's own resume path. */
+   * models resume_in_use as transient for the member's own resume path.
+   * The same budget bounds silent flush failures (watchdog/close/send
+   * throw) so a black-holed link cannot spin forever (#585). */
   var FLUSH_RETRY_MS = 4000;
   var FLUSH_RETRY_MAX = 3;
+  var FLUSH_DRAIN_MS = 250;           // delay before flushing the next queued tombstone
   var RESUME_HB_MS = 4000;            // ownership heartbeat while bound
   var RESUME_HB_STALE_MS = 12000;     // owner presumed dead after this silence
   var RESUME_WINDOW_MS = 300 * 1000;      // sessions.RESUME_WINDOW_SECONDS
@@ -125,6 +129,23 @@
     try {
       return (typeof window !== 'undefined' && window.localStorage) || null;
     } catch (e) { return null; }
+  }
+
+  /* Parse the tombstone store into a {sessionId: entry} map. Legacy
+   * single-object records ({sessionId, memberId, ...} at top level, as
+   * written before #585) normalize to a one-entry map so an in-flight
+   * v1 tombstone still flushes after upgrade. Never throws. */
+  function _tombstoneEntries(raw) {
+    var d;
+    try { d = JSON.parse(raw || 'null'); } catch (e) { return {}; }
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return {};
+    if (typeof d.sessionId === 'string' && typeof d.memberId === 'string') {
+      var one = {};
+      one[d.sessionId] = {memberId: d.memberId,
+                          resumeToken: d.resumeToken, at: d.at};
+      return one;
+    }
+    return d;
   }
 
   function _rid() {
@@ -619,33 +640,78 @@
      * genuinely lives on a healthier link, that link's owner sends its
      * own LEAVE and the tombstone just idles out with the window. */
 
-    function _tombstoneRead() {
+    /* Tombstones are a sessionId-keyed MAP (#585): localStorage is shared
+     * by every tab but a pair session belongs to one tab, so two tabs can
+     * each owe a different peer its LEAVE. A single slot let the newer
+     * write clobber the older parked LEAVE — its peer then waited out the
+     * whole resume window, the exact #157 symptom. */
+    function _tombstoneMap() {
       if (!_persist) return null;
       try {
-        var d = JSON.parse(_persist.getItem(LEAVE_TOMBSTONE_KEY) || 'null');
-        if (d && d.sessionId && d.memberId && d.resumeToken &&
-            typeof d.at === 'number') {
-          if (_now() - d.at <= _resumeWindow) return d;
-          _tombstoneClear();         // server already reaped the member
-        }
-      } catch (e) {}
-      return null;
+        return _tombstoneEntries(_persist.getItem(LEAVE_TOMBSTONE_KEY));
+      } catch (e) { return {}; }
     }
 
-    function _tombstoneWrite(member) {
-      if (!_persist || !member) return;
-      _flushRetries = 0;             // a fresh leave earns a fresh budget
+    function _tombstoneWriteMap(map) {
+      if (!_persist) return;
       try {
-        _persist.setItem(LEAVE_TOMBSTONE_KEY, JSON.stringify({
-          sessionId: member.sessionId, memberId: member.memberId,
-          resumeToken: member.resumeToken, at: _now(),
-        }));
+        if (!map || !Object.keys(map).length) {
+          _persist.removeItem(LEAVE_TOMBSTONE_KEY);
+          return;
+        }
+        _persist.setItem(LEAVE_TOMBSTONE_KEY, JSON.stringify(map));
       } catch (e) { /* best-effort */ }
     }
 
-    function _tombstoneClear() {
+    /* Oldest live entry wins the next flush; expired or malformed entries
+     * are garbage-collected here so they cannot linger past their window
+     * (#585 minor). Returns {sessionId, memberId, resumeToken, at} or null. */
+    function _tombstoneRead() {
+      var map = _tombstoneMap();
+      if (!map) return null;
+      var now = _now(), best = null, dirty = false;
+      for (var sid in map) {
+        var d = map[sid];
+        if (!d || typeof d !== 'object' || !d.memberId || !d.resumeToken ||
+            typeof d.at !== 'number' || !isFinite(d.at) ||
+            now - d.at > _resumeWindow) {
+          delete map[sid];
+          dirty = true;
+          continue;
+        }
+        if (!best || d.at < best.at) {
+          best = {sessionId: sid, memberId: d.memberId,
+                  resumeToken: d.resumeToken, at: d.at};
+        }
+      }
+      if (dirty) _tombstoneWriteMap(map);
+      return best;
+    }
+
+    function _tombstoneWrite(member) {
+      if (!_persist || !member || !member.sessionId) return;
+      _flushRetries = 0;             // a fresh leave earns a fresh budget
+      var map = _tombstoneMap() || {};
+      map[member.sessionId] = {
+        memberId: member.memberId, resumeToken: member.resumeToken,
+        at: _now(),
+      };
+      _tombstoneWriteMap(map);
+    }
+
+    /* Clear ONE entry — the flush that delivered it, or the leave() whose
+     * LEAVE went out on a live link. Passing no sessionId clears all
+     * (legacy callers / full reset). */
+    function _tombstoneClear(sessionId) {
       if (!_persist) return;
-      try { _persist.removeItem(LEAVE_TOMBSTONE_KEY); } catch (e) {}
+      if (sessionId === undefined) {
+        try { _persist.removeItem(LEAVE_TOMBSTONE_KEY); } catch (e) {}
+        return;
+      }
+      var map = _tombstoneMap();
+      if (!map || !(sessionId in map)) return;
+      delete map[sessionId];
+      _tombstoneWriteMap(map);
     }
 
     /* Best-effort flush: own throwaway link, own frames — the session the
@@ -671,7 +737,24 @@
       var done = function (clear) {
         if (rec.done) return;
         rec.done = true;
-        if (clear) { _tombstoneClear(); _flushRetries = 0; }
+        if (clear) {
+          /* Delivered (or made moot): drop ONLY this session's entry —
+           * a sibling tab's parked LEAVE must survive (#585) — then
+           * drain: another session's tombstone may still be queued. */
+          _tombstoneClear(d.sessionId);
+          _flushRetries = 0;
+          _later(_maybeFlushLeave, FLUSH_DRAIN_MS);
+        } else {
+          /* Silent failure (watchdog/close/send throw): the tombstone
+           * stays parked — retry on a bounded delay instead of waiting
+           * for the next lifecycle event (#585). The shared retry budget
+           * also covers resume_in_use rejects, so a persistently
+           * contested member cannot spin forever either. */
+          _flushRetries += 1;
+          if (_flushRetries <= FLUSH_RETRY_MAX) {
+            _later(_maybeFlushLeave, FLUSH_RETRY_MS);
+          }
+        }
         if (_tombstoneFlush === rec) _tombstoneFlush = null;
         if (rec.watchdog !== null) {
           _clearT(rec.watchdog);
@@ -697,20 +780,18 @@
           return;
         }
         if (f.type === 'REJECT' && f.requestId === resumeF.requestId) {
-          if (f.reason === 'resume_in_use' &&
-              _flushRetries < FLUSH_RETRY_MAX) {
+          if (f.reason === 'resume_in_use') {
             /* Transient: the member's dead link has not been reaped
-             * server-side yet — close this attempt and retry shortly.
-             * If a healthier link genuinely owns the member its owner
-             * sends LEAVE itself; the tombstone just idles until then. */
-            _flushRetries += 1;
+             * server-side yet — close this attempt and let done(false)
+             * schedule the bounded retry. If a healthier link genuinely
+             * owns the member its owner sends LEAVE itself; the
+             * tombstone just idles until then. */
             done(false);
-            _later(_maybeFlushLeave, FLUSH_RETRY_MS);
             return;
           }
-          /* bad_resume/resume_expired are terminal; an exhausted
-           * resume_in_use keeps the tombstone for the next event. */
-          done(f.reason !== 'resume_in_use');
+          /* bad_resume/resume_expired are terminal — drop only this
+           * entry; other sessions' tombstones are untouched (#585). */
+          done(true);
           return;
         }
         if (f.type === 'END') { done(true); return; }
@@ -1148,6 +1229,7 @@
     function leave() {
       if (_destroyed) return Promise.resolve({left: false});
       var l = _link, e = _entry, flushAfter = null;
+      var leaveSid = _member ? _member.sessionId : null;
       if (_member) _tombstoneWrite(_member);   // cleared below once LEAVE is on the wire
       if (_member && e && l && l.t && !l.gone) {
         /* The server binds member→link only on the entry ACK — a LEAVE sent
@@ -1163,20 +1245,40 @@
         var t = l.t;
         _link = null;
         flushAfter = function () {
-          var watchdog = _setT(function () {
-            try { t.close(); } catch (x) {}
-          }, _attemptTimeout);
+          var finished = false;
+          var watchdog = null;
+          /* Silent exits (watchdog/close/send throw) used to just close
+           * the detached link and wait for the next lifecycle event — in
+           * a black-holed network that is the whole resume window (#585).
+           * Route every failure through the same bounded retry the
+           * tombstone flush uses; _flushRetries was reset by
+           * _tombstoneWrite above so this leave earns a fresh budget. */
+          var retryFlush = function () {
+            _flushRetries += 1;
+            if (_flushRetries <= FLUSH_RETRY_MAX) {
+              _later(_maybeFlushLeave, FLUSH_RETRY_MS);
+            }
+          };
           /* delivered=true once LEAVE is on the wire (or made moot — a
            * REJECT means the member never bound, END means the session is
-           * already over): the tombstone can go. A silent close/watchdog
-           * leaves it for the next flush to replay. */
+           * already over): only THIS session's tombstone goes (#585) —
+           * other tabs' parked LEAVEs are untouched. */
           var done = function (delivered) {
-            if (delivered) _tombstoneClear();
+            if (finished) return;
+            finished = true;
             _clearT(watchdog);
             try { t.close(); } catch (x) {}
+            if (delivered) {
+              if (leaveSid) _tombstoneClear(leaveSid);
+              _flushRetries = 0;
+              _later(_maybeFlushLeave, FLUSH_DRAIN_MS);
+            } else {
+              retryFlush();
+            }
           };
+          watchdog = _setT(function () { done(false); }, _attemptTimeout);
           t.onopen = null;
-          t.onclose = function () { _clearT(watchdog); };
+          t.onclose = function () { done(false); };
           t.onframe = function (f) {
             if (!f || typeof f !== 'object') return;
             if (f.type === 'HELLO') {
@@ -1198,7 +1300,7 @@
           };
         };
       } else if (_member && _linkOpen() && _ctlSend(_req('LEAVE', {}))) {
-        _tombstoneClear();             // LEAVE is queued on a live link
+        if (leaveSid) _tombstoneClear(leaveSid);  // LEAVE is queued on a live link
       }
       _left = true;
       _terminate('ended', END_REASON.LEFT);
@@ -2039,17 +2141,28 @@
 
   /* Cheap boot check (pairController): is a leave tombstone waiting for a
    * flush? Same window rule as _tombstoneRead — the pair controller creates
-   * a client for the flush only while one is still worth sending (#157). */
-  function peekLeaveTombstone(storage, now) {
+   * a client for the flush only while one is still worth sending (#157).
+   * The store is a sessionId-keyed map (#585): the OLDEST live entry is
+   * what the next flush would deliver, so that is what we report. */
+  function peekLeaveTombstone(storage, now, resumeWindowMs) {
     try {
       var p = storage !== undefined ? storage : _defaultLocalStorage();
       if (!p) return null;
-      var d = JSON.parse(p.getItem(LEAVE_TOMBSTONE_KEY) || 'null');
-      if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
-          typeof d.at !== 'number') return null;
+      var map = _tombstoneEntries(p.getItem(LEAVE_TOMBSTONE_KEY));
       var t = typeof now === 'function' ? now() : Date.now();
-      if (t - d.at > RESUME_WINDOW_MS) return null;
-      return d;
+      var w = resumeWindowMs || RESUME_WINDOW_MS;
+      var best = null;
+      for (var sid in map) {
+        var d = map[sid];
+        if (!d || typeof d !== 'object' || !d.memberId || !d.resumeToken ||
+            typeof d.at !== 'number' || !isFinite(d.at) ||
+            t - d.at > w) continue;
+        if (!best || d.at < best.at) {
+          best = {sessionId: sid, memberId: d.memberId,
+                  resumeToken: d.resumeToken, at: d.at};
+        }
+      }
+      return best;
     } catch (e) { return null; }
   }
 
