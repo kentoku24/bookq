@@ -25,6 +25,8 @@ mod auth;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+// #573: `--healthcheck` — the image has no shell for a compose probe.
+mod healthcheck;
 mod library;
 mod oauth;
 mod pair_report;
@@ -808,6 +810,11 @@ async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return method_not_allowed("GET, HEAD");
     }
+    // #373: a cross-site initiation must not write the `bookq_oauth` tx
+    // cookie (login CSRF plants an attacker PKCE challenge).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
     let Some(flow) = st.auth_flow.clone() else {
         return auth_unconfigured();
     };
@@ -843,6 +850,11 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return method_not_allowed("GET, HEAD");
+    }
+    // #373: logout is a state-changing GET — refuse cross-site
+    // initiations (forced logout CSRF).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let Some(flow) = st.auth_flow.clone() else {
         return auth_unconfigured();
@@ -1063,6 +1075,13 @@ impl axum::serve::Listener for NoDelayListener {
 
 #[tokio::main]
 async fn main() {
+    // #573: distroless has no shell/curl, so the compose healthcheck runs
+    // this binary with `--healthcheck` instead of a `bash -c` one-liner.
+    // Handled before any tracing/runtime work so the probe stays quiet.
+    if std::env::args().skip(1).any(|a| a == "--healthcheck") {
+        std::process::exit(healthcheck::run());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -1258,6 +1277,41 @@ mod handler_tests {
             auth_unconfigured().status(),
             StatusCode::NOT_IMPLEMENTED
         );
+    }
+
+    /// #359: `/api/v1/version` requires auth; health stays public.
+    #[tokio::test]
+    async fn version_requires_auth_health_stays_public() {
+        // Unauthenticated version is 401 — sha/build_date must not leak.
+        let st = hook_state(false);
+        let (status, body) = body_json(
+            api_version(State(st.clone()), http_req("GET", "/api/v1/version", "")).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, serde_json::json!({"detail": "authentication required"}));
+        // Health stays public for uptime probes.
+        let (status, body) =
+            body_json(api_health(State(st), http_req("GET", "/api/v1/health", "")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"status": "ok"}));
+        // Authed (test-mode mock user) version is 200 with no-store.
+        let st = hook_state(true);
+        let res = api_version(State(st), http_req("GET", "/api/v1/version", "")).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-store"
+        );
+        let (status, body) = body_json(res).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["version"], serde_json::json!("2.0.0"));
+        assert!(body.get("sha").is_some());
+        assert!(body.get("build_date").is_some());
     }
 
     /// Minimal AppState for the test-hook handlers: nothing here touches

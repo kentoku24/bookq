@@ -12,12 +12,13 @@
 //! in-process via `pdfium-render`, issue #402; multipart RAR sets beyond
 //! store-concat — compressed members/missing volumes let upstream 7z
 //! decide), formats the `image` crate can't decode that Pillow
-//! might (`.avif`, `.tiff`, archive files used as sources — gated by
+//! might (`.tiff`, archive files used as sources — gated by
 //! `NATIVE_DECODE` before the payload read) and archive entries we fail to
 //! extract (unsupported compression/CRC/missing volumes — upstream decides).
+//! `.avif` decodes natively since #563 (`avif-native` → mp4parse + dav1d).
 //! Sprite misses compose in-process (9-cell strip + `rows` grid, same
 //! `sprites/<w>/` namespace as `thumbs.py`); a sheet needing an
-//! upstream-only source (PDF page, `.avif`/`.tiff` cell Pillow could
+//! upstream-only source (PDF page, `.tiff` cell Pillow could
 //! decode) proxies whole so Python renders it instead of a gray cell.
 //! RAR members incl. multipart store sets read in-process via
 //! `bookq_core` (bundled unrar + #403 store-concat), so `/view` on a
@@ -303,20 +304,20 @@ fn media_response(
 /// `tests/test_media_decode_contract.py` が一致を検証する)。
 ///
 /// `NATIVE_DECODE`: 有効な `image` features が decode できる拡張子 —
-/// それ以外は source load の前に proxy する (`.avif`/`.tiff`/`.cbz` 全体を
+/// それ以外は source load の前に 501 する (`.tiff`/`.cbz` 全体を
 /// 読んで `into_decoder` で失敗するのは read を二重に払う — broken-image は
-/// キャッシュ不可で毎リクエスト繰り返すため)。
+/// キャッシュ不可で毎リクエスト繰り返すため)。`.avif` は #563 で
+/// `avif-native` (mp4parse + dav1d) 経由の native decode に移行。
 /// `DECODE_PYTHON_ONLY`: Pillow ≥13 が decode するが `image` crate
-/// (bmp/gif/jpeg/png/webp のみ) はしない — Proxy → upstream 200 で
-/// client 可視は同じ 200。
+/// (bmp/gif/jpeg/png/webp/avif のみ) はしない — no-upstream で 501。
 /// `DECODE_UNSUPPORTED_EXAMPLES`: 両 backend とも decode 不可の代表例 —
-/// Python 404 == Rust Proxy → upstream 404 で同じ 404。
-const NATIVE_DECODE: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
-/// Pillow-only (Pillow ≥13 libavif 同梱): Rust は Proxy → upstream 200.
+/// no-upstream で 501。
+const NATIVE_DECODE: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"];
+/// Pillow-only (Pillow ≥13): no-upstream の現在は 501.
 /// 代表例列挙 — Pillow は content-sniff のため decode 可能形式は他にもある
 /// (tga/pcx/…) が、tree に載るのは IMAGE_EXTENSIONS のみ (spec §7 参照)。
 #[cfg(test)]
-const DECODE_PYTHON_ONLY: &[&str] = &[".avif", ".tif", ".tiff"];
+const DECODE_PYTHON_ONLY: &[&str] = &[".tif", ".tiff"];
 /// Neither backend decodes (representative examples): 404 on both.
 #[cfg(test)]
 const DECODE_UNSUPPORTED_EXAMPLES: &[&str] = &[".heic", ".heif", ".jxl"];
@@ -596,7 +597,7 @@ fn generate_thumb(
     headers: &HeaderMap,
 ) -> Response {
     if !is_svg && !native_decodable(path) {
-        return not_implemented("not implemented"); // e.g. .avif — decode would fail after the read
+        return not_implemented("not implemented"); // e.g. .tiff — decode would fail after the read
     }
     let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
         Ok(x) => x,
@@ -748,7 +749,7 @@ pub fn view(library: &Path, cache: &Path, path: &str, w: Option<&String>, header
 /// the `image` crate can't handle still proxy.
 fn generate_view(library: &Path, cache: &Path, path: &str, width: Option<u32>, headers: &HeaderMap) -> Response {
     if !native_decodable(path) {
-        return not_implemented("not implemented"); // e.g. .avif — decode would fail after the read
+        return not_implemented("not implemented"); // e.g. .tiff — decode would fail after the read
     }
     let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
         Ok(x) => x,
@@ -950,8 +951,8 @@ fn compose_grid(
 /// Returns `None` (→ proxy whole sheet) when a present member cannot be
 /// proven identical natively (unsupported compression/CRC) or the set
 /// itself needs an external 7z (multipart RAR) answer 501 instead of a
-/// wrong gray cell. `.avif`/`.tiff` cells decode-unknown formats also
-/// decline to 501 (#532: no upstream).
+/// wrong gray cell. `.tiff` cells and other decode-unknown formats also
+/// decline to 501 (#532: no upstream; `.avif` is native since #563).
 fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Option<Vec<u8>>>> {
     if is_rar_path(archive) && bookq_core::rar_needs_external_7z(archive) {
         return None;
@@ -973,7 +974,7 @@ fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Opt
             out.push(None);
             continue;
         }
-        // Formats Pillow may decode that `image` cannot → whole-sheet proxy.
+        // Formats `image` cannot decode (e.g. .tiff) → whole-sheet 501.
         if !native_decodable(name) && suffix_lower(Path::new(name)) != ".svg" {
             return None;
         }
@@ -991,7 +992,7 @@ fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Opt
 /// Dir-sprite raw reads (fail-open per cell like Python).
 /// Returns `None` (→ proxy whole sheet) when any cell needs upstream-only
 /// tooling (PDF page render, multipart RAR member, undecodable archive
-/// member) or decodes Pillow might handle (`.avif`/`.tiff`).
+/// member) or decodes `image` doesn't cover (`.tiff`).
 fn load_dir_sprite_cells(
     library: &Path,
     folder: &str,
@@ -1003,8 +1004,8 @@ fn load_dir_sprite_cells(
             out.push(None);
             continue;
         }
-        // Same conservative gate as the archive path: a present `.avif` /
-        // `.tiff` cell Pillow might decode must proxy, not gray.
+        // Same conservative gate as the archive path: a present `.tiff`
+        // cell `image` can't decode must 501, not gray.
         if !native_decodable(name) && suffix_lower(Path::new(name)) != ".svg" {
             // SVG grays in Python too (Pillow has no SVG decoder), so only
             // non-SVG undecodables force the proxy.
@@ -1427,15 +1428,20 @@ mod tests {
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
-    /// Extensions `image` can't decode answer 501 BEFORE the payload read —
-    /// a garbage `.avif` must not even try (same for broken-but-decodable
-    /// names, which reach the decoder and still 501).
+    /// Extensions `image` can't decode answer 501 BEFORE the payload read
+    /// (`.tiff`), while a decodable-but-broken name (`.avif` — native since
+    /// #563) reaches the decoder and still 501s on the decode failure.
     #[test]
     fn thumb_undecodable_answers_501() {
         let (dl, cache) = tmp_dirs("t3");
+        std::fs::write(dl.join("v.tiff"), b"garbage").unwrap();
         std::fs::write(dl.join("v.avif"), b"garbage").unwrap();
         std::fs::write(dl.join("x.png"), b"garbage").unwrap();
         let h = HeaderMap::new();
+        assert_eq!(
+            thumb(&dl, &cache, "v.tiff", None, &h).status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
         assert_eq!(
             thumb(&dl, &cache, "v.avif", None, &h).status(),
             StatusCode::NOT_IMPLEMENTED
@@ -1447,12 +1453,12 @@ mod tests {
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
-    /// Decode 契約 (#406): gate 真理値表 — 共通集合のみ native、
-    /// Python-only (avif/tiff) と両側 unsupported (heic/heif/jxl) は 501.
+    /// Decode 契約 (#406, #563): gate 真理値表 — 共通集合のみ native、
+    /// Python-only (tiff) と両側 unsupported (heic/heif/jxl) は 501.
     /// `NATIVE_DECODE` に形式を足したら `DECODE_*` と spec §7 も同時更新すること.
     #[test]
     fn decode_gate_truth_table() {
-        for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"] {
+        for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"] {
             assert!(native_decodable(&format!("p{ext}")), "{ext} native");
             assert!(
                 !DECODE_PYTHON_ONLY.contains(&ext),
@@ -1469,8 +1475,8 @@ mod tests {
         for ext in DECODE_UNSUPPORTED_EXAMPLES {
             assert!(!native_decodable(&format!("p{ext}")), "{ext} proxies");
         }
-        // Case-insensitive: suffix_lower 前提 (e.g. P.AVIF proxies too).
-        assert!(!native_decodable("p.AVIF"));
+        // Case-insensitive: suffix_lower 前提.
+        assert!(native_decodable("p.AVIF"));
         assert!(native_decodable("p.PNG"));
     }
 
@@ -1495,6 +1501,99 @@ mod tests {
                 StatusCode::NOT_IMPLEMENTED,
                 "{name} view"
             );
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: genuine AVIF decodes natively (mp4parse + dav1d via
+    /// `avif-native`) — /thumb and /view both answer 200 + image/jpeg and
+    /// cache the rendition. Fixture is a real Pillow-encoded 48x64 AVIF
+    /// (tests/fixtures/ok-48x64.avif), not a renamed raster.
+    #[test]
+    fn avif_decodes_natively() {
+        let (dl, cache) = tmp_dirs("av1");
+        std::fs::write(
+            dl.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        let h = HeaderMap::new();
+        for res in [
+            thumb(&dl, &cache, "p.avif", None, &h),
+            view(&dl, &cache, "p.avif", None, &h),
+        ] {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Every NATIVE_DECODE format really decodes end-to-end (#563): thumb
+    /// → 200 JPEG; view honours each contract shape — original bytes for
+    /// passthrough types (jpg/jpeg/png/gif), normalized JPEG for
+    /// webp/bmp/avif, and `?w=` always normalizes to JPEG. Sources are
+    /// encoded in-test by the same `image` build (avif has no encoder —
+    /// the committed fixture stands in).
+    #[test]
+    fn native_formats_decode_end_to_end() {
+        let (dl, cache) = tmp_dirs("nf");
+        let h = HeaderMap::new();
+        let w400 = "400".to_string();
+        let mut im = image::RgbImage::new(48, 64);
+        for p in im.pixels_mut() {
+            *p = image::Rgb([12, 34, 56]);
+        }
+        let src = image::DynamicImage::ImageRgb8(im);
+        // (name, encode format — None uses the AVIF fixture, /view no-w mime)
+        let cases: &[(&str, Option<image::ImageFormat>, &str)] = &[
+            ("p.jpg", Some(image::ImageFormat::Jpeg), "image/jpeg"),
+            ("p.jpeg", Some(image::ImageFormat::Jpeg), "image/jpeg"),
+            ("p.png", Some(image::ImageFormat::Png), "image/png"),
+            ("p.gif", Some(image::ImageFormat::Gif), "image/gif"),
+            ("p.webp", Some(image::ImageFormat::WebP), "image/jpeg"),
+            ("p.bmp", Some(image::ImageFormat::Bmp), "image/jpeg"),
+            ("p.avif", None, "image/jpeg"),
+        ];
+        for (name, fmt, view_mime) in cases {
+            let bytes = match fmt {
+                Some(f) => {
+                    let mut out = Vec::new();
+                    src.write_to(&mut Cursor::new(&mut out), *f)
+                        .unwrap_or_else(|e| panic!("encode {name}: {e}"));
+                    out
+                }
+                None => include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+            };
+            std::fs::write(dl.join(name), &bytes).unwrap();
+            for (res, want) in [
+                (thumb(&dl, &cache, name, None, &h), "image/jpeg"),
+                (view(&dl, &cache, name, None, &h), *view_mime),
+                (view(&dl, &cache, name, Some(&w400), &h), "image/jpeg"),
+            ] {
+                assert_eq!(res.status(), StatusCode::OK, "{name}");
+                assert_eq!(res.headers()[header::CONTENT_TYPE], want, "{name}");
+            }
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: an AVIF member inside a zip decodes through the same path as
+    /// a directory file — /thumb and /view answer 200 JPEG.
+    #[test]
+    fn archive_avif_member_decodes() {
+        let (dl, cache) = tmp_dirs("a1");
+        let entries: Vec<(&str, Vec<u8>)> = vec![(
+            "p.avif",
+            include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+        )];
+        write_zip(&dl.join("book.zip"), &entries);
+        let h = HeaderMap::new();
+        for res in [
+            thumb(&dl, &cache, "book.zip/p.avif", None, &h),
+            view(&dl, &cache, "book.zip/p.avif", None, &h),
+        ] {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
         }
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
@@ -1886,6 +1985,43 @@ mod tests {
             status(&thumb_sprite(&dl, &cache, &qbad, "names=nope.png,nada.png", &HeaderMap::new())),
             StatusCode::NOT_FOUND
         );
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: an AVIF cell composes natively in both sprite paths —
+    /// before, `.avif` was upstream-only and the whole sheet 501'd.
+    #[test]
+    fn sprite_avif_cell_composes() {
+        let (dl, cache) = tmp_dirs("s4");
+        std::fs::write(
+            dl.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,p.avif")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=r.png,p.avif", &HeaderMap::new());
+        assert_eq!(status(&out), StatusCode::OK);
+        assert_eq!(jpeg_dims(&sprite_body(out)), (400, 150));
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: same for an AVIF member inside a zip archive cell.
+    #[test]
+    fn sprite_archive_avif_cell_composes() {
+        let (dl, cache) = tmp_dirs("s5");
+        let entries: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "p.avif",
+                include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+            ),
+            ("r.png", png_rgb(400, 300, [255, 0, 0])),
+        ];
+        write_zip(&dl.join("work.zip"), &entries);
+        let q = sprite_q(&[("folder", "work.zip"), ("names", "p.avif,r.png")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=p.avif,r.png", &HeaderMap::new());
+        assert_eq!(status(&out), StatusCode::OK);
+        assert_eq!(jpeg_dims(&sprite_body(out)), (400, 150));
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 

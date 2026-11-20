@@ -4,6 +4,7 @@ import re
 
 from playwright.sync_api import expect
 
+from browse_header_helpers import set_view_mode
 from tests.fixtures.ios_helpers import (
     _GAP_INNER_EXPECT,
     _GAP_OUTER_EXPECT,
@@ -91,14 +92,13 @@ def test_ios_grid_adaptive(ios_page):
     )
     assert widths["tiles"], "no tiles measured"
     assert abs(widths["tiles"][0] - widths["gridW"] * 0.5) < 18, f"tile not ~50% at 390: {widths}"
-    btn = page.locator("#footer-refresh-btn")
-    btn.click()
+    set_view_mode(page, "list")
     expect(page.locator("#tile-grid")).to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".item.folder").first).to_be_visible()
-    btn.click()
+    set_view_mode(page, "card")
     expect(page.locator("#tile-grid")).to_have_class(re.compile(r"\bcard-mode\b"))
     expect(page.locator(".card").first).to_be_visible()
-    btn.click()
+    set_view_mode(page, "tile")
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"\bcard-mode\b"))
     expect(page.locator(".tile").first).to_be_visible()

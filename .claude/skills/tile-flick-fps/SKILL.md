@@ -35,10 +35,10 @@ marker exists (e.g. `cdp-eval.py 'typeof window.browseWhenSettled'`).
 cd .claude/skills/tile-flick-fps/references
 
 # Synthetic flicks (kernel-level input injection — no hands needed):
-uv run --with websockets python3 flick-fps.py --url dev-04.javanese
+uv run --with websockets python3 flick-fps.py --url dev-04.<tail>.ts.net
 
 # Real-finger pass (authoritative for input-path costs):
-uv run --with websockets python3 flick-fps.py --url dev-04.javanese --finger 12
+uv run --with websockets python3 flick-fps.py --url dev-04.<tail>.ts.net --finger 12
 # → script prints "DRAG NOW"; flick the grid for ~12s, it dumps + reports.
 ```
 
@@ -80,7 +80,7 @@ scroll-active frames: 484 (of 586 total)
 | `websockets missing` | Ran with system python | Always `uv run --with websockets python3 flick-fps.py` |
 | `probe lost` after run | A **downward** swipe at scrollTop=0 fired pull-to-refresh → page reloaded | Keep swipes upward (`y1>y2`); script defaults already do |
 | `NO SCROLL EVENTS` | Swipe hit banner/dialog, lock screen, or wrong tab | `adb shell screencap` first; narrow `--url` |
-| `dev-04` matches `dev-04-1` tabs | Ghost-node suffix contains the substring | Pass the FQDN: `--url dev-04.javanese` |
+| `dev-04` matches `dev-04-1` tabs | Ghost-node suffix contains the substring | Pass the FQDN: `--url dev-04.<tail>.ts.net` |
 | p50 looks great but grid stutters | You read all-frames p50 (idle-dominated) | Read the scroll-active block |
 | First run slower than second | Cold sprite/thumb decode | `--warmup` covers it; don't compare cold vs warm |
 | Real finger much worse than `input swipe` | Injected swipes have no touchmove density | Expected — `--finger` is the authoritative pass |

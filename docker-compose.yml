@@ -47,14 +47,14 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - BASE_URL=${BASE_URL}
-    # イメージは debian-slim + バイナリのみ (curl/wget/python なし) —
-    # bash の /dev/tcp で /api/v1/health を叩く。
+    # イメージは distroless (#573): shell も curl/wget も無いので、
+    # ヘルスチェックはバイナリ自身の `--healthcheck` が loopback で
+    # /api/v1/health を叩く（200 → exit 0）。
     healthcheck:
       test:
         - CMD
-        - bash
-        - -c
-        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/v1/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200'"
+        - /usr/local/bin/viewer-rs
+        - --healthcheck
       interval: 2s
       timeout: 3s
       retries: 15
@@ -91,7 +91,7 @@ services:
   # (http://viewer-rs:8080) の対応は Cloudflare ダッシュボード側で管理する。
   cloudflared:
     profiles: ["public"]
-    image: cloudflare/cloudflared:2026.10.4
+    image: cloudflare/cloudflared:2026.11.1
     container_name: bookq-prd-cloudflared
     command: tunnel --no-autoupdate run
     environment:

@@ -118,6 +118,9 @@ jobs:
         with:
           workspaces: rust
 
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
@@ -170,6 +173,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
@@ -264,6 +270,15 @@ jobs:
         with:
           workspaces: rust
 
+      # macOS runner — brew, not apt (#563). `|| true` keeps the step
+      # green when dav1d is already installed at a newer version.
+      - name: System deps (dav1d for avif-native, #563)
+        run: brew install dav1d pkg-config || brew upgrade dav1d pkg-config || true
+      # rust-cache restores dav1d-sys's build-script output, which bakes
+      # the Cellar version path into -L — stale after a brew version bump
+      # (observed: ld searched Cellar/dav1d/1.5.4 while brew had 1.5.5).
+      - name: Drop stale dav1d-sys build cache
+        run: cargo clean --manifest-path rust/Cargo.toml -p dav1d-sys
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 

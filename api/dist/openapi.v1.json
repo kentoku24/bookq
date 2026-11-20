@@ -2906,6 +2906,7 @@
     },
     "/api/v1/version": {
       "get": {
+        "description": "認証必須 (#359)。未認証は 401。sha/build_date の公開面漏洩を防ぐため\nhealth と異なり `security: []` を付けない (全体既定の認証を継承)。\n",
         "operationId": "getVersion",
         "responses": {
           "200": {
@@ -2943,6 +2944,9 @@
               }
             },
             "description": "バージョン情報。`Cache-Control: no-store`"
+          },
+          "401": {
+            "description": "未認証"
           }
         },
         "summary": "サーババージョン",

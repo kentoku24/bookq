@@ -38,7 +38,7 @@ jobs:
 
       - name: Probe production endpoints
         env:
-          BOOKQ_MONITOR_BASE_URL: https://bookq.mats.dpdns.org
+          BOOKQ_MONITOR_BASE_URL: ${{ vars.BOOKQ_MONITOR_BASE_URL }}
           BOOKQ_MONITOR_OUT: monitor-result.json
         run: python3 scripts/prod_monitor.py probe
 
@@ -85,7 +85,7 @@ jobs:
           A production monitoring probe for bookq (a personal manga/image viewer
           behind Cloudflare Tunnel -> cloudflared -> FastAPI viewer, plus a
           viewer-rs Rust gateway on the tailnet path) detected a service
-          deviation on the public domain https://bookq.mats.dpdns.org.
+          deviation on the public domain (BOOKQ_MONITOR_BASE_URL).
 
           The GitHub issue below contains the full diagnostic bundle (per-endpoint
           HTTP status/latency/cf-ray, failure classification, deployed sha).

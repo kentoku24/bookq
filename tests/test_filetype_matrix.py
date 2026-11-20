@@ -10,10 +10,10 @@ Covers all 14 file types the viewer-rs scanner knows
 Each type x (v1 enumeration ``{folder, images}``, ``/image/*`` 200,
 ``/thumb/*`` 200) is asserted against viewer-rs (#503 rs-only):
 
-- ``/thumb`` for genuine AVIF: the ``image`` crate cannot decode it —
-  rs proxies, and with no upstream that is 501.
-- PDF pages need libpdfium: rs proxies them (no-upstream 501) for both
-  ``/image`` and ``/thumb``.
+- ``/thumb`` for genuine AVIF decodes natively since #563
+  (``avif-native``: mp4parse + dav1d) → 200 image/jpeg.
+- PDF pages need libpdfium: when the shared lib is absent the render
+  declines (no-upstream 501) for both ``/image`` and ``/thumb``.
 - RAR/CBR members read natively (bundled unrar + ``image`` crate).
 
 AVIF honesty rule: generated only via Pillow. If Pillow cannot encode AVIF in
@@ -258,8 +258,8 @@ def test_matrix_image(matrix_server, filetype, kind, folder, inner):
 def test_matrix_thumb(matrix_server, filetype, kind, folder, inner):
     """Cell 3: /thumb/<folder>/<inner>?w=200 renders a thumbnail.
 
-    AVIF genuine-decode is unsupported by the image crate (rs no-upstream
-    Proxy 501); PDF pages likewise need libpdfium (rs 501).
+    AVIF decodes natively (#563); PDF pages need libpdfium — without the
+    shared lib the render declines with rs 501.
     """
     _skip_if_unmeasurable(filetype)
     path = "/thumb/{}/{}?w=200".format(
@@ -267,7 +267,7 @@ def test_matrix_thumb(matrix_server, filetype, kind, folder, inner):
         "/".join(urllib.parse.quote(p, safe="") for p in inner.split("/")),
     )
     status, headers, raw = _get(matrix_server, path)
-    if filetype in ("avif", "pdf"):
+    if filetype == "pdf":
         assert status == 501, path
         assert headers["content-type"] == "application/json"
         return

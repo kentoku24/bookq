@@ -99,10 +99,13 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 
 ## リーダー仕様（web parity）
 
-- 縦=1ページ / 横=spread（spreadOffset 0=通常ペア、1=表紙単独、spread 離脱で 0 に
-  リセット）を `spread.js` 通りに再現。RTL: 右端=最初のページ。タップゾーンは
-  端30%=送り / 反対端30%=戻し / 中央=UI トグルで、`tapForward` 相当の
-  方向切替ボタンあり（セッション限定・デフォルト左=次）。
+- 縦=1ページ / 横=spread（spreadOffset 0=通常ペア、1=表紙単独）を `spread.js`
+  通りに再現。**iOS 差異**: spreadOffset はモード離脱でリセットせず、
+  single モードでも同じペアリングをページペア (peek/めくり方向) に使う
+  ため offset トグルは常時表示（web は spread 時のみ・離脱で 0 リセット）。
+  RTL: 右端=最初のページ。タップゾーンは端30%=送り / 反対端30%=戻し /
+  中央=UI トグルで、`tapForward` 相当の方向切替ボタンあり
+  （セッション限定・デフォルト左=次）。
 - ページ送りは TabView ではなく自前の ZStack ページャ。視覚状態は連続値
   `pos`（spread 単位、小数=めくり途中）で、`floor(pos)` が上層として右へ
   スライドし `ceil(pos)` が下に静止する — pos 上昇=現在 spread が右へ
@@ -110,6 +113,20 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   1 つの式で両方向を表現するため、ドラッグ中の指の反転は向きの再判定
   なしに `pos` が原点を通って戻るだけで処理できる。`PageTurnMath`
   純粋関数がドラッグデルタ・端ラバーバンド・コミット方向判定を担当。
+- **single モードの見開きペア認識**（iOS 独自、web には無い）:
+  `ReaderWork.pairRoles`/`intraIntervals` が spreadOffset のペアリングを
+  1ページ spread に適用する（章をまたぐペアは dissolve — spread は
+  章を混ぜない不変条件を維持）。rest 時、ペア相手ページは物理側の端に
+  **1px だけ常時覗く**（1ページ目=次ページの右端が左端に、2ページ目=
+  前ページの左端が右端に）。ピッチは実測ページ幅から算出する
+  strip pitch `(viewWidth+pageWidth)/2-1` で、レターボックスされた
+  landscape でも画面端に 1pt のコンテンツ sliver が出る。
+  ペア内のめくり（1→2ページ目）は strip
+  レイアウト `(pos-index)*stripPitch` で両ページが互いにスライドし、
+  一瞬見開きのように並ぶ。ペアをまたぐめくりは従来の stack
+  （次=裏から露出 / 前=右から被さる）のまま。退出位置と次の peek
+  位置が一致するため peek→めくり→peek はシームレスで、戻る方向も
+  鏡像になる。
   ドラッグと ←/→ キーは**章をまたぐ**（本全体 `[0, spreads.count-1]`
   にクランプ、両端のみラバーバンド→バウンスバック）。タップゾーン・
   スワイプ・矢印キーの全ページ送り操作が章跨ぎ可 — エピソード間の
@@ -145,17 +162,25 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
   （web・Android と同じ RTL 規約）。
 - chrome 配置は向きで分岐: **縦=従来の上部バー+下部スライダー**、
-  **横=画面右端（trailing）の全高バーティカルレール**。見開きは高さ
-  制約 fit で上下に余裕がなく左右に大きな余白ができるため、iPhone
-  Duo HIG の "vertical controls" 指針（側面レールでコンテンツ縦幅を
-  確保、上=プライマリナビ、低頻度操作は overflow へ）に倣い、画像と
-  重なりにくい側面へ寄せる。レールは上→下に 閉じる / カウンタ /
-  複数ページ / ⋯メニュー / 縦章スライダー（`VerticalSlider`、上=章
-  先頭・下=章末・下ドラッグで進む）。モード系操作（見開きずらし /
-  landscape 見開き切替 / タップ方向 / 外部ディスプレイ）は ⋯メニュー
-  へ集約。画像は `spreadFit`/`spreadCell` 無変更で最大サイズのまま
-  中央配置 — 広い AR の見開きでレールが画像端に重なり得るが、
-  レール背後のスクリムで可読性を担保する。`PairedReaderView` は対象外。
+  **横=左右分割レール+下部コーナーのタップ方向ボタン**。見開きは
+  高さ制約 fit で上下に余裕がなく左右に大きな余白ができるため、
+  iPhone Duo HIG の "vertical controls" 指針（側面レールで
+  コンテンツ縦幅を確保）に倣いつつ、Web クライアントの
+  `#tapmode-controls`（画面下部左右のタップ方向ボタン）にも準拠する。
+  - **左レール**（leading・上→下・上寄せ）: 閉じる / 見開き on/off /
+    見開きずらし（spread 時のみ）
+  - **右レール**（trailing）: カウンタ / 複数ページ / ⋯メニュー /
+    縦章スライダー（`VerticalSlider`、上=章先頭・下=章末・下ドラッグ
+    で進む）
+  - **下部コーナー**: ◀=左タップで次へ（`tapForwardLeft`）を
+    bottom-left、▶=右タップで次へを bottom-right に分割配置
+    （web `#tapmode-controls` と同じ左右分割。アクティブ方向は
+    accent 強調）
+  - ⋯メニューには外部ディスプレイ切替+診断のみ残る（表示条件を
+    満たさない時はボタン自体を非表示）
+  画像は `spreadFit`/`spreadCell` 無変更で最大サイズのまま中央配置
+  — 広い AR の見開きでレールが画像端に重なり得るが、レール背後の
+  スクリムで可読性を担保する。`PairedReaderView` は対象外。
   Android は上部バー+overflow の構成で、iOS の横置きレールとは意図的に
   異なる。
 
