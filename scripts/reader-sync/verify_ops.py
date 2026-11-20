@@ -674,10 +674,11 @@ def op_pair(ctx: RunCtx, op: dict) -> None:
 
 def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     """Real-app pairing UI surface — the PRODUCTION gesture (#142):
-    sidebar launcher (#pair-btn, in #sidebar-header) → one-tap
-    connect() → MATCH auto-join, or the code-entry view reached through
-    an ended panel. Chrome drives the DOM; the simulator driver walks
-    the Safari AX tree."""
+    sidebar launcher (#pair-btn, in #sidebar-header) opens the pair
+    panel; the idle choice's 近くの相手とつながる (#pair-create) fires
+    connect() → MATCH auto-join, and コードで参加 (#pair-join-open)
+    opens the code-entry view directly (#160). Chrome drives the DOM;
+    the simulator driver walks the Safari AX tree."""
     via = op.get("via") or "match"
     lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
     if ctx.driver.name == "simulator":
@@ -690,7 +691,7 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
                 pass
     # 'match' must start clean — a leftover session hijacks MATCH.
     # 'code' instead NEEDS the connected session a prior pair op made
-    # (its flow reaches the join view via an ended panel).
+    # (its flow leaves through the real UI, then re-pairs by code).
     if via != "code":
         _ui_ensure_idle(ctx)
     if lsp.page is not None and fsp.page is not None:
@@ -774,13 +775,15 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                     f"ensure-idle: {spec.role} stuck at status={st!r}")
             _ui_close_panel(ctx, spec)
             # an 'ended' session leaves the reader mounted and the
-            # launcher unreachable (zone taps instead of connect()).
+            # launcher unreachable behind the zone tap targets.
             _ui_browse_root(ctx, spec)
 
 
 def _ui_close_panel(ctx: RunCtx, spec, timeout: float = 8.0) -> None:
-    """Leave the pair panel shut — a still-open overlay swallows the next
-    launcher tap as a backdrop close() and connect() never fires."""
+    """Leave the pair panel shut — a still-open overlay swallows the
+    next launcher tap as a backdrop close() (inside the #160 grace
+    window it is ignored, but the panel must be open to pick
+    つながる / コードで参加 anyway)."""
     deadline = time.monotonic() + timeout * ctx.tscale
     while time.monotonic() < deadline:
         try:
@@ -828,24 +831,29 @@ def _op_pair_ui_dom(ctx: RunCtx, via: str) -> None:
     _open_sidebar_dom(leader)
     _open_sidebar_dom(follower)
     if via == "code":
-        # The code-entry view is reachable in production ONLY from an
-        # 'ended' panel's choice section — an idle/ended launcher tap
-        # fires connect() and MATCH intercepts it. Deterministic reach:
-        # follower opens its panel (secSession), leader leaves through
-        # the real UI, then connect()s for a fresh code; the follower's
-        # still-open panel falls back to secChoice → 参加 → code entry.
+        # #160: the idle choice offers コードで参加 directly — the old
+        # ended-panel detour is gone. The clients arrive paired (a
+        # prior pair op made the session), so both panels open on
+        # secSession; the leader leaves through the real UI, lands on
+        # secChoice, and re-enters via 近くの相手とつながる for a fresh
+        # code while the follower's still-open panel sits on secChoice
+        # → コードで参加 → code entry.
         follower.click("#pair-status")
         leader.click("#pair-status")
         leader.click("#pair-leave")
-        leader.click("#pair-btn")
+        leader.click("#pair-create")
         code = _wait_code_dom(leader)
+        follower.wait_for_selector(
+            "#pair-sec-choice:not([hidden])", timeout=15000)
         follower.click("#pair-join-open")
         follower.fill("#pair-code-input", code)
         # sanitizeCode auto-submits on the 6th digit — no submit click.
     elif via == "match":
-        leader.click("#pair-btn")          # open() + connect()
-        code = _wait_code_dom(leader)
-        follower.click("#pair-btn")        # MATCH joins + auto-approves
+        leader.click("#pair-btn")          # open() → secChoice
+        leader.click("#pair-create")       # つながる → connect() → waiting leader
+        code = _wait_code_dom(leader)      # waiting leader up before MATCH
+        follower.click("#pair-btn")        # open() → secChoice
+        follower.click("#pair-create")     # つながる → connect() → MATCH joins
     else:
         raise UnsupportedError(f"pair via {via!r}")
     for p in (leader, follower):
@@ -870,7 +878,9 @@ _NEEDLE_SEL = {
     "接続済": "#pair-status", "相手不在": "#pair-status",
     "再接続中": "#pair-status", "読み込み中": "#pair-status",
     "解除": "#pair-leave", "左右交換": "#pair-swap",
-    "参加": "#pair-join-open", "コードで参加する": "#pair-leader-join",
+    "近くの相手とつながる": "#pair-create",
+    "参加": "#pair-join-open", "コードで参加": "#pair-join-open",
+    "コードで参加する": "#pair-leader-join",
     "6桁のコードを入力": "#pair-code-input",
     "コードを入力": "#pair-code-input",
     "フォルダ一覧": "#menu-btn", "閉じる": "#pair-close",
@@ -894,6 +904,7 @@ _OPENERS = {
     "#pair-status": [],
     "#pair-swap": ["#pair-status"],
     "#pair-leave": ["#pair-status"],
+    "#pair-create": ["#pair-status"],
     "#pair-join-open": ["#pair-status"],
     "#pair-code-input": ["#pair-join-open", "#pair-status"],
     "#pair-leader-cancel": ["#pair-status"],
@@ -1210,16 +1221,17 @@ def _wait_code_ui(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
 def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
     lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
     if via == "code":
-        # Same deterministic reach as the DOM path: follower panel open
-        # (secSession) → leader ends via the real UI → leader reconnects
-        # for a fresh code → follower panel is on secChoice → 参加.
+        # Same deterministic reach as the DOM path (#160): the clients
+        # arrive paired; both panels open on secSession, the leader
+        # leaves via the real UI and its still-open panel lands on
+        # secChoice → つながる issues a fresh code → the follower's
+        # panel is on secChoice → コードで参加 → code entry.
         _ui_open_pair_panel(ctx, fsp)
         _ui_open_pair_panel(ctx, lsp)
         _ui_tap(ctx, lsp, ["解除"], "leave button (leader)",
                 expect_el="#pair-leave")
-        _ui_close_panel(ctx, lsp)
-        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
-                expect_el="#pair-btn")
+        _ui_tap(ctx, lsp, ["近くの相手とつながる"],
+                "waiting leader (leader)", expect_el="#pair-create")
         code = _wait_code_ui(ctx, lsp)
         for attempt in range(2):
             _ui_tap(ctx, fsp, ["参加"], "join open (follower)",
@@ -1268,16 +1280,22 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         ctx.note("code_typed", True,
                  f"joinCode={'submitted' if typed is None else 'len=' + str(len(typed))}")
     elif via == "match":
-        # No code read needed — the launcher's connect() either creates
-        # a waiting session or MATCH-joins an existing one; the poll
-        # below is the assert. A still-open overlay eats the launcher
-        # tap as a backdrop close, so shut any stray panel first.
+        # #160: the launcher only OPENS the panel now — the explicit
+        # 近くの相手とつながる pick fires connect(). Leader first: its
+        # code proves the waiting session is registered before the
+        # follower's connect() can MATCH onto it (a still-open overlay
+        # eats stray taps as backdrop closes, so shut any first).
         for spec in (lsp, fsp):
             _ui_close_panel(ctx, spec)
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
                 expect_el="#pair-btn")
+        _ui_tap(ctx, lsp, ["近くの相手とつながる"],
+                "match connect (leader)", expect_el="#pair-create")
+        _wait_code_ui(ctx, lsp)
         _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)",
                 expect_el="#pair-btn")
+        _ui_tap(ctx, fsp, ["近くの相手とつながる"],
+                "match connect (follower)", expect_el="#pair-create")
     else:
         raise UnsupportedError(f"pair via {via!r}")
     ctx.poll_both(

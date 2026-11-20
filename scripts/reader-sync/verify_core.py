@@ -364,8 +364,8 @@ def _validate_op(name: str, j: int, op: dict) -> None:
                 f"scenario {name} op[{j}]: burst needs int count >= 1")
     elif t == "pair":
         # 'taps' = fixture DOM taps (simulator); 'match'/'code' select the
-        # production-UI gesture on the ui surface (one-tap connect vs the
-        # code-entry view) — 'match' is also the ui default when absent.
+        # production-UI gesture on the ui surface (explicit つながる pick
+        # vs the コードで参加 form) — 'match' is also the ui default.
         if op.get("via") not in (None, "taps", "match", "code"):
             raise ScenarioError(
                 f"scenario {name} op[{j}]: pair via must be 'taps', "
