@@ -1,0 +1,23 @@
+# cargo-mutants config — see docs/mutation-testing.md
+# Run from rust/:  cargo mutants [-j N] [--file <glob>] [--in-diff]
+#
+# Full workspace ≈ 3,968 mutants (2026-11-19, `cargo mutants --list`).
+# A full run is an overnight-scale job; routine checks should use
+# --in-diff (mutants touching changed lines) or -f <glob> to scope.
+
+# nextest is not a repo dependency; cargo test is the baseline runner.
+test_tool = "cargo"
+
+# Denied/warn lints must not make mutants "unviable".
+cap_lints = true
+
+# Skip trivially-uninteresting call mutations (with_capacity, vec![], etc.)
+skip_calls_defaults = true
+
+# Rust tests are fast; keep auto timeouts generous for cold/slow machines.
+minimum_test_timeout = 60.0
+timeout_multiplier = 2.0
+build_timeout_multiplier = 3.0
+
+# Results land in mutants.out/ (gitignored) — html + json + logs per mutant.
+output = "mutants.out"

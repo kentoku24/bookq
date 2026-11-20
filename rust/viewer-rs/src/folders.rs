@@ -860,6 +860,22 @@ pub async fn ensure_tree_and_index_wait(
     st.current().await
 }
 
+/// Test-only CacheData carrying just `comics` — search/facets unit tests
+/// exercise the index consumers without a real tree/signature.
+#[cfg(test)]
+pub(crate) fn test_cache_data(comics: Vec<ComicRec>) -> CacheData {
+    CacheData {
+        tree: Vec::new(),
+        comics,
+        facets: HashMap::new(),
+        timestamp_micros: AtomicU64::new((now_secs() * 1e6) as u64),
+        generation: 1,
+        signature: None,
+        body_cache: Mutex::new(HashMap::new()),
+        body_bytes: AtomicU64::new(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,3 +39,11 @@ android/local.properties
 # SwiftPM (BookqCore ローカルパッケージ + Xcode DerivedData)
 .build/
 ios/build/
+
+# Node tooling for web/static unit tests + StrykerJS (see docs/mutation-testing.md)
+node_modules/
+.reports/
+.stryker-tmp/
+
+# cargo-mutants results (rust/mutants.out — regenerate with `cargo mutants`)
+mutants.out/
