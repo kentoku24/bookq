@@ -33,6 +33,7 @@ from verify_core import (
     AssertError,
     EnvError,
     UnsupportedError,
+    check_url_reachable,
     expected_page,
     marker_rgb,
     png_marker_fraction,
@@ -1313,6 +1314,16 @@ def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
         return json.loads(r.read().decode())
 
 
+def _api_json_compat(ctx: RunCtx, v1_path: str, legacy_path: str,
+                     timeout: float = 10.0) -> object:
+    """viewer-rs serves ``/api/v1/*``; pre-#503 backends used the
+    unversioned paths — try v1 first, legacy second."""
+    try:
+        return _api_json(ctx, v1_path, timeout=timeout)
+    except Exception:
+        return _api_json(ctx, legacy_path, timeout=timeout)
+
+
 def _api_post(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
     req = urllib.request.Request(
         ctx.base_url.rstrip("/") + path, method="POST", data=b"{}",
@@ -1324,7 +1335,7 @@ def _api_post(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
 def _resolve_work(ctx: RunCtx, decl) -> dict:
     """op/scenario work forms:
     - ``{discover: true, minPages}`` — pick a real folder off the target
-      env's own tree via /api/folders + /api/images (the folder name stays
+      env's own tree via the v1 tree/images APIs (the folder name stays
       inside the run; only page names echo into evidence)
     - ``{folder, page:{folder,name}, offset?}`` — an explicit env work
     Named fx fixtures are synthetic-table declarations — S11 exercises the
@@ -1349,21 +1360,22 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
     deterministic across runs of the same env without ever naming it in
     a declaration (``index`` 1+ lets a scenario switch to a DIFFERENT
     work, the spec's leader作品変更, still without naming folders)."""
-    # /api/folders rescans the target tree on every request — under load
-    # or on a cold post-restart container a single 25s read can time out
-    # transiently, which is NOT proof the environment is down. A few
-    # patient attempts before declaring env.
+    # The tree endpoint rescans the target library on every request —
+    # under load or on a cold post-restart container a single 25s read
+    # can time out transiently, which is NOT proof the environment is
+    # down. A few patient attempts before declaring env.
     folders = last_err = None
     for attempt in range(4):
         try:
-            folders = _api_json(ctx, "/api/folders", timeout=25)
+            folders = _api_json_compat(ctx, "/api/v1/tree",
+                                       "/api/folders", timeout=25)
             break
         except Exception as e:
             last_err = e
             time.sleep(3.0)
     if folders is None:
         raise EnvError(
-            f"work discovery: /api/folders failed: {last_err}")
+            f"work discovery: tree fetch failed: {last_err}")
     cands = []
 
     def walk(node, path):
@@ -1380,14 +1392,18 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
                 if isinstance(ch, dict) and ch.get("type") == "folder":
                     walk(ch, p)
 
-    for top in folders if isinstance(folders, list) \
-            else (folders or {}).get("folders") or []:
+    top_nodes = folders if isinstance(folders, list) else (
+        (folders or {}).get("nodes")
+        or (folders or {}).get("folders") or [])
+    for top in top_nodes:
         walk(top, "")
     cands.sort()
     for folder, tile in cands:
         try:
-            imgs = _api_json(
-                ctx, "/api/images?folder=" +
+            imgs = _api_json_compat(
+                ctx, "/api/v1/images?folder=" +
+                urllib.parse.quote(folder, safe=""),
+                "/api/images?folder=" +
                 urllib.parse.quote(folder, safe=""))
         except Exception:
             continue
@@ -2298,13 +2314,8 @@ def op_server_restart(ctx: RunCtx, op: dict) -> None:
     deadline = time.monotonic() + 60
     ok = False
     while time.monotonic() < deadline and not ok:
-        try:
-            import urllib.request
-            with urllib.request.urlopen(
-                    ctx.base_url.rstrip("/") + "/api/health",
-                    timeout=3) as r:
-                ok = json.loads(r.read().decode()).get("status") == "ok"
-        except Exception:
+        ok = bool(check_url_reachable(ctx.base_url, timeout=3).get("ok"))
+        if not ok:
             time.sleep(1.0)
     if not ok:
         raise EnvError("target did not come back healthy within 60s")
