@@ -224,7 +224,7 @@ class RunCtx:
                     _simctl("terminate", spec.udid, "com.apple.mobilesafari",
                             check=False)
                     time.sleep(1.0)
-                _simctl("openurl", spec.udid, spec.launch_url)
+                _simctl("openurl", spec.udid, _heal_url(spec))
             except Exception:
                 pass
         return st
@@ -930,6 +930,27 @@ def _browse_needle(n: str) -> bool:
     return True if sel is None else sel in _BROWSE_SELS
 
 
+# Controls that exist ONLY while a pair session is live — the status
+# strip hides on idle outright and on 'ended' once the 3s flash expires,
+# and secSession (leave/swap/change-work) unmounts for idle/ended/error.
+# Choice/join/browse needles deliberately absent: they are exactly how a
+# post-'ended' client re-pairs, so they must stay resolvable.
+_SESSION_ONLY_SELS = {"#pair-status", "#pair-leave", "#pair-swap",
+                      "#pair-change-work"}
+# 'ended' keeps the strip mounted for END_FLASH_MS=3000 — a session-only
+# tap may legitimately resolve inside that window (the follower-reopen
+# path does), so the early-exit grace must outlast flash + report lag.
+_TERMINAL_GRACE_S = 4.5
+
+
+def _session_only_needles(needles) -> bool:
+    for n in needles:
+        sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
+        if sel not in _SESSION_ONLY_SELS:
+            return False
+    return True
+
+
 def _browse_escape_url(spec) -> str:
     """Hash-nav URL back to the browse grid — WITHOUT pair_reset. A
     same-doc nav is harmless either way, but if Safari turns the
@@ -938,6 +959,16 @@ def _browse_escape_url(spec) -> str:
     base = (spec.launch_url or "").split("#")[0]
     base = base.replace("pair_reset=1&", "").replace("&pair_reset=1", "")
     return base + "#/browse/"
+
+
+def _heal_url(spec) -> str:
+    """Refocus URL for the stale-report heal — pair_reset stripped for
+    the same reason as _browse_escape_url: if Safari reloads instead of
+    just refocusing, pair_reset=1 would wipe the resume credential and
+    turn a recoverable frozen tab into a dead session (mid-scenario
+    'ended' events traced to exactly this)."""
+    return (spec.launch_url or "").replace(
+        "pair_reset=1&", "").replace("&pair_reset=1", "")
 
 
 def _ui_offset(ctx: RunCtx, spec) -> tuple:
@@ -997,6 +1028,36 @@ def _ui_rect(rep: dict, needles) -> dict | None:
     return None
 
 
+def _verify_opener_tap(ctx: RunCtx, spec, op_sel: str, t0: int,
+                       window: float = 2.5) -> str | None:
+    """Opener taps used to be blind — a mistimed tap during a scroll or
+    layout shift silently failed and the poll just kept waiting for a
+    needle that could never mount. Confirm the pointerdown landed on the
+    intended control so mistaps/dropped taps surface as notes instead of
+    mysterious needle timeouts. Returns the observed lastTap.el, or None
+    when no pointerdown arrived at all — the caller uses that to detect a
+    dead HID transport. Diagnostic only: the poll loop's own opener
+    cooldown still owns retries."""
+    deadline = time.monotonic() + window
+    hit = None
+    while time.monotonic() < deadline:
+        try:
+            lt = (ctx._pair_report_state(spec.role).get("lastTap") or {})
+        except AssertError:
+            lt = {}
+        if lt.get("t", 0) >= t0 - 300 and lt.get("el"):
+            hit = lt["el"]
+            break
+        time.sleep(0.25)
+    if hit is None:
+        ctx.note("ui_opener_miss", True,
+                 f"opener {op_sel}: no pointerdown within {window}s")
+    elif hit != op_sel:
+        ctx.note("ui_mistap", True,
+                 f"opener {op_sel} hit {hit} — retrying")
+    return hit
+
+
 def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             tries: int = 16, delay: float = 0.7,
             expect_el=None) -> str:
@@ -1016,6 +1077,30 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
     prev_r = None
     fired = {}
     last_rep = None
+    term_since = None
+    dead_taps = 0
+    session_only = _session_only_needles(needles)
+
+    def _dead_check(what_: str) -> None:
+        # idb 'hid succeeded' does NOT prove the touch reached the page —
+        # a companion whose dtuhid channel died (sim reboot, companion
+        # restart, long-uptime wedge) reports success while iOS discards
+        # every event, so lastTap.t never advances. Consecutive taps with
+        # zero observed pointerdowns (while reports stay fresh) mean the
+        # input path itself is dead — fail fast instead of burning the
+        # whole poll budget on an unrecoverable transport.
+        nonlocal dead_taps
+        if dead_taps >= 3:
+            _age = -1.0
+            if last_rep:
+                _age = time.time() - float(
+                    last_rep.get("received_at") or 0)
+            raise EnvError(
+                f"ui tap: {what_} — {dead_taps} taps produced no "
+                f"pointerdown (repAge={_age:.0f}s) — simulator input "
+                f"transport dead; restart idb_companion or reboot the "
+                f"simulator")
+
     for it in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
@@ -1024,6 +1109,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             # miss after all tries below is the real EnvError.
             time.sleep(delay)
             continue
+        last_rep = rep
         r = _ui_rect(rep, needles)
         if r is not None:
             vp_h = float((rep.get("vp") or {}).get("h") or 0)
@@ -1059,14 +1145,16 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             drv.tap(spec, x, y)
             ctx.note(f"ui_tap_{needles[0]}", True,
                      f"{what} @({x:.0f},{y:.0f})")
-            if expect_el is None:
-                return needles[0]
             # Verify what the tap actually hit — a rect sampled before
             # an async re-layout lands on the WRONG control (the pair
             # session-info reflow slid 作品変更 under the 左右交換
             # coordinate). The hook's lastTap.el names the real target;
             # a mistap re-enters the poll so the opener chain reopens
             # the surface and the next report supplies a fresh rect.
+            # With expect_el=None any fresh pointerdown still proves the
+            # HID event reached the page — idb reports 'hid succeeded'
+            # even when the companion's dtuhid channel is dead and iOS
+            # discards every touch, so delivery itself must be confirmed.
             hit = None
             vdead = time.monotonic() + 3.0
             while time.monotonic() < vdead:
@@ -1079,16 +1167,44 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                     hit = lt["el"]
                     break
                 time.sleep(0.3)
-            if hit in expect_el:
-                return needles[0]
-            ctx.note("ui_mistap", True,
-                     f"{what} @({x:.0f},{y:.0f}) hit {hit or '?'} "
-                     f"(want {expect_el}) — retrying")
+            if hit is None:
+                dead_taps += 1
+                _dead_check(what)
+                ctx.note("ui_tap_drop", True,
+                         f"{what} @({x:.0f},{y:.0f}) — no pointerdown "
+                         f"reached the page")
+            else:
+                dead_taps = 0
+            if expect_el is None or hit in expect_el:
+                if hit is not None:
+                    return needles[0]
+            elif hit is not None:
+                ctx.note("ui_mistap", True,
+                         f"{what} @({x:.0f},{y:.0f}) hit {hit} "
+                         f"(want {expect_el}) — retrying")
             prev_r = None
             time.sleep(delay)
             continue
         prev_r = None
-        last_rep = rep
+        # Terminal session states make session-only needles unreachable:
+        # the strip hides once the 'ended' flash expires and secSession
+        # controls unmount — burning the remaining polls only delays the
+        # inevitable EnvError. Choice/join/browse needles legitimately
+        # exist in idle/ended (they are how a client re-pairs), so the
+        # check applies per needle-set after the flash grace.
+        if session_only:
+            _st = (rep.get("pc") or {}).get("status")
+            if _st in ("idle", "ended"):
+                if term_since is None:
+                    term_since = time.monotonic()
+                elif time.monotonic() - term_since > _TERMINAL_GRACE_S:
+                    raise EnvError(
+                        f"ui tap: {what} unreachable — session status "
+                        f"'{_st}' endReason="
+                        f"{(rep.get('pc') or {}).get('endReason')} — "
+                        f"needles={needles} require a live session")
+            else:
+                term_since = None
         # A zombie reader (leave/resume aftermath) mounts AFTER the
         # scenario's cleanup pass and covers every control below it —
         # escape back to browse instead of burning the poll budget on
@@ -1126,8 +1242,15 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                     fired[op_sel] = it
                     if off is None:
                         off = _ui_offset(ctx, spec)
+                    t0 = int(time.time() * 1000)
                     drv.tap(spec, orr["x"] + orr["w"] / 2 + off[0],
                             orr["y"] + orr["h"] / 2 + off[1])
+                    ohit = _verify_opener_tap(ctx, spec, op_sel, t0)
+                    if ohit is None:
+                        dead_taps += 1
+                        _dead_check(what)
+                    else:
+                        dead_taps = 0
                     break
             else:
                 continue
@@ -1141,12 +1264,15 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
               for t in ((last_rep or {}).get("tiles") or [])][:10]
     _age = (time.time() - float((last_rep or {}).get("received_at") or 0)
             if last_rep else -1)
+    _lt = (last_rep or {}).get("lastTap") or {}
     raise EnvError(
         f"ui tap: {what} not found on screen (needles={needles}) "
         f"[phase={_pc.get('phase')} status={_pc.get('status')} "
+        f"endReason={_pc.get('endReason')} "
         f"hdr={(last_rep or {}).get('browseHeader')!r} "
         f"reader={(last_rep or {}).get('readerView')} "
-        f"tiles={_tiles} repAge={_age:.0f}s]")
+        f"tiles={_tiles} repAge={_age:.0f}s "
+        f"vp={(last_rep or {}).get('vp')} lastTap={_lt}]")
 
 
 def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
