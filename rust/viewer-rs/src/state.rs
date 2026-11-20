@@ -1798,6 +1798,10 @@ mod tests {
         std::fs::create_dir_all(lib.join("secret")).unwrap();
         std::fs::write(lib.join("secret").join("cover.png"), b"png").unwrap();
         std::fs::write(lib.join("top.png"), b"png").unwrap();
+        // snapshot_path() falls back to /var/lib/bookq — a real
+        // index-snapshot.json there would replace the synthetic tree and
+        // make membership environment-dependent. Point it inside the tempdir.
+        std::env::set_var("BOOKQ_STATE_DIR", &dir);
         let st = vis_state(&dir);
         let owner = visibility_owner("u@x.com", "test-secret");
         let put = |body: &'static [u8]| {
@@ -1826,6 +1830,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let (_, body) = resp_json(res).await;
         assert_eq!(body["hiddenRoots"], serde_json::json!([]));
+        std::env::remove_var("BOOKQ_STATE_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
