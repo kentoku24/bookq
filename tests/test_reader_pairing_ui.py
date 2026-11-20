@@ -955,10 +955,10 @@ def test_open_close_has_no_peer_side_effects(browser, server):
         ctx.close()
 
 
-# ── MATCH (one-tap connect) ────────────────────────────────────────
+# ── MATCH (explicit つながる pick → connect) ───────────────────────
 
-# Mock variant whose controller implements connect() — the one-tap MATCH
-# path. __pairConnectResult steers its resolved value per test.
+# Mock variant whose controller implements connect() — the MATCH path.
+# __pairConnectResult steers its resolved value per test.
 CONNECT_JS = MOCK_JS.replace(
     "create() { window.__pairCalls.push('create'); },",
     """connect(pick) {
