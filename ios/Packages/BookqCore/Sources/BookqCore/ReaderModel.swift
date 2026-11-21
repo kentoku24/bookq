@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 /// Pure reader model — chapter assembly + spread construction, byte-faithful
 /// to `web/static/app.js` `loadImages` and `web/static/viewer/spread.js`.
@@ -80,38 +83,6 @@ public enum PageTurnMath {
     /// 2560px default while flip-through stays sharp enough to read
     /// motion. Settled spreads upgrade to the full rendition.
     public static let fastPageWidth = 1600
-    /// Peak black overlay on the covered (static) spread mid-turn —
-    /// the depth scrim that sells the page-lift metaphor (iBooks /
-    /// Android `STACK_SCRIM` parity). Fully covered → this opacity,
-    /// fully revealed → 0.
-    public static let stackScrimMax: CGFloat = 0.35
-
-    /// Strip pitch for a single-mode pair interval — `(viewWidth +
-    /// meanPageWidth) / 2 - 1pt`, where `pageWidth` is the pair's mean
-    /// displayed page width (`spreadFit` width: `min(viewportW,
-    /// ar * viewportH)`). The mate's cell is full-viewport wide with the
-    /// page centred inside, so this pitch puts the mate's inner image
-    /// edge exactly 1pt inside the screen edge — a true 1pt peek of page
-    /// content at any aspect ratio. Full-width pages (portrait) give
-    /// `viewWidth - 1`; letterboxed pages (landscape single) pitch by
-    /// less than the viewport so the sliver still lands on the screen
-    /// edge instead of the page edge (where it would show the whole
-    /// mate page, not a peek). Averaging the pair's two widths keeps
-    /// peek → strip → peek seamless when the mates' aspects differ.
-    public static func stripPitch(viewWidth: CGFloat, pageWidth: CGFloat) -> CGFloat {
-        max((viewWidth + pageWidth) / 2 - 1, 0)
-    }
-
-    /// Whether `pos` sits strictly inside an intra-spread interval —
-    /// `[floor(pos), floor(pos)+1]` is a pair adjacency, so the two
-    /// pages of one spread pair slide past each other (strip layout)
-    /// instead of the stack reveal. Integer `pos` is a rest state and
-    /// always false here; the rest peek is handled separately.
-    public static func inStripInterval(_ pos: CGFloat,
-                                intraIntervals: Set<Int>) -> Bool {
-        let j = Int(floor(pos))
-        return pos != CGFloat(j) && intraIntervals.contains(j)
-    }
 
     /// Direction verdict: nil until the drag is clearly horizontal
     /// (|dx| > decideDistance and |dx| > |dy|). +1 = forward (drag right),
@@ -164,33 +135,6 @@ public enum PageTurnMath {
         return nil
     }
 
-    /// Covered fraction of the static (`ceil`) spread during a turn —
-    /// `ceil(pos) - pos` inside the book. Forward (`pos = i+f`) dims the
-    /// revealed next spread by 1-f so it brightens as the mover slides
-    /// away; backward (`pos = i-f`) dims the current spread by f as the
-    /// previous one covers it. Integer `pos` yields 0 for free, and
-    /// edge overshoot is excluded so rubber-banding never dims.
-    public static func coveredFraction(_ pos: CGFloat, count: Int) -> CGFloat {
-        guard pos > 0, pos < CGFloat(count - 1) else { return 0 }
-        return min(max(ceil(pos) - pos, 0), 1)
-    }
-}
-
-/// A page's position inside its spread pair — single-page mode only.
-/// `mate` is the mate page's *display* spread index (single mode has
-/// one page per spread, so it names the adjacent pager layer).
-public enum SpreadPairRole: Equatable {
-    case solo
-    case first(mate: Int)     // 1ページ目 — right page, read first
-    case second(mate: Int)    // 2ページ目 — left/facing page
-
-    /// The mate's display-spread index, nil for unpaired pages.
-    public var mateSpread: Int? {
-        switch self {
-        case .solo: return nil
-        case .first(let m), .second(let m): return m
-        }
-    }
 }
 
 public struct ReaderWork: Equatable {
@@ -203,15 +147,6 @@ public struct ReaderWork: Equatable {
     public var spreads: [[Int]]              // per-spread page indices (non-spacer only)
     public var idxToSpread: [Int]            // global idx → spread index (-1 spacer)
     public var pageMode: ReaderPageMode
-    /// Single-mode spread pairing: the offset-aware spread grouping
-    /// applied to one-page spreads — each display spread's role inside
-    /// its pair. `.spread` mode leaves every role `.solo` (the pair is
-    /// already side-by-side there).
-    public var pairRoles: [SpreadPairRole] = []
-    /// Display-spread j where [j, j+1] are the two pages of one pair —
-    /// the pager's "intra-spread" turn intervals (strip layout).
-    public var intraIntervals: Set<Int> = []
-
     public var isCrossChapter: Bool { chapters.count > 1 }
 
     /// Sibling leaf folders of `path` — `getSiblingLeafFolders` (app.js).
@@ -382,39 +317,7 @@ public struct ReaderWork: Equatable {
         var w = self
         w.spreads = spreads
         w.idxToSpread = i2s
-        w.rebuildPairLayout(offset: offset)
         return w
-    }
-
-    /// Single-mode pair layout: which display spread is the first
-    /// (1ページ目) or second (2ページ目) page of its spread pair, and
-    /// the mate's display spread. Pair membership comes from the
-    /// spread-mode grouping (offset-aware) applied to global indices;
-    /// pairs that would straddle a chapter boundary are dissolved —
-    /// spreads never mix chapters, so a chapter edge stays a stack
-    /// turn even when single-mode offset pairing would pair across it
-    /// (single-mode spacer padding is computed for offset 0).
-    private mutating func rebuildPairLayout(offset: Int) {
-        pairRoles = [SpreadPairRole](repeating: .solo, count: spreads.count)
-        intraIntervals = []
-        guard pageMode == .single else { return }
-        let boundarySet = Set(boundaries.dropFirst())
-        // global page idx → (isFirst, mate global idx); only real pairs.
-        var pairPos: [Int: (first: Bool, mate: Int)] = [:]
-        for g in Self.spreadGroups(n: images.count, offset: offset) {
-            let pages = g.filter { !images[$0].isSpacer }
-            guard pages.count == 2, !boundarySet.contains(pages[1]) else { continue }
-            pairPos[pages[0]] = (true, pages[1])
-            pairPos[pages[1]] = (false, pages[0])
-        }
-        for (s, spread) in spreads.enumerated() {
-            guard let g = spread.first, let p = pairPos[g] else { continue }
-            let mateSpread = idxToSpread[p.mate]
-            pairRoles[s] = p.first ? .first(mate: mateSpread) : .second(mate: mateSpread)
-            // Mates are adjacent real pages, hence adjacent display
-            // spreads — [s, s+1] is the pair's intra-spread interval.
-            if p.first && mateSpread == s + 1 { intraIntervals.insert(s) }
-        }
     }
 
     /// New work after a mode/offset change (runtime toggle — no re-pad).
@@ -442,6 +345,51 @@ public struct ReaderWork: Equatable {
             w = size.width
         }
         return CGSize(width: w, height: h)
+    }
+
+    /// Landscape 1-page mode side previews (#496) — which spreads sit in
+    /// the margins for a continuous pager position `pos`. The pager's
+    /// active pair is {floor(pos), ceil(pos)}; the margins always show
+    /// the spreads just OUTSIDE that pair, so a mid-turn never exposes
+    /// the same page twice (sliding cell + margin preview). At rest
+    /// pos == i this yields prev=i-1 (right side, RTL) and next=i+1
+    /// (left side); a rubber-banded pos clamps to the edge spread's real
+    /// neighbours. nil = no neighbour on that side (book edge).
+    public static func neighborSpreads(pos: CGFloat, count: Int)
+        -> (prev: Int?, next: Int?) {
+        guard count > 0 else { return (nil, nil) }
+        let f = min(max(Int(floor(pos)), 0), count - 1)
+        let c = min(max(Int(ceil(pos)), 0), count - 1)
+        let prev = f - 1, next = c + 1
+        return (prev >= 0 ? prev : nil,
+                next < count ? next : nil)
+    }
+
+    /// Landscape 1-page mode neighbour frames (#496) — each neighbour
+    /// keeps its own single-page `spreadFit` size and sits `gap` pt
+    /// outside the centred current page toward the screen edge (the
+    /// layout the web strip shows once its gapBefore() widening is
+    /// lifted for landscape-single; web parity is deferred to the
+    /// frontend relocation). A neighbour wider than its margin bleeds
+    /// off-screen (the viewport clips it); leftover stays black at the
+    /// far edge. Vertical centre matches the pager cell's centre fit.
+    /// nil AR = no preview on that side.
+    public static func neighborFrames(curAR: CGFloat, prevAR: CGFloat?,
+                               nextAR: CGFloat?, in size: CGSize,
+                               gap: CGFloat = 10)
+        -> (prev: CGRect?, next: CGRect?) {
+        let curFit = spreadFit(ars: [curAR], gap: 5, in: size)
+        let curX = (size.width - curFit.width) / 2
+        let curMaxX = curX + curFit.width
+        func frame(_ ar: CGFloat?, onRight: Bool) -> CGRect? {
+            guard let ar, ar > 0 else { return nil }
+            let fit = spreadFit(ars: [ar], gap: 5, in: size)
+            let y = (size.height - fit.height) / 2
+            let x = onRight ? curMaxX + gap : curX - gap - fit.width
+            return CGRect(x: x, y: y, width: fit.width, height: fit.height)
+        }
+        return (frame(prevAR, onRight: true),
+                frame(nextAR, onRight: false))
     }
 
     /// `getChapterSpreadRange` (app.js) — spread index range [lo, hi]

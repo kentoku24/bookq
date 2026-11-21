@@ -56,102 +56,6 @@ final class ReaderModelTests: XCTestCase {
         XCTAssertNil(w.prevSpreadFirstPage(before: 0))
     }
 
-    // MARK: - single-mode spread pairing (peek / intra turns)
-
-    func testSingleModeSpreadPairRolesOffset0() {
-        // pairs (0,1)(2,3), page 4 solo (odd tail)
-        let w = ReaderWork.assemble(clickedPath: "a",
-                                    chapters: [chapter("a", "a", 5)],
-                                    pageMode: .single, spreadOffset: 0)
-        XCTAssertEqual(w.pairRoles,
-                       [.first(mate: 1), .second(mate: 0),
-                        .first(mate: 3), .second(mate: 2), .solo])
-        XCTAssertEqual(w.intraIntervals, [0, 2])
-    }
-
-    func testSingleModeSpreadPairRolesOffset1() {
-        // cover solo: [0], pairs (1,2)(3,4)
-        let w = ReaderWork.assemble(clickedPath: "a",
-                                    chapters: [chapter("a", "a", 5)],
-                                    pageMode: .single, spreadOffset: 1)
-        XCTAssertEqual(w.pairRoles,
-                       [.solo, .first(mate: 2), .second(mate: 1),
-                        .first(mate: 4), .second(mate: 3)])
-        XCTAssertEqual(w.intraIntervals, [1, 3])
-    }
-
-    func testSingleModeSpreadPairRolesEvenCount() {
-        // 4 pages offset0 → two full pairs, no solo tail
-        let w = ReaderWork.assemble(clickedPath: "a",
-                                    chapters: [chapter("a", "a", 4)],
-                                    pageMode: .single, spreadOffset: 0)
-        XCTAssertEqual(w.pairRoles,
-                       [.first(mate: 1), .second(mate: 0),
-                        .first(mate: 3), .second(mate: 2)])
-        XCTAssertEqual(w.intraIntervals, [0, 2])
-    }
-
-    func testSingleModeSpreadPairRolesCrossChapter() {
-        // ch0:3 / ch1:4 offset0 → 1 spacer before ch1.
-        // pair groups (g0,g1), (g2,S)→solo, (g4,g5), (g6,g7).
-        // display spreads [[0],[1],[2],[4],[5],[6],[7]] — mates land on
-        // display spreads 0-1, 3-4, 5-6.
-        let w = ReaderWork.assemble(clickedPath: "w/01",
-                                    chapters: [chapter("01", "w/01", 3),
-                                               chapter("02", "w/02", 4)],
-                                    pageMode: .single, spreadOffset: 0)
-        XCTAssertEqual(w.spreads.count, 7)
-        XCTAssertEqual(w.pairRoles[0], .first(mate: 1))
-        XCTAssertEqual(w.pairRoles[1], .second(mate: 0))
-        XCTAssertEqual(w.pairRoles[2], .solo)          // spacer partner
-        XCTAssertEqual(w.pairRoles[3], .first(mate: 4))
-        XCTAssertEqual(w.pairRoles[4], .second(mate: 3))
-        XCTAssertEqual(w.pairRoles[5], .first(mate: 6))
-        XCTAssertEqual(w.pairRoles[6], .second(mate: 5))
-        XCTAssertEqual(w.intraIntervals, [0, 3, 5])
-    }
-
-    func testSingleModeSpreadPairRolesNeverCrossChapterBoundary() {
-        // ch0:4 / ch1:4, single-mode load pads for offset0 (no spacer —
-        // boundary already even). offset1 pairing would pair globals
-        // 3 (ch0 last) & 4 (ch1 first); the boundary check dissolves it.
-        let w = ReaderWork.assemble(clickedPath: "w/01",
-                                    chapters: [chapter("01", "w/01", 4),
-                                               chapter("02", "w/02", 4)],
-                                    pageMode: .single, spreadOffset: 1)
-        // groups [0],[1,2],[3,4],[5,6],[7] → pairs (1,2),(3,4),(5,6);
-        // (3,4) straddles boundary 4 → both solo.
-        XCTAssertEqual(w.pairRoles,
-                       [.solo, .first(mate: 2), .second(mate: 1),
-                        .solo, .solo,
-                        .first(mate: 6), .second(mate: 5), .solo])
-        XCTAssertEqual(w.intraIntervals, [1, 5])
-    }
-
-    func testSpreadPairRolesSpreadModeAllSolo() {
-        // .spread mode: pairs are already side-by-side — no strip/peek.
-        let w = ReaderWork.assemble(clickedPath: "a",
-                                    chapters: [chapter("a", "a", 5)],
-                                    pageMode: .spread, spreadOffset: 0)
-        XCTAssertTrue(w.pairRoles.allSatisfy { $0 == .solo })
-        XCTAssertTrue(w.intraIntervals.isEmpty)
-    }
-
-    func testSpreadPairRolesFollowOffsetToggle() {
-        // withMode rebuilds the pair layout without regrouping the
-        // single-mode display spreads — pos stays valid across toggles.
-        var w = ReaderWork.assemble(clickedPath: "a",
-                                    chapters: [chapter("a", "a", 5)],
-                                    pageMode: .single, spreadOffset: 0)
-        w = w.withMode(.single, offset: 1)
-        XCTAssertEqual(w.spreads, [[0], [1], [2], [3], [4]])
-        XCTAssertEqual(w.pairRoles[0], .solo)
-        XCTAssertEqual(w.pairRoles[1], .first(mate: 2))
-        XCTAssertEqual(w.intraIntervals, [1, 3])
-        // Back to spread mode → roles reset to solo.
-        w = w.withMode(.spread, offset: 0)
-        XCTAssertTrue(w.pairRoles.allSatisfy { $0 == .solo })
-    }
 
     // MARK: - chapters + spacers
 
@@ -557,70 +461,96 @@ final class ReaderModelTests: XCTestCase {
                                                   viewWidth: 0))
     }
 
-    // MARK: - depth scrim (coveredFraction)
+    // MARK: - landscape 1-page neighbour previews (#496)
 
-    func testCoveredFractionZeroAtRest() {
-        // Integer pos = settled spread — nothing is covered.
-        XCTAssertEqual(PageTurnMath.coveredFraction(0, count: 6), 0)
-        XCTAssertEqual(PageTurnMath.coveredFraction(2, count: 6), 0)
-        XCTAssertEqual(PageTurnMath.coveredFraction(5, count: 6), 0)
+    func testNeighborSpreadsAtRest() {
+        // Settled pos=i → margins show i-1 (right/prev) and i+1 (left/next).
+        let r = ReaderWork.neighborSpreads(pos: 2, count: 6)
+        XCTAssertEqual(r.prev, 1)
+        XCTAssertEqual(r.next, 3)
     }
 
-    func testCoveredFractionForwardTurn() {
-        // pos = i+0.3 forward: the revealed next spread is still 70%
-        // covered → scrim fraction 0.7, brightening toward 0 at i+1.
-        XCTAssertEqual(PageTurnMath.coveredFraction(2.3, count: 6), 0.7,
-                       accuracy: 0.0001)
-        XCTAssertEqual(PageTurnMath.coveredFraction(2.9, count: 6), 0.1,
-                       accuracy: 0.0001)
+    func testNeighborSpreadsMidTurnShowsOuterPair() {
+        // Forward turn 2→3 (pos=2.4): active pair {2,3} → margins show
+        // the OUTER neighbours 1 and 4 — never the pages in flight, so
+        // no page appears both sliding and in a margin.
+        let fwd = ReaderWork.neighborSpreads(pos: 2.4, count: 6)
+        XCTAssertEqual(fwd.prev, 1)
+        XCTAssertEqual(fwd.next, 4)
+        // Backward turn written as pos=1.6 (floor 1 sliding in on top,
+        // ceil 2 beneath): active pair {1,2} → outer 0 and 3.
+        let back = ReaderWork.neighborSpreads(pos: 1.6, count: 6)
+        XCTAssertEqual(back.prev, 0)
+        XCTAssertEqual(back.next, 3)
     }
 
-    func testCoveredFractionBackwardTurn() {
-        // pos = i-0.3 written as 2.7 (floor 2 sliding in on top):
-        // the current spread is 30% covered → fraction 0.3.
-        XCTAssertEqual(PageTurnMath.coveredFraction(2.7, count: 6), 0.3,
-                       accuracy: 0.0001)
-        XCTAssertEqual(PageTurnMath.coveredFraction(2.1, count: 6), 0.9,
-                       accuracy: 0.0001)
+    func testNeighborSpreadsBookEdges() {
+        let first = ReaderWork.neighborSpreads(pos: 0, count: 6)
+        XCTAssertNil(first.prev)
+        XCTAssertEqual(first.next, 1)
+        let last = ReaderWork.neighborSpreads(pos: 5, count: 6)
+        XCTAssertEqual(last.prev, 4)
+        XCTAssertNil(last.next)
+        // Rubber-band past either edge clamps to the edge spread's
+        // real neighbours — never the edge spread itself.
+        let over = ReaderWork.neighborSpreads(pos: -0.4, count: 6)
+        XCTAssertNil(over.prev)
+        XCTAssertEqual(over.next, 1)
+        let under = ReaderWork.neighborSpreads(pos: 5.4, count: 6)
+        XCTAssertEqual(under.prev, 4)
+        XCTAssertNil(under.next)
+        // Empty work → no previews at all.
+        let empty = ReaderWork.neighborSpreads(pos: 0, count: 0)
+        XCTAssertNil(empty.prev)
+        XCTAssertNil(empty.next)
     }
 
-    func testCoveredFractionEdgesAndOvershoot() {
-        // No covered page at the book edges or while rubber-banding past.
-        XCTAssertEqual(PageTurnMath.coveredFraction(-0.4, count: 6), 0)
-        XCTAssertEqual(PageTurnMath.coveredFraction(0.5, count: 1), 0)
-        XCTAssertEqual(PageTurnMath.coveredFraction(5.5, count: 6), 0)
-        XCTAssertEqual(PageTurnMath.coveredFraction(6.2, count: 6), 0)
+    func testNeighborFramesTypicalPortraitPage() throws {
+        // iPhone landscape ~852x393, AR 0.7 pages: each neighbour keeps
+        // its own height-fit size and sits `gap` outside the centred
+        // current page toward the screen edge.
+        let size = CGSize(width: 852, height: 393)
+        let frames = ReaderWork.neighborFrames(curAR: 0.7, prevAR: 0.7,
+                                               nextAR: 0.7, in: size,
+                                               gap: 10)
+        let curW: CGFloat = 0.7 * 393   // 275.1 — height-fit, no width cap
+        let nW: CGFloat = 0.7 * 393
+        let curLeft = (852 - curW) / 2
+        let curRight = curLeft + curW
+        let prev = try XCTUnwrap(frames.prev)
+        let next = try XCTUnwrap(frames.next)
+        XCTAssertEqual(prev.minX, curRight + 10, accuracy: 0.001)
+        XCTAssertEqual(prev.width, nW, accuracy: 0.001)
+        XCTAssertEqual(prev.height, 393, accuracy: 0.001)
+        // next's RIGHT edge is gap left of the current page's left edge.
+        XCTAssertEqual(next.maxX, curLeft - 10, accuracy: 0.001)
+        XCTAssertEqual(next.width, nW, accuracy: 0.001)
+        // Both centred vertically like the pager cell.
+        XCTAssertEqual(prev.midY, 393.0 / 2, accuracy: 0.001)
+        XCTAssertEqual(next.midY, 393.0 / 2, accuracy: 0.001)
     }
 
-    // MARK: - strip layout (single-mode pair turns)
-
-    func testStripPitchFullWidthPage() {
-        // Portrait pages fill the viewport width → pitch = vw − 1pt,
-        // the classic "width - 1" strip step.
-        XCTAssertEqual(PageTurnMath.stripPitch(viewWidth: 440, pageWidth: 440),
-                       439, accuracy: 0.0001)
+    func testNeighborFramesWideNeighbourBleedsOffScreen() throws {
+        // A wide neighbour (AR 1.4) is wider than its margin: it keeps
+        // its own fit and bleeds past the screen edge — the display
+        // clips it, matching the web strip's overflow behaviour.
+        let size = CGSize(width: 852, height: 393)
+        let frames = ReaderWork.neighborFrames(curAR: 0.7, prevAR: 1.4,
+                                               nextAR: nil, in: size,
+                                               gap: 10)
+        let prev = try XCTUnwrap(frames.prev)
+        XCTAssertNil(frames.next)
+        // AR 1.4 height-fit: w = 1.4*393 = 550.2 — far past the ~288pt
+        // margin, so prev.maxX lands well beyond the viewport width.
+        XCTAssertEqual(prev.width, 1.4 * 393, accuracy: 0.001)
+        XCTAssertGreaterThan(prev.maxX, size.width)
     }
 
-    func testStripPitchLetterboxedPage() {
-        // Landscape single: a 280pt page centered in a 956pt viewport
-        // pitches by less than vw so the mate's *image* edge — not its
-        // cell edge — lands 1pt inside the screen edge.
-        XCTAssertEqual(PageTurnMath.stripPitch(viewWidth: 956, pageWidth: 280),
-                       617, accuracy: 0.0001)
-        // Degenerate inputs clamp at 0 rather than going negative.
-        XCTAssertEqual(PageTurnMath.stripPitch(viewWidth: 0, pageWidth: 0), 0)
-    }
-
-    func testInStripInterval() {
-        let intervals: Set<Int> = [0, 2]
-        // Strictly inside a pair interval → strip layout.
-        XCTAssertTrue(PageTurnMath.inStripInterval(0.5, intraIntervals: intervals))
-        XCTAssertTrue(PageTurnMath.inStripInterval(2.7, intraIntervals: intervals))
-        // Integral pos = rest state → never strip (peek handles it).
-        XCTAssertFalse(PageTurnMath.inStripInterval(0.0, intraIntervals: intervals))
-        XCTAssertFalse(PageTurnMath.inStripInterval(2.0, intraIntervals: intervals))
-        // Outside any pair interval → stack layout.
-        XCTAssertFalse(PageTurnMath.inStripInterval(1.5, intraIntervals: intervals))
-        XCTAssertFalse(PageTurnMath.inStripInterval(3.5, intraIntervals: intervals))
+    func testNeighborFramesNilARMeansNoPreview() {
+        let size = CGSize(width: 852, height: 393)
+        let frames = ReaderWork.neighborFrames(curAR: 0.7, prevAR: nil,
+                                               nextAR: 0.7, in: size)
+        XCTAssertNil(frames.prev)
+        XCTAssertNotNil(frames.next)
     }
 }

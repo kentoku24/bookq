@@ -14,4 +14,19 @@ public struct CGSize: Equatable {
         self.height = height
     }
 }
+
+public struct CGRect: Equatable {
+    public var x: CGFloat
+    public var y: CGFloat
+    public var width: CGFloat
+    public var height: CGFloat
+    public init(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+    public var minX: CGFloat { x }
+    public var maxX: CGFloat { x + width }
+}
 #endif
