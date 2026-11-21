@@ -144,6 +144,11 @@ spec の `security` は cookie OR Bearer のどちらか。
   - `grant_type=refresh_token` + `refresh_token` → **新 pair**
     - rotation: 提示 refresh は **成否に関わらず consume** (並行リクエストでの
       2 重使用防止のため single-flight 前提)
+  - **レート制限 (#559 AUTH-01)**: 失敗交換 (401) はクライアント IP 毎に
+    60 秒窓 20 件まで。超過で **429 + `Retry-After`**。成功交換は
+    カウントしないため通常のリトライで誤発動しない。`GET /auth/login`
+    起動も別枠で 60 秒 120 件。識別は sidecar が付与する proxy ヘッダ
+    (`CF-Connecting-IP` / XFF 末尾) 由来。
 - **access token**: HS256 JWT、claims `{sub,name,picture,iat,exp}`、`exp = iat+3600`。
   - identity の取得は claims をローカル decode する (`/api/me` 等は存在しない)
   - server 側の検証: exp 必須・`sub` を email として allowlist (`ALLOWED_EMAILS`)

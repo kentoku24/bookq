@@ -1,6 +1,16 @@
 # Schemathesis contract-test configuration.
 # Loaded automatically when `schemathesis run` executes in this directory.
 
+# /api/v1/auth/token is failure-throttled per client IP (#559): a fuzz
+# run that generates enough 401s legitimately starts seeing 429s, and
+# every schemathesis case shares the runner's single source IP.
+
+[[operations]]
+include-name = "POST /api/v1/auth/token"
+checks.positive_data_acceptance.expected-statuses = [
+  "2xx", "3xx", "400", "401", "429", "5xx",
+]
+
 # The far-future `ts` guard on reading-position PUTs rejects schema-valid
 # input with 400 — an intentional wrong-clock defense (see the comment in
 # app/routes.py: a clamped ts would let a skewed device dominate LWW

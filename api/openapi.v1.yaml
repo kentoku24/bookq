@@ -874,6 +874,7 @@ paths:
                     refresh_token: "refresh-abc123"
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {description: コード / verifier / refresh token 不正}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
 
   # ── library edit ────────────────────────────────────────────────────
   # ライブラリへの書き込み面。対応形式は .zip .cbz .rar .cbr .epub .pdf
@@ -1604,6 +1605,22 @@ components:
             index_building:
               summary: 構築中（Retry-After で再送）
               value: {detail: "metadata index building"}
+    TooManyRequests:
+      description: |
+        per-IP レート制限 (#559 AUTH-01)。`/api/v1/auth/token` は失敗交換
+        (401) をクライアント IP 毎に 60 秒窓 20 件までに制限し、超過で
+        スロットルする。`Retry-After` に残り秒数。成功交換はカウント
+        しない。`Cache-Control: no-store`。
+      headers:
+        Retry-After:
+          schema: {type: integer, description: 制限解除までの秒数}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          examples:
+            default:
+              summary: 失敗交換スロットル
+              value: {detail: "too many failed token exchanges"}
     BadRequest:
       description: パラメータ不正
       content:
