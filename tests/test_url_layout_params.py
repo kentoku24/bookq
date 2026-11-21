@@ -5,6 +5,8 @@ import re
 
 from playwright.sync_api import expect
 
+from browse_header_helpers import set_view_mode
+
 
 def _open_long(page, server):
     page.goto(server + "/#/view/long?p=0")
@@ -37,7 +39,7 @@ def test_layout_params_restore_from_url(landscape_page, server):
     assert landscape_page.evaluate("window.landscapeSpread") is False
     # Same folder/page, different query only -> same-document navigation
     # (hashchange fires but applyUrlState's st.page===cur.page short-circuits
-    # the reload per the Task 2 note in the brief). A reload simulates the
+    # the reload). A reload simulates the
     # realistic case of opening a shared deep link fresh.
     landscape_page.goto(server + "/#/view/long?p=2&o=1")
     landscape_page.reload()
@@ -68,8 +70,11 @@ def test_no_localstorage_for_layout(landscape_page, server):
     keys = landscape_page.evaluate("Object.keys(localStorage)")
     # bookq.folderVisibility.v1.<owner> は仕様上のowner別snapshot cache
     # (offline起動用) — レイアウト状態ではないため許可する。
+    # bookq_progress(:<email>)? は読書進捗 — アカウントスコープ化 (#375) 後は
+    # `bookq_progress:<email>` 形式も許可する。
     assert all(
-        k in ("bookq_progress", "bookq_persist_toast")
+        k == "bookq_progress" or k.startswith("bookq_progress:")
+        or k == "bookq_persist_toast"
         or k.startswith("bookq.folderVisibility.v1.")
         for k in keys
     ), keys
@@ -78,13 +83,13 @@ def test_no_localstorage_for_layout(landscape_page, server):
 def test_view_mode_in_browse_url(page, server):
     page.goto(server + "/")
     page.wait_for_selector("#tile-grid .tile")
-    page.locator("#footer-refresh-btn").click()   # tile → list
+    set_view_mode(page, "list")
     expect(page).to_have_url(re.compile(r"#/browse/\?v=list$"))
     page.locator('#tile-grid [data-path="series"]').click()
     expect(page).to_have_url(re.compile(r"#/browse/series\?v=list$"))
-    page.locator("#footer-refresh-btn").click()   # list → card
+    set_view_mode(page, "card")
     expect(page).to_have_url(re.compile(r"#/browse/series\?v=card$"))
-    page.locator("#footer-refresh-btn").click()   # card → tile（既定: パラメータ無し）
+    set_view_mode(page, "tile")                    # 既定: パラメータ無し
     expect(page).to_have_url(re.compile(r"#/browse/series$"))
 
 
@@ -92,7 +97,7 @@ def test_view_mode_restores_from_url(page, server):
     page.goto(server + "/#/browse/series?v=list")
     page.wait_for_selector("#tile-grid .item, #tile-grid .tile")
     assert page.evaluate("window.viewMode") == "list"
-    expect(page.locator("#footer-refresh-btn")).to_have_text("📋")
+    expect(page.locator("#menu-view-list")).to_have_attribute("aria-checked", "true")
 
 
 def test_breadcrumb_back_after_mode_change_uses_history(page, server):
@@ -107,7 +112,7 @@ def test_breadcrumb_back_after_mode_change_uses_history(page, server):
     page.wait_for_selector("#tile-grid .tile")
     page.locator('[data-path="series"]').click()
     expect(page).to_have_url(re.compile(r"#/browse/series$"))
-    page.locator("#footer-refresh-btn").click()
+    set_view_mode(page, "list")
     expect(page).to_have_url(re.compile(r"#/browse/series\?v=list$"))
     before = page.evaluate("history.length")
     page.locator("#browse-header").click()  # breadcrumb ↩ back to root
@@ -117,9 +122,9 @@ def test_breadcrumb_back_after_mode_change_uses_history(page, server):
     after = page.evaluate("history.length")
     assert after == before, f"breadcrumb pop after a mode change grew history: {before} -> {after}"
     assert page.evaluate("window.viewMode") == "tile"
-    expect(page.locator("#footer-refresh-btn")).to_have_text("🎨")
+    expect(page.locator("#menu-view-tile")).to_have_attribute("aria-checked", "true")
     # The DOM must actually re-render to match — a stale list-mode grid
-    # under a tile-glyph footer was the fix-round-1 regression (the ↩
+    # under a tile-checked menu radio was the fix-round-1 regression (the ↩
     # handler's own synchronous render happened before the async
     # hashchange reset viewMode, so nothing re-rendered afterwards).
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"list-mode"))
@@ -133,7 +138,7 @@ def test_browse_url_without_v_resets_to_tile(page, server):
     page.goto(server + "/#/browse/series")
     page.wait_for_selector("#tile-grid .tile")
     assert page.evaluate("window.viewMode") == "tile"
-    expect(page.locator("#footer-refresh-btn")).to_have_text("🎨")
+    expect(page.locator("#menu-view-tile")).to_have_attribute("aria-checked", "true")
 
 
 def test_dead_folder_with_v_clears_hash(page, server):

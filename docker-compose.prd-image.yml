@@ -3,11 +3,8 @@
 # image: のみ。build: / volumes: / ports: の上書きは禁止（pin 欠落時の
 # dirty フォールバック防止。deploy は必ず up -d --no-build で行う）。
 services:
-  viewer:
-    image: ${PRD_VIEWER_IMAGE:?}
   tailscale:
     image: ${PRD_TAILSCALE_IMAGE:?}
   viewer-rs:
-    # profile rs は opt-in — pin が無くても非 rs デプロイの parse を壊さない。
-    # 有効化前に `./rebuild.sh prd build` が rs イメージを作っておくこと。
-    image: ${PRD_RS_IMAGE:-bookq-prd-viewer-rs:unbuilt}
+    # #409 で本体サービス (#503 rs-only) — pin 必須（欠落 deploy は parse 時点で失敗させる）。
+    image: ${PRD_RS_IMAGE:?}

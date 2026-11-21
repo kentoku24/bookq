@@ -185,12 +185,20 @@ pub fn resolve(
     // still return it as the caller, and the Bearer may be someone else.
     match session_lookup(headers, session_key) {
         SessionLookup::User(u) => {
-            return match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
-                Some(email) => Caller::User(Identity {
-                    email: email.to_lowercase(),
-                }),
-                None => Caller::Delegate,
-            };
+            match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
+                // #373: the Bearer path re-checks ALLOWED_EMAILS on every
+                // request; the session cookie gets the same evaluation so
+                // a removed email loses access now, not at cookie expiry.
+                // A disallowed session yields no identity — fall to
+                // Bearer exactly like `NoUser`.
+                Some(email) => {
+                    let email = email.to_lowercase();
+                    if allowlist.contains(&email) {
+                        return Caller::User(Identity { email });
+                    }
+                }
+                None => return Caller::Delegate,
+            }
         }
         SessionLookup::Corrupt => return Caller::Delegate,
         SessionLookup::Absent | SessionLookup::NoUser => {}
@@ -203,7 +211,7 @@ pub fn resolve(
 
 /// The `Bearer` token portion of `Authorization`, if well-formed —
 /// `partition(" ")` semantics: the scheme ends at the first space.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = auth.split_once(' ').unwrap_or((auth, ""));
     if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
@@ -263,16 +271,44 @@ pub fn session_key(secret: &str) -> Option<SessionKey> {
 /// left to right). First-wins would let `session=<valid>; session=<x>`
 /// authenticate where Python sees the tampered value and falls to 401.
 fn session_cookie_value(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, "session")
+}
+
+/// `<name>=<value>` lookup over all Cookie headers — last wins (see
+/// `session_cookie_value`).
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut last = None;
     for v in headers.get_all(header::COOKIE) {
         let Ok(v) = v.to_str() else { continue };
         for kv in v.split(';') {
-            if let Some(rest) = kv.trim().strip_prefix("session=") {
-                last = Some(rest.trim_matches('"').to_string());
+            let kv = kv.trim();
+            if let Some(rest) = kv.strip_prefix(name) {
+                if let Some(rest) = rest.strip_prefix('=') {
+                    last = Some(rest.trim_matches('"').to_string());
+                }
             }
         }
     }
     last
+}
+
+/// `TimestampSigner(secret).sign(data)` — mint the cookie value starlette
+/// emits: `b64std(payload) + "." + b64url(ts) + "." + b64url(sig)`. The
+/// payload base64 is STANDARD (`b64encode`, padding kept) — `+`/`/`/`=`
+/// all appear; ts is the big-endian integer with leading zero bytes
+/// stripped (`int_to_bytes`); the signature is URL_SAFE_NO_PAD HMAC-SHA1
+/// over `value + "." + ts`.
+pub fn sign_session(key: &SessionKey, payload: &[u8], ts: u64) -> String {
+    let value_b64 = STANDARD.encode(payload);
+    let ts_bytes = ts.to_be_bytes();
+    let start = ts_bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    let ts_b64 = URL_SAFE_NO_PAD.encode(&ts_bytes[start..]);
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key.0).expect("hmac key");
+    mac.update(value_b64.as_bytes());
+    mac.update(b".");
+    mac.update(ts_b64.as_bytes());
+    let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("{value_b64}.{ts_b64}.{sig}")
 }
 
 /// `TimestampSigner(secret).unsign(data, max_age)` → the session payload
@@ -371,8 +407,17 @@ pub fn resolve_ws_user(
         return Some(Value::Object(u));
     }
     match session_lookup(headers, session_key) {
-        // Any non-null `user` is the caller upstream — return it whole.
-        SessionLookup::User(u) => return Some(u),
+        SessionLookup::User(u) => {
+            match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
+                // #373: same ALLOWED_EMAILS re-evaluation as `resolve` —
+                // a removed email fails the handshake; the Bearer
+                // fallback below still applies.
+                Some(e) if !allowlist.contains(&e.to_lowercase()) => {}
+                // Any other non-null `user` is the caller upstream —
+                // return it whole.
+                _ => return Some(u),
+            }
+        }
         // Signed but not a session object — starlette raises on load and
         // the handshake dies; fail closed.
         SessionLookup::Corrupt => return None,
@@ -520,23 +565,11 @@ mod tests {
 
     // ── resolve(): session-cookie callers ────────────────────────────────
 
-    /// Mint a cookie the way starlette does: the value is STANDARD
-    /// base64 of the JSON (`b64encode`, `=` padding kept — `+`/`/` can
-    /// appear), ts and signature are itsdangerous urlsafe-b64. The key
-    /// comes from the shared `session_key` derivation so tests can't
-    /// drift from the verifier they exercise.
+    /// Mint a cookie the way starlette does — delegates to the prod
+    /// `sign_session` so tests exercise the same code path the OAuth
+    /// callback mints with.
     fn sign_session(secret: &str, payload: &[u8], ts: u64) -> String {
-        let value_b64 = STANDARD.encode(payload);
-        let ts_bytes = ts.to_be_bytes();
-        let start = ts_bytes.iter().position(|&b| b != 0).unwrap_or(7);
-        let ts_b64 = URL_SAFE_NO_PAD.encode(&ts_bytes[start..]);
-        let key = session_key(secret).unwrap();
-        let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key.0).unwrap();
-        mac.update(value_b64.as_bytes());
-        mac.update(b".");
-        mac.update(ts_b64.as_bytes());
-        let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-        format!("{value_b64}.{ts_b64}.{sig}")
+        super::sign_session(&session_key(secret).unwrap(), payload, ts)
     }
 
     fn headers_with(cookie: Option<&str>, auth: Option<&str>) -> HeaderMap {
@@ -701,16 +734,58 @@ mod tests {
         }
     }
 
-    /// `SESSION_MAX_AGE` is hand-mirrored from `SessionMiddleware(max_age=)`
-    /// — a Python-side change must trip this test, not silently diverge
-    /// (Rust would accept cookies Python already revoked).
+    /// #373: the session cookie gets the Bearer path's per-request
+    /// ALLOWED_EMAILS re-check — a removed email yields no identity.
     #[test]
-    fn session_max_age_matches_python() {
-        let main_py = include_str!("../../../app/main.py");
-        assert!(
-            main_py.contains("max_age=86400 * 7"),
-            "app/main.py SessionMiddleware max_age changed — update SESSION_MAX_AGE"
+    fn disallowed_session_user_falls_to_bearer() {
+        const REMOVED_JSON: &str =
+            "{\"user\":{\"email\":\"b@example.com\",\"name\":\"Bob\",\"picture\":\"\"}}";
+        let cookie = sign_session(SECRET, REMOVED_JSON.as_bytes(), now_ts());
+        // No Bearer → the request is simply unauthenticated.
+        let h = headers_with(Some(&format!("session={cookie}")), None);
+        assert!(matches!(
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            Caller::Delegate
+        ));
+        // A valid Bearer still wins — the disallowed session yields no
+        // identity, it does not veto the request.
+        let h = headers_with(
+            Some(&format!("session={cookie}")),
+            Some(&format!("Bearer {}", bearer_for("a@example.com", 3600))),
         );
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()) {
+            Caller::User(u) => assert_eq!(u.email, "a@example.com"),
+            Caller::Delegate => panic!("bearer after disallowed session delegated"),
+        }
+    }
+
+    /// #373: the same re-check on the reader-sync handshake path.
+    #[test]
+    fn disallowed_session_user_fails_ws_handshake() {
+        const REMOVED_JSON: &str =
+            "{\"user\":{\"email\":\"b@example.com\",\"name\":\"Bob\",\"picture\":\"\"}}";
+        let cookie = sign_session(SECRET, REMOVED_JSON.as_bytes(), now_ts());
+        let h = headers_with(Some(&format!("session={cookie}")), None);
+        assert!(
+            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist())
+                .is_none()
+        );
+        // An allowlisted session still resolves.
+        let good = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
+        let h = headers_with(Some(&format!("session={good}")), None);
+        assert!(
+            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist())
+                .is_some()
+        );
+    }
+
+    /// `SESSION_MAX_AGE` mirrors the Python-era `SessionMiddleware(max_age=86400 * 7)`
+    /// so cookies minted before the Rust cutover stay valid. Live sessions carry
+    /// this value — lowering it revokes them early, raising it extends a contract
+    /// already baked into signed cookies. The Python source this was pinned
+    /// against was deleted in #473; the constant is now owned here.
+    #[test]
+    fn session_max_age_matches_deployed_contract() {
         assert_eq!(SESSION_MAX_AGE, 86400 * 7);
     }
 

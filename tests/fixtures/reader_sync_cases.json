@@ -1,5 +1,47 @@
 {
   "version": 1,
+  "manifestDigestCases": [
+    {
+      "name": "canon-作品A-offset1",
+      "manifest": {
+        "v": 1,
+        "folder": "作品A",
+        "offset": 1,
+        "initial": {"spreadId": "s0"},
+        "chapters": [
+          {
+            "name": "第1話",
+            "folder": "作品A/第1話",
+            "pages": [
+              {"folder": "作品A/第1話", "name": "p1.png"},
+              {"folder": "作品A/第1話", "name": "p2.png"},
+              {"folder": "作品A/第1話", "name": "p3.png"}
+            ]
+          }
+        ],
+        "pageRefs": [
+          {"folder": "作品A/第1話", "name": "p1.png"},
+          {"folder": "作品A/第1話", "name": "p2.png"},
+          {"folder": "作品A/第1話", "name": "p3.png"}
+        ],
+        "spreadTable": [
+          {
+            "id": "s0",
+            "chapterFolder": "作品A/第1話",
+            "right": {"folder": "作品A/第1話", "name": "p1.png"},
+            "left": {"folder": "作品A/第1話", "name": "p2.png"}
+          },
+          {
+            "id": "s1",
+            "chapterFolder": "作品A/第1話",
+            "right": {"folder": "作品A/第1話", "name": "p3.png"},
+            "left": null
+          }
+        ]
+      },
+      "expectDigest": "sha256:476147ea0d741c9253a1998b62b0b8e9958597e8cc26bc155aa34b70c59e1e87"
+    }
+  ],
   "spreadCases": [
     {
       "name": "0ページ",

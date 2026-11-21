@@ -1,6 +1,11 @@
 # Smoke mirror of opencode-auto.yml's verification tail (checkout / uv / Playwright /
-# iOS gate / full suite). Keep these steps in the same shape as opencode-auto.yml --
-# if they diverge, the green relied on here is not the green the bot produces.
+# full suite against viewer-rs). Keep these steps in the same shape as
+# opencode-auto.yml -- if they diverge, the green relied on here is not the
+# green the bot produces.
+#
+# #503 rs-only: the Python lane (uv-gate-unit/browser) is retired — pytest-rs
+# is the single pytest lane. `uv-gate` stays as the required-check anchor
+# and now aggregates the rs lanes.
 #
 # Manual dispatch, plus any PR that can change a pytest outcome. Deploy-script-only
 # PRs (dev.sh, rebuild.sh, tailscale/) intentionally do not gate.
@@ -12,28 +17,59 @@ on:
   # app/tests PRs are gated here (#230). A cheaper browser-free lane is not possible;
   # read #230 before trying one again.
   pull_request:
-    paths:
-      - ".github/workflows/*.yml"
-      - ".github/scripts/*.sh"
-      - "app/**"
-      - "tests/**"
-      - "requirements.txt"
-      - "requirements-dev.txt"
-      - "Dockerfile"
-      - "docker-compose*.yml"
-      # pytest golden-frame harness input (#210) — a case-file-only edit must
-      # still run tests/test_reader_sync_golden.py.
-      - "api/reader-sync-cases.json"
 
 permissions:
   contents: read
+  # paths-filter lists the PR's changed files via the API.
+  pull-requests: read
 
 concurrency:
   group: oc-smoke-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  # Job-level path gating so every PR reports these check names — see
+  # android.yml changes-android for why workflow-level paths: would
+  # deadlock required status checks (#382).
+  changes-workflow-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+      run-rs: ${{ steps.filter.outputs.run-rs }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        # pytest golden-frame harness input (#210) — a case-file-only
+        # edit must still run tests/test_reader_sync_golden.py, hence
+        # api/reader-sync-cases.json below.
+        with:
+          filters: |
+            run:
+              - ".github/workflows/*.yml"
+              - ".github/scripts/*.sh"
+              - "tests/**"
+              - "requirements-dev.txt"
+              - "Dockerfile.viewer-rs"
+              - "docker-compose*.yml"
+              - "api/reader-sync-cases.json"
+            # #503 rs-only: the suite oracles viewer-rs — Rust source,
+            # the spec/vectors it is checked against, the shell assets it
+            # serves, and the harness itself all matter.
+            run-rs:
+              - ".github/workflows/*.yml"
+              - "rust/**"
+              - "tests/**"
+              - "web/static/**"
+              - "web/templates/**"
+              - "web/perf/**"
+              - "api/openapi.v1.yaml"
+              - "api/vectors/**"
+
   validate:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -50,17 +86,99 @@ jobs:
       - name: pool slot regression tests
         run: bash .github/scripts/test_pool_slot.sh
 
-  # Mirrors the verification tail of opencode-auto.yml
-  # (implement / research / implement-direct / research-direct).
-  uv-gate:
+  # #503/#532 rs-only: the suite oracles viewer-rs (all routes
+  # native). Split on the `browser` marker;
+  # rust-cache keeps the per-lane cargo build warm (each lane spawns its
+  # own fixture binary). `uv-gate` below keeps the required-check name
+  # and aggregates these rs lanes.
+  pytest-rs-unit:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # chromium-only gate (mirrors opencode-auto.yml)
+    # ~272s single-runner suite (the PR-gate critical path, #331) —
+    # pytest-split shards it across 3 runners. Until a committed
+    # `.test_durations` exists the split is even-by-count; each shard
+    # stores its own durations file as an artifact for a follow-up merge.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Playwright version
+        id: pw
+        run: echo "v=$(uv run --with playwright python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.pw.outputs.v }}
+
+      # `-m "not browser"` is a partition, not a guarantee —
+      # helper-hidden browser users land here too.
+      - name: Install Playwright browsers (chromium)
+        run: uv run --with playwright playwright install --with-deps chromium
+
+      - name: Run non-browser test suite against viewer-rs
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m "not browser" --splits 3 --group ${{ matrix.shard }} --store-durations --reruns 1 --reruns-delay 2
+
+      # Feeds the follow-up balanced-split merge (#331): upload each
+      # shard's durations so a complete `.test_durations` can be committed.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-durations-${{ matrix.shard }}
+          path: .test_durations
+          if-no-files-found: ignore
+          retention-days: 7
+
+  pytest-rs-browser:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -78,5 +196,115 @@ jobs:
       - name: Install Playwright browsers (chromium)
         run: uv run --with playwright playwright install --with-deps chromium
 
-      - name: Run bookq test gate (full suite)
-        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto --reruns 1 --reruns-delay 2
+      # --reruns 2: concentrating browser tests on one lane keeps all
+      # -n auto workers on browsers at once — higher contention, so
+      # timing-sensitive tests flake more. Extra rerun absorbs that without
+      # touching what is asserted.
+      - name: Run browser test suite against viewer-rs
+        run: BROWSER=chromium BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -n auto -m browser --reruns 2 --reruns-delay 2
+
+  # Keeps the `pytest-rs` check name stable for PRs — not a required
+  # check, but the aggregate preserves the single pass/fail signal.
+  pytest-rs:
+    needs: [changes-workflow-smoke, pytest-rs-unit, pytest-rs-browser]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify lanes
+        env:
+          UNIT: ${{ needs.pytest-rs-unit.result }}
+          BROWSER: ${{ needs.pytest-rs-browser.result }}
+        run: |
+          echo "pytest-rs-unit: $UNIT"
+          echo "pytest-rs-browser: $BROWSER"
+          [ "$UNIT" = "success" ] && [ "$BROWSER" = "success" ]
+
+  # Required-check anchor: branch protection names `uv-gate`, so this
+  # aggregate keeps reporting that context — now backed by the rs lanes
+  # (#503: the Python uv-gate-unit/browser lanes are retired).
+  uv-gate:
+    needs: [changes-workflow-smoke, pytest-rs-unit, pytest-rs-browser]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify lanes
+        env:
+          UNIT: ${{ needs.pytest-rs-unit.result }}
+          BROWSER: ${{ needs.pytest-rs-browser.result }}
+        run: |
+          echo "pytest-rs-unit: $UNIT"
+          echo "pytest-rs-browser: $BROWSER"
+          [ "$UNIT" = "success" ] && [ "$BROWSER" = "success" ]
+
+  # Real-Safari lane: runs every browser-marked test under safaridriver on an
+  # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
+  # session globally, so a shard can never parallelize — the suite is split
+  # across runners with --num-shards/--shard-id instead of pytest -n.
+  # 3 shards: the account's macOS concurrency is ~4 runners and ios-test
+  # (xcode-27) consumes one more on the same PR, so N+1 must stay within the
+  # pool. 4 safari legs + ios-test = 5 left one leg queued ~15min until the
+  # platform cancelled it (#558 hit this repeatedly — rerun loops cost far
+  # more than the extra ~1.5min a third split adds per leg). Each shard runs
+  # ~4x/3 the tests (~13min) — still inside the 60min timeout.
+  safari-gate:
+    needs: changes-workflow-smoke
+    if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # macOS runner — brew, not apt (#563). `|| true` keeps the step
+      # green when dav1d is already installed at a newer version.
+      - name: System deps (dav1d for avif-native, #563)
+        run: brew install dav1d pkg-config || brew upgrade dav1d pkg-config || true
+      # rust-cache restores dav1d-sys's build-script output, which bakes
+      # the Cellar version path into -L — stale after a brew version bump
+      # (observed: ld searched Cellar/dav1d/1.5.4 while brew had 1.5.5).
+      - name: Drop stale dav1d-sys build cache
+        run: cargo clean --manifest-path rust/Cargo.toml -p dav1d-sys
+      - name: cargo build (test fixture binary)
+        run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Enable safaridriver
+        run: sudo safaridriver --enable
+
+      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/3)
+        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 3 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+
+  # Required-check anchor for the safari matrix (#540): matrix legs report
+  # `safari-gate (N)` when they run but a single bare `safari-gate` when the
+  # job is skipped, so no one context name covers both shapes — this gate
+  # reports a stable name backed by needs.safari-gate.result, same pattern
+  # as uv-gate above.
+  safari-gate-all:
+    needs: [changes-workflow-smoke, safari-gate]
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify safari shards
+        env:
+          SAFARI: ${{ needs.safari-gate.result }}
+        run: |
+          echo "safari-gate: $SAFARI"
+          [ "$SAFARI" = "success" ]

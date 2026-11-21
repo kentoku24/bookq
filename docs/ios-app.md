@@ -16,22 +16,40 @@ xcodebuild -project ios/Bookq.xcodeproj -scheme Bookq \
 プロジェクトは PBXFileSystemSynchronizedRootGroup（フォルダ自動同期）なので
 `Bookq/` 配下にファイルを置くだけでビルド対象になる。
 
+## ドメイン規則パッケージ (`ios/Packages/BookqCore`)
+
+シミュレータ不要の純粋な規則（`BrowseModel` / `ReaderWork` / `PairModels` /
+`CanonicalJSON` / `ImageURL` / `TreeNode` / `PairJoinCode`）はローカル
+SwiftPM パッケージ `BookqCore` に切り出してある（#282）。Xcode プロジェクト
+は `XCLocalSwiftPackageReference` で参照し、`Bookq` / `BookqTests` ターゲット
+がリンクする。UI に依存しないためシミュレータなしでテストできる：
+
+```bash
+swift test --package-path ios/Packages/BookqCore
+```
+
+ドメインのテストは言語共通テストケース（`api/vectors/*.json`、#280）を
+`TestRepo` 経由の `#filePath` 相対パスで読む。Linux でも通ること
+（CryptoKit/`CGFloat` を使わず純粋 Swift のみ）が条件。
+
 ## 開発用サーバーへの接続
 
 シミュレータは Mac のネットワークを共有するため、ローカルの TEST_MODE
-サーバーには `http://localhost:8080` で直接届く（ATS は localhost 対象外）:
+サーバーには `http://127.0.0.1:8080` で直接届く（ATS は loopback 対象外。`localhost` ではなく IPv4 固定にする — `localhost` が `::1` に解決される環境で別サービスが 8080 を掴んでいると別物に繋がる）:
 
 ```bash
-BOOKQ_TEST_MODE=true DOWNLOADS_DIR=/path/to/images \
-  uv run --with-requirements requirements-dev.txt \
-  uvicorn app.main:app --port 8080
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
+  SECRET_KEY=dev-not-a-secret \
+  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
+  BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 起動時に `-serverURL` 引数を渡すと URL をプリセットできる
 （NSArgumentDomain → @AppStorage）:
 
 ```bash
-xcrun simctl launch <udid> dev.bookq.reader -serverURL http://localhost:8080
+xcrun simctl launch <udid> dev.bookq.reader -serverURL http://127.0.0.1:8080
 ```
 
 実機からの接続には Tailscale アプリが必要（サーバーは tailnet 限定）。
@@ -48,6 +66,19 @@ access JWT（1h）+ refresh（30d、rotation 付き）の pair を 1 Keychain it
 （single-flight coalescing）。API セッションは cookie storage を明示的に無効化
 （Bearer 一本）。identity は JWT claims（`sub`/`name`/`picture`）由来の `AuthUser`
 — `/api/me` のような検証 endpoint は存在しない。
+
+refresh token はサーバープロセスのインメモリのため、サーバー再起動/再デプロイで
+全消去される。アクセストークン期限切れ後の refresh は 400/401 で拒否される —
+これは確定的なセッション死亡として `AuthManager.onSessionExpired` が発火し、
+`AppModel.sessionDidExpire()` が `.ready` → `.login` に遷移する
+（Android `sessionExpired` parity。ネットワーク断・5xx では発火しない）。
+foreground 復帰時は `AppModel.foregrounded()` が refresh を事前行使し、
+再起動で死んだセッションをページをめくる前に検知する。
+リーダー/ペアリーダーのページ画像は失敗時に目立つ ⚠️ +「再読み込み」ボタンを
+表示し、タップでそのページだけ再取得する（グリッドのカバー類はバッジのみ）。
+DEBUG 起動では `-testToken` と併用する `-testRefreshToken <rt>` で refresh
+経路を再現できる — TEST_MODE サーバーが発行していない値を渡すと refresh が
+401 で拒否され、上記の sessionExpired → Login 遷移をそのまま検証できる。
 
 native フローは TEST_MODE でも Google OAuth を通る（`?client=native` は
 `_TEST_MODE` をバイパスしない）。dev 環境でのアプリ側フロー検証には
@@ -68,22 +99,90 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 
 ## リーダー仕様（web parity）
 
-- 縦=1ページ / 横=spread（spreadOffset 0=通常ペア、1=表紙単独、spread 離脱で 0 に
-  リセット）を `spread.js` 通りに再現。RTL: 右端=最初のページ。タップゾーンは
-  端30%=送り / 反対端30%=戻し / 中央=UI トグルで、`tapForward` 相当の
-  方向切替ボタンあり（セッション限定・デフォルト左=次）。
-- 連打は 160ms 合流（最初のタップは即時、以後の連打は最終 spread へ一発遷移）
-  で TabView アニメーションの直列詰まりを回避。
+- 縦=1ページ / 横=spread（spreadOffset 0=通常ペア、1=表紙単独）を `spread.js`
+  通りに再現。**iOS 差異**: spreadOffset はモード離脱でリセットせず、
+  single モードでも同じペアリングをページペア (peek/めくり方向) に使う
+  ため offset トグルは常時表示（web は spread 時のみ・離脱で 0 リセット）。
+  RTL: 右端=最初のページ。タップゾーンは端30%=送り / 反対端30%=戻し /
+  中央=UI トグルで、`tapForward` 相当の方向切替ボタンあり
+  （セッション限定・デフォルト左=次）。
+- ページ送りは TabView ではなく自前の ZStack ページャ。視覚状態は連続値
+  `pos`（spread 単位、小数=めくり途中）で、`floor(pos)` が上層として右へ
+  スライドし `ceil(pos)` が下に静止する — pos 上昇=現在 spread が右へ
+  出て次が現れ、pos 下降=前 spread が右からスライドインして覆う。
+  1 つの式で両方向を表現するため、ドラッグ中の指の反転は向きの再判定
+  なしに `pos` が原点を通って戻るだけで処理できる。`PageTurnMath`
+  純粋関数がドラッグデルタ・端ラバーバンド・コミット方向判定を担当。
+- **single モードの見開きペア認識**（iOS 独自、web には無い）:
+  `ReaderWork.pairRoles`/`intraIntervals` が spreadOffset のペアリングを
+  1ページ spread に適用する（章をまたぐペアは dissolve — spread は
+  章を混ぜない不変条件を維持）。rest 時、ペア相手ページは物理側の端に
+  **1px だけ常時覗く**（1ページ目=次ページの右端が左端に、2ページ目=
+  前ページの左端が右端に）。ピッチは実測ページ幅から算出する
+  strip pitch `(viewWidth+pageWidth)/2-1` で、レターボックスされた
+  landscape でも画面端に 1pt のコンテンツ sliver が出る。
+  ペア内のめくり（1→2ページ目）は strip
+  レイアウト `(pos-index)*stripPitch` で両ページが互いにスライドし、
+  一瞬見開きのように並ぶ。ペアをまたぐめくりは従来の stack
+  （次=裏から露出 / 前=右から被さる）のまま。退出位置と次の peek
+  位置が一致するため peek→めくり→peek はシームレスで、戻る方向も
+  鏡像になる。
+  ドラッグと ←/→ キーは**章をまたぐ**（本全体 `[0, spreads.count-1]`
+  にクランプ、両端のみラバーバンド→バウンスバック）。タップゾーン・
+  スワイプ・矢印キーの全ページ送り操作が章跨ぎ可 — エピソード間の
+  移動は「最後のページでの送り」「最初のページでの戻し」でのみ起きる
+  （**web/Android はスワイプ・キーを章内 clamp するが、iOS はユーザ
+  要望で意図的に全操作を章跨ぎにしている差異**）。コミット閾値は
+  web touchend と同じ `min(10%幅, 70pt)` + flick 予測 50%。
+  `currentIdx` はコミット開始時点で着地し、カウンタ/スライダー/外部
+  ディスプレイはアニメーションと同時に動く（web の strip 追従と同じ）。
+- ページスライダーは**現在エピソード (章) のみにスコープ**
+  （web `syncChapterSlider`/`idxToChapterSlider`/`chapterSliderToIdx`
+  相当の `chapterSliderMax`/`idxToChapterSlider`/`chapterSliderToIdx`
+  を `ReaderWork` に実装）。RTL: 右端=章の最初のページ、左端=最後の
+  ページ。章をまたいだ時点で範囲が新しい章に追従する。スライダーから
+  他エピソードへは飛べない（ジャンプはページ送りのみ）。
+- 連打は合流しない: タップ毎に `posTarget` が 1 spread 進み、`pos` が
+  定速チェイスで追従する。10 taps/s 程度でも各タップが 1 ページ送りとして
+  計上され、ページは連続値を通って高速にめくれる（アニメーションの
+  キューイングは発生しない）。
 - 章結合: 兄弟 leaf を一続きで読み、各章境の前にスペーサーを挿入して
   spread ペア境界に揃える（app.js と同一式 `(startIdx-spreadOff+2)%2`）。
 - 進捗は常に「leaf パス + 章ローカル page」で保存・同期（`sync.js`
   と同じワイヤ {folder,page,total,ts}、2s デバウンス+バックオフ）。
 - ズームは UIScrollView ベース（pinch/pan のみ、double-tap 拡大なし）。
   1x 時は pan ジェスチャを無効化して外側ページングにスワイプを渡す。
+  ピンチ中は `onPinchState` でページドラッグを停止する。
 - 複数ページ（`overview.js` 相当）: 右上グリッドボタン or ピンチインで
   `OverviewView` を開く。章見出し・章ローカルページ番号・現ページ
-  ハイライト・現ページへ 1/3 位置スクロール・タップジャンプ。
-- キーボード（iPad/外付け）: →=次 / ←=前 / Home・End=章頭・章末 / G=複数ページ。
+  ハイライト・現ページへ 1/3 位置スクロール・タップジャンプ
+  （ページャと同じアニメーションで遷移）。
+- キーボード（iPad/外付け）: ←=次 / →=前（章跨ぎ可、両端で no-op）/
+  Home=即時で章頭・End=章末 spread 先頭ページへアニメーション遷移
+  （web `spreads[r.hi].pages[0]` と同じ着地）/ G=複数ページ
+  （web・Android と同じ RTL 規約）。
+- chrome 配置は向きで分岐: **縦=従来の上部バー+下部スライダー**、
+  **横=左右分割レール+下部コーナーのタップ方向ボタン**。見開きは
+  高さ制約 fit で上下に余裕がなく左右に大きな余白ができるため、
+  iPhone Duo HIG の "vertical controls" 指針（側面レールで
+  コンテンツ縦幅を確保）に倣いつつ、Web クライアントの
+  `#tapmode-controls`（画面下部左右のタップ方向ボタン）にも準拠する。
+  - **左レール**（leading・上→下・上寄せ）: 閉じる / 見開き on/off /
+    見開きずらし（spread 時のみ）
+  - **右レール**（trailing）: カウンタ / 複数ページ / ⋯メニュー /
+    縦章スライダー（`VerticalSlider`、上=章先頭・下=章末・下ドラッグ
+    で進む）
+  - **下部コーナー**: ◀=左タップで次へ（`tapForwardLeft`）を
+    bottom-left、▶=右タップで次へを bottom-right に分割配置
+    （web `#tapmode-controls` と同じ左右分割。アクティブ方向は
+    accent 強調）
+  - ⋯メニューには外部ディスプレイ切替+診断のみ残る（表示条件を
+    満たさない時はボタン自体を非表示）
+  画像は `spreadFit`/`spreadCell` 無変更で最大サイズのまま中央配置
+  — 広い AR の見開きでレールが画像端に重なり得るが、レール背後の
+  スクリムで可読性を担保する。`PairedReaderView` は対象外。
+  Android は上部バー+overflow の構成で、iOS の横置きレールとは意図的に
+  異なる。
 
 ## ブラウズ仕様（web parity）
 
@@ -133,8 +232,10 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 - `Sync/PairSheet.swift` — ペアリング UI（作成=コード+QR / 6桁参加 /
   MATCH 自動接続 / セッション情報 / 切断）。
 - `Sync/PairedReaderView.swift` — pairedView.js 相当。自分の side の
-  単ページ描画、タップゾーン TURN(cross)、スワイプ/キー TURN(clamp)、
-  スライダー GOTO、offset/入替トグル。leader が閉じると
+  単ページ描画、タップゾーン/スワイプ/キー TURN(cross — ソロリーダーと
+  同じく全ページ送り操作が章跨ぎ可)、章ローカルスライダー GOTO
+  （`PairModel.chapterRange` で現在 chapterFolder の spread 範囲に
+  スコープ）、offset/入替トグル。leader が閉じると
   SET_ACTIVITY selecting。
 - `LibraryView` — leader+paired の作品タップは OPEN_WORK intent に
   ルーティング（solo リーダーは開かない）。phase→reading で
@@ -177,4 +278,37 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
 - idb の HID 注入では swipe/pinch が成立しないため実機 QA が必要
 - 外部ディスプレイはシミュレータで生成できないため投影経路は実機 QA のみ
   （単体テストは state machine/レイアウト helper のみカバー）
-- UI 自動テストなし（単体テストのみ）
+
+## テスト
+
+- `BookqTests`（単体 + `SpecConformanceTests` 契約スイート）と
+  `BookqUITests`（XCUITest UX スイート）の 2 ターゲット。`Bookq.xcscheme`
+  の Testables に両方登録済みで `xcodebuild test` が両方走る。
+- UI テストは `BookqUITests/UITestSupport.swift` が `-serverURL` /
+  `-testToken` 起動引数で TEST_MODE サーバーへ直接接続する（fixture は
+  android.yml と同じ合成木: Series/vol1+vol2, Other）。`-uitestReset`
+  （または `BOOKQ_UI_TEST_RESET`）で起動毎に永続状態を初期化する —
+  ローカルの読書位置・pair-sync・レイアウト設定を init で wipe し、
+  Documents/ 配下のオフラインダウンロードとサーバー側の
+  reading-positions（boot 内の初回 sync 前に DELETE）も初期化する。
+  テスト間の状態持ち越しによるフレーク防止（#551）。タップ対象は
+  `tile:<path>` / `selfTile:<path>` / `readerClose` / `readerCounter` /
+  `layoutMenuBtn` / `offlineBtn:<path>` 等の accessibilityIdentifier
+  （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。
+- CI: `.github/workflows/ios.yml`（`xcode-27` イメージ = Xcode 27 /
+  iOS 27 SDK 搭載の arm64 preview runner。pull_request +
+  workflow_dispatch）。paths-filter で `ios/**` `api/**` `app/**`
+  `requirements*.txt` `rust/viewer-rs/**` に限定し、非対象 PR では
+  skipped になる（required check 互換）。`.github/scripts/ios-ui-test.sh`
+  がシミュレータ選択（iPhone 13 優先・最新 runtime へフォールバック）→
+  DerivedData キャッシュ → `build-for-testing` → `BookqTests` →
+  `BookqUITests` を一括実行し、xcresult + サーバーログを artifact 化する。
+  実行時間はジョブサマリに記録される（macOS 分は ubuntu の約10倍のため、
+  required 化の判断材料とする）。
+  **SDK ゲート**: アプリは iOS 27 SDK のシンボル
+  （`ExternalNonInteractiveAccessory` / `sceneAccessory`、
+  `ios/Bookq/External/`）を使うため、runner の iPhoneOS SDK が 27 未満
+  ならテストはスキップされる（`#available` は実行時ガードのみで
+  コンパイルには SDK 自体が必要）。`xcode-27` は public preview の
+  ため、イメージ内容が変わった場合の安全網としてゲートは残してある。
+  ローカル再現は `.github/scripts/ios-ui-test.sh`。

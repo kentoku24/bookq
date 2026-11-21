@@ -1,4 +1,4 @@
-"""ビューア磨き込み（監査 V3/V4/V5）。"""
+"""ビューア磨き込み。"""
 import io
 import re
 import time
@@ -12,7 +12,7 @@ DARK_MAX = 40  # 背景 #0d0d0d 近傍とみなす RGB 上限
 # The anchor spread's own <img>s live inside the .spread-container positioned
 # at left:0 (spreadLeft(anchorSpread) is always 0 — see spread.js:spreadLeft).
 # Any <img> outside that container must not intersect the viewport
-# horizontally: with gapBefore() widened (Task 4 / 監査 V3), a narrower
+# horizontally: with gapBefore() widened, a narrower
 # (solo/odd) spread's leftover margin must never be filled by the *next*
 # spread's real page content peeking in.
 _FIND_NEIGHBOUR_PEEK_JS = """
@@ -100,7 +100,7 @@ def test_odd_trailing_page_does_not_show_neighbour(landscape_page, server):
 
 
 def test_chapter_start_spread_does_not_show_previous_chapter(landscape_page, server):
-    """監査 V3: a chapter-start spread (vol2's solo spread, 1 page) used to use a
+    """A chapter-start spread (vol2's solo spread, 1 page) used to use a
     fixed CHAPTER_GAP_PX=20 seam regardless of leftover, so the previous
     chapter's spread (vol1, 2 pages) peeked ~230px into view at 900x600.
     gapBefore() now treats CHAPTER_GAP_PX as a floor under the same
@@ -127,14 +127,14 @@ def test_slider_hit_area_44px_but_thin_track(page, server):
     runnable-track') is not usable here: -webkit-appearance:none on the host
     makes Chromium stop rendering/exposing that pseudo-element, so the call
     silently falls back to the *host's* computed height (44px, not the
-    authored 8px — confirmed empirically, see task-5-report.md). Instead:
+    authored 8px — confirmed empirically). Instead:
     the host background must be transparent (so only the pseudo-element's
     #333 track paints anything inside the 44px box), and the actual
     rendered band is measured with a real screenshot pixel scan.
 
     #toolbar's own backdrop-filter is neutralized for this measurement only
-    (via an injected <style>, not touching app/static/style.css). Empirically
-    (see task-5-report.md), Playwright's headless Chromium fails to rasterize
+    (via an injected <style>, not touching web/static/style.css). Empirically,
+    Playwright's headless Chromium fails to rasterize
     the ::-webkit-slider-runnable-track pseudo-element at all when the
     ancestor #toolbar has an active backdrop-filter — confirmed both with a
     minimal isolated reproduction (passes) and a real, non-headless Chrome

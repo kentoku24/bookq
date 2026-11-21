@@ -1,4 +1,4 @@
-"""Task 8: version/link/wipe — tests-after.
+"""Harness version/link/wipe — tests-after.
 
 Three tests:
   - test_api_version            — /api/version keys + Cache-Control + health unchanged
@@ -43,8 +43,8 @@ def _get(server, path, headers=None):
 
 def test_api_version(server):
     """version/sha/build_date exist, Cache-Control no-store, health unchanged."""
-    status, body, headers = _get(server, "/api/version")
-    assert status == 200, f"/api/version status {status} body {body[:500]}"
+    status, body, headers = _get(server, "/api/v1/version")
+    assert status == 200, f"/api/v1/version status {status} body {body[:500]}"
     data = json.loads(body.decode("utf-8"))
     assert "version" in data, f"missing version key {data}"
     assert "sha" in data, f"missing sha key {data}"
@@ -58,8 +58,8 @@ def test_api_version(server):
     assert "no-store" in cc.lower(), f"Cache-Control should contain no-store, got {cc!r}"
 
     # health unchanged
-    status2, body2, headers2 = _get(server, "/api/health")
-    assert status2 == 200, f"/api/health status {status2}"
+    status2, body2, headers2 = _get(server, "/api/v1/health")
+    assert status2 == 200, f"/api/v1/health status {status2}"
     hdata = json.loads(body2.decode("utf-8"))
     assert hdata == {"status": "ok"}, f"health payload changed {hdata!r}"
 
@@ -85,7 +85,7 @@ def test_harness_link_visible(server):
     assert "display: none" not in tag.lower(), f"harness-link tag should not have display: none, got {tag!r}"
 
     # also verify index.html source does not gate harness-link behind test_mode conditional hidden style
-    idx_text = (REPO_ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+    idx_text = (REPO_ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     # harness-link should be present without display:none in the template
     idx_m = re.search(r'<[^>]*id=["\']harness-link["\'][^>]*>', idx_text, re.I)
     assert idx_m, "index.html missing harness-link tag"
@@ -108,8 +108,8 @@ def test_harness_link_visible(server):
 def _file_wipe_assertions():
     """File-content fallback: the harness delegates the wipe to OfflineCore, which
     owns the coverage (viewing-only work caches included, SHELL kept, progress keys)."""
-    html = (REPO_ROOT / "app" / "static" / "offline-harness.html").read_text(encoding="utf-8")
-    core = (REPO_ROOT / "app" / "static" / "offline-core.js").read_text(encoding="utf-8")
+    html = (REPO_ROOT / "web" / "static" / "offline-harness.html").read_text(encoding="utf-8")
+    core = (REPO_ROOT / "web" / "static" / "offline-core.js").read_text(encoding="utf-8")
     # doWipeAll exists and no longer does the deletion work itself
     assert "doWipeAll" in html, "offline-harness.html missing doWipeAll"
     assert "wipeClientData" in html, "the harness wipe must delegate to OfflineCore.wipeClientData"
@@ -138,7 +138,6 @@ def test_harness_wipe_logic(page, server):
 
     # Attempt live Playwright wipe verification (best-effort, tolerance)
     base = _base(server)
-    # Navigate to harness
     try:
         page.goto(base + "/static/offline-harness.html?harness=1", timeout=15000)
         page.wait_for_selector("#harness-status", timeout=10000)
@@ -164,7 +163,7 @@ def test_harness_wipe_logic(page, server):
                 await shell.put('/dummy-shell-entry-'+Date.now(), new Response('shell', {headers:{'Content-Type':'text/plain'}}));
                 // api + fallback caches to verify deletion
                 const api = await caches.open('bookq-api-v1');
-                await api.put('/api/dummy-wipe', new Response('{}', {headers:{'Content-Type':'application/json'}}));
+                await api.put('/api/v1/dummy-wipe', new Response('{}', {headers:{'Content-Type':'application/json'}}));
                 const fb = await caches.open('bookq-images-fallback');
                 await fb.put('/image/dummy-wipe', new Response('img', {headers:{'Content-Type':'image/png'}}));
                 // storage keys: to be removed
@@ -179,7 +178,6 @@ def test_harness_wipe_logic(page, server):
             }"""
         )
         page.wait_for_timeout(800)
-        # Verify seeded
         pre = page.evaluate(
             """async () => {
                 const all = await window.OfflineStore.getAll();
@@ -242,9 +240,8 @@ def test_harness_wipe_logic(page, server):
     assert result["prog"] is None, f"bookq_progress should be removed, got {result['prog']!r}"
     assert result["persistToast"] is None, f"bookq_persist_toast should be removed, got {result['persistToast']!r}"
     assert result["autoSync"] is None, f"bookq_auto_sync_done should be removed, got {result['autoSync']!r}"
-    # harness keep not removed (SHEL-like keep)
+    # harness keep not removed (SHELL-like keep)
     # This is optional tolerance — if harness key was cleared, still pass if SHELL kept, but spec says keep
-    # Assert keep when present
     if result.get("harnessKeep") is not None:
         assert result["harnessKeep"] == "1", f"bookq_harness should be kept, got {result['harnessKeep']!r}"
 
@@ -261,7 +258,6 @@ def test_harness_wipe_logic(page, server):
             }"""
         )
         page.wait_for_timeout(500)
-        # Click wipe all -> modal -> confirm
         page.click("#btn-wipe-all", timeout=5000)
         page.wait_for_selector("#harness-wipe-modal", timeout=5000)
         # modal should be visible (display flex)

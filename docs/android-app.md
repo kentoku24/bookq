@@ -58,7 +58,7 @@ adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity \
 
 - `dev.bookq.reader.debug`（debug は applicationId suffix `.debug`）。
 - 実機からの接続には **Tailscale アプリ**が必要（サーバーは tailnet 限定）。
-- ホストの TEST_MODE uvicorn には `adb reverse tcp:8080 tcp:8080` →
+- ホストの TEST_MODE viewer-rs には `adb reverse tcp:8080 tcp:8080` →
   `http://localhost:8080` で到達（debug の network security config は
   localhost / 10.0.2.2 のみ cleartext 許可）。
 
@@ -104,8 +104,8 @@ native フローは TEST_MODE でも Google OAuth を通る。dev でのフロ�
 
 - §5 ゲート一括実行: `android/scripts/perf-gate.sh <dev-url> [--generate]`
   — benchmark variant をインストール → 全 Macrobenchmark を実行 →
-  `benchmarkData.json` を閾値（タップ median <60ms、fling janky <1%・
-  p99 <16ms、コールド TTFD <1.5s、readerOpen <400ms、各 n≥10）と比較し
+  `benchmarkData.json` をスクリプト内 GATES 表の閾値（テスト毎、
+  90 Hz 実測フロア + ~25% に再校正済み — 下表「ゲート」列）と比較し
   非ゼロ終了。
 - 計測点: `bookq.pageTurn`（`turn()` → 対象スプレッドの settle 描画
   — スタック遷移では対象が既に下に常駐し描画済みのため
@@ -143,6 +143,13 @@ RTL `HorizontalPager` の各スプレッドに offset 駆動の変換を掛け�
 4. `reportFullyDrawn` は `withFrameNanos` でフレームコールバック
    内に着地（StartupTimingQuery はマーカー後に終了する doFrame を
    要求するため）。
+
+注: TEST_MODE では OAuth を通らないため `auth.user` が立たず、
+`hasOfflineSnapshot()` は常に false — ベンチのコールド起動は
+snapshot-first ではなく probe 経路を通る。下表 TTFD 827ms は
+probe 経路の実測値（ログの `PerfBoot: boot snap=false` で確認可）。
+ログイン済み実ユーザーの再起動は snapshot-first なので実測は
+これより速い。
 
 ### 計測結果（CP08-J1 / release + Baseline Profile）
 
@@ -205,7 +212,11 @@ BOOKQ_KEY_PASSWORD` を読み、未設定なら unsigned のままビルドは�
 
 `.github/workflows/android.yml` — `unit`（JVM テスト + lint + APK artifact）と
 `ui`（reactivecircus/android-emulator-runner API 35 x86_64 + KVM。
-TEST_MODE uvicorn を job 内で起動し `10.0.2.2:8080` 経由で接続）。
+TEST_MODE viewer-rs を job 内で起動し、`adb reverse` 経由の
+`127.0.0.1:8080` で接続）。
+`ui` は `:app` の androidTest に加え `:data` の androidTest
+（`KeystoreTokenStoreTest`。self-instrumenting でサーバー不要のため
+同一エミュレータで先に1回実行）も `am instrument` で回す。
 
 ## 既知の制限
 

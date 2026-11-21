@@ -1,7 +1,7 @@
-"""Task 7 baseline + failing-first proof.
+"""Baseline + failing-first proof.
 
 Baseline pins existing harness displays must stay.
-Failing proof asserts new displays (thumb hit, /api/folders cached with ignoreSearch, SHELL hit counts)
+Failing proof asserts new displays (thumb hit, tree v1 cached with ignoreSearch, SHELL hit counts)
 that are absent before the fix, so this test FAILS until harness is extended.
 """
 import re
@@ -56,7 +56,7 @@ def test_baseline_existing_harness_still_present(page, server):
     assert "getLeafPathsFor" in harness_html
 
 def test_failing_new_displays_thumb_api_shell(page, server):
-    """Failing-first proof: new displays must exist after Task 7."""
+    """Failing-first proof: the new displays must exist."""
     clear_all(page)
     goto_harness(page, server)
     # wait for harness tree + refresh within 800ms (similar to test_06 expectation)
@@ -72,11 +72,11 @@ def test_failing_new_displays_thumb_api_shell(page, server):
     assert re.search(r"thumb.*hit", thumb_text, re.I), f"thumb hit text missing 'thumb.*hit', got {thumb_text!r}"
     assert re.search(r"\d+\s*/\s*\d+", thumb_text), f"thumb hit should show X/Y, got {thumb_text!r}"
 
-    # 2. /api/folders cached with ignoreSearch fallback
+    # 2. tree v1 endpoint cached with ignoreSearch fallback
     api_el = page.locator("#harness-api-folders-cached")
     assert api_el.count() == 1, "missing #harness-api-folders-cached"
     api_text = api_el.text_content() or ""
-    assert "/api/v1/tree" in api_text, f"/api/folders missing, got {api_text!r}"
+    assert "/api/v1/tree" in api_text, f"tree path missing, got {api_text!r}"
     assert "cached" in api_text.lower(), f"cached missing, got {api_text!r}"
     # must mention ignoreSearch
     assert "ignoreSearch" in api_text or "ignore" in api_text.lower(), f"ignoreSearch fallback not displayed, got {api_text!r}"

@@ -20,7 +20,7 @@ def test_live_folders_and_search(live_server, live_sample):
     probe = live_sample[0]["images"][0]
     term = next((c for c in probe if c.isalnum()), "a")
     with urllib.request.urlopen(
-        live_server + "/api/search?q=" + urllib.parse.quote(term, safe=""), timeout=120
+        live_server + "/api/v1/search?q=" + urllib.parse.quote(term, safe=""), timeout=120
     ) as r:
         assert r.status == 200
         body = json.load(r)

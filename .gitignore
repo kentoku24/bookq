@@ -1,6 +1,8 @@
 downloads/
+library/
 .DS_Store
 .omo/
+.archify/
 .omc/
 .env
 __pycache__/
@@ -23,6 +25,7 @@ dev_fixture/
 .schemathesis/
 
 # Rust build artifacts (docker -v mounts can create this locally)
+rust/target
 rust/target/
 
 # Android ネイティブクライアント (`android/`)
@@ -32,3 +35,15 @@ android/.kotlin/
 android/local.properties
 *.jks
 *.keystore
+
+# SwiftPM (BookqCore ローカルパッケージ + Xcode DerivedData)
+.build/
+ios/build/
+
+# Node tooling for web/static unit tests + StrykerJS (see docs/mutation-testing.md)
+node_modules/
+.reports/
+.stryker-tmp/
+
+# cargo-mutants results (rust/mutants.out — regenerate with `cargo mutants`)
+mutants.out/

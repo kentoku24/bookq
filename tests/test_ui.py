@@ -14,6 +14,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from browse_header_helpers import open_header_menu, set_view_mode
+
 
 def open_folder(page, path: str, expect_pages: int):
     page.locator(f'.tile[data-path="{path}"]').click()
@@ -98,20 +100,21 @@ def test_multi_thumbnail_tile_for_folder_with_subfolders(page):
 
 
 def test_list_mode_toggle(page):
-    # View mode now cycles tile → list → card → tile (3 states)
-    btn = page.locator("#footer-refresh-btn")
-
-    btn.click()  # tile → list
+    # View mode is picked directly from the header ⋯menu's radio items.
+    set_view_mode(page, "list")
     expect(page.locator("#tile-grid")).to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".item.folder").first).to_be_visible()
+    expect(page.locator("#menu-view-list")).to_have_attribute("aria-checked", "true")
 
-    btn.click()  # list → card
+    set_view_mode(page, "card")
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".card").first).to_be_visible()
+    expect(page.locator("#menu-view-card")).to_have_attribute("aria-checked", "true")
 
-    btn.click()  # card → tile
+    set_view_mode(page, "tile")
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".tile").first).to_be_visible()
+    expect(page.locator("#menu-view-tile")).to_have_attribute("aria-checked", "true")
 
 
 def test_empty_folder_drills_into_no_folders_found(page):
@@ -449,7 +452,7 @@ def test_current_spread_is_horizontally_centered(landscape_page):
 def test_inner_and_outer_gaps_are_preserved(landscape_page):
     """A7 — GAP_INNER=5 within a spread; the outer gap is GAP_OUTER=10 only when
     both neighbouring spreads exactly fill the viewport (leftover=0 on both
-    sides). gapBefore() (監査 V3) otherwise widens it to at least half of
+    sides). gapBefore() otherwise widens it to at least half of
     either neighbouring spread's own viewport leftover, so that spread's edge
     lands at (or past) the viewport boundary instead of peeking into view —
     see CLAUDE.md's gapBefore() note. A tight (but non-zero-leftover) fit
@@ -610,7 +613,7 @@ def test_chapter_boundary_uses_the_chapter_gap(landscape_page):
     assert len(g["spreads"]) >= 2, f"expected chapters concatenated: {g['spreads']}"
     first, second = g["spreads"][0], g["spreads"][1]
     gap = first["left"] - second["right"]
-    # CHAPTER_GAP_PX=20 is only the floor (監査 V3): gapBefore() widens the
+    # CHAPTER_GAP_PX=20 is only the floor: gapBefore() widens the
     # chapter seam the same way it widens an ordinary spread gap, so vol2's
     # solo chapter-start spread never lets vol1 peek in (or vice versa).
     leftover_first = g["vw"] - first["width"]
@@ -644,7 +647,7 @@ def test_flattened_wrapper_chapters_still_auto_concatenate(landscape_page):
 
 
 def test_cross_chapter_concat_natural_order(page):
-    """T4 — forward page turns across chapter seams must follow episode order
+    """Forward page turns across chapter seams must follow episode order
     (ch-2 → ch-10 → ch-11): regression guard for the client-side
     _naturalCompare in getSiblingLeafFolders (SIBLING_AUTOLOAD_MIN_DEPTH=2)."""
     # Sidebar is one-level drill-down: the ch-2 tile only exists after
@@ -725,10 +728,10 @@ def test_page_change_animation_lands_on_the_right_place(landscape_page):
 
 def test_tight_fit_neighbours_sit_flush_at_the_edges(landscape_page):
     """On a tight fit (iPad Air landscape, 1180x820) the leftover is only a few
-    px per side. Since 監査 V3, gapBefore() widens every gap to at least the
+    px per side. gapBefore() widens every gap to at least the
     centred spread's leftover, so a neighbour never peeks into that margin — but
     it must not be pushed further away either: it sits flush at the viewport
-    edge. (Before V3 this test asserted the neighbours were visible; its
+    edge. (This test previously asserted the neighbours were visible; its
     `right > 0` then only held by float rounding, and failed on CI.)"""
     page = landscape_page
     page.set_viewport_size({"width": 1180, "height": 820})
@@ -793,10 +796,13 @@ def test_portrait_keeps_single_page_layout(page):
 
 
 def test_filter_btn_keeps_sidebar_open(page):
-    """B-C1 — #filter-btn sits inside #sidebar-header, whose delegated click
-    handler closes the sidebar for any non-INPUT click. Opening the filter
-    sheet must NOT close the sidebar: after Apply the user must still see the
-    browse grid (pre-fix they landed on a blank screen)."""
+    """B-C1 — #filter-btn now lives in the header ⋯menu, inside
+    #sidebar-header whose delegated click handler closes the sidebar for any
+    non-INPUT click. Both the menu click and the sheet open must NOT close
+    the sidebar: after Apply the user must still see the browse grid
+    (pre-fix they landed on a blank screen)."""
+    expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"))
+    open_header_menu(page)
     expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"))
     page.locator("#filter-btn").click()
     # The sheet slides in over the sidebar — the sidebar itself stays open.

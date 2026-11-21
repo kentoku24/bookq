@@ -1,34 +1,22 @@
-"""E2E tests for the filter facet sheet + in-place browse filtering.
+"""E2E tests for the filter facet sheet + in-place browse filtering (#476 v1 port).
 
-The downloads tree is deliberately NESTED (metadata.toml only at depth 2-3):
-the current metadata index scans only depth 1 (app/metadata/index.py), so
-`/api/metadata/facets` is EMPTY against this tree and the sheet shows zero
-chips. Every test in this file is therefore RED against the current code and
-turns green only after the recursive-index + subtree-facets work lands.
-
-Expected RED failures (current code):
-- tests 1-2: `expect(... .chip).to_have_count(3|5)` times out on 0 chips
-  (the sheet falls back to the "No artists" placeholder span, no .chip).
-- tests 3-4: the atelier-chip locator click times out (no chip exists).
+The library tree is deliberately NESTED (metadata.toml only at depth 2-3),
+so the facet sheet only shows chips once the recursive-index + subtree-facets
+work lands — the sheet at COMEDY level lists 3 subtree artists, at root all 5.
 
 Run:
     uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/test_filters_e2e.py -q
 """
 
 import os
-import socket
 import struct
-import subprocess
-import sys
-import time
-import urllib.request
 import zlib
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from browse_header_helpers import open_header_menu
 
 
 def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -> None:
@@ -50,45 +38,6 @@ def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) 
     )
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _start_server(downloads: Path):
-    """Boot a uvicorn test-mode server against *downloads*; yield base URL."""
-    port = _free_port()
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(downloads)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env=env,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("Server exited early")
-        try:
-            with urllib.request.urlopen(base_url + "/api/health", timeout=1):
-                break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("Server did not become healthy within 10s")
-    try:
-        yield base_url
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
-
-
 def _metadata_toml(source: str, artist: str, title_jp: str = "テスト作品") -> str:
     """Minimal parseable metadata.toml (shape mirrors tests/test_ui_logic.py:419-432)."""
     return (
@@ -104,7 +53,7 @@ def _metadata_toml(source: str, artist: str, title_jp: str = "テスト作品") 
 
 
 @pytest.fixture(scope="module")
-def facet_downloads(tmp_path_factory) -> Path:
+def facet_library(tmp_path_factory) -> Path:
     """Dedicated NESTED metadata tree for the filter-facet tests.
 
     Anti-flattening shape — scan_tree collapses a folder with no images and
@@ -115,11 +64,8 @@ def facet_downloads(tmp_path_factory) -> Path:
     sample_library/シリーズ/ch-1) collapse into image leaves, so the artist inside
     reaches the browse node ONLY via subtree aggregation — the load-bearing
     case the whole subtree_facets design exists for.
-
-    Current index scans only depth 1, so against this tree /api/metadata/facets
-    is EMPTY (the tomls live at depth 2-3) — that is the RED probe.
     """
-    root = tmp_path_factory.mktemp("facet_downloads")
+    root = tmp_path_factory.mktemp("facet_library")
 
     def gallery(rel: str, toml: str) -> None:
         folder = root / rel
@@ -157,8 +103,17 @@ def facet_downloads(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def facet_server(facet_downloads: Path):
-    yield from _start_server(facet_downloads)
+def facet_server(facet_library: Path):
+    """viewer-rs backend against the nested tree."""
+    from rs_spawn import spawn_backend
+
+    proc, base_url = spawn_backend(
+        library_dir=facet_library,
+        state_dir=os.environ["BOOKQ_STATE_DIR"],
+    )
+    yield base_url
+    proc.terminate()
+    proc.wait(timeout=5)
 
 
 @pytest.fixture(scope="module")
@@ -179,6 +134,13 @@ def _goto_root(page, base_url: str) -> None:
     page.wait_for_selector(".tile")
 
 
+def _open_filter_sheet(page) -> None:
+    """Open the header ⋯menu and pick 絞り込み — lands on the bottom sheet."""
+    open_header_menu(page)
+    page.click("#filter-btn")
+    page.wait_for_selector("#bottom-sheet.open")
+
+
 def test_filter_sheet_lists_subtree_artists(facet_page, facet_server):
     """The sheet at COMEDY level lists only COMEDY-subtree artists (3), sorted casefold."""
     page = facet_page
@@ -186,7 +148,7 @@ def test_filter_sheet_lists_subtree_artists(facet_page, facet_server):
     page.click('.tile[data-path="COMEDY"]')
     expect(page.locator('.tile[data-path="COMEDY/atelier-sun"]')).to_have_count(1)
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
     expect(artists).to_have_count(3)
     chip_texts = artists.all_inner_texts()
@@ -200,7 +162,7 @@ def test_filter_sheet_at_root_lists_all_artists(facet_page, facet_server):
     page = facet_page
     _goto_root(page, facet_server)
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
     expect(artists).to_have_count(5)
     assert artists.all_inner_texts() == [
@@ -215,7 +177,7 @@ def test_filter_sheet_at_root_lists_all_artists(facet_page, facet_server):
 def test_filter_sheet_in_search_mode_lists_all_artists(facet_page, facet_server):
     """Search mode: the sheet lists whole-library options, not the stale browse subtree.
 
-    currentBrowsePath stays at COMEDY after drilling down, but /api/search applies
+    currentBrowsePath stays at COMEDY after drilling down, but /api/v1/search applies
     filters library-wide — so opening the sheet mid-search must list all 5
     artists, not just COMEDY's 3.
     """
@@ -227,7 +189,7 @@ def test_filter_sheet_in_search_mode_lists_all_artists(facet_page, facet_server)
     page.locator("#search-input").fill("dead")
     page.wait_for_timeout(600)  # 300 ms debounce + fetch
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
     expect(artists).to_have_count(5)
     assert artists.all_inner_texts() == [
@@ -247,7 +209,7 @@ def test_apply_artist_filter_filters_browse_in_place(facet_page, facet_server):
     # unfiltered COMEDY level: atelier-sun / example-artist (flattened) / standalone
     expect(page.locator(".tile")).to_have_count(3)
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     page.locator("#facet-artists .chip", has_text="atelier-sun").click()
     page.click("#filter-apply-btn")
     # only the matching folder survives; the counter reflects the filtered set
@@ -269,7 +231,7 @@ def test_filter_reset_and_chip_remove_restore_browse(facet_page, facet_server):
     expect(page.locator(".tile")).to_have_count(3)
 
     def apply_atelier() -> None:
-        page.click("#filter-btn")
+        _open_filter_sheet(page)
         page.locator("#facet-artists .chip", has_text="atelier-sun").click()
         page.click("#filter-apply-btn")
         expect(page.locator(".tile")).to_have_count(1)
@@ -286,7 +248,7 @@ def test_filter_reset_and_chip_remove_restore_browse(facet_page, facet_server):
 
     # apply again, then reset from the sheet → full listing restored
     apply_atelier()
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     page.click("#filter-reset-btn")
     page.click("#bottom-sheet-close")
     expect(page.locator(".tile")).to_have_count(3)
