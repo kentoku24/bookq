@@ -203,6 +203,14 @@ pub(crate) fn is_image_entry(name: &str) -> bool {
     IMAGE_EXTENSIONS.contains(&suffix_lower(Path::new(base)).as_str())
 }
 
+/// Archive-entry inner path lexical guard (#277): empty, absolute, or
+/// containing a `..` segment is rejected before any archive lookup.
+/// Shared by the `/image` archive paths and the thumb/view loaders so a
+/// new media route can't grow its own copy of this check.
+pub(crate) fn valid_archive_inner(inner: &str) -> bool {
+    !inner.is_empty() && !inner.starts_with('/') && !inner.split('/').any(|p| p == "..")
+}
+
 /// `_finalize`: image filter + first-wins dedupe + natural sort + 2000 cap.
 fn finalize(names: impl IntoIterator<Item = String>, keep_order: bool) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -700,7 +708,7 @@ pub fn image(library: &Path, path: &str, headers: &HeaderMap) -> Response {
 /// `render(scale=2.0)` PNG. A render failure (missing `libpdfium`, corrupt
 /// page) answers 501 — never a native 500.
 fn serve_pdf_page(archive: &Path, inner: &str, headers: &HeaderMap) -> Response {
-    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+    if !valid_archive_inner(inner) {
         return detail(StatusCode::BAD_REQUEST, "Invalid image path");
     }
     let stat = match archive.metadata() {
@@ -738,7 +746,7 @@ fn serve_pdf_page(archive: &Path, inner: &str, headers: &HeaderMap) -> Response 
 
 /// `_serve_archive_entry` for ZIP/CBZ/EPUB and RAR/CBR.
 fn serve_archive_entry(archive: &Path, inner: &str, headers: &HeaderMap) -> Response {
-    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+    if !valid_archive_inner(inner) {
         return detail(StatusCode::BAD_REQUEST, "Invalid image path");
     }
     let stat = match archive.metadata() {
@@ -984,6 +992,20 @@ mod tests {
             );
         }
         m
+    }
+
+    #[test]
+    fn valid_archive_inner_rejects_lexical_attacks() {
+        // #277: the guard shared by /image archive paths + thumb/view
+        // loaders — empty, absolute, and `..` segments are all rejected.
+        for ok in ["p001.png", "sub/dir/p002.jpg", "a.b/c"] {
+            assert!(valid_archive_inner(ok), "{ok}");
+        }
+        for bad in ["", "/abs.png", "../evil.png", "a/../b.png", "a//../b"] {
+            assert!(!valid_archive_inner(bad), "{bad}");
+        }
+        // `..` as a substring is fine — only whole segments are rejected.
+        assert!(valid_archive_inner("foo..bar/p1.png"));
     }
 
     #[test]

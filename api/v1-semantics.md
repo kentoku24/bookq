@@ -14,7 +14,8 @@
 5. [gzip / 圧縮対象](#5-gzip)
 6. [エラー応答の形](#6-エラー応答)
 7. [media decode — thumb/view/sprite の対応形式契約](#7-media-decode)
-8. [library edit — アップロード (単発/分割) と削除](#8-library-edit)
+8. [media ETag / Range — 条件付き取得の書式](#8-media-etag--range)
+9. [library edit — アップロード (単発/分割) と削除](#9-library-edit)
 
 ## 1. tree
 
@@ -203,7 +204,41 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
   `tests/test_media_decode_contract.py` + `thumbs.rs::tests` を同時更新
   すること (#563 の `.avif` 追加がこの手順の実例)。
 
-## 8. library edit
+## 8. media ETag / Range
+
+`/image` `/thumb` `/view` `/api/thumb-sprite` の条件付き取得契約
+(#277 — それまで実装だけに存在した ETag 書式の正本化)。
+mtime/size は `fmt_mtime` (`{:.0}`) で整数表記される
+(`/image` loose/archive の size は u64 そのまま — 同じ整数値)。
+**ETag 文字列を変えてはいけない** — SW の再検証とオフラインキャッシュの
+ヒット率に直結する (#277 の注意書きどおり)。
+
+| endpoint | ETag 形式 | digest の素 |
+|---|---|---|
+| `GET /image/{path}` loose file | `"<mtime>-<size>"` | — |
+| `GET /image/{path}` archive entry | `"<mtime>-<size>-<sha1(inner)[..16]>"` | inner パスの SHA1 |
+| `GET /image/{path}` PDF page (`pNNN.png`) | `"<mtime>-<size>-pdf<idx>"` | idx は 0-based ページ番号 |
+| `GET /thumb/{path}` | `"<mtime>-<size>-<width>-<digest[..16]>"` | ソース cache-key の SHA1 |
+| `GET /view/{path}` passthrough 分岐 | `"<mtime>-<size>-view-<digest[..16]>"` | ソース cache-key の SHA1 |
+| `GET /view/{path}` normalize 分岐 | `"<mtime>-<size>-view-<wtag>-<digest[..16]>"` | `?w=` 有りは cache-key に `|w<w>` が乗る。`wtag` は `"full"` または clamp 後の幅 |
+| `GET /api/thumb-sprite` | `"<mtime>-<size>-<cell>-s<digest[..16]>"` | セル内容 key の SHA1 |
+
+- **`If-None-Match`**: ETag 一致で **304** (body 無し)。
+- **`If-Modified-Since`**: archive 系は `int(mtime)` 切り捨てで比較
+  (`archive_not_modified`)、`/image` loose file は float mtime を
+  そのまま比較 (`file_not_modified`) — サブ秒の差で 304 が揺れ得る
+  非対称は既知のまま (ETag 側が主経路)。
+- **`Last-Modified`**: 全 media 応答に付与 (HTTP-date)。
+- **`Range: bytes=`**: `/image` のみ単一 Range に対応 (206 +
+  `Content-Range`)。複数 Range・不正構文は契約外 — 複数 Range は
+  200 フル、構文エラーは 400 (`text/plain` になり得る — §6 参照)、
+  長さ超過は 416。`/thumb` `/view` `/api/thumb-sprite` は Range 対象外
+  (生成物のため)。
+- **archive inner path の字句ガード**: `/image/{archive}/{inner}` と
+  `/thumb` `/view` の archive 分岐は `serve.rs::valid_archive_inner`
+  (空・先頭 `/`・`..` セグメントを拒否 → 400) を共有する (#277)。
+
+## 9. library edit
 
 `/api/v1/library/*` — ライブラリへの書き込み面 (参照:
 `rust/viewer-rs/src/library.rs`)。読み取り面と同じくダウンロードルート
