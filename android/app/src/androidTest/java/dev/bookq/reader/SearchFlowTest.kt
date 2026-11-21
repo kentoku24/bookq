@@ -96,29 +96,50 @@ class SearchFlowTest {
             check(goneTag("facetApply")) { "facet sheet did not close" }
 
             // ── show-all + hide/unhide round-trip ──
-            composeRule.onNodeWithTag("layoutMenuBtn").performClick()
-            check(waitTag("showAllMenuItem")) { "menu did not open" }
-            composeRule.onNodeWithTag("showAllMenuItem").performClick()
-
-            // In showAll the top tile gets an eye toggle.
-            check(waitTag("visToggle:$top")) {
-                "no visToggle on the top tile in show-all" }
             try {
-                composeRule.onNodeWithTag("visToggle:$top").performClick()
-                check(waitTag("visBadge:$top")) {
-                    "hide did not mark the top tile — tags: " + allTags() }
+                composeRule.onNodeWithTag("layoutMenuBtn").performClick()
+                check(waitTag("showAllMenuItem")) { "menu did not open" }
+                composeRule.onNodeWithTag("showAllMenuItem").performClick()
+
+                // In showAll the top tile gets an eye toggle.
+                check(waitTag("visToggle:$top")) {
+                    "no visToggle on the top tile in show-all" }
+                try {
+                    composeRule.onNodeWithTag("visToggle:$top").performClick()
+                    check(waitTag("visBadge:$top")) {
+                        "hide did not mark the top tile — tags: " + allTags() }
+                } finally {
+                    // Restore only when the tile is actually marked — a blind
+                    // second tap would HIDE it when the first write failed.
+                    val marked = composeRule.onAllNodesWithTag("visBadge:$top")
+                        .fetchSemanticsNodes().isNotEmpty()
+                    if (marked) {
+                        runCatching {
+                            composeRule.onNodeWithTag("visToggle:$top")
+                                .performClick()
+                        }
+                        check(goneTag("visBadge:$top", 10_000)) {
+                            "unhide did not clear the badge" }
+                    }
+                }
             } finally {
-                // Restore only when the tile is actually marked — a blind
-                // second tap would HIDE it when the first write failed.
-                val marked = composeRule.onAllNodesWithTag("visBadge:$top")
-                    .fetchSemanticsNodes().isNotEmpty()
-                if (marked) {
-                    runCatching {
-                        composeRule.onNodeWithTag("visToggle:$top")
+                // showAll is process-global via the shared ServerScope —
+                // always exit it so later test classes start clean. The
+                // menu item toggles, so only click while an overlay tag
+                // proves show-all is still on.
+                runCatching {
+                    composeRule.onNodeWithTag("layoutMenuBtn").performClick()
+                    check(waitTag("showAllMenuItem", 5_000)) {
+                        "menu did not reopen for show-all cleanup" }
+                    val stillOn =
+                        composeRule.onAllNodesWithTag("visToggle:$top")
+                            .fetchSemanticsNodes().isNotEmpty() ||
+                        composeRule.onAllNodesWithTag("visBadge:$top")
+                            .fetchSemanticsNodes().isNotEmpty()
+                    if (stillOn) {
+                        composeRule.onNodeWithTag("showAllMenuItem")
                             .performClick()
                     }
-                    check(goneTag("visBadge:$top", 10_000)) {
-                        "unhide did not clear the badge" }
                 }
             }
         }

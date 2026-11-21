@@ -63,6 +63,13 @@ class ShowAllGestureTest {
             check(waitTag("showAllTitle")) { "root title missing" }
             composeRule.onNodeWithTag("tile:$tile").assertIsDisplayed()
 
+            // showAll is process-global via the shared ServerScope — an
+            // earlier test class (SearchFlowTest) can leave it on, so
+            // assert the swipe FLIPS the state it finds instead of
+            // assuming a clean OFF start.
+            val wasOn = composeRule.onAllNodesWithTag("visToggle:$tile")
+                .fetchSemanticsNodes().isNotEmpty()
+
             val title = composeRule.onNodeWithTag("showAllTitle")
             val bounds = title.fetchSemanticsNode().boundsInWindow
             val screenW = UiDevice.getInstance(
@@ -75,17 +82,28 @@ class ShowAllGestureTest {
                     Offset(endLocalX, bounds.height / 2f),
                     durationMillis = 400)
             }
-            check(waitTag("visToggle:$tile")) {
-                "edge swipe did not enter show-all" }
+            if (wasOn) {
+                check(goneTag("visToggle:$tile")) {
+                    "edge swipe did not exit show-all" }
+            } else {
+                check(waitTag("visToggle:$tile")) {
+                    "edge swipe did not enter show-all" }
+            }
 
-            // Same gesture exits — release at the edge again.
+            // Same gesture flips back — exit when we entered, re-enter
+            // when the run started inside show-all.
             title.performTouchInput {
                 swipe(Offset(8f, bounds.height / 2f),
                     Offset(endLocalX, bounds.height / 2f),
                     durationMillis = 400)
             }
-            check(goneTag("visToggle:$tile")) {
-                "second edge swipe did not exit show-all" }
+            if (wasOn) {
+                check(waitTag("visToggle:$tile")) {
+                    "second edge swipe did not re-enter show-all" }
+            } else {
+                check(goneTag("visToggle:$tile")) {
+                    "second edge swipe did not exit show-all" }
+            }
         }
     }
 }
