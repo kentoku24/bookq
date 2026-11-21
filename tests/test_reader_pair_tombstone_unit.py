@@ -266,6 +266,56 @@ def test_silent_flush_failure_retries_on_bounded_budget(browser):
     assert set(res["mapKept"]) == {"sess-a"}
 
 
+def test_exhausted_oldest_tombstone_yields_to_younger(browser):
+    """#594: a persistently unflushable OLDEST entry must not starve
+    younger tombstones — once its per-entry budget is spent the drain
+    skips it and delivers the next session's LEAVE. The spent entry
+    stays parked until its window lapses."""
+    src = r"""
+    async (h) => {
+      // Seed the map directly: sess-a is oldest, sess-b younger. One
+      // client drains the queue serially through its own flush link.
+      h.persist.setItem('bookq.readerSync.leaveTombstone.v1', JSON.stringify({
+        'sess-a': {memberId: 'mem-a', resumeToken: 'tok-a', at: 90000},
+        'sess-b': {memberId: 'mem-b', resumeToken: 'tok-b', at: 99000},
+      }));
+      const c = window.PairClient.createClient(h.opts('drain'));
+
+      const sids = [];
+      // sess-a's member stays contested: every RESUME draws
+      // resume_in_use. Each rejection burns one of the entry's
+      // FLUSH_RETRY_MAX+1 (=4) attempts; the 5th flush must be sess-b.
+      for (let i = 0; i < 12; i++) {
+        const t = h.pendingFor('ws://fake/drain');
+        if (!t) { h.fireTimers(); continue; }
+        t.onframe({v: 1, type: 'HELLO'});
+        const resume = t.sent[t.sent.length - 1];
+        sids.push(resume.sessionId);
+        if (resume.sessionId === 'sess-b') {
+          t.onframe({v: 1, type: 'ACK', requestId: resume.requestId,
+                     data: {}});
+        } else {
+          t.onframe({v: 1, type: 'REJECT', requestId: resume.requestId,
+                     reason: 'resume_in_use'});
+        }
+        h.fireTimers();
+        if (sids[sids.length - 1] === 'sess-b' &&
+            !h.pendingFor('ws://fake/drain')) break;
+      }
+      h.results.sids = sids;
+      h.results.finalMap = h.readMap();
+      c.destroy();
+    }
+    """
+    res = _run(browser, src)
+    # sess-a burns exactly its 4-attempt budget, then sess-b is delivered
+    assert res["sids"] == ["sess-a"] * 4 + ["sess-b"]
+    # sess-b's entry cleared on delivery; sess-a stays parked with its
+    # spent budget until the window lapses
+    assert set(res["finalMap"]) == {"sess-a"}
+    assert res["finalMap"]["sess-a"]["fails"] == 4
+
+
 def test_peek_leave_tombstone_map_oldest_expiry_and_legacy(browser):
     """peekLeaveTombstone reports the OLDEST live map entry (what the next
     flush would deliver), skips expired/malformed entries, and still
