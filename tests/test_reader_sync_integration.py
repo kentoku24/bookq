@@ -174,12 +174,13 @@ def test_solo_opens_no_socket_and_pair_idle(browser, server):
 
 # ── pairing establishment ─────────────────────────────────────────────────
 
-def test_match_one_tap_pairs_two_devices(devs):
+def test_match_explicit_choice_pairs_two_devices(devs):
     timeout = 15000
-    """The 🔗 launcher IS the pairing gesture — one real tap on each
-    device: the first MATCHes into a waiting leader, the second MATCHes
-    onto it as follower, auto-approve runs, and a leader work pick then
-    lands the shared spread on both."""
+    """The 🔗 launcher opens the pair panel; MATCH fires on the explicit
+    近くの相手とつながる pick (#160) — the first device becomes the
+    waiting leader, the second MATCHes onto it as follower,
+    auto-approve runs, and a leader work pick then lands the shared
+    spread on both."""
     pl, pf = devs
     # sidebar is open on boot → the header launcher is a real click target;
     # #160: MATCH fires on the explicit 近くの相手とつながる pick

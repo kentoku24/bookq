@@ -33,6 +33,7 @@ from verify_core import (
     AssertError,
     EnvError,
     UnsupportedError,
+    check_url_reachable,
     expected_page,
     marker_rgb,
     png_marker_fraction,
@@ -223,7 +224,7 @@ class RunCtx:
                     _simctl("terminate", spec.udid, "com.apple.mobilesafari",
                             check=False)
                     time.sleep(1.0)
-                _simctl("openurl", spec.udid, spec.launch_url)
+                _simctl("openurl", spec.udid, _heal_url(spec))
             except Exception:
                 pass
         return st
@@ -674,10 +675,11 @@ def op_pair(ctx: RunCtx, op: dict) -> None:
 
 def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
     """Real-app pairing UI surface — the PRODUCTION gesture (#142):
-    sidebar launcher (#pair-btn, in #sidebar-header) → one-tap
-    connect() → MATCH auto-join, or the code-entry view reached through
-    an ended panel. Chrome drives the DOM; the simulator driver walks
-    the Safari AX tree."""
+    sidebar launcher (#pair-btn, in #sidebar-header) opens the pair
+    panel; the idle choice's 近くの相手とつながる (#pair-create) fires
+    connect() → MATCH auto-join, and コードで参加 (#pair-join-open)
+    opens the code-entry view directly (#160). Chrome drives the DOM;
+    the simulator driver walks the Safari AX tree."""
     via = op.get("via") or "match"
     lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
     if ctx.driver.name == "simulator":
@@ -690,7 +692,7 @@ def _op_pair_ui(ctx: RunCtx, op: dict) -> None:
                 pass
     # 'match' must start clean — a leftover session hijacks MATCH.
     # 'code' instead NEEDS the connected session a prior pair op made
-    # (its flow reaches the join view via an ended panel).
+    # (its flow leaves through the real UI, then re-pairs by code).
     if via != "code":
         _ui_ensure_idle(ctx)
     if lsp.page is not None and fsp.page is not None:
@@ -774,13 +776,15 @@ def _ui_ensure_idle(ctx: RunCtx) -> None:
                     f"ensure-idle: {spec.role} stuck at status={st!r}")
             _ui_close_panel(ctx, spec)
             # an 'ended' session leaves the reader mounted and the
-            # launcher unreachable (zone taps instead of connect()).
+            # launcher unreachable behind the zone tap targets.
             _ui_browse_root(ctx, spec)
 
 
 def _ui_close_panel(ctx: RunCtx, spec, timeout: float = 8.0) -> None:
-    """Leave the pair panel shut — a still-open overlay swallows the next
-    launcher tap as a backdrop close() and connect() never fires."""
+    """Leave the pair panel shut — a still-open overlay swallows the
+    next launcher tap as a backdrop close() (inside the #160 grace
+    window it is ignored, but the panel must be open to pick
+    つながる / コードで参加 anyway)."""
     deadline = time.monotonic() + timeout * ctx.tscale
     while time.monotonic() < deadline:
         try:
@@ -828,24 +832,29 @@ def _op_pair_ui_dom(ctx: RunCtx, via: str) -> None:
     _open_sidebar_dom(leader)
     _open_sidebar_dom(follower)
     if via == "code":
-        # The code-entry view is reachable in production ONLY from an
-        # 'ended' panel's choice section — an idle/ended launcher tap
-        # fires connect() and MATCH intercepts it. Deterministic reach:
-        # follower opens its panel (secSession), leader leaves through
-        # the real UI, then connect()s for a fresh code; the follower's
-        # still-open panel falls back to secChoice → 参加 → code entry.
+        # #160: the idle choice offers コードで参加 directly — the old
+        # ended-panel detour is gone. The clients arrive paired (a
+        # prior pair op made the session), so both panels open on
+        # secSession; the leader leaves through the real UI, lands on
+        # secChoice, and re-enters via 近くの相手とつながる for a fresh
+        # code while the follower's still-open panel sits on secChoice
+        # → コードで参加 → code entry.
         follower.click("#pair-status")
         leader.click("#pair-status")
         leader.click("#pair-leave")
-        leader.click("#pair-btn")
+        leader.click("#pair-create")
         code = _wait_code_dom(leader)
+        follower.wait_for_selector(
+            "#pair-sec-choice:not([hidden])", timeout=15000)
         follower.click("#pair-join-open")
         follower.fill("#pair-code-input", code)
         # sanitizeCode auto-submits on the 6th digit — no submit click.
     elif via == "match":
-        leader.click("#pair-btn")          # open() + connect()
-        code = _wait_code_dom(leader)
-        follower.click("#pair-btn")        # MATCH joins + auto-approves
+        leader.click("#pair-btn")          # open() → secChoice
+        leader.click("#pair-create")       # つながる → connect() → waiting leader
+        code = _wait_code_dom(leader)      # waiting leader up before MATCH
+        follower.click("#pair-btn")        # open() → secChoice
+        follower.click("#pair-create")     # つながる → connect() → MATCH joins
     else:
         raise UnsupportedError(f"pair via {via!r}")
     for p in (leader, follower):
@@ -870,7 +879,9 @@ _NEEDLE_SEL = {
     "接続済": "#pair-status", "相手不在": "#pair-status",
     "再接続中": "#pair-status", "読み込み中": "#pair-status",
     "解除": "#pair-leave", "左右交換": "#pair-swap",
-    "参加": "#pair-join-open", "コードで参加する": "#pair-leader-join",
+    "近くの相手とつながる": "#pair-create",
+    "参加": "#pair-join-open", "コードで参加": "#pair-join-open",
+    "コードで参加する": "#pair-leader-join",
     "6桁のコードを入力": "#pair-code-input",
     "コードを入力": "#pair-code-input",
     "フォルダ一覧": "#menu-btn", "閉じる": "#pair-close",
@@ -894,6 +905,7 @@ _OPENERS = {
     "#pair-status": [],
     "#pair-swap": ["#pair-status"],
     "#pair-leave": ["#pair-status"],
+    "#pair-create": ["#pair-status"],
     "#pair-join-open": ["#pair-status"],
     "#pair-code-input": ["#pair-join-open", "#pair-status"],
     "#pair-leader-cancel": ["#pair-status"],
@@ -918,6 +930,27 @@ def _browse_needle(n: str) -> bool:
     return True if sel is None else sel in _BROWSE_SELS
 
 
+# Controls that exist ONLY while a pair session is live — the status
+# strip hides on idle outright and on 'ended' once the 3s flash expires,
+# and secSession (leave/swap/change-work) unmounts for idle/ended/error.
+# Choice/join/browse needles deliberately absent: they are exactly how a
+# post-'ended' client re-pairs, so they must stay resolvable.
+_SESSION_ONLY_SELS = {"#pair-status", "#pair-leave", "#pair-swap",
+                      "#pair-change-work"}
+# 'ended' keeps the strip mounted for END_FLASH_MS=3000 — a session-only
+# tap may legitimately resolve inside that window (the follower-reopen
+# path does), so the early-exit grace must outlast flash + report lag.
+_TERMINAL_GRACE_S = 4.5
+
+
+def _session_only_needles(needles) -> bool:
+    for n in needles:
+        sel = _NEEDLE_SEL.get(n) or (n if n.startswith("#") else None)
+        if sel not in _SESSION_ONLY_SELS:
+            return False
+    return True
+
+
 def _browse_escape_url(spec) -> str:
     """Hash-nav URL back to the browse grid — WITHOUT pair_reset. A
     same-doc nav is harmless either way, but if Safari turns the
@@ -926,6 +959,16 @@ def _browse_escape_url(spec) -> str:
     base = (spec.launch_url or "").split("#")[0]
     base = base.replace("pair_reset=1&", "").replace("&pair_reset=1", "")
     return base + "#/browse/"
+
+
+def _heal_url(spec) -> str:
+    """Refocus URL for the stale-report heal — pair_reset stripped for
+    the same reason as _browse_escape_url: if Safari reloads instead of
+    just refocusing, pair_reset=1 would wipe the resume credential and
+    turn a recoverable frozen tab into a dead session (mid-scenario
+    'ended' events traced to exactly this)."""
+    return (spec.launch_url or "").replace(
+        "pair_reset=1&", "").replace("&pair_reset=1", "")
 
 
 def _ui_offset(ctx: RunCtx, spec) -> tuple:
@@ -985,6 +1028,36 @@ def _ui_rect(rep: dict, needles) -> dict | None:
     return None
 
 
+def _verify_opener_tap(ctx: RunCtx, spec, op_sel: str, t0: int,
+                       window: float = 2.5) -> str | None:
+    """Opener taps used to be blind — a mistimed tap during a scroll or
+    layout shift silently failed and the poll just kept waiting for a
+    needle that could never mount. Confirm the pointerdown landed on the
+    intended control so mistaps/dropped taps surface as notes instead of
+    mysterious needle timeouts. Returns the observed lastTap.el, or None
+    when no pointerdown arrived at all — the caller uses that to detect a
+    dead HID transport. Diagnostic only: the poll loop's own opener
+    cooldown still owns retries."""
+    deadline = time.monotonic() + window
+    hit = None
+    while time.monotonic() < deadline:
+        try:
+            lt = (ctx._pair_report_state(spec.role).get("lastTap") or {})
+        except AssertError:
+            lt = {}
+        if lt.get("t", 0) >= t0 - 300 and lt.get("el"):
+            hit = lt["el"]
+            break
+        time.sleep(0.25)
+    if hit is None:
+        ctx.note("ui_opener_miss", True,
+                 f"opener {op_sel}: no pointerdown within {window}s")
+    elif hit != op_sel:
+        ctx.note("ui_mistap", True,
+                 f"opener {op_sel} hit {hit} — retrying")
+    return hit
+
+
 def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             tries: int = 16, delay: float = 0.7,
             expect_el=None) -> str:
@@ -1004,6 +1077,30 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
     prev_r = None
     fired = {}
     last_rep = None
+    term_since = None
+    dead_taps = 0
+    session_only = _session_only_needles(needles)
+
+    def _dead_check(what_: str) -> None:
+        # idb 'hid succeeded' does NOT prove the touch reached the page —
+        # a companion whose dtuhid channel died (sim reboot, companion
+        # restart, long-uptime wedge) reports success while iOS discards
+        # every event, so lastTap.t never advances. Consecutive taps with
+        # zero observed pointerdowns (while reports stay fresh) mean the
+        # input path itself is dead — fail fast instead of burning the
+        # whole poll budget on an unrecoverable transport.
+        nonlocal dead_taps
+        if dead_taps >= 3:
+            _age = -1.0
+            if last_rep:
+                _age = time.time() - float(
+                    last_rep.get("received_at") or 0)
+            raise EnvError(
+                f"ui tap: {what_} — {dead_taps} taps produced no "
+                f"pointerdown (repAge={_age:.0f}s) — simulator input "
+                f"transport dead; restart idb_companion or reboot the "
+                f"simulator")
+
     for it in range(tries):
         try:
             rep = ctx._pair_report_state(spec.role)
@@ -1012,6 +1109,7 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             # miss after all tries below is the real EnvError.
             time.sleep(delay)
             continue
+        last_rep = rep
         r = _ui_rect(rep, needles)
         if r is not None:
             vp_h = float((rep.get("vp") or {}).get("h") or 0)
@@ -1047,14 +1145,16 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
             drv.tap(spec, x, y)
             ctx.note(f"ui_tap_{needles[0]}", True,
                      f"{what} @({x:.0f},{y:.0f})")
-            if expect_el is None:
-                return needles[0]
             # Verify what the tap actually hit — a rect sampled before
             # an async re-layout lands on the WRONG control (the pair
             # session-info reflow slid 作品変更 under the 左右交換
             # coordinate). The hook's lastTap.el names the real target;
             # a mistap re-enters the poll so the opener chain reopens
             # the surface and the next report supplies a fresh rect.
+            # With expect_el=None any fresh pointerdown still proves the
+            # HID event reached the page — idb reports 'hid succeeded'
+            # even when the companion's dtuhid channel is dead and iOS
+            # discards every touch, so delivery itself must be confirmed.
             hit = None
             vdead = time.monotonic() + 3.0
             while time.monotonic() < vdead:
@@ -1067,16 +1167,44 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                     hit = lt["el"]
                     break
                 time.sleep(0.3)
-            if hit in expect_el:
-                return needles[0]
-            ctx.note("ui_mistap", True,
-                     f"{what} @({x:.0f},{y:.0f}) hit {hit or '?'} "
-                     f"(want {expect_el}) — retrying")
+            if hit is None:
+                dead_taps += 1
+                _dead_check(what)
+                ctx.note("ui_tap_drop", True,
+                         f"{what} @({x:.0f},{y:.0f}) — no pointerdown "
+                         f"reached the page")
+            else:
+                dead_taps = 0
+            if expect_el is None or hit in expect_el:
+                if hit is not None:
+                    return needles[0]
+            elif hit is not None:
+                ctx.note("ui_mistap", True,
+                         f"{what} @({x:.0f},{y:.0f}) hit {hit} "
+                         f"(want {expect_el}) — retrying")
             prev_r = None
             time.sleep(delay)
             continue
         prev_r = None
-        last_rep = rep
+        # Terminal session states make session-only needles unreachable:
+        # the strip hides once the 'ended' flash expires and secSession
+        # controls unmount — burning the remaining polls only delays the
+        # inevitable EnvError. Choice/join/browse needles legitimately
+        # exist in idle/ended (they are how a client re-pairs), so the
+        # check applies per needle-set after the flash grace.
+        if session_only:
+            _st = (rep.get("pc") or {}).get("status")
+            if _st in ("idle", "ended"):
+                if term_since is None:
+                    term_since = time.monotonic()
+                elif time.monotonic() - term_since > _TERMINAL_GRACE_S:
+                    raise EnvError(
+                        f"ui tap: {what} unreachable — session status "
+                        f"'{_st}' endReason="
+                        f"{(rep.get('pc') or {}).get('endReason')} — "
+                        f"needles={needles} require a live session")
+            else:
+                term_since = None
         # A zombie reader (leave/resume aftermath) mounts AFTER the
         # scenario's cleanup pass and covers every control below it —
         # escape back to browse instead of burning the poll budget on
@@ -1114,8 +1242,15 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
                     fired[op_sel] = it
                     if off is None:
                         off = _ui_offset(ctx, spec)
+                    t0 = int(time.time() * 1000)
                     drv.tap(spec, orr["x"] + orr["w"] / 2 + off[0],
                             orr["y"] + orr["h"] / 2 + off[1])
+                    ohit = _verify_opener_tap(ctx, spec, op_sel, t0)
+                    if ohit is None:
+                        dead_taps += 1
+                        _dead_check(what)
+                    else:
+                        dead_taps = 0
                     break
             else:
                 continue
@@ -1129,12 +1264,15 @@ def _ui_tap(ctx: RunCtx, spec, needles, what: str,
               for t in ((last_rep or {}).get("tiles") or [])][:10]
     _age = (time.time() - float((last_rep or {}).get("received_at") or 0)
             if last_rep else -1)
+    _lt = (last_rep or {}).get("lastTap") or {}
     raise EnvError(
         f"ui tap: {what} not found on screen (needles={needles}) "
         f"[phase={_pc.get('phase')} status={_pc.get('status')} "
+        f"endReason={_pc.get('endReason')} "
         f"hdr={(last_rep or {}).get('browseHeader')!r} "
         f"reader={(last_rep or {}).get('readerView')} "
-        f"tiles={_tiles} repAge={_age:.0f}s]")
+        f"tiles={_tiles} repAge={_age:.0f}s "
+        f"vp={(last_rep or {}).get('vp')} lastTap={_lt}]")
 
 
 def _ui_browse_root(ctx: RunCtx, spec, pops: int = 10) -> bool:
@@ -1210,16 +1348,17 @@ def _wait_code_ui(ctx: RunCtx, spec, timeout: float = 25.0) -> str:
 def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
     lsp, fsp = ctx.clients["leader"], ctx.clients["follower"]
     if via == "code":
-        # Same deterministic reach as the DOM path: follower panel open
-        # (secSession) → leader ends via the real UI → leader reconnects
-        # for a fresh code → follower panel is on secChoice → 参加.
+        # Same deterministic reach as the DOM path (#160): the clients
+        # arrive paired; both panels open on secSession, the leader
+        # leaves via the real UI and its still-open panel lands on
+        # secChoice → つながる issues a fresh code → the follower's
+        # panel is on secChoice → コードで参加 → code entry.
         _ui_open_pair_panel(ctx, fsp)
         _ui_open_pair_panel(ctx, lsp)
         _ui_tap(ctx, lsp, ["解除"], "leave button (leader)",
                 expect_el="#pair-leave")
-        _ui_close_panel(ctx, lsp)
-        _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
-                expect_el="#pair-btn")
+        _ui_tap(ctx, lsp, ["近くの相手とつながる"],
+                "waiting leader (leader)", expect_el="#pair-create")
         code = _wait_code_ui(ctx, lsp)
         for attempt in range(2):
             _ui_tap(ctx, fsp, ["参加"], "join open (follower)",
@@ -1268,16 +1407,22 @@ def _op_pair_ui_ax(ctx: RunCtx, via: str) -> None:
         ctx.note("code_typed", True,
                  f"joinCode={'submitted' if typed is None else 'len=' + str(len(typed))}")
     elif via == "match":
-        # No code read needed — the launcher's connect() either creates
-        # a waiting session or MATCH-joins an existing one; the poll
-        # below is the assert. A still-open overlay eats the launcher
-        # tap as a backdrop close, so shut any stray panel first.
+        # #160: the launcher only OPENS the panel now — the explicit
+        # 近くの相手とつながる pick fires connect(). Leader first: its
+        # code proves the waiting session is registered before the
+        # follower's connect() can MATCH onto it (a still-open overlay
+        # eats stray taps as backdrop closes, so shut any first).
         for spec in (lsp, fsp):
             _ui_close_panel(ctx, spec)
         _ui_tap(ctx, lsp, _PAIR_LAUNCHER, "pair launcher (leader)",
                 expect_el="#pair-btn")
+        _ui_tap(ctx, lsp, ["近くの相手とつながる"],
+                "match connect (leader)", expect_el="#pair-create")
+        _wait_code_ui(ctx, lsp)
         _ui_tap(ctx, fsp, _PAIR_LAUNCHER, "pair launcher (follower)",
                 expect_el="#pair-btn")
+        _ui_tap(ctx, fsp, ["近くの相手とつながる"],
+                "match connect (follower)", expect_el="#pair-create")
     else:
         raise UnsupportedError(f"pair via {via!r}")
     ctx.poll_both(
@@ -1295,6 +1440,16 @@ def _api_json(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
         return json.loads(r.read().decode())
 
 
+def _api_json_compat(ctx: RunCtx, v1_path: str, legacy_path: str,
+                     timeout: float = 10.0) -> object:
+    """viewer-rs serves ``/api/v1/*``; pre-#503 backends used the
+    unversioned paths — try v1 first, legacy second."""
+    try:
+        return _api_json(ctx, v1_path, timeout=timeout)
+    except Exception:
+        return _api_json(ctx, legacy_path, timeout=timeout)
+
+
 def _api_post(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
     req = urllib.request.Request(
         ctx.base_url.rstrip("/") + path, method="POST", data=b"{}",
@@ -1306,7 +1461,7 @@ def _api_post(ctx: RunCtx, path: str, timeout: float = 10.0) -> object:
 def _resolve_work(ctx: RunCtx, decl) -> dict:
     """op/scenario work forms:
     - ``{discover: true, minPages}`` — pick a real folder off the target
-      env's own tree via /api/folders + /api/images (the folder name stays
+      env's own tree via the v1 tree/images APIs (the folder name stays
       inside the run; only page names echo into evidence)
     - ``{folder, page:{folder,name}, offset?}`` — an explicit env work
     Named fx fixtures are synthetic-table declarations — S11 exercises the
@@ -1331,21 +1486,22 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
     deterministic across runs of the same env without ever naming it in
     a declaration (``index`` 1+ lets a scenario switch to a DIFFERENT
     work, the spec's leader作品変更, still without naming folders)."""
-    # /api/folders rescans the target tree on every request — under load
-    # or on a cold post-restart container a single 25s read can time out
-    # transiently, which is NOT proof the environment is down. A few
-    # patient attempts before declaring env.
+    # The tree endpoint rescans the target library on every request —
+    # under load or on a cold post-restart container a single 25s read
+    # can time out transiently, which is NOT proof the environment is
+    # down. A few patient attempts before declaring env.
     folders = last_err = None
     for attempt in range(4):
         try:
-            folders = _api_json(ctx, "/api/folders", timeout=25)
+            folders = _api_json_compat(ctx, "/api/v1/tree",
+                                       "/api/folders", timeout=25)
             break
         except Exception as e:
             last_err = e
             time.sleep(3.0)
     if folders is None:
         raise EnvError(
-            f"work discovery: /api/folders failed: {last_err}")
+            f"work discovery: tree fetch failed: {last_err}")
     cands = []
 
     def walk(node, path):
@@ -1362,14 +1518,18 @@ def _discover_work(ctx: RunCtx, min_pages: int, offset,
                 if isinstance(ch, dict) and ch.get("type") == "folder":
                     walk(ch, p)
 
-    for top in folders if isinstance(folders, list) \
-            else (folders or {}).get("folders") or []:
+    top_nodes = folders if isinstance(folders, list) else (
+        (folders or {}).get("nodes")
+        or (folders or {}).get("folders") or [])
+    for top in top_nodes:
         walk(top, "")
     cands.sort()
     for folder, tile in cands:
         try:
-            imgs = _api_json(
-                ctx, "/api/images?folder=" +
+            imgs = _api_json_compat(
+                ctx, "/api/v1/images?folder=" +
+                urllib.parse.quote(folder, safe=""),
+                "/api/images?folder=" +
                 urllib.parse.quote(folder, safe=""))
         except Exception:
             continue
@@ -2280,13 +2440,8 @@ def op_server_restart(ctx: RunCtx, op: dict) -> None:
     deadline = time.monotonic() + 60
     ok = False
     while time.monotonic() < deadline and not ok:
-        try:
-            import urllib.request
-            with urllib.request.urlopen(
-                    ctx.base_url.rstrip("/") + "/api/health",
-                    timeout=3) as r:
-                ok = json.loads(r.read().decode()).get("status") == "ok"
-        except Exception:
+        ok = bool(check_url_reachable(ctx.base_url, timeout=3).get("ok"))
+        if not ok:
             time.sleep(1.0)
     if not ok:
         raise EnvError("target did not come back healthy within 60s")

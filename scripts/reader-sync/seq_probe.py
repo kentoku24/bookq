@@ -76,16 +76,23 @@ def _expect(ws, rtype, label):
 def _pick_work(base: str):
     """First (folder, page_name) with a direct image child in the tree.
 
-    DFS over one /api/folders fetch (the first hit on a cold library scan
+    DFS over one tree fetch (the first hit on a cold library scan
     can take tens of seconds — the timeout is generous). A node's server
     path is ``parent_path + "/" + name``; flattened names already carry
     intermediate segments. Archive/pdf folders list their inner pages as
     image children, so this works uniformly. Folder names are never printed
     (live-library leak prevention).
     """
-    with urllib.request.urlopen(base + "/api/folders", timeout=120) as r:
-        tree = json.load(r)
-    nodes = tree if isinstance(tree, list) else tree.get("folders", [])
+    try:
+        with urllib.request.urlopen(base + "/api/v1/tree",
+                                    timeout=120) as r:
+            tree = json.load(r)
+    except Exception:
+        with urllib.request.urlopen(base + "/api/folders",
+                                    timeout=120) as r:
+            tree = json.load(r)
+    nodes = tree if isinstance(tree, list) else (
+        tree.get("nodes") or tree.get("folders") or [])
     stack = [("", n) for n in nodes]
     while stack:
         prefix, node = stack.pop(0)
@@ -128,10 +135,19 @@ def main() -> int:
                 return 1
             work, first_page = picked
         if first_page is None:
-            with urllib.request.urlopen(
-                    base + "/api/images?folder=" + urllib.parse.quote(work),
-                    timeout=30) as r:
-                first_page = json.load(r)[0]
+            q = urllib.parse.quote(work)
+            try:
+                with urllib.request.urlopen(
+                        base + "/api/v1/images?folder=" + q,
+                        timeout=30) as r:
+                    data = json.load(r)
+            except Exception:
+                with urllib.request.urlopen(
+                        base + "/api/images?folder=" + q,
+                        timeout=30) as r:
+                    data = json.load(r)
+            imgs = data.get("images") if isinstance(data, dict) else data
+            first_page = imgs[0]
 
         log("connect", url=url)
         with connect(url) as a, connect(url) as b:
