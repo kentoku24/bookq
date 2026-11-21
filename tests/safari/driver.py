@@ -52,7 +52,10 @@ class SafariDriverManager:
         time.sleep(0.5)
 
     def start(self) -> None:
-        self._proc = subprocess.Popen(
+        # #139: watchdog spawn — pytest death can't orphan safaridriver.
+        from tests._server_proc import spawn as _spawn_server
+
+        self._proc = _spawn_server(
             ["safaridriver", "-p", str(self._port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
