@@ -1255,7 +1255,7 @@ def test_sw_offline_reload_revalidates_on_reconnect(browser, server):
         assert page.evaluate(
             """async () => {
                 try {
-                    const c = await caches.open('bookq-api-v1');
+                    const c = await caches.open('bookq-api-v2');
                     return !!(await c.match('/api/v1/tree'));
                 } catch (e) { return false; }
             }"""

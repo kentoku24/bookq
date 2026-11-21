@@ -108,7 +108,7 @@ def test_view_only_work_cache_is_wiped(page, server):
             sessionStorage.setItem('bookq_auto_sync_done', '1');
             // distinctive entries: the api/fallback caches are recreated by the
             // harness refresh right after a wipe, so the *content* must be the proof.
-            const api = await caches.open('bookq-api-v1');
+            const api = await caches.open('bookq-api-v2');
             await api.put('/api/wipe-probe', new Response('{}'));
             const fb = await caches.open('bookq-images-fallback');
             await fb.put('/wipe-probe-fallback', new Response('x'));
@@ -132,7 +132,7 @@ def test_view_only_work_cache_is_wiped(page, server):
     leftovers = page.evaluate(
         """async () => {
             const out = [];
-            for (const n of ['bookq-api-v1', 'bookq-images-fallback']) {
+            for (const n of ['bookq-api-v2', 'bookq-images-fallback']) {
                 try {
                     const c = await caches.open(n);
                     for (const r of await c.keys()) out.push(n + ' ' + r.url);
@@ -173,7 +173,7 @@ def test_saved_work_records_and_tree_snapshot_are_wiped(page, server):
             await c.put('/image/wipe-work/2.png', new Response('b'));
             const shell = await caches.open('bookq-shell-v2');
             await shell.put('/static/shell-keep-probe', new Response('shell'));
-            const api = await caches.open('bookq-api-v1');
+            const api = await caches.open('bookq-api-v2');
             await api.put('/api/keep-probe', new Response('{}'));
             await window.OfflineTree.putTree([{name:'wipe-work', type:'folder', children:[]}]);
             localStorage.setItem('bookq_progress', '{"wipe-work":1}');
@@ -210,7 +210,7 @@ def test_cache_classification_and_shell_guard(page, server):
     got = page.evaluate(
         """() => ({
             work: window.OfflineCore.isDataCacheName('bookq-work-a%2Fb-v1'),
-            api: window.OfflineCore.isDataCacheName('bookq-api-v1'),
+            api: window.OfflineCore.isDataCacheName('bookq-api-v2'),
             fallback: window.OfflineCore.isDataCacheName('bookq-images-fallback'),
             shell: window.OfflineCore.isDataCacheName('bookq-shell-v2'),
             other: window.OfflineCore.isDataCacheName('ms-playwright-cache'),

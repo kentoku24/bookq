@@ -9,7 +9,7 @@ they skip honestly via :func:`ensure_sw_interception`.
 
 from .exceptions import SafariUnsupported
 
-# Probe a URL only the SW can cache: page-context puts into bookq-api-v1
+# Probe a URL only the SW can cache: page-context puts into bookq-api-v2
 # always use the fixed /api/v1/tree key (app.js revalidate write-back), so a
 # bare keys().length check can false-positive on a write the page itself
 # made. An exact match on ?sw_probe=1 is only reachable through a real
@@ -17,7 +17,7 @@ from .exceptions import SafariUnsupported
 _PROBE_JS = """(async () => {
   try {
     const probe = '/api/v1/tree?sw_probe=1';
-    const c = await caches.open('bookq-api-v1');
+    const c = await caches.open('bookq-api-v2');
     await fetch(probe, {cache: 'no-store'});
     for (let i = 0; i < 30; i++) {
       if (await c.match(probe)) return true;
