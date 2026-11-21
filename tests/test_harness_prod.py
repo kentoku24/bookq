@@ -162,7 +162,7 @@ def test_harness_wipe_logic(page, server):
                 const shell = await caches.open('bookq-shell-v2');
                 await shell.put('/dummy-shell-entry-'+Date.now(), new Response('shell', {headers:{'Content-Type':'text/plain'}}));
                 // api + fallback caches to verify deletion
-                const api = await caches.open('bookq-api-v1');
+                const api = await caches.open('bookq-api-v2');
                 await api.put('/api/v1/dummy-wipe', new Response('{}', {headers:{'Content-Type':'application/json'}}));
                 const fb = await caches.open('bookq-images-fallback');
                 await fb.put('/image/dummy-wipe', new Response('img', {headers:{'Content-Type':'image/png'}}));
@@ -208,7 +208,7 @@ def test_harness_wipe_logic(page, server):
                 const cn = window.OfflineStore ? window.OfflineStore.cacheNameFor('wipe-test-folder') : 'bookq-work-wipe-test-folder-v1';
                 const hasWork = keys.some(k => k === cn || k.includes('wipe-test-folder'));
                 const hasShell = keys.includes('bookq-shell-v2');
-                const hasApi = keys.includes('bookq-api-v1');
+                const hasApi = keys.includes('bookq-api-v2');
                 const hasFb = keys.includes('bookq-images-fallback');
                 const prog = localStorage.getItem('bookq_progress');
                 const persistToast = localStorage.getItem('bookq_persist_toast');
@@ -234,7 +234,7 @@ def test_harness_wipe_logic(page, server):
     # SHELL kept (if existed)
     assert result["hasShell"], f"SHELL cache bookq-shell-v2 should be kept, keys={result['keys']}"
     # api and fallback deleted
-    assert not result["hasApi"], f"bookq-api-v1 should be deleted, keys={result['keys']}"
+    assert not result["hasApi"], f"bookq-api-v2 should be deleted, keys={result['keys']}"
     assert not result["hasFb"], f"bookq-images-fallback should be deleted, keys={result['keys']}"
     # storage keys removed
     assert result["prog"] is None, f"bookq_progress should be removed, got {result['prog']!r}"

@@ -175,7 +175,7 @@ def test_api_folders_offline_recovery(page, server):
     # loadFolders should not contain caches.open for folders nor caches.match for folders catch
     lf_section = app_text[app_text.find("async function loadFolders"): app_text.find("async function loadFolders")+4000]
     assert "caches.match" not in lf_section, "loadFolders must not contain caches.match for the tree endpoint (IDB-only)"
-    assert 'caches.open("bookq-api-v1")' not in lf_section, "loadFolders must not put the tree endpoint to Cache (IDB-only)"
+    assert 'caches.open("bookq-api-v2")' not in lf_section, "loadFolders must not put the tree endpoint to Cache (IDB-only)"
     # hashchange only, no popstate
     assert 'addEventListener("hashchange"' in hash_text, "must have single hashchange listener (owned by browse/hash.js)"
     assert app_text.count('addEventListener("hashchange"') == 0, "app.js must not add its own hashchange listener"
@@ -541,7 +541,7 @@ def test_viewer_hash_relaunch_offline_restores_tiles(page, server):
     page.wait_for_selector(".tile", timeout=2400)
     # 4. Ensure IDB path works with Cache absent (delete Cache entry if present, assert IDB still restores)
     # IDB is now sole tree store; a Cache tree entry is harmless opportunistic (SW) but app no longer relies on it.
-    page.evaluate("async () => { try{ const c=await caches.open('bookq-api-v1'); const ks=await c.keys(); for(const k of ks){ if(k.url.includes('/api/v1/tree')) try{ await c.delete(k);}catch{} } }catch{} }")
+    page.evaluate("async () => { try{ const c=await caches.open('bookq-api-v2'); const ks=await c.keys(); for(const k of ks){ if(k.url.includes('/api/v1/tree')) try{ await c.delete(k);}catch{} } }catch{} }")
     idb_still = page.evaluate("async () => { try { const t = await window.OfflineTree.getTree(); return Array.isArray(t) && t.length>0; } catch { return false; } }")
     assert idb_still, "OfflineTree.getTree must still have tree after Cache eviction (IDB-only recovery)"
     # Cache tree entry should now be absent or empty (not required)
@@ -1254,7 +1254,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
         assert res["tiles"] == 0
         assert "フォルダが見つかりません" in res["grid"]
     finally:
-        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v1'); await c.put('/api/v1/tree', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
+        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v2'); await c.put('/api/v1/tree', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
         page.goto(server + "/?offline=1")
         page.wait_for_selector(".tile", timeout=10000)
         wait_for_sw(page)
@@ -1289,7 +1289,7 @@ def test_revalidate_empty_tree_and_stale_browse_path_repairs(page, server):
         assert "episodes" not in res2["header"].lower()
         assert "フォルダ" not in res2["header"]
     finally:
-        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v1'); await c.put('/api/v1/tree', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
+        page.evaluate("async (orig) => { try { if(window.OfflineTree&&window.OfflineTree.putTree) await window.OfflineTree.putTree(orig); } catch {} try { const c=await caches.open('bookq-api-v2'); await c.put('/api/v1/tree', new Response(JSON.stringify(orig), {headers:{'Content-Type':'application/json'}})); } catch {} }", orig)
         page.goto(server + "/?offline=1")
         page.wait_for_selector(".tile", timeout=10000)
         wait_for_sw(page)

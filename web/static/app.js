@@ -379,7 +379,7 @@
         currentBrowsePath = resolveAliveAncestor(currentBrowsePath);
       }
       try{
-        const c = await (_d.caches || caches).open("bookq-api-v1");
+        const c = await (_d.caches || caches).open("bookq-api-v2");
         await c.put(globalThis.BookqApi.endpoints.tree, new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
       } catch(e) { console.warn(e); }
       if (!_isRevalidateCurrent(loadGen, connGen)) return;
@@ -1775,7 +1775,7 @@
     // SW api-cache の /api/v1/tree ETag を warm etag として seed —
     // オフラインリロード後の再接続再検証を条件付き (304) に保つ。
     try {
-      var _apiCache = await caches.open("bookq-api-v1");
+      var _apiCache = await caches.open("bookq-api-v2");
       var _cachedTree = _apiCache ? await _apiCache.match(globalThis.BookqApi.endpoints.tree) : null;
       var _seedEtag = _cachedTree && _cachedTree.headers ? _cachedTree.headers.get("ETag") : null;
       if (_seedEtag) etagByKey.set(_foldersEtagKey(null), _seedEtag);
