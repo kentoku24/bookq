@@ -13,6 +13,7 @@ Run:
 """
 
 import json
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -236,3 +237,94 @@ def test_full_tree_body_is_compact_json_and_matches_payload(server):
     data = json.loads(raw.decode("utf-8"))
     assert isinstance(data["nodes"], list) and data["nodes"][0]["type"] == "folder"
     assert any(n.get("name") == "夏 の 本" for n in data["nodes"])
+
+
+# --- #260: shallow must not leak metadata keys, even after a full-tree
+# request populated the index (the order the Python bug needed) ---
+
+_META_TOML = (
+    "[source]\n"
+    'name = "generic"\n'
+    "\n"
+    "[comic]\n"
+    'id = "1"\n'
+    'title_jp = "メタ作品"\n'
+    'title_en = "Meta Work"\n'
+    "total_pages = 2\n"
+    "\n"
+    "[tags]\n"
+    'artist = ["テスト作者"]\n'
+    'tag = ["ファンタジー"]\n'
+)
+
+
+@pytest.fixture(scope="module")
+def meta_library(tmp_path_factory) -> Path:
+    """Dedicated tree WITH metadata.toml — the shared conftest tree has
+    none, which is why the shallow key-leak went unnoticed (#260)."""
+    from tests.conftest import _make_png
+
+    root = tmp_path_factory.mktemp("meta_library")
+    work = root / "meta_work"
+    work.mkdir()
+    _make_png(work / "p1.png")
+    _make_png(work / "p2.png")
+    (work / "metadata.toml").write_text(_META_TOML)
+    plain = root / "plain_work"
+    plain.mkdir()
+    _make_png(plain / "1.png")
+    return root
+
+
+@pytest.fixture(scope="module")
+def meta_server(meta_library: Path):
+    """Second backend against the metadata-bearing tree (module-scoped —
+    one spawn per file run, shared by the #260 tests)."""
+    from rs_spawn import spawn_backend
+
+    proc, base_url = spawn_backend(
+        library_dir=meta_library,
+        state_dir=os.environ["BOOKQ_STATE_DIR"],
+    )
+    try:
+        yield base_url
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_shallow_omits_metadata_keys_after_full_tree(meta_server):
+    """#260 regression: full tree FIRST (populates the metadata attach),
+    then shallow — shallow nodes must carry only the listing key set.
+
+    Spec (api/v1-semantics.md §1): `depth>=1` nodes have `children: []`
+    and no `metadata`/`has_metadata`/`subtree_facets` keys — a shallow
+    payload is deliberately not a full-tree snapshot for offline
+    persistence.
+    """
+    # 1) Full tree: prove the fixture actually carries the fields —
+    # without this the absence assertions below could pass vacuously.
+    status, raw, _ = _get(meta_server, "/api/v1/tree")
+    assert status == 200
+    full = {n["name"]: n for n in json.loads(raw.decode("utf-8"))["nodes"]}
+    meta = full["meta_work"]
+    assert meta["has_metadata"] is True
+    assert meta["metadata"]["title_jp"] == "メタ作品"
+    assert meta["subtree_facets"]["artists"] == ["テスト作者"]
+    # The plain sibling proves has_metadata:false alone still counts as
+    # a leaked key in shallow (the issue lists it alongside metadata).
+    assert full["plain_work"]["has_metadata"] is False
+
+    # 2) Shallow AFTER the full request — the Python-era leak needed this
+    # order; viewer-rs attached at build time so it leaked regardless,
+    # but the wire contract under test is identical.
+    status, raw, _ = _get(meta_server, "/api/v1/tree?depth=1")
+    assert status == 200
+    nodes = json.loads(raw.decode("utf-8"))["nodes"]
+    assert {n["name"] for n in nodes} == {"meta_work", "plain_work"}
+    for node in nodes:
+        assert node["children"] == []
+        for banned in ("metadata", "has_metadata", "subtree_facets"):
+            assert banned not in node, (
+                f"{banned} leaked into shallow node {node['name']!r}"
+            )

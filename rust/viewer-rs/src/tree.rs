@@ -443,8 +443,9 @@ pub fn subtree_facets(comics: &[ComicRec], interner: &mut Interner) -> FacetMap 
 // ── borrowed serialization views (zero-clone emit) ──────────────────────────
 
 /// Emits a node list as a JSON array. `shallow` = the `shallow_from_tree`
-/// contract: folder children only, each with `children: []` and all other
-/// fields intact. `parent` is the path prefix for facet lookup ("" at root).
+/// contract: folder children only, each with `children: []`; metadata,
+/// has_metadata and subtree_facets are dropped (#260 — spec key set).
+/// `parent` is the path prefix for facet lookup ("" at root).
 pub struct TreeSer<'a> {
     pub nodes: &'a [Node],
     pub facets: &'a FacetMap,
@@ -523,18 +524,25 @@ impl Serialize for NodeSer<'_> {
                 if f.pdf {
                     m.serialize_entry("pdf", &true)?;
                 }
-                m.serialize_entry("has_metadata", &f.has_metadata)?;
-                if let Some(meta) = &f.metadata {
-                    m.serialize_entry(
-                        "metadata",
-                        &MetaSer {
-                            meta,
-                            path: &path,
-                        },
-                    )?;
-                }
-                if let Some(fac) = facets {
-                    m.serialize_entry("subtree_facets", &FacetSer(fac))?;
+                // #260: shallow (`depth>=1`) nodes carry only the listing
+                // key set — spec (v1-semantics §1) forbids metadata,
+                // has_metadata and subtree_facets on `children: []` rows.
+                // They are also meaningless without the subtree: a shallow
+                // payload must never be mistaken for a full-tree snapshot.
+                if !self.shallow {
+                    m.serialize_entry("has_metadata", &f.has_metadata)?;
+                    if let Some(meta) = &f.metadata {
+                        m.serialize_entry(
+                            "metadata",
+                            &MetaSer {
+                                meta,
+                                path: &path,
+                            },
+                        )?;
+                    }
+                    if let Some(fac) = facets {
+                        m.serialize_entry("subtree_facets", &FacetSer(fac))?;
+                    }
                 }
                 m.end()
             }
@@ -960,5 +968,73 @@ mod tests {
         ));
         let nodes = scan(&d);
         assert!(nodes.is_empty());
+    }
+
+    // ── #260: shallow key set (v1-semantics §1) ────────────────────────
+
+    #[test]
+    fn shallow_drops_metadata_keys_that_full_tree_emits() {
+        let mut interner = Interner::default();
+        let artist = interner.intern("artist-a");
+        let mut nodes = vec![folder_node(
+            "meta_work",
+            vec![image_node("p1.png", &mut interner)],
+            &mut interner,
+        )];
+        // Simulate attach_metadata + subtree_facets output on the cached
+        // tree — the state in which the shallow serializer runs in prod.
+        let f = nodes[0].as_folder_mut().unwrap();
+        f.has_metadata = true;
+        f.metadata = Some(Box::new(NodeMeta {
+            folder_name: "meta_work".into(),
+            title_jp: "作品".into(),
+            title_en: "".into(),
+            artist: vec![artist.clone()],
+            tags: Vec::new(),
+            source: "generic".into(),
+            pages: 1,
+        }));
+        let mut facets = FacetMap::new();
+        facets.insert(
+            "meta_work".into(),
+            FacetSet {
+                artists: vec![artist].into_boxed_slice(),
+                tags: Vec::new().into_boxed_slice(),
+            },
+        );
+
+        let full = serde_json::to_value(TreeSer {
+            nodes: &nodes,
+            facets: &facets,
+            parent: "",
+            shallow: false,
+        })
+        .unwrap();
+        let shallow = serde_json::to_value(TreeSer {
+            nodes: &nodes,
+            facets: &facets,
+            parent: "",
+            shallow: true,
+        })
+        .unwrap();
+
+        // Full tree keeps the whole contract…
+        let fnn = &full[0];
+        assert_eq!(fnn["has_metadata"], true);
+        assert!(fnn.get("metadata").is_some());
+        assert!(fnn.get("subtree_facets").is_some());
+        assert_eq!(fnn["children"].as_array().unwrap().len(), 1);
+
+        // …shallow emits only the listing key set: children [] and none of
+        // metadata / has_metadata / subtree_facets (v1-semantics §1).
+        let sn = &shallow[0];
+        assert_eq!(sn["name"], "meta_work");
+        assert_eq!(sn["type"], "folder");
+        assert_eq!(sn["children"], serde_json::json!([]));
+        assert!(sn.get("metadata").is_none());
+        assert!(sn.get("has_metadata").is_none());
+        assert!(sn.get("subtree_facets").is_none());
+        // Listing fields the shallow UI still needs stay.
+        assert_eq!(sn["thumb"], "p1.png");
     }
 }
