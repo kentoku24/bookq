@@ -308,7 +308,7 @@ image が復活する）。
 
 `Dockerfile.viewer-rs` の最終 stage は `gcr.io/distroless/cc-debian12`。shell / apt / curl を持たないため、`docker exec ... bash` での調査はできない。
 
-- **ベース更新は Renovate に追従させる**。distroless の Debian パッケージは Debian セキュリティ更新より遅れて再ビルドされることがある（実測: ある時点の digest は libssl3 3.0.20 で、`debian:bookworm-slim` の 3.0.22 より古かった）。digest を固定したまま放置すると逆に CVE が増えるので、`renovate.json` の `dockerfile` + `pinDigests` で更新 PR を受ける。
+- **ベース更新は Dependabot + digest pin で追従する** (#581)。distroless の Debian パッケージは Debian セキュリティ更新より遅れて再ビルドされることがある（実測: ある時点の digest は libssl3 3.0.20 で、`debian:bookworm-slim` の 3.0.22 より古かった）。`Dockerfile.viewer-rs` / `tailscale/Dockerfile` の `FROM` は `@sha256:` pin 済みで、`.github/dependabot.yml` の docker ecosystem が週次で digest 更新 PR を出す。tag のみの参照（動くタグ）は Dependabot が検知できないため pin を維持すること。pdfium は Dependabot の対象外（`ARG` + tarball sha256）なので `.github/workflows/pdfium-update.yml` が週次で更新 PR を作る。
 - **ヘルスチェックは viewer-rs 自身**。`--healthcheck` が `BOOKQ_BIND` のポートへ loopback で `GET /api/v1/health` を投げ、200 なら exit 0（`docker-compose.yml` / `docker-compose.dev.yml` の `test` はこれ）。`depends_on: service_healthy` と `rebuild.sh deploy` の待機は従来どおり動く。
 - **libpdfium は `PDFIUM_LIB_PATH` で解決する**。distroless に `ldconfig` が無いため、Dockerfile が `ENV PDFIUM_LIB_PATH=/usr/local/lib/libpdfium.so` を設定している。これが外れると PDF レンダリングは例外ではなく **静かに 501 へ退行**する（CI の `/image/.../doc.pdf/p001.png` = 200 が検出点）。
 - 一時的な調査は debug バリアント（busybox 入り）で:
