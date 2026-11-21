@@ -837,3 +837,93 @@ def test_peer_latency_needs_table_and_fixture():
     ctx.surface = "ui"
     with pytest.raises(core.UnsupportedError):
         ops_mod.op_peer_latency(ctx, {"op": "peer_latency"})
+
+
+# ── #596 — simulator ownership markers ────────────────────────────────
+
+def test_sim_owner_claim_blocks_live_and_releases(tmp_path, monkeypatch):
+    """The flock excludes even a second claim from the SAME process;
+    release closes the fd and drops the info file."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    udid = "0A11CE00-0000-4000-8000-000000000596"
+    fd = drivers_mod._claim_sim_owner(udid, "run-a")
+    jpath = drivers_mod._sim_owner_json(udid)
+    owner = json.loads(jpath.read_text())
+    assert owner["pid"] == os.getpid() and owner["label"] == "run-a"
+    # flock is per open-file-description — a second fd in this process
+    # still collides, matching cross-process mutual exclusion
+    with pytest.raises(core.EnvError, match="owned by a live run"):
+        drivers_mod._claim_sim_owner(udid, "run-b")
+    drivers_mod._release_sim_owner(udid, fd)
+    assert not jpath.exists()
+    fd2 = drivers_mod._claim_sim_owner(udid, "run-b")
+    assert json.loads(jpath.read_text())["label"] == "run-b"
+    drivers_mod._release_sim_owner(udid, fd2)
+    assert not jpath.exists()
+
+
+def test_sim_owner_claim_overwrites_stale_info(tmp_path, monkeypatch):
+    """A leftover .json from a dead run does not block the claim — the
+    flock (not the file) is the source of truth; the info file is
+    atomically replaced."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    udid = "0A11CE00-0000-4000-8000-000000000B02"
+    jpath = drivers_mod._sim_owner_json(udid)
+    jpath.parent.mkdir(parents=True, exist_ok=True)
+    jpath.write_text(json.dumps({"pid": 999999, "label": "ghost"}))
+    fd = drivers_mod._claim_sim_owner(udid, "run-c")
+    assert json.loads(jpath.read_text())["label"] == "run-c"
+    drivers_mod._release_sim_owner(udid, fd)
+
+
+def test_sim_owner_release_keeps_foreign_file(tmp_path, monkeypatch):
+    """release must not unlink a .json that was recreated under another
+    pid between claim and release."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    udid = "0A11CE00-0000-4000-8000-000000000C03"
+    fd = drivers_mod._claim_sim_owner(udid, "run-d")
+    jpath = drivers_mod._sim_owner_json(udid)
+    jpath.write_text(json.dumps({"pid": 1, "label": "other"}))
+    drivers_mod._release_sim_owner(udid, fd)
+    assert jpath.exists()
+    jpath.unlink()
+
+
+def test_sim_driver_stop_only_shuts_down_own_boots(tmp_path, monkeypatch):
+    """stop() shuts down only devices whose `simctl boot` returned rc==0
+    (_booted_by_us); a raced/already-booted device is left running, and
+    owner fds are released even when a shutdown call raises."""
+    monkeypatch.setattr(drivers_mod, "_SIM_OWNER_DIR", tmp_path)
+    shutdowns = []
+
+    def fake_simctl(*args, timeout=60.0, check=True):
+        cp = drivers_mod.subprocess.CompletedProcess(list(args), 0, "", "")
+        if args[0] == "boot":
+            cp.returncode = 0 if args[1] == "0A11CE00-0000-4000-8000-000000000D01" else 1   # U-raced: already booted
+        elif args[0] == "shutdown":
+            shutdowns.append(args[1])
+            if args[1] == "0A11CE00-0000-4000-8000-000000000D01":
+                raise drivers_mod.EnvError("simctl shutdown hung")
+        return cp
+
+    monkeypatch.setattr(drivers_mod, "_simctl", fake_simctl)
+    monkeypatch.setattr(drivers_mod.SimulatorDriver, "_wait_booted",
+                        lambda self, udid, timeout=90.0: None)
+
+    d = drivers_mod.SimulatorDriver("0A11CE00-0000-4000-8000-000000000D01", "0A11CE00-0000-4000-8000-000000000D02", label="t")
+    specs = {"leader": drivers_mod.ClientSpec("leader", "leader"),
+             "follower": drivers_mod.ClientSpec("follower", "follower")}
+    specs["leader"].kind = specs["follower"].kind = "x"   # skip Safari wipe
+    urls = {"leader": "http://x/leader", "follower": "http://x/follower"}
+    d.launch(specs, urls)
+    assert d._booted_by_us == {"0A11CE00-0000-4000-8000-000000000D01"}
+    assert set(d._owner_fds) == {"0A11CE00-0000-4000-8000-000000000D01", "0A11CE00-0000-4000-8000-000000000D02"}
+
+    with pytest.raises(core.EnvError, match="shutdown failed"):
+        d.stop()
+    # shutdown was attempted for our boot; the raced device untouched;
+    # owners released via finally despite the raised shutdown error
+    assert shutdowns == ["0A11CE00-0000-4000-8000-000000000D01"]
+    assert d._owner_fds == {}
+    assert not drivers_mod._sim_owner_json("0A11CE00-0000-4000-8000-000000000D01").exists()
+    assert not drivers_mod._sim_owner_json("0A11CE00-0000-4000-8000-000000000D02").exists()

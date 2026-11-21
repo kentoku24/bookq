@@ -298,7 +298,8 @@ def main(argv=None) -> int:
         elif args.driver == "real":
             driver = RealDriver()
         else:
-            driver = SimulatorDriver(args.leader_udid, args.follower_udid)
+            driver = SimulatorDriver(args.leader_udid, args.follower_udid,
+                                     label=run_id)
         result["preflight"]["driver"] = driver.preflight()
 
         # fixture bind host: LAN runs need a non-loopback origin so ws://
@@ -471,6 +472,17 @@ def main(argv=None) -> int:
                 driver.stop()
             except Exception as e:
                 print(f"[verify] driver stop error: {e}", file=sys.stderr)
+        elif driver is not None:
+            # --keep leaves devices up for debugging but the RUN is over —
+            # release sim ownership so the next run/teardown sees them as
+            # unowned rather than waiting on this (exiting) pid.
+            rel = getattr(driver, "release_owners", None)
+            if rel is not None:
+                try:
+                    rel()
+                except Exception as e:
+                    print(f"[verify] owner release error: {e}",
+                          file=sys.stderr)
         if fx is not None:
             try:
                 fx.stop()

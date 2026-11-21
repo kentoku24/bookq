@@ -17,11 +17,13 @@ fixture session.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -32,6 +34,122 @@ from verify_core import (
     EnvError,
     UnsupportedError,
 )
+
+
+# Simulator ownership (#596): simulator UDIDs are a global pool shared by
+# every agent on the machine — two concurrent verify runs on the same
+# UDID would tap each other's screens, and a bare sim-teardown.sh kills
+# ALL booted sims. Each run claims a UDID via two files under
+# /tmp/bookq-sim-owners/:
+#   <udid>.lock — flock(2) token held for the process lifetime. The kernel
+#     releases it automatically on exit/SIGKILL, so there is no stale
+#     state and no unlink/link race: mutual exclusion is exact.
+#   <udid>.json — {pid,label,acquired_at} published atomically for
+#     sim-teardown.sh to display. Informational only — the flock is the
+#     source of truth; a leftover .json from a dead run is simply
+#     overwritten by the next claim.
+# A live lock holder blocks acquisition (fail fast instead of silently
+# sharing the device).
+#
+# The dir is per-UID (u<uid>/): simulators themselves are a per-user
+# namespace on macOS (~/Library/Developer/CoreSimulator), so two login
+# users can never contend for the same UDID — per-UID dirs keep the
+# shared /tmp dir 0755-safe (no cross-user writes, no symlink planting)
+# while still isolating every run/check-out of the SAME user, which is
+# where the contention actually happens.
+_SIM_OWNER_DIR = Path(f"/tmp/bookq-sim-owners/u{os.getuid()}")
+
+
+def _sim_owner_lock(udid: str) -> Path:
+    return _SIM_OWNER_DIR / f"{udid}.lock"
+
+
+def _sim_owner_json(udid: str) -> Path:
+    return _SIM_OWNER_DIR / f"{udid}.json"
+
+
+def _read_sim_owner(udid: str) -> dict | None:
+    try:
+        d = json.loads(_sim_owner_json(udid).read_text())
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _claim_sim_owner(udid: str, label: str) -> int:
+    """Claim exclusive ownership of a simulator UDID. Returns the fd
+    holding the flock — keep it open for the run's lifetime and pass it
+    to _release_sim_owner (or just exit; the kernel drops the lock)."""
+    if not udid or not all(c in "0123456789abcdefABCDEF-" for c in udid):
+        raise EnvError(f"invalid simulator UDID: {udid!r}")
+    try:
+        _SIM_OWNER_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise EnvError(f"simulator {udid}: owner dir failed: {e}") from e
+    lock_path = _sim_owner_lock(udid)
+    try:
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        raise EnvError(f"simulator {udid}: owner lock open failed: {e}") from e
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        owner = _read_sim_owner(udid) or {}
+        raise EnvError(
+            f"simulator {udid} is owned by a live run "
+            f"pid={owner.get('pid')} label={owner.get('label')!r} — "
+            "choose different --leader-udid/--follower-udid "
+            "or wait for that run to finish") from None
+    # Lock held — publish owner info atomically. os.replace gives readers
+    # complete-or-absent (old or new inode, never partial); a stale .json
+    # may exist but only we can be in this section (the flock excludes
+    # every other claimant), so replace cannot clobber a live owner.
+    # Without the .json, teardown would see the sim as unowned and could
+    # kill it mid-run — so a publish failure releases the lock and fails
+    # the claim outright. mkstemp (O_EXCL, unpredictable name) keeps the
+    # payload off any pre-planted symlink.
+    json_path = _sim_owner_json(udid)
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "label": label,
+        "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    })
+    tmp = None
+    try:
+        fd2, tmp = tempfile.mkstemp(dir=json_path.parent,
+                                    prefix=json_path.name + ".")
+        with os.fdopen(fd2, "w") as f:
+            f.write(payload)
+        os.replace(tmp, json_path)
+    except OSError as e:
+        os.close(fd)
+        raise EnvError(
+            f"simulator {udid}: owner publish failed: {e}") from e
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+    return fd
+
+
+def _release_sim_owner(udid: str, fd: int | None) -> None:
+    """Drop the owner info file (only if it still names THIS process —
+    a recreated file belongs to someone else) and close the lock fd,
+    which releases the flock."""
+    owner = _read_sim_owner(udid)
+    if owner is not None and owner.get("pid") == os.getpid():
+        try:
+            _sim_owner_json(udid).unlink()
+        except FileNotFoundError:
+            pass
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 class ClientSpec:
@@ -239,10 +357,14 @@ class SimulatorDriver:
     SPRINGBOARD = "com.apple.springboard"
     PREFS = "com.apple.Preferences"
 
-    def __init__(self, leader_udid: str, follower_udid: str):
+    def __init__(self, leader_udid: str, follower_udid: str,
+                 label: str = ""):
         self.udids = {"leader": leader_udid, "follower": follower_udid}
+        self._label = label
         self._pre_booted: set[str] = set()
+        self._booted_by_us: set[str] = set()
         self._recorders: dict[str, subprocess.Popen] = {}
+        self._owner_fds: dict[str, int] = {}
 
     # -- capability / preflight -------------------------------------
 
@@ -286,12 +408,29 @@ class SimulatorDriver:
         raise EnvError(f"simulator {udid} did not boot in {timeout}s")
 
     def launch(self, clients: dict, urls: dict, fx=None) -> None:
+        # Claim the UDIDs before touching any device — a concurrent run
+        # holding them fails fast here instead of interleaving Safari
+        # wipes / taps on the same screens (#596).
+        try:
+            for udid in self.udids.values():
+                self._owner_fds[udid] = _claim_sim_owner(udid, self._label)
+        except EnvError:
+            self.release_owners()
+            raise
         for cid, spec in clients.items():
             udid = self.udids[spec.role]
             spec.udid = udid
             spec.launch_url = urls[cid]
-            if udid not in self._pre_booted:
-                _simctl("boot", udid, check=False)   # already-booted → rc!=0
+            # Always attempt boot — _pre_booted is only a preflight-time
+            # snapshot and can go stale (a finishing run may shut the
+            # device down between preflight and launch). rc==0 → WE booted
+            # it (stop() may shut it down). rc!=0 → already booted —
+            # possibly by a concurrent run that raced us, or booted at
+            # preflight and still up; like _pre_booted it must be left
+            # running (#596).
+            out = _simctl("boot", udid, check=False)
+            if out.returncode == 0:
+                self._booted_by_us.add(udid)
             self._wait_booted(udid)
         for cid, spec in clients.items():
             if spec.kind != "safari":
@@ -326,12 +465,35 @@ class SimulatorDriver:
                         f"pwa client {cid}: relaunched page is not "
                         "standalone (webclip did not take over)")
 
+    def release_owners(self) -> None:
+        """Drop this run's sim-ownership claims. Called by stop() and by
+        verify.py's finally even under --keep (the RUN ended; the sims
+        staying booted for debugging does not extend ownership)."""
+        for udid, fd in list(self._owner_fds.items()):
+            _release_sim_owner(udid, fd)
+        self._owner_fds = {}
+
     def stop(self) -> None:
         for udid, proc in list(self._recorders.items()):
             self.stop_video(udid)
-        for udid in self.udids.values():
-            if udid not in self._pre_booted:
-                _simctl("shutdown", udid, check=False)
+        # Only devices THIS run actually booted (simctl boot rc==0) are
+        # ours to shut down — pre-booted devices and devices a concurrent
+        # run booted mid-launch are left running (#596). A hung
+        # `simctl shutdown` must not skip the remaining devices or the
+        # ownership release, so each call is isolated and owners are
+        # released in `finally`.
+        err = None
+        try:
+            for udid in list(self._booted_by_us):
+                try:
+                    _simctl("shutdown", udid, check=False)
+                except Exception as e:
+                    err = err or e
+            self._booted_by_us = set()
+        finally:
+            self.release_owners()
+        if err is not None:
+            raise EnvError(f"simulator shutdown failed: {err}") from err
 
     # -- evidence / input -------------------------------------------
 

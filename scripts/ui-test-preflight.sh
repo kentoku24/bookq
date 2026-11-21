@@ -52,7 +52,17 @@ if [ -z "$pids" ]; then
 else
   for pid in $pids; do
     cmd=$(ps -p "$pid" -o command= 2>/dev/null | head -1)
-    if api_is_current; then
+    # 高負荷時は健全なサーバーでも 3s curl を1回外し得る — kill 判定の前に
+    # 計3回まで確認し、一時的な無応答で他エージェントのサーバーを殺さない (#596)
+    api_ok_now=0
+    for _try in 1 2 3; do
+      if api_is_current; then
+        api_ok_now=1
+        break
+      fi
+      [ "$_try" -lt 3 ] && sleep 1
+    done
+    if [ "$api_ok_now" = 1 ]; then
       api_ok=1
       say "  pid $pid ($cmd) — current viewer-rs, keep"
       continue
