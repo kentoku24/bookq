@@ -25,6 +25,8 @@ mod auth;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+// #573: `--healthcheck` — the image has no shell for a compose probe.
+mod healthcheck;
 mod library;
 mod oauth;
 mod pair_report;
@@ -808,6 +810,11 @@ async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response 
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return method_not_allowed("GET, HEAD");
     }
+    // #373: a cross-site initiation must not write the `bookq_oauth` tx
+    // cookie (login CSRF plants an attacker PKCE challenge).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
     let Some(flow) = st.auth_flow.clone() else {
         return auth_unconfigured();
     };
@@ -843,6 +850,11 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return method_not_allowed("GET, HEAD");
+    }
+    // #373: logout is a state-changing GET — refuse cross-site
+    // initiations (forced logout CSRF).
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let Some(flow) = st.auth_flow.clone() else {
         return auth_unconfigured();
@@ -1063,6 +1075,13 @@ impl axum::serve::Listener for NoDelayListener {
 
 #[tokio::main]
 async fn main() {
+    // #573: distroless has no shell/curl, so the compose healthcheck runs
+    // this binary with `--healthcheck` instead of a `bash -c` one-liner.
+    // Handled before any tracing/runtime work so the probe stays quiet.
+    if std::env::args().skip(1).any(|a| a == "--healthcheck") {
+        std::process::exit(healthcheck::run());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -1258,6 +1277,41 @@ mod handler_tests {
             auth_unconfigured().status(),
             StatusCode::NOT_IMPLEMENTED
         );
+    }
+
+    /// #359: `/api/v1/version` requires auth; health stays public.
+    #[tokio::test]
+    async fn version_requires_auth_health_stays_public() {
+        // Unauthenticated version is 401 — sha/build_date must not leak.
+        let st = hook_state(false);
+        let (status, body) = body_json(
+            api_version(State(st.clone()), http_req("GET", "/api/v1/version", "")).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, serde_json::json!({"detail": "authentication required"}));
+        // Health stays public for uptime probes.
+        let (status, body) =
+            body_json(api_health(State(st), http_req("GET", "/api/v1/health", "")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"status": "ok"}));
+        // Authed (test-mode mock user) version is 200 with no-store.
+        let st = hook_state(true);
+        let res = api_version(State(st), http_req("GET", "/api/v1/version", "")).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "no-store"
+        );
+        let (status, body) = body_json(res).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["version"], serde_json::json!("2.0.0"));
+        assert!(body.get("sha").is_some());
+        assert!(body.get("build_date").is_some());
     }
 
     /// Minimal AppState for the test-hook handlers: nothing here touches
@@ -1482,5 +1536,47 @@ mod handler_tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!({"ended": 0}));
+    }
+
+    /// `/api/v1/thumb-sprite` — the only HTTP-level coverage of the
+    /// handler: method gate, auth, query plumbing into `thumb_sprite`,
+    /// and the image/* gzip exclusion (#582).
+    #[tokio::test]
+    async fn thumb_sprite_route_serves_sheet() {
+        let mut st = hook_state(true);
+        std::fs::create_dir_all(&st.library).unwrap();
+        std::fs::create_dir_all(&st.thumb_cache).unwrap();
+        // /var → /private/var on macOS: is_within compares canonical paths.
+        st.library = st.library.canonicalize().unwrap();
+        st.thumb_cache = st.thumb_cache.canonicalize().unwrap();
+        std::fs::write(
+            st.library.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        // GET with Accept-Encoding: gzip — image/* must stay identity.
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/thumb-sprite?folder=.&names=p.avif")
+            .header("accept-encoding", "gzip")
+            .body(Body::from(""))
+            .unwrap();
+        let res = api_thumb_sprite(State(st.clone()), req).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
+        // Method gate → 405; bad folder → 400 through the same plumbing.
+        let res = api_thumb_sprite(
+            State(st.clone()),
+            http_req("POST", "/api/v1/thumb-sprite?folder=.&names=p.avif", ""),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let res = api_thumb_sprite(
+            State(st),
+            http_req("GET", "/api/v1/thumb-sprite?folder=/x&names=p.avif", ""),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 }

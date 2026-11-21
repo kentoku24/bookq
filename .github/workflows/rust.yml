@@ -53,8 +53,8 @@ jobs:
         with:
           toolchain: stable
 
-      - name: System deps (zlib for flate2)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config
+      - name: System deps (zlib for flate2, dav1d for avif-native #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config libdav1d-dev
 
       # libpdfium (PDFium engine for the native PDF pipeline, #402) — must
       # track pdfium-render's `pdfium_latest` bindings (8125 at 0.9.5).
@@ -176,12 +176,14 @@ jobs:
       # it may delete canonical fixtures or leave uploads behind — the
       # 200-check below hits fixture paths and would flake. Empty the
       # mount *contents* only (the dir itself is the bind inode), rebuild,
-      # and force an index refresh. The delete runs inside the container:
-      # .bookq-uploads/ session dirs are written by viewer-rs as root, so
-      # the host runner gets EACCES unlinking them.
+      # and force an index refresh. The delete runs as root in a throwaway
+      # debian container (#573: the distroless runtime has no shell/find, and
+      # .bookq-uploads/ session dirs are written by viewer-rs, so the host
+      # runner gets EACCES unlinking them).
       - name: Regenerate fuzzed library fixtures
         run: |
-          docker exec viewer-rs find /app/library -mindepth 1 -delete
+          docker run --rm --volumes-from viewer-rs debian:bookworm-slim \
+            find /app/library -mindepth 1 -delete
           mkdir -p .ci-dl/Series/vol1 .ci-dl/Manga
           uv run --with pillow python - <<'EOF'
           from PIL import Image

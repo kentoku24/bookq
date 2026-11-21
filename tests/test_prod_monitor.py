@@ -111,7 +111,7 @@ def test_eval_static_app_size_floor():
 # ---------------------------------------------------------------------------
 
 def _stub_fetch_ok(url, timeout):
-    path = url.split("bookq.mats.dpdns.org")[-1]
+    path = url.split("bookq.example.com")[-1]
     bodies = {
         "/api/v1/health": b'{"status":"ok"}',
         "/": "<html><title>bookq — ログイン</title></html>".encode(),
@@ -128,7 +128,7 @@ def _stub_fetch_ok(url, timeout):
 
 def test_run_probe_all_ok(monkeypatch):
     monkeypatch.setattr(pm, "fetch", _stub_fetch_ok)
-    result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
+    result = pm.run_probe("https://bookq.example.com", 1)
     assert result["verdict"] == "ok"
     assert result["signature"] == "ok"
     # v1-only: /api/v1/version requires auth, so no sha is observable.
@@ -144,7 +144,7 @@ def test_run_probe_all_down(monkeypatch):
     def dead(url, timeout):
         return _http(None, error="timeout")
     monkeypatch.setattr(pm, "fetch", dead)
-    result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
+    result = pm.run_probe("https://bookq.example.com", 1)
     assert result["verdict"] == "fail"
     assert result["classification"] == "unreachable"
     assert result["signature"].startswith("unreachable:")
@@ -157,7 +157,7 @@ def test_run_probe_auth_bypass_is_top_class(monkeypatch):
             return _http(200, b'{"kind":"tree","nodes":[],"generation":1}')
         return _stub_fetch_ok(url, timeout)
     monkeypatch.setattr(pm, "fetch", bypass)
-    result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
+    result = pm.run_probe("https://bookq.example.com", 1)
     assert result["classification"] == "auth_bypass"
     assert "tree_gate" in result["signature"]
 
@@ -168,7 +168,7 @@ def test_run_probe_version_gate_bypass_is_auth_bypass(monkeypatch):
             return _http(200, b'{"version":"2.0.0","sha":"abc1234","build_date":"d"}')
         return _stub_fetch_ok(url, timeout)
     monkeypatch.setattr(pm, "fetch", bypass)
-    result = pm.run_probe("https://bookq.mats.dpdns.org", 1)
+    result = pm.run_probe("https://bookq.example.com", 1)
     assert result["classification"] == "auth_bypass"
     assert "v1_version_gate" in result["signature"]
 

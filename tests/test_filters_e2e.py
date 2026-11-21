@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
+from browse_header_helpers import open_header_menu
+
 
 def _make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -> None:
     """Write a minimal solid-color RGB PNG without external deps."""
@@ -132,6 +134,13 @@ def _goto_root(page, base_url: str) -> None:
     page.wait_for_selector(".tile")
 
 
+def _open_filter_sheet(page) -> None:
+    """Open the header ⋯menu and pick 絞り込み — lands on the bottom sheet."""
+    open_header_menu(page)
+    page.click("#filter-btn")
+    page.wait_for_selector("#bottom-sheet.open")
+
+
 def test_filter_sheet_lists_subtree_artists(facet_page, facet_server):
     """The sheet at COMEDY level lists only COMEDY-subtree artists (3), sorted casefold."""
     page = facet_page
@@ -139,7 +148,7 @@ def test_filter_sheet_lists_subtree_artists(facet_page, facet_server):
     page.click('.tile[data-path="COMEDY"]')
     expect(page.locator('.tile[data-path="COMEDY/atelier-sun"]')).to_have_count(1)
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
     expect(artists).to_have_count(3)
     chip_texts = artists.all_inner_texts()
@@ -153,7 +162,7 @@ def test_filter_sheet_at_root_lists_all_artists(facet_page, facet_server):
     page = facet_page
     _goto_root(page, facet_server)
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
     expect(artists).to_have_count(5)
     assert artists.all_inner_texts() == [
@@ -180,7 +189,7 @@ def test_filter_sheet_in_search_mode_lists_all_artists(facet_page, facet_server)
     page.locator("#search-input").fill("dead")
     page.wait_for_timeout(600)  # 300 ms debounce + fetch
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
     expect(artists).to_have_count(5)
     assert artists.all_inner_texts() == [
@@ -200,7 +209,7 @@ def test_apply_artist_filter_filters_browse_in_place(facet_page, facet_server):
     # unfiltered COMEDY level: atelier-sun / example-artist (flattened) / standalone
     expect(page.locator(".tile")).to_have_count(3)
 
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     page.locator("#facet-artists .chip", has_text="atelier-sun").click()
     page.click("#filter-apply-btn")
     # only the matching folder survives; the counter reflects the filtered set
@@ -222,7 +231,7 @@ def test_filter_reset_and_chip_remove_restore_browse(facet_page, facet_server):
     expect(page.locator(".tile")).to_have_count(3)
 
     def apply_atelier() -> None:
-        page.click("#filter-btn")
+        _open_filter_sheet(page)
         page.locator("#facet-artists .chip", has_text="atelier-sun").click()
         page.click("#filter-apply-btn")
         expect(page.locator(".tile")).to_have_count(1)
@@ -239,7 +248,7 @@ def test_filter_reset_and_chip_remove_restore_browse(facet_page, facet_server):
 
     # apply again, then reset from the sheet → full listing restored
     apply_atelier()
-    page.click("#filter-btn")
+    _open_filter_sheet(page)
     page.click("#filter-reset-btn")
     page.click("#bottom-sheet-close")
     expect(page.locator(".tile")).to_have_count(3)

@@ -1007,6 +1007,7 @@
       // real coordinates — element rects here plus the last pointerdown
       // let it calibrate screen->client the same way the fixture does.
       var _SEL = ['#pair-btn', '#pair-status', '#menu-btn', '#filter-btn',
+                  '#header-menu-btn',
                   '#pair-code-input', '#pair-join-open', '#pair-join-submit',
                   '#pair-join-back', '#pair-leader-join', '#pair-create',
                   '#pair-leader-cancel', '#pair-waiting-cancel',

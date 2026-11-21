@@ -64,14 +64,13 @@ services:
       com.bookq.dev-image-tag: "${DEV_IMAGE}"
       com.bookq.backend: "rs"
 
-    # イメージは debian-slim + バイナリのみ (curl/wget/python なし) —
-    # bash の /dev/tcp で /api/v1/health を叩く。
+    # イメージは distroless (#573): シェルが無いので、ヘルスチェックは
+    # バイナリ自身の `--healthcheck` が loopback で /api/v1/health を叩く。
     healthcheck:
       test:
         - CMD
-        - bash
-        - -c
-        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/v1/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200'"
+        - /usr/local/bin/viewer-rs
+        - --healthcheck
       interval: 2s
       timeout: 3s
       retries: 15

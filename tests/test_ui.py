@@ -14,6 +14,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from browse_header_helpers import open_header_menu, set_view_mode
+
 
 def open_folder(page, path: str, expect_pages: int):
     page.locator(f'.tile[data-path="{path}"]').click()
@@ -98,20 +100,21 @@ def test_multi_thumbnail_tile_for_folder_with_subfolders(page):
 
 
 def test_list_mode_toggle(page):
-    # View mode now cycles tile → list → card → tile (3 states)
-    btn = page.locator("#footer-refresh-btn")
-
-    btn.click()  # tile → list
+    # View mode is picked directly from the header ⋯menu's radio items.
+    set_view_mode(page, "list")
     expect(page.locator("#tile-grid")).to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".item.folder").first).to_be_visible()
+    expect(page.locator("#menu-view-list")).to_have_attribute("aria-checked", "true")
 
-    btn.click()  # list → card
+    set_view_mode(page, "card")
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".card").first).to_be_visible()
+    expect(page.locator("#menu-view-card")).to_have_attribute("aria-checked", "true")
 
-    btn.click()  # card → tile
+    set_view_mode(page, "tile")
     expect(page.locator("#tile-grid")).not_to_have_class(re.compile(r"\blist-mode\b"))
     expect(page.locator(".tile").first).to_be_visible()
+    expect(page.locator("#menu-view-tile")).to_have_attribute("aria-checked", "true")
 
 
 def test_empty_folder_drills_into_no_folders_found(page):
@@ -793,10 +796,13 @@ def test_portrait_keeps_single_page_layout(page):
 
 
 def test_filter_btn_keeps_sidebar_open(page):
-    """B-C1 — #filter-btn sits inside #sidebar-header, whose delegated click
-    handler closes the sidebar for any non-INPUT click. Opening the filter
-    sheet must NOT close the sidebar: after Apply the user must still see the
-    browse grid (pre-fix they landed on a blank screen)."""
+    """B-C1 — #filter-btn now lives in the header ⋯menu, inside
+    #sidebar-header whose delegated click handler closes the sidebar for any
+    non-INPUT click. Both the menu click and the sheet open must NOT close
+    the sidebar: after Apply the user must still see the browse grid
+    (pre-fix they landed on a blank screen)."""
+    expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"))
+    open_header_menu(page)
     expect(page.locator("#sidebar")).to_have_class(re.compile(r"\bopen\b"))
     page.locator("#filter-btn").click()
     # The sheet slides in over the sidebar — the sidebar itself stays open.

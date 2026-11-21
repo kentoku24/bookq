@@ -252,7 +252,7 @@ docker rm -f <迷子のコンテナ名>
 
 ### 本番監視（prod-monitor）
 
-`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン `https://bookq.mats.dpdns.org` の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
+`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン（repo variable `BOOKQ_MONITOR_BASE_URL` で設定）の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
 
 プローブ本体は `scripts/prod_monitor.py`（stdlib + `gh` CLI のみ）。7 つの check（#407 で v1 のみに整理 — v0 は viewer 停止と同時廃止のため監視対象外）:
 
@@ -304,6 +304,23 @@ Python 実装は source tree から削除済みのため、`py-rollback` profile
 当時の手順書どおりの切戻しも可能（古い ref からの再 build で `py-rollback`
 image が復活する）。
 
+#### runtime は distroless (#573)
+
+`Dockerfile.viewer-rs` の最終 stage は `gcr.io/distroless/cc-debian12`。shell / apt / curl を持たないため、`docker exec ... bash` での調査はできない。
+
+- **ベース更新は Renovate に追従させる**。distroless の Debian パッケージは Debian セキュリティ更新より遅れて再ビルドされることがある（実測: ある時点の digest は libssl3 3.0.20 で、`debian:bookworm-slim` の 3.0.22 より古かった）。digest を固定したまま放置すると逆に CVE が増えるので、`renovate.json` の `dockerfile` + `pinDigests` で更新 PR を受ける。
+- **ヘルスチェックは viewer-rs 自身**。`--healthcheck` が `BOOKQ_BIND` のポートへ loopback で `GET /api/v1/health` を投げ、200 なら exit 0（`docker-compose.yml` / `docker-compose.dev.yml` の `test` はこれ）。`depends_on: service_healthy` と `rebuild.sh deploy` の待機は従来どおり動く。
+- **libpdfium は `PDFIUM_LIB_PATH` で解決する**。distroless に `ldconfig` が無いため、Dockerfile が `ENV PDFIUM_LIB_PATH=/usr/local/lib/libpdfium.so` を設定している。これが外れると PDF レンダリングは例外ではなく **静かに 501 へ退行**する（CI の `/image/.../doc.pdf/p001.png` = 200 が検出点）。
+- 一時的な調査は debug バリアント（busybox 入り）で:
+
+```bash
+docker run --rm -it --entrypoint /busybox/sh \
+  -v bookq_user-state:/var/lib/bookq \
+  gcr.io/distroless/cc-debian12:debug
+```
+
+- 実行ユーザは当面 **root**（plain tag）。`:nonroot` (65532) 化は `user-state` / `thumb-cache` / library bind mount の所有権変更が前提で、別変更として扱う。
+
 #### 新規 route の追加 (#532 以降)
 
 全 route が無条件 native のため gate への追加は不要。追加の前提は従来どおり:
@@ -317,7 +334,7 @@ image が復活する）。
 #### 検証済みの運用ポイント
 
 - `verify_url` は `/api/v1/health`（公開）を叩く。v0 `/api/health` は 501。
-- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health`。
+- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health`（`viewer-rs --healthcheck`、#573 で distroless 化したため shell の `/dev/tcp` から置換）。
 - 未知経路の観測: fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。残るはずのない 501 が継続していたら contract 漏れの兆候。
 
 `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。

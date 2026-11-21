@@ -508,6 +508,48 @@ fn native_params(query: &HashMap<String, String>) -> Result<Option<NativeParams>
     }))
 }
 
+/// Fetch-Metadata/Origin gate for the state-changing GETs `/auth/login`
+/// and `/auth/logout` (#373): a cross-site initiation must neither write
+/// the `bookq_oauth` tx cookie — a login-CSRF plants an attacker PKCE
+/// `code_challenge` in the victim's browser — nor clear `session`
+/// (forced logout). Only `Sec-Fetch-Site: same-origin`/`none` (or an
+/// absent header — older WebKit, curl, native clients) passes; a present
+/// `Origin` must name this host. The gate narrows, never widens: it does
+/// not apply to `/auth/callback`, which Google reaches cross-site by
+/// design.
+pub fn same_site_initiation(headers: &HeaderMap) -> bool {
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+    {
+        if !site.eq_ignore_ascii_case("same-origin") && !site.eq_ignore_ascii_case("none") {
+            return false;
+        }
+    }
+    match (
+        headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+    ) {
+        (Some(origin), Some(host)) => {
+            match (uri_host(origin), uri_host(&format!("http://{host}"))) {
+                (Some(o), Some(h)) => o.eq_ignore_ascii_case(&h),
+                _ => false,
+            }
+        }
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+/// Bare host of an absolute URI or `//authority` reference — `Uri::host`
+/// already strips `:port` and IPv6 brackets. Unparseable → `None`
+/// (`Origin: null` included → fail closed).
+fn uri_host(s: &str) -> Option<String> {
+    s.parse::<axum::http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(str::to_owned))
+}
+
 /// `GET /auth/login` — validate native params (400s first), then 302 to
 /// Google's consent screen with the tx state in `bookq_oauth`.
 pub fn login(flow: &AuthFlow, query: &HashMap<String, String>) -> Response {
@@ -936,6 +978,51 @@ mod tests {
         let mut q = base.clone();
         q.insert("state".into(), "s".repeat(257));
         assert!(native_params(&q).unwrap_err().status() == StatusCode::BAD_REQUEST);
+    }
+
+    /// #373: `same_site_initiation` — the CSRF gate on the state-changing
+    /// GETs. Absent fetch metadata passes (older WebKit, curl, native
+    /// clients); explicit cross-site/same-site and any value outside the
+    /// spec pair fails; a present `Origin` must name this host.
+    #[test]
+    fn same_site_initiation_matrix() {
+        fn h(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+            let mut m = HeaderMap::new();
+            for &(k, v) in pairs {
+                m.insert(
+                    header::HeaderName::from_static(k),
+                    header::HeaderValue::from_static(v),
+                );
+            }
+            m
+        }
+        assert!(same_site_initiation(&h(&[])));
+        for site in ["same-origin", "none"] {
+            assert!(same_site_initiation(&h(&[("sec-fetch-site", site)])), "{site}");
+        }
+        for site in ["cross-site", "same-site", "bogus"] {
+            assert!(!same_site_initiation(&h(&[("sec-fetch-site", site)])), "{site}");
+        }
+        // Origin names this host → pass, port differences ignored.
+        assert!(same_site_initiation(&h(&[
+            ("origin", "https://bookq.example"),
+            ("host", "bookq.example:443"),
+        ])));
+        for pairs in [
+            [("origin", "https://evil.example"), ("host", "bookq.example")],
+            [("origin", "https://sub.bookq.example"), ("host", "bookq.example")],
+            [("origin", "null"), ("host", "bookq.example")],
+        ] {
+            assert!(!same_site_initiation(&h(&pairs)), "{pairs:?}");
+        }
+        // Origin with no Host fails closed.
+        assert!(!same_site_initiation(&h(&[("origin", "https://bookq.example")])));
+        // Fetch-site fires even when Origin matches.
+        assert!(!same_site_initiation(&h(&[
+            ("sec-fetch-site", "cross-site"),
+            ("origin", "https://bookq.example"),
+            ("host", "bookq.example"),
+        ])));
     }
 
     #[test]

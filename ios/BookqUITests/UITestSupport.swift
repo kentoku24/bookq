@@ -49,3 +49,43 @@ enum UITestSupport {
         app.launch()
     }
 }
+
+extension XCUIApplication {
+    /// Wait for `element` to appear; on timeout attach a screenshot and
+    /// the full accessibility tree to the test activity, then fail. A
+    /// bare "did not appear" cannot distinguish cover-stuck / login /
+    /// empty-level on a CI runner — the attachments land in the
+    /// .xcresult that ios-ui-test.sh uploads, so the next flake is
+    /// diagnosable instead of a dead timeout.
+    func assertExists(_ element: XCUIElement, within timeout: TimeInterval,
+                      _ message: @autoclosure () -> String = "",
+                      file: StaticString = #filePath, line: UInt = #line) {
+        if element.waitForExistence(timeout: timeout) { return }
+        attachUIState()
+        XCTFail(message().isEmpty
+                    ? "\(element) did not appear within \(timeout)s"
+                    : message(),
+                file: file, line: line)
+    }
+
+    /// Same check in reverse — an element that must go away (a dismissed
+    /// cover, a withdrawn control) staying visible is a different bug
+    /// than the next screen being late.
+    func assertGone(_ element: XCUIElement, within timeout: TimeInterval,
+                    _ message: @autoclosure () -> String = "",
+                    file: StaticString = #filePath, line: UInt = #line) {
+        if element.waitForNonExistence(timeout: timeout) { return }
+        attachUIState()
+        XCTFail(message().isEmpty
+                    ? "\(element) still present after \(timeout)s"
+                    : message(),
+                file: file, line: line)
+    }
+
+    private func attachUIState() {
+        XCTContext.runActivity(named: "UI state at timeout") { activity in
+            activity.add(XCTAttachment(screenshot: screenshot()))
+            activity.add(XCTAttachment(string: debugDescription))
+        }
+    }
+}
