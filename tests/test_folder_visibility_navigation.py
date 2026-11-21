@@ -41,6 +41,14 @@ def vpage(vis_env, request):
     b = request_browser(request)
     context = b.new_context(viewport={"width": 390, "height": 844})
     page = context.new_page()
+    page._bookq_console_errors = []
+    try:
+        page.on("console", lambda m: page._bookq_console_errors.append(
+            f"console.{m.type}: {m.text}") if m.type == "error" else None)
+        page.on("pageerror", lambda e: page._bookq_console_errors.append(
+            f"pageerror: {e}"))
+    except Exception:
+        pass
     page.goto(vis_env)
     page.wait_for_selector(".tile")
     yield page
@@ -200,6 +208,50 @@ def _wait_held(held, timeout=30.0):
     return held
 
 
+def _page_diag(vpage):
+    """Post-mortem for a held-GET timeout. Dumps which app globals exist,
+    where Connectivity parked, and which /static + /api resources the
+    document actually fetched (responseStatus separates 404/5xx from a
+    request that never left the page) — enough to tell 'scripts failed
+    to load' from 'init skipped' from 'connectivity parked offline'."""
+    try:
+        diag = vpage.evaluate(
+            """() => {
+                const named = (s) => performance.getEntriesByType('resource')
+                    .filter(e => e.name.includes(s))
+                    .map(e => e.name.replace(location.origin, '')
+                        + ' → ' + (e.responseStatus || 0));
+                return JSON.stringify({
+                    url: location.href,
+                    ready: document.readyState,
+                    tiles: document.querySelectorAll('.tile').length,
+                    FV: typeof window.FolderVisibility,
+                    FVstate: window.FolderVisibility
+                        ? window.FolderVisibility.readyState : null,
+                    Api: typeof window.BookqApi,
+                    getVis: !!(window.BookqApi && window.BookqApi.getVisibility),
+                    conn: window.Connectivity ? window.Connectivity.state : null,
+                    statics: named('/static/'),
+                    apis: named('/api/'),
+                });
+            }"""
+        )
+    except Exception as exc:
+        diag = f"<evaluate failed: {exc}>"
+    errs = getattr(vpage, "_bookq_console_errors", None) or []
+    return f"page diag: {diag}\nconsole/page errors: {errs[-8:] or '[]'}"
+
+
+def _assert_held(vpage, held):
+    """_wait_held with a post-mortem dump — a timeout means the app never
+    issued the GET, and the dump distinguishes a degraded document (a
+    script or the shell itself failed to load) from a state-machine park
+    (#502 family) on the next occurrence."""
+    if _wait_held(held):
+        return
+    pytest.fail("visibility GET was never issued\n" + _page_diag(vpage))
+
+
 def _drop_vis_snapshot(vpage):
     """Remove the owner-scoped visibility snapshot so the next document
     loads cold — the vpage fixture's first successful load caches one, and
@@ -253,20 +305,6 @@ def _pin_online_boot(vpage):
         "clearInterval(t);}},50);})()")
 
 
-def _pin_online_boot(vpage):
-    """Same verdict, applied from document start — the visibility GET is
-    issued inside init() after the first loadFolders paint, and an
-    'offline' park during early boot suppresses it entirely ("GET was
-    never issued" flakes #502). The init script polls until
-    window.Connectivity exists, then reportSuccess() pins the state
-    machine before init's chain reaches the fetch. Harmless when a real
-    probe already won — reportSuccess is a no-op verdict."""
-    vpage.add_init_script(
-        "(()=>{const t=setInterval(()=>{"
-        "if(window.Connectivity){window.Connectivity.reportSuccess();"
-        "clearInterval(t);}},50);})()")
-
-
 def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     """While the first visibility GET is outstanding the grid must never
     paint an unfiltered list — release converges to the filtered grid.
@@ -279,7 +317,7 @@ def test_loading_gate_shows_no_unfiltered_tiles(vpage, vis_env):
     _pin_online_boot(vpage)
     _suppress_embed(vpage)
     vpage.reload()
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     # The loading gate can fail-open while Connectivity is still offline
     # (spec §9 — DL filter is the only one): under slow CI the fixed 300ms
     # samples the open window. Converge on online + empty grid instead.
@@ -305,7 +343,7 @@ def test_loading_queues_browse_url_then_applies(vpage, vis_env):
     _pin_online_boot(vpage)
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series")
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     # Same offline fail-open window as the loading gate: wait for
     # connectivity + empty grid to converge instead of a fixed timeout.
     _pin_online(vpage)
@@ -326,7 +364,7 @@ def test_loading_queues_view_url_then_applies(vpage, vis_env):
     _pin_online_boot(vpage)
     _suppress_embed(vpage)
     _fresh_goto(vpage, vis_env + "/#/view/keep_a?p=0")
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     # An 'offline' connectivity transition drains the queued view open as
     # denied (spec §2) — pin online so the nav stays queued until release.
     _pin_online(vpage)
@@ -385,7 +423,7 @@ def test_embedded_snapshot_filters_first_paint(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     _pin_online_boot(vpage)
     vpage.reload()
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     # NOT the loading gate — the embed supplies a snapshot, so the grid
     # paints (filtered) before the GET resolves.
     vpage.wait_for_selector("#tile-grid .tile")
@@ -410,7 +448,7 @@ def test_pending_browse_restore_keeps_list_mode(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     _pin_online_boot(vpage)
     _fresh_goto(vpage, vis_env + "/#/browse/hide_series?v=list")
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     _pin_online(vpage)
     for r in list(held):
         r.fallback()
@@ -453,7 +491,7 @@ def test_pending_nav_last_write_wins(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     _pin_online_boot(vpage)
     vpage.reload()
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     _pin_online(vpage)
     vpage.wait_for_function("() => window.FolderVisibility"
                             " && window.FolderVisibility.readyState === 'loading'")
@@ -473,7 +511,7 @@ def test_pending_nav_last_write_wins_view(vpage, vis_env):
     _drop_vis_snapshot(vpage)
     _pin_online_boot(vpage)
     vpage.reload()
-    assert _wait_held(held), "visibility GET was never issued"
+    _assert_held(vpage, held)
     _pin_online(vpage)
     vpage.wait_for_function("() => window.FolderVisibility"
                             " && window.FolderVisibility.readyState === 'loading'")
