@@ -30,6 +30,14 @@ data class TreeNode(
     @SerialName("has_metadata") val hasMetadata: Boolean? = null,
     val metadata: ComicMetadata? = null,
     @SerialName("subtree_facets") val subtreeFacets: Facets? = null,
+    // Server-resolved fields (T03, additive optional — old clients
+    // ignore them; absent until the server emits them).
+    val path: String? = null,
+    val coverUrl: String? = null,
+    val coverUrls: List<String>? = null,
+    val kind: String? = null, // "work" | "shelf" | "mixed"
+    val work: String? = null,
+    val hidden: Boolean? = null,
 ) {
     val isFolder: Boolean get() = type == "folder"
     val isImage: Boolean get() = type == "image"

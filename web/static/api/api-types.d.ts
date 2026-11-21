@@ -57,6 +57,13 @@ export interface paths {
          *
          *     `since` に既知の `generation` を渡すと、一致時 304、
          *     不一致時は全木を返す（`since` 指定時は常に全木モード）。
+         *
+         *     `visibility` 省略時 (既定) の挙動は不変 — 隠しルートを除外せず
+         *     従来どおりの未フィルタ木を返す (旧クライアント互換)。
+         *     `visibility=apply` は隠しルートをサーバ側で除外する。
+         *     `visibility=annotate` は除外せず隠しノードに `hidden: true` を付ける。
+         *     意味論の正本は `api/v1-semantics.md` §1 (apply の 503 fail-closed、
+         *     ETag への visibility リビジョン含有を含む)。
          */
         get: operations["getTree"];
         put?: never;
@@ -626,6 +633,11 @@ export interface components {
          * @description `name` は flatten 規約により `/` を含み得る（"parent/child"）。
          *     `thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`
          *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。
+         *     `path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は
+         *     サーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは
+         *     未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`
+         *     始まりの絶対 URL で、クライアントは `?w=` のみを付与する。
+         *     `hidden` は `visibility=annotate` 時のみ付く。
          */
         TreeNode: {
             name: string;
@@ -643,6 +655,36 @@ export interface components {
             has_metadata?: boolean;
             metadata?: components["schemas"]["ComicMetadata"];
             subtree_facets?: components["schemas"]["Facets"];
+            /**
+             * @description 合成済みフル path (flatten 後の `parent/child` を含む。不透明値として扱う)
+             * @example Series/vol1
+             */
+            path?: string;
+            /**
+             * @description `/thumb/…` 始まりの絶対 URL。クライアントは `?w=` のみ付与する
+             * @example /thumb/Series/vol1/p00.jpg
+             */
+            coverUrl?: string;
+            /**
+             * @description `coverUrl` の複数版 (multi-thumb グリッド用)。`thumbs` がある時の解決済み形
+             * @example [
+             *       "/thumb/Shelf/a/p00.jpg",
+             *       "/thumb/Shelf/b/p00.jpg"
+             *     ]
+             */
+            coverUrls?: string[];
+            /**
+             * @description `work`=タップで開く作品、`shelf`=階層のみ、`mixed`=両方を含む
+             * @enum {string}
+             */
+            kind?: "work" | "shelf" | "mixed";
+            /**
+             * @description タップ時に開く Work の `folder` (不透明値として `GET /api/v1/work?folder=` に渡す)
+             * @example Series/vol1
+             */
+            work?: string;
+            /** @description `visibility=annotate` 時のみ付く。`true` = 隠しルート配下 */
+            hidden?: boolean;
         };
         TreeResponse: {
             /**
@@ -858,6 +900,8 @@ export interface operations {
                 depth?: number;
                 /** @description 既知 generation。一致 = 304 */
                 since?: number;
+                /** @description 省略 = 不変 (未フィルタ)。apply=隠しルート除外、annotate=`hidden:true` 付与 */
+                visibility?: "apply" | "annotate";
             };
             header?: never;
             path?: never;
@@ -886,6 +930,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationError"];
+            503: components["responses"]["ServiceUnavailable"];
         };
     };
     listImages: {

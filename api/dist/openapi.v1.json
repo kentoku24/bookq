@@ -391,7 +391,7 @@
         "type": "object"
       },
       "TreeNode": {
-        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。\n",
+        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。\n`path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は\nサーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは\n未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`\n始まりの絶対 URL で、クライアントは `?w=` のみを付与する。\n`hidden` は `visibility=annotate` 時のみ付く。\n",
         "properties": {
           "archive": {
             "description": "書庫仮想フォルダ",
@@ -406,13 +406,47 @@
               "null"
             ]
           },
+          "coverUrl": {
+            "description": "`/thumb/…` 始まりの絶対 URL。クライアントは `?w=` のみ付与する",
+            "example": "/thumb/Series/vol1/p00.jpg",
+            "type": "string"
+          },
+          "coverUrls": {
+            "description": "`coverUrl` の複数版 (multi-thumb グリッド用)。`thumbs` がある時の解決済み形",
+            "example": [
+              "/thumb/Shelf/a/p00.jpg",
+              "/thumb/Shelf/b/p00.jpg"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "has_metadata": {
             "type": "boolean"
+          },
+          "hidden": {
+            "description": "`visibility=annotate` 時のみ付く。`true` = 隠しルート配下",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "`work`=タップで開く作品、`shelf`=階層のみ、`mixed`=両方を含む",
+            "enum": [
+              "work",
+              "shelf",
+              "mixed"
+            ],
+            "type": "string"
           },
           "metadata": {
             "$ref": "#/components/schemas/ComicMetadata"
           },
           "name": {
+            "type": "string"
+          },
+          "path": {
+            "description": "合成済みフル path (flatten 後の `parent/child` を含む。不透明値として扱う)",
+            "example": "Series/vol1",
             "type": "string"
           },
           "pdf": {
@@ -442,6 +476,11 @@
               "folder",
               "image"
             ],
+            "type": "string"
+          },
+          "work": {
+            "description": "タップ時に開く Work の `folder` (不透明値として `GET /api/v1/work?folder=` に渡す)",
+            "example": "Series/vol1",
             "type": "string"
           }
         },
@@ -2779,7 +2818,7 @@
     },
     "/api/v1/tree": {
       "get": {
-        "description": "`depth` 省略で全木を返す。`depth>=1` で `path` 直下の\nfolder 型子ノードのみを浅く返す（`children: []`、`metadata`/\n`subtree_facets` キーなし）。\n\n`since` に既知の `generation` を渡すと、一致時 304、\n不一致時は全木を返す（`since` 指定時は常に全木モード）。\n",
+        "description": "`depth` 省略で全木を返す。`depth>=1` で `path` 直下の\nfolder 型子ノードのみを浅く返す（`children: []`、`metadata`/\n`subtree_facets` キーなし）。\n\n`since` に既知の `generation` を渡すと、一致時 304、\n不一致時は全木を返す（`since` 指定時は常に全木モード）。\n\n`visibility` 省略時 (既定) の挙動は不変 — 隠しルートを除外せず\n従来どおりの未フィルタ木を返す (旧クライアント互換)。\n`visibility=apply` は隠しルートをサーバ側で除外する。\n`visibility=annotate` は除外せず隠しノードに `hidden: true` を付ける。\n意味論の正本は `api/v1-semantics.md` §1 (apply の 503 fail-closed、\nETag への visibility リビジョン含有を含む)。\n",
         "operationId": "getTree",
         "parameters": [
           {
@@ -2807,6 +2846,18 @@
             "schema": {
               "type": "integer"
             }
+          },
+          {
+            "description": "省略 = 不変 (未フィルタ)。apply=隠しルート除外、annotate=`hidden:true` 付与",
+            "in": "query",
+            "name": "visibility",
+            "schema": {
+              "enum": [
+                "apply",
+                "annotate"
+              ],
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2814,6 +2865,33 @@
             "content": {
               "application/json": {
                 "examples": {
+                  "annotated": {
+                    "summary": "visibility=annotate (hidden 付与)",
+                    "value": {
+                      "generation": 7,
+                      "kind": "tree",
+                      "nodes": [
+                        {
+                          "children": [],
+                          "coverUrl": "/thumb/Series/vol1/p00.jpg",
+                          "kind": "shelf",
+                          "name": "Series",
+                          "path": "Series",
+                          "type": "folder"
+                        },
+                        {
+                          "children": [],
+                          "coverUrl": "/thumb/Secret/p00.jpg",
+                          "hidden": true,
+                          "kind": "work",
+                          "name": "Secret",
+                          "path": "Secret",
+                          "type": "folder",
+                          "work": "Secret"
+                        }
+                      ]
+                    }
+                  },
                   "children": {
                     "summary": "depth=1 の浅い一覧",
                     "value": {
@@ -2870,6 +2948,62 @@
                         }
                       ]
                     }
+                  },
+                  "resolved": {
+                    "summary": "解決済みフィールド付き (T03・加算的)",
+                    "value": {
+                      "generation": 7,
+                      "kind": "tree",
+                      "nodes": [
+                        {
+                          "children": [
+                            {
+                              "name": "p00.jpg",
+                              "path": "Series/vol1/p00.jpg",
+                              "type": "image"
+                            },
+                            {
+                              "name": "p01.jpg",
+                              "path": "Series/vol1/p01.jpg",
+                              "type": "image"
+                            }
+                          ],
+                          "coverUrl": "/thumb/Series/vol1/p00.jpg",
+                          "kind": "work",
+                          "name": "Series/vol1",
+                          "path": "Series/vol1",
+                          "thumb": "p00.jpg",
+                          "type": "folder",
+                          "work": "Series/vol1"
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [],
+                              "coverUrl": "/thumb/Shelf/a/p00.jpg",
+                              "kind": "work",
+                              "name": "a",
+                              "path": "Shelf/a",
+                              "type": "folder",
+                              "work": "Shelf/a"
+                            }
+                          ],
+                          "coverUrl": "/thumb/Shelf/a/p00.jpg",
+                          "coverUrls": [
+                            "/thumb/Shelf/a/p00.jpg",
+                            "/thumb/Shelf/b/p00.jpg"
+                          ],
+                          "kind": "shelf",
+                          "name": "Shelf",
+                          "path": "Shelf",
+                          "thumbs": [
+                            "a/p00.jpg",
+                            "b/p00.jpg"
+                          ],
+                          "type": "folder"
+                        }
+                      ]
+                    }
                   }
                 },
                 "schema": {
@@ -2896,6 +3030,9 @@
           },
           "422": {
             "$ref": "#/components/responses/ValidationError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
           }
         },
         "summary": "フォルダツリー取得（全木または浅い一覧）",

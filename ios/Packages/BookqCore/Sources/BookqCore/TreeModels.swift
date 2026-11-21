@@ -17,6 +17,14 @@ public struct TreeNode: Codable, Hashable {
     public var hasMetadata: Bool? = nil
     public var metadata: ComicMetadata? = nil
     public var subtreeFacets: [String: [String]]? = nil
+    // Server-resolved fields (T03, additive optional — old clients
+    // ignore them; absent until the server emits them).
+    public var path: String? = nil
+    public var coverUrl: String? = nil
+    public var coverUrls: [String]? = nil
+    public var kind: String? = nil        // "work" | "shelf" | "mixed"
+    public var work: String? = nil
+    public var hidden: Bool? = nil
 
     public var isFolder: Bool { type == "folder" }
     public var isImage: Bool { type == "image" }
@@ -25,7 +33,10 @@ public struct TreeNode: Codable, Hashable {
                 thumb: String? = nil, thumbs: [String]? = nil,
                 archive: Bool? = nil, pdf: Bool? = nil,
                 hasMetadata: Bool? = nil, metadata: ComicMetadata? = nil,
-                subtreeFacets: [String: [String]]? = nil) {
+                subtreeFacets: [String: [String]]? = nil,
+                path: String? = nil, coverUrl: String? = nil,
+                coverUrls: [String]? = nil, kind: String? = nil,
+                work: String? = nil, hidden: Bool? = nil) {
         self.name = name
         self.type = type
         self.children = children
@@ -36,10 +47,17 @@ public struct TreeNode: Codable, Hashable {
         self.hasMetadata = hasMetadata
         self.metadata = metadata
         self.subtreeFacets = subtreeFacets
+        self.path = path
+        self.coverUrl = coverUrl
+        self.coverUrls = coverUrls
+        self.kind = kind
+        self.work = work
+        self.hidden = hidden
     }
 
     enum CodingKeys: String, CodingKey {
         case name, type, children, thumb, thumbs, archive, pdf, metadata
+        case path, coverUrl, coverUrls, kind, work, hidden
         case hasMetadata = "has_metadata"
         case subtreeFacets = "subtree_facets"
     }

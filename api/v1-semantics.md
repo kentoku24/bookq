@@ -29,9 +29,32 @@
 - **`since=<gen>`**: `since == 現在の generation` → **304**。古い世代 →
   **200 + 現在のフルツリー** (`{kind:"tree", nodes, generation}` — 差分ではない)。
   この応答には ETag を付けない。
-- **`ETag`**: `"<sha1-24hex>-g<generation>"`。sha1 は `key_ns:path:depth:body`。
-  `-g` 接尾辞により、本文 digest が同一でも background-fill で世代が進めば
-  revalidation が起きる。`If-None-Match` 完全一致 → **304**。
+- **`ETag`**: `"<sha1-24hex>-g<generation>-v<revision>"`。sha1 は
+  `key_ns:path:depth:visibility:body`。`-g` 接尾辞により、本文 digest が同一でも
+  background-fill で世代が進めば revalidation が起きる。`-v<revision>` は
+  folder-visibility の `revision` (§3) で、隠しルートの変更で 304 が誤って
+  返らないようにする。パラメータなしの既定応答にも `-v` を含める。
+  `If-None-Match` 完全一致 → **304**。
+- **`visibility`** (T03・加算的、省略可): 既定 (パラメータなし) の挙動は
+  **不変** — 隠しルートを除外しない従来どおりの未フィルタ木を返す
+  (旧クライアント互換のため)。
+  - `visibility=apply`: 隠しルート配下をサーバ側で除外する
+    (先頭セグメント一致、書庫も対象、§3 と同一述語)。
+    visibility 状態を読めない時は未フィルタの木を返さず **503**
+    (fail-closed。`GET /api/v1/search` と同じく、フィルタなし一覧は返さない)。
+  - `visibility=annotate`: 除外せず、隠しルート配下のノードに
+    `hidden: true` を付ける (隠しモード・再表示 UI 用)。
+    `hidden` はこのモードでのみ現れ、他のモードではキーを付けない
+    (不在 = 可視ではなく「注釈なし」として扱うこと)。
+  - 不正値 (上記 2 つ以外) → **422**。`since` との併用時は `since` 判定を優先する。
+- **解決済みフィールド** (T03・加算的、optional): ノードの `path` は
+  flatten 後の合成済みフル path (`parent/child` を含む。不透明値として扱い、
+  分解・再合成しない)。`coverUrl`/`coverUrls[]` は `/thumb/…` 始まりの絶対 URL
+  (クライアントは `?w=` のみ付与し、`/image/<fullPath>/<thumb>` の自前解決はしない)。
+  `kind` は `work` (タップで開く作品) / `shelf` (階層のみ) /
+  `mixed` (両方を含む)。`work` はタップ時に開く Work の `folder`
+  (将来の `GET /api/v1/work?folder=` にそのまま渡す)。旧クライアントは
+  未知フィールドを無視するため互換は保たれる。
 - **`Cache-Control`**: `private, max-age=60`。
 - **index 構築中**: **202** `{"detail":"metadata index building"}` +
   `Retry-After: 2` + `Cache-Control: no-store`。クライアントは Retry-After 秒後に
