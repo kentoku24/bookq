@@ -68,7 +68,7 @@ digest re-verification)."""
         raise ValueError("manifest digest verification failed")
     return manifest
 
-# conftest downloads_tree fixture: 1/2/3/10/11.png — offset0 spreads
+# conftest library_tree fixture: 1/2/3/10/11.png — offset0 spreads
 # c0:s0=(1,2) c0:s1=(3,10) c0:s2=(11,–)
 WORK = "simple_manga"
 FIRST_PAGE = {"folder": WORK, "name": "1.png"}

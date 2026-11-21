@@ -1,6 +1,6 @@
 # Android native client — JVM unit tests + lint + debug APK, and an
-# emulator UI smoke test against a TEST_MODE server (api-contract.yml
-# builds the same synthetic tree).
+# emulator UI smoke test against a TEST_MODE server plus the :data
+# androidTest suite (api-contract.yml builds the same synthetic tree).
 name: android
 
 on:
@@ -30,13 +30,16 @@ jobs:
         if: github.event_name == 'pull_request'
         # The ui job boots the repo's viewer-rs binary and asserts on
         # /api/v1/* — server or shell-asset changes can break the client,
-        # hence web/** (served payload, #503) below.
+        # hence web/** (served payload, #503) below. The ui runner script
+        # itself must also gate, or script-only PRs skip the very job
+        # that exercises it.
         with:
           filters: |
             run:
               - "android/**"
               - "api/**"
               - ".github/workflows/android.yml"
+              - ".github/scripts/android-ui-test.sh"
               - "web/**"
               - "rust/viewer-rs/**"
 
@@ -64,7 +67,7 @@ jobs:
           # same-repo PRs write so the cache warms; fork PRs stay read-only.
           cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
           # Default includes omit wrapper; without it every job
-          # re-downloads the Gradle distribution.
+          # re-library the Gradle distribution.
           gradle-home-cache-includes: |
             caches
             notifications
@@ -131,7 +134,12 @@ jobs:
         with:
           toolchain: stable
 
+      # Cargo.toml lives under rust/ — without `workspaces` the action
+      # runs `cargo metadata` at the repo root and fails hard (v2 now
+      # treats a missing manifest as fatal).
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - uses: actions/setup-java@v6
         with:
@@ -144,7 +152,7 @@ jobs:
           # same-repo PRs write so the cache warms; fork PRs stay read-only.
           cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
           # Default includes omit wrapper; without it every job
-          # re-downloads the Gradle distribution.
+          # re-library the Gradle distribution.
           gradle-home-cache-includes: |
             caches
             notifications
@@ -168,7 +176,7 @@ jobs:
 
       # Synthetic tree — Series/vol1 flattens to one "Series/vol1" node;
       # Other/ has direct images so its top-level name stays "Other".
-      - name: Build synthetic downloads tree
+      - name: Build synthetic library tree
         run: |
           mkdir -p /tmp/dl/Series/vol1 /tmp/dl/Other /tmp/bookq-state
           uv run --with pillow python - <<'PYEOF'
@@ -178,14 +186,16 @@ jobs:
           Image.new("RGB", (80, 120), (0, 120, 0)).save("/tmp/dl/Other/p00.jpg")
           PYEOF
 
+      - name: System deps (dav1d for avif-native, #563)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libdav1d-dev pkg-config
+
       - name: Build viewer-rs
         run: cargo build --manifest-path rust/Cargo.toml -p viewer-rs
 
       - name: Start bookq (test mode)
         run: |
-          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state DOWNLOADS_DIR=/tmp/dl \
-            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_RS_NO_UPSTREAM=true \
-            BOOKQ_BIND=127.0.0.1:8080 \
+          BOOKQ_TEST_MODE=true BOOKQ_STATE_DIR=/tmp/bookq-state LIBRARY_DIR=/tmp/dl \
+            BOOKQ_WEB_DIR="$GITHUB_WORKSPACE/web" BOOKQ_BIND=127.0.0.1:8080 \
             ./rust/target/debug/viewer-rs > /tmp/bookq-android-ci-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && exit 0 || sleep 1
@@ -232,5 +242,6 @@ jobs:
           path: |
             android/app/build/reports/androidTests/
             android/build/outputs/android-ui-test-results.txt
+            android/build/outputs/android-data-test-results.txt
             android/build/outputs/server.log
           if-no-files-found: ignore

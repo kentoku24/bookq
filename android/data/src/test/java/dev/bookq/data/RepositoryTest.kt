@@ -125,6 +125,62 @@ class RepositoryTest {
         assertEquals(1, server.requestCount)
     }
 
+    @Test fun restoredShallowSwapsToCompleteSnapshotOnFullFailure() = runBlocking {
+        // Boot path: restoreShallow() painted the depth-1 envelope
+        // (children=null — tiles can't drill), then the full fetch
+        // fails. A complete file snapshot exists, so swap to it
+        // instead of leaving the shallow window on screen.
+        server.enqueue(json(500, "{}"))
+        val snap = TreeRepository.MemorySnapshotIO().apply {
+            text = """{"nodes":[{"name":"cached","type":"folder"}],"generation":9}"""
+        }
+        val shallowSnap = TreeRepository.MemorySnapshotIO().apply {
+            text = """{"nodes":[{"name":"top","type":"folder"}],"generation":7}"""
+        }
+        val repo = TreeRepository(api(), java.io.File("."), testScope(),
+            snapshot = snap, shallow = shallowSnap)
+        assertTrue(repo.restoreShallow())
+        assertTrue(repo.state.value.shallow)
+        assertFalse(repo.state.value.treeLoaded)
+        withTimeout(5_000) { repo.load().join() }
+        val st = repo.state.value
+        assertFalse(st.shallow)
+        assertTrue(st.treeLoaded)
+        assertEquals("cached", st.nodes[0].name)
+        assertEquals(9, st.generation)
+        // Stage 1 skipped (hasSnapshot backed the screen) — one
+        // request only, and it carried no depth param.
+        assertFalse(server.takeRequest().url.toString().contains("depth"))
+    }
+
+    @Test fun restoredShallowWithoutFullNeverFreezesAsLoaded() = runBlocking {
+        // The depth-1-only grid must never be marked treeLoaded:
+        // children=null tiles can't drill, so the retry loop has to
+        // stay alive until a full tree arrives. First load 500s, the
+        // scheduled retry then succeeds.
+        server.enqueue(json(500, "{}"))
+        server.enqueue(json(200, tree(5, "a", "b")))
+        val shallowSnap = TreeRepository.MemorySnapshotIO().apply {
+            text = """{"nodes":[{"name":"top","type":"folder"}],"generation":7}"""
+        }
+        val repo = TreeRepository(api(), java.io.File("."), testScope(),
+            snapshot = TreeRepository.MemorySnapshotIO(),
+            shallow = shallowSnap)
+        assertTrue(repo.restoreShallow())
+        withTimeout(5_000) { repo.load().join() }
+        // Failed full fetch leaves the shallow window up — but NOT as
+        // a frozen "loaded" state.
+        assertTrue(repo.state.value.shallow)
+        assertFalse(repo.state.value.treeLoaded)
+        // scheduleFullRetry (5 s) recovers on its own.
+        withTimeout(10_000) {
+            while (!repo.state.value.treeLoaded) kotlinx.coroutines.delay(20)
+        }
+        assertFalse(repo.state.value.shallow)
+        assertEquals(5, repo.state.value.generation)
+        assertEquals(2, repo.state.value.nodes.size)
+    }
+
     @Test fun refreshJobCompletesOnIndexFailure() = runBlocking {
         // The pull-to-refresh spinner is cleared via Job completion, so
         // a refreshIndex failure must still complete the Job.

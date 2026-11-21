@@ -998,7 +998,7 @@ pub async fn put_folder_visibility(
         };
         if !snap.hidden_roots.iter().any(|r| r == root) {
             // wait=True: no 202 available for a PUT — ride the build.
-            let data = ensure_tree_and_index_wait(&st.index, &st.downloads).await;
+            let data = ensure_tree_and_index_wait(&st.index, &st.library).await;
             let Some(data) = data else {
                 return vis_detail(StatusCode::SERVICE_UNAVAILABLE, "library tree unavailable");
             };
@@ -1211,6 +1211,626 @@ mod tests {
             store2.list_positions("b@x.com", None).unwrap()[0].page,
             9
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── covered_by_roots (search/facets hidden-root filter, M6) ─────────
+    // Privacy contract: a hidden root covers itself AND everything under
+    // "root/" — but never a sibling sharing only a string prefix.
+
+    #[test]
+    fn covered_by_roots_exact_and_descendants() {
+        let roots = vec!["secret".to_string(), "private/dir".to_string()];
+        assert!(covered_by_roots("secret", &roots));
+        assert!(covered_by_roots("secret/comic", &roots));
+        assert!(covered_by_roots("secret/a/b/c", &roots));
+        assert!(covered_by_roots("private/dir/x", &roots));
+        assert!(covered_by_roots("private/dir", &roots));
+    }
+
+    #[test]
+    fn covered_by_roots_prefix_is_not_substring() {
+        let roots = vec!["sec".to_string()];
+        // "secret" shares the prefix but is NOT under root "sec/"
+        assert!(!covered_by_roots("secret", &roots));
+        assert!(covered_by_roots("sec/x", &roots));
+        // empty path never covered (root listing stays visible)
+        assert!(!covered_by_roots("", &roots));
+        // empty root entries are ignored, not treated as match-all
+        let roots2 = vec!["".to_string()];
+        assert!(!covered_by_roots("anything", &roots2));
+        assert!(!covered_by_roots("", &roots2));
+    }
+
+    #[test]
+    fn covered_by_roots_empty_roots_covers_nothing() {
+        assert!(!covered_by_roots("a/b", &[]));
+        assert!(!covered_by_roots("", &[]));
+    }
+
+    // ── PositionStore persistence edges (data integrity) ────────────────
+    // The conformance vectors pin Slot rules; these pin what survives a
+    // "restart" — tombstones, per-user isolation, eviction — because a
+    // stale client PUT resurrecting a wiped position is real data loss.
+
+    fn pos_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bookq-pos-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn position_delete_all_tombstone_survives_restart() {
+        let dir = pos_dir("delall");
+        let store = PositionStore::new(&dir);
+        store.put_v1("u@x.com", "a", 1, 10, 100).unwrap();
+        store.put_v1("u@x.com", "b", 2, 10, 200).unwrap();
+        store.delete_all("u@x.com").unwrap();
+        // "Restart": fresh store on the same file.
+        let store2 = PositionStore::new(&dir);
+        assert!(store2.list_positions("u@x.com", None).unwrap().is_empty());
+        // Stale writes at/below the wipe ts still can't resurrect.
+        assert_eq!(
+            store2.put_v1("u@x.com", "a", 5, 10, 200).unwrap(),
+            STALE
+        );
+        assert_eq!(
+            store2.put_v1("u@x.com", "a", 5, 10, 100).unwrap(),
+            STALE
+        );
+        // A write newer than the wipe is accepted.
+        assert_eq!(
+            store2.put_v1("u@x.com", "a", 5, 10, 201).unwrap(),
+            STORED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn position_delete_all_is_per_user() {
+        let dir = pos_dir("peruser");
+        let store = PositionStore::new(&dir);
+        store.put_v1("a@x.com", "f", 1, 10, 100).unwrap();
+        store.put_v1("b@x.com", "f", 2, 10, 300).unwrap();
+        store.delete_all("a@x.com").unwrap();
+        // b's slot is untouched; a's wipe tombstone doesn't leak.
+        let brecs = store.list_positions("b@x.com", None).unwrap();
+        assert_eq!(brecs.len(), 1);
+        assert_eq!(brecs[0].page, 2);
+        assert!(store.list_positions("a@x.com", None).unwrap().is_empty());
+        assert_eq!(
+            store.put_v1("b@x.com", "g", 1, 10, 400).unwrap(),
+            STORED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn position_delete_user_resets_slot_and_tombstones() {
+        let dir = pos_dir("hard");
+        let store = PositionStore::new(&dir);
+        store.put_v1("u@x.com", "a", 1, 10, 100).unwrap();
+        store.delete_folder("u@x.com", "a").unwrap();
+        // TEST_MODE reset: the whole slot incl. tombstones is dropped, so
+        // an old-ts write that was STALE is accepted again.
+        store.delete_user("u@x.com").unwrap();
+        assert!(store.list_positions("u@x.com", None).unwrap().is_empty());
+        assert_eq!(
+            store.put_v1("u@x.com", "a", 1, 10, 100).unwrap(),
+            STORED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn position_evicts_stalest_user_at_cap() {
+        let dir = pos_dir("evict");
+        let store = PositionStore::new(&dir);
+        // POSITION_MAX_USERS = 100 — the 101st distinct user evicts the
+        // least-recently-updated slot (u0, written first).
+        for i in 0..=POSITION_MAX_USERS {
+            let key = format!("u{i}@x.com");
+            store.put_v1(&key, "f", 1, 10, i as i64 + 1).unwrap();
+        }
+        assert!(store.list_positions("u0@x.com", None).unwrap().is_empty());
+        assert_eq!(
+            store
+                .list_positions(&format!("u{POSITION_MAX_USERS}@x.com"), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn position_list_folder_filter_via_store() {
+        let dir = pos_dir("filter");
+        let store = PositionStore::new(&dir);
+        store.put_v1("u@x.com", "a", 1, 10, 100).unwrap();
+        store.put_v1("u@x.com", "b", 2, 10, 200).unwrap();
+        store.delete_folder("u@x.com", "a").unwrap();
+        // Unfiltered: only the live record remains.
+        let all = store.list_positions("u@x.com", None).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].folder, "b");
+        // Filtered: tombstoned and unknown folders both yield empty.
+        assert!(store
+            .list_positions("u@x.com", Some("a"))
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .list_positions("u@x.com", Some("zzz"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_positions("u@x.com", Some("b"))
+                .unwrap()[0]
+                .page,
+            2
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── request validation helpers ──────────────────────────────────────
+
+    #[test]
+    fn as_int_validation_matrix() {
+        assert_eq!(as_int(&serde_json::json!(5)), Some(5));
+        assert_eq!(as_int(&serde_json::json!(-3)), Some(-3));
+        assert_eq!(as_int(&serde_json::json!(i64::MAX)), Some(i64::MAX));
+        // bools are NOT ints (Python bool is int, JSON true is not page=1)
+        assert_eq!(as_int(&serde_json::json!(true)), None);
+        assert_eq!(as_int(&serde_json::json!(false)), None);
+        // integral floats admitted; fractional rejected
+        assert_eq!(as_int(&serde_json::json!(7.0)), Some(7));
+        assert_eq!(as_int(&serde_json::json!(-0.0)), Some(0));
+        assert_eq!(as_int(&serde_json::json!(7.5)), None);
+        // finite-but-out-of-i64-range floats rejected
+        assert_eq!(as_int(&serde_json::json!(1e300)), None);
+        // non-numeric shapes rejected
+        assert_eq!(as_int(&serde_json::json!("5")), None);
+        assert_eq!(as_int(&serde_json::json!(null)), None);
+        assert_eq!(as_int(&serde_json::json!([1])), None);
+    }
+
+    #[test]
+    fn valid_folder_param_boundaries() {
+        assert!(!valid_folder_param(""));
+        assert!(valid_folder_param("a"));
+        assert!(valid_folder_param("a/b/c"));
+        assert!(!valid_folder_param("/abs"));
+        assert!(!valid_folder_param("a\0b"));
+        // 2048 chars OK, 2049 rejected — counted in chars, not bytes
+        assert!(valid_folder_param(&"x".repeat(2048)));
+        assert!(!valid_folder_param(&"x".repeat(2049)));
+        assert!(valid_folder_param(&"あ".repeat(2048)));
+        assert!(!valid_folder_param(&"あ".repeat(2049)));
+    }
+
+    #[test]
+    fn validate_root_rules() {
+        assert!(validate_root("secret"));
+        assert!(validate_root("a/b/c"));
+        assert!(validate_root("作品/第1巻"));
+        assert!(!validate_root(""));
+        assert!(!validate_root(&"x".repeat(MAX_ROOT_LENGTH + 1)));
+        assert!(validate_root(&"x".repeat(MAX_ROOT_LENGTH)));
+        assert!(!validate_root("a\\b")); // backslash
+        assert!(!validate_root("a\0b")); // NUL
+        assert!(!validate_root("a//b")); // empty segment
+        assert!(!validate_root("/a")); // leading slash → empty first seg
+        assert!(!validate_root("a/")); // trailing slash → empty last seg
+        assert!(!validate_root("a/./b"));
+        assert!(!validate_root("a/../b"));
+        assert!(!validate_root(".hidden"));
+        assert!(!validate_root("a/.h"));
+        assert!(!validate_root(".."));
+    }
+
+    // ── visibility store ────────────────────────────────────────────────
+
+    #[test]
+    fn visibility_set_hidden_bumps_revision_only_on_change() {
+        let dir = pos_dir("visrev");
+        let store = VisibilityStore::new(&dir);
+        let s0 = store.set_hidden(GLOBAL_USER_KEY, "sec", true).unwrap();
+        assert_eq!(s0.revision, 1);
+        assert_eq!(s0.hidden_roots, vec!["sec".to_string()]);
+        // Idempotent re-hide: no revision bump.
+        let s1 = store.set_hidden(GLOBAL_USER_KEY, "sec", true).unwrap();
+        assert_eq!(s1.revision, 1);
+        let s2 = store.set_hidden(GLOBAL_USER_KEY, "abc", true).unwrap();
+        assert_eq!(s2.revision, 2);
+        // Roots come back sorted (ORDER BY root) — feed covered_by_roots.
+        assert_eq!(s2.hidden_roots, vec!["abc".to_string(), "sec".to_string()]);
+        let s3 = store.set_hidden(GLOBAL_USER_KEY, "sec", false).unwrap();
+        assert_eq!(s3.revision, 3);
+        assert_eq!(s3.hidden_roots, vec!["abc".to_string()]);
+        // Unhide of a non-hidden root changes nothing.
+        let s4 = store.set_hidden(GLOBAL_USER_KEY, "nope", false).unwrap();
+        assert_eq!(s4.revision, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn visibility_owner_is_user_and_secret_scoped() {
+        let o = visibility_owner("a@x.com", "s3cret");
+        assert_eq!(o.len(), 64); // sha256 hex
+        assert_eq!(o, visibility_owner("a@x.com", "s3cret")); // deterministic
+        assert_ne!(o, visibility_owner("b@x.com", "s3cret")); // per-user
+        assert_ne!(o, visibility_owner("a@x.com", "other")); // per-secret
+        // No delimiter confusion between user keys.
+        assert_ne!(
+            visibility_owner("a@x.com", "s"),
+            visibility_owner("a@x.com.evil", "s")
+        );
+    }
+
+    // ── HTTP handlers ───────────────────────────────────────────────────
+
+    async fn resp_json(res: Response) -> (StatusCode, Value) {
+        let status = res.status();
+        let bytes = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn put_position_validation_and_status_mapping() {
+        let dir = pos_dir("putpos");
+        let store = std::sync::Arc::new(PositionStore::new(&dir));
+        let put = |folder: &str, body: &[u8]| {
+            let store = store.clone();
+            let folder = folder.to_string();
+            let body = body.to_vec();
+            async move { put_position(store, "u@x.com", &folder, &body).await }
+        };
+        // folder param validation
+        for bad in ["", "/lead", "a\0b"] {
+            let (s, _) = resp_json(put(bad, br#"{"page":0,"total":1,"ts":1}"#).await).await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "folder {bad:?}");
+        }
+        // body validation
+        let (s, _) = resp_json(put("f", b"not json").await).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = resp_json(put("f", b"[1,2]").await).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, b) = resp_json(put("f", br#"{"page":-1,"total":10,"ts":5}"#).await).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b["detail"], "invalid page");
+        let (s, b) = resp_json(put("f", br#"{"page":0,"total":0,"ts":5}"#).await).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b["detail"], "invalid total");
+        let (s, b) = resp_json(put("f", br#"{"page":0,"total":10,"ts":-1}"#).await).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b["detail"], "invalid ts");
+        // bool is not an int
+        let (s, _) = resp_json(
+            put("f", br#"{"page":true,"total":10,"ts":5}"#).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // fractional float rejected, integral float accepted
+        let (s, _) = resp_json(
+            put("f", br#"{"page":1.5,"total":10,"ts":5}"#).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, b) = resp_json(
+            put("f", br#"{"page":1.0,"total":10,"ts":5}"#).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "ok");
+        // far-future ts → wrong-clock guard
+        let far = (now_secs() * 1000.0) as i64 + POSITION_TS_FUTURE_SLACK_MS + 60_000;
+        let body = format!(r#"{{"page":0,"total":10,"ts":{far}}}"#);
+        let (s, b) = resp_json(put("f", body.as_bytes()).await).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(b["detail"], "ts too far in the future");
+        // stale vs stored status mapping (folder "g" fresh slot)
+        let (s, b) = resp_json(
+            put("g", br#"{"page":3,"total":10,"ts":100}"#).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "ok");
+        let (s, b) = resp_json(
+            put("g", br#"{"page":4,"total":10,"ts":50}"#).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "stale");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn list_positions_handler_shape_and_headers() {
+        let dir = pos_dir("listpos");
+        let store = std::sync::Arc::new(PositionStore::new(&dir));
+        store.put_v1("u@x.com", "a", 3, 10, 100).unwrap();
+        store.put_v1("u@x.com", "b", 5, 10, 200).unwrap();
+        // Newest first; only live fields in the JSON shape.
+        let res = list_positions(store.clone(), "u@x.com", None).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let (_, body) = resp_json(res).await;
+        let items = body["positions"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["folder"], "b");
+        assert_eq!(items[0]["page"], 5);
+        assert_eq!(items[1]["folder"], "a");
+        // folder filter
+        let (_, body) = resp_json(
+            list_positions(store.clone(), "u@x.com", Some("a".into())).await,
+        )
+        .await;
+        assert_eq!(body["positions"].as_array().unwrap().len(), 1);
+        // unknown user → empty positions, still 200
+        let (_, body) = resp_json(list_positions(store, "nobody@x.com", None).await).await;
+        assert_eq!(body["positions"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_positions_handlers() {
+        let dir = pos_dir("delpos");
+        let store = std::sync::Arc::new(PositionStore::new(&dir));
+        store.put_v1("u@x.com", "a", 1, 10, 100).unwrap();
+        store.put_v1("u@x.com", "b", 2, 10, 200).unwrap();
+        // folder delete → tombstone; stale re-put rejected via handler
+        let (s, b) = resp_json(
+            delete_positions(store.clone(), "u@x.com", Some("a")).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "ok");
+        let (s, b) = resp_json(
+            put_position(
+                store.clone(),
+                "u@x.com",
+                "a",
+                br#"{"page":9,"total":10,"ts":100}"#,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "stale");
+        // invalid folder → 400
+        let (s, _) = resp_json(
+            delete_positions(store.clone(), "u@x.com", Some("/bad")).await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // delete-all
+        let (s, b) = resp_json(delete_positions(store.clone(), "u@x.com", None).await).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "ok");
+        assert!(store.list_positions("u@x.com", None).unwrap().is_empty());
+        // hard user reset
+        let (s, b) = resp_json(delete_user_positions(store.clone(), "u@x.com").await).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["status"], "ok");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── visibility HTTP handlers ────────────────────────────────────────
+
+    fn vis_state(dir: &Path) -> crate::AppState {
+        let index = std::sync::Arc::new(crate::folders::IndexState::new());
+        let library = dir.join("lib");
+        let registry = crate::reader_sync::Registry::new(index.clone(), library.clone());
+        crate::AppState {
+            library,
+            test_mode: true,
+            allowed_emails: std::sync::Arc::new(std::collections::HashSet::new()),
+            index,
+            position_store: std::sync::Arc::new(PositionStore::new(dir)),
+            visibility: std::sync::Arc::new(VisibilityStore::new(dir)),
+            session_key: None,
+            secret_key: "test-secret".into(),
+            auth_flow: None,
+            registry,
+            pair_reports: std::sync::Arc::new(crate::pair_report::PairReports::new(
+                std::collections::HashMap::new(),
+            )),
+            thumb_cache: dir.join("thumbs"),
+            git_sha: "test".into(),
+            build_date: "test".into(),
+            web_dir: dir.join("web"),
+            upload_root: None,
+            place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn vis_headers(owner: Option<&str>, ctype: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(o) = owner {
+            h.insert(
+                "x-bookq-visibility-owner",
+                HeaderValue::from_str(o).unwrap(),
+            );
+        }
+        if let Some(c) = ctype {
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_str(c).unwrap());
+        }
+        h
+    }
+
+    #[tokio::test]
+    async fn get_folder_visibility_shape_and_private_headers() {
+        let dir = pos_dir("getvis");
+        let st = vis_state(&dir);
+        st.visibility
+            .set_hidden(GLOBAL_USER_KEY, "sec", true)
+            .unwrap();
+        let res = get_folder_visibility(&st, "u@x.com").await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+        assert_eq!(res.headers().get(header::VARY).unwrap(), "Cookie");
+        let (_, body) = resp_json(res).await;
+        assert_eq!(body["owner"], visibility_owner("u@x.com", "test-secret"));
+        assert_eq!(body["revision"], 1);
+        assert_eq!(body["hiddenRoots"], serde_json::json!(["sec"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn put_folder_visibility_validation_chain() {
+        let dir = pos_dir("putvis");
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let st = vis_state(&dir);
+        let owner = visibility_owner("u@x.com", "test-secret");
+        let put = |headers: HeaderMap, body: &'static [u8]| {
+            let st = &st;
+            async move { put_folder_visibility(st, "u@x.com", &headers, body).await }
+        };
+        // owner header required
+        let (s, _) = resp_json(
+            put(vis_headers(None, Some("application/json")), br#"{"root":"a","hidden":false}"#)
+                .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::FORBIDDEN);
+        // owner mismatch → 409
+        let (s, _) = resp_json(
+            put(
+                vis_headers(Some("deadbeef"), Some("application/json")),
+                br#"{"root":"a","hidden":false}"#,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT);
+        // same-length tampered owner (two chars swapped) and truncated owner → 409.
+        // The constant-time compare must reject these, not just different lengths.
+        let ob = owner.as_bytes();
+        let (i, j) = (0..ob.len())
+            .find_map(|i| (i + 1..ob.len()).find_map(|j| (ob[i] != ob[j]).then_some((i, j))))
+            .expect("owner token has at least two distinct chars");
+        let mut swapped = owner.clone().into_bytes();
+        swapped.swap(i, j);
+        let swapped = String::from_utf8(swapped).unwrap();
+        for bad in [swapped, owner[..owner.len() - 1].to_string()] {
+            let (s, _) = resp_json(
+                put(
+                    vis_headers(Some(&bad), Some("application/json")),
+                    br#"{"root":"a","hidden":false}"#,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(s, StatusCode::CONFLICT, "owner {bad:?}");
+        }
+        // wrong content type → 415
+        let (s, _) = resp_json(
+            put(
+                vis_headers(Some(&owner), Some("text/plain")),
+                br#"{"root":"a","hidden":false}"#,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // invalid JSON / non-object
+        let (s, _) = resp_json(
+            put(vis_headers(Some(&owner), Some("application/json")), b"nope").await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = resp_json(
+            put(
+                vis_headers(Some(&owner), Some("application/json")),
+                b"[1,2]",
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        // must be exactly {root, hidden}
+        for body in [
+            &br#"{}"#[..],
+            br#"{"root":"a"}"#,
+            br#"{"root":"a","hidden":false,"x":1}"#,
+            br#"{"root":"a","hidden":"yes"}"#,
+            br#"{"root":"a/../b","hidden":false}"#,
+            br#"{"root":".hid","hidden":false}"#,
+        ] {
+            let (s, _) = resp_json(
+                put(vis_headers(Some(&owner), Some("application/json")), body).await,
+            )
+            .await;
+            assert_eq!(s, StatusCode::BAD_REQUEST, "body {body:?}");
+        }
+        // unhide of a non-hidden root: valid, no tree check needed → 200
+        let res = put(
+            vis_headers(Some(&owner), Some("application/json")),
+            br#"{"root":"ghost","hidden":false}"#,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn put_folder_visibility_hide_requires_tree_membership() {
+        let dir = pos_dir("vismem");
+        // library with one top-level folder "secret" containing an image.
+        // A sibling file keeps the root from flattening secret away.
+        let lib = dir.join("lib");
+        std::fs::create_dir_all(lib.join("secret")).unwrap();
+        std::fs::write(lib.join("secret").join("cover.png"), b"png").unwrap();
+        std::fs::write(lib.join("top.png"), b"png").unwrap();
+        // snapshot_path() falls back to /var/lib/bookq — a real
+        // index-snapshot.json there would replace the synthetic tree and
+        // make membership environment-dependent. Point it inside the tempdir.
+        std::env::set_var("BOOKQ_STATE_DIR", &dir);
+        let st = vis_state(&dir);
+        let owner = visibility_owner("u@x.com", "test-secret");
+        let put = |body: &'static [u8]| {
+            let st = &st;
+            let headers = vis_headers(Some(&owner), Some("application/json"));
+            async move { put_folder_visibility(st, "u@x.com", &headers, body).await }
+        };
+        // hiding a root that is NOT in the tree → 404
+        let (s, _) = resp_json(put(br#"{"root":"nosuch","hidden":true}"#).await).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        // hiding an existing top-level folder → 200 + hiddenRoots
+        let res = put(br#"{"root":"secret","hidden":true}"#).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, body) = resp_json(res).await;
+        assert_eq!(body["hiddenRoots"], serde_json::json!(["secret"]));
+        assert_eq!(body["revision"], 1);
+        // re-hide skips the membership check entirely → still 200
+        let res = put(br#"{"root":"secret","hidden":true}"#).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        // with a non-empty hidden set, hiding a root outside the tree still → 404
+        // (the membership check must not be skipped just because other roots are hidden)
+        let (s, _) = resp_json(put(br#"{"root":"nosuch","hidden":true}"#).await).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        // unhide → 200, root leaves the set
+        let res = put(br#"{"root":"secret","hidden":false}"#).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, body) = resp_json(res).await;
+        assert_eq!(body["hiddenRoots"], serde_json::json!([]));
+        std::env::remove_var("BOOKQ_STATE_DIR");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

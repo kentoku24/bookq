@@ -355,7 +355,6 @@
     var dead = !!path && !node; // a path was requested but doesn't resolve — dead/nonexistent folder
     try { window.currentBrowsePath = (path && node) ? path : null; } catch(e) { console.warn(e); }
     if (typeof window.updateBrowseHeader === 'function') try { window.updateBrowseHeader(); } catch(e) { console.warn(e); }
-    // Clear search
     try { window.searchMode = false; } catch(e) { console.warn(e); }
     var si = document.getElementById("search-input");
     if (si) si.value = "";
@@ -469,7 +468,7 @@
             var _nextMode = bs.v ? bs.v : "tile";
             if (window.viewMode !== _nextMode){
               window.viewMode = _nextMode;
-              if (window.updateFooterBtn) window.updateFooterBtn();
+              if (window.updateViewMenu) window.updateViewMenu();
             }
             window.navigateToFolder(bs.path);
           }
@@ -507,7 +506,7 @@
       var nextMode = (bs && bs.v) ? bs.v : "tile";
       if (window.viewMode !== nextMode) {
         window.viewMode = nextMode;
-        if (window.updateFooterBtn) window.updateFooterBtn();
+        if (window.updateViewMenu) window.updateViewMenu();
         modeChanged = true;
       }
     }

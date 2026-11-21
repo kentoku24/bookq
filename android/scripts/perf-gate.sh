@@ -10,9 +10,9 @@
 #   --compilation none|full   override the default Partial(Require)
 #
 # Runs every Macrobenchmark gate, prints the results table, and exits
-# non-zero when any threshold is missed. Gates (issue #292 §5):
-#   tap turn median < 60ms · fling janky < 1% & p99 < 16ms ·
-#   cold start TTFD < 1.5s · reader open < 400ms
+# non-zero when any threshold is missed. Gates are per-test and
+# recalibrated to the CP08-J1 (90 Hz) measured floors — see the GATES
+# table below and docs/android-app.md (issue #302 §5).
 set -euo pipefail
 
 URL="${1:?usage: perf-gate.sh <dev-url> [--generate] [--compilation mode]}"
@@ -71,17 +71,9 @@ if [[ "$GENERATE" == "1" ]]; then
         "-Pandroid.testInstrumentationRunnerArguments.bookqServerUrl=$URL" \
         "-Pandroid.testInstrumentationRunnerArguments.class=dev.bookq.reader.baselineprofile.BaselineProfileGenerator" \
         --console=plain
-    # The plugin only merges src/<variant>/baselineProfiles — generated
-    # output lands under src/release/generated, so mirror it into the
-    # measurement variants (committed so plain assemble* also carries
-    # the profile).
-    for v in benchmarkRelease nonMinifiedRelease; do
-        mkdir -p "app/src/$v/baselineProfiles"
-        for p in baseline-prof.txt startup-prof.txt; do
-            cp "app/src/release/generated/baselineProfiles/$p" \
-               "app/src/$v/baselineProfiles/" 2>/dev/null || true
-        done
-    done
+    # Measurement variants read src/release/generated/baselineProfiles
+    # via addStaticSourceDirectory in app/build.gradle.kts — nothing to
+    # copy here.
 fi
 
 echo "== building + installing benchmark variants =="

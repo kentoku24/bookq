@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// Root browse screen: NavigationStack of FolderLevelViews + reader modal.
@@ -124,6 +125,11 @@ struct LibraryView: View {
                             FolderLevelView(path: path, library: library, onOpen: openWork)
                                 .navigationTitle(title(for: path))
                                 .navigationBarTitleDisplayMode(.inline)
+                                // web parity: the browse chrome (pair /
+                                // settings / ⋯menu) stays on every level —
+                                // only the root-specific "bookq" title
+                                // (showAll gesture) is root-only.
+                                .toolbar { trailingItems }
                         }
                     case .reader:
                         EmptyView() // readers open as a fullScreenCover
@@ -231,6 +237,14 @@ struct LibraryView: View {
                 .contentShape(Rectangle())
                 .gesture(bookqSwipe)
         }
+        trailingItems
+    }
+
+    /// Trailing toolbar cluster — shared by the root level and every
+    /// pushed FolderLevelView (Android keeps the same actions visible at
+    /// all depths). The root-only "bookq" principal stays in `toolbar`.
+    @ToolbarContentBuilder
+    private var trailingItems: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Menu {
                 Picker("表示", selection: layoutBinding) {

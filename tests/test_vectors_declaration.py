@@ -17,15 +17,15 @@ EXPECTED = {
     "work-chapters.json": ["js", "swift", "rust", "kotlin"],
     "path-lookup.json": ["js", "swift", "rust", "kotlin"],
     "encode-path.json": ["js", "swift", "rust", "kotlin"],
-    "solo-spreads.json": ["js", "swift", "kotlin"],
-    "chapter-padding.json": ["js", "swift", "kotlin"],
+    "solo-spreads.json": ["js", "swift", "kotlin", "rust"],
+    "chapter-padding.json": ["js", "swift", "kotlin", "rust"],
     "positions-cases.json": ["rust"],
 }
 
 # Language -> test file that consumes the vectors for that language.
 READERS = {
     "js": "tests/test_conformance_vectors_js.py",
-    "swift": "ios/BookqTests/ConformanceVectorsTests.swift",
+    "swift": "ios/Packages/BookqCore/Tests/BookqCoreTests/ConformanceVectorsTests.swift",
     "kotlin": "android/core/src/test/kotlin/dev/bookq/core/ConformanceVectorsTest.kt",
     "rust": "rust/viewer-rs/src/conformance_vectors.rs",
 }

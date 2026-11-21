@@ -41,12 +41,28 @@ def test_dev_compose_keeps_healthcheck_and_restart():
 def test_viewer_healthcheck_does_not_spawn_python():
     # The healthcheck fires every 2s for the container's lifetime; spawning a
     # python interpreter each time costs ~10-15MB transient plus fork/exec
-    # churn. The bash /dev/tcp probe answers the /api/v1/health 200 contract
-    # without a second interpreter.
+    # churn. #573: the runtime is distroless (no /bin/sh, no curl), so the
+    # probe is the viewer-rs binary itself — `--healthcheck` does a loopback
+    # GET /api/v1/health and exits 0 on 200.
     for compose in (PROD_COMPOSE, DEV_COMPOSE):
         assert "urllib.request" not in compose
-        assert "/dev/tcp" in compose
-        assert "/api/v1/health" in compose
+        # CMD-SHELL cannot work: exec "/bin/sh" fails in the distroless image.
+        assert "/dev/tcp" not in compose
+        assert not re.search(r"^\s*-\s*(?:bash|sh)\s*$", compose, re.M)
+        assert re.search(
+            r"healthcheck:\s*\n\s*test:\s*\n\s*-\s*CMD\s*\n"
+            r"\s*-\s*/usr/local/bin/viewer-rs\s*\n\s*-\s*--healthcheck",
+            compose,
+        )
+
+
+def test_dockerfile_runtime_is_distroless():
+    # #573: no shell/apt/curl in the final stage. `cc` (not `static`) because
+    # the binary is glibc-linked and the bundled unrar C++ needs
+    # libstdc++/libgcc. distroless has no ldconfig, so the PDF engine is
+    # located explicitly — without it pages silently answer 501.
+    assert "FROM gcr.io/distroless/cc-debian12" in DOCKERFILE
+    assert "PDFIUM_LIB_PATH=/usr/local/lib/libpdfium.so" in DOCKERFILE
 
 
 # ── #223: RAR content serving needs the reference decoder ─────────────
@@ -58,7 +74,10 @@ def test_viewer_healthcheck_does_not_spawn_python():
 
 def test_dockerfile_builds_bundled_unrar():
     assert "unrar" in DOCKERFILE
-    assert "libstdc++6" in DOCKERFILE
+    # libstdc++6 is no longer apt-installed by the runtime stage (#573): the
+    # distroless `cc` base supplies it — which is also why `static-debian12`
+    # (no libstdc++) cannot be used.
+    assert "distroless/cc-debian12" in DOCKERFILE
 
 
 # ── folder-visibility user state: dedicated volume, not a cache ───────
@@ -80,8 +99,17 @@ def test_dev_compose_mounts_user_state_volume():
     assert re.search(r"^volumes:\n(?:\s+\S.*\n)*\s{2}user-state:", DEV_COMPOSE, re.M)
 
 
-def test_dev_compose_downloads_stay_readonly():
-    assert ":/app/downloads:ro" in DEV_COMPOSE
+def test_dev_compose_library_stay_writable():
+    # Library editing (upload/delete via /api/v1/library/*) writes into the
+    # library tree — prod stays rw.
+    assert ":/app/library:rw" in PROD_COMPOSE
+
+
+def test_dev_compose_library_defaults_readonly():
+    # Dev runs BOOKQ_TEST_MODE=true (auth bypass), so a writable mount of the
+    # real library is opt-in: the mode interpolates to ro unless
+    # DEV_LIBRARY_MODE is set (dev.sh --fixture / --writable-library → rw).
+    assert ":/app/library:${DEV_LIBRARY_MODE:-ro}" in DEV_COMPOSE
 
 
 def test_user_state_is_not_a_cache_mount():

@@ -73,10 +73,23 @@ _SCRUB_JS = """
   try {
     if (indexedDB.databases) {
       const dbs = await indexedDB.databases();
-      await Promise.all((dbs || []).map(d => new Promise(res => {
-        const rq = indexedDB.deleteDatabase(d.name);
-        rq.onsuccess = rq.onerror = rq.onblocked = res;
-      })));
+      // deleteDatabase fires onblocked while the PREVIOUS test's page still
+      // holds IDB connections (Safari teardown lags context.close). Escaping
+      // on blocked leaks the whole profile's offline state into the next
+      // test — restoreOfflineFirst then races loadFolders and flakes
+      // index-building assertions. Wait for the block to clear instead.
+      await Promise.all((dbs || []).map(d => (async () => {
+        for (let i = 0; i < 20; i++) {
+          const st = await new Promise(res => {
+            const rq = indexedDB.deleteDatabase(d.name);
+            rq.onsuccess = () => res('ok');
+            rq.onerror = () => res('err');
+            rq.onblocked = () => res('blocked');
+          });
+          if (st !== 'blocked') return;
+          await new Promise(r => setTimeout(r, 150));
+        }
+      })()));
     }
   } catch (e) {}
   return true;

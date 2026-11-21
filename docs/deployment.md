@@ -9,7 +9,7 @@
 | tailnet ノード | `bookq` | `dev-01`〜`dev-10`（固定 10 個を使い回し） |
 | URL | `https://bookq.your-tailnet.ts.net` | `https://dev-XX.your-tailnet.ts.net`（XX=01..10） |
 | 認証 | Google OAuth + メール許可リスト | なし（`BOOKQ_TEST_MODE=true`） |
-| 画像ツリー | 読み書き可でマウント | **読み取り専用** (`:ro`) |
+| 画像ツリー | 読み書き可でマウント (`:rw`) | 既定 read-only (`:ro`) — `BOOKQ_TEST_MODE=true` で認証を抜くため実ライブラリへの書き込みは opt-in (`./dev.sh up --writable-library`)。`--fixture` の合成ツリーは常に rw |
 | 起動/停止方法 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、Freeプランでノード再利用） |
 
 ---
@@ -65,8 +65,8 @@ tailscale に参加せず `http://127.0.0.1:<port>` で確認する軽量モー�
 ```
 
 - 既定は `http://127.0.0.1:8080`。2つ目の同時環境は `--port 1024-65535` で別ポートを指定する（使用中ポートはビルド前に fail fast する）。
-- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（プール通常環境と同じ）。画像ツリーは読み取り専用。
-- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証の読み取り専用ツリーを晒すので、検証用 LAN でのみ使うこと。
+- 認証は `BOOKQ_TEST_MODE=true` でスキップされる（プール通常環境と同じ）。画像ツリーは既定 read-only — upload/delete を試すなら `--fixture`（使い捨て合成ツリー、常に rw）か `--writable-library`（実ライブラリを rw、明示 opt-in）。
+- `--lan-allow` は bind を `0.0.0.0` に変える opt-in。`0.0.0.0` + `BOOKQ_TEST_MODE=true` + 開発用 `SECRET_KEY` の組み合わせは LAN 内に未認証のツリーを晒す（`--writable-library` 併用時は upload/delete も誰でも使える）ので、検証用 LAN でのみ使うこと。
 - Secure Context 注意: `--lan-allow` で起動した場合も、普段の確認は `http://127.0.0.1:<port>` で開くこと。`http://127.0.0.1` は Secure Context だが、素の `http://<lan-ip>` は Secure Context ではない。そのため Service Worker とオフライン QA は `app/static/app.js:32` の条件で黙ってスキップされ、`?offline=1` か `localStorage.bookq_enable_sw=1` が無いと登録されない。LAN IP 経由の iPad ではオフライン QA はできない。
 - iOS Simulator からもそのまま開ける（host network 共有）: `./scripts/open-simulator.sh http://127.0.0.1:<port>`。helper は `https://` と loopback `http://` のみ受理し、`http://<lan-ip>` は Secure Context でないため拒否する。手順は `.claude/skills/ios-simulator/references/overview.md: Local mode`。
 - 10スロットプールを共有する。ローカル環境も `find_free_slot` の割当に数えられ、10/10 枯渇時は通常環境と同じく `pool exhausted (10/10)` で失敗する（仕様として許容）。
@@ -252,7 +252,7 @@ docker rm -f <迷子のコンテナ名>
 
 ### 本番監視（prod-monitor）
 
-`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン `https://bookq.mats.dpdns.org` の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
+`.github/workflows/prod-monitor.yml` が **10 分毎**（cron `*/10 * * * *`、手動は `gh workflow run prod-monitor.yml`）に公開ドメイン（repo variable `BOOKQ_MONITOR_BASE_URL` で設定）の無認証エンドポイントをプローブする。デプロイ時の `verify_url` は「デプロイの瞬間」しか見ないのに対し、こちらは継続監視。コストは public repo の Actions 無料枠のみで、解析用 opencode は障害時だけ走る。
 
 プローブ本体は `scripts/prod_monitor.py`（stdlib + `gh` CLI のみ）。7 つの check（#407 で v1 のみに整理 — v0 は viewer 停止と同時廃止のため監視対象外）:
 
@@ -279,8 +279,8 @@ docker rm -f <迷子のコンテナ名>
 
 構成:
 
-- `viewer-rs` は `BOOKQ_UPSTREAM` 未設定 = **upstream 不在モード**（#408）で動く（明示的に有効化する `BOOKQ_RS_NO_UPSTREAM=1` も同等）。従来の暗黙デフォルト `http://viewer:8080` は #408 で廃止 — 指定し忘れは fail-closed になる。native 化されていない経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエスト（`caller_or_proxy` の Delegate）は **401** をローカルで返す。v0 `/api/*` は全て 501。lenient（STRICT 無し）起動時は未対応 gate 一覧を WARN に出す。
-- `BOOKQ_RS_NATIVE` 既定は全 gate 列挙（`auth` 含む）。`BOOKQ_RS_NATIVE_STRICT=1` 既定で、gate 抜け・auth OAuth 設定欠落・部分グループは起動拒否。
+- `viewer-rs` は全 route を native に serve する（#532 で strangler proxy を撤去 — `BOOKQ_UPSTREAM` / `BOOKQ_RS_NATIVE` / `BOOKQ_RS_NO_UPSTREAM` / `_STRICT` は廃止）。未知経路・router fallback への着弾は **501 + path WARN ログ**、認証不能なリクエストは **401** をローカルで返す。v0 `/api/*` は全て 501。
+- OAuth 一式の欠落時は `/auth/*` + `/api/v1/auth/token` が 501 を返す（起動時 WARN）。
 - Python `viewer` は #503 で削除（`app/`・`Dockerfile`・`requirements.txt` と共に source tree から除去）。`user-state`/`thumb-cache` volume は viewer-rs が使用する。
 - `tailscale.depends_on` / `cloudflared.depends_on` は viewer-rs を指す（profile service への depends_on は profile を auto-enable してしまうため、viewer への依存は残さない）。
 - `./prd.sh up` は `bookq-prd-viewer-rs`/`tailscale` 2 イメージをビルドし、deploy は `ps -q viewer-rs` の healthcheck + `viewer-rs` image タグの sha 照合で検証する（`/api/v1/version` は認証必須のため HTTP 照合は不可）。
@@ -304,9 +304,26 @@ Python 実装は source tree から削除済みのため、`py-rollback` profile
 当時の手順書どおりの切戻しも可能（古い ref からの再 build で `py-rollback`
 image が復活する）。
 
-#### 新規 native route の有効化
+#### runtime は distroless (#573)
 
-`BOOKQ_RS_NATIVE` の列挙に新 gate 名を追加する（`all` は将来 route の自動有効化を防ぐため使わない）。追加の前提は従来どおり:
+`Dockerfile.viewer-rs` の最終 stage は `gcr.io/distroless/cc-debian12`。shell / apt / curl を持たないため、`docker exec ... bash` での調査はできない。
+
+- **ベース更新は Renovate に追従させる**。distroless の Debian パッケージは Debian セキュリティ更新より遅れて再ビルドされることがある（実測: ある時点の digest は libssl3 3.0.20 で、`debian:bookworm-slim` の 3.0.22 より古かった）。digest を固定したまま放置すると逆に CVE が増えるので、`renovate.json` の `dockerfile` + `pinDigests` で更新 PR を受ける。
+- **ヘルスチェックは viewer-rs 自身**。`--healthcheck` が `BOOKQ_BIND` のポートへ loopback で `GET /api/v1/health` を投げ、200 なら exit 0（`docker-compose.yml` / `docker-compose.dev.yml` の `test` はこれ）。`depends_on: service_healthy` と `rebuild.sh deploy` の待機は従来どおり動く。
+- **libpdfium は `PDFIUM_LIB_PATH` で解決する**。distroless に `ldconfig` が無いため、Dockerfile が `ENV PDFIUM_LIB_PATH=/usr/local/lib/libpdfium.so` を設定している。これが外れると PDF レンダリングは例外ではなく **静かに 501 へ退行**する（CI の `/image/.../doc.pdf/p001.png` = 200 が検出点）。
+- 一時的な調査は debug バリアント（busybox 入り）で:
+
+```bash
+docker run --rm -it --entrypoint /busybox/sh \
+  -v bookq_user-state:/var/lib/bookq \
+  gcr.io/distroless/cc-debian12:debug
+```
+
+- 実行ユーザは当面 **root**（plain tag）。`:nonroot` (65532) 化は `user-state` / `thumb-cache` / library bind mount の所有権変更が前提で、別変更として扱う。
+
+#### 新規 route の追加 (#532 以降)
+
+全 route が無条件 native のため gate への追加は不要。追加の前提は従来どおり:
 
 | 条件 | 確認方法 |
 |---|---|
@@ -314,13 +331,11 @@ image が復活する）。
 | `cargo test --workspace` が通る | `rust/`（CI `rust.yml` の `test`） |
 | gateway-contract が該当 endpoint を native で通る | CI `rust.yml` の `gateway-contract` |
 
-部分グループ（`tree,search,facets,images` / `tree,reader-sync`）は STRICT 既定により起動時に拒否される。
-
 #### 検証済みの運用ポイント
 
-- `verify_url` は `/api/v1/health`（公開・native）を叩く。v0 `/api/health` は 501。
-- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health` — upstream 不在でも standalone で healthy になる。
-- proxy-hit の観測: no-upstream では fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。cutover 後に残るはずのない 501 が継続していたら contract 漏れの兆候。
+- `verify_url` は `/api/v1/health`（公開）を叩く。v0 `/api/health` は 501。
+- コンテナ内 healthcheck は viewer-rs 自身の `/api/v1/health`（`viewer-rs --healthcheck`、#573 で distroless 化したため shell の `/dev/tcp` から置換）。
+- 未知経路の観測: fallback 着弾が WARN ログに path 付きで出る（`docker compose logs viewer-rs`）。残るはずのない 501 が継続していたら contract 漏れの兆候。
 
 `user-state` volume の共有で hidden_roots 等の永続状態はそのまま引き継がれる。**reading positions も #375 以降 `user-state` の `folder-visibility.sqlite3`（`position_users`/`position_folders` テーブル、スキーマ v2）に永続化**され、切替/切戻しで「どこまで読んだか」は失われない。スキーマバージョンが新しい側が古い側を拒否する仕組みは hidden_roots と同じ（docs/user-state-db.md 参照）。
 

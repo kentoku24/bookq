@@ -7,18 +7,21 @@
 # 2 つ目の tailnet ノードが立ち上がって本番と名前を争う。
 # 開発には ./dev.sh（docker-compose.dev.yml）を使う。
 services:
-  # viewer-rs (#409, #503): 唯一の本番バックエンド — 全 traffic がここを通る
-  # （tailscale serve → viewer-rs）。upstream は設定しない (#408 の
-  # upstream 不在モード): native 化されていない経路は 501、認証不能は
-  # 401 をローカルで返す。Python viewer / py-rollback profile は #503 で
-  # 削除 — rollback は git history からの再 build (docs/deployment.md 参照)。
+  # viewer-rs (#409, #503, #532): 唯一の本番バックエンド — 全 traffic が
+  # ここを通る（tailscale serve → viewer-rs）。strangler proxy は #532 で
+  # 撤去: 全 route が native 応答し、未知経路は 501・認証不能は 401 を
+  # ローカルで返す。Python viewer / py-rollback profile は #503 で削除 —
+  # rollback は git history からの再 build (docs/deployment.md 参照)。
   viewer-rs:
     build:
       context: .
       dockerfile: Dockerfile.viewer-rs
     container_name: bookq-prd-viewer-rs
     volumes:
-      - "${DOWNLOADS_HOST_DIR:-./downloads}:/app/downloads:ro"
+      # read-write: /api/v1/library/* (upload/delete) writes here.
+      # DOWNLOADS_HOST_DIR は rename 前の変数名 — 旧 .env が残っていても
+      # 解決できるよう nested fallback (新名が優先)。
+      - "${LIBRARY_HOST_DIR:-${DOWNLOADS_HOST_DIR:-./library}}:/app/library:rw"
       # folder-visibility SQLite — user-state volume に永続化。
       - user-state:/var/lib/bookq
       # thumb/sprite hit-path cache — 共有しないと native thumb は常に
@@ -26,38 +29,32 @@ services:
       # (#206 gateway-contract CI と同じ構成)。
       - thumb-cache:/var/cache/bookq-thumbs
     environment:
-      # upstream 不在モード (#408): BOOKQ_UPSTREAM を渡さない。fallback
-      # 着弾は 501 + path WARN、認証不能は 401 で fail-fast する。
-      - DOWNLOADS_DIR=/app/downloads
+      # #532: strangler proxy 撤去済み — upstream/gate env は存在しない。
+      # 未知経路の着弾は 501 + path WARN、認証不能は 401 で fail-fast する。
+      - LIBRARY_DIR=/app/library
+      # rollback 互換: prebuilt 旧イメージは DOWNLOADS_DIR を読む —
+      # この compose は deploy 対象の新旧どちらにも使われるため、同じ
+      # マウントを旧変数名にも指させる (新バイナリは無視する)。
+      - DOWNLOADS_DIR=/app/library
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
-      # 全 native 面を列挙（`all` ではなく列挙 — 将来追加される native
-      # route が未検証のまま自動有効化されるのを防ぐ）。`auth` も含む:
-      # Python 不在では login/token を proxy する先が存在しないため、
-      # cutover と同時に必須になる。OAuth 一式は下で配線済み。
-      - BOOKQ_RS_NATIVE=${BOOKQ_RS_NATIVE:-health,version,image,images,tree,search,facets,visibility,positions,thumb,view,thumb-sprite,refresh,reader-sync,shell,static,auth}
-      # 全 native + upstream 不在の起動時検証 (#408): 何か gate が抜けて
-      # いたら起動を拒否する（501 を出すだけの半壊起動を防ぐ）。
-      - BOOKQ_RS_NATIVE_STRICT=${BOOKQ_RS_NATIVE_STRICT:-1}
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC。
       - SECRET_KEY=${SECRET_KEY}
       - BOOKQ_GIT_SHA=${GIT_SHA:-}
       - ALLOWED_EMAILS=${ALLOWED_EMAILS}
-      # `auth` gate (#400): /auth/* + /api/v1/auth/token の native 化に
-      # 必要な OAuth 一式。未設定のまま auth を列挙に足しても surface は
-      # 丸ごと proxy に留まる（STRICT 時は起動失敗）。
+      # OAuth 一式 (#400): /auth/* + /api/v1/auth/token に必須。未設定の
+      # ままでは surface は 501 を返す（起動時 WARN）。
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - BASE_URL=${BASE_URL}
-    # イメージは debian-slim + バイナリのみ (curl/wget/python なし) —
-    # bash の /dev/tcp で /api/v1/health を叩く。upstream 不在でも health
-    # gate は native 応答する（no-upstream でも standalone で healthy）。
+    # イメージは distroless (#573): shell も curl/wget も無いので、
+    # ヘルスチェックはバイナリ自身の `--healthcheck` が loopback で
+    # /api/v1/health を叩く（200 → exit 0）。
     healthcheck:
       test:
         - CMD
-        - bash
-        - -c
-        - "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/v1/health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200'"
+        - /usr/local/bin/viewer-rs
+        - --healthcheck
       interval: 2s
       timeout: 3s
       retries: 15
@@ -94,7 +91,7 @@ services:
   # (http://viewer-rs:8080) の対応は Cloudflare ダッシュボード側で管理する。
   cloudflared:
     profiles: ["public"]
-    image: cloudflare/cloudflared:2026.10.4
+    image: cloudflare/cloudflared:2026.11.1
     container_name: bookq-prd-cloudflared
     command: tunnel --no-autoupdate run
     environment:

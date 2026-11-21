@@ -868,7 +868,7 @@ Three properties make it safe under parallel agents, and they are the ones to pr
 
 - [ ] **Step 4: ドキュメント内の旧構成参照の残骸チェック**
 
-Run: `grep -rn "bookq-dev.javanese\|8100\|--port\|reconcile\|gateway" README.md docs/deployment.md CLAUDE.md | grep -v "tailnet ノード" || echo "clean"`
+Run: `grep -rn "bookq-dev.<tail>\|8100\|--port\|reconcile\|gateway" README.md docs/deployment.md CLAUDE.md | grep -v "tailnet ノード" || echo "clean"`
 Expected: 旧構成への参照が残っていない（`gateway` は「共有ゲートウェイ」という語が一切消えていること。「tailnet ノード」等の新しい語だけが残ること）。残骸があれば修正して再チェック。
 
 - [ ] **Step 5: Commit**

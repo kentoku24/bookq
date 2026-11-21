@@ -12,12 +12,13 @@
 //! in-process via `pdfium-render`, issue #402; multipart RAR sets beyond
 //! store-concat — compressed members/missing volumes let upstream 7z
 //! decide), formats the `image` crate can't decode that Pillow
-//! might (`.avif`, `.tiff`, archive files used as sources — gated by
+//! might (`.tiff`, archive files used as sources — gated by
 //! `NATIVE_DECODE` before the payload read) and archive entries we fail to
 //! extract (unsupported compression/CRC/missing volumes — upstream decides).
+//! `.avif` decodes natively since #563 (`avif-native` → mp4parse + dav1d).
 //! Sprite misses compose in-process (9-cell strip + `rows` grid, same
 //! `sprites/<w>/` namespace as `thumbs.py`); a sheet needing an
-//! upstream-only source (PDF page, `.avif`/`.tiff` cell Pillow could
+//! upstream-only source (PDF page, `.tiff` cell Pillow could
 //! decode) proxies whole so Python renders it instead of a gray cell.
 //! RAR members incl. multipart store sets read in-process via
 //! `bookq_core` (bundled unrar + #403 store-concat), so `/view` on a
@@ -38,9 +39,9 @@ use image::ImageDecoder;
 use sha1::{Digest, Sha1};
 
 use crate::serve::{
-    archive_not_modified, fmt_mtime, http_date, is_image_entry, is_pdf_file,
-    is_rar_path, is_within, not_modified, realpath, resolve_archive,
-    suffix_lower, Serve,
+    archive_not_modified, fmt_mtime, has_dot_component, http_date, is_image_entry,
+    is_pdf_file, is_rar_path, is_within, not_implemented, not_modified, realpath,
+    resolve_archive, suffix_lower,
 };
 
 const CACHE_MAX_AGE: i64 = 86400;
@@ -132,9 +133,9 @@ fn stat_archive_source(archive: &Path, inner: &str) -> Result<(f64, f64, String)
 
 /// `_stat_source` — mtime/size/cache-key WITHOUT opening archives or
 /// extracting bytes (same validation as `load_source_bytes`).
-fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Response> {
-    if let Some((archive, inner)) = resolve_archive(downloads, path) {
-        if !is_within(downloads, &archive) {
+fn stat_source(library: &Path, path: &str) -> Result<(f64, f64, String), Response> {
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
             return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
         let archive = realpath(&archive)
@@ -147,8 +148,8 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
     if path.contains('\x00') {
         return Err(detail(StatusCode::NOT_FOUND, "File not found"));
     }
-    let file_path = downloads.join(path);
-    if !is_within(downloads, &file_path) {
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
         return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let file_path =
@@ -177,11 +178,11 @@ fn stat_source(downloads: &Path, path: &str) -> Result<(f64, f64, String), Respo
 /// PDF pages render natively via `pdfium-render` (same PDFium engine as
 /// pypdfium2) when the library is present.
 fn load_source_bytes(
-    downloads: &Path,
+    library: &Path,
     path: &str,
 ) -> Result<Option<(Vec<u8>, f64, f64, String)>, Response> {
-    if let Some((archive, inner)) = resolve_archive(downloads, path) {
-        if !is_within(downloads, &archive) {
+    if let Some((archive, inner)) = resolve_archive(library, path) {
+        if !is_within(library, &archive) {
             return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
         }
         let archive = realpath(&archive)
@@ -195,8 +196,8 @@ fn load_source_bytes(
         // PDF pages render in-process via pdfium-render (#402) — except
         // when `libpdfium` is unavailable. rar/cbr entries read natively
         // via `archive_read_entry` (bundled unrar + #403 multipart
-        // store-concat). A native miss (`None`) proxies so upstream 7z
-        // decides — same contract as the /image path.
+        // store-concat). A native miss (`None`) answers 501 — same
+        // contract as the /image path (#532: no upstream).
         if is_pdf_file(&archive) {
             let count = bookq_core::pdf_page_count(&archive);
             let Some(idx) = bookq_core::parse_pdf_page_name(&inner, count) else {
@@ -210,8 +211,8 @@ fn load_source_bytes(
             );
             return match bookq_core::render_pdf_page(&archive, idx, 2.0) {
                 Some(data) => Ok(Some((data, mtime, size, key))),
-                // Missing libpdfium or a corrupt page — upstream decides
-                // (renders or 501s) exactly like the pre-native posture.
+                // Missing libpdfium or a corrupt page answers 501 —
+                // exactly like the no-upstream posture.
                 None => Ok(None),
             };
         }
@@ -238,8 +239,8 @@ fn load_source_bytes(
     if path.contains('\x00') {
         return Err(detail(StatusCode::NOT_FOUND, "File not found"));
     }
-    let file_path = downloads.join(path);
-    if !is_within(downloads, &file_path) {
+    let file_path = library.join(path);
+    if !is_within(library, &file_path) {
         return Err(detail(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let file_path =
@@ -303,20 +304,20 @@ fn media_response(
 /// `tests/test_media_decode_contract.py` が一致を検証する)。
 ///
 /// `NATIVE_DECODE`: 有効な `image` features が decode できる拡張子 —
-/// それ以外は source load の前に proxy する (`.avif`/`.tiff`/`.cbz` 全体を
+/// それ以外は source load の前に 501 する (`.tiff`/`.cbz` 全体を
 /// 読んで `into_decoder` で失敗するのは read を二重に払う — broken-image は
-/// キャッシュ不可で毎リクエスト繰り返すため)。
+/// キャッシュ不可で毎リクエスト繰り返すため)。`.avif` は #563 で
+/// `avif-native` (mp4parse + dav1d) 経由の native decode に移行。
 /// `DECODE_PYTHON_ONLY`: Pillow ≥13 が decode するが `image` crate
-/// (bmp/gif/jpeg/png/webp のみ) はしない — Proxy → upstream 200 で
-/// client 可視は同じ 200。
+/// (bmp/gif/jpeg/png/webp/avif のみ) はしない — no-upstream で 501。
 /// `DECODE_UNSUPPORTED_EXAMPLES`: 両 backend とも decode 不可の代表例 —
-/// Python 404 == Rust Proxy → upstream 404 で同じ 404。
-const NATIVE_DECODE: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
-/// Pillow-only (Pillow ≥13 libavif 同梱): Rust は Proxy → upstream 200.
+/// no-upstream で 501。
+const NATIVE_DECODE: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"];
+/// Pillow-only (Pillow ≥13): no-upstream の現在は 501.
 /// 代表例列挙 — Pillow は content-sniff のため decode 可能形式は他にもある
 /// (tga/pcx/…) が、tree に載るのは IMAGE_EXTENSIONS のみ (spec §7 参照)。
 #[cfg(test)]
-const DECODE_PYTHON_ONLY: &[&str] = &[".avif", ".tif", ".tiff"];
+const DECODE_PYTHON_ONLY: &[&str] = &[".tif", ".tiff"];
 /// Neither backend decodes (representative examples): 404 on both.
 #[cfg(test)]
 const DECODE_UNSUPPORTED_EXAMPLES: &[&str] = &[".heic", ".heif", ".jxl"];
@@ -342,11 +343,19 @@ static GEN_PERMITS: std::sync::LazyLock<tokio::sync::Semaphore> =
 /// the EXIF orientation applied. Animated formats decode to their first
 /// frame, like Pillow's thumbnail path.
 fn load_oriented(data: &[u8]) -> Option<image::DynamicImage> {
-    let mut dec = image::ImageReader::new(std::io::Cursor::new(data))
+    let mut rd = image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
-        .ok()?
-        .into_decoder()
         .ok()?;
+    // Decode bombs: a tiny crafted PNG can declare ~100k×100k — the
+    // default limits are unbounded, so a full-res RGBA buffer (~40GB)
+    // would allocate before decode failed. Manga pages sit far below
+    // these bounds; violations surface as decode errors → 501, not OOM.
+    let mut limits = image::Limits::no_limits();
+    limits.max_image_width = Some(32_768);
+    limits.max_image_height = Some(32_768);
+    limits.max_alloc = Some(1 << 30); // 1 GiB raw-pixel ceiling
+    rd.limits(limits);
+    let mut dec = rd.into_decoder().ok()?;
     let orientation = dec
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -542,86 +551,91 @@ fn view_etag(mtime: f64, size: f64, digest: &str) -> String {
 /// in-process (SVG sources pass their bytes through like Pillow's
 /// `_make_thumb_bytes`), falling back to proxy only when the source can't
 /// be reached natively (rar/pdf) or the `image` crate can't decode it.
-pub fn thumb(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Serve {
+pub fn thumb(library: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
+    // Dot-prefixed components are never listable — keep `.bookq-uploads`
+    // staging unreadable here too (404 so it isn't discoverable).
+    if has_dot_component(path) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
     let width = normalize_width(w);
-    let (mtime, size, key) = match stat_source(downloads, path) {
+    let (mtime, size, key) = match stat_source(library, path) {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     };
     let is_svg = suffix_lower(Path::new(path)) == ".svg";
     let digest = sha1hex(&key);
     let etag = thumb_etag(mtime, size, width, &digest);
     if archive_not_modified(headers, &etag, mtime) {
-        return Serve::Done(not_modified());
+        return not_modified();
     }
     let dest = thumb_dest(cache, &digest, width, is_svg);
     if !dest.is_file() {
-        return generate_thumb(downloads, cache, path, width, is_svg, headers);
+        return generate_thumb(library, cache, path, width, is_svg, headers);
     }
     let body = match std::fs::read(&dest) {
         Ok(b) => b,
-        Err(_) => return Serve::Proxy,
+        Err(_) => return not_implemented("not implemented"),
     };
-    Serve::Done(media_response(
+    media_response(
         body,
         if is_svg { "image/svg+xml" } else { "image/jpeg" },
         &etag,
         mtime,
         is_svg,
-    ))
+    )
 }
 
 /// `handle_thumb`'s miss path: `load_source_bytes` → re-derive etag/dest →
 /// recheck the cache (a concurrent writer may have landed it) → render →
 /// `_store_thumb`. SVG sources store/served as their original bytes.
 fn generate_thumb(
-    downloads: &Path,
+    library: &Path,
     cache: &Path,
     path: &str,
     width: i64,
     is_svg: bool,
     headers: &HeaderMap,
-) -> Serve {
+) -> Response {
     if !is_svg && !native_decodable(path) {
-        return Serve::Proxy; // e.g. .avif — decode would fail after the read
+        return not_implemented("not implemented"); // e.g. .tiff — decode would fail after the read
     }
-    let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
+    let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     }) else {
-        return Serve::Proxy;
+        return not_implemented("not implemented");
     };
     let digest = sha1hex(&key);
     let etag = thumb_etag(mtime, size, width, &digest);
     if archive_not_modified(headers, &etag, mtime) {
-        return Serve::Done(not_modified());
+        return not_modified();
     }
     let dest = thumb_dest(cache, &digest, width, is_svg);
     let body = if dest.is_file() {
         match std::fs::read(&dest) {
             Ok(b) => b,
-            Err(_) => return Serve::Proxy,
+            Err(_) => return not_implemented("not implemented"),
         }
     } else {
         let made = if is_svg {
             Some(data)
         } else {
             let Ok(_permit) = GEN_PERMITS.blocking_acquire() else {
-                return Serve::Proxy;
+                return not_implemented("not implemented");
             };
             make_thumb(&data, width)
         };
-        let Some(body) = made else { return Serve::Proxy };
+        let Some(body) = made else { return not_implemented("not implemented") };
         store_cached(&dest, &body);
         body
     };
-    Serve::Done(media_response(
+    media_response(
         body,
         if is_svg { "image/svg+xml" } else { "image/jpeg" },
         &etag,
         mtime,
         is_svg,
-    ))
+    )
 }
 
 // ── /view/{path} ──────────────────────────────────────────────────────────────
@@ -664,7 +678,10 @@ fn view_etag_w(mtime: f64, size: f64, wtag: &str, digest: &str) -> String {
 /// in-process with upstream fallback. `?w=<px>` opts into the normalized
 /// branch at that width — the fast-tier rendition mobile readers use
 /// while flip-through is in flight (iOS `BookqAPI.swift`; #440).
-pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Serve {
+pub fn view(library: &Path, cache: &Path, path: &str, w: Option<&String>, headers: &HeaderMap) -> Response {
+    if has_dot_component(path) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
     let suffix = suffix_lower(Path::new(path));
     let width = normalize_view_width(w);
     let passthrough = VIEW_PASSTHROUGH
@@ -676,18 +693,18 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
     // it passes through even when ?w= asks for a size. Passthrough types
     // also pass through ONLY with no valid w — ?w= is the fast-tier opt-in.
     if is_svg || (width.is_none() && passthrough.is_some()) {
-        let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
+        let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
             Ok(x) => x,
-            Err(res) => return Serve::Done(res),
+            Err(res) => return res,
         }) else {
-            return Serve::Proxy;
+            return not_implemented("not implemented");
         };
         let digest = sha1hex(&key);
         let etag = view_etag(mtime, size, &digest);
         if archive_not_modified(headers, &etag, mtime) {
-            return Serve::Done(not_modified());
+            return not_modified();
         }
-        return Serve::Done(media_response(
+        return media_response(
             data,
             if is_svg {
                 "image/svg+xml"
@@ -697,11 +714,11 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
             &etag,
             mtime,
             is_svg,
-        ));
+        );
     }
-    let (mtime, size, key) = match stat_source(downloads, path) {
+    let (mtime, size, key) = match stat_source(library, path) {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     };
     // Width is part of the cache identity: the same source serves the
     // 2560 default rendition and any ?w= fast-tier size side by side.
@@ -713,32 +730,32 @@ pub fn view(downloads: &Path, cache: &Path, path: &str, w: Option<&String>, head
     let digest = sha1hex(&cache_key);
     let etag = view_etag_w(mtime, size, &wtag, &digest);
     if archive_not_modified(headers, &etag, mtime) {
-        return Serve::Done(not_modified());
+        return not_modified();
     }
     let dest = cache.join("view").join(format!("{digest}.jpg"));
     if !dest.is_file() {
-        return generate_view(downloads, cache, path, width, headers);
+        return generate_view(library, cache, path, width, headers);
     }
     let body = match std::fs::read(&dest) {
         Ok(b) => b,
-        Err(_) => return Serve::Proxy,
+        Err(_) => return not_implemented("not implemented"),
     };
-    Serve::Done(media_response(body, "image/jpeg", &etag, mtime, false))
+    media_response(body, "image/jpeg", &etag, mtime, false)
 }
 
 /// `handle_view`'s normalized-format miss path: `load_source_bytes` →
 /// re-derive etag/dest → recheck the cache → `make_view_bytes` →
 /// `_store_thumb`. Sources only upstream can reach (rar/pdf) and decodes
 /// the `image` crate can't handle still proxy.
-fn generate_view(downloads: &Path, cache: &Path, path: &str, width: Option<u32>, headers: &HeaderMap) -> Serve {
+fn generate_view(library: &Path, cache: &Path, path: &str, width: Option<u32>, headers: &HeaderMap) -> Response {
     if !native_decodable(path) {
-        return Serve::Proxy; // e.g. .avif — decode would fail after the read
+        return not_implemented("not implemented"); // e.g. .tiff — decode would fail after the read
     }
-    let Some((data, mtime, size, key)) = (match load_source_bytes(downloads, path) {
+    let Some((data, mtime, size, key)) = (match load_source_bytes(library, path) {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     }) else {
-        return Serve::Proxy;
+        return not_implemented("not implemented");
     };
     let cache_key = match width {
         Some(w) => format!("{key}|w{w}"),
@@ -748,25 +765,25 @@ fn generate_view(downloads: &Path, cache: &Path, path: &str, width: Option<u32>,
     let digest = sha1hex(&cache_key);
     let etag = view_etag_w(mtime, size, &wtag, &digest);
     if archive_not_modified(headers, &etag, mtime) {
-        return Serve::Done(not_modified());
+        return not_modified();
     }
     let dest = cache.join("view").join(format!("{digest}.jpg"));
     let body = if dest.is_file() {
         match std::fs::read(&dest) {
             Ok(b) => b,
-            Err(_) => return Serve::Proxy,
+            Err(_) => return not_implemented("not implemented"),
         }
     } else {
         let Ok(_permit) = GEN_PERMITS.blocking_acquire() else {
-            return Serve::Proxy;
+            return not_implemented("not implemented");
         };
         let Some(body) = make_view(&data, width.unwrap_or(VIEW_MAX_WIDTH)) else {
-            return Serve::Proxy;
+            return not_implemented("not implemented");
         };
         store_cached(&dest, &body);
         body
     };
-    Serve::Done(media_response(body, "image/jpeg", &etag, mtime, false))
+    media_response(body, "image/jpeg", &etag, mtime, false)
 }
 
 // ── /api/v1/thumb-sprite ──────────────────────────────────────────────────────
@@ -933,10 +950,11 @@ fn compose_grid(
 /// `None` per cell = gray (bad name, absent member, corrupt bytes).
 /// Returns `None` (→ proxy whole sheet) when a present member cannot be
 /// proven identical natively (unsupported compression/CRC) or the set
-/// itself needs upstream (multipart RAR), so Python decides instead of a
-/// wrong gray cell. `.avif`/`.tiff` cells Pillow might decode also proxy.
+/// itself needs an external 7z (multipart RAR) answer 501 instead of a
+/// wrong gray cell. `.tiff` cells and other decode-unknown formats also
+/// decline to 501 (#532: no upstream; `.avif` is native since #563).
 fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Option<Vec<u8>>>> {
-    if is_rar_path(archive) && bookq_core::rar_needs_upstream(archive) {
+    if is_rar_path(archive) && bookq_core::rar_needs_external_7z(archive) {
         return None;
     }
     // Raw membership like Python's `set(zf.namelist())`: epub uses the raw
@@ -956,7 +974,7 @@ fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Opt
             out.push(None);
             continue;
         }
-        // Formats Pillow may decode that `image` cannot → whole-sheet proxy.
+        // Formats `image` cannot decode (e.g. .tiff) → whole-sheet 501.
         if !native_decodable(name) && suffix_lower(Path::new(name)) != ".svg" {
             return None;
         }
@@ -974,9 +992,9 @@ fn read_archive_sprite_cells(archive: &Path, names: &[String]) -> Option<Vec<Opt
 /// Dir-sprite raw reads (fail-open per cell like Python).
 /// Returns `None` (→ proxy whole sheet) when any cell needs upstream-only
 /// tooling (PDF page render, multipart RAR member, undecodable archive
-/// member) or decodes Pillow might handle (`.avif`/`.tiff`).
+/// member) or decodes `image` doesn't cover (`.tiff`).
 fn load_dir_sprite_cells(
-    downloads: &Path,
+    library: &Path,
     folder: &str,
     names: &[String],
 ) -> Option<Vec<Option<Vec<u8>>>> {
@@ -986,8 +1004,8 @@ fn load_dir_sprite_cells(
             out.push(None);
             continue;
         }
-        // Same conservative gate as the archive path: a present `.avif` /
-        // `.tiff` cell Pillow might decode must proxy, not gray.
+        // Same conservative gate as the archive path: a present `.tiff`
+        // cell `image` can't decode must 501, not gray.
         if !native_decodable(name) && suffix_lower(Path::new(name)) != ".svg" {
             // SVG grays in Python too (Pillow has no SVG decoder), so only
             // non-SVG undecodables force the proxy.
@@ -997,10 +1015,11 @@ fn load_dir_sprite_cells(
             out.push(None);
             continue;
         }
-        match load_source_bytes(downloads, &format!("{folder}/{name}")) {
+        match load_source_bytes(library, &format!("{folder}/{name}")) {
             Ok(Some((data, _, _, _))) => out.push(Some(data)),
-            // `Ok(None)` = needs upstream (PDF page, multipart RAR,
-            // unsupported extraction): proxy whole sheet so Python renders.
+            // `Ok(None)` = needs an external decoder (PDF page,
+            // multipart RAR, unsupported extraction): the whole sheet
+            // declines so the route answers 501.
             Ok(None) => return None,
             // `Err` = per-entry guard failure (400/403/404) → gray cell.
             Err(_) => out.push(None),
@@ -1011,12 +1030,12 @@ fn load_dir_sprite_cells(
 
 /// `handle_thumb_sprite` — validation + key → hit serve; miss renders native.
 pub fn thumb_sprite(
-    downloads: &Path,
+    library: &Path,
     cache: &Path,
     q: &HashMap<String, String>,
     query_string: &str,
     headers: &HeaderMap,
-) -> Serve {
+) -> Response {
     let folder = q.get("folder").map(|s| s.as_str()).unwrap_or("");
     let cell = SPRITE_CELL_WIDTH;
     let rows = parse_sprite_rows(q.get("rows"));
@@ -1030,30 +1049,31 @@ pub fn thumb_sprite(
         || folder.starts_with('/')
         || folder.ends_with('/')
         || folder.contains('\x00')
+        || has_dot_component(folder)
     {
-        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid sprite folder"));
+        return detail(StatusCode::BAD_REQUEST, "Invalid sprite folder");
     }
     if folder.split('/').any(|p| p == "..") {
-        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Invalid sprite folder"));
+        return detail(StatusCode::BAD_REQUEST, "Invalid sprite folder");
     }
-    let folder_path = downloads.join(folder);
-    if !is_within(downloads, &folder_path) {
-        return Serve::Done(detail(StatusCode::FORBIDDEN, "Forbidden"));
+    let folder_path = library.join(folder);
+    if !is_within(library, &folder_path) {
+        return detail(StatusCode::FORBIDDEN, "Forbidden");
     }
     let Ok(folder_path) = realpath(&folder_path) else {
-        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+        return detail(StatusCode::NOT_FOUND, "File not found");
     };
     let is_archive = folder_path.is_file() && crate::serve::is_archive_file(&folder_path);
     let is_dir = folder_path.is_dir();
     if !folder_path.exists() {
-        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+        return detail(StatusCode::NOT_FOUND, "File not found");
     }
     if !is_archive && !is_dir {
-        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Not an archive or directory"));
+        return detail(StatusCode::BAD_REQUEST, "Not an archive or directory");
     }
 
     let Some(raw_names) = raw_query_value(query_string, "names") else {
-        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Missing names"));
+        return detail(StatusCode::BAD_REQUEST, "Missing names");
     };
     let names: Vec<String> = raw_names
         .split(',')
@@ -1062,7 +1082,7 @@ pub fn thumb_sprite(
         .take(SPRITE_MAX_ENTRIES)
         .collect();
     if names.is_empty() {
-        return Serve::Done(detail(StatusCode::BAD_REQUEST, "Missing names"));
+        return detail(StatusCode::BAD_REQUEST, "Missing names");
     }
 
     let names_part = names.join("\x00");
@@ -1078,7 +1098,7 @@ pub fn thumb_sprite(
 
     let (key, etag_mtime, etag_size) = if is_archive {
         let Some((mtime, size)) = stat_mtime_size(&folder_path) else {
-            return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+            return detail(StatusCode::NOT_FOUND, "File not found");
         };
         (
             format!(
@@ -1100,7 +1120,7 @@ pub fn thumb_sprite(
                 keys.push(format!("bad:{name}"));
                 continue;
             }
-            match stat_source(downloads, &format!("{folder}/{name}")) {
+            match stat_source(library, &format!("{folder}/{name}")) {
                 Ok((mtime, _size, skey)) => {
                     max_mtime = max_mtime.max(mtime);
                     keys.push(skey);
@@ -1127,7 +1147,7 @@ pub fn thumb_sprite(
         &digest[..16]
     );
     if archive_not_modified(headers, &etag, etag_mtime) {
-        return Serve::Done(not_modified());
+        return not_modified();
     }
     let dest = cache
         .join("sprites")
@@ -1136,44 +1156,44 @@ pub fn thumb_sprite(
     if dest.is_file() {
         let body = match std::fs::read(&dest) {
             Ok(b) => b,
-            Err(_) => return Serve::Proxy,
+            Err(_) => return not_implemented("not implemented"),
         };
-        return Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false));
+        return media_response(body, "image/jpeg", &etag, etag_mtime, false);
     }
     // ── miss: render in-process, same namespace/key as `thumbs.py` ──────
     let cells: Vec<Option<Vec<u8>>> = if is_archive {
         match read_archive_sprite_cells(&folder_path, &names) {
             Some(c) => c,
-            None => return Serve::Proxy,
+            None => return not_implemented("not implemented"),
         }
     } else {
-        match load_dir_sprite_cells(downloads, folder, &names) {
+        match load_dir_sprite_cells(library, folder, &names) {
             Some(c) => c,
-            None => return Serve::Proxy,
+            None => return not_implemented("not implemented"),
         }
     };
     if cells.iter().all(|c| c.is_none()) {
-        return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+        return detail(StatusCode::NOT_FOUND, "File not found");
     }
     // A racing writer may have landed the sheet while sources loaded.
     if dest.is_file() {
         let body = match std::fs::read(&dest) {
             Ok(b) => b,
-            Err(_) => return Serve::Proxy,
+            Err(_) => return not_implemented("not implemented"),
         };
-        return Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false));
+        return media_response(body, "image/jpeg", &etag, etag_mtime, false);
     }
     let Ok(_permit) = GEN_PERMITS.blocking_acquire() else {
-        return Serve::Proxy;
+        return not_implemented("not implemented");
     };
     let body: Vec<u8> = if let Some(r) = rows.as_ref() {
         match compose_grid(&cells, r, grid_size) {
             Some((sheet, 0)) => {
                 let _ = sheet;
-                return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+                return detail(StatusCode::NOT_FOUND, "File not found");
             }
             Some((sheet, _)) => sheet,
-            None => return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found")),
+            None => return detail(StatusCode::NOT_FOUND, "File not found"),
         }
     } else {
         let mut thumbs: Vec<Option<image::DynamicImage>> = Vec::with_capacity(cells.len());
@@ -1194,17 +1214,17 @@ pub fn thumb_sprite(
             }
         }
         if failed == cells.len() {
-            return Serve::Done(detail(StatusCode::NOT_FOUND, "File not found"));
+            return detail(StatusCode::NOT_FOUND, "File not found");
         }
         match compose_strip(&thumbs, cell) {
             Some(sheet) => sheet,
-            None => return Serve::Proxy,
+            None => return not_implemented("not implemented"),
         }
     };
     store_cached(&dest, &body);
     // A racing writer may have replaced dest mid-render; serve our bytes
     // (same key → same sheet geometry, pixel-approx contract).
-    Serve::Done(media_response(body, "image/jpeg", &etag, etag_mtime, false))
+    media_response(body, "image/jpeg", &etag, etag_mtime, false)
 }
 
 #[cfg(test)]
@@ -1352,11 +1372,8 @@ mod tests {
         (dl.canonicalize().unwrap(), cache.canonicalize().unwrap())
     }
 
-    fn status(s: &Serve) -> StatusCode {
-        match s {
-            Serve::Done(r) => r.status(),
-            Serve::Proxy => StatusCode::IM_A_TEAPOT,
-        }
+    fn status(r: &Response) -> StatusCode {
+        r.status()
     }
 
     /// `/thumb` miss → render → land under thumbs/<w>/<digest>.jpg → a
@@ -1367,7 +1384,7 @@ mod tests {
         std::fs::write(dl.join("a.png"), png_rgb(800, 600, [9, 9, 9])).unwrap();
         let h = HeaderMap::new();
         let res = thumb(&dl, &cache, "a.png", None, &h);
-        let Serve::Done(r) = res else { panic!("expected Done") };
+        let r = res;
         assert_eq!(r.status(), StatusCode::OK);
         let etag = r
             .headers()
@@ -1396,7 +1413,7 @@ mod tests {
         std::fs::write(dl.join("i.svg"), b"<svg xmlns=\"x\"/>").unwrap();
         let h = HeaderMap::new();
         let res = thumb(&dl, &cache, "i.svg", None, &h);
-        let Serve::Done(r) = res else { panic!("expected Done") };
+        let r = res;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "image/svg+xml");
         let stored: Vec<_> = std::fs::read_dir(cache.join("thumbs/400"))
@@ -1411,33 +1428,37 @@ mod tests {
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
-    /// Extensions `image` can't decode proxy BEFORE the payload read —
-    /// a garbage `.avif` must not even try (same for broken-but-decodable
-    /// names, which reach the decoder and still proxy).
+    /// Extensions `image` can't decode answer 501 BEFORE the payload read
+    /// (`.tiff`), while a decodable-but-broken name (`.avif` — native since
+    /// #563) reaches the decoder and still 501s on the decode failure.
     #[test]
-    fn thumb_undecodable_proxies() {
+    fn thumb_undecodable_answers_501() {
         let (dl, cache) = tmp_dirs("t3");
+        std::fs::write(dl.join("v.tiff"), b"garbage").unwrap();
         std::fs::write(dl.join("v.avif"), b"garbage").unwrap();
         std::fs::write(dl.join("x.png"), b"garbage").unwrap();
         let h = HeaderMap::new();
-        assert!(matches!(
-            thumb(&dl, &cache, "v.avif", None, &h),
-            Serve::Proxy
-        ));
-        assert!(matches!(
-            thumb(&dl, &cache, "x.png", None, &h),
-            Serve::Proxy
-        ));
+        assert_eq!(
+            thumb(&dl, &cache, "v.tiff", None, &h).status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+        assert_eq!(
+            thumb(&dl, &cache, "v.avif", None, &h).status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+        assert_eq!(
+            thumb(&dl, &cache, "x.png", None, &h).status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
-    /// Decode 契約 (#406): gate 真理値表 — 共通集合のみ native、
-    /// Python-only (avif/tiff) と両側 unsupported (heic/heif/jxl) は Proxy
-    /// (upstream Python が 200 / 404 を決める)。`NATIVE_DECODE` に形式を
-    /// 足したら `DECODE_*` と `app/thumbs.py` + spec §7 も同時更新すること.
+    /// Decode 契約 (#406, #563): gate 真理値表 — 共通集合のみ native、
+    /// Python-only (tiff) と両側 unsupported (heic/heif/jxl) は 501.
+    /// `NATIVE_DECODE` に形式を足したら `DECODE_*` と spec §7 も同時更新すること.
     #[test]
     fn decode_gate_truth_table() {
-        for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"] {
+        for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"] {
             assert!(native_decodable(&format!("p{ext}")), "{ext} native");
             assert!(
                 !DECODE_PYTHON_ONLY.contains(&ext),
@@ -1454,40 +1475,141 @@ mod tests {
         for ext in DECODE_UNSUPPORTED_EXAMPLES {
             assert!(!native_decodable(&format!("p{ext}")), "{ext} proxies");
         }
-        // Case-insensitive: suffix_lower 前提 (e.g. P.AVIF proxies too).
-        assert!(!native_decodable("p.AVIF"));
+        // Case-insensitive: suffix_lower 前提.
+        assert!(native_decodable("p.AVIF"));
         assert!(native_decodable("p.PNG"));
     }
 
     /// Python-only と両側 unsupported の拡張子は /thumb・/view ともに
-    /// payload を読む前に Proxy — client 可視 status は upstream Python が
-    /// 決める (genuine avif/tiff → 200、heic/garbage → 404)。
+    /// payload を読む前に 501 (#532: strangler proxy 撤去後は upstream が
+    /// 決めない)。
     #[test]
-    fn thumb_view_python_only_and_unsupported_proxy() {
+    fn thumb_view_python_only_and_unsupported_501() {
         let (dl, cache) = tmp_dirs("t5");
         std::fs::write(dl.join("a.tiff"), b"garbage").unwrap();
         std::fs::write(dl.join("b.heic"), b"garbage").unwrap();
         std::fs::write(dl.join("c.jxl"), b"garbage").unwrap();
         let h = HeaderMap::new();
         for name in ["a.tiff", "b.heic", "c.jxl"] {
-            assert!(matches!(thumb(&dl, &cache, name, None, &h), Serve::Proxy), "{name} thumb");
-            assert!(matches!(view(&dl, &cache, name, None, &h), Serve::Proxy), "{name} view");
+            assert_eq!(
+                thumb(&dl, &cache, name, None, &h).status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "{name} thumb"
+            );
+            assert_eq!(
+                view(&dl, &cache, name, None, &h).status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "{name} view"
+            );
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: genuine AVIF decodes natively (mp4parse + dav1d via
+    /// `avif-native`) — /thumb and /view both answer 200 + image/jpeg and
+    /// cache the rendition. Fixture is a real Pillow-encoded 48x64 AVIF
+    /// (tests/fixtures/ok-48x64.avif), not a renamed raster.
+    #[test]
+    fn avif_decodes_natively() {
+        let (dl, cache) = tmp_dirs("av1");
+        std::fs::write(
+            dl.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        let h = HeaderMap::new();
+        for res in [
+            thumb(&dl, &cache, "p.avif", None, &h),
+            view(&dl, &cache, "p.avif", None, &h),
+        ] {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Every NATIVE_DECODE format really decodes end-to-end (#563): thumb
+    /// → 200 JPEG; view honours each contract shape — original bytes for
+    /// passthrough types (jpg/jpeg/png/gif), normalized JPEG for
+    /// webp/bmp/avif, and `?w=` always normalizes to JPEG. Sources are
+    /// encoded in-test by the same `image` build (avif has no encoder —
+    /// the committed fixture stands in).
+    #[test]
+    fn native_formats_decode_end_to_end() {
+        let (dl, cache) = tmp_dirs("nf");
+        let h = HeaderMap::new();
+        let w400 = "400".to_string();
+        let mut im = image::RgbImage::new(48, 64);
+        for p in im.pixels_mut() {
+            *p = image::Rgb([12, 34, 56]);
+        }
+        let src = image::DynamicImage::ImageRgb8(im);
+        // (name, encode format — None uses the AVIF fixture, /view no-w mime)
+        let cases: &[(&str, Option<image::ImageFormat>, &str)] = &[
+            ("p.jpg", Some(image::ImageFormat::Jpeg), "image/jpeg"),
+            ("p.jpeg", Some(image::ImageFormat::Jpeg), "image/jpeg"),
+            ("p.png", Some(image::ImageFormat::Png), "image/png"),
+            ("p.gif", Some(image::ImageFormat::Gif), "image/gif"),
+            ("p.webp", Some(image::ImageFormat::WebP), "image/jpeg"),
+            ("p.bmp", Some(image::ImageFormat::Bmp), "image/jpeg"),
+            ("p.avif", None, "image/jpeg"),
+        ];
+        for (name, fmt, view_mime) in cases {
+            let bytes = match fmt {
+                Some(f) => {
+                    let mut out = Vec::new();
+                    src.write_to(&mut Cursor::new(&mut out), *f)
+                        .unwrap_or_else(|e| panic!("encode {name}: {e}"));
+                    out
+                }
+                None => include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+            };
+            std::fs::write(dl.join(name), &bytes).unwrap();
+            for (res, want) in [
+                (thumb(&dl, &cache, name, None, &h), "image/jpeg"),
+                (view(&dl, &cache, name, None, &h), *view_mime),
+                (view(&dl, &cache, name, Some(&w400), &h), "image/jpeg"),
+            ] {
+                assert_eq!(res.status(), StatusCode::OK, "{name}");
+                assert_eq!(res.headers()[header::CONTENT_TYPE], want, "{name}");
+            }
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: an AVIF member inside a zip decodes through the same path as
+    /// a directory file — /thumb and /view answer 200 JPEG.
+    #[test]
+    fn archive_avif_member_decodes() {
+        let (dl, cache) = tmp_dirs("a1");
+        let entries: Vec<(&str, Vec<u8>)> = vec![(
+            "p.avif",
+            include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+        )];
+        write_zip(&dl.join("book.zip"), &entries);
+        let h = HeaderMap::new();
+        for res in [
+            thumb(&dl, &cache, "book.zip/p.avif", None, &h),
+            view(&dl, &cache, "book.zip/p.avif", None, &h),
+        ] {
+            assert_eq!(res.status(), StatusCode::OK);
+            assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
         }
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
     /// An archive member we can't extract (unsupported compression, CRC
-    /// failure, absent) proxies — never a native 404, because Python's
-    /// zipfile/rarfile may still read it.
+    /// failure, absent) answers 501 — there is no upstream zipfile/rarfile
+    /// left to decide (#532).
     #[test]
-    fn thumb_missing_archive_member_proxies() {
+    fn thumb_missing_archive_member_501() {
         let (dl, cache) = tmp_dirs("t4");
         std::fs::write(dl.join("book.cbz"), b"not a zip").unwrap();
         let h = HeaderMap::new();
-        assert!(matches!(
-            thumb(&dl, &cache, "book.cbz/x.png", None, &h),
-            Serve::Proxy
-        ));
+        assert_eq!(
+            thumb(&dl, &cache, "book.cbz/x.png", None, &h).status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
@@ -1502,7 +1624,7 @@ mod tests {
         std::fs::write(dl.join("c.bmp"), src).unwrap();
         let h = HeaderMap::new();
         let res = view(&dl, &cache, "c.bmp", None, &h);
-        let Serve::Done(r) = res else { panic!("expected Done") };
+        let r = res;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()[header::CONTENT_TYPE], "image/jpeg");
         assert_eq!(
@@ -1514,24 +1636,19 @@ mod tests {
 
     // ── #440: `/view?w=` fast-tier parity with `app/thumbs.py` ──────────
 
-    fn body_vec(s: Serve) -> (StatusCode, HeaderMap, Vec<u8>) {
+    fn body_vec(r: Response) -> (StatusCode, HeaderMap, Vec<u8>) {
         use http_body_util::BodyExt;
-        match s {
-            Serve::Done(r) => {
-                let status = r.status();
-                let headers = r.headers().clone();
-                let bytes = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(r.into_body().collect())
-                    .unwrap()
-                    .to_bytes()
-                    .to_vec();
-                (status, headers, bytes)
-            }
-            Serve::Proxy => panic!("expected Done, got Proxy"),
-        }
+        let status = r.status();
+        let headers = r.headers().clone();
+        let bytes = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(r.into_body().collect())
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        (status, headers, bytes)
     }
 
     fn jpg_rgb(w: u32, h: u32, px: [u8; 3]) -> Vec<u8> {
@@ -1623,8 +1740,7 @@ mod tests {
         let (w400, w800) = ("400".to_string(), "800".to_string());
         let mut etags = Vec::new();
         for w in [&w400, &w800] {
-            let Serve::Done(r) = view(&dl, &cache, "p.png", Some(w), &HeaderMap::new())
-            else { panic!("expected Done") };
+            let r = view(&dl, &cache, "p.png", Some(w), &HeaderMap::new());
             etags.push(r.headers()[header::ETAG].to_str().unwrap().to_string());
         }
         assert_ne!(etags[0], etags[1], "widths must not share an etag");
@@ -1637,8 +1753,7 @@ mod tests {
         // Conditional re-request on the w400 rendition → 304.
         let mut h = HeaderMap::new();
         h.insert(header::IF_NONE_MATCH, etags[0].parse().unwrap());
-        let Serve::Done(r) = view(&dl, &cache, "p.png", Some(&w400), &h)
-        else { panic!("expected Done") };
+        let r = view(&dl, &cache, "p.png", Some(&w400), &h);
         assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
@@ -1650,12 +1765,10 @@ mod tests {
         let (dl, cache) = tmp_dirs("vw5");
         std::fs::write(dl.join("p.png"), png_rgb(900, 600, [7, 7, 7])).unwrap();
         let (w100, w240) = ("100".to_string(), "240".to_string());
-        let Serve::Done(r100) = view(&dl, &cache, "p.png", Some(&w100), &HeaderMap::new())
-        else { panic!("expected Done") };
+        let r100 = view(&dl, &cache, "p.png", Some(&w100), &HeaderMap::new());
         let e100 = r100.headers()[header::ETAG].to_str().unwrap().to_string();
         assert!(e100.contains("-view-240-"), "etag {e100} carries the clamped width");
-        let Serve::Done(r240) = view(&dl, &cache, "p.png", Some(&w240), &HeaderMap::new())
-        else { panic!("expected Done") };
+        let r240 = view(&dl, &cache, "p.png", Some(&w240), &HeaderMap::new());
         assert_eq!(
             r240.headers()[header::ETAG].to_str().unwrap(),
             e100,
@@ -1718,24 +1831,19 @@ mod tests {
             .collect()
     }
 
-    fn sprite_body(s: Serve) -> Vec<u8> {
+    fn sprite_body(r: Response) -> Vec<u8> {
         use http_body_util::BodyExt;
-        match s {
-            Serve::Done(r) => {
-                assert_eq!(r.status(), StatusCode::OK);
-                let bytes = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(r.into_body().collect())
-                    .unwrap()
-                    .to_bytes()
-                    .to_vec();
-                assert_eq!(&bytes[..2], b"\xff\xd8");
-                bytes
-            }
-            Serve::Proxy => panic!("expected Done, got Proxy"),
-        }
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(r.into_body().collect())
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        assert_eq!(&bytes[..2], b"\xff\xd8");
+        bytes
     }
 
     fn write_zip(path: &Path, entries: &[(&str, Vec<u8>)]) {
@@ -1840,7 +1948,19 @@ mod tests {
             ]);
             let out = thumb_sprite(&dl, &cache, &q, &qs, &HeaderMap::new());
             let body = sprite_body(out);
-            assert_eq!(jpeg_dims(&body), expect, "w={w}");
+            let (sw, sh) = expect;
+            assert_eq!((sw, sh), jpeg_dims(&body), "w={w}");
+            // Row-major cell colors: r,g on row 0; b,p on row 1. Dims-only
+            // asserts let compose_grid coordinate mutants survive (#582).
+            let (cw, rh) = (sw / 2, sh / 2);
+            assert_cell_color(sprite_px(&body, cw / 2, rh / 2), [255, 0, 0], "cell r");
+            assert_cell_color(sprite_px(&body, cw + cw / 2, rh / 2), [0, 255, 0], "cell g");
+            assert_cell_color(sprite_px(&body, cw / 2, rh + rh / 2), [0, 0, 255], "cell b");
+            assert_cell_color(
+                sprite_px(&body, cw + cw / 2, rh + rh / 2),
+                [255, 0, 255],
+                "cell p",
+            );
             std::fs::remove_dir_all(dl.parent().unwrap()).ok();
         }
     }
@@ -1865,6 +1985,8 @@ mod tests {
             &HeaderMap::new(),
         ));
         assert_eq!(jpeg_dims(&body), (400, 150));
+        // Decoded cell keeps its color; the missing entry stays gray.
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "r.png cell");
         // Gray cell: right slot center is ~(128,128,128) ± JPEG tolerance.
         let dec = image::load_from_memory(&body).unwrap().to_rgb8();
         let px = dec.get_pixel(300, 75);
@@ -1877,6 +1999,57 @@ mod tests {
             status(&thumb_sprite(&dl, &cache, &qbad, "names=nope.png,nada.png", &HeaderMap::new())),
             StatusCode::NOT_FOUND
         );
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: an AVIF cell composes natively in both sprite paths —
+    /// before, `.avif` was upstream-only and the whole sheet 501'd.
+    #[test]
+    fn sprite_avif_cell_composes() {
+        let (dl, cache) = tmp_dirs("s4");
+        std::fs::write(
+            dl.join("p.avif"),
+            include_bytes!("../tests/fixtures/ok-48x64.avif"),
+        )
+        .unwrap();
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,p.avif")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=r.png,p.avif", &HeaderMap::new());
+        assert_eq!(status(&out), StatusCode::OK);
+        let body = sprite_body(out);
+        assert_eq!(jpeg_dims(&body), (400, 150));
+        // The fixture is solid (200,61,59) at 48x64 — never upscaled, so
+        // the thumb occupies only x∈[200,248), y∈[0,64) of its 200px
+        // slot; everything else stays SPRITE_GRAY.
+        assert_cell_color(sprite_px(&body, 224, 30), [200, 61, 59], "avif cell");
+        assert_gray_cell(sprite_px(&body, 300, 30), "avif cell right of thumb");
+        assert_gray_cell(sprite_px(&body, 224, 120), "avif cell below thumb");
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "png cell");
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// #563: same for an AVIF member inside a zip archive cell.
+    #[test]
+    fn sprite_archive_avif_cell_composes() {
+        let (dl, cache) = tmp_dirs("s5");
+        let entries: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "p.avif",
+                include_bytes!("../tests/fixtures/ok-48x64.avif").to_vec(),
+            ),
+            ("r.png", png_rgb(400, 300, [255, 0, 0])),
+        ];
+        write_zip(&dl.join("work.zip"), &entries);
+        let q = sprite_q(&[("folder", "work.zip"), ("names", "p.avif,r.png")]);
+        let out = thumb_sprite(&dl, &cache, &q, "names=p.avif,r.png", &HeaderMap::new());
+        assert_eq!(status(&out), StatusCode::OK);
+        let body = sprite_body(out);
+        assert_eq!(jpeg_dims(&body), (400, 150));
+        // avif thumb is 48x64 at the slot's top-left; the rest is gray.
+        assert_cell_color(sprite_px(&body, 24, 30), [200, 61, 59], "avif cell");
+        assert_gray_cell(sprite_px(&body, 100, 30), "avif cell right of thumb");
+        assert_gray_cell(sprite_px(&body, 24, 120), "avif cell below thumb");
+        assert_cell_color(sprite_px(&body, 300, 75), [255, 0, 0], "png cell");
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
@@ -1899,5 +2072,287 @@ mod tests {
         std::fs::remove_dir_all(dl.parent().unwrap()).ok();
     }
 
+    // ── #582: mutation-survivor coverage ──────────────────────────────
 
+    /// Sprite JPEG pixel probe — callers pick cell-interior coordinates.
+    fn sprite_px(body: &[u8], x: u32, y: u32) -> [u8; 3] {
+        let d = image::load_from_memory(body).unwrap().to_rgb8();
+        let p = d.get_pixel(x, y).0;
+        [p[0], p[1], p[2]]
+    }
+
+    /// ±40 per channel: uniform fills survive JPEG q75 easily, and the
+    /// test colors differ by ≥127 so cells still discriminate.
+    fn assert_cell_color(px: [u8; 3], want: [u8; 3], what: &str) {
+        for (got, exp) in px.iter().zip(want.iter()) {
+            assert!(
+                (*got as i32 - *exp as i32).abs() <= 40,
+                "{what}: got {px:?}, want ~{want:?}"
+            );
+        }
+    }
+
+    /// SPRITE_GRAY fallback cell (JPEG drift around 128).
+    fn assert_gray_cell(px: [u8; 3], what: &str) {
+        assert!(
+            px.iter().all(|v| (110..=146).contains(v)),
+            "{what}: got {px:?}, want SPRITE_GRAY ~128"
+        );
+    }
+
+    /// Left/right two-tone PNG — `cover_fit` crop asserts need a
+    /// non-uniform source; solid fills hide crop-offset mutants.
+    fn png_split_lr(w: u32, h: u32, split: u32, left: [u8; 3], right: [u8; 3]) -> Vec<u8> {
+        let mut im = image::RgbImage::new(w, h);
+        for (x, _, p) in im.enumerate_pixels_mut() {
+            *p = image::Rgb(if x < split { left } else { right });
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(im)
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    /// Strip cells land left→right in `names` order, each keeping its
+    /// source color — dims-only asserts let `compose_strip` coordinate
+    /// mutants survive.
+    #[test]
+    fn sprite_strip_cells_keep_their_colors() {
+        let (dl, cache) = tmp_dirs("sc1");
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), png_rgb(400, 300, [0, 255, 0])).unwrap();
+        std::fs::write(dl.join("b.png"), png_rgb(400, 300, [0, 0, 255])).unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "r.png,g.png,b.png")]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q,
+            "names=r.png,g.png,b.png",
+            &HeaderMap::new(),
+        ));
+        assert_eq!(jpeg_dims(&body), (600, 150));
+        // 200px slots, 150px tall: sample each cell center.
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "cell0 red");
+        assert_cell_color(sprite_px(&body, 300, 75), [0, 255, 0], "cell1 green");
+        assert_cell_color(sprite_px(&body, 500, 75), [0, 0, 255], "cell2 blue");
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `cover_fit` center-crops: a left/right split source must show red
+    /// left-of-center and blue right-of-center inside each grid cell.
+    /// rows="2" → one row, two 240x720 cells on a 480x720 sheet.
+    #[test]
+    fn sprite_grid_center_crops_cells() {
+        let (dl, cache) = tmp_dirs("sgc");
+        // 400x300 split at x=200 → cover_fit scales to 960x720 and crops
+        // x∈[360,600); the source boundary lands at cell dx=120.
+        std::fs::write(
+            dl.join("split.png"),
+            png_split_lr(400, 300, 200, [255, 0, 0], [0, 0, 255]),
+        )
+        .unwrap();
+        let q = sprite_q(&[
+            ("folder", "."),
+            ("names", "split.png,split.png"),
+            ("rows", "2"),
+        ]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q,
+            "names=split.png,split.png&rows=2",
+            &HeaderMap::new(),
+        ));
+        assert_eq!(jpeg_dims(&body), (480, 720));
+        // Both cells: dx=60 → source x≈175 (red), dx=180 → ≈225 (blue).
+        for (x0, tag) in [(0u32, "cell0"), (240u32, "cell1")] {
+            assert_cell_color(sprite_px(&body, x0 + 60, 360), [255, 0, 0], tag);
+            assert_cell_color(sprite_px(&body, x0 + 180, 360), [0, 0, 255], tag);
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `.svg` cells gray like Python (no rasterizer) — the `!= ".svg"`
+    /// exemption must not flip to `==`, which would 501 the whole sheet.
+    #[test]
+    fn sprite_svg_cell_grays_in_dir_and_archive() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec();
+        for (tag, archive) in [("dir", false), ("zip", true)] {
+            let (dl, cache) = tmp_dirs(&format!("ssvg{tag}"));
+            std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+            let (folder, names) = if archive {
+                let entries: Vec<(&str, Vec<u8>)> = vec![
+                    ("r.png", png_rgb(400, 300, [255, 0, 0])),
+                    ("icon.svg", svg.clone()),
+                ];
+                write_zip(&dl.join("work.zip"), &entries);
+                ("work.zip", "r.png,icon.svg")
+            } else {
+                std::fs::write(dl.join("icon.svg"), &svg).unwrap();
+                (".", "r.png,icon.svg")
+            };
+            let q = sprite_q(&[("folder", folder), ("names", names)]);
+            let body = sprite_body(thumb_sprite(
+                &dl,
+                &cache,
+                &q,
+                &format!("names={names}"),
+                &HeaderMap::new(),
+            ));
+            assert_eq!(jpeg_dims(&body), (400, 150), "{tag}");
+            assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], tag);
+            assert_gray_cell(sprite_px(&body, 300, 75), tag);
+            std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+        }
+    }
+
+    /// Present-but-corrupt cells count toward the all-fail 404 — the
+    /// `failed` tally mutants (`*=`/`-=`) would paint an all-gray sheet.
+    #[test]
+    fn sprite_strip_corrupt_cells_count_toward_404() {
+        let (dl, cache) = tmp_dirs("scc");
+        std::fs::write(dl.join("bad1.png"), b"not a png").unwrap();
+        std::fs::write(dl.join("bad2.png"), b"still not").unwrap();
+        let q = sprite_q(&[("folder", "."), ("names", "bad1.png,bad2.png")]);
+        assert_eq!(
+            status(&thumb_sprite(
+                &dl,
+                &cache,
+                &q,
+                "names=bad1.png,bad2.png",
+                &HeaderMap::new()
+            )),
+            StatusCode::NOT_FOUND
+        );
+        // Mixed: one good + one corrupt → 200, corrupt slot stays gray.
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        let q2 = sprite_q(&[("folder", "."), ("names", "r.png,bad1.png")]);
+        let body = sprite_body(thumb_sprite(
+            &dl,
+            &cache,
+            &q2,
+            "names=r.png,bad1.png",
+            &HeaderMap::new(),
+        ));
+        assert_cell_color(sprite_px(&body, 100, 75), [255, 0, 0], "good cell");
+        assert_gray_cell(sprite_px(&body, 300, 75), "corrupt cell");
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Folder/names validation matrix — every `||`→`&&` weakening must
+    /// still 400 (or 404 for a missing path), not fall through to 403.
+    #[test]
+    fn sprite_folder_validation_matrix() {
+        let (dl, cache) = tmp_dirs("sval");
+        std::fs::write(dl.join("plain.txt"), b"x").unwrap();
+        for (folder, qs, want) in [
+            ("", "names=a.png", StatusCode::BAD_REQUEST),
+            ("/abs", "names=a.png", StatusCode::BAD_REQUEST),
+            ("trail/", "names=a.png", StatusCode::BAD_REQUEST),
+            ("a\0b", "names=a.png", StatusCode::BAD_REQUEST),
+            ("a/../b", "names=a.png", StatusCode::BAD_REQUEST),
+            (".hidden", "names=a.png", StatusCode::BAD_REQUEST),
+            ("..", "names=a.png", StatusCode::BAD_REQUEST),
+            // Exists but is neither archive nor directory.
+            ("plain.txt", "names=a.png", StatusCode::BAD_REQUEST),
+            ("nope", "names=a.png", StatusCode::NOT_FOUND),
+            // `names` is read from the raw query string, not the map.
+            (".", "folder=.", StatusCode::BAD_REQUEST),
+            (".", "names=", StatusCode::BAD_REQUEST),
+        ] {
+            let q = sprite_q(&[("folder", folder)]);
+            assert_eq!(
+                status(&thumb_sprite(&dl, &cache, &q, qs, &HeaderMap::new())),
+                want,
+                "folder={folder:?} qs={qs:?}"
+            );
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// Out-of-range `rows` falls back to the strip path — the
+    /// `1..=9`/`len ≤ 3` bounds mutants must not accept them as grids.
+    #[test]
+    fn sprite_rows_out_of_range_falls_back_to_strip() {
+        let (dl, cache) = tmp_dirs("srows");
+        std::fs::write(dl.join("r.png"), png_rgb(400, 300, [255, 0, 0])).unwrap();
+        std::fs::write(dl.join("g.png"), png_rgb(400, 300, [0, 255, 0])).unwrap();
+        for rows in ["0", "10", "1,1,1,1", "2,0"] {
+            let q = sprite_q(&[
+                ("folder", "."),
+                ("names", "r.png,g.png"),
+                ("rows", rows),
+            ]);
+            let body = sprite_body(thumb_sprite(
+                &dl,
+                &cache,
+                &q,
+                &format!("names=r.png,g.png&rows={rows}"),
+                &HeaderMap::new(),
+            ));
+            assert_eq!(jpeg_dims(&body), (400, 150), "rows={rows}");
+        }
+        std::fs::remove_dir_all(dl.parent().unwrap()).ok();
+    }
+
+    /// `flatten_on_white` blends by the actual alpha — α=128-only coverage
+    /// let `255-a`→`255+a` and `/255`→`*255` mutants survive (#582).
+    #[test]
+    fn flatten_on_white_blends_by_alpha() {
+        let mut im = image::RgbaImage::new(4, 1);
+        for (p, v) in im.pixels_mut().zip([
+            [200u8, 100, 50, 64],
+            [10, 20, 30, 128],
+            [255, 0, 0, 255],
+            [0, 0, 0, 0],
+        ]) {
+            *p = image::Rgba(v);
+        }
+        let flat = flatten_on_white(&image::DynamicImage::ImageRgba8(im));
+        let got: Vec<[u8; 3]> = flat.pixels().map(|p| [p[0], p[1], p[2]]).collect();
+        // (p*a + 255*(255-a))/255, computed independently of the impl.
+        assert_eq!(got[0], [241, 216, 203]); // a=64
+        assert_eq!(got[1], [132, 137, 142]); // a=128
+        assert_eq!(got[2], [255, 0, 0]); // a=255 → passthrough
+        assert_eq!(got[3], [255, 255, 255]); // a=0 → white
+    }
+
+    /// `jpeg_encode` keeps L-mode sources grayscale — the Luma8/Luma16
+    /// arms must not fall through to the RGB encoder.
+    #[test]
+    fn jpeg_encode_luma_stays_grayscale() {
+        let l8 = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            8,
+            8,
+            image::Luma([77]),
+        ));
+        let jpg = jpeg_encode(&l8, 75).unwrap();
+        assert_eq!(
+            image::load_from_memory(&jpg).unwrap().color(),
+            image::ColorType::L8
+        );
+        let l16buf: image::ImageBuffer<image::Luma<u16>, Vec<u16>> =
+            image::ImageBuffer::from_pixel(8, 8, image::Luma([30000u16]));
+        let l16 = image::DynamicImage::ImageLuma16(l16buf);
+        let jpg16 = jpeg_encode(&l16, 75).unwrap();
+        assert_eq!(jpeg_dims(&jpg16), (8, 8));
+        assert_eq!(
+            image::load_from_memory(&jpg16).unwrap().color(),
+            image::ColorType::L8
+        );
+    }
+
+    /// `thumbnail_box` passes through when the image already fits the
+    /// box — an exact-fit source must not be re-resampled.
+    #[test]
+    fn thumbnail_box_exact_fit_passthrough() {
+        let im = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            200,
+            100,
+            image::Rgb([1, 2, 3]),
+        ));
+        let out = thumbnail_box(im, 200, 800);
+        assert_eq!((out.width(), out.height()), (200, 100));
+    }
 }

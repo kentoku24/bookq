@@ -28,7 +28,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** サーババージョン */
+        /**
+         * サーババージョン
+         * @description 認証必須 (#359)。未認証は 401。sha/build_date の公開面漏洩を防ぐため
+         *     health と異なり `security: []` を付けない (全体既定の認証を継承)。
+         */
         get: operations["getVersion"];
         put?: never;
         post?: never;
@@ -260,6 +264,124 @@ export interface paths {
          *     その `code` + PKCE `code_verifier` をここで交換する。
          */
         post: operations["exchangeToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/library/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 作品ファイルのアップロード（multipart・1〜複数ファイル）
+         * @description `dir`（ルート相対。省略・空 = ライブラリルート）直下に multipart の
+         *     `file` フィールドを保存する。`dir` は実在ディレクトリ必須
+         *     （書庫ファイルや `.bookq-uploads` 配下は 400、不存在は 404）。
+         *     同名が既にある場合は `name (n).ext` で自動リネームし、採用名を
+         *     `files[].name` で返す。
+         *
+         *     リクエスト単位の失敗（dir 不正・file フィールドなし等）は 4xx。
+         *     ファイル単位の失敗は 200 の `errors[]` に `{name, code}` で列挙する
+         *     （`invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+         *     `conflict` (dedupe 名が尽きた) / `malformed` (multipart が途中で
+         *     切れた)）。非UTF-8 で復号不能な filename は `name:"?"`、
+         *     `malformed` は `name:"*"` の sentinel を使う。
+         *     大容量や途中再開が要る場合は `POST /api/v1/library/uploads` の
+         *     分割アップロードを使うこと。
+         */
+        post: operations["uploadLibraryFiles"];
+        /**
+         * 作品ファイル / フォルダの削除
+         * @description `path`（ルート相対、必須）を削除する。ファイルは単体削除、
+         *     ディレクトリは配下ごと再帰削除。ルート（空パス）・
+         *     `.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。
+         *     読書位置やクライアント側オフラインキャッシュは消えない
+         *     （孤立するが無害 — v1-semantics.md §8）。
+         */
+        delete: operations["deleteLibraryFile"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/library/uploads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 分割アップロードセッション開始
+         * @description 再開可能な分割アップロード。init（本 op）→
+         *     `PUT /api/v1/library/uploads/{id}` で `Upload-Offset` 順に chunk を
+         *     append → `POST .../finalize` でライブラリへ確定。セッションは
+         *     `<library>/.bookq-uploads/<id>/` に保持され再起動をまたぐ。
+         *     `name`/`dir` の検証は `/files` と同一、`size` は確定後の総バイト数。
+         */
+        post: operations["createLibraryUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/library/uploads/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description createLibraryUpload が発行した upload_id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** セッション状態（再開位置の確認） */
+        get: operations["getLibraryUpload"];
+        /**
+         * チャンクの追記（offset 順）
+         * @description ボディ（raw octet-stream）を `Upload-Offset` が示す位置から追記する。
+         *     `Upload-Offset` はサーバの現在 `offset` と一致必須 — 不一致は
+         *     **409 + `{offset: <現在値>}`** を返し、クライアントは返された
+         *     offset から送り直す。`offset + len(body) > size` は 400。
+         *     順序外・重複チャンクは offset 不一致で 409 になるため安全に再送できる。
+         */
+        put: operations["appendLibraryUpload"];
+        post?: never;
+        /** セッション破棄 */
+        delete: operations["cancelLibraryUpload"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/library/uploads/{id}/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * セッション確定（ライブラリへ配置）
+         * @description `offset == size` の時のみ受理。blob を fsync してから
+         *     `dir` 内で自動リネームして atomic rename、セッションを掃除し、
+         *     採用名を返す。未完は **409 + `{offset: <現在値>}`**。
+         */
+        post: operations["finalizeLibraryUpload"];
         delete?: never;
         options?: never;
         head?: never;
@@ -562,6 +684,35 @@ export interface components {
             /** @description 先頭パスセグメント（書庫も対象） */
             hiddenRoots: string[];
         };
+        LibraryFileEntry: {
+            /** @description 採用されたファイル名（衝突時は `name (n).ext` に自動リネーム） */
+            name: string;
+            /** @description ルート相対パス */
+            path: string;
+            size: number;
+        };
+        LibraryFileError: {
+            name: string;
+            /**
+             * @description `invalid_name` / `unsupported_type` / `too_large` / `io_error` /
+             *     `conflict` (dedupe で空き名なし) / `malformed` (multipart が
+             *     途中で切れた — `name` は `"*"` の sentinel)
+             */
+            code: string;
+        };
+        LibraryUploadInit: {
+            upload_id: string;
+            offset: number;
+        };
+        LibraryUploadState: {
+            upload_id: string;
+            /** @description 保存先（ルート相対、空 = ルート） */
+            dir: string;
+            name: string;
+            size: number;
+            /** @description 受領済みバイト数（次の追記開始位置） */
+            offset: number;
+        };
     };
     responses: {
         /**
@@ -688,6 +839,13 @@ export interface operations {
                         build_date: string;
                     };
                 };
+            };
+            /** @description 未認証 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -916,6 +1074,8 @@ export interface operations {
                 };
                 content: {
                     "image/*": string;
+                    "application/*": string;
+                    "text/*": string;
                 };
             };
             /** @description 単一 Range レスポンス */
@@ -923,7 +1083,11 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "image/*": string;
+                    "application/*": string;
+                    "text/*": string;
+                };
             };
             /** @description ETag 一致 */
             304: {
@@ -933,7 +1097,7 @@ export interface operations {
                 content?: never;
             };
             /**
-             * @description 不正な Range ヘッダ等。Starlette の FileResponse Range 処理は
+             * @description 不正な Range ヘッダ等。viewer-rs の Range 検証は
              *     `text/plain` ボディを返す（`{"detail": …}` JSON とは別形式）。
              */
             400: {
@@ -947,6 +1111,30 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /**
+             * @description Range がファイル長を超過（`bytes=N-` や `bytes=a-b` で
+             *     a ≥ size、`bytes=-0` 等の unsatisfiable 指定）
+             */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /**
+             * @description 抽出/描画不能 — 圧縮 multipart RAR のエントリ、または libpdfium
+             *     無し環境での PDF ページ
+             */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     getThumb: {
@@ -976,6 +1164,15 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description 非画像などネイティブでサムネ生成不能なソース */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     getView: {
@@ -1002,6 +1199,15 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            /** @description 非画像などネイティブで正規化不能なソース */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     listReadingPositions: {
@@ -1208,6 +1414,349 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    uploadLibraryFiles: {
+        parameters: {
+            query?: {
+                /** @description 保存先フォルダ（ルート相対、空 = ルート） */
+                dir?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    file: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description 受理結果（errors が空なら全件成功） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        files: components["schemas"]["LibraryFileEntry"][];
+                        errors: components["schemas"]["LibraryFileError"][];
+                    };
+                };
+            };
+            /**
+             * @description パラメータ不正。multipart 自体が不正（boundary 欠損等）な場合は
+             *     extractor がハンドラ到達前に `text/plain` を返す（/image の 400
+             *     と同じ二形式）。
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                    "text/plain": string;
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description uploads が無効（library 書き込み不可のデプロイ） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    deleteLibraryFile: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 削除完了 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description 削除したルート相対パス */
+                        deleted: string;
+                        /** @enum {string} */
+                        kind: "file" | "dir";
+                    };
+                };
+            };
+            /** @description パラメータ不正（空・ルート・`.bookq-uploads` 配下） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["ValidationError"];
+            /** @description uploads が無効（library 書き込み不可のデプロイ） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    createLibraryUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @default  */
+                    dir?: string;
+                    name: string;
+                    size: number;
+                };
+            };
+        };
+        responses: {
+            /** @description セッション作成 */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryUploadInit"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description `size` が `BOOKQ_UPLOAD_MAX_BYTES` 超過 */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 対応外の拡張子 */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            422: components["responses"]["ValidationError"];
+            /** @description uploads が無効（library 書き込み不可のデプロイ） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getLibraryUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description createLibraryUpload が発行した upload_id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description セッション状態 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryUploadState"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description uploads が無効 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    appendLibraryUpload: {
+        parameters: {
+            query?: never;
+            header: {
+                "Upload-Offset": number;
+            };
+            path: {
+                /** @description createLibraryUpload が発行した upload_id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description 追記完了 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        offset: number;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            /** @description offset 不一致（body の `offset` が現在の受領位置） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                        /** @enum {string} */
+                        code: "offset_mismatch";
+                        offset: number;
+                    };
+                };
+            };
+            /** @description `BOOKQ_UPLOAD_MAX_BYTES` 超過 */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description uploads が無効 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    cancelLibraryUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description createLibraryUpload が発行した upload_id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 破棄完了（本体なし） */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            /** @description uploads が無効 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    finalizeLibraryUpload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 確定完了 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryFileEntry"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /**
+             * @description 未完（`code:incomplete`、`offset` が現在の受領位置）または
+             *     dedupe の空き名枯渇（`conflict`、detail のみ）
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: string;
+                        /** @enum {string} */
+                        code?: "incomplete" | "conflict";
+                        offset?: number;
+                    };
+                };
+            };
+            /** @description uploads が無効 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
             };
         };
     };

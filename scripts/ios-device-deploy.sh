@@ -61,6 +61,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# == 0. --prd は origin/main の内容からのみ ==
+# basic rule: prd app (dev.bookq.reader) は main/origin/main からのみ deploy。
+# dev app (既定) は任意ブランチ/worktree から可。
+# 緊急回避は BOOKQ_PRD_SKIP_MAIN_CHECK=1。
+if [ -n "$PRD" ] && [ -z "${BOOKQ_PRD_SKIP_MAIN_CHECK:-}" ]; then
+  head_sha="$(git rev-parse HEAD)"
+  main_sha="$(git rev-parse origin/main 2>/dev/null || true)"
+  if [ -z "$main_sha" ] || [ "$head_sha" != "$main_sha" ]; then
+    echo "error: --prd は origin/main と一致するツリーからのみ deploy できます" >&2
+    echo "  HEAD=$head_sha origin/main=${main_sha:-<unresolved>}" >&2
+    echo "  main checkout で 'git fetch origin && git merge --ff-only origin/main' してから再実行" >&2
+    echo "  緊急回避: BOOKQ_PRD_SKIP_MAIN_CHECK=1" >&2
+    exit 1
+  fi
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "error: --prd は tracked ファイルに未コミット変更がある状態では deploy できません" >&2
+    echo "  'git status' で差分を確認し commit/stash してから再実行" >&2
+    exit 1
+  fi
+fi
+
 BUNDLE_ID=dev.bookq.reader.dev
 OVERRIDES=(PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" PRODUCT_NAME=BookqDev)
 if [ -n "$PRD" ]; then

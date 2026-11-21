@@ -41,7 +41,7 @@
     const s = document.createElement('script'); s.src = '/static/touch-indicator.js'; document.head.appendChild(s);
   }
 
-  // ── Service Worker registration (Todo 2) ──
+  // ── Service Worker registration ──
   // TEST_MODE gate: skip registration unless ?offline=1 or localStorage flag.
   (function registerSW(){
     if (!('serviceWorker' in navigator)) return;
@@ -226,7 +226,17 @@
     return Promise.resolve(false);
   }
   let _onlineRevalidateLast = 0;
-  // Todo 5: warm-only conditional fetch. Keys mirror the server
+  // Connection generation: bumped on link loss (the offline handlers) so a
+  // slow response from the previous connection can never continue (index
+  // build, cache/IDB writes, render, stamp) over the new connection's state.
+  // Deliberately not an AbortController — in-flight work that already left
+  // the network stack must still be recognized as stale at every await.
+  let _onlineConnectionGen = 0;
+  // In-flight full load tracked by loadFolders: revalidation waits for it
+  // instead of racing it for index/tree ownership.
+  let _loadFoldersInFlight = null;
+  let _revalidateInFlightGen = -1;
+  // Warm-only conditional fetch. Keys mirror the server
   // _folders_response cache keys (path,depth): root full vs shallow1.
   // Cold first fetch (loadFolders stages) stays unconditional — ETag never
   // claims cold savings. Only fetchLatestFolders/revalidateFoldersForOnline
@@ -235,6 +245,23 @@
   const etagByKey = new Map();
   function _foldersEtagKey(depth){ return ":" + (depth ? "shallow" + depth : "full"); }
   const _rawFoldersText = new WeakMap();
+  // ETags parsed from a response are staged here, NOT committed to etagByKey.
+  // The caller commits via _commitFolderEtag only once it decides to apply
+  // the payload — a stale (superseded) response must never rewrite the warm
+  // ETag, or the next revalidation would 304 against a tree it never got.
+  const _pendingFolderEtag = new WeakMap();
+  function _commitFolderEtag(data, depth){
+    if(!Array.isArray(data)) return;
+    let pending = null;
+    try { pending = _pendingFolderEtag.get(data); } catch(e) {}
+    if(!pending) return;
+    const key = _foldersEtagKey(depth);
+    try {
+      if(pending.etag) etagByKey.set(key, pending.etag);
+      else etagByKey.delete(key);
+    } catch(e) { console.warn(e); }
+    try { _pendingFolderEtag.delete(data); } catch(e) {}
+  }
   async function readFoldersResponse(res, depth, isCurrent){
     if(res.status === 304){
       // Warm revalidation hit: server tree unchanged. No body; the caller
@@ -261,11 +288,11 @@
     } else return;
     if(!Array.isArray(data)) return;
     if (!_cur()) return;
+    // Stage the ETag on the payload; the caller commits it only when the
+    // payload is actually applied (see _commitFolderEtag).
     try {
       const etag = res.headers ? res.headers.get("ETag") : null;
-      const key = _foldersEtagKey(depth);
-      if (etag) etagByKey.set(key, etag);
-      else etagByKey.delete(key);
+      try { _pendingFolderEtag.set(data, {etag: etag}); } catch(_setErr) {}
     } catch(e) { console.warn(e); }
     return data;
   }
@@ -301,8 +328,17 @@
     return next;
   }
   let _revalidateInFlight = null;
+  function _isRevalidateCurrent(loadGen, connGen){
+    try {
+      if (typeof _loadFoldersGen !== "undefined" && loadGen !== _loadFoldersGen) return false;
+    } catch(e) {}
+    return connGen === _onlineConnectionGen;
+  }
   async function _revalidateFoldersForOnlineInner(deps){
     const _d = _resolveDeps(deps);
+    const _preConnGen = _onlineConnectionGen;
+    let _preLoadGen = 0;
+    try { _preLoadGen = _loadFoldersGen; } catch(e) {}
     try{
       // offline では自動リトライしない (spec §3)。connecting 中は通す —
       // 失敗した再検証の直後リトライが connecting ウィンドウで死なない
@@ -310,10 +346,19 @@
       if(window.Connectivity.isOffline()) return;
       const now=Date.now();
       if(now - _onlineRevalidateLast < 5*60*1000) return;
+      // A full load owns the index/tree pipeline while in flight — wait for
+      // it instead of racing it, then re-check both generations.
+      if(_loadFoldersInFlight){
+        try { await _loadFoldersInFlight; } catch(e) {}
+        if(_preConnGen !== _onlineConnectionGen) return;
+        try { if(_preLoadGen !== _loadFoldersGen) return; } catch(e) {}
+        if(window.Connectivity.isOffline()) return;
+      }
       const loadGen = _loadFoldersGen;
-      const result = await fetchLatestFolders(_d, {isCurrent: function(){ return loadGen === _loadFoldersGen; }});
+      const connGen = _onlineConnectionGen;
+      const result = await fetchLatestFolders(_d, {isCurrent: function(){ return _isRevalidateCurrent(loadGen, connGen); }});
       if(!result) return;
-      if (loadGen !== _loadFoldersGen) return;
+      if (!_isRevalidateCurrent(loadGen, connGen)) return;
       if(result && result.notModified){
         // 304: tree unchanged — stamp the gate, redraw nothing, loop never.
         _onlineRevalidateLast = now;
@@ -321,11 +366,13 @@
       }
       const data = result;
       if(isSameTree(tree, data)){
+        _commitFolderEtag(data, null);
         _onlineRevalidateLast = now;
         return;
       }
       const map = await setFullPathsAndIndexAsync(data);
-      if(!map || loadGen !== _loadFoldersGen) return;
+      if(!map || !_isRevalidateCurrent(loadGen, connGen)) return;
+      _commitFolderEtag(data, null);
       tree = data;
       invalidateLeafPaths();
       if(currentBrowsePath && !getNodeAt(currentBrowsePath)){
@@ -335,13 +382,13 @@
         const c = await (_d.caches || caches).open("bookq-api-v1");
         await c.put(globalThis.BookqApi.endpoints.tree, new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
       } catch(e) { console.warn(e); }
-      if (loadGen !== _loadFoldersGen) return;
+      if (!_isRevalidateCurrent(loadGen, connGen)) return;
       try{ await refreshOfflineMap(); } catch(e) { console.warn(e); }
-      if (loadGen !== _loadFoldersGen) return;
+      if (!_isRevalidateCurrent(loadGen, connGen)) return;
       // IDB is the sole offline tree source (IDB-only since 8aacd57): persist
       // the revalidated tree alongside Cache, otherwise the next offline
       // reload would serve the stale snapshot. Full-only, background, never
-      // blocking the redraw (Todo2 contract; shallow never reaches here).
+      // blocking the redraw (shallow never reaches here).
       _persistTreeSnapshot(data, {defer:true});
       updateBrowseHeader();
       renderView();
@@ -350,13 +397,17 @@
     } catch(e) { console.warn(e); }
   }
   function revalidateFoldersForOnline(deps){
-    if(!_revalidateInFlight){
-      _revalidateInFlight = _revalidateFoldersForOnlineInner(deps).then(
-        function(){ _revalidateInFlight = null; },
-        function(e){ _revalidateInFlight = null; console.warn(e); }
-      );
-    }
-    return _revalidateInFlight;
+    // A newer connection generation owns a fresh slot: the old slot stays
+    // alive until its continuations bail, but its cleanup must never clear
+    // the new slot (identity-guarded).
+    if(_revalidateInFlight && _revalidateInFlightGen === _onlineConnectionGen) return _revalidateInFlight;
+    const my = _revalidateFoldersForOnlineInner(deps).then(
+      function(v){ if(_revalidateInFlight === my) _revalidateInFlight = null; return v; },
+      function(e){ if(_revalidateInFlight === my) _revalidateInFlight = null; console.warn(e); throw e; }
+    );
+    _revalidateInFlight = my;
+    _revalidateInFlightGen = _onlineConnectionGen;
+    return my;
   }
   // Connectivity state transitions (bookq:connectivity-change) own reconnect
   // and revalidation now; the raw OS events only update the local meter.
@@ -364,7 +415,12 @@
   // Going offline must invalidate the freshness stamp: an online→offline→online
   // flip inside the 5-minute window has to revalidate immediately, since the
   // tree could not be revalidated while offline.
-  window.addEventListener('offline',()=>{ _onlineRevalidateLast = 0; updateStorageBar(); });
+  // Link loss also bumps the connection generation so continuations from
+  // the previous connection bail at their next gate instead of overwriting
+  // the new connection's state (deliberately not on 'online': a flap-
+  // suppressed reconnect starts no pipeline and must not orphan the load
+  // that is still legitimately in flight).
+  window.addEventListener('offline',()=>{ _onlineConnectionGen++; _onlineRevalidateLast = 0; updateStorageBar(); });
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   function ensurePersist(deps){
     if(persistRequested) return;
@@ -499,7 +555,7 @@
   // second document-level dismiss here or popovers render twice per keypress.
 
   // ── ReadingProgress: localStorage-backed persistence ──
-  // Todo 4: renders must batch-parse ONCE per render (see browse/render.js
+  // Renders must batch-parse ONCE per render (see browse/render.js
   // _buildRenderCtx) — never call get() per tile. getAllSafe/pick are the
   // one-shot path; corrupt values degrade to {} so the grid never falls.
   const ReadingProgress = {
@@ -571,7 +627,7 @@
     Object.defineProperty(window, 'urlRestoreGen', {get(){return urlRestoreGen;}, set(v){urlRestoreGen=v;}, configurable:true});
     Object.defineProperty(window, 'urlSyncPaused', {get(){return urlSyncPaused;}, set(v){urlSyncPaused=v;}, configurable:true});
   } catch(e) { console.warn(e); }
-  // ── two-stage first paint (Todo2: shallow depth=1 → full) ──
+  // ── two-stage first paint (shallow depth=1 → full) ──
   // _shallowMode is true between the shallow first paint and the full-tree
   // arrival. While true: facet filtering stays off (shallow nodes carry no
   // subtree_facets), treeLoaded stays false (no prefetch/applyUrlState leak),
@@ -609,7 +665,6 @@
   // and neutralize the track's transition/transform. Shared by loadImages and
   // resetToTop — keep the two in sync (any change to strip teardown goes here).
   function resetStrip() {
-    // Reset strip
     for (const k of Object.keys(stripImgs)){
       const img = stripImgs[k];
       const cell = stripCells[k];
@@ -618,7 +673,6 @@
       delete stripImgs[k];
       delete stripCells[k];
     }
-    // Reset chapter labels
     for (const label of chapterLabels) label.remove();
     chapterLabels = [];
     for (const k of Object.keys(spreadEls)) spreadEls[k].remove();
@@ -940,7 +994,7 @@
   function getChapterLocalRealIdx(globalIdx){
     return globalIdx - chapterBoundaries[getCurrentChapterInfo(globalIdx).chapterIdx];
   }
-  // ── chapter-local slider sync: central max/value write point (wired up by later tasks) ──
+  // ── chapter-local slider sync: central max/value write point ──
   function syncChapterSlider(globalIdx, opts){
     const resetMax = !!(opts && opts.resetMax === true);
     let info;
@@ -1096,7 +1150,7 @@
   }
   function hideResumeBtn(){ resumeBtn.classList.add("hidden"); setInert(resumeBtn, true); sidebar.classList.remove("has-resume"); }
   function showResumeBtn(){ resumeBtn.classList.remove("hidden"); setInert(resumeBtn, false); sidebar.classList.add("has-resume"); }
-  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); syncSidebarA11y(); }
+  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); closeHeaderMenu({focus:false}); syncSidebarA11y(); }
   try { window.closeSidebar = closeSidebar; window.setInert = setInert; window.syncSidebarA11y = syncSidebarA11y; } catch(e) { console.warn(e); }
   // The visual side of opening the drawer — shared with browse/pairSync.js
   // (paired scroll-mirror opens the follower's sidebar without a nav intent).
@@ -1130,6 +1184,9 @@
   });
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape") return;
+    // The header ⋯menu is the topmost layer while open — Escape closes it
+    // (and returns focus to its button) rather than the sidebar behind it.
+    if (closeHeaderMenu()) return;
     // H4(c): the filter sheet is a real dialog (role=dialog aria-modal=true)
     // now — Escape must dismiss IT first, not the sidebar behind it.
     if (bottomSheet.classList.contains("open")) { closeFilterSheet(); return; }
@@ -1145,7 +1202,7 @@
     }
   }
 
-  // Todo 5: single-traversal index. One walk assigns _fullPath, builds the
+  // Single-traversal index. One walk assigns _fullPath, builds the
   // nodeMap, and emits both thumb lists matching OfflineThumb.collect —
   // singles via {singleOnly:true} (device cover width, the same string
   // resolveCoverSingle requests), full via the default path (singles at the
@@ -1572,7 +1629,7 @@
   // thumbs/resolveCover.js owns the cover fallback chain (thumb → thumbs[0] → null).
   function _coverUrl(node, w){ return window.ThumbResolve.resolveCover(node, w); }
   function buildNodeMap(){
-    // Todo 5: the map is built by setFullPathsAndIndex on every restoreTree;
+    // The map is built by setFullPathsAndIndex on every restoreTree;
     // return the cache when it tracks the live tree, rebuild (one walk) only
     // when an out-of-band mutation replaced the reference. The repair walk
     // uses the non-superseding helper — a pending async full-index build
@@ -1582,7 +1639,7 @@
     // authoritative topLevel 公開のふりをしないよう引き継ぐ。
     return _buildIndexSync(tree, _indexProvisional);
   }
-  // Todo 4: single delegated #tile-grid listener + closest() — replaces the
+  // Single delegated #tile-grid listener + closest() — replaces the
   // per-tile addEventListener loops (N listeners → 1). The selector arg is
   // kept for caller compat; the handler matches the browse union
   // (.tile/.item[data-path]/.card) and no-ops while searchMode (search tiles
@@ -1779,13 +1836,21 @@
   }
 
   let _loadFoldersGen = 0;
+  function _isLoadCurrent(_loadGen, _connGen){
+    return _loadGen === _loadFoldersGen && _connGen === _onlineConnectionGen;
+  }
   async function loadFolders(opts, deps){
     const _d = _resolveDeps(deps);
     const _fetch = _d.fetch;
     const preservePath = !!(opts && opts.preservePath);
     const _wantedPath = preservePath ? currentBrowsePath : null;
     const _loadGen = ++_loadFoldersGen;
+    const _connGen = _onlineConnectionGen;
     _indexGen++;
+    let _loadDoneResolve = null;
+    const _myLoadPromise = new Promise(function(_res){ _loadDoneResolve = _res; });
+    _loadFoldersInFlight = _myLoadPromise;
+    try {
     // Interface contract: restoreTree(tree, {shallow}). shallow:true skips
     // isSameTree compare (none here) and OfflineTree.putTree (full-only per
     // routes.py:287-290), keeps treeLoaded=false with no markTreeReady /
@@ -1794,7 +1859,7 @@
     // _applyTreeData — the offline-first boot restore shares it.
     async function restoreTree(data, opts){
       return _applyTreeData(data, Object.assign({}, opts, {
-        genOk: function(){ return _loadGen === _loadFoldersGen; },
+        genOk: function(){ return _isLoadCurrent(_loadGen, _connGen); },
         wantedPath: _wantedPath,
       }));
     }
@@ -1802,30 +1867,32 @@
     let shallowOk = false;
     try {
       const res = await _fetch(globalThis.BookqApi.treeUrl({depth: 1}), {credentials: 'same-origin'});
-      if (_loadGen !== _loadFoldersGen) return;
+      if (!_isLoadCurrent(_loadGen, _connGen)) return;
       if (!res.ok) throw new Error("http "+res.status);
-      const data = await readFoldersResponse(res, 1, () => _loadGen === _loadFoldersGen);
-      if (_loadGen !== _loadFoldersGen) return;
+      const data = await readFoldersResponse(res, 1, () => _isLoadCurrent(_loadGen, _connGen));
+      if (!_isLoadCurrent(_loadGen, _connGen)) return;
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
       if (!await restoreTree(data, {shallow:true})) return;
+      _commitFolderEtag(data, 1);
       shallowOk = true;
     } catch(e){ console.warn("shallow folders failed, falling through to full", e); }
     // Stage 2: full tree in the background — final DOM identical to full-only.
     const _applyFullRes = async function(res){
-      const data = await readFoldersResponse(res, null, () => _loadGen === _loadFoldersGen);
-      if (_loadGen !== _loadFoldersGen) return false;
+      const data = await readFoldersResponse(res, null, () => _isLoadCurrent(_loadGen, _connGen));
+      if (!_isLoadCurrent(_loadGen, _connGen)) return false;
       if (!Array.isArray(data)) throw new Error("Malformed folders response");
       // Render first, persist in the background — the fetched `data` drives the
       // tree, IDB persistence only matters for the next reload, so it must
       // never delay first paint.
       if (!await restoreTree(data, {shallow:false})) return false;
-      if (_loadGen !== _loadFoldersGen) return false;
+      if (!_isLoadCurrent(_loadGen, _connGen)) return false;
+      _commitFolderEtag(data, null);
       // Stamp only a genuinely-online load: an offline cold start must keep
       // _onlineRevalidateLast=0 so the reconnect revalidation fires instead
       // of being eaten by the freshness gate.
       if (!window.Connectivity || window.Connectivity.isOnline()) _onlineRevalidateLast = Date.now();
       _persistTreeSnapshot(data, {defer:true});
-      // Shallow-warmup idle fill (plan T4): hand the full-tree ETag to the
+      // Shallow-warmup idle fill: hand the full-tree ETag to the
       // render.js poll loop so background-filled archive covers land without
       // a reload. The filled tree re-enters via restoreTree (existing path).
       try {
@@ -1848,10 +1915,10 @@
     const _scheduleFullRetry = function(){
       if (++_fullRetry > 40) return;
       setTimeout(async function(){
-        if (_loadGen !== _loadFoldersGen) return;
+        if (!_isLoadCurrent(_loadGen, _connGen)) return;
         try {
           const res2 = await _fetch(globalThis.BookqApi.endpoints.tree, {credentials: 'same-origin'});
-          if (_loadGen !== _loadFoldersGen) return;
+          if (!_isLoadCurrent(_loadGen, _connGen)) return;
           if (res2.status === 202){ _scheduleFullRetry(); return; }
           if (!res2.ok) throw new Error("http "+res2.status);
           await _applyFullRes(res2);
@@ -1860,7 +1927,7 @@
     };
     try {
       const res = await _fetch(globalThis.BookqApi.endpoints.tree, {credentials: 'same-origin'});
-      if (_loadGen !== _loadFoldersGen) return;
+      if (!_isLoadCurrent(_loadGen, _connGen)) return;
       if (res.status === 202){
         _scheduleFullRetry();
         if (shallowOk){ updateShallowBadge(); return; }
@@ -1873,7 +1940,7 @@
     } catch(e){
       // Recovery work is only valid while this load generation still owns the
       // pipeline — a newer loadFolders must never see stale marks/renders.
-      if (_loadGen !== _loadFoldersGen) return;
+      if (!_isLoadCurrent(_loadGen, _connGen)) return;
       if (shallowOk){
         // Full failed after a shallow paint: stay on the shallow grid with
         // the waiting badge — treeLoaded stays false so neither prefetch nor
@@ -1884,7 +1951,7 @@
       let recovered = false;
       try {
         const snap = await window.OfflineTree.getTree();
-        if (_loadGen !== _loadFoldersGen) return;
+        if (!_isLoadCurrent(_loadGen, _connGen)) return;
         if (Array.isArray(snap) && snap.length>0) {
           // A false return means this load was superseded mid-restore — bail
           // instead of treating it as recovered (no mark/render below).
@@ -1893,10 +1960,10 @@
         }
       } catch(e) { console.warn(e); }
       if (!recovered) {
-        if (_loadGen !== _loadFoldersGen) return;
+        if (!_isLoadCurrent(_loadGen, _connGen)) return;
         if (tree && tree.length) {
           try { await refreshOfflineMap(); } catch(e) { console.warn(e); }
-          if (_loadGen !== _loadFoldersGen) return;
+          if (!_isLoadCurrent(_loadGen, _connGen)) return;
           renderView();
           markTreeReady();
           // Stale tree rendered — resolve so applyUrlState() still restores the view.
@@ -1905,6 +1972,10 @@
           throw e;
         }
       }
+    }
+    } finally {
+      if (_loadFoldersInFlight === _myLoadPromise) _loadFoldersInFlight = null;
+      try { _loadDoneResolve(); } catch(_finErr) {}
     }
   }
 
@@ -2061,6 +2132,9 @@
     });
     filterBtn.classList.toggle('active',
       activeFilters.artist.length > 0 || activeFilters.tag.length > 0);
+    // the ⋯menu button mirrors the active state — it's the only always-
+    // visible hint now that the funnel lives inside the menu.
+    if (headerMenuBtn) headerMenuBtn.classList.toggle('active', filterBtn.classList.contains('active'));
   }
 
   function openFilterSheet() {
@@ -2077,7 +2151,7 @@
     sheetOverlay.classList.remove("hidden");
     sheetOverlay.classList.add("visible");
     bottomSheet.classList.remove("hidden");
-    // Trigger layout then slide in
+    // Unhide must commit a frame before .open or the slide-in never runs
     requestAnimationFrame(() => {
       bottomSheet.classList.add("open");
       sheetCloseBtn.focus();
@@ -2092,7 +2166,13 @@
     // Restore whatever inert state the sidebar's own open/closed class
     // implies (it was forced inert in openFilterSheet regardless of that).
     syncSidebarA11y();
-    filterBtn.focus();
+    // 起動元の filterBtn は ⋯メニュー内にあり、シートが閉じる頃には
+    // display:none 配下なので focus() が効かない。常時表示の ⋯ボタンへ
+    // 戻す。メニュー無しの旧シェルでは表示中の filterBtn にフォールバック。
+    const menuBtn = document.getElementById("header-menu-btn");
+    const focusTarget = (menuBtn && menuBtn.offsetParent !== null) ? menuBtn
+      : (filterBtn && filterBtn.offsetParent !== null) ? filterBtn : null;
+    if (focusTarget) focusTarget.focus();
     sheetOverlay.classList.remove("visible");
     setTimeout(() => {
       bottomSheet.classList.add("hidden");
@@ -2196,7 +2276,7 @@
     return undefined;
   }
 
-  // Physical directory depth of a folder relative to the downloads root,
+  // Physical directory depth of a folder relative to the library root,
   // counted from the raw path rather than the post-flatten tree: scanner.py's
   // single-child flattening merges wrapper folders into a node's name (e.g.
   // "wrap/inner/vol1"), so a real multi-chapter series can end up looking
@@ -2221,7 +2301,6 @@
 
     const parentNode = findParentOf(tree, fullPath, null);
 
-    // If no parent (root level), return only current folder
     if (!parentNode) {
       const parts = fullPath.split("/");
       return [{ name: parts[parts.length - 1], fullPath }];
@@ -2635,8 +2714,8 @@
     }
     // Chapter divider labels sit centred in the gap to the right of the
     // spread that opens the chapter (manga RTL: the previous chapter is to
-    // the right). The gap itself may be wider than CHAPTER_GAP_PX (監査 V3
-    // — gapBefore() widens it so neither neighbour peeks), so centre on the
+    // the right). The gap itself may be wider than CHAPTER_GAP_PX
+    // (gapBefore() widens it so neither neighbour peeks), so centre on the
     // actual computed gap, not the CHAPTER_GAP_PX floor. Labels are windowed
     // (ensureChapterLabels), so iterate the live set via its chapter index.
     for (const el of chapterLabels) {
@@ -4024,6 +4103,10 @@
     const u = sidebar.cloneNode(true);
     u.style.transform = '';          // never inherit a mid-gesture translate
     u.style.transition = 'none';     // per-rAF parallax writes must not lag
+    // The clone is a static snapshot: never freeze an open ⋯menu into it,
+    // and the floating connectivity pill belongs to the live panel only.
+    const _hm = u.querySelector('#header-menu'); if (_hm) _hm.hidden = true;
+    const _os = u.querySelector('#offline-status'); if (_os) _os.remove();
     if (patch) { try { patch(u); } catch(e) { console.warn(e); } }
     navUnderlaySlot.appendChild(u);
     navUnderlay = host;
@@ -4076,6 +4159,7 @@
     const header = document.getElementById('sidebar-header');
     if (header) {
       const hc = header.cloneNode(true);
+      const _hcMenu = hc.querySelector('#header-menu'); if (_hcMenu) _hcMenu.hidden = true;
       const h = hc.querySelector('#browse-header');
       if (h) {
         if (!parent) h.innerHTML = '<span id="browse-root-icon">\uD83D\uDCC1</span> フォルダ';
@@ -4631,7 +4715,7 @@
 
   imgContainer.addEventListener("touchstart", e => {
     if (!images.length) return;
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     const act = window.ViewerGesture.activeTouches(e);
     // A second finger landed mid-swipe: the reader is starting a pinch, not
     // continuing the drag. Abort it here rather than leaving dragActive true.
@@ -4650,7 +4734,7 @@
   }, {passive: true});
 
   imgContainer.addEventListener("touchmove", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive) {
       // Late arming: the lone edge-started touch has moved ARM_PX and stopped
       // being a palm — with no touchstart of its own. Measure the drag from
@@ -4710,7 +4794,7 @@
   }, {passive: false});
 
   imgContainer.addEventListener("touchend", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive){
       // A never-promoted edge touch lifting: forget it, or the NEXT edge-started
       // touch could not register as pending. (Its tap still reaches the zones
@@ -4828,7 +4912,7 @@
   });
 
   imgContainer.addEventListener("touchcancel", e => {
-    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan (Task 5)
+    if (window.Zoom.isActive()) return; // zoomed: zoom.js owns 1-finger pan
     if (!dragActive) {
       if (pendingPalmId !== null && findTouch(e.changedTouches, pendingPalmId)) pendingPalmId = null;
       return;
@@ -4842,24 +4926,96 @@
     if (dragDecided) snapTo(currentIdx);
   });
 
-  // ── footer: toggle tile ↔ list ↔ card ──
-  const footerBtn = document.getElementById("footer-refresh-btn");
-  function updateFooterBtn(){
-    const labels = { tile: "🎨", list: "📋", card: "🃏" };
-    footerBtn.textContent = labels[viewMode] || "🎨";
-    footerBtn.title = "表示: " + ({tile:"タイル",list:"リスト",card:"カード"}[viewMode] || viewMode);
+  // ── header ⋯menu: filter / edit / view / reload / harness / logout ──
+  // The view-mode radios are the successor of the old footer cycle button —
+  // URL restore still pokes window.updateViewMenu (hash.js) to resync them.
+  const headerMenuBtn = document.getElementById("header-menu-btn");
+  const headerMenu = document.getElementById("header-menu");
+  function updateViewMenu(){
+    const ids = { tile: "menu-view-tile", list: "menu-view-list", card: "menu-view-card" };
+    for (const [mode, id] of Object.entries(ids)) {
+      const el = document.getElementById(id);
+      if (el) el.setAttribute("aria-checked", viewMode === mode ? "true" : "false");
+    }
   }
-  try { window.updateFooterBtn = updateFooterBtn; } catch(e) { console.warn(e); }
-  footerBtn.addEventListener("click", async () => {
-    const modes = ["tile", "list", "card"];
-    const idx = modes.indexOf(viewMode);
-    viewMode = modes[(idx + 1) % modes.length];
-    updateFooterBtn();
+  try { window.updateViewMenu = updateViewMenu; } catch(e) { console.warn(e); }
+  // Returns true when it actually closed an open menu — the global Escape
+  // chain and closeSidebar use that to tell "menu ate the event" apart.
+  function closeHeaderMenu(opts){
+    if (!headerMenu || headerMenu.hidden) return false;
+    headerMenu.hidden = true;
+    headerMenuBtn.setAttribute("aria-expanded", "false");
+    if (!opts || opts.focus !== false) headerMenuBtn.focus();
+    return true;
+  }
+  try { window.closeHeaderMenu = closeHeaderMenu; } catch(e) { console.warn(e); }
+  function openHeaderMenu(){
+    headerMenu.hidden = false;
+    headerMenuBtn.setAttribute("aria-expanded", "true");
+    const first = headerMenu.querySelector("[role=menuitem]:not([disabled]),[role=menuitemradio]");
+    if (first) first.focus();
+  }
+  if (headerMenuBtn && headerMenu){
+    headerMenuBtn.addEventListener("click", e => {
+      e.stopPropagation();   // #sidebar-header's delegated close must not see it
+      if (headerMenu.hidden) openHeaderMenu(); else closeHeaderMenu();
+    });
+    // Capture: the menu hides BEFORE the item's own action runs — e.g.
+    // #filter-btn's listener stopPropagations at target, which a bubble
+    // closer would never survive. Dispatch continues to the (now hidden)
+    // item either way since the path is already computed.
+    headerMenu.addEventListener("click", e => {
+      if (e.target.closest("[role=menuitem],[role=menuitemradio]")) closeHeaderMenu();
+    }, true);
+    headerMenu.addEventListener("click", e => { e.stopPropagation(); });
+    headerMenu.addEventListener("keydown", e => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+      const items = Array.from(headerMenu.querySelectorAll("[role=menuitem],[role=menuitemradio]")).filter(el => !el.disabled);
+      if (!items.length) return;
+      e.preventDefault(); e.stopPropagation();
+      let i = items.indexOf(document.activeElement);
+      if (e.key === "Home") i = 0;
+      else if (e.key === "End") i = items.length - 1;
+      else i = (i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      items[i].focus();
+    });
+    document.addEventListener("click", e => {
+      if (headerMenu.hidden) return;
+      if (e.target.closest("#header-menu") || e.target.closest("#header-menu-btn")) return;
+      closeHeaderMenu({focus:false});
+    });
+  }
+  async function setViewMode(mode){
+    if (["tile", "list", "card"].indexOf(mode) < 0) return;
+    viewMode = mode;
+    updateViewMenu();
     try { await refreshOfflineMap(); } catch(e) { console.warn(e); }
     renderView();
     window.HashRouter.writeBrowseStateReplace();
+  }
+  for (const mode of ["tile", "list", "card"]) {
+    const el = document.getElementById("menu-view-" + mode);
+    if (el) el.addEventListener("click", () => { setViewMode(mode); });
+  }
+  const menuReload = document.getElementById("menu-reload");
+  if (menuReload) menuReload.addEventListener("click", async () => {
+    // iOS library.refresh() parity: rescan the index, then reload the tree
+    // keeping the current folder.
+    try {
+      const res = await _connFetch()(globalThis.BookqApi.endpoints.indexRefresh, {method: "POST"});
+      if (!res.ok) throw new Error("http " + res.status);
+      await loadFolders({preservePath: true});
+      // 検索中はツリー更新だけでは searchResults が古いままなので、
+      // 現クエリ+フィルタで取り直す（visibility切替時と同じ再検索経路）。
+      if (searchMode && typeof doSearch === "function") {
+        try { await doSearch(); } catch(e2) { console.warn(e2); }
+      }
+    } catch(e) {
+      console.warn(e);
+      try { showErrorToast("再読み込みに失敗しました"); } catch(e2) { console.warn(e2); }
+    }
   });
-  updateFooterBtn();
+  updateViewMenu();
 
   // ── continue-reading button ──
   function updateResumeButton() {
@@ -5006,6 +5162,8 @@
     restoreOfflineFirst, _mergeOfflineTree, _offlineWorkReadable, _subtreeHasDownload,
     _isEpisodeNode, _hasAnyDownload, getBrowseChildrenAt,
     get etagByKey(){ return etagByKey; },
+    get onlineConnectionGen(){ return _onlineConnectionGen; },
+    get onlineRevalidateLast(){ return _onlineRevalidateLast; },
     setTree(v){ tree=v; setFullPathsAndIndex(tree); invalidateLeafPaths(); updateBrowseHeader(); renderView(); },
     getTree(){ return tree; },
     get treeLoaded(){ return treeLoaded; },
@@ -5131,6 +5289,11 @@
   // 60 秒窓で 4 回目以降の online 遷移だけ調停を抑止する。
   var _recentOnlineTransitions = [];
   function _onOnline(){
+    // NOTE: no connection-generation bump here — a flap-suppressed online
+    // (see below) starts no pipeline, so bumping would orphan the load that
+    // is still legitimately in flight. Link loss already bumped the
+    // generation via the offline handlers; a fresh loadFolders/revalidate
+    // started below owns the current epoch.
     _onlineRevalidateLast = 0;
     var _now = Date.now();
     _recentOnlineTransitions = _recentOnlineTransitions.filter(function(t){ return _now - t < 60000; });
@@ -5162,6 +5325,7 @@
     try { renderView(); } catch(e) { console.warn(e); }
     if (state === "online") _onOnline();
     else if (state === "offline"){
+      _onlineConnectionGen++;
       // 接続中にキューした open/移動を正式判定へ drain — 各ガードが
       // オフラインの拒否 (トースト/トップ戻し) を実行する。
       _drainPendingNav();

@@ -41,7 +41,7 @@
     return _murl("/image/" + encodePath(inner));
   }
 
-  // Browse-list cover builder (Todo 4): same per-segment encoding as
+  // Browse-list cover builder: same per-segment encoding as
   // imageUrl, but targets the thumbnail endpoint. w is one of 200|400|800.
   // imageUrl stays the viewer + download source (never route those here).
   function thumbUrl(folder, name, w) {
@@ -139,11 +139,11 @@
   // dpr-dependent w plus v=2) — enumerate-vs-DOM is not byte-identical there,
   // which is fine because prefetch eligibility is DOM-scan driven and the
   // harness hit-rate was never exact on multi tiles anyway.
-  // Cache policy (Todo 4): /thumb entries live in the
+  // Cache policy: /thumb entries live in the
   // same per-work cache as /image (prefetch puts + SW caches.match hit the
   // exact same URL string, so no orphan entries); storeAdapter downloads stay
   // on /image (full-res reading source, untouched).
-  // Todo 3: collect(nodes, {singleOnly:true}) emits ONLY the single cover per
+  // collect(nodes, {singleOnly:true}) emits ONLY the single cover per
   // node at coverWidth() — exactly what the single-first DOM requests on this
   // device, so no orphan entry is created and first-to-verdict stays
   // unified (no double-fetch). Card-img still requests w=400 explicitly and
@@ -182,7 +182,7 @@
     function urls(nodes, opts) {
       return collect(nodes, opts).map((e) => e.url);
     }
-    // Todo 5 integration name: collectThumbUrls(nodes, {singleOnly:true}).
+    // Integration name: collectThumbUrls(nodes, {singleOnly:true}).
     function collectThumbUrls(nodes, opts) {
       return collect(nodes, opts);
     }
@@ -250,13 +250,11 @@
   }
 
   let _treeWriterGen = 0;
-  let _treeWriterWorker = null;
   let _treeWriterSlot = null;
   function _cancelTreeWrites() {
     _treeWriterGen++;
     const slot = _treeWriterSlot;
     _treeWriterSlot = null;
-    _treeWriterWorker = null;
     if (slot) { try { slot.cancel(); } catch (e) {} }
   }
 
@@ -333,7 +331,7 @@
 
   const OfflineTree = (function () {
     function openKV() { return openDB(); }
-    // Todo 5: opts.defer schedules the write on requestIdleCallback (falls
+    // opts.defer schedules the write on requestIdleCallback (falls
     // back to an immediate write where idle callbacks don't exist) so warm
     // revalidation never blocks the redraw. Default stays immediate so
     // reload-restore tests observe the snapshot without extra waiting.
@@ -368,9 +366,9 @@
       });
     }
     async function putTree(data, opts) {
+      if (!Array.isArray(data)) return Promise.resolve();
       _cancelTreeWrites();
       const gen = _treeWriterGen;
-      if (!Array.isArray(data)) return Promise.resolve();
       if (opts && opts.defer && typeof requestIdleCallback === "function") {
         return _deferTreeJob(gen, function () { return _writeTree(data, gen); });
       }
@@ -386,10 +384,10 @@
       return { data };
     }
     function putJson(jsonText, opts) {
+      if (typeof jsonText !== "string" || !jsonText.length) return Promise.resolve();
       _cancelTreeWrites();
       const gen = _treeWriterGen;
       const treeEnvelope = !!(opts && opts.treeEnvelope);
-      if (typeof jsonText !== "string" || !jsonText.length) return Promise.resolve();
       function start() {
         return new Promise((resolve, reject) => {
           function fallback() {
@@ -413,7 +411,6 @@
             worker.onerror = null;
             if (ownGlobals) {
               if (_treeWriterSlot === slot) _treeWriterSlot = null;
-              if (_treeWriterWorker === worker) _treeWriterWorker = null;
             }
             try { worker.terminate(); } catch (e) {}
           }
@@ -435,7 +432,6 @@
               fallback();
             });
           }
-          _treeWriterWorker = worker;
           _treeWriterSlot = slot;
           worker.onmessage = function (e) {
             if (settled || gen !== _treeWriterGen) return;

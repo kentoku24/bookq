@@ -30,18 +30,36 @@ body{position:fixed;inset:0}
 	#sidebar.open{transform:translateX(0)}
 		#sidebar-header{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 12px;box-shadow:0 1px 0 rgba(255,255,255,0.04),0 4px 12px rgba(0,0,0,0.3)}
 		#sidebar-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:auto;touch-action:pan-y;display:flex;flex-direction:column}
+		#sidebar-body{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}
 		#sidebar-header h1{font-size:16px;font-weight:600;color:#e0e0e0;white-space:nowrap;flex-shrink:0;letter-spacing:-0.01em;line-height:1.2;max-width:calc(50% - 32px);min-width:0;overflow:hidden;text-overflow:ellipsis}
-		/* pair launcher is centered in the tile header (2台見開き entry);
-		 * the right cluster stays above it so a tap near the edge still
-		 * hits フィルタ/オンライン status, never a stray MATCH. */
-		#sidebar-header #pair-btn{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
-		#sidebar-header #pair-btn:active{transform:translate(-50%,-50%) scale(0.95)}
-		#sidebar-header #filter-btn{margin-left:auto;position:relative;z-index:1}
-		#sidebar-header #offline-status{position:relative;z-index:1}
-		#offline-status{font-size:11px;color:#8ab4f8;white-space:nowrap;margin-left:0;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;min-height:44px;padding:0 8px;margin:-12px 0}
+		/* trailing icon cluster hugs the right edge — iOS toolbar parity
+		 * (pair + ⋯menu). Anything else in the header stays on the
+		 * title side so it can't crowd the cluster. */
+		#sidebar-header #pair-btn{margin-left:auto}
+		#sidebar-header #pair-btn:active{transform:scale(0.95)}
+		#header-menu-btn{background:none;border:none;color:#888;font-size:16px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;flex-shrink:0;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;transition:background .15s,color .15s}
+		#header-menu-btn:hover{background:rgba(255,255,255,0.08);color:#aaa}
+		#header-menu-btn:active{background:rgba(255,255,255,0.15);transform:scale(0.95)}
+		#header-menu-btn.active{color:#8ab4f8}
+		#header-menu-btn:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px}
+		#header-menu{position:absolute;top:100%;right:8px;z-index:56;min-width:200px;max-height:calc(100vh - 64px);max-height:calc(100dvh - 64px);overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-y;background:#1b212b;border:1px solid #39414f;border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.5);padding:4px;animation:popIn .15s ease}
+		#header-menu[hidden]{display:none}
+		#header-menu button,#header-menu a{display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;min-height:44px;background:none;border:none;color:#dfe5ee;font-size:13.5px;cursor:pointer;text-align:left;font-family:inherit;line-height:1.35;text-decoration:none;border-radius:8px}
+		#header-menu button:hover,#header-menu a:hover{background:rgba(255,255,255,.06)}
+		#header-menu button:disabled{opacity:.4;cursor:default}
+		#header-menu hr{border:none;border-top:1px solid #39414f;margin:4px 0}
+		#header-menu [role=menuitemradio]::before{content:"";display:inline-block;width:14px;color:#8ab4f8}
+		#header-menu [role=menuitemradio][aria-checked="true"]::before{content:"✓"}
+		#header-menu [aria-checked="true"]{color:#8ab4f8}
+		#header-menu #filter-btn.active{color:#8ab4f8}
+		#header-menu #lib-edit-btn[aria-pressed="true"]{color:#8ab4f8}
+		/* connectivity pill — floats over the grid's bottom-left on every
+		 * level (iOS OnlineStatusBadge parity); tap retries while offline,
+		 * online keeps the harness link. */
+		#offline-status{position:absolute;left:12px;bottom:12px;z-index:3;font-size:11px;color:#8ab4f8;white-space:nowrap;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;min-height:44px;padding:0 12px;border-radius:999px;background:rgba(30,30,30,.85);border:1px solid #333;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 		#offline-status:visited{color:#8ab4f8}
 		#offline-status:hover{color:#a8c4ff;text-decoration:underline}
-		#offline-status:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px;border-radius:2px}
+		#offline-status:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px;border-radius:999px}
 		#offline-status.offline{color:#c9a24f}
 		#offline-status.offline:visited{color:#c9a24f}
 		#offline-status.offline:hover{color:#dabb6a}
@@ -103,12 +121,6 @@ body{position:fixed;inset:0}
 	#sidebar-footer{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;font-size:11px;color:#9a9a9a;box-shadow:0 -1px 0 rgba(255,255,255,0.04),0 -4px 12px rgba(0,0,0,0.2)}
 	#sidebar-footer .footer-right{flex:1;text-align:right}
 	#sidebar-footer #storage-text{font-size:11px;color:#9a9a9a;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:1;margin-left:8px}
-	#footer-refresh-btn{background:none;border:1px solid #333;color:#888;font-size:14px;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1;transition:background .15s,color .15s;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
-	#footer-refresh-btn:hover{background:#1e1e1e;color:#ccc}
-	#footer-refresh-btn:active{background:#2a2a2a}
-	#logout-btn{background:none;border:1px solid #333;color:#888;font-size:14px;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1;text-decoration:none;transition:background .15s,color .15s;min-width:44px;min-height:44px;display:inline-flex;align-items:center;justify-content:center}
-	#logout-btn:hover{background:#1e1e1e;color:#c44}
-	#harness-link{display:inline-flex;align-items:center;min-height:44px;padding:0 6px;white-space:nowrap}
 	#app-version{white-space:nowrap}
 	#menu-btn:active{background:rgba(255,255,255,0.15);transform:scale(0.95)}
 	.tile:active{transform:scale(0.97);border-color:#666;transition:transform 80ms ease-out}
@@ -118,8 +130,6 @@ body{position:fixed;inset:0}
 	.tile:has(.offline-btn:active),
 	.card:has(.offline-btn:active),
 	#tile-grid.card-mode .card:has(.offline-btn:active){transform:none;border-color:#2a2a2a}
-	#footer-refresh-btn:active{background:#2a2a2a;color:#ccc}
-	#logout-btn:active{background:#2a2a2a;color:#c44}
 	#page-slider::-webkit-slider-thumb:active{background:#ccc;transform:scale(1.15)}
 	#page-slider::-moz-range-thumb:active{background:#ccc;transform:scale(1.15)}
 	/* list-mode items (when #tile-grid.list-mode) */
@@ -267,6 +277,8 @@ body.overview-open #img-retry{pointer-events:none!important;opacity:0}
   #folder-name{order:4;width:100%;max-width:none;font-size:11px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0}
   /* same order as #counter — source order keeps ⊞ to its right */
   #overview-btn{order:3}
+  /* strip stays on row 1, last — without an order it would sort first */
+  #pair-status{order:3}
 }
 
 /* ── overview: series-wide RTL page grid (viewer/overview.js) ── */
@@ -329,7 +341,7 @@ body.landscape-single #spread-shift{display:none}
   #sidebar,#toolbar,#img-track,.tile,#hint,
   #spread-controls,#spread-toggle,#spread-shift,#tapmode-controls,#tapmode-controls button,#menu-btn,
   .item,.item .chevron,#spread-shift,
-  #footer-refresh-btn,#logout-btn,#page-slider{
+  #header-menu,#header-menu button,#header-menu a,#page-slider{
     transition-duration:0.01ms !important;
     animation-duration:0.01ms !important;
   }
@@ -360,7 +372,11 @@ body.landscape-single #spread-shift{display:none}
 #resume-btn:hover{background:rgba(40,40,40,0.9);border-color:rgba(74,122,196,0.6)}
 #resume-btn:active{background:rgba(50,50,50,0.95);transform:translateX(-50%) scale(0.97)}
 #resume-btn.hidden{display:none !important}
-#sidebar.has-resume #tile-grid{padding-bottom:72px}
+/* resume pill (fixed, bottom:76px + ~46px tall) must clear the last tile —
+ * the thinner info-only footer pushed the scroll edge ~30px lower, so the
+ * old 72px clearance no longer suffices. Also covers the floating
+ * #offline-status pill (bottom:12px + ~46px) at the grid's bottom-left. */
+#sidebar.has-resume #tile-grid{padding-bottom:112px}
 
 	/* ── filter chips row ── */
 	#filter-chips{display:flex;gap:6px;padding:4px 12px 8px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none}
@@ -439,12 +455,6 @@ body.landscape-single #spread-shift{display:none}
 	.card-badges{display:flex;flex-wrap:wrap;gap:3px;margin-top:2px}
 	.card-badges .metadata-badge{font-size:9px;padding:1px 5px;border-radius:3px;max-width:100px}
 
-	/* ── filter toggle button in header ── */
-	#filter-btn{background:none;border:none;color:#888;font-size:16px;cursor:pointer;padding:2px 4px;border-radius:4px;line-height:1;flex-shrink:0;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center;transition:background .15s,color .15s}
-	#filter-btn:hover{background:rgba(255,255,255,0.08);color:#aaa}
-	#filter-btn:active{background:rgba(255,255,255,0.15);transform:scale(0.95)}
-	#filter-btn.active{color:#8ab4f8}
-
 	/* ── search result list mode ── */
 	#tile-grid.list-mode .search-result .name{color:#bbb}
 	#tile-grid.list-mode .search-result .meta{font-size:11px;color:#666;margin-top:2px;display:flex;flex-wrap:wrap;gap:4px}
@@ -508,14 +518,20 @@ body.landscape-single #spread-shift{display:none}
 #pair-btn:active{background:rgba(255,255,255,.15);transform:scale(0.95)}
 /* session strip: one-line, tappable (→ session panel), only while a
  * session is (or is becoming) real — idle/ended hide it via [hidden] */
-#pair-status{position:fixed;top:calc(104px + env(safe-area-inset-top,0px));right:12px;z-index:4;display:flex;flex-direction:row;align-items:center;gap:0;font-size:11px;letter-spacing:0.01em;transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0);cursor:pointer}
+#pair-status{display:flex;flex-direction:row;align-items:center;gap:0;font-size:11px;letter-spacing:0.01em;transition:opacity .3s cubic-bezier(0.25,0.1,0.25,1.0)}
+/* Inside #toolbar the strip rides existing chrome instead of floating
+ * over page content (#159); the fixed overlay is only the fallback for
+ * toolbar-less shells. */
+body>#pair-status{position:fixed;top:calc(104px + env(safe-area-inset-top,0px));right:12px;z-index:4}
 #pair-status[hidden]{display:none}
 #pair-status.hidden{opacity:0;pointer-events:none}
-#pair-status>span{display:inline-block;background:rgba(20,24,32,.85);border:1px solid #39414f;color:#aab3c2;white-space:nowrap}
-#pair-status>span:first-child{border-radius:10px 0 0 10px;padding:3px 6px 3px 8px;border-right:none}
-#pair-status>span:last-child{border-radius:0 10px 10px 0;padding:3px 8px 3px 6px;border-left:none}
-#pair-status>span:only-child{border-radius:10px;padding:3px 8px;border:1px solid #39414f}
-#pair-status>[hidden]{display:none}
+#pair-status-btn{background:none;border:none;padding:0 4px;color:inherit;font:inherit;cursor:pointer;display:flex;flex-direction:row;align-items:center;justify-content:center;min-width:44px;min-height:44px;border-radius:10px;-webkit-tap-highlight-color:transparent}
+#pair-status-btn:focus-visible{outline:2px solid #8ab4f8;outline-offset:2px}
+#pair-status-btn>span{display:inline-block;background:rgba(20,24,32,.85);border:1px solid #39414f;color:#aab3c2;white-space:nowrap}
+#pair-status-btn>span:first-child{border-radius:10px 0 0 10px;padding:3px 6px 3px 8px;border-right:none}
+#pair-status-btn>span:last-child{border-radius:0 10px 10px 0;padding:3px 8px 3px 6px;border-left:none}
+#pair-status-btn>span:only-child{border-radius:10px;padding:3px 8px;border:1px solid #39414f}
+#pair-status-btn>[hidden]{display:none}
 #pair-status[data-status="connected"] #pair-status-text{color:#8ab4f8;border-color:rgba(74,122,196,.6)}
 #pair-status[data-status="reconnecting"] #pair-status-text,
 #pair-status[data-status="peer-away"] #pair-status-text{color:#c9a24f;border-color:#6b5a2e}
@@ -589,3 +605,20 @@ body.fv-showall #visibility-status:not(:empty){display:flex}
    unhide toggle stay usable in 全表示 mode. */
 .visibility-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;line-height:1.4;background:rgba(196,68,68,.18);color:#ffb4b4;border:1px solid rgba(196,68,68,.4);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 #tile-grid.list-mode .item .visibility-badge{margin-left:6px;flex:none}
+
+/* ── library edit (追加+削除) — edit-mode bar, per-tile 🗑, drop hint ── */
+#lib-edit-bar{display:flex;align-items:center;gap:8px;padding:4px 16px 8px;font-size:12px}
+#lib-edit-bar[hidden]{display:none}
+#lib-upload-btn,#lib-edit-done{min-height:32px;padding:3px 12px;border-radius:6px;border:1px solid #555;background:#1a1a1a;color:#ccc;font-size:12px;cursor:pointer;font-family:inherit}
+#lib-upload-btn:hover,#lib-edit-done:hover{background:#222;border-color:#777}
+#lib-edit-status{flex:1;min-width:0;font-size:11px;color:#9a9a9a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 🗑 on tile/card: bottom-right (.visibility-toggle owns top-left,
+   .offline-btn top-right). 2タップ目 (lib-del-arm) で赤化。 */
+.lib-del{position:absolute;bottom:4px;right:4px;width:44px;height:44px;padding:0;border:none;border-radius:50%;display:flex;align-items:center;justify-content:center;z-index:2;background:rgba(0,0,0,.65);color:#fff;font-size:16px;cursor:pointer;transition:background-color .18s ease,transform .12s ease}
+.lib-del:hover{filter:brightness(1.18)}
+.lib-del:active{transform:scale(0.95)}
+.lib-del.lib-del-arm{background:rgba(196,68,68,.85)}
+#tile-grid.list-mode .item .lib-del{position:static;flex:none;order:0;margin-left:auto;width:36px;height:36px;font-size:13px}
+#tile-grid .tile,#tile-grid .card,#tile-grid .item{position:relative}
+/* drop hint — 編集モード中のサイドバーへのドラッグ */
+#sidebar-scroll.lib-drop{outline:2px dashed #4a7ac4;outline-offset:-4px}

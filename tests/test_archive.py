@@ -10,7 +10,7 @@ viewer-rs ``server`` fixture (#503 rs-only):
 
 Python internals retired with ``app/`` in #503 (``tests/test_archive_internals.py`` deleted).
 
-The module fixture stages the archives in the shared ``downloads_tree``
+The module fixture stages the archives in the shared ``library_tree``
 and publishes them with a synchronous index refresh; it removes them
 afterwards so the shared tree is unchanged for other modules.
 
@@ -184,29 +184,29 @@ _ARCHIVE_DIRS = ["aport_simple", "aport_sub"]
 
 
 @pytest.fixture(scope="module", autouse=True)
-def archive_lib(server, downloads_tree: Path):
+def archive_lib(server, library_tree: Path):
     """Stage the archive fixtures in the shared tree and publish via refresh."""
     from tests.fixtures.rar5 import make_rar5_store
 
-    work = downloads_tree / "_aport_work"
+    work = library_tree / "_aport_work"
     work.mkdir(exist_ok=True)
     for name in ["10.png", "2.png", "1.png"]:
         _make_png(work / f"src_{name}")
-    with zipfile.ZipFile(downloads_tree / "work.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "work.zip", "w") as zf:
         zf.write(work / "src_10.png", "10.png")
         zf.write(work / "src_2.png", "2.png")
         zf.write(work / "src_1.png", "ch1/1.png")
         zf.writestr("../evil.png", "x")
         zf.writestr("/abs.png", "x")
         zf.writestr("readme.txt", "hi")
-    with zipfile.ZipFile(downloads_tree / "empty.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "empty.zip", "w") as zf:
         zf.writestr("readme.txt", "no images here")
-    with zipfile.ZipFile(downloads_tree / "book.cbz", "w") as zf:
+    with zipfile.ZipFile(library_tree / "book.cbz", "w") as zf:
         zf.write(work / "src_1.png", "p01.png")
         zf.write(work / "src_2.png", "p02.png")
-    _make_pdf(downloads_tree / "doc.pdf", pages=2)
+    _make_pdf(library_tree / "doc.pdf", pages=2)
     make_rar5_store(
-        downloads_tree / "book.cbr",
+        library_tree / "book.cbr",
         [
             ("10.png", (work / "src_10.png").read_bytes()),
             ("2.png", (work / "src_2.png").read_bytes()),
@@ -215,29 +215,29 @@ def archive_lib(server, downloads_tree: Path):
             ("readme.txt", b"hi"),
         ],
     )
-    (downloads_tree / "broken.rar").write_bytes(b"Rar!\x1a\x07\x01\x00garbage")
+    (library_tree / "broken.rar").write_bytes(b"Rar!\x1a\x07\x01\x00garbage")
     png = (work / "src_1.png").read_bytes()
     _make_epub(
-        downloads_tree / "manga.epub",
+        library_tree / "manga.epub",
         [("c.xhtml", "z_cover.png"), ("b.xhtml", "a_p1.png"), ("a.xhtml", "m_p2.png")],
         png,
     )
     _make_epub(
-        downloads_tree / "svg.epub",
+        library_tree / "svg.epub",
         [("p1.xhtml", "page 1.png"), ("p2.xhtml", "page 2.png")],
         png,
         svg=True,
     )
     _make_epub(
-        downloads_tree / "broken.epub",
+        library_tree / "broken.epub",
         [("c.xhtml", "z_cover.png"), ("b.xhtml", "a_p1.png")],
         png,
         broken=True,
     )
-    simple = downloads_tree / "aport_simple"
+    simple = library_tree / "aport_simple"
     simple.mkdir(exist_ok=True)
     _make_png(simple / "1.png")
-    sub = downloads_tree / "aport_sub"
+    sub = library_tree / "aport_sub"
     sub.mkdir(exist_ok=True)
     with zipfile.ZipFile(sub / "nested.cbz", "w") as zf:
         zf.write(work / "src_1.png", "a.png")
@@ -250,9 +250,9 @@ def archive_lib(server, downloads_tree: Path):
     import shutil
 
     for name in _ARCHIVE_FILES:
-        (downloads_tree / name).unlink(missing_ok=True)
+        (library_tree / name).unlink(missing_ok=True)
     for name in _ARCHIVE_DIRS:
-        shutil.rmtree(downloads_tree / name, ignore_errors=True)
+        shutil.rmtree(library_tree / name, ignore_errors=True)
     _post(server, "/api/v1/index/refresh")
 
 
@@ -368,11 +368,11 @@ def test_serve_nested_archive_entry(server):
     assert headers.get("etag")
 
 
-def test_serve_zip_entry_with_non_ascii_name(server, downloads_tree: Path, tmp_path: Path):
+def test_serve_zip_entry_with_non_ascii_name(server, library_tree: Path, tmp_path: Path):
     """A Japanese inner entry name must not break the ETag header or delivery."""
     _make_png(tmp_path / "src.png")
     inner = "日本語フォルダ/表紙_日本語.png"
-    with zipfile.ZipFile(downloads_tree / "aport_jp.zip", "w") as zf:
+    with zipfile.ZipFile(library_tree / "aport_jp.zip", "w") as zf:
         zf.write(tmp_path / "src.png", inner)
     try:
         assert _post(server, "/api/v1/index/refresh") == 200
@@ -392,7 +392,7 @@ def test_serve_zip_entry_with_non_ascii_name(server, downloads_tree: Path, tmp_p
         assert status4 == 200
         assert raw4[:2] == b"\xff\xd8"
     finally:
-        (downloads_tree / "aport_jp.zip").unlink(missing_ok=True)
+        (library_tree / "aport_jp.zip").unlink(missing_ok=True)
         _post(server, "/api/v1/index/refresh")
 
 

@@ -71,10 +71,10 @@ def _post_raw(server, raw, content_type="application/json"):
             return e.code, None, _headers(e)
 
 
-def _get_nofollow(server, path):
+def _get_nofollow(server, path, headers=None):
     parsed = urllib.parse.urlparse(server)
     conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
-    conn.request("GET", path)
+    conn.request("GET", path, headers=headers or {})
     resp = conn.getresponse()
     body = resp.read()
     headers = {k.lower(): v for k, v in resp.getheaders()}
@@ -174,5 +174,66 @@ def test_login_native_valid_redirect(server):
 
 def test_login_browser_redirect(server):
     status, headers, _ = _get_nofollow(server, "/auth/login")
+    assert status in (302, 303, 307)
+    assert "accounts.google.com" in headers.get("location", "")
+
+
+# ── state-changing GET CSRF guard (#373) ────────────────────────────
+
+
+def test_login_rejects_cross_site_initiation(server):
+    # A cross-site navigation must not write the bookq_oauth tx cookie —
+    # that is the login-CSRF channel that plants an attacker PKCE
+    # challenge in the victim's browser.
+    for site in ("cross-site", "same-site"):
+        status, headers, _ = _get_nofollow(
+            server, "/auth/login", headers={"Sec-Fetch-Site": site}
+        )
+        assert status == 403, site
+        assert "bookq_oauth" not in headers.get("set-cookie", "")
+
+
+def test_logout_rejects_cross_site_initiation(server):
+    # Forced-logout CSRF: the state-changing GET must not clear session
+    # for a cross-site initiator.
+    status, headers, _ = _get_nofollow(
+        server, "/auth/logout", headers={"Sec-Fetch-Site": "cross-site"}
+    )
+    assert status == 403
+    assert "set-cookie" not in headers
+
+
+def test_login_logout_allow_same_origin_and_no_metadata(server):
+    # The browser's own navigations keep working: same-origin/none
+    # fetch metadata and no metadata at all (older WebKit) all pass.
+    for site in ("same-origin", "none"):
+        status, headers, _ = _get_nofollow(
+            server, "/auth/login", headers={"Sec-Fetch-Site": site}
+        )
+        assert status in (302, 303, 307), site
+        assert "accounts.google.com" in headers.get("location", "")
+    status, headers, _ = _get_nofollow(server, "/auth/logout")
+    assert status in (302, 303, 307)
+
+
+def test_login_origin_must_name_this_host(server):
+    status, _, _ = _get_nofollow(
+        server,
+        "/auth/login",
+        headers={
+            "Origin": "https://evil.example",
+            "Host": "127.0.0.1",
+        },
+    )
+    assert status == 403
+    # An Origin naming this host passes the gate.
+    status, headers, _ = _get_nofollow(
+        server,
+        "/auth/login",
+        headers={
+            "Origin": "http://127.0.0.1",
+            "Host": "127.0.0.1",
+        },
+    )
     assert status in (302, 303, 307)
     assert "accounts.google.com" in headers.get("location", "")

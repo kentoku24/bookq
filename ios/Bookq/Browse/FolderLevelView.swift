@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 
 /// One browse level: grid/list/card of folder tiles + "read self" tiles for

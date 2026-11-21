@@ -38,30 +38,30 @@ final class LibraryUITests: XCTestCase {
                 break
             }
         }
-        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        app.assertExists(field, within: 15)
         return field
     }
 
     func testTopLevelFoldersRender() throws {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60),
-                      "top-level 'Series' tile never appeared")
-        XCTAssertTrue(tile("Other").waitForExistence(timeout: 15),
-                      "top-level 'Other' tile never appeared")
-        XCTAssertTrue(app.staticTexts["2 件"].waitForExistence(timeout: 15),
-                      "folder count label '2 件' never appeared")
+        app.assertExists(tile("Series"), within: 60,
+                         "top-level 'Series' tile never appeared")
+        app.assertExists(tile("Other"), within: 15,
+                         "top-level 'Other' tile never appeared")
+        app.assertExists(app.staticTexts["2 件"], within: 15,
+                         "folder count label '2 件' never appeared")
     }
 
     func testDrillDownShowsVolumeTiles() throws {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60))
+        app.assertExists(tile("Series"), within: 60)
         tile("Series").tap()
-        XCTAssertTrue(tile("Series/vol1").waitForExistence(timeout: 30),
-                      "drilled level did not show Series/vol1")
-        XCTAssertTrue(tile("Series/vol2").waitForExistence(timeout: 15),
-                      "drilled level did not show Series/vol2")
+        app.assertExists(tile("Series/vol1"), within: 30,
+                         "drilled level did not show Series/vol1")
+        app.assertExists(tile("Series/vol2"), within: 15,
+                         "drilled level did not show Series/vol2")
     }
 
     func testSearchModeToggles() throws {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60))
+        app.assertExists(tile("Series"), within: 60)
         let field = openSearchField()
         field.tap()
         field.typeText("Series")
@@ -69,9 +69,9 @@ final class LibraryUITests: XCTestCase {
         // Fixture folders carry no comic metadata, so the global index
         // returns zero hits — the important UX signal is that the browse
         // grid is REPLACED by the search surface (empty state text).
-        XCTAssertTrue(
-            app.staticTexts["一致する結果がありません"]
-                .waitForExistence(timeout: 30),
+        app.assertExists(
+            app.staticTexts["一致する結果がありません"],
+            within: 30,
             "search mode never engaged (empty-results text missing)")
         XCTAssertFalse(tile("Series").exists,
                        "browse tile still present while search is active")
@@ -91,30 +91,49 @@ final class LibraryUITests: XCTestCase {
                 app.keyboards.keys["delete"].tap()
             }
         }
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 30),
-                      "browse grid did not return after search exit")
+        app.assertExists(tile("Series"), within: 30,
+                         "browse grid did not return after search exit")
     }
 
     func testLayoutModeSwitch() throws {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60))
+        app.assertExists(tile("Series"), within: 60)
         app.buttons["layoutMenuBtn"].tap()
         let listItem = app.buttons["リスト"]
-        XCTAssertTrue(listItem.waitForExistence(timeout: 10),
-                      "layout menu did not offer リスト")
+        app.assertExists(listItem, within: 10,
+                         "layout menu did not offer リスト")
         listItem.tap()
         // Row layout re-renders the same tiles — identifier must still
         // resolve (guards the LazyVStack re-layout path).
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 15))
-        XCTAssertTrue(tile("Other").waitForExistence(timeout: 10))
+        app.assertExists(tile("Series"), within: 15)
+        app.assertExists(tile("Other"), within: 10)
+    }
+
+    func testTrailingToolbarSurvivesDrillDown() throws {
+        app.assertExists(tile("Series"), within: 60)
+        tile("Series").tap()
+        app.assertExists(tile("Series/vol1"), within: 30)
+        // pair / settings / ⋯menu must stay on pushed levels too —
+        // Android and the web client keep the same cluster visible at
+        // every depth (pre-fix it was root-only).
+        app.assertExists(app.buttons["pairBtn"], within: 10,
+                         "pairBtn missing on drilled level")
+        app.assertExists(app.buttons["settingsBtn"], within: 10,
+                         "settingsBtn missing on drilled level")
+        app.assertExists(app.buttons["layoutMenuBtn"], within: 10,
+                         "layoutMenuBtn missing on drilled level")
+        // And the menu still functions there — the 表示 picker opens.
+        app.buttons["layoutMenuBtn"].tap()
+        app.assertExists(app.buttons["リスト"], within: 10,
+                         "layout menu did not open on drilled level")
     }
 
     func testOfflineButtonPresent() throws {
-        XCTAssertTrue(tile("Series").waitForExistence(timeout: 60))
-        XCTAssertTrue(
-            app.buttons["offlineBtn:Series"].waitForExistence(timeout: 15),
+        app.assertExists(tile("Series"), within: 60)
+        app.assertExists(
+            app.buttons["offlineBtn:Series"], within: 15,
             "offline download button missing on folder tile")
-        XCTAssertTrue(
-            app.buttons["offlineBtn:Other"].waitForExistence(timeout: 10),
+        app.assertExists(
+            app.buttons["offlineBtn:Other"], within: 10,
             "offline download button missing on image-only tile")
     }
 }

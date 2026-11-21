@@ -140,7 +140,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -237,7 +237,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -470,7 +470,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -535,7 +535,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -591,7 +591,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -647,7 +647,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -748,7 +748,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -843,7 +843,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -950,7 +950,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1055,7 +1055,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1198,6 +1198,472 @@
       }
     },
     {
+      "operationId": "uploadLibraryFiles",
+      "method": "post",
+      "path": "/api/v1/library/files",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "全件成功",
+      "value": {
+        "files": [
+          {
+            "name": "work.rar",
+            "path": "Series/work.rar",
+            "size": 12345678
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "operationId": "uploadLibraryFiles",
+      "method": "post",
+      "path": "/api/v1/library/files",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "renamed",
+      "summary": "衝突で自動リネーム",
+      "value": {
+        "files": [
+          {
+            "name": "work (1).rar",
+            "path": "Series/work (1).rar",
+            "size": 12345678
+          }
+        ],
+        "errors": []
+      }
+    },
+    {
+      "operationId": "uploadLibraryFiles",
+      "method": "post",
+      "path": "/api/v1/library/files",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "partial",
+      "summary": "一部失敗",
+      "value": {
+        "files": [
+          {
+            "name": "a.cbz",
+            "path": "Series/a.cbz",
+            "size": 1000
+          }
+        ],
+        "errors": [
+          {
+            "name": "b.txt",
+            "code": "unsupported_type"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "uploadLibraryFiles",
+      "method": "post",
+      "path": "/api/v1/library/files",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes library root"
+      }
+    },
+    {
+      "operationId": "uploadLibraryFiles",
+      "method": "post",
+      "path": "/api/v1/library/files",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "uploadLibraryFiles",
+      "method": "post",
+      "path": "/api/v1/library/files",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "deleteLibraryFile",
+      "method": "delete",
+      "path": "/api/v1/library/files",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "file",
+      "summary": "ファイル削除",
+      "value": {
+        "deleted": "Series/work.rar",
+        "kind": "file"
+      }
+    },
+    {
+      "operationId": "deleteLibraryFile",
+      "method": "delete",
+      "path": "/api/v1/library/files",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "dir",
+      "summary": "フォルダ削除（再帰）",
+      "value": {
+        "deleted": "Series/vol1",
+        "kind": "dir"
+      }
+    },
+    {
+      "operationId": "deleteLibraryFile",
+      "method": "delete",
+      "path": "/api/v1/library/files",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes library root"
+      }
+    },
+    {
+      "operationId": "deleteLibraryFile",
+      "method": "delete",
+      "path": "/api/v1/library/files",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "deleteLibraryFile",
+      "method": "delete",
+      "path": "/api/v1/library/files",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "deleteLibraryFile",
+      "method": "delete",
+      "path": "/api/v1/library/files",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "201",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "upload_id": "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b",
+        "offset": 0
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "default",
+      "summary": "経路外アクセス",
+      "value": {
+        "detail": "path escapes library root"
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "403",
+      "section": "response",
+      "sharedResponse": "Forbidden",
+      "media": "application/json",
+      "name": "hidden",
+      "summary": "hidden 配下（サーバ側除外）",
+      "value": {
+        "detail": "path is hidden"
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "422",
+      "section": "response",
+      "sharedResponse": "ValidationError",
+      "media": "application/json",
+      "name": "default",
+      "summary": "バリデーション失敗",
+      "value": {
+        "detail": [
+          {
+            "loc": [
+              "query",
+              "folder"
+            ],
+            "msg": "field required",
+            "type": "missing"
+          }
+        ]
+      }
+    },
+    {
+      "operationId": "createLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads",
+      "status": "request",
+      "section": "request",
+      "media": "application/json",
+      "name": "default",
+      "summary": "セッション開始",
+      "value": {
+        "dir": "Series",
+        "name": "work.rar",
+        "size": 500000000
+      }
+    },
+    {
+      "operationId": "getLibraryUpload",
+      "method": "get",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "途中状態",
+      "value": {
+        "upload_id": "3f2c9a1b7d4e4f0a9c8b7a6d5e4f3c2b",
+        "dir": "Series",
+        "name": "work.rar",
+        "size": 500000000,
+        "offset": 134217728
+      }
+    },
+    {
+      "operationId": "getLibraryUpload",
+      "method": "get",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "appendLibraryUpload",
+      "method": "put",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系",
+      "value": {
+        "offset": 167772160
+      }
+    },
+    {
+      "operationId": "appendLibraryUpload",
+      "method": "put",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "400",
+      "section": "response",
+      "sharedResponse": "BadRequest",
+      "media": "application/json",
+      "name": "default",
+      "summary": "パラメータ不正",
+      "value": {
+        "detail": "invalid folder parameter"
+      }
+    },
+    {
+      "operationId": "appendLibraryUpload",
+      "method": "put",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "appendLibraryUpload",
+      "method": "put",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "409",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "offset 不一致",
+      "value": {
+        "detail": "offset mismatch",
+        "code": "offset_mismatch",
+        "offset": 33554432
+      }
+    },
+    {
+      "operationId": "cancelLibraryUpload",
+      "method": "delete",
+      "path": "/api/v1/library/uploads/{id}",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "finalizeLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads/{id}/finalize",
+      "status": "200",
+      "section": "response",
+      "media": "application/json",
+      "name": "default",
+      "summary": "正常系（リネームなし）",
+      "value": {
+        "name": "work.rar",
+        "path": "Series/work.rar",
+        "size": 500000000
+      }
+    },
+    {
+      "operationId": "finalizeLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads/{id}/finalize",
+      "status": "404",
+      "section": "response",
+      "sharedResponse": "NotFound",
+      "media": "application/json",
+      "name": "default",
+      "summary": "対象なし",
+      "value": {
+        "detail": "not found: Series/vol1"
+      }
+    },
+    {
+      "operationId": "finalizeLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads/{id}/finalize",
+      "status": "409",
+      "section": "response",
+      "media": "application/json",
+      "name": "incomplete",
+      "summary": "未完",
+      "value": {
+        "detail": "upload incomplete",
+        "code": "incomplete",
+        "offset": 33554432
+      }
+    },
+    {
+      "operationId": "finalizeLibraryUpload",
+      "method": "post",
+      "path": "/api/v1/library/uploads/{id}/finalize",
+      "status": "409",
+      "section": "response",
+      "media": "application/json",
+      "name": "conflict",
+      "summary": "dedupe 枯渇",
+      "value": {
+        "detail": "no free filename slot"
+      }
+    },
+    {
       "operationId": "legacyGetFolders",
       "method": "get",
       "path": "/api/folders",
@@ -1236,7 +1702,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1301,7 +1767,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1491,7 +1957,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1547,7 +2013,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1589,7 +2055,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
@@ -1645,7 +2111,7 @@
       "name": "default",
       "summary": "経路外アクセス",
       "value": {
-        "detail": "path escapes downloads root"
+        "detail": "path escapes library root"
       }
     },
     {
