@@ -1006,8 +1006,12 @@ private fun ShowAllTitle(
             else Color.Unspecified,
         modifier = Modifier
             .testTag("showAllTitle")
-            .onGloballyPositioned { titleMinX = it.boundsInWindow().left }
+            // onGloballyPositioned must sit INSIDE .offset — boundsInWindow
+            // then tracks the dragged position (iOS bookqMinX includes
+            // bookqDragX). Placed before .offset it reports the static
+            // layout edge and lastGlobalX collapses to the down point.
             .offset { IntOffset(dragX.roundToInt(), 0) }
+            .onGloballyPositioned { titleMinX = it.boundsInWindow().left }
             .pointerInput(scope) {
                 detectHorizontalDragGestures(
                     onDragStart = { start ->
