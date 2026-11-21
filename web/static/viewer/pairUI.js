@@ -239,7 +239,7 @@
     status.setAttribute('aria-atomic', 'true');
     status.innerHTML =
       '<button id="pair-status-btn" type="button" aria-haspopup="dialog" ' +
-        'aria-expanded="false">' +
+        'aria-expanded="false" aria-controls="pair-panel">' +
         '<span id="pair-status-text">未接続</span>' +
         '<span id="pair-side" hidden></span>' +
         '<span id="pair-transport" hidden></span>' +
@@ -314,7 +314,11 @@
   let hideObs = null;
   function syncStripA11y() {
     if (!els.statusBtn) return;
+    // !closest('#toolbar'): the toolbar-less fallback appends the strip to
+    // body where CSS display:none's it — it must leave the a11y tree too,
+    // or an invisible button stays tabbable (#586).
     const gone = !!els.status.closest('.hidden, [hidden]') ||
+      !els.status.closest('#toolbar') ||
       document.body.classList.contains('overview-open');
     els.status.setAttribute('aria-hidden', gone ? 'true' : 'false');
     els.statusBtn.tabIndex = gone ? -1 : 0;
@@ -528,6 +532,40 @@
     firstControl().focus();
   }
 
+  /* A focus-restore candidate must be somewhere a user can actually
+   * see and reach (#586): mounted, not inert/[hidden]/.hidden-chrome,
+   * not under the overview veil, not flung off-canvas (the closed
+   * sidebar slides translateX(-100%) — only a rect check catches that,
+   * no class marks it), and really painted inside the viewport. BODY
+   * itself is never a valid landing spot: focusing it is a no-op that
+   * strands focus exactly where #159 found it. */
+  function focusable(el) {
+    if (!el || el === document.body || el === document.documentElement) {
+      return false;
+    }
+    if (!document.contains(el) || typeof el.focus !== 'function') {
+      return false;
+    }
+    if (el.closest('[inert]') || el.closest('[hidden]') ||
+        el.closest('.hidden')) return false;
+    /* overview-open veils chrome with opacity:0 — #toolbar/#spread-controls
+     * are also inerted (covered above) and the sidebar launcher stays
+     * visible, so only the veil-without-inert set needs an explicit check
+     * (#586 review: a blanket body.overview-open reject stranded focus on
+     * BODY even when #pair-btn was plainly on screen). */
+    if (document.body.classList.contains('overview-open') &&
+        el.closest('#tapmode-controls, #hint, #zone-prev, #zone-next,' +
+                   ' #zone-toggle, #img-retry')) return false;
+    if (typeof el.checkVisibility === 'function' &&
+        !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) {
+      return false;
+    }
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 &&
+           r.bottom > 0 && r.right > 0 &&
+           r.top < window.innerHeight && r.left < window.innerWidth;
+  }
+
   function close() {
     if (!open_) return;
     open_ = false;
@@ -543,20 +581,17 @@
       inertSnapshot = null;
     }
     // Restore focus to where it came from; if that element is gone or
-    // hidden/inert, land on a real control — the visible strip first,
-    // then the launcher, then the menu button — never BODY (#159).
-    const usable = el => el && document.contains(el) &&
-      typeof el.focus === 'function' && !el.closest('[inert]') &&
-      !el.closest('[hidden]');
+    // not actually on screen, land on a real control — the visible
+    // strip first, then the launcher, then the menu button — never
+    // BODY (#159; off-canvas/hidden-aware since #586).
     let back = lastFocus;
     lastFocus = null;
-    if (!usable(back)) {
-      back = (els.status && !els.status.hidden &&
-              !els.status.classList.contains('hidden')) ? els.statusBtn : null;
+    if (!focusable(back)) {
+      back = focusable(els.statusBtn) ? els.statusBtn : null;
     }
-    if (!usable(back)) back = els.btn;
-    if (!usable(back)) back = _el('menu-btn');
-    if (usable(back)) back.focus();
+    if (!focusable(back)) back = els.btn;
+    if (!focusable(back)) back = _el('menu-btn');
+    if (focusable(back)) back.focus();
   }
 
   // ── code input ──
