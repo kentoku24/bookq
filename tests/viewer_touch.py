@@ -13,6 +13,12 @@ def open_book(page, server, folder: str, p: int, expect_local_total: int) -> Non
 
 
 def touch_session(page):
+    # BROWSER=safari: real Safari speaks WebDriver, not CDP — route the same
+    # Input.dispatchTouchEvent calls through synthetic TouchEvent dispatch.
+    if page.__class__.__name__ == "SafariPage":
+        from tests.safari.touch import JSTouchSession
+
+        return JSTouchSession(page)
     return page.context.new_cdp_session(page)
 
 

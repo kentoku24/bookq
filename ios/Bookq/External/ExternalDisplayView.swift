@@ -1,3 +1,4 @@
+import BookqCore
 import SwiftUI
 import UIKit
 
@@ -51,17 +52,6 @@ struct ExternalDisplayRootView: View {
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .onDisappear { store.screenLost() }
-        // Diagnostics overlay (temporary, for device bring-up): shows what
-        // mode/bounds the panel actually reports. Inset enough to survive
-        // panel-level overscan clipping.
-        .overlay(alignment: .bottomLeading) {
-            if let screen = store.externalScreen {
-                Text(ExternalDisplayStore.describe(screen))
-                    .font(.system(size: 18, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .padding(40)
-            }
-        }
     }
 }
 
@@ -112,7 +102,7 @@ struct ExternalReaderView: View {
 
     private func spreadCell(ext: ReaderWork, pages: [Int], in size: CGSize) -> some View {
         let gap: CGFloat = 5
-        let ars = pages.map { p.pageAR[$0] ?? 0.7 }
+        let ars = pages.map { p.pageAR[$0] ?? p.lastAR }
         let fit = ReaderWork.spreadFit(ars: ars, gap: gap, in: size)
         return HStack(spacing: gap) {
             ForEach(Array(pages.enumerated()), id: \.offset) { pos, idx in

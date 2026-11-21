@@ -1,7 +1,7 @@
 """Shared helpers for folder-visibility tests that mutate state.
 
 Each test file builds its own synthetic library + its own BOOKQ_STATE_DIR +
-its own uvicorn — the shared conftest `server`/`downloads_tree` fixtures keep
+its own viewer-rs — the shared conftest `server`/`library_tree` fixtures keep
 their exact root count and never see a hidden flag. Never reuse the session
 server for hide/unhide writes.
 """
@@ -52,7 +52,7 @@ def make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -
 
 def _metadata_toml(title: str) -> str:
     """Minimal parseable metadata.toml — /api/search scores title_jp/title_en/
-    artist/tags only (app/metadata/search.py); folder names alone never match.
+    artist/tags only (rust search port); folder names alone never match.
     """
     return (
         "[source]\n"
@@ -145,47 +145,25 @@ FLAT_VIS_ROOTS = ["wrap/wA", "wrap/wB", "wrap/arc.zip"]
 
 def spawn_vis_server(tree: Path, state_dir: Path) -> tuple:
     """Same shape as conftest's server fixture but with a dedicated state dir."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
-    env["DOWNLOADS_DIR"] = str(tree)
-    env["BOOKQ_STATE_DIR"] = str(state_dir)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app",
-         "--host", "127.0.0.1", "--port", str(port)],
-        env=env, cwd=str(REPO_ROOT),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    # Same headroom as conftest's server fixture — cold metadata warmup
-    # regularly eats most of a 10s deadline on a loaded machine.
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("visibility test server exited early")
-        try:
-            urllib.request.urlopen(base_url + "/api/health", timeout=1)
-            break
-        except OSError:
-            time.sleep(0.1)
-    else:
-        proc.terminate()
-        raise RuntimeError("visibility test server did not become healthy in 30s")
-    return proc, base_url
+    from rs_spawn import spawn_backend
+
+    return spawn_backend(library_dir=tree, state_dir=state_dir)
+
+
+def _vis_path() -> str:
+    return "/api/v1/folder-visibility"
 
 
 def vis_get(base_url: str) -> dict:
     return json.loads(
-        urllib.request.urlopen(base_url + "/api/folder-visibility", timeout=5).read()
+        urllib.request.urlopen(base_url + _vis_path(), timeout=5).read()
     )
 
 
 def vis_put(base_url: str, root: str, hidden: bool) -> dict:
     owner = vis_get(base_url)["owner"]
     req = urllib.request.Request(
-        base_url + "/api/folder-visibility",
+        base_url + _vis_path(),
         method="PUT",
         data=json.dumps({"root": root, "hidden": hidden}).encode(),
         headers={
@@ -209,6 +187,9 @@ def swipe_root_icon(page) -> None:
     """The hidden entry/exit gesture: drag the root 📁 header icon to the
     right edge of the screen. Toggles full-display mode both ways."""
     icon = page.locator("#browse-root-icon")
+    # The icon renders after .tile does — under parallel CI load the
+    # bounding box can still be empty right after the grid paints.
+    icon.wait_for(state="visible", timeout=15000)
     box = icon.bounding_box()
     assert box, "#browse-root-icon has no box (not at browse root?)"
     vw = page.viewport_size["width"] if page.viewport_size else 1280

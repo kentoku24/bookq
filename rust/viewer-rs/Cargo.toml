@@ -3,27 +3,36 @@ name = "viewer-rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Rust backend for bookq — parallel deployment with proxy fall-through (issue #163)"
+description = "Rust backend for bookq — sole production backend, all routes native (#532)"
 license = "Proprietary"
 
 [dependencies]
 bookq-core = { path = "../bookq-core" }
-axum = { version = "0.8", features = ["ws"] }
+crc32fast = "1"
+axum = { version = "0.8", features = ["ws", "multipart"] }
 base64 = "0.22"
-flate2 = { version = "1", features = ["zlib"] }
+# zlib-rs (not "zlib"): the distroless runtime has no system libz.so.1, and
+# bookq-core already uses the same backend — the binary keeps zero C
+# compression deps (#573).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
+md-5 = "0.10"
 percent-encoding = "2"
+rand = "0.9"
+# Google OAuth round-trip (token exchange + userinfo) — webpki roots so
+# the slim image needs no ca-certificates package (#400).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 # default-features off: default pulls ~40 unused crates (ravif/rav1e AVIF
-# encoder, exr, tiff, qoi, moxcms, rayon). Min = locked version, which is
-# what we build/test (ImageDecoder::orientation landed in 0.25.5).
-image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+# encoder, exr, tiff, qoi, moxcms, rayon). `avif-native` is decode-only
+# (mp4parse + dav1d C lib) — the encoder deps stay out (#563). Min =
+# locked version, which is what we build/test (ImageDecoder::orientation
+# landed in 0.25.5).
+image = { version = "0.25.10", default-features = false, features = ["avif-native", "bmp", "gif", "jpeg", "png", "webp"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha1 = "0.10"

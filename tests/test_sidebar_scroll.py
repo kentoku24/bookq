@@ -1,6 +1,6 @@
 """Mobile scroll-together + desktop fixed header + scroll restoration.
 
-Covers search-storage-scroll-with-thumbnails plan Todo 4:
+Covers:
 - mobile 390x844: #search (and its #search-input, top-of-sidebar) scroll out with tiles
 - desktop 1200x800: they stay fixed (visible) after scroll
 - scroll restoration across drill-down and Safari-native PTR delegation

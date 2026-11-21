@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -18,6 +18,7 @@ use axum::{
     response::Response,
 };
 use serde::Serialize;
+#[cfg(test)]
 use serde_json::Value;
 use sha1::{Digest, Sha1};
 use tokio::sync::{Mutex, Notify};
@@ -41,6 +42,9 @@ pub struct IndexState {
     building: Mutex<Option<Arc<Notify>>>,
     /// Single-flight background refresh (`index_refresh_task`).
     refreshing: Mutex<bool>,
+    /// A schedule request that arrived mid-refresh — the running task
+    /// re-scans once more instead of dropping the mutation for a TTL.
+    refresh_pending: AtomicBool,
 }
 
 pub struct CacheData {
@@ -81,6 +85,12 @@ impl CacheData {
         self.timestamp_micros
             .store((now_secs() * 1e6) as u64, Ordering::Relaxed);
     }
+    /// Age the stamp past the TTL — a `/api/v1/library/*` write must surface
+    /// at the next tree read, not when the 300s TTL rolls over. The
+    /// signature gate then rebuilds instead of re-stamping the same body.
+    fn mark_stale(&self) {
+        self.timestamp_micros.store(0, Ordering::Relaxed);
+    }
     fn fresh(&self) -> bool {
         now_secs() - self.timestamp() <= INDEX_CACHE_TTL_SECS
     }
@@ -99,6 +109,7 @@ impl IndexState {
             cache: Mutex::new(None),
             building: Mutex::new(None),
             refreshing: Mutex::new(false),
+            refresh_pending: AtomicBool::new(false),
         }
     }
 
@@ -108,40 +119,65 @@ impl IndexState {
     }
 
     /// Startup warmup — mirrors `warmup_metadata_index`.
-    pub fn spawn_warmup(self: &Arc<Self>, downloads: PathBuf) {
+    pub fn spawn_warmup(self: &Arc<Self>, library: PathBuf) {
         let st = self.clone();
         tokio::spawn(async move {
-            let _ = ensure_tree_and_index(&st, &downloads).await;
+            let _ = ensure_tree_and_index(&st, &library).await;
         });
     }
 
     /// `_schedule_index_refresh` — single-flight background refresh.
-    fn schedule_refresh(self: &Arc<Self>, downloads: &Path) {
+    /// Also kicked by `/api/v1/library/*` after a successful write; those
+    /// callers need the change visible promptly, so the stamp is aged past
+    /// the TTL first (the gate then rebuilds instead of re-stamping).
+    /// A call that lands mid-refresh sets `refresh_pending` under the same
+    /// mutex (its write already hit the FS, so the in-flight scan may or may
+    /// not see it — the extra pass settles it) instead of being dropped.
+    pub(crate) fn schedule_refresh(self: &Arc<Self>, library: &Path) {
         let st = self.clone();
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         tokio::spawn(async move {
             {
                 let mut r = st.refreshing.lock().await;
                 if *r {
+                    st.refresh_pending.store(true, Ordering::SeqCst);
                     return;
                 }
                 *r = true;
             }
-            background_index_refresh(&st, &d).await;
-            *st.refreshing.lock().await = false;
+            loop {
+                if let Some(c) = st.current().await {
+                    c.mark_stale();
+                }
+                st.refresh_pending.store(false, Ordering::SeqCst);
+                background_index_refresh(&st, &d).await;
+                if !st.refresh_pending.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            {
+                let mut r = st.refreshing.lock().await;
+                *r = false;
+                // A caller that slipped in between the last pending check
+                // and this release would be dropped — reschedule for it.
+                if st.refresh_pending.swap(false, Ordering::SeqCst) {
+                    drop(r);
+                    st.schedule_refresh(&d);
+                }
+            }
         });
     }
 }
 
 /// `_background_index_refresh` — signature gate outside the lock; an
 /// unchanged tree re-stamps in place, a verified change swaps with prev+1.
-async fn background_index_refresh(st: &IndexState, downloads: &Path) {
+async fn background_index_refresh(st: &IndexState, library: &Path) {
     let cur = match st.current().await {
         Some(c) => c,
         None => return,
     };
     let sig = tokio::task::spawn_blocking({
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         move || bookq_core::tree_signature(&d)
     })
     .await
@@ -163,7 +199,7 @@ async fn background_index_refresh(st: &IndexState, downloads: &Path) {
     }
     // Full rebuild outside the lock; swap under it.
     let built = tokio::task::spawn_blocking({
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         move || build_cache(&d)
     })
     .await
@@ -278,9 +314,9 @@ fn snapshot_load() -> Option<CacheData> {
 /// same rule as the background path — verified signature change bumps
 /// `prev+1`, otherwise `prev` — so `since=` tokens stay honest about a
 /// tree that actually changed.
-pub async fn force_rebuild(st: &Arc<IndexState>, downloads: &Path) -> Option<usize> {
+pub async fn force_rebuild(st: &Arc<IndexState>, library: &Path) -> Option<usize> {
     let mut data = tokio::task::spawn_blocking({
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         move || build_cache(&d)
     })
     .await
@@ -300,20 +336,20 @@ pub async fn force_rebuild(st: &Arc<IndexState>, downloads: &Path) -> Option<usi
 }
 
 /// `_scan_and_rebuild` — full tree + metadata + attaches in one walk.
-fn build_cache(downloads: &Path) -> Option<CacheData> {
+fn build_cache(library: &Path) -> Option<CacheData> {
     // The signature walk is independent of the scan/metadata walk — run it
     // on its own thread so the two full-tree traversals overlap instead of
     // serialising back to back (each is a complete stat-walk of the volume).
     let signature_walk = {
-        let d = downloads.to_path_buf();
+        let d = library.to_path_buf();
         std::thread::spawn(move || bookq_core::tree_signature(&d))
     };
     let mut interner = tree::Interner::default();
-    let mut t = tree::scan_tree(downloads, &mut interner)?;
+    let mut t = tree::scan_tree(library, &mut interner)?;
     // `rebuild_from_tree` (NOT `_walk`): tree-driven parse — archive
     // nodes' internal dirs produce phantom minimal records, and real
     // dirs absent from the tree are never indexed.
-    let comics = tree::rebuild_index_from_tree(&t, downloads);
+    let comics = tree::rebuild_index_from_tree(&t, library);
     let lookup: HashMap<String, ComicRec> =
         comics.iter().map(|c| (c.0.clone(), c.clone())).collect();
     tree::attach_metadata(&mut t, &lookup, "", &mut interner);
@@ -340,16 +376,17 @@ pub enum Ensure {
     Stale(Arc<CacheData>),
     /// `_IndexBuilding` — cold and still building past the 0.8s budget.
     Building,
-    /// Build failed — Python propagates; the caller proxies upstream.
+    /// Build failed — the error propagates to the caller's 5xx.
+    /// (#532: no upstream left to proxy to.)
     Failed,
 }
 
-pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) -> Ensure {
+pub async fn ensure_tree_and_index(st: &Arc<IndexState>, library: &PathBuf) -> Ensure {
     if let Some(c) = st.current().await {
         if c.fresh() {
             return Ensure::Fresh(c);
         }
-        st.schedule_refresh(downloads);
+        st.schedule_refresh(library);
         return Ensure::Stale(c);
     }
     enum Role {
@@ -383,13 +420,13 @@ pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) ->
             }
             *st.building.lock().await = None;
             n.notify_waiters();
-            st.schedule_refresh(&downloads);
+            st.schedule_refresh(&library);
             return match st.current().await {
                 Some(c) => Ensure::Stale(c),
                 None => Ensure::Building,
             };
         }
-        return build_and_serve(st, downloads.clone(), n).await;
+        return build_and_serve(st, library.clone(), n).await;
     }
     let Role::Follower(follower) = role else {
         unreachable!()
@@ -407,8 +444,8 @@ pub async fn ensure_tree_and_index(st: &Arc<IndexState>, downloads: &PathBuf) ->
 }
 
 /// Builder branch: scan outside the lock, swap under it, wake the waiters.
-async fn build_and_serve(st: &Arc<IndexState>, downloads: PathBuf, done: Arc<Notify>) -> Ensure {
-    let built = tokio::task::spawn_blocking(move || build_cache(&downloads))
+async fn build_and_serve(st: &Arc<IndexState>, library: PathBuf, done: Arc<Notify>) -> Ensure {
+    let built = tokio::task::spawn_blocking(move || build_cache(&library))
         .await
         .ok()
         .flatten();
@@ -556,16 +593,16 @@ fn depth_repr(depth: Option<i64>) -> String {
 /// v1: `{"kind":"children", nodes, generation: fallback_gen}` where
 /// fallback_gen is the cache's generation or 0 when there is no cache.
 fn live_fs_response(
-    downloads: &Path,
+    library: &Path,
     norm: &str,
     depth: i64,
     fallback_gen: i64,
     headers: &HeaderMap,
 ) -> Response {
     let target = if norm.is_empty() {
-        downloads.to_path_buf()
+        library.to_path_buf()
     } else {
-        downloads.join(norm)
+        library.join(norm)
     };
     let shallow = if norm.is_empty() || target.is_dir() {
         tree::shallow_live(&target).unwrap_or_default()
@@ -579,7 +616,10 @@ fn live_fs_response(
     });
     let body_str = serde_json::to_string(&payload).unwrap();
     let digest = Sha1::digest(format!("v1:{norm}:{depth}:{body_str}").as_bytes());
-    let etag = format!("\"{}\"", hex24(&digest));
+    // #469: `-g{gen}` must ride every tree ETag — the client parses the
+    // generation out of it (`render.js` /-g(\d+)/) to seed `?since=` polls;
+    // a bare digest reads as stale and forces a full-tree refetch.
+    let etag = format!("\"{}-g{}\"", hex24(&digest), fallback_gen);
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -592,41 +632,70 @@ fn live_fs_response(
 
 // ── handler ─────────────────────────────────────────────────────────────────
 
-use crate::serve::{is_within, Serve};
+use crate::serve::is_within;
 use crate::AppState;
 
+/// `_require_int_literal` parity: only `-?[0-9]+` is an integer literal —
+/// `+5`, ` 5`, `1.5` are 422 upstream (#326 ST201). Integer syntax that
+/// overflows i64 saturates, because Python ints are arbitrary precision
+/// and FastAPI accepts them (#465 — schemathesis ST202 flagged
+/// `since=2**63` as a 422 when the spec's `integer` is unbounded).
 fn parse_i64(v: Option<&String>) -> Result<Option<i64>, ()> {
     match v {
         None => Ok(None),
-        Some(s) => s.parse::<i64>().map(Some).map_err(|_| ()),
+        Some(s) => {
+            let neg = s.starts_with('-');
+            let digits = if neg { &s[1..] } else { s.as_str() };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(());
+            }
+            Ok(Some(match digits.parse::<i64>() {
+                Ok(n) if neg => -n,
+                Ok(n) => n,
+                Err(_) if neg => i64::MIN,
+                Err(_) => i64::MAX,
+            }))
+        }
     }
 }
 
 /// GET /api/v1/tree — native port of `_folder_tree(v1=True)`.
-pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, String>) -> Serve {
+pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, String>) -> Response {
     // Query types: path:str, depth:int|None, since:int|None. Non-integer
-    // depth/since → FastAPI 422 — fall through to the upstream renderer.
+    // depth/since → FastAPI 422 answered locally.
     let path = q.get("path").cloned().unwrap_or_default();
     let depth = match parse_i64(q.get("depth")) {
         Ok(d) => d,
-        Err(()) => return Serve::Proxy,
+        Err(()) => {
+            return crate::serve::unprocessable(
+                "depth",
+                "value_error",
+                "invalid depth",
+            )
+        }
     };
     let since = match parse_i64(q.get("since")) {
         Ok(s) => s,
-        Err(()) => return Serve::Proxy,
+        Err(()) => {
+            return crate::serve::unprocessable(
+                "since",
+                "value_error",
+                "invalid since",
+            )
+        }
     };
     if let Some(d) = depth {
         if d < 1 {
-            return Serve::Done(detail_response(
+            return detail_response(
                 StatusCode::BAD_REQUEST,
                 "depth must be >= 1",
-            ));
+            );
         }
     }
 
     if depth.is_none() {
         // ── Full tree mode — `path` is ignored by the Python handler.
-        let data = match ensure_tree_and_index(&st.index, &st.downloads).await {
+        let data = match ensure_tree_and_index(&st.index, &st.library).await {
             Ensure::Fresh(c) | Ensure::Stale(c) => c,
             Ensure::Building => {
                 let mut res = Response::builder()
@@ -648,13 +717,18 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("no-store"),
                 );
-                return Serve::Done(res);
+                return res;
             }
-            Ensure::Failed => return Serve::Proxy,
+            Ensure::Failed => {
+                return detail_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "index build failed",
+                )
+            }
         };
         let gen_int = data.generation;
         if since == Some(gen_int) {
-            return Serve::Done(not_modified(FOLDERS_CACHE_CONTROL, None));
+            return not_modified(FOLDERS_CACHE_CONTROL, None);
         }
         if since.is_some() {
             // Stale poll → same envelope, but through the body cache
@@ -679,9 +753,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 },
                 generation: gen_int,
             };
-            return Serve::Done(
-                folders_response(&data, &payload, "", None, &headers, "v1-since").await,
-            );
+            return folders_response(&data, &payload, "", None, &headers, "v1-since").await;
         }
         let payload = tree::EnvSer {
             kind: "tree",
@@ -693,22 +765,31 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
             },
             generation: gen_int,
         };
-        return Serve::Done(folders_response(&data, &payload, "", None, &headers, "v1").await);
+        return folders_response(&data, &payload, "", None, &headers, "v1").await;
     }
 
     // ── Shallow mode (depth >= 1).
     let depth = depth.unwrap();
     let norm = path.trim_end_matches('/').to_string();
+    // Dot-prefixed components are never listable — `.bookq-uploads` live
+    // session ids must not be enumerable through the tree API either (404
+    // keeps the dir invisible, same as the listing filters).
+    if crate::serve::has_dot_component(&norm) {
+        return detail_response(
+            StatusCode::NOT_FOUND,
+            "folder not found",
+        );
+    }
     let target = if norm.is_empty() {
-        st.downloads.clone()
+        st.library.clone()
     } else {
-        st.downloads.join(&norm)
+        st.library.join(&norm)
     };
-    if !is_within(&st.downloads, &target) {
-        return Serve::Done(detail_response(
+    if !is_within(&st.library, &target) {
+        return detail_response(
             StatusCode::FORBIDDEN,
-            "path outside downloads dir",
-        ));
+            "path outside library dir",
+        );
     }
     match st.index.current().await {
         Some(data) if data.fresh() => {
@@ -718,10 +799,10 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 match tree::find_tree_node(&data.tree, &norm, "") {
                     Some(tree::Node::Folder(f)) => &f.children,
                     _ => {
-                        return Serve::Done(detail_response(
+                        return detail_response(
                             StatusCode::NOT_FOUND,
                             "folder not found",
-                        ))
+                        )
                     }
                 }
             };
@@ -737,7 +818,7 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 },
                 generation: data.generation,
             };
-            Serve::Done(folders_response(&data, &payload, &norm, Some(depth), &headers, "v1").await)
+            folders_response(&data, &payload, &norm, Some(depth), &headers, "v1").await
         }
         // Cold/stale → live-FS one-level listing (never waits on the scan).
         // fallback_gen = cache's generation when a (stale) cache exists, else 0.
@@ -746,13 +827,13 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
                 Some(d) => d.generation,
                 None => 0,
             };
-            Serve::Done(live_fs_response(
-                &st.downloads,
+            live_fs_response(
+                &st.library,
                 &norm,
                 depth,
                 fallback_gen,
                 &headers,
-            ))
+            )
         }
     }
 }
@@ -761,9 +842,9 @@ pub async fn api_tree(st: &AppState, headers: &HeaderMap, q: HashMap<String, Str
 /// in-flight build to completion (no await budget).
 pub async fn ensure_tree_and_index_wait(
     st: &Arc<IndexState>,
-    downloads: &PathBuf,
+    library: &PathBuf,
 ) -> Option<Arc<CacheData>> {
-    match ensure_tree_and_index(st, downloads).await {
+    match ensure_tree_and_index(st, library).await {
         Ensure::Fresh(c) | Ensure::Stale(c) => return Some(c),
         Ensure::Failed => return None,
         Ensure::Building => {}
@@ -777,6 +858,22 @@ pub async fn ensure_tree_and_index_wait(
         n.notified().await;
     }
     st.current().await
+}
+
+/// Test-only CacheData carrying just `comics` — search/facets unit tests
+/// exercise the index consumers without a real tree/signature.
+#[cfg(test)]
+pub(crate) fn test_cache_data(comics: Vec<ComicRec>) -> CacheData {
+    CacheData {
+        tree: Vec::new(),
+        comics,
+        facets: HashMap::new(),
+        timestamp_micros: AtomicU64::new((now_secs() * 1e6) as u64),
+        generation: 1,
+        signature: None,
+        body_cache: Mutex::new(HashMap::new()),
+        body_bytes: AtomicU64::new(0),
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +896,29 @@ mod tests {
 
     async fn body_bytes(res: Response) -> Vec<u8> {
         res.into_body().collect().await.unwrap().to_bytes().to_vec()
+    }
+
+    /// #465 ST202: the spec's `integer` is unbounded — values beyond i64
+    /// must saturate like Python's arbitrary-precision ints, not 422.
+    #[test]
+    fn parse_i64_saturates_overflow() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(parse_i64(None).unwrap(), None);
+        assert_eq!(parse_i64(s("5").as_ref()).unwrap(), Some(5));
+        assert_eq!(parse_i64(s("-7").as_ref()).unwrap(), Some(-7));
+        assert_eq!(parse_i64(s("9223372036854775808").as_ref()).unwrap(), Some(i64::MAX));
+        assert_eq!(parse_i64(s("-99999999999999999999").as_ref()).unwrap(), Some(i64::MIN));
+        assert_eq!(parse_i64(s("-9223372036854775808").as_ref()).unwrap(), Some(i64::MIN));
+        // #326 literal parity: `+5`/whitespace are 422 upstream.
+        assert!(parse_i64(s("+5").as_ref()).is_err());
+        assert!(parse_i64(s(" 5").as_ref()).is_err());
+        assert!(parse_i64(s("5 ").as_ref()).is_err());
+        assert!(parse_i64(s("abc").as_ref()).is_err());
+        assert!(parse_i64(s("1.5").as_ref()).is_err());
+        assert!(parse_i64(s("").as_ref()).is_err());
+        assert!(parse_i64(s("-").as_ref()).is_err());
+        assert!(parse_i64(s("+").as_ref()).is_err());
+        assert!(parse_i64(s("--5").as_ref()).is_err());
     }
 
     fn test_folder(name: &str) -> tree::Node {

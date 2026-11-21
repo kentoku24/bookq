@@ -68,6 +68,9 @@ pub const END_REJECTED: &str = "rejected";
 pub const END_LEFT: &str = "left";
 pub const END_CODE_EXPIRED: &str = "code_expired";
 pub const END_RESUME_EXPIRED: &str = "resume_expired";
+/// `POST /api/v1/pair-reset` (#405) — the test hook ends every live session
+/// with this reason so a stale link-drop session can't hijack the next MATCH.
+pub const END_RESET: &str = "reset";
 #[allow(dead_code)]
 pub const END_SHUTDOWN: &str = "shutdown";
 
@@ -416,7 +419,7 @@ pub struct Registry {
     pub inner: Mutex<Inner>,
     pub wake: Arc<Notify>,
     pub index: Arc<IndexState>,
-    pub downloads: PathBuf,
+    pub library: PathBuf,
     pub manifest_cache: Mutex<catalog::ManifestCache>,
     /// Test-only work-resolver override (golden-frame harness, #210):
     /// replaces `resolve_work` wholesale, like py's `work_resolver` param.
@@ -444,7 +447,7 @@ pub struct Inner {
 }
 
 impl Registry {
-    pub fn new(index: Arc<IndexState>, downloads: PathBuf) -> Arc<Self> {
+    pub fn new(index: Arc<IndexState>, library: PathBuf) -> Arc<Self> {
         let wake = Arc::new(Notify::new());
         Arc::new(Self {
             inner: Mutex::new(Inner {
@@ -458,7 +461,7 @@ impl Registry {
             }),
             wake,
             index,
-            downloads,
+            library,
             manifest_cache: Mutex::new(catalog::ManifestCache::new()),
             #[cfg(test)]
             test_resolver: std::sync::Mutex::new(None),
@@ -493,6 +496,33 @@ impl Registry {
         g.detach_link(link_id);
     }
 
+    /// End every live session with `reason`, returning the count — the
+    /// native `POST /api/v1/pair-reset` (#405). A simulator client that went
+    /// idle by link-drop never LEAVEd, so its server-side session lingers in
+    /// the resume window and would hijack the next MATCH.
+    pub async fn end_all(&self, reason: &str) -> usize {
+        let sids: Vec<String> = {
+            self.inner
+                .lock()
+                .await
+                .sessions
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let n = sids.len();
+        for sid in sids {
+            self.inner.lock().await.end_session(&sid, reason);
+        }
+        n
+    }
+
+    /// Live session count (gateway tests assert reset empties the registry).
+    #[cfg(test)]
+    pub async fn session_count(&self) -> usize {
+        self.inner.lock().await.sessions.len()
+    }
+
     /// Ticker task — runs every time-driven transition.
     pub async fn run_ticker(self: &Arc<Self>) {
         loop {
@@ -524,7 +554,7 @@ impl Registry {
         let (folder, pref) =
             catalog::validate_args(&Value::String(job.folder.clone()), &job.page, &job.offset)?;
         let cache =
-            match crate::folders::ensure_tree_and_index_wait(&self.index, &self.downloads).await {
+            match crate::folders::ensure_tree_and_index_wait(&self.index, &self.library).await {
                 Some(c) => c,
                 None => {
                     return Err(catalog::ManifestError {
@@ -546,14 +576,14 @@ impl Registry {
         let core = match hit {
             Some(c) => c,
             None => {
-                let downloads = self.downloads.clone();
+                let library = self.library.clone();
                 // #322: move the Arc'd cache into the task — cloning
                 // `cache.tree` used to deep-copy the whole node DOM per
                 // manifest build.
                 let cache_c = cache.clone();
                 let folder_c = folder.clone();
                 let built = tokio::task::spawn_blocking(move || {
-                    catalog::build_manifest_core(&downloads, &cache_c.tree, &folder_c, offset_i64)
+                    catalog::build_manifest_core(&library, &cache_c.tree, &folder_c, offset_i64)
                 })
                 .await;
                 let built = match built {
@@ -2454,6 +2484,27 @@ mod tests {
         let ack = next_json(&mut r2);
         assert_eq!(ack["type"], "ACK");
         assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn end_all_resets_every_live_session() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        assert_eq!(ack["type"], "ACK");
+        let _ = next_json(&mut r1); // STATE
+        drop(inner);
+        let n = reg.end_all(END_RESET).await;
+        assert_eq!(n, 1);
+        let end = next_json(&mut r1);
+        assert_eq!(end["type"], "END");
+        assert_eq!(end["reason"], END_RESET);
+        assert!(reg.inner.lock().await.sessions.is_empty());
+        // Nothing left to end.
+        assert_eq!(reg.end_all(END_RESET).await, 0);
     }
 }
 

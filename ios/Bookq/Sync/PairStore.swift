@@ -1,3 +1,4 @@
+import BookqCore
 import Foundation
 import SwiftUI
 
@@ -18,7 +19,7 @@ protocol PairTransporting: Actor {
 
 extension PairSocket: PairTransporting {}
 
-enum PairError: LocalizedError {
+enum PairError: LocalizedError, @unchecked Sendable {
     case rejected(reason: String, snapshot: [String: Any]?)
     case disconnected
     case malformed(String)
@@ -72,7 +73,7 @@ final class PairStore: ObservableObject {
 
     /// Peer display info (the other member in presence).
     var peer: PairPresenceEntry? {
-        guard let m = member, let st = lastState else { return nil }
+        guard let m = member, lastState != nil else { return nil }
         return presence.first { $0.key != m.memberId }?.value
     }
     @Published private(set) var presence: [String: PairPresenceEntry] = [:]
@@ -250,7 +251,7 @@ final class PairStore: ObservableObject {
             guard let self else { return }
             for await ev in stream {
                 guard !Task.isCancelled else { return }
-                await self.handle(ev, gen: gen)
+                self.handle(ev, gen: gen)
             }
         }
     }
@@ -430,7 +431,6 @@ final class PairStore: ObservableObject {
 
     /// Send a session-bound request; resolves with ACK data or throws
     /// PairError.rejected/disconnected.
-    @discardableResult
     func sendRequest(_ type: String, payload: [String: Any],
                      workEpoch: Int? = nil,
                      baseRevision: Int? = nil) async throws {
@@ -747,7 +747,7 @@ final class PairStore: ObservableObject {
         let req = envelope(type: "LEAVE", payload: [:])
         Task { [weak self] in
             let deadline = Date().addingTimeInterval(3)
-            while await self?.entryAwaitingAck == true, Date() < deadline {
+            while self?.entryAwaitingAck == true, Date() < deadline {
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
             // Web sends LEAVE then closes — the socket's close handshake

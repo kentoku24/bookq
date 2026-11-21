@@ -334,6 +334,12 @@ final class VisibilityStore: ObservableObject {
         return (!path.isEmpty && hiddenRootFor(path) != nil) ? .hidden : .allow
     }
 
+    /// spec §9 fail-open — offline/connecting with NO snapshot: the hidden-
+    /// roots judgment cannot complete (the refresh is unreachable), so the
+    /// gate opens and the stricter download filter decides. Any snapshot
+    /// (cached or live) keeps the normal fail-closed rules.
+    func failOpen(isOnline: Bool) -> Bool { !isOnline && !hasSnapshot }
+
     /// Grid-wide blocked placeholder while NO snapshot exists — with any
     /// snapshot (cached or live) the grid renders normally off its data.
     enum Blocked { case none, loading, error }

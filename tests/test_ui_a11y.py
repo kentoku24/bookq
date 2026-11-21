@@ -60,7 +60,9 @@ def test_hidden_controls_not_focusable(page):
     sheet_inert = "() => document.getElementById('bottom-sheet').hasAttribute('inert')"
     # Closed by default: off-screen sheet must be inert (out of tab order + a11y tree).
     assert page.evaluate(sheet_inert), "closed #bottom-sheet must be inert"
-    # Open it via the filter button.
+    # Open it via the filter item inside the header ⋯menu.
+    page.click("#header-menu-btn")
+    page.wait_for_selector("#header-menu:not([hidden])")
     page.click("#filter-btn")
     page.wait_for_function(
         "document.getElementById('bottom-sheet').classList.contains('open')"
@@ -75,6 +77,11 @@ def test_hidden_controls_not_focusable(page):
     # Close it again: inert must come back.
     page.click("#bottom-sheet-close")
     assert page.evaluate(sheet_inert), "closed #bottom-sheet must be inert again"
+    # Focus returns to the always-visible ⋯button — the opener (#filter-btn)
+    # is inside the already-hidden menu, so focusing it would be a no-op.
+    assert page.evaluate(
+        "document.activeElement && document.activeElement.id"
+    ) == "header-menu-btn", "sheet close must move focus back to #header-menu-btn"
 
 
 def test_sidebar_inert_when_closed(page):
@@ -101,8 +108,8 @@ def test_icon_buttons_have_aria_labels(page):
     """H4(d): icon-only controls expose an aria-label."""
     for sel in (
         "#menu-btn",
+        "#header-menu-btn",
         "#filter-btn",
-        "#footer-refresh-btn",
         "#logout-btn",
         "#spread-toggle",
         "#spread-shift",

@@ -142,7 +142,18 @@ data class ReaderWork(
     fun withMode(mode: ReaderPageMode, offset: Int): ReaderWork =
         copy(pageMode = mode, spreadOffset = offset).rebuildSpreads(offset)
 
-    private fun rebuildSpreads(offset: Int): ReaderWork {
+    /** Chapter-opening spread — `chapterStart` (spread.js `rebuildSpreads`):
+     *  a spread whose first page is a non-zero chapter boundary. */
+    fun chapterStartSpread(s: Int): Boolean {
+        val first = spreads.getOrNull(s)?.firstOrNull() ?: return false
+        return boundaries.indexOf(first) > 0
+    }
+
+    /** `rebuildSpreads` (spread.js) — groups pages into spreads, filters
+     *  spacers, marks chapter-start spreads. Public for the
+     *  `api/vectors/solo-spreads.json` conformance test, which supplies
+     *  pre-padded images + boundaries (no `assemble` re-pad). */
+    fun rebuildSpreads(offset: Int): ReaderWork {
         val groups = mutableListOf<List<Int>>()
         val n = images.size
         if (pageMode == ReaderPageMode.SPREAD) {
@@ -253,13 +264,10 @@ data class ReaderWork(
                     boundaries.add(images.size)
                     images.addAll(ch.images)
                 }
-                // Deliberate divergence from app.js: web computes
-                // `startIdx = boundaries[c] + spacersSoFar` — double-
-                // counting earlier pads so later chapters can land on
-                // odd boundaries (and offset=1 leaves c0 unpadded).
-                // Here every chapter boundary pads to pair alignment on
-                // the POST-shift index — a chapter always opens on its
-                // own right page, which is the intent of the spacers.
+                // Padding contract (#441, web parity): pad on the
+                // post-shift index — boundaries[c] already includes
+                // earlier pads, so every chapter opens on its own
+                // right page.
                 val spreadOff = if (pageMode == ReaderPageMode.SPREAD) spreadOffset else 0
                 for (c in chapters.indices) {
                     val startIdx = boundaries[c]

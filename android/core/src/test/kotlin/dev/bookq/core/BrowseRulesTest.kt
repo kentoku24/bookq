@@ -8,7 +8,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Browse rule parity with `app/static/browse/render.js` —
+/** Browse rule parity with `web/static/browse/render.js` —
  *  port of iOS `BrowseModelTests.swift`. */
 class BrowseRulesTest {
 

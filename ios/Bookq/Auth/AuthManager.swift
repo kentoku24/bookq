@@ -118,6 +118,9 @@ final class AuthManager: ObservableObject {
         ])
         let pair = TokenPair(resp)
         try persist(pair)
+        // A refresh exchange from the previous session may still be in
+        // flight — bump the epoch so its result is discarded on resume.
+        credentialEpoch += 1
         self.tokenBox.token = pair.accessToken
         self.refreshToken = pair.refreshToken
         apply(user: Self.user(fromAccessToken: pair.accessToken))
@@ -128,11 +131,19 @@ final class AuthManager: ObservableObject {
     /// 401s coalesce on one in-flight exchange.
     private var refreshTask: Task<String?, Never>?
 
+    /// Bumped on every credential replace/clear (logout, login, testSeed).
+    /// An exchange suspended across one of those must not write the old
+    /// session's pair back — nor clobber a newer login — when it resumes.
+    private var credentialEpoch = 0
+
     /// Return a fresh access token, or nil when refresh is impossible /
     /// failed (caller then drops to the login screen).
     func refreshAccessToken() async -> String? {
         if let t = refreshTask { return await t.value }
-        guard let refreshToken else { return nil }
+        // An empty refresh can never succeed — exchanging it would earn a
+        // 400 that reads as session death (e.g. -testToken seeds "").
+        guard let refreshToken, !refreshToken.isEmpty else { return nil }
+        let epoch = credentialEpoch
         let t = Task { [weak self] () -> String? in
             guard let self, let base = self.baseURLProvider?() else { return nil }
             do {
@@ -141,11 +152,24 @@ final class AuthManager: ObservableObject {
                     "refresh_token": refreshToken,
                 ])
                 let pair = TokenPair(resp)
+                guard self.credentialEpoch == epoch else { return nil }
                 try self.persist(pair)
                 self.tokenBox.token = pair.accessToken
                 self.refreshToken = pair.refreshToken
                 self.apply(user: Self.user(fromAccessToken: pair.accessToken))
                 return pair.accessToken
+            } catch AuthError.exchange(let status) where status == 400 || status == 401 {
+                // Refresh rejected server-side — the presented token was
+                // consumed or is unknown (e.g. a restart wiped the
+                // in-memory store). Android sessionExpired parity: drop
+                // local credentials and notify; the app routes to Login.
+                // Network failures and 5xx fall through as transient nil.
+                // A stale exchange (credentials replaced mid-flight) must
+                // not re-logout the newer session or re-emit the signal.
+                guard self.credentialEpoch == epoch else { return nil }
+                self.logout()
+                self.onSessionExpired?()
+                return nil
             } catch {
                 return nil
             }
@@ -158,8 +182,14 @@ final class AuthManager: ObservableObject {
     /// Server base URL the refresh exchange must target — set by AppModel.
     var baseURLProvider: (() -> URL?)?
 
+    /// Definitive session-death signal — fired once when the refresh
+    /// exchange is rejected (400/401). AppModel routes a live session to
+    /// `.login`; transient failures (network, 5xx) never fire it.
+    var onSessionExpired: (@MainActor () -> Void)?
+
     /// Test hook — inject a pair as if login/refresh had returned it.
     func testSeed(_ pair: TokenPair) {
+        credentialEpoch += 1
         tokenBox.token = pair.accessToken
         refreshToken = pair.refreshToken
         apply(user: Self.user(fromAccessToken: pair.accessToken))
@@ -191,6 +221,7 @@ final class AuthManager: ObservableObject {
     }
 
     func logout() {
+        credentialEpoch += 1
         KeychainStore.delete(account: account)
         tokenBox.token = nil
         refreshToken = nil

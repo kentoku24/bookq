@@ -3,9 +3,9 @@
 //! Ports `app/routes.py::_search_impl` / `_facets_impl` over the shared
 //! index cache: relevance scoring (`_calculate_relevance`), artist/tag
 //! filters (`_matches_filters`), the `(-score, natural_key, name)` ordering,
-//! and the fail-closed hidden-root exclusion — the caller's roots are read
-//! from the shared visibility SQLite and a failed read answers 503, never
-//! an unfiltered list (`hidden_roots_for_request` posture).
+//! and the fail-closed hidden-root exclusion — the library-global roots are
+//! read from the shared visibility SQLite and a failed read answers 503,
+//! never an unfiltered list (`hidden_roots_for_request` posture).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,8 +18,7 @@ use serde_json::Value;
 use bookq_core::ComicRec;
 
 use crate::folders::{ensure_tree_and_index, CacheData, Ensure};
-use crate::serve::Serve;
-use crate::state::{covered_by_roots, VisibilityStore};
+use crate::state::{covered_by_roots, VisibilityStore, GLOBAL_USER_KEY};
 use crate::tree;
 use crate::AppState;
 
@@ -59,11 +58,11 @@ fn building() -> Response {
     res
 }
 
-/// `_visibility_hidden_roots` — the caller's hidden roots, fail-closed.
-async fn hidden_roots(st: &AppState, user_key: &str) -> Option<Vec<String>> {
+/// `_visibility_hidden_roots` — the library-global hidden roots,
+/// fail-closed. Same for every caller; `include_hidden` opts out.
+async fn hidden_roots(st: &AppState) -> Option<Vec<String>> {
     let store: Arc<VisibilityStore> = st.visibility.clone();
-    let key = user_key.to_string();
-    tokio::task::spawn_blocking(move || store.read(&key))
+    tokio::task::spawn_blocking(move || store.read(GLOBAL_USER_KEY))
         .await
         .ok()
         .and_then(|r| r.ok())
@@ -225,10 +224,9 @@ fn bool_param(q: &HashMap<String, String>, name: &str) -> Option<Option<bool>> {
 /// produced (202/503) or the call must proxy (Failed).
 async fn index_and_hidden(
     st: &AppState,
-    user_key: &str,
     include_hidden: bool,
 ) -> Result<(Arc<CacheData>, Vec<String>), Response> {
-    let data = match ensure_tree_and_index(&st.index, &st.downloads).await {
+    let data = match ensure_tree_and_index(&st.index, &st.library).await {
         Ensure::Fresh(d) | Ensure::Stale(d) => d,
         Ensure::Building => return Err(building()),
         Ensure::Failed => return Err(detail(StatusCode::INTERNAL_SERVER_ERROR, "index build failed")),
@@ -236,7 +234,7 @@ async fn index_and_hidden(
     let hidden = if include_hidden {
         Vec::new()
     } else {
-        match hidden_roots(st, user_key).await {
+        match hidden_roots(st).await {
             Some(h) => h,
             None => {
                 return Err(detail(
@@ -249,18 +247,26 @@ async fn index_and_hidden(
     Ok((data, hidden))
 }
 
-/// `GET /api/v1/search` — `_search_impl`. `sort` is `Literal["relevance"]`
-/// upstream: any other value falls through to keep FastAPI's 422.
-pub async fn api_search(st: &AppState, user_key: &str, q: &HashMap<String, String>) -> Serve {
+/// `GET /api/v1/search` — `_search_impl`. `sort` is `Literal["relevance"]`;
+/// any other value answers FastAPI's 422 locally.
+pub async fn api_search(st: &AppState, q: &HashMap<String, String>) -> Response {
     if q.get("sort").map(|s| s.as_str()).unwrap_or("relevance") != "relevance" {
-        return Serve::Proxy;
+        return crate::serve::unprocessable(
+            "sort",
+            "value_error",
+            "invalid sort",
+        );
     }
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
-        return Serve::Proxy;
+        return crate::serve::unprocessable(
+            "include_hidden",
+            "value_error",
+            "invalid include_hidden",
+        );
     };
-    let (data, hidden) = match index_and_hidden(st, user_key, include_hidden.unwrap()).await {
+    let (data, hidden) = match index_and_hidden(st, include_hidden.unwrap()).await {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     };
     let mut filters: HashMap<&str, Vec<String>> = HashMap::new();
     let artist = q.get("artist").map(|s| s.as_str()).unwrap_or("");
@@ -280,7 +286,7 @@ pub async fn api_search(st: &AppState, user_key: &str, q: &HashMap<String, Strin
     }
     let qv = q.get("q").map(|s| s.as_str()).unwrap_or("");
     let results = search_index(&data, qv, &filters, &hidden);
-    Serve::Done(json_response(
+    json_response(
         StatusCode::OK,
         serde_json::to_string(&serde_json::json!({
             "query": qv,
@@ -289,24 +295,291 @@ pub async fn api_search(st: &AppState, user_key: &str, q: &HashMap<String, Strin
         }))
         .unwrap()
         .into_bytes(),
-    ))
+    )
 }
 
 /// `GET /api/v1/facets` — `_facets_impl`. `path` is a raw string filter
-/// (no traversal check upstream — a non-matching value just empties the set).
-pub async fn api_facets(st: &AppState, user_key: &str, q: &HashMap<String, String>) -> Serve {
+/// (no traversal check — a non-matching value just empties the set).
+pub async fn api_facets(st: &AppState, q: &HashMap<String, String>) -> Response {
     let Some(include_hidden) = bool_param(q, "include_hidden") else {
-        return Serve::Proxy;
+        return crate::serve::unprocessable(
+            "include_hidden",
+            "value_error",
+            "invalid include_hidden",
+        );
     };
-    let (data, hidden) = match index_and_hidden(st, user_key, include_hidden.unwrap()).await {
+    let (data, hidden) = match index_and_hidden(st, include_hidden.unwrap()).await {
         Ok(x) => x,
-        Err(res) => return Serve::Done(res),
+        Err(res) => return res,
     };
     let path = q.get("path").map(|s| s.as_str()).unwrap_or("");
-    Serve::Done(json_response(
+    json_response(
         StatusCode::OK,
         serde_json::to_string(&facets_for(&data, path, &hidden))
             .unwrap()
             .into_bytes(),
-    ))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::folders::test_cache_data;
+
+    fn comic(path: &str, name: &str, tj: &str, te: &str, artists: &[&str], tags: &[&str]) -> ComicRec {
+        (
+            path.to_string(),
+            name.to_string(),
+            tj.to_string(),
+            te.to_string(),
+            artists.iter().map(|s| s.to_string()).collect(),
+            tags.iter().map(|s| s.to_string()).collect(),
+            "test".to_string(),
+            true,
+            10,
+        )
+    }
+
+    fn paths_of(results: &[Value]) -> Vec<String> {
+        results
+            .iter()
+            .map(|r| r["folder_path"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    // ── relevance ──────────────────────────────────────────────────────
+
+    #[test]
+    fn relevance_empty_query_scores_zero() {
+        let c = comic("a", "n", "t", "", &[], &[]);
+        assert_eq!(relevance("", &c), 0.0);
+        assert_eq!(relevance("   ", &c), 0.0);
+    }
+
+    #[test]
+    fn relevance_weights_title_artist_tag() {
+        let c = comic("a", "n", "のだめ", "nodame", &["person A"], &["romance"]);
+        // title_jp + title_en are concatenated into one haystack
+        assert_eq!(relevance("nodame", &c), 10.0);
+        assert_eq!(relevance("person", &c), 8.0);  // artist substring
+        assert_eq!(relevance("romance", &c), 3.0); // tag substring
+    }
+
+    #[test]
+    fn relevance_multi_field_bonus() {
+        let c = comic("a", "n", "alpha", "beta", &["gamma"], &["delta"]);
+        // "a" hits title? "alpha" contains "a" → +10; artist "gamma" no; tag "delta" no.
+        // Use a word present in title AND artist AND tag.
+        let c2 = comic("a", "n", "foo title", "", &["foo artist"], &["foo tag"]);
+        // per word: title +10, artist +8, tag +3 = 21 + fields(3)-1 *2 = 25
+        assert_eq!(relevance("foo", &c2), 25.0);
+        let _ = c;
+    }
+
+    #[test]
+    fn relevance_is_case_insensitive_substring() {
+        let c = comic("a", "n", "TitleCase", "", &["SomeArtist"], &[]);
+        assert!(relevance("titlecase", &c) > 0.0);
+        assert!(relevance("ARTIST", &c) > 0.0);
+        // substring, not word-boundary
+        assert_eq!(relevance("tle", &c), 10.0);
+    }
+
+    #[test]
+    fn relevance_multi_word_accumulates() {
+        let c = comic("a", "n", "red blue", "", &[], &[]);
+        // "red" +10, "blue" +10 → 20; same field hit twice → fields=1 → no bonus
+        assert_eq!(relevance("red blue", &c), 20.0);
+        // unknown word contributes nothing
+        assert_eq!(relevance("red zzz", &c), 10.0);
+    }
+
+    // ── matches_filters ────────────────────────────────────────────────
+
+    fn filters<'a>(pairs: &'a [(&'a str, &'a [&'a str])]) -> HashMap<&'a str, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, vs)| (*k, vs.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn filters_artist_substring_case_insensitive() {
+        let c = comic("a", "n", "", "", &["CLAMP Artist"], &[]);
+        assert!(matches_filters(&c, &filters(&[("artist", &["clamp"])]) ));
+        assert!(matches_filters(&c, &filters(&[("artist", &["ARTIST"])])));
+        assert!(!matches_filters(&c, &filters(&[("artist", &["other"])]) ));
+    }
+
+    #[test]
+    fn filters_or_within_key_and_across_keys() {
+        let c = comic("a", "n", "", "", &["A"], &["x", "y"]);
+        // OR within tags
+        assert!(matches_filters(&c, &filters(&[("tags", &["x", "z"])]) ));
+        // AND across keys: artist A ok but missing tag w → false
+        assert!(!matches_filters(&c, &filters(&[("artist", &["A"]), ("tags", &["w"])]) ));
+        // empty value list → key skipped
+        assert!(matches_filters(&c, &filters(&[("artist", &[] as &[&str])]) ));
+        // unknown key filters everything out
+        assert!(!matches_filters(&c, &filters(&[("genre", &["x"])]) ));
+        // comic with no artists + artist filter → false
+        let c2 = comic("a", "n", "", "", &[], &["x"]);
+        assert!(!matches_filters(&c2, &filters(&[("artist", &["A"])]) ));
+    }
+
+    // ── search_index ───────────────────────────────────────────────────
+
+    fn data(comics: Vec<ComicRec>) -> CacheData {
+        test_cache_data(comics)
+    }
+
+    #[test]
+    fn search_index_empty_query_returns_all_visible_sorted() {
+        let d = data(vec![
+            comic("lib/b", "Beta", "", "", &[], &[]),
+            comic("lib/a", "Alpha", "", "", &[], &[]),
+        ]);
+        let out = search_index(&d, "", &HashMap::new(), &[]);
+        // empty query → score 0 for all; natural_cmp on folder_name
+        assert_eq!(paths_of(&out), vec!["lib/a", "lib/b"]);
+    }
+
+    #[test]
+    fn search_index_ranks_by_score_then_name() {
+        let d = data(vec![
+            comic("lib/x", "zzz", "", "needle", &[], &[]),   // title_en hit → 10
+            comic("lib/y", "yyy", "", "", &["needle"], &[]), // artist hit → 8
+            comic("lib/z", "needle2", "", "", &[], &[]),    // folder_name not scored! title_jp empty
+        ]);
+        // "needle" hits title_en of lib/x (10) and artist of lib/y (8);
+        // lib/z's folder_name isn't part of relevance haystack → score 0 → excluded
+        let out = search_index(&d, "needle", &HashMap::new(), &[]);
+        assert_eq!(paths_of(&out), vec!["lib/x", "lib/y"]);
+    }
+
+    #[test]
+    fn search_index_excludes_hidden_roots() {
+        // Privacy contract: hidden roots must not appear in results even when
+        // the query matches — include_hidden is the only opt-out (handler level).
+        let d = data(vec![
+            comic("secret/comic", "Hidden Hit", "needle", "", &[], &[]),
+            comic("lib/ok", "Visible Hit", "needle", "", &[], &[]),
+            comic("secret/deep/x", "Deep Hidden", "needle", "", &[], &[]),
+        ]);
+        let roots = vec!["secret".to_string()];
+        let out = search_index(&d, "needle", &HashMap::new(), &roots);
+        assert_eq!(paths_of(&out), vec!["lib/ok"]);
+        // empty query also excludes hidden
+        let out_all = search_index(&d, "", &HashMap::new(), &roots);
+        assert_eq!(paths_of(&out_all), vec!["lib/ok"]);
+        // no roots → everything visible
+        let out_none = search_index(&d, "needle", &HashMap::new(), &[]);
+        assert_eq!(out_none.len(), 3);
+    }
+
+    #[test]
+    fn search_index_applies_filters_after_scoring() {
+        let d = data(vec![
+            comic("lib/a", "A", "needle", "", &["X"], &[]),
+            comic("lib/b", "B", "needle", "", &["Y"], &[]),
+        ]);
+        let f = filters(&[("artist", &["x"])]);
+        let out = search_index(&d, "needle", &f, &[]);
+        assert_eq!(paths_of(&out), vec!["lib/a"]);
+    }
+
+    #[test]
+    fn search_index_result_shape_matches_comic_to_json() {
+        let d = data(vec![comic("lib/a", "A", "題", "Title", &["Ar"], &["tg"],)]);
+        let out = search_index(&d, "", &HashMap::new(), &[]);
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        for k in ["folder_path","folder_name","title_jp","title_en","artist","tags","source","has_metadata","total_pages"] {
+            assert!(r.get(k).is_some(), "missing key {k}");
+        }
+        assert_eq!(r["total_pages"], 10);
+        assert_eq!(r["has_metadata"], true);
+    }
+
+    // ── build_facets / facets_for ──────────────────────────────────────
+
+    #[test]
+    fn build_facets_dedups_exact_and_sorts_case_insensitive() {
+        // Contract (ports Python `sorted(set(...), key=str.casefold)`):
+        // dedup is EXACT — "ALPHA"/"Alpha" are distinct entries — while the
+        // ordering is case-insensitive with original-string tiebreak.
+        let comics = vec![
+            comic("a", "n", "", "", &["beta", "Alpha"], &["z", "a"]),
+            comic("b", "n", "", "", &["ALPHA", "gamma"], &["m"]),
+        ];
+        let v = build_facets(comics.iter());
+        assert_eq!(
+            v["artists"],
+            serde_json::json!(["ALPHA", "Alpha", "beta", "gamma"])
+        );
+        assert_eq!(v["tags"], serde_json::json!(["a", "m", "z"]));
+    }
+
+    #[test]
+    fn facets_for_scopes_to_path_prefix() {
+        let d = data(vec![
+            comic("lib/a/x", "n", "", "", &["in-a"], &[]),
+            comic("lib/ab/y", "n", "", "", &["in-ab"], &[]),
+            comic("lib/b/z", "n", "", "", &["in-b"], &[]),
+            comic("other/w", "n", "", "", &["other"], &[]),
+        ]);
+        // path "lib/a" must NOT match "lib/ab" (prefix needs the "/" boundary)
+        let v = facets_for(&d, "lib/a", &[]);
+        assert_eq!(v["artists"], serde_json::json!(["in-a"]));
+        // exact folder match included
+        let v2 = facets_for(&d, "lib/b/z", &[]);
+        assert_eq!(v2["artists"], serde_json::json!(["in-b"]));
+        // empty path → all
+        let v3 = facets_for(&d, "", &[]);
+        assert_eq!(v3["artists"].as_array().unwrap().len(), 4);
+        // trailing slash tolerated
+        let v4 = facets_for(&d, "lib/a/", &[]);
+        assert_eq!(v4["artists"], serde_json::json!(["in-a"]));
+    }
+
+    #[test]
+    fn facets_for_excludes_hidden_roots() {
+        // Hidden works' artists/tags must not leak into the facet list —
+        // same fail-closed contract as search_index.
+        let d = data(vec![
+            comic("secret/x", "n", "", "", &["secret-artist"], &["secret-tag"]),
+            comic("lib/y", "n", "", "", &["public-artist"], &["public-tag"]),
+        ]);
+        let roots = vec!["secret".to_string()];
+        let v = facets_for(&d, "", &roots);
+        assert_eq!(v["artists"], serde_json::json!(["public-artist"]));
+        assert_eq!(v["tags"], serde_json::json!(["public-tag"]));
+    }
+
+    // ── parse_bool / bool_param ────────────────────────────────────────
+
+    #[test]
+    fn parse_bool_accepts_fastapi_token_sets() {
+        let s = |v: &str| Some(v.to_string());
+        for t in ["1","true","t","yes","y","on","TRUE","Yes"] {
+            assert_eq!(parse_bool(s(t).as_ref()), Some(true), "{t}");
+        }
+        for t in ["0","false","f","no","n","off","FALSE","No"] {
+            assert_eq!(parse_bool(s(t).as_ref()), Some(false), "{t}");
+        }
+        for t in ["", "maybe", "2", "enable"] {
+            assert_eq!(parse_bool(s(t).as_ref()), None, "{t}");
+        }
+        assert_eq!(parse_bool(None), None);
+    }
+
+    #[test]
+    fn bool_param_defaults_false_and_rejects_invalid() {
+        let mut q = HashMap::new();
+        assert_eq!(bool_param(&q, "include_hidden"), Some(Some(false)));
+        q.insert("include_hidden".to_string(), "true".to_string());
+        assert_eq!(bool_param(&q, "include_hidden"), Some(Some(true)));
+        q.insert("include_hidden".to_string(), "junk".to_string());
+        assert_eq!(bool_param(&q, "include_hidden"), None);
+    }
 }
