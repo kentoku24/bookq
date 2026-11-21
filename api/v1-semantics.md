@@ -195,8 +195,13 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
 - **decode 失敗**: `.heic`/`.heif` `.jxl`、破損バイト等 — 拡張子ゲート
   (`NATIVE_DECODE` 外 → 501) または decode 失敗 (`make_thumb`/`make_view`
   が `None` → 501)。いずれも 500 ではない。
-- **`/image/{path}` は対象外**: 生バイト配布で decode しないため、
-  上記いずれの形式も **200** (存在すれば)。
+- **`/image/{path}` は decode 対象外だが配信は画像限定** (#62):
+  生バイト配布で decode はしないが、loose file / アーカイブ entry
+  とも `IMAGE_EXTENSIONS` (`.avif .webp .jpg .jpeg .png .gif .bmp
+  .svg`) のみ 200 — それ以外は 404 (存在を秘匿)。レスポンスには
+  `nosniff` が付き、SVG は sandbox CSP (`default-src 'none';
+  sandbox`) を伴う。loose file の判定は realpath 後のパスで行う
+  ため `*.png` 名の symlink 経由の型偽装は不可。
 - **将来の対応形式追加時の規則**: `image` crate に feature を足す
   (例: `tiff`) 場合は、必ず本節の集合と
   `rust/viewer-rs/src/thumbs.rs` の定数と
