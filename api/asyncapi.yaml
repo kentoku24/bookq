@@ -374,6 +374,7 @@ components:
         top: {type: number, minimum: 0, description: sender scroller の px}
         viewH: {type: number, exclusiveMinimum: 0, maximum: 100000}
         scrollH: {type: number, exclusiveMinimum: 0, maximum: 100000000}
+        pred: {type: number, minimum: 0, maximum: 100000000, description: sender の fling 終端予測 px（optional — 未送信なら受信側は実測追従）}
         mode: {type: string, enum: [tile, list, card]}
 
     StateFrame:

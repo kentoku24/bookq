@@ -801,6 +801,31 @@ def test_ui_sync_payload_carries_scroll_height(browser, server):
         ctx.close()
 
 
+def test_ui_sync_pred_reaches_the_wire(browser, server):
+    """#262: pairSync produces `pred` (fling-endpoint estimate) but the old
+    sendUiSync whitelist dropped it, so the peer never saw it — production
+    silently degraded to measured-only follow while unit fakes passed.
+    Drive the REAL sendUiSync on a paired leader and assert pred appears
+    in its outbound WS frame (the __wsLog send-spy records egress, so this
+    IS the wire; relay forwarding is verbatim — pairing suite)."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        n0 = pl.evaluate("() => window.__wsLog.length")
+        ok = pl.evaluate(
+            "() => window.PairController.sendUiSync("
+            "  {view: 'browse', path: null, top: 300, viewH: 460, pred: 900})")
+        assert ok is True
+        pl.wait_for_function(
+            f"() => window.__wsLog.slice({n0}).some("
+            "  f => f.type === 'UI_SYNC' && f.payload && f.payload.pred === 900)",
+            timeout=5000)
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
 def test_legacy_frame_without_scrollh_uses_px_transform(browser, server):
     """Mixed-version guard: a frame carrying no scrollH (old client, or a
     device whose sendUiSync can't carry it) falls back to the legacy px

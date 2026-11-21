@@ -910,6 +910,12 @@
               "null"
             ]
           },
+          "pred": {
+            "description": "sender の fling 終端予測 px（optional — 未送信なら受信側は実測追従）",
+            "maximum": 100000000,
+            "minimum": 0,
+            "type": "number"
+          },
           "scrollH": {
             "exclusiveMinimum": 0,
             "maximum": 100000000,
