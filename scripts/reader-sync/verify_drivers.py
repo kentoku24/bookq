@@ -23,6 +23,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -43,13 +44,20 @@ from verify_core import (
 #   <udid>.lock — flock(2) token held for the process lifetime. The kernel
 #     releases it automatically on exit/SIGKILL, so there is no stale
 #     state and no unlink/link race: mutual exclusion is exact.
-#   <udid>.json — {pid,label,acquired_at} published atomically via
-#     link(2) for sim-teardown.sh to read. Informational only — the
-#     flock is the source of truth; a leftover .json from a dead run is
-#     simply overwritten by the next claim.
+#   <udid>.json — {pid,label,acquired_at} published atomically for
+#     sim-teardown.sh to display. Informational only — the flock is the
+#     source of truth; a leftover .json from a dead run is simply
+#     overwritten by the next claim.
 # A live lock holder blocks acquisition (fail fast instead of silently
 # sharing the device).
-_SIM_OWNER_DIR = Path("/tmp/bookq-sim-owners")
+#
+# The dir is per-UID (u<uid>/): simulators themselves are a per-user
+# namespace on macOS (~/Library/Developer/CoreSimulator), so two login
+# users can never contend for the same UDID — per-UID dirs keep the
+# shared /tmp dir 0755-safe (no cross-user writes, no symlink planting)
+# while still isolating every run/check-out of the SAME user, which is
+# where the contention actually happens.
+_SIM_OWNER_DIR = Path(f"/tmp/bookq-sim-owners/u{os.getuid()}")
 
 
 def _sim_owner_lock(udid: str) -> Path:
@@ -93,41 +101,37 @@ def _claim_sim_owner(udid: str, label: str) -> int:
             f"pid={owner.get('pid')} label={owner.get('label')!r} — "
             "choose different --leader-udid/--follower-udid "
             "or wait for that run to finish") from None
-    # Lock held — publish owner info atomically. link(2) gives readers
-    # complete-or-absent; a stale .json may exist but only we can be in
-    # this section (the flock excludes every other claimant), so
-    # unlink+link cannot race a live owner. Without the .json, teardown
-    # would see the sim as unowned and could kill it mid-run — so a
-    # publish failure releases the lock and fails the claim outright.
+    # Lock held — publish owner info atomically. os.replace gives readers
+    # complete-or-absent (old or new inode, never partial); a stale .json
+    # may exist but only we can be in this section (the flock excludes
+    # every other claimant), so replace cannot clobber a live owner.
+    # Without the .json, teardown would see the sim as unowned and could
+    # kill it mid-run — so a publish failure releases the lock and fails
+    # the claim outright. mkstemp (O_EXCL, unpredictable name) keeps the
+    # payload off any pre-planted symlink.
     json_path = _sim_owner_json(udid)
-    tmp = json_path.with_name(f"{json_path.name}.{os.getpid()}.tmp")
     payload = json.dumps({
         "pid": os.getpid(),
         "label": label,
         "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     })
+    tmp = None
     try:
-        tmp.write_text(payload)
-        for _ in range(4):
-            try:
-                os.link(tmp, json_path)
-                break
-            except FileExistsError:
-                try:
-                    json_path.unlink()
-                except FileNotFoundError:
-                    pass
-        else:
-            raise EnvError(f"simulator {udid}: ownership publish kept racing")
-    except (OSError, EnvError) as e:
+        fd2, tmp = tempfile.mkstemp(dir=json_path.parent,
+                                    prefix=json_path.name + ".")
+        with os.fdopen(fd2, "w") as f:
+            f.write(payload)
+        os.replace(tmp, json_path)
+    except OSError as e:
         os.close(fd)
         raise EnvError(
             f"simulator {udid}: owner publish failed: {e}") from e
     finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
     return fd
 
 
@@ -417,14 +421,16 @@ class SimulatorDriver:
             udid = self.udids[spec.role]
             spec.udid = udid
             spec.launch_url = urls[cid]
-            if udid not in self._pre_booted:
-                out = _simctl("boot", udid, check=False)
-                # rc==0 → WE booted it (stop() may shut it down). rc!=0 →
-                # already booted — possibly by a concurrent run that raced
-                # us between preflight and launch; like _pre_booted it
-                # must be left running (#596).
-                if out.returncode == 0:
-                    self._booted_by_us.add(udid)
+            # Always attempt boot — _pre_booted is only a preflight-time
+            # snapshot and can go stale (a finishing run may shut the
+            # device down between preflight and launch). rc==0 → WE booted
+            # it (stop() may shut it down). rc!=0 → already booted —
+            # possibly by a concurrent run that raced us, or booted at
+            # preflight and still up; like _pre_booted it must be left
+            # running (#596).
+            out = _simctl("boot", udid, check=False)
+            if out.returncode == 0:
+                self._booted_by_us.add(udid)
             self._wait_booted(udid)
         for cid, spec in clients.items():
             if spec.kind != "safari":

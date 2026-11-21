@@ -32,6 +32,24 @@ cd "$START_TOP"
 
 git fetch origin main -q
 
+# 実行中プロセス (cargo/pytest/verify.py/simctl 等) の cwd が worktree 配下
+# なら「使用中」— マージ済みでも検証・ビルド中の worktree は消さない。
+# test-preflight.sh の worktree_in_use と同じパターン。判定ツールが無い
+# 環境では「使用中」に倒す (削除スクリプトなので安全側)。
+worktree_in_use() {
+  local wt="$1" pid cwd
+  command -v lsof >/dev/null 2>&1 || return 0
+  command -v pgrep >/dev/null 2>&1 || return 0
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    case "$cwd" in
+      "$wt" | "$wt"/*) return 0 ;;
+    esac
+  done < <(pgrep -f 'cargo (build|test|run)|rustc|viewer-rs|pytest|xcodebuild|gradlew|ios-ui-test|verify\.py|reader-sync|seq_probe|ws_probe|simctl' 2>/dev/null)
+  return 1
+}
+
 REMOVED=0
 CANDIDATES=0
 
@@ -62,6 +80,11 @@ while IFS= read -r wt; do
   ahead="$(git rev-list --count "origin/main..$branch" 2>/dev/null || echo 1)"
   if [ "$ahead" != "0" ]; then
     echo "SKIP (ahead=$ahead): $wt ($branch)"
+    continue
+  fi
+  # 実行中プロセスの cwd が worktree 配下なら消さない (#596)
+  if worktree_in_use "$wt"; then
+    echo "SKIP (in use): $wt ($branch)"
     continue
   fi
   CANDIDATES=$((CANDIDATES + 1))

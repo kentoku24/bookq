@@ -7,8 +7,10 @@ set -euo pipefail
 # sim を使った検証の終了時に必須実行する片付け+CPU監査 (冪等)。
 #   1. --dev-env 指定の dev 環境を down (user-state volume は保持)
 #   2. booted sim を shutdown (--udid 指定時はその1台のみ)
-#      /tmp/bookq-sim-owners/<udid>.json に生存 pid の owner がいる sim は
-#      他エージェントの検証中とみなしてスキップ (#596)。--force で無視可。
+#      /tmp/bookq-sim-owners/u<uid>/<udid>.lock の flock が取れない sim は
+#      他エージェントの検証中とみなしてスキップ (#596)。操作は flock 保持
+#      中に行うので check〜実行の間に新しい run が claim する競合もない。
+#      --force で無視可。
 #   3. xcodebuild テスト Clone デバイスを delete (--keep-clones で保持)
 #   4. ~/Library/Developer/XCTestDevices の残留データを削除
 #   5. idb_companion 停止 — 生存 owner のいる sim の companion は残す
@@ -51,45 +53,79 @@ fi
 # テスト資産として shutdown/delete 対象から外す (殺すと他セッションのテストが死ぬ)
 live_xcodebuild=$(pgrep -f "xcodebuild.*test" | head -1 || true)
 
-# /tmp/bookq-sim-owners/<udid>.json — verify.py の SimulatorDriver が run 中に
-# 取得する所有権マーカー (#596)。実際の排他は <udid>.lock の flock(2) が担い、
-# .json は {pid,label} の情報ファイル (teardown はこれを読む)。記録された pid が
-# 生存していれば他エージェントの検証中とみなし、shutdown / companion kill の
-# 対象から外す。--force で無視可。
-SIM_OWNER_DIR="/tmp/bookq-sim-owners"
-SIM_OWNER_DESC=""
-sim_live_owner() {
-  local f="$SIM_OWNER_DIR/$1.json" pid
-  SIM_OWNER_DESC=""
-  [ -f "$f" ] || return 1
-  pid=$(python3 -c 'import json,sys
-try: print(json.load(open(sys.argv[1])).get("pid") or "")
-except Exception: print("")' "$f" 2>/dev/null)
-  # pid は正の整数のみ有効 — 0/-1 は kill -0 でプロセスグループ全体に
-  # 効いてしまい「常に生存」誤判定になる
-  [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 0 ] || return 1
-  # kill -0 は他ユーザー所有プロセスで EPERM 失敗し得る — 生きているのに
-  # 「死んでいる」と誤判定して殺す方向に倒れるので、ps (cross-user で生存
-  # 確認可) をフォールバックに使う。python 側の PermissionError→alive と同じ倒し。
-  if kill -0 "$pid" 2>/dev/null || ps -p "$pid" -o pid= >/dev/null 2>&1; then
-    SIM_OWNER_DESC="pid=$pid"
-    return 0
-  fi
-  return 1
+# /tmp/bookq-sim-owners/u<uid>/<udid>.{lock,json} — verify.py の
+# SimulatorDriver が run 中に取得する所有権 (#596)。排他の真実は .lock の
+# flock(2) で、プロセス死亡時に kernel が自動解放する。json は {pid,label}
+# の表示用情報ファイル。このスクリプトも破壊操作の前に同じ flock を
+# ノンブロッキングで取得する — 取得できなければ生存 run が所有している
+# のでスキップ、取得できれば操作完了まで保持するため、チェックと操作の
+# 間に新しい run が claim する TOCTOU が起きない。--force で全て無視。
+SIM_OWNER_DIR="/tmp/bookq-sim-owners/u$(id -u)"
+
+# flock 取得 → 成功なら op を実行 (flock は open file description に
+# 紐付くので exec/子プロセスへ継承され、操作中ずっと保持される)。
+# rc: 0=実行した / 3=生存 owner がいてスキップ / その他=エラー。
+# stderr の "OWNER pid=.. label=.." 行はスキップ理由の表示用。
+sim_flock_op() { # <udid> <shutdown|delete|killcomp> [pid]
+  python3 - "$SIM_OWNER_DIR" "$@" <<'PY'
+import fcntl, json, os, signal, subprocess, sys
+
+owner_dir, udid, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+rest = sys.argv[4:]
+try:
+    os.makedirs(owner_dir, exist_ok=True)
+    fd = os.open(os.path.join(owner_dir, udid + ".lock"),
+                 os.O_RDWR | os.O_CREAT, 0o644)
+except OSError as e:
+    print(f"owner lock open failed: {e}", file=sys.stderr)
+    sys.exit(2)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    try:
+        with open(os.path.join(owner_dir, udid + ".json")) as f:
+            info = json.load(f)
+    except Exception:
+        info = {}
+    print("OWNER pid={} label={!r}".format(
+        info.get("pid"), info.get("label")), file=sys.stderr)
+    sys.exit(3)
+os.set_inheritable(fd, True)
+if mode == "shutdown":
+    os.execvp("xcrun", ["xcrun", "simctl", "shutdown", udid])
+elif mode == "delete":
+    subprocess.run(["xcrun", "simctl", "shutdown", udid],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.execvp("xcrun", ["xcrun", "simctl", "delete", udid])
+elif mode == "killcomp":
+    try:
+        os.kill(int(rest[0]), signal.SIGTERM)
+    except (IndexError, ValueError, ProcessLookupError):
+        pass
+    sys.exit(0)
+sys.exit(2)
+PY
 }
 
 if [ "$AUDIT_ONLY" = 0 ]; then
 
 echo "== sim shutdown"
 if [ -n "$TARGET_UDID" ]; then
-  if [ "$FORCE" = 0 ] && sim_live_owner "$TARGET_UDID"; then
-    echo "  skip: $TARGET_UDID (sim owner ${SIM_OWNER_DESC} — 他エージェントの検証中; --force で強制)"
+  if [ "$FORCE" = 0 ]; then
+    owner_line=$(sim_flock_op "$TARGET_UDID" shutdown 2>&1) && op_rc=0 || op_rc=$?
+    if [ "$op_rc" = 3 ]; then
+      echo "  skip: $TARGET_UDID (${owner_line#OWNER } — 他エージェントの検証中; --force で強制)"
+    elif [ "$op_rc" = 0 ]; then
+      echo "  shutdown: $TARGET_UDID"
+    else
+      echo "  warn: $TARGET_UDID shutdown failed (rc=$op_rc ${owner_line%%$'\n'*})"
+    fi
   else
     xcrun simctl shutdown "$TARGET_UDID" 2>/dev/null || true
   fi
 else
   # booted デバイスを列挙: Clone かつ xcodebuild 生存中ならスキップ、
-  # 生存 owner のいる sim もスキップ、それ以外を shutdown
+  # flock が取れない sim (生存 run が所有) もスキップ、それ以外を shutdown
   xcrun simctl list devices booted -j 2>/dev/null | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -100,8 +136,15 @@ for devs in d.get("devices",{}).values():
 ' | while IFS=$'\t' read -r u name; do
     if [ -n "$live_xcodebuild" ] && [ "${name#Clone }" != "$name" ]; then
       echo "  skip: $name (xcodebuild test 実行中 pid $live_xcodebuild — 他セッション所有の可能性)"
-    elif [ "$FORCE" = 0 ] && sim_live_owner "$u"; then
-      echo "  skip: $name (sim owner ${SIM_OWNER_DESC} — 他エージェントの検証中; --force で強制)"
+      continue
+    fi
+    if [ "$FORCE" = 0 ]; then
+      owner_line=$(sim_flock_op "$u" shutdown 2>&1) && op_rc=0 || op_rc=$?
+      if [ "$op_rc" = 3 ]; then
+        echo "  skip: $name (${owner_line#OWNER } — 他エージェントの検証中; --force で強制)"
+      elif [ "$op_rc" = 0 ]; then
+        echo "  shutdown: $name"
+      fi
     else
       xcrun simctl shutdown "$u" 2>/dev/null && echo "  shutdown: $name" || true
     fi
@@ -123,12 +166,19 @@ for devs in d.get("devices",{}).values():
       echo "  skip: Clone $u (xcodebuild test 実行中 pid $live_xcodebuild)"
       continue
     fi
-    if [ "$FORCE" = 0 ] && sim_live_owner "$u"; then
-      echo "  skip: Clone $u (sim owner ${SIM_OWNER_DESC} — 他エージェントの検証中; --force で強制)"
-      continue
+    if [ "$FORCE" = 0 ]; then
+      owner_line=$(sim_flock_op "$u" delete 2>&1) && op_rc=0 || op_rc=$?
+      if [ "$op_rc" = 3 ]; then
+        echo "  skip: Clone $u (${owner_line#OWNER } — 他エージェントの検証中; --force で強制)"
+      elif [ "$op_rc" = 0 ]; then
+        echo "  deleted Clone $u"
+      else
+        echo "  warn: Clone $u delete failed (rc=$op_rc)"
+      fi
+    else
+      xcrun simctl shutdown "$u" 2>/dev/null || true
+      xcrun simctl delete "$u" && echo "  deleted Clone $u"
     fi
-    xcrun simctl shutdown "$u" 2>/dev/null || true
-    xcrun simctl delete "$u" && echo "  deleted Clone $u"
   done
   [ -z "$clone_udids" ] && echo "  (Clone なし)"
 fi
@@ -152,20 +202,31 @@ fi
 if [ "$SKIP_PROC_KILLS" = 0 ] && [ "$KEEP_IDB" = 0 ]; then
   # companion を UDID 単位で整理 — 生存 owner のいる sim の companion は残す。
   # companion を殺すと相手の idb AX/tap が dtuhid 断絶で死ぬ (#587 調査済み)。
-  # --force 時は従来通り全 companion を停止。
-  # パターンは "idb_companion" と "--udid" の両方を要求 — `tail -f
+  # 通常時の列挙は "idb_companion" と "--udid" の両方を要求 — `tail -f
   # idb_companion.log` のような無関係プロセスを巻き込まない。
+  # --force 時は従来通り broad pattern で全 companion を停止する。
+  if [ "$FORCE" = 0 ]; then
+    companion_pat="idb_companion.*--udid"
+  else
+    companion_pat="idb_companion"
+  fi
   idb_killed=0
   idb_kept=0
   while read -r cpid ccmd; do
     [ -n "$cpid" ] || continue
     cudid=$(printf '%s' "$ccmd" | sed -n 's/.*--udid \([A-Za-z0-9-]*\).*/\1/p')
-    if [ "$FORCE" = 0 ] && [ -n "$cudid" ] && sim_live_owner "$cudid"; then
-      idb_kept=$((idb_kept + 1))
-      continue
+    if [ "$FORCE" = 0 ]; then
+      # 対象 sim の flock を取れた時だけ kill — 取れなければ生存 run の
+      # companion なので保持 (check〜kill の間の claim も flock が防ぐ)
+      if [ -n "$cudid" ] && sim_flock_op "$cudid" killcomp "$cpid" 2>/dev/null; then
+        idb_killed=$((idb_killed + 1))
+      else
+        idb_kept=$((idb_kept + 1))
+      fi
+    else
+      kill "$cpid" 2>/dev/null && idb_killed=$((idb_killed + 1)) || true
     fi
-    kill "$cpid" 2>/dev/null && idb_killed=$((idb_killed + 1)) || true
-  done < <(pgrep -fl "idb_companion.*--udid" 2>/dev/null || true)
+  done < <(pgrep -fl "$companion_pat" 2>/dev/null || true)
   [ "$idb_killed" -gt 0 ] && echo "== idb_companion 停止 ($idb_killed 件)" || true
   [ "$idb_kept" -gt 0 ] && echo "== idb_companion 保持 ($idb_kept 件 — 生存 owner の sim)" || true
 fi
