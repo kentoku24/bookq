@@ -57,12 +57,13 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config libdav1d-dev
 
       # libpdfium (PDFium engine for the native PDF pipeline, #402) — must
-      # track pdfium-render's `pdfium_latest` bindings (8125 at 0.9.5).
+      # track pdfium-render's `pdfium_latest` bindings; keep in lockstep with
+      # PDFIUM_VERSION in Dockerfile.viewer-rs (#581).
       # Without it the render tests degrade to the 501-decline asserts.
       - name: libpdfium for native PDF tests
         run: |
           mkdir -p /tmp/pdfium-test/lib
-          curl -fsSL -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8125/pdfium-linux-x64.tgz
+          curl -fsSL -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8165/pdfium-linux-x64.tgz
           tar xzf /tmp/pdfium.tgz -C /tmp/pdfium-test
           ls -la /tmp/pdfium-test/lib/
 

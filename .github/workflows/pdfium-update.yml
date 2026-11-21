@@ -1,0 +1,127 @@
+# pdfium-update — weekly check for a newer bblanchon/pdfium-binaries
+# release and open a PR bumping ARG PDFIUM_VERSION + per-arch SHA256 in
+# Dockerfile.viewer-rs and the cargo-test libpdfium pin in rust.yml (#581).
+#
+# Dependabot can't see ARG bumps or the tarball checksum, so this closes
+# the gap the issue called out (8125 was 3 releases / 3 weeks stale).
+# The PR is never auto-merged: a broken upstream build must fail CI
+# (/image/.../doc.pdf/p001.png = 200 in the image-build job) and be
+# closed by hand.
+#
+# Manual dry-run: Actions → pdfium-update → Run workflow.
+name: pdfium-update
+
+on:
+  schedule:
+    # Monday 07:00 JST — right after dependabot's Monday 06:00 JST scan.
+    - cron: "0 22 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve latest pdfium release
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dockerfile=Dockerfile.viewer-rs
+          current=$(grep -oP '^ARG PDFIUM_VERSION=\K[0-9]+' "$dockerfile")
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+          gh api repos/bblanchon/pdfium-binaries/releases/latest \
+            --jq '{tag: .tag_name, assets: [.assets[] | {name, digest}]}' \
+            > /tmp/pdfium-rel.json
+          latest=$(python3 -c "import json;print(json.load(open('/tmp/pdfium-rel.json'))['tag'].split('/')[-1])")
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+          if [ "$latest" = "$current" ]; then
+            echo "pdfium $current is already latest — nothing to do"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 - <<'PY' > /tmp/pdfium-args.env
+          import json
+          rel = json.load(open('/tmp/pdfium-rel.json'))
+          digests = {a['name']: a['digest'].split(':', 1)[1]
+                     for a in rel['assets'] if a.get('digest')}
+          want = {
+              'PDFIUM_SHA256_AMD64': 'pdfium-linux-x64.tgz',
+              'PDFIUM_SHA256_ARM64': 'pdfium-linux-arm64.tgz',
+          }
+          for arg, asset in want.items():
+              sha = digests.get(asset)
+              if not sha:
+                  raise SystemExit(f'missing digest for {asset}')
+              print(f'{arg}={sha}')
+          PY
+          cat /tmp/pdfium-args.env >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Bump pdfium version refs
+        if: steps.rel.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.rel.outputs.latest }}
+          SHA_AMD64: ${{ steps.rel.outputs.PDFIUM_SHA256_AMD64 }}
+          SHA_ARM64: ${{ steps.rel.outputs.PDFIUM_SHA256_ARM64 }}
+        run: |
+          set -euo pipefail
+          dockerfile=Dockerfile.viewer-rs
+          sed -i \
+            -e "s/^ARG PDFIUM_VERSION=.*/ARG PDFIUM_VERSION=${LATEST}/" \
+            -e "s/^ARG PDFIUM_SHA256_AMD64=.*/ARG PDFIUM_SHA256_AMD64=${SHA_AMD64}/" \
+            -e "s/^ARG PDFIUM_SHA256_ARM64=.*/ARG PDFIUM_SHA256_ARM64=${SHA_ARM64}/" \
+            "$dockerfile"
+          # rust.yml's cargo-test libpdfium download tracks the same release.
+          sed -i "s|releases/download/chromium/[0-9]*/|releases/download/chromium/${LATEST}/|" \
+            .github/workflows/rust.yml
+          git diff -- "$dockerfile" .github/workflows/rust.yml
+
+      - name: Open update PR
+        if: steps.rel.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.rel.outputs.latest }}
+          CURRENT: ${{ steps.rel.outputs.current }}
+        run: |
+          set -euo pipefail
+          branch="chore/pdfium-${LATEST}"
+          # An already-open PR for this version makes the push a no-op.
+          open_prs=$(gh pr list --head "$branch" --state open --json number --jq 'length')
+          if [ "$open_prs" != "0" ]; then
+            echo "PR for $branch already open — skipping"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add Dockerfile.viewer-rs .github/workflows/rust.yml
+          git commit -m "chore(deps): pdfium ${CURRENT} → ${LATEST} (#581)"
+          # force-with-lease: a stale remote branch from a previously
+          # closed/unmerged PR would otherwise fail the push forever.
+          git push --force-with-lease -u origin "$branch"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main \
+            --title "chore(deps): pdfium ${CURRENT} → ${LATEST} (#581)" \
+            --body "$(cat <<EOF
+          ## Summary
+
+          Weekly pdfium-binaries bump (#581): \`chromium/${CURRENT}\` → \`chromium/${LATEST}\`, including per-arch SHA256 pins in \`Dockerfile.viewer-rs\`.
+
+          Auto-opened by \`.github/workflows/pdfium-update.yml\` — **not auto-merged**. If the upstream build is broken, close this PR.
+
+          #### Test plan
+          - [ ] \`image-build\` job green (\`/image/.../doc.pdf/p001.png\` = 200 proves libpdfium loads)
+
+          Generated with [Devin](https://devin.ai)
+          EOF
+          )"
