@@ -752,7 +752,17 @@
         workEpoch: 0, baseRevision: 0, type: 'LEAVE', payload: {},
       };
       var rec = {t: t, watchdog: null, done: false};
-      var done = function (clear) {
+      /* done(clear, charge): `charge` spends this entry's retry budget
+       * (#594). ONLY an application-level transient — resume_in_use —
+       * may charge it: that is the one failure mode that is specific to
+       * THIS entry while siblings would succeed, so bounding it is what
+       * keeps a contested member from starving the queue. Transport
+       * failures (offline, close, watchdog, send throw) hit every queued
+       * entry equally — charging them would let a connectivity blip or
+       * black-holed server retire the LEAVE before its window ends and
+       * the peer would never learn we left (#598 review). They simply
+       * retry on FLUSH_RETRY_MS until the window lapses. */
+      var done = function (clear, charge) {
         if (rec.done) return;
         rec.done = true;
         if (clear) {
@@ -763,13 +773,7 @@
           _flushRetries = 0;
           _later(_maybeFlushLeave, FLUSH_DRAIN_MS);
         } else {
-          /* Silent failure (watchdog/close/send throw) or a transient
-           * resume_in_use: charge THIS entry's own budget (#594) and
-           * keep draining — the next _tombstoneRead skips it once the
-           * budget is spent and moves on to a younger entry instead of
-           * starving the whole queue behind one contested member. The
-           * spent entry still expires with its window. */
-          _tombstoneBumpFails(d.sessionId);
+          if (charge) _tombstoneBumpFails(d.sessionId);
           _later(_maybeFlushLeave, FLUSH_RETRY_MS);
         }
         if (_tombstoneFlush === rec) _tombstoneFlush = null;
@@ -798,12 +802,14 @@
         }
         if (f.type === 'REJECT' && f.requestId === resumeF.requestId) {
           if (f.reason === 'resume_in_use') {
-            /* Transient: the member's dead link has not been reaped
-             * server-side yet — close this attempt and let done(false)
-             * schedule the bounded retry. If a healthier link genuinely
-             * owns the member its owner sends LEAVE itself; the
-             * tombstone just idles until then. */
-            done(false);
+            /* Transient AND entry-specific: the member's dead link has
+             * not been reaped server-side yet — the one failure mode
+             * that can starve younger tombstones, so it alone spends
+             * this entry's budget (#594/#598). Close this attempt and
+             * let done(false, true) schedule the bounded retry. If a
+             * healthier link genuinely owns the member its owner sends
+             * LEAVE itself; the tombstone just idles until then. */
+            done(false, true);
             return;
           }
           /* bad_resume/resume_expired are terminal — drop only this

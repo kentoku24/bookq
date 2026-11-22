@@ -239,10 +239,12 @@ def test_legacy_single_tombstone_still_flushes(browser):
     assert res["mapAfter"] == {}
 
 
-def test_silent_flush_failure_retries_on_bounded_budget(browser):
-    """A black-holed flush link (watchdog fires, no frames ever) used to
-    wait for the next lifecycle event — the whole resume window. It now
-    retries on a bounded budget, then keeps the tombstone parked."""
+def test_transport_failures_do_not_spend_entry_budget(browser):
+    """#598: a black-holed/offline flush link is an ENVIRONMENTAL failure —
+    it hits every queued entry equally, so it must not spend the entry's
+    retry budget. Only resume_in_use (entry-specific) is bounded (#594).
+    Transport failures retry on FLUSH_RETRY_MS until the window lapses,
+    and the tombstone stays parked (never cleared by silence)."""
     src = r"""
     async (h) => {
       const a = await h.bind('a', 'sess-a', 'mem-a');
@@ -259,11 +261,53 @@ def test_silent_flush_failure_retries_on_bounded_budget(browser):
     }
     """
     res = _run(browser, src)
-    # 1 initial attempt + FLUSH_RETRY_MAX(3) bounded retries = 4 transports
-    assert res["attempts"] == 4
-    # silent failures never clear the tombstone — it waits for the next
-    # lifecycle event or window expiry
+    # Uncharged: retries continue past the old 4-attempt cap — the entry
+    # is only bounded by its resume window, not by a failure counter.
+    assert res["attempts"] > 4
+    # silent failures never clear the tombstone and never write `fails`
     assert set(res["mapKept"]) == {"sess-a"}
+    assert "fails" not in res["mapKept"]["sess-a"]
+
+
+def test_offline_leave_delivers_after_reconnect(browser):
+    """#598 regression: leaving while offline must not burn the retry
+    budget — once the transport answers again the parked LEAVE goes out
+    and the tombstone clears, inside the same resume window."""
+    src = r"""
+    async (h) => {
+      const a = await h.bind('a', 'sess-a', 'mem-a');
+      a.t.onclose();
+      await a.c.leave();   // parks tombstone + flush attempt #1
+      const flushStart = h.transports.length - 1;
+      // "Offline": every flush transport dies on close before HELLO.
+      // Far more attempts than the old budget of 4.
+      for (let i = 0; i < 12; i++) {
+        const t = h.transports[h.transports.length - 1];
+        if (t && t._url && t.sent.length === 0 && !t.closed) t.onclose();
+        h.fireTimers();
+      }
+      const offlineAttempts = h.transports.length - flushStart;
+      // "Reconnect": the next flush transport answers HELLO -> RESUME ->
+      // ACK -> LEAVE like a healthy link.
+      const t = h.pendingFor('ws://fake/a');
+      if (t) {
+        t.onframe({v: 1, type: 'HELLO'});
+        const resume = t.sent[t.sent.length - 1];
+        t.onframe({v: 1, type: 'ACK', requestId: resume.requestId, data: {}});
+      }
+      h.fireTimers();
+      const lastFlush = h.transports[h.transports.length - 1];
+      h.results.offlineAttempts = offlineAttempts;
+      h.results.delivered = !!lastFlush &&
+        lastFlush.sent.some(f => f.type === 'LEAVE');
+      h.results.mapAfter = h.readMap();
+      a.c.destroy();
+    }
+    """
+    res = _run(browser, src)
+    assert res["offlineAttempts"] > 4          # survived past old budget
+    assert res["delivered"] is True            # LEAVE actually sent
+    assert res["mapAfter"] == {}               # tombstone cleared
 
 
 def test_exhausted_oldest_tombstone_yields_to_younger(browser):
