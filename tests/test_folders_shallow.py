@@ -13,7 +13,6 @@ Run:
 """
 
 import json
-import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -277,14 +276,16 @@ def meta_library(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def meta_server(meta_library: Path):
+def meta_server(meta_library: Path, tmp_path_factory):
     """Second backend against the metadata-bearing tree (module-scoped —
-    one spawn per file run, shared by the #260 tests)."""
+    one spawn per file run, shared by the #260 tests). Own state dir —
+    sharing BOOKQ_STATE_DIR with the main fixture could let one
+    library's index satisfy another's startup check (#600 review)."""
     from rs_spawn import spawn_backend
 
     proc, base_url = spawn_backend(
         library_dir=meta_library,
-        state_dir=os.environ["BOOKQ_STATE_DIR"],
+        state_dir=tmp_path_factory.mktemp("meta-state"),
     )
     try:
         yield base_url
