@@ -22,6 +22,7 @@ use std::path::PathBuf;
 // path containment, tree assembly, index cache) that the v1 envelopes
 // are wired onto. v0 routes are deprecated and answer 501 via the fallback.
 mod auth;
+mod admin_ui;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
