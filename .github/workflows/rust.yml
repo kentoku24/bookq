@@ -142,7 +142,7 @@ jobs:
             -e BOOKQ_TEST_MODE=true \
             -e GOOGLE_CLIENT_ID=ci-dummy -e GOOGLE_CLIENT_SECRET=ci-dummy \
             -e BASE_URL=http://127.0.0.1:8080 \
-            -e ALLOWED_EMAILS=test@example.com -e SECRET_KEY=ci-not-a-secret \
+            -e SECRET_KEY=ci-not-a-secret \
             -e LIBRARY_DIR=/app/library -e BOOKQ_STATE_DIR=/var/lib/bookq \
             -e BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs \
             -v "$PWD/.ci-dl:/app/library" \

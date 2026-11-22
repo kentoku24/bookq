@@ -50,7 +50,7 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     """Live viewer-rs WITHOUT test-mode: real signed-cookie session auth.
 
     Same shape as conftest's server fixture but with a custom env — spawns
-    viewer-rs with the same SECRET_KEY/allowlist contract. The health probe
+    viewer-rs with the same SECRET_KEY contract. The health probe
     is the public v1 endpoint.
     """
     with socket.socket() as s:
@@ -61,7 +61,6 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     env["LIBRARY_DIR"] = str(library_tree)
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env["SECRET_KEY"] = AUTH_SECRET
-    env["ALLOWED_EMAILS"] = f"{ALICE['email']},{BOB['email']}"
     env.update({
         "BOOKQ_BIND": f"127.0.0.1:{port}",
         "GOOGLE_CLIENT_ID": "ci-dummy",
@@ -95,7 +94,12 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
 @pytest.fixture(scope="module")
 def auth_server(library_tree, tmp_path_factory):
     """Live server WITHOUT test-mode: real signed-cookie session auth."""
+    from rs_spawn import users_cli
+
     state_dir = tmp_path_factory.mktemp("reader-ws-auth-state")
+    for user in (ALICE, BOB):
+        cp = users_cli(state_dir, "add", user["email"])
+        assert cp.returncode == 0, cp.stderr
     proc, base_url = _spawn_server(library_tree, state_dir)
     yield base_url
     proc.terminate()

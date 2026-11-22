@@ -146,8 +146,9 @@ def spawn_backend(
     the same headroom covers a loaded machine — and `cargo build` runs
     before this is called.
 
-    ``test_mode=False`` spawns with real signed-cookie/Bearer auth; the
-    ``ALLOWED_EMAILS`` env below is the one-time member seed (#608).
+    ``test_mode=False`` spawns with real signed-cookie/Bearer auth. There is
+    no env allowlist; enroll users with ``users_cli()`` before requesting a
+    session (#610).
     """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -167,7 +168,6 @@ def spawn_backend(
             "GOOGLE_CLIENT_ID": "ci-dummy",
             "GOOGLE_CLIENT_SECRET": "ci-dummy",
             "BASE_URL": base_url,
-            "ALLOWED_EMAILS": "test@example.com",
             "SECRET_KEY": "ci-not-a-secret",
             "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
             "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),

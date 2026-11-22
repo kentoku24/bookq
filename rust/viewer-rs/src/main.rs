@@ -1250,21 +1250,12 @@ async fn main() {
     let test_mode = std::env::var("BOOKQ_TEST_MODE")
         .unwrap_or_default()
         .eq_ignore_ascii_case("true");
-    // `ALLOWED_EMAILS` is a one-time seed; after `settings.users_seeded`
-    // the `users` table is authoritative (see users.rs).
-    let seed_emails: Vec<String> = std::env::var("ALLOWED_EMAILS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|e| e.trim().to_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect();
     let state_dir = PathBuf::from(
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
-    let users_store = std::sync::Arc::new(users::UserStore::new(
-        &state_dir,
-        Some(seed_emails),
-    ));
+    // No env allowlist: the users table is the only membership source.
+    // A fresh DB starts empty; enroll the first admin with `viewer-rs users`.
+    let users_store = std::sync::Arc::new(users::UserStore::new(&state_dir));
     let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
     // #400: the auth surface needs the full OAuth config — missing config
     // answers 501 (warned at startup).
@@ -1529,7 +1520,7 @@ mod handler_tests {
         ));
         let index = std::sync::Arc::new(folders::IndexState::new());
         let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
-        let users_store = std::sync::Arc::new(users::UserStore::new(&dir, None));
+        let users_store = std::sync::Arc::new(users::UserStore::new(&dir));
         let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
         AppState {
             library: dir.join("dl"),

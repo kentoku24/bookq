@@ -50,12 +50,13 @@ CREATE TABLE IF NOT EXISTS position_folders (
 
 -- User directory (#608): the authoritative membership + role store.
 -- Rows are written only by the offline CLI (`viewer-rs users`); there is no
--- HTTP write path. `email` is normalized (trim+lowercase) before every
--- write; COLLATE NOCASE is belt-and-braces for manual SQL.
+-- HTTP write path and no env allowlist. `email` is normalized
+-- (trim+lowercase) before every write; COLLATE NOCASE is belt-and-braces for
+-- manual SQL. A disabled user keeps the row (`disabled_at`) for audit instead
+-- of being deleted.
 --
--- `ALLOWED_EMAILS` is a one-time seed on first init (guarded by the
--- `settings.users_seeded` marker), then the DB is authoritative. A disabled
--- user keeps the row (`disabled_at`) for audit instead of being deleted.
+-- A fresh DB starts empty: enroll the first admin with
+-- `viewer-rs users add <email> --role admin` before anyone can log in.
 CREATE TABLE IF NOT EXISTS users (
   email       TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
   role        TEXT NOT NULL DEFAULT 'member'
@@ -66,6 +67,9 @@ CREATE TABLE IF NOT EXISTS users (
   note        TEXT NOT NULL DEFAULT ''
 );
 
+-- Reserved for internal one-off flags. The legacy `users_seeded` key from
+-- the #608 seed path may exist; it is ignored now that enrollment is
+-- CLI-only.
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

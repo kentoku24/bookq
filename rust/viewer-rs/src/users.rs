@@ -11,12 +11,12 @@
 //! background task refreshes it every second; the `/admin` gate additionally
 //! checks the DB per request so admin revocation is immediate.
 //!
-//! `ALLOWED_EMAILS` is a **one-time seed** (`settings.users_seeded` marker):
-//! the first init inserts those emails as `member`, then the DB is
-//! authoritative. Re-seeding after an intentional removal is prevented by the
-//! marker; a lost DB re-seeds from the env on recovery.
+//! There is no env allowlist. The first user (normally an admin) is enrolled
+//! with `viewer-rs users add <email> --role admin`; normal users use the same
+//! command with the default `member` role. A fresh DB starts empty, so no one
+//! can log in until the operator enrolls at least one user.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -170,17 +170,6 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn table_exists(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<bool> {
-    let found = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |_| Ok(()),
-        )
-        .optional()?;
-    Ok(found.is_some())
-}
-
 fn parse_role(raw: &str) -> Option<Role> {
     Role::parse(raw)
 }
@@ -188,107 +177,18 @@ fn parse_role(raw: &str) -> Option<Role> {
 pub(crate) struct UserStore {
     path: PathBuf,
     init: Mutex<bool>,
-    /// `Some` for the server (seed/migrate on first init); `None` for the CLI
-    /// so a CLI-first bootstrap cannot consume the one-time seed marker.
-    seed: Option<Vec<String>>,
 }
 
 impl UserStore {
-    pub(crate) fn new(state_dir: &Path, seed: Option<Vec<String>>) -> Self {
+    pub(crate) fn new(state_dir: &Path) -> Self {
         Self {
             path: state::user_state_path(state_dir),
             init: Mutex::new(false),
-            seed,
         }
     }
 
     fn connect(&self) -> Result<rusqlite::Connection, UserError> {
-        let seed = self.seed.as_deref();
-        Ok(state::connect_user_state_with(
-            &self.path,
-            &self.init,
-            |conn| match seed {
-                Some(seed) => Self::ensure_seed(conn, seed),
-                None => Ok(()),
-            },
-        )?)
-    }
-
-    /// One-time seed + legacy `admin_users` migration. Runs before the
-    /// `init` flag is set; an error leaves the store uninitialized so the
-    /// next call retries (the DDL is idempotent).
-    fn ensure_seed(conn: &rusqlite::Connection, seed: &[String]) -> rusqlite::Result<()> {
-        let tx = conn.unchecked_transaction()?;
-        let seeded = tx
-            .query_row(
-                "SELECT 1 FROM settings WHERE key = 'users_seeded'",
-                [],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if seeded {
-            tx.commit()?;
-            return Ok(());
-        }
-
-        let seed_set: HashSet<String> = seed.iter().filter_map(|e| normalize_email(e)).collect();
-        let now = now_secs();
-
-        // Unmerged-branch DBs had `admin_users`. Copy only grants that were
-        // actually reachable (in ALLOWED_EMAILS); dormant rows are skipped
-        // rather than silently activated. Production (v2) has no such table.
-        if table_exists(&tx, "admin_users")? {
-            let rows: Vec<(String, f64, String, String)> = {
-                let mut stmt =
-                    tx.prepare("SELECT email, created_at, created_by, note FROM admin_users")?;
-                let rows = stmt
-                    .query_map([], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, f64>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-            for (email, created_at, created_by, note) in rows {
-                let Some(email) = normalize_email(&email) else {
-                    continue;
-                };
-                if seed_set.contains(&email) {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO users \
-                         (email, role, disabled_at, created_at, created_by, note) \
-                         VALUES (?1, 'admin', NULL, ?2, ?3, ?4)",
-                        params![email, created_at, created_by, note],
-                    )?;
-                } else {
-                    tracing::warn!(
-                        email = %email,
-                        "skipping legacy admin grant absent from ALLOWED_EMAILS seed"
-                    );
-                }
-            }
-            tx.execute("DROP TABLE admin_users", [])?;
-        }
-
-        for email in &seed_set {
-            tx.execute(
-                "INSERT OR IGNORE INTO users \
-                 (email, role, disabled_at, created_at, created_by, note) \
-                 VALUES (?1, 'member', NULL, ?2, 'seed', '')",
-                params![email, now],
-            )?;
-        }
-        tx.execute(
-            "INSERT INTO settings (key, value) VALUES ('users_seeded', '1')",
-            [],
-        )?;
-        tx.commit()?;
-        Ok(())
+        Ok(state::connect_user_state(&self.path, &self.init)?)
     }
 
     /// Active email → role. Invalid roles from manual SQL are skipped
@@ -584,10 +484,6 @@ mod tests {
         dir
     }
 
-    fn seeded(dir: &Path, emails: &[&str]) -> UserStore {
-        UserStore::new(dir, Some(emails.iter().map(|e| e.to_string()).collect()))
-    }
-
     #[test]
     fn normalize_email_matrix() {
         assert_eq!(
@@ -627,72 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn seed_members_and_marker_is_one_time() {
-        let dir = temp_dir("seed");
-        let store = seeded(&dir, &["a@example.com", "b@example.com"]);
-        let rows = store.list().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.role == Role::Member && r.active()));
-
-        // A new seed must not be applied after the marker exists (an
-        // intentional removal must survive a restart).
-        let store2 = seeded(&dir, &["c@example.com"]);
-        let rows = store2.list().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(!rows.iter().any(|r| r.email == "c@example.com"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn marker_prevents_reseed_after_all_users_are_removed() {
-        let dir = temp_dir("no-reseed");
-        let store = seeded(&dir, &["a@example.com"]);
-        assert!(store.is_active("a@example.com").unwrap());
-        store.disable("a@example.com").unwrap();
-        // Re-open with a new seed; the marker must keep the directory empty.
-        let store2 = seeded(&dir, &["b@example.com"]);
-        let rows = store2.list().unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(!rows[0].active());
-        assert!(!store2.is_active("b@example.com").unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn cli_first_does_not_consume_the_server_seed_marker() {
-        let dir = temp_dir("cli-first");
-        let cli_store = UserStore::new(&dir, None);
-        assert_eq!(
-            cli_store
-                .add("admin@example.com", Role::Admin, "cli", "")
-                .unwrap(),
-            Change::Added
-        );
-        // Server starts later: its seed still runs and keeps the admin role.
-        let server_store = seeded(&dir, &["member@example.com"]);
-        let rows = server_store.list().unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows.iter()
-                .find(|r| r.email == "admin@example.com")
-                .unwrap()
-                .role,
-            Role::Admin
-        );
-        assert_eq!(
-            rows.iter()
-                .find(|r| r.email == "member@example.com")
-                .unwrap()
-                .role,
-            Role::Member
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn add_change_disable_reactivate() {
         let dir = temp_dir("crud");
-        let store = seeded(&dir, &[]);
+        let store = UserStore::new(&dir);
         assert_eq!(
             store
                 .add("a@example.com", Role::Member, "cli", "note")
@@ -734,7 +567,7 @@ mod tests {
     #[test]
     fn invalid_input_does_not_write() {
         let dir = temp_dir("invalid");
-        let store = seeded(&dir, &[]);
+        let store = UserStore::new(&dir);
         assert!(matches!(
             store.add("not-an-email", Role::Member, "cli", ""),
             Err(UserError::InvalidEmail)
@@ -756,56 +589,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_admin_users_are_migrated_filtered_by_seed() {
-        let dir = temp_dir("legacy-admin");
-        let path = state::user_state_path(&dir);
-        {
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE admin_users (
-                     email TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
-                     created_at REAL NOT NULL,
-                     created_by TEXT NOT NULL,
-                     note TEXT NOT NULL DEFAULT ''
-                 );
-                 INSERT INTO admin_users VALUES ('a@example.com', 11.0, 'cli', 'legacy');
-                 INSERT INTO admin_users VALUES ('outside@example.com', 12.0, 'cli', 'dormant');
-                 PRAGMA user_version = 3;",
-            )
-            .unwrap();
-        }
-        let store = seeded(&dir, &["a@example.com", "member@example.com"]);
-        let rows = store.list().unwrap();
-        assert_eq!(rows.len(), 2);
-        let admin = rows.iter().find(|r| r.email == "a@example.com").unwrap();
-        assert_eq!(admin.role, Role::Admin);
-        assert_eq!(admin.note, "legacy");
-        assert!(rows.iter().any(|r| r.email == "member@example.com"));
-        assert!(!rows.iter().any(|r| r.email == "outside@example.com"));
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        let legacy: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='admin_users'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy, 0);
-        let marker: String = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key='users_seeded'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(marker, "1");
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn v2_db_seeds_members_without_losing_visibility_rows() {
-        let dir = temp_dir("v2-seed");
+    fn v2_db_upgrades_without_users_and_preserves_visibility_rows() {
+        let dir = temp_dir("v2-upgrade");
         let path = state::user_state_path(&dir);
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
@@ -825,8 +610,11 @@ mod tests {
             )
             .unwrap();
         }
-        let store = seeded(&dir, &["a@example.com"]);
-        assert!(store.is_active("a@example.com").unwrap());
+        let store = UserStore::new(&dir);
+        // No env seed: a pre-users DB upgrades with an empty directory; the
+        // operator must enroll users via the CLI.
+        assert!(store.list().unwrap().is_empty());
+        assert!(!store.is_active("a@example.com").unwrap());
         let conn = rusqlite::Connection::open(&path).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -847,16 +635,20 @@ mod tests {
     #[test]
     fn directory_tracks_refresh_and_roles() {
         let dir = temp_dir("directory");
-        let store = std::sync::Arc::new(seeded(&dir, &["member@example.com"]));
+        let store = std::sync::Arc::new(UserStore::new(&dir));
         let directory = UserDirectory::new(store.clone());
-        assert!(directory.is_member("member@example.com"));
-        assert!(!directory.is_admin("member@example.com"));
-        assert!(!directory.is_member("outside@example.com"));
+        assert!(!directory.is_member("member@example.com"));
 
+        store
+            .add("member@example.com", Role::Member, "cli", "")
+            .unwrap();
         store
             .add("admin@example.com", Role::Admin, "cli", "")
             .unwrap();
         directory.refresh().unwrap();
+        assert!(directory.is_member("member@example.com"));
+        assert!(!directory.is_admin("member@example.com"));
+        assert!(!directory.is_member("outside@example.com"));
         assert!(directory.is_admin("admin@example.com"));
         store.disable("member@example.com").unwrap();
         directory.refresh().unwrap();
@@ -880,7 +672,7 @@ mod tests {
     fn store_failure_is_err_not_member() {
         let dir = temp_dir("openfail");
         std::fs::create_dir(dir.join("folder-visibility.sqlite3")).unwrap();
-        let store = UserStore::new(&dir, Some(vec![]));
+        let store = UserStore::new(&dir);
         assert!(store.is_active("a@b.com").is_err());
         assert!(store.list().is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -894,7 +686,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.pragma_update(None, "user_version", 99).unwrap();
         }
-        let store = UserStore::new(&dir, Some(vec![]));
+        let store = UserStore::new(&dir);
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.is_active("a@b.com")));
         assert!(result.is_err());

@@ -88,7 +88,7 @@ jobs:
             BOOKQ_BIND=127.0.0.1:8080 \
             GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
             BASE_URL=http://127.0.0.1:8080 \
-            SECRET_KEY=ci-not-a-secret ALLOWED_EMAILS=test@example.com \
+            SECRET_KEY=ci-not-a-secret \
             rust/target/debug/viewer-rs > /tmp/bookq-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8080/api/v1/health && break || sleep 1

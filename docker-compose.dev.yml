@@ -45,7 +45,6 @@ services:
       - GOOGLE_CLIENT_ID=ci-dummy
       - GOOGLE_CLIENT_SECRET=ci-dummy
       - BASE_URL=https://dev-${DEV_POOL_SLOT:?DEV_POOL_SLOT is required — use ./dev.sh up}.ts.net
-      - ALLOWED_EMAILS=test@example.com
       - BOOKQ_THUMB_CACHE_DIR=/var/cache/bookq-thumbs
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_WEB_DIR=/web

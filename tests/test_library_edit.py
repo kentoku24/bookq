@@ -80,7 +80,6 @@ def lib_server_auth(lib_root, tmp_path_factory):
             "GOOGLE_CLIENT_ID": "ci-dummy",
             "GOOGLE_CLIENT_SECRET": "ci-dummy",
             "BASE_URL": base_url,
-            "ALLOWED_EMAILS": "test@example.com",
             "SECRET_KEY": "ci-not-a-secret",
             "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
             "BOOKQ_THUMB_CACHE_DIR": str(state / "thumbs"),

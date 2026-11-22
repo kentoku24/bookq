@@ -1,7 +1,7 @@
 """User directory + `/admin` gate (#608).
 
-The `users` table is DB-authoritative after the one-time `ALLOWED_EMAILS`
-seed. These tests exercise the production binary end to end:
+The `users` table is the only membership source (no env allowlist). These
+tests exercise the production binary end to end:
 
 - test-mode server (mock user) for the page / menu / CLI contract
 - real-auth server (signed session cookie + Bearer) for the membership and
@@ -304,7 +304,7 @@ def test_admin_template_is_not_public(admin_server):
 
 def test_cli_first_bootstrap_survives_seed_and_restart(library_tree, tmp_path):
     state = tmp_path / "state"
-    # CLI-first: create the admin before the server seeds ALLOWED_EMAILS.
+    # CLI-first: enroll the admin before the server starts.
     cp = users_cli(state, "add", TEST_EMAIL, "--role", "admin")
     assert cp.returncode == 0, cp.stderr
 
