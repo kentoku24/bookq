@@ -21,6 +21,7 @@ use std::path::PathBuf;
 // serve/tree/folders hold the contract-independent core (archive listing,
 // path containment, tree assembly, index cache) that the v1 envelopes
 // are wired onto. v0 routes are deprecated and answer 501 via the fallback.
+mod admin;
 mod auth;
 #[cfg(test)]
 mod conformance_vectors;
@@ -53,6 +54,9 @@ pub(crate) struct AppState {
     pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
+    /// #608: admin registry on the same user-state DB. Rows are written only
+    /// by the offline `viewer-rs admin` CLI; every HTTP caller is read-only.
+    pub(crate) admin: std::sync::Arc<admin::AdminStore>,
     /// #400: the whole auth surface (`/auth/*` + `/api/v1/auth/token`).
     /// `Some` iff the OAuth config is complete, else the surface answers 501.
     pub(crate) auth_flow: Option<std::sync::Arc<oauth::AuthFlow>>,
@@ -1137,6 +1141,7 @@ async fn main() {
         index: index.clone(),
         position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
+        admin: std::sync::Arc::new(admin::AdminStore::new(&state_dir)),
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
@@ -1335,6 +1340,7 @@ mod handler_tests {
             index,
             position_store: std::sync::Arc::new(state::PositionStore::new(&dir)),
             visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
+            admin: std::sync::Arc::new(admin::AdminStore::new(&dir)),
             session_key: None,
             secret_key: "test-secret".into(),
             auth_flow: None,

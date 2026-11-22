@@ -314,7 +314,7 @@ pub struct PositionStore {
 impl PositionStore {
     pub fn new(state_dir: &Path) -> Self {
         Self {
-            path: state_dir.join("folder-visibility.sqlite3"),
+            path: user_state_path(state_dir),
             init: Mutex::new(false),
         }
     }
@@ -693,17 +693,24 @@ pub async fn delete_user_positions(
 // ── folder visibility (shared SQLite store) ──────────────────────────────────
 
 // The DDL lives in one shared file (#200) — api/user-state-schema.sql is
-// the single source FastAPI and viewer-rs both apply. USER_STATE_SCHEMA_VERSION
-// must equal the file's `PRAGMA user_version` stamp; a DB stamped newer
-// than it is refused rather than silently downgraded. v2 added the reading-
-// position tables (#375) — the constant versions the whole user-state DB.
+// the single source viewer-rs applies. USER_STATE_SCHEMA_VERSION must equal
+// the file's `PRAGMA user_version` stamp; a DB stamped newer than it is
+// refused rather than silently downgraded. v2 added the reading-position
+// tables (#375); v3 added the admin registry (#608) — the constant versions
+// the whole user-state DB.
 const VIS_SCHEMA: &str = include_str!("../../../api/user-state-schema.sql");
-const USER_STATE_SCHEMA_VERSION: i64 = 2;
+pub(crate) const USER_STATE_SCHEMA_VERSION: i64 = 3;
+
+/// The one user-state DB filename — shared by every store (`VisibilityStore`,
+/// `PositionStore`, `AdminStore`) so a future rename cannot split them.
+pub(crate) fn user_state_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("folder-visibility.sqlite3")
+}
 
 /// Shared user-state DB connect: WAL + busy_timeout, lazy idempotent
-/// schema apply under `init`, fresh connection per call. Used by both
-/// `VisibilityStore` and `PositionStore` on the same file.
-fn connect_user_state(
+/// schema apply under `init`, fresh connection per call. Used by
+/// `VisibilityStore`, `PositionStore` and `AdminStore` on the same file.
+pub(crate) fn connect_user_state(
     path: &Path,
     init: &Mutex<bool>,
 ) -> rusqlite::Result<rusqlite::Connection> {
@@ -766,7 +773,7 @@ pub struct Snapshot {
 impl VisibilityStore {
     pub fn new(state_dir: &Path) -> Self {
         Self {
-            path: state_dir.join("folder-visibility.sqlite3"),
+            path: user_state_path(state_dir),
             init: Mutex::new(false),
         }
     }
@@ -1640,6 +1647,7 @@ mod tests {
             index,
             position_store: std::sync::Arc::new(PositionStore::new(dir)),
             visibility: std::sync::Arc::new(VisibilityStore::new(dir)),
+            admin: std::sync::Arc::new(crate::admin::AdminStore::new(dir)),
             session_key: None,
             secret_key: "test-secret".into(),
             auth_flow: None,
