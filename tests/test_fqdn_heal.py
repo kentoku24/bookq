@@ -34,6 +34,7 @@ STATE="$STUB_STATE"
 case "${1:-}" in
   ps) printf 'fakecid123\\n'; exit 0 ;;
   compose)
+    printf 'compose %s\\n' "$*" >> "$STATE/docker.log"
     # prd deploy: `compose [profiles/-f...] <cmd>` — ps -q must name the
     # service so viewer-rs and tailscale resolve to distinct cids.
     case " $* " in
@@ -228,9 +229,18 @@ def test_tagged_offline_ghost_is_deleted_and_self_renamed(tmp_path):
             "tags": ["tag:bookq-dev"],
         }
     )
+    # An unrelated OFFLINE peer whose name differs from the expected FQDN
+    # must not confuse peer_online — it keeps scanning past non-matching
+    # peers to the ghost's own entry (#604 review).
+    status = _status(online=False)
+    status["Peer"]["nodekey:alias"] = {
+        "DNSName": "alias-01.tail.ts.net.",
+        "Online": False,
+        "TailscaleIPs": ["100.64.0.55"],
+    }
     proc, state = run_heal(
         tmp_path,
-        status_before=_status(online=False),
+        status_before=status,
         devices=devices,
         status_after={"Self": {"DNSName": f"{EXPECTED}."}},
     )
@@ -343,6 +353,12 @@ def test_prd_deploy_invokes_heal_with_base_url_fqdn(tmp_path):
             "TS_OAUTH_CLIENT_SECRET": "stub-client-secret",
             "TS_TAILNET": "-",
             "TS_AUTHKEY_TAGS": "tag:bookq-dev",
+            # deploy_prd falls back to `dotenv_value` (worktree .env then
+            # main checkout .env) when unset — and `${VAR:-...}` treats an
+            # empty value as unset too, so only a non-empty pin is
+            # deterministic. A dummy token forces the `public` profile
+            # regardless of local .env / exported env (#604 review).
+            "CLOUDFLARE_TUNNEL_TOKEN": "stub-token",
         }
     )
     proc = subprocess.run(
@@ -357,6 +373,11 @@ def test_prd_deploy_invokes_heal_with_base_url_fqdn(tmp_path):
     assert f"DELETE https://api.tailscale.com/api/v2/device/{GHOST_ID}" in log
     assert f"POST https://api.tailscale.com/api/v2/device/{SELF_ID}/name" in log
     assert (state / "restarted").exists()
+    # The token pin must actually take the public-profile compose path —
+    # otherwise the test silently exercised whichever profile local .env
+    # happened to imply.
+    docker_log = (state / "docker.log").read_text()
+    assert "--profile public" in docker_log
 
 
 def test_ghost_already_gone_still_renames_self(tmp_path):
