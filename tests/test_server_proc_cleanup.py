@@ -94,12 +94,17 @@ def test_spawned_server_dies_with_parent_sigkill(tmp_path):
 def test_stop_kills_whole_process_group(tmp_path):
     """stop() must reap the group, not just the direct child: the server
     cmd forks a grandchild that would survive a plain terminate()."""
+    gpidfile = tmp_path / "grandchild.pid"
     child_cmd = [
         sys.executable,
         "-c",
-        "import subprocess,sys,time;"
-        "subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)']);"
-        "time.sleep(600)",
+        # g.wait() keeps the middle process alive for the grandchild's
+        # lifetime AND reaps it — a bare sleep would leave the killed
+        # grandchild a zombie that os.kill(pid, 0) still reports alive.
+        "import subprocess,sys,pathlib;"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)']);"
+        f"pathlib.Path({str(gpidfile)!r}).write_text(str(g.pid));"
+        "g.wait()",
     ]
     proc = _server_proc.spawn(
         child_cmd,
@@ -108,12 +113,25 @@ def test_stop_kills_whole_process_group(tmp_path):
     )
     pgid = proc.pid  # launcher is the process-group leader
     try:
+        # Wait until the grandchild actually exists — terminating
+        # earlier could pass vacuously with nothing to reap (#601
+        # review).
+        deadline = time.time() + 10
+        while not gpidfile.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert gpidfile.exists(), "server never spawned its grandchild"
+        gpid = int(gpidfile.read_text().strip())
+        assert _pid_alive(gpid), "grandchild not alive before stop()"
+
         proc.terminate()
         assert proc.poll() is not None
         # Group-empty check catches grandchildren a direct-child kill
         # would leave behind (reparented orphans keep the pgid alive).
         assert _wait_dead(lambda: _group_alive(pgid), 5.0), (
             f"process group {pgid} still has members after stop()"
+        )
+        assert _wait_dead(lambda: _pid_alive(gpid), 5.0), (
+            f"grandchild pid {gpid} survived stop()"
         )
     finally:
         proc.stop()

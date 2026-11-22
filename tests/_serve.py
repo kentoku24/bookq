@@ -69,6 +69,15 @@ def main() -> int:
         # (or grandchildren outliving the direct child) still die.
         _kill_group(signal.SIGKILL)
         proc.wait()
+    elif proc.poll() is not None:
+        # Server exited before parent death — don't leave grandchildren
+        # it forked behind in our group (#601 review). SIGTERM only:
+        # the launcher ignores it (set above) and must survive to
+        # report the child's exit code; TERM-survivors are still
+        # covered by ServerProc.stop()/atexit killpg escalation.
+        proc.wait()
+        _kill_group(signal.SIGTERM)
+        time.sleep(0.3)
 
     return proc.returncode if proc.returncode is not None else 0
 

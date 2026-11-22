@@ -73,13 +73,14 @@ class ServerProc:
         deadline = time.time() + grace
         while self._proc.poll() is None and time.time() < deadline:
             time.sleep(0.05)
-        if self._proc.poll() is None:
-            # Watchdog wedged — kill the launcher group outright; the
-            # server subtree shares that group.
-            try:
-                os.killpg(self._proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        # Kill the launcher group outright if it's still up — and also
+        # when the launcher already exited but stragglers keep the pgid
+        # alive (server exited first, grandchildren outlived it; #601
+        # review). ESRCH is harmless when the group is truly empty.
+        try:
+            os.killpg(self._proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
         try:
             self._proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
