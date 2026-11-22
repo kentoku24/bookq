@@ -391,7 +391,7 @@
         "type": "object"
       },
       "TreeNode": {
-        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は folder ノードで常時 bool。\n`path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は\nサーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは\n未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`\n始まりの絶対 URL で、クライアントは `?w=` のみを付与する。\n`hidden` は `visibility=annotate` 時のみ付く。\n",
+        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は全木 (`depth` 省略) の folder ノードで常時 bool — `depth>=1` の浅い一覧ではキー自体を返さない (上記 depth 説明参照)。\n`path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は\nサーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは\n未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`\n始まりの絶対 URL で、クライアントは `?w=` のみを付与する。\n`hidden` は `visibility=annotate` 時のみ付く。\n",
         "properties": {
           "archive": {
             "description": "書庫仮想フォルダ",

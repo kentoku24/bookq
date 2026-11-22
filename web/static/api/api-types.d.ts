@@ -632,7 +632,7 @@ export interface components {
         /**
          * @description `name` は flatten 規約により `/` を含み得る（"parent/child"）。
          *     `thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`
-         *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は folder ノードで常時 bool。
+         *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は全木 (`depth` 省略) の folder ノードで常時 bool — `depth>=1` の浅い一覧ではキー自体を返さない (上記 depth 説明参照)。
          *     `path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は
          *     サーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは
          *     未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`
