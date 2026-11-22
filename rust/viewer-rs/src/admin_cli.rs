@@ -287,17 +287,26 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
             }
             Err(e) => fail(&e),
         },
-        Cmd::Check { email } => match store.is_admin(&email) {
-            Ok(true) => {
-                println!("admin");
-                EXIT_OK
+        Cmd::Check { email } => {
+            // `is_admin` treats a malformed email as "not an admin" (the
+            // server wants that fail-closed behavior). The CLI distinguishes
+            // a typo from a real non-admin so scripts can tell them apart.
+            if admin::normalize_email(&email).is_none() {
+                eprintln!("error: invalid email\n\n{USAGE}");
+                return EXIT_USAGE;
             }
-            Ok(false) => {
-                println!("not admin");
-                EXIT_NOT_FOUND
+            match store.is_admin(&email) {
+                Ok(true) => {
+                    println!("admin");
+                    EXIT_OK
+                }
+                Ok(false) => {
+                    println!("not admin");
+                    EXIT_NOT_FOUND
+                }
+                Err(e) => fail(&e),
             }
-            Err(e) => fail(&e),
-        },
+        }
         Cmd::Help => EXIT_OK,
     }
 }
@@ -393,6 +402,7 @@ mod tests {
         assert_eq!(run(&args(&["remove", "a@b.com"]), &dir), EXIT_NOT_FOUND);
         // Invalid input never reaches the store.
         assert_eq!(run(&args(&["add", "not-an-email"]), &dir), EXIT_USAGE);
+        assert_eq!(run(&args(&["check", "not-an-email"]), &dir), EXIT_USAGE);
         assert_eq!(run(&args(&["wat"]), &dir), EXIT_USAGE);
         let _ = std::fs::remove_dir_all(&dir);
     }

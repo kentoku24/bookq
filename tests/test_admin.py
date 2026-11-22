@@ -198,6 +198,7 @@ def test_invalid_input_and_empty_list(admin_state, no_admin):
     assert cp.returncode == 1
     assert cp.stdout.strip() == "not admin"
 
+    assert admin_cli(admin_state, "check", "not-an-email").returncode == 2
     assert admin_cli(admin_state, "add").returncode == 2
     cp = admin_cli(admin_state, "--help")
     assert cp.returncode == 0
