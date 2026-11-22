@@ -368,12 +368,12 @@ def test_auth_without_cookie_goes_to_login(auth_server, auth_reset):
 
 def test_auth_seeded_member_is_member_not_admin(auth_server, auth_reset):
     headers = _cookie_header(TEST_EMAIL)
+    _wait_api(auth_server, headers, 200)
     status, _, body = _request(auth_server, "GET", "/", headers)
     assert status == 200
     assert b'id="tile-grid"' in body
     assert b'id="admin-link"' not in body
     assert _request(auth_server, "GET", "/admin", headers)[0] == 404
-    _wait_api(auth_server, headers, 200)
 
 
 def test_auth_non_member_session_is_denied(auth_server, auth_reset):
