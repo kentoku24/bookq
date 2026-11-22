@@ -33,7 +33,10 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{border:1px solid #2a2a2a;padding:6px 8px;text-align:left}
 th{background:#222;color:#aaa;font-weight:600}
 td{color:#ccc}
-select{width:100%;max-width:480px;padding:8px 10px;border-radius:8px;border:1px solid #333;background:#222;color:#ccc;font-size:13px}
+/* iOS Safari/PWA auto-zooms the page when a focused form control computes
+   <16px font-size and never zooms back — keep >=16px (same rule as
+   #search-input in style.css). */
+select{width:100%;max-width:480px;padding:8px 10px;border-radius:8px;border:1px solid #333;background:#222;color:#ccc;font-size:16px}
 .signal-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .signal{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;font-size:13px;border:1px solid #333;background:#222}
 .signal.ok{border-color:rgba(52,168,83,.4);color:#34a853;background:rgba(52,168,83,.12)}

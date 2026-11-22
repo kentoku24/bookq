@@ -705,3 +705,14 @@ def test_10_clone_and_quota_handling(page, server):
     # cleanup oldest
     page.evaluate("""async () => { try { await window.OfflineStore.delete('oldest_work'); } catch {} try { await window.OfflineStore.delete('simple_manga'); } catch {} }""")
     assert quota_handled, f"cancel path must surface 容量不足のため中断 and keep the victim, toast={toast_text!r} kept={kept_after_cancel}"
+
+
+def test_harness_select_font_size_meets_ios_threshold(page, server):
+    """Same iOS auto-zoom guard as #search-input: the harness <select> must
+    keep computed font-size >=16px so focusing it can't zoom the page."""
+    goto_harness(page, server)
+    size = page.eval_on_selector(
+        "#harness-target-select",
+        "el => parseFloat(getComputedStyle(el).fontSize)",
+    )
+    assert size >= 16
