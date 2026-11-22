@@ -23,7 +23,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 
-from rs_spawn import _viewer_rs_binary  # noqa: E402
+from rs_spawn import viewer_rs_binary  # noqa: E402
 
 UPLOAD_DIR_NAME = ".bookq-uploads"
 
@@ -80,14 +80,13 @@ def lib_server_auth(lib_root, tmp_path_factory):
             "GOOGLE_CLIENT_ID": "ci-dummy",
             "GOOGLE_CLIENT_SECRET": "ci-dummy",
             "BASE_URL": base_url,
-            "ALLOWED_EMAILS": "test@example.com",
             "SECRET_KEY": "ci-not-a-secret",
             "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
             "BOOKQ_THUMB_CACHE_DIR": str(state / "thumbs"),
         }
     )
     proc = subprocess.Popen(
-        [str(_viewer_rs_binary())],
+        [str(viewer_rs_binary())],
         env=env,
         cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL,

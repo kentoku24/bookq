@@ -714,21 +714,6 @@ pub(crate) fn connect_user_state(
     path: &Path,
     init: &Mutex<bool>,
 ) -> rusqlite::Result<rusqlite::Connection> {
-    connect_user_state_with(path, init, |_| Ok(()))
-}
-
-/// [`connect_user_state`] plus a one-time `after` hook that runs after the
-/// DDL and before `init` is marked done. `UserStore` uses it for the one-time
-/// seed / legacy `admin_users` migration; an error leaves `init` unset so the
-/// next call retries (the DDL is idempotent).
-pub(crate) fn connect_user_state_with<F>(
-    path: &Path,
-    init: &Mutex<bool>,
-    after: F,
-) -> rusqlite::Result<rusqlite::Connection>
-where
-    F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>,
-{
     {
         let mut done = init.lock().unwrap();
         if !*done {
@@ -757,7 +742,6 @@ where
                  expects v{USER_STATE_SCHEMA_VERSION} — bump \
                  USER_STATE_SCHEMA_VERSION with the DDL"
             );
-            after(&conn)?;
             drop(conn);
             let _ = std::fs::set_permissions(
                 path,
@@ -1656,7 +1640,7 @@ mod tests {
         let index = std::sync::Arc::new(crate::folders::IndexState::new());
         let library = dir.join("lib");
         let registry = crate::reader_sync::Registry::new(index.clone(), library.clone());
-        let users_store = std::sync::Arc::new(crate::users::UserStore::new(dir, None));
+        let users_store = std::sync::Arc::new(crate::users::UserStore::new(dir));
         let directory = std::sync::Arc::new(crate::users::UserDirectory::new(users_store.clone()));
         crate::AppState {
             library,

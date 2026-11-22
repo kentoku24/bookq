@@ -21,11 +21,10 @@ The DB holds the following feature families:
   before every write. A removed user is soft-disabled via
   `disabled_at`, not deleted, so the row survives as a minimal audit
   trail.
-- Settings (`settings`) — added at schema v3. Internal metadata; the
-  `users_seeded=1` marker records that the one-time `ALLOWED_EMAILS`
-  seed has run. It prevents a restart from re-adding users after an
-  operator intentionally removed them. Losing the DB loses the marker
-  too, so an empty DB + env seed is the recovery path.
+- Settings (`settings`) — added at schema v3. Reserved for internal
+  one-off flags. The legacy `users_seeded=1` key from the #608 seed path
+  may exist in a deployed DB but is ignored now that enrollment is
+  CLI-only.
 
 ## Authorization
 
@@ -38,16 +37,15 @@ The DB holds the following feature families:
 - The OAuth callback checks membership against the DB (a just-added
   member can log in on the first attempt) and refreshes the directory
   before redirecting to `/`.
-- `ALLOWED_EMAILS` is a **one-time seed**, not an OR allowlist. After
-  `settings.users_seeded`, changing the env has no authorization effect;
-  use `viewer-rs users` instead.
-- On a v2 → v3 upgrade the seed inserts the existing `ALLOWED_EMAILS` as
-  `member`, preserving access. The first admin is assigned explicitly
-  via the CLI (no automatic promotion).
-- This branch's earlier v3 schema used `admin_users`; a one-time Rust
-  migration copies only admins that are present in the seed allowlist
-  (dormant grants are skipped rather than activated), then drops
-  `admin_users`.
+- There is **no env allowlist**. The `users` table is the only
+  membership source; enroll/disable with `viewer-rs users`.
+- A fresh DB starts with an empty directory: the operator enrolls the
+  first admin with `viewer-rs users add <email> --role admin` before
+  anyone can log in. Normal users use the same command with the default
+  `member` role (no automatic promotion).
+- A v2 → v3 upgrade creates the empty `users`/`settings` tables and does
+  not seed anyone. If upgrading a pre-users deployment, enroll the
+  former allowlist members via the CLI after the upgrade.
 
 ## Versioning
 
@@ -64,12 +62,14 @@ The DB holds the following feature families:
 - v2 → v3 is additive (`CREATE TABLE IF NOT EXISTS`); existing
   visibility/position rows survive. A v2 binary refuses a v3 DB, so take
   a `user-state` snapshot before deploying v3 and restore it to roll
-  back.
+  back. Rolling back to a pre-#608 image also requires
+  `BOOKQ_LEGACY_ALLOWED_EMAILS` because that binary authorizes logins
+  from the retired env (`docs/deployment.md` "rollback").
 - The DB file is chmod 0600 and its parent 0700 by the store init.
 
 `user-state` is persistent user data, not a cache — cleanup paths must
-not delete it. It now carries the login allowlist and roles, so a restore
-is an authorization-state change: run `viewer-rs users list` after
-restoring and disable stale users. A lost volume with `ALLOWED_EMAILS`
-set re-seeds those members on first boot (then assign an admin via the
-CLI); without it, bootstrap with `viewer-rs users add ... --role admin`.
+not delete it. It now carries the login allowlist (`users`) and roles, so
+a restore is an authorization-state change: run `viewer-rs users list`
+after restoring and disable stale users. A lost volume comes back with an
+empty `users` table; bootstrap with
+`viewer-rs users add <email> --role admin`.

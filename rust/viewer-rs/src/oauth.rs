@@ -817,7 +817,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let users = Arc::new(UserStore::new(&dir, Some(vec!["a@example.com".into()])));
+        let users = Arc::new(UserStore::new(&dir));
         let directory = Arc::new(UserDirectory::new(users.clone()));
         AuthFlow {
             http: reqwest::Client::new(),

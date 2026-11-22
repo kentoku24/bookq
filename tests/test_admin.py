@@ -1,7 +1,7 @@
 """User directory + `/admin` gate (#608).
 
-The `users` table is DB-authoritative after the one-time `ALLOWED_EMAILS`
-seed. These tests exercise the production binary end to end:
+The `users` table is the only membership source (no env allowlist). These
+tests exercise the production binary end to end:
 
 - test-mode server (mock user) for the page / menu / CLI contract
 - real-auth server (signed session cookie + Bearer) for the membership and
@@ -302,9 +302,9 @@ def test_admin_template_is_not_public(admin_server):
         assert "管理機能".encode("utf-8") not in body
 
 
-def test_cli_first_bootstrap_survives_seed_and_restart(library_tree, tmp_path):
+def test_cli_first_bootstrap_survives_restart(library_tree, tmp_path):
     state = tmp_path / "state"
-    # CLI-first: create the admin before the server seeds ALLOWED_EMAILS.
+    # CLI-first: enroll the admin before the server starts.
     cp = users_cli(state, "add", TEST_EMAIL, "--role", "admin")
     assert cp.returncode == 0, cp.stderr
 
@@ -321,6 +321,36 @@ def test_cli_first_bootstrap_survives_seed_and_restart(library_tree, tmp_path):
     finally:
         proc2.terminate()
         proc2.wait(timeout=5)
+
+
+def test_retired_allowed_emails_env_neither_seeds_nor_authorizes(
+    library_tree, tmp_path
+):
+    """#610: an inherited legacy allowlist must not enroll or authorize."""
+    state = tmp_path / "legacy-env-state"
+    proc, base_url = spawn_backend(
+        library_dir=library_tree,
+        state_dir=state,
+        test_mode=False,
+        env_extra={"ALLOWED_EMAILS": OUTSIDE},
+    )
+    try:
+        # The retired env is ignored at startup: nobody is seeded.
+        cp = users_cli(state, "list")
+        assert cp.returncode == 0, cp.stderr
+        assert cp.stdout == ""
+        headers = _cookie_header(OUTSIDE)
+        _wait_api(base_url, headers, 401)
+        assert _request(base_url, "GET", "/admin", headers)[0] == 303
+
+        # CLI enrollment remains the only way in, with no restart needed.
+        cp = users_cli(state, "add", OUTSIDE)
+        assert cp.returncode == 0, cp.stderr
+        _wait_api(base_url, headers, 200)
+        assert _request(base_url, "GET", "/admin", headers)[0] == 404
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────

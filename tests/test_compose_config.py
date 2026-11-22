@@ -12,6 +12,10 @@ REPO_ROOT = Path(__file__).parent.parent
 PROD_COMPOSE = (REPO_ROOT / "docker-compose.yml").read_text()
 DEV_COMPOSE = (REPO_ROOT / "docker-compose.dev.yml").read_text()
 DOCKERFILE = (REPO_ROOT / "Dockerfile.viewer-rs").read_text()
+REBUILD = (REPO_ROOT / "rebuild.sh").read_text()
+LEGACY_ALLOWLIST_COMPOSE = (
+    REPO_ROOT / "docker-compose.legacy-allowlist.yml"
+).read_text()
 
 
 def test_prod_compose_has_no_web_concurrency():
@@ -118,3 +122,20 @@ def test_user_state_is_not_a_cache_mount():
         # state volume is distinct from the warmup/thumb cache mounts
         assert "user-state:/var/cache" not in compose
 
+
+# ── retired env allowlist (#610) ────────────────────────────────────────
+#
+# Membership lives in the `users` table and is enrolled only through the
+# `viewer-rs users` CLI. Normal deploys must not pass the retired env; a
+# pre-#608 rollback still needs it, so that path is an explicit opt-in.
+
+
+def test_normal_compose_files_do_not_pass_retired_allowlist():
+    for compose in (PROD_COMPOSE, DEV_COMPOSE):
+        assert "ALLOWED_EMAILS" not in compose
+
+
+def test_legacy_allowlist_override_is_rollback_only():
+    assert "${BOOKQ_LEGACY_ALLOWED_EMAILS" in LEGACY_ALLOWLIST_COMPOSE
+    assert "docker-compose.legacy-allowlist.yml" in REBUILD
+    assert "BOOKQ_LEGACY_ALLOWED_EMAILS" in REBUILD

@@ -7,7 +7,7 @@
 //! docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin
 //! ```
 //!
-//! Membership is DB-authoritative after the one-time `ALLOWED_EMAILS` seed;
+//! Membership is DB-authoritative; this CLI is the only enrollment path;
 //! additions/removals take effect without a restart (the server refreshes
 //! its directory every second; `/admin` checks the DB per request).
 //!
@@ -242,8 +242,7 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
     // BOOKQ_STATE_DIR is the easiest way to change a different env.
     eprintln!("state: {}", state::user_state_path(state_dir).display());
     warn_if_new_db(state_dir);
-    // CLI-first must not consume the server's one-time ALLOWED_EMAILS seed.
-    let store = UserStore::new(state_dir, None);
+    let store = UserStore::new(state_dir);
     match cmd {
         Cmd::Add {
             email,
@@ -428,18 +427,18 @@ mod tests {
             run(&args(&["add", display, "--role", "admin"]), &dir),
             EXIT_OK
         );
-        let rows = UserStore::new(&dir, None).list().unwrap();
+        let rows = UserStore::new(&dir).list().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].role, Role::Admin);
         assert!(rows[0].active());
 
         assert_eq!(run(&args(&["remove", display]), &dir), EXIT_OK);
         assert_eq!(run(&args(&["check", display]), &dir), EXIT_NOT_FOUND);
-        let rows = UserStore::new(&dir, None).list().unwrap();
+        let rows = UserStore::new(&dir).list().unwrap();
         assert!(!rows[0].active());
 
         assert_eq!(run(&args(&["add", display]), &dir), EXIT_OK);
-        let rows = UserStore::new(&dir, None).list().unwrap();
+        let rows = UserStore::new(&dir).list().unwrap();
         assert_eq!(rows[0].role, Role::Member);
         assert!(rows[0].active());
 
@@ -467,7 +466,7 @@ mod tests {
             ),
             EXIT_OK
         );
-        let rows = UserStore::new(&dir, None).list().unwrap();
+        let rows = UserStore::new(&dir).list().unwrap();
         assert_eq!(rows.len(), 1);
         let line = format_row(&rows[0]);
         let cols: Vec<&str> = line.split('\t').collect();
