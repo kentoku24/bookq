@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import expect
 
 sys.path.insert(0, str(Path(__file__).parent))
 from folder_visibility_helpers import (  # noqa: E402
@@ -669,8 +670,12 @@ def test_show_all_hidden_descendant_not_dimmed(vpage, vis_env, mode):
     if mode == "tile":
         multi = root_el.locator(".tile-multi")
         multi.wait_for(state="attached")
-        assert _cs(multi, "opacity") == "1"
-        assert _cs(multi, "filter") == "none"
+        # The grid can re-render after show-all / view-mode. Reading
+        # getComputedStyle on a node that was detached in that window yields
+        # "", which made this assertion flake under parallel load; expect()
+        # re-resolves the locator and retries until the fresh node settles.
+        expect(multi).to_have_css("opacity", "1")
+        expect(multi).to_have_css("filter", "none")
     else:
         _assert_no_dimming(root_el, sibling, mode)
     ref_name = ref_thumb = None
