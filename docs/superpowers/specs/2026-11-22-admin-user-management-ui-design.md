@@ -40,13 +40,14 @@
 
 ### 一覧
 
-`users` テーブルの全行を email 昇順で表示する。列は次の 3 つ。
+`users` テーブルの全行を email 昇順で表示する。列は次の 4 つ。
 
 | 列 | 内容 |
 |---|---|
 | email | 正規化済み email（HTML エスケープして表示） |
 | role | `admin` / `member` |
 | status | `active` / `disabled` |
+| 操作 | member の停止 / 再有効化、admin は `CLI で管理` の注記 |
 
 行ごとの操作:
 
@@ -180,8 +181,8 @@ impl UserStore {
 admin 行の保護を UI の事前チェックだけにしないのは、CLI や別リクエストとの
 競合で admin を降格・無効化しないため。
 
-`Change::AdminProtected` の追加に伴い、`users_cli.rs` の `Change` match も
-網羅性のために更新する（CLI の `add` / `disable` 経路では発生しない）。
+`users_cli.rs` は `Ok(other)` の catch-all を持つため、`Change` への
+variant 追加に伴う変更は不要（CLI の `add` / `disable` 経路では発生しない）。
 
 ## レンダリング
 
@@ -234,7 +235,7 @@ admin 行の保護を UI の事前チェックだけにしないのは、CLI や
 ## エラーハンドリング
 
 - 入力 email 不正: store の `InvalidEmail` → `?status=invalid`
-- 本文パース失敗・サイズ超過: 400（画面に戻さない）
+- 本文パース失敗: 400、サイズ超過: 413（画面に戻さない）
 - store error: 500 + `tracing::warn!`。ユーザーには詳細を出さない
 - `AdminProtected`: `?status=admin-readonly`
 - `NotFound`（disable/enable 対象なし）: `?status=not-found`
