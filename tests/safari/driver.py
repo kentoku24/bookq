@@ -52,7 +52,15 @@ class SafariDriverManager:
         time.sleep(0.5)
 
     def start(self) -> None:
-        self._proc = subprocess.Popen(
+        # #139: watchdog spawn — pytest death can't orphan safaridriver.
+        # NB: `tests._server_proc` would be a SECOND module object with
+        # its own _PROCS registry — conftest's stop_all() only drains
+        # `_server_proc`, so safaridriver would leak past
+        # pytest_sessionfinish (#601 review). Import the top-level
+        # module like every other caller.
+        from _server_proc import spawn as _spawn_server
+
+        self._proc = _spawn_server(
             ["safaridriver", "-p", str(self._port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

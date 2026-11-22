@@ -19,6 +19,7 @@ Run:
 """
 
 import json
+import os
 import struct
 import urllib.error
 import urllib.parse
@@ -276,6 +277,44 @@ def test_tree_shows_archives_as_folders(server):
     assert by_name["empty.zip"]["children"] == []
     assert by_name["empty.zip"]["thumb"] is None
     assert by_name["aport_simple"]["thumb"] == "1.png"
+
+
+def test_tree_archive_symlinks_stay_consistent(server, library_tree: Path, tmp_path: Path):
+    """#602 review: a symlinked archive/PDF lists only when the entry NAME
+    and resolved target agree on the media category AND the target stays
+    inside the library — anything else would list pages that all 404 (or
+    leak inner names of an archive serving would refuse)."""
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unsupported")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with zipfile.ZipFile(outside / "secret.zip", "w") as zf:
+        zf.writestr("leak.png", "x")
+    links = {
+        "alias_work.zip": library_tree / "work.zip",      # inside, servable
+        "escape.zip": outside / "secret.zip",            # outside → dropped
+        "noext_img": library_tree / "aport_simple" / "1.png",  # ext-less name
+        "mislabel.png": library_tree / "doc.pdf",        # image name → pdf
+    }
+    made = []
+    try:
+        for name, target in links.items():
+            p = library_tree / name
+            p.symlink_to(target)
+            made.append(p)
+        assert _post(server, "/api/v1/index/refresh") == 200
+        by_name = {n["name"]: n for n in _tree(server)}
+        # inside alias: listed AND its pages serve
+        assert by_name["alias_work.zip"]["children"], "alias archive empty"
+        status, raw, _ = _get(server, "/image/alias_work.zip/2.png")
+        assert status == 200
+        # outside escape / ext-less name / cross-category: all unlisted
+        for name in ("escape.zip", "noext_img", "mislabel.png"):
+            assert name not in by_name, name
+    finally:
+        for p in made:
+            p.unlink(missing_ok=True)
+        _post(server, "/api/v1/index/refresh")
 
 
 def test_tree_shows_rar_and_epub(server):

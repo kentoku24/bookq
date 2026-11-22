@@ -68,7 +68,11 @@ body{position:fixed;inset:0}
 	#search input:disabled{opacity:.45;cursor:not-allowed}
 	#pair-btn:disabled{opacity:.45;cursor:not-allowed}
 		#search{min-width:0;padding:0 16px}
-		#search input{width:100%;padding:6px 10px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#ccc;font-size:13px;outline:none;min-height:44px}
+		/* iOS Safari/PWA auto-zooms the page when a focused text field
+		   computes <16px font-size and never zooms back (pinch-out is
+		   unreliable in the installed PWA). Keep >=16px — do not shrink
+		   to match the surrounding 13px UI. */
+		#search input{width:100%;padding:6px 10px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#ccc;font-size:16px;outline:none;min-height:44px}
 	#search input:focus{border-color:#555}
 	/* tile grid — flex-wrap with responsive column widths */
 	#tile-grid{flex:1;padding:8px;display:flex;flex-wrap:wrap;gap:8px;align-content:flex-start}

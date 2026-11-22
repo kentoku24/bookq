@@ -22,6 +22,17 @@ def test_search_input_exists(page):
     expect(page.locator("#search-input")).to_be_visible()
 
 
+def test_search_input_font_size_meets_ios_threshold(page):
+    """iOS Safari/PWA auto-zooms on focus of text fields under 16px and
+    never zooms back — pin the computed font-size floor (Chromium cannot
+    reproduce the iOS focus zoom, so assert the threshold directly)."""
+    size = page.eval_on_selector(
+        "#search-input",
+        "el => parseFloat(getComputedStyle(el).fontSize)",
+    )
+    assert size >= 16
+
+
 def test_search_filters_local_folders(page):
     """Search calls the /api/v1/search endpoint.
     With no metadata.toml files in the fixture the API returns 0 results,

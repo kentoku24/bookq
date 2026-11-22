@@ -70,7 +70,10 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
         "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
     })
     cmd = [str(_viewer_rs_binary())]
-    proc = subprocess.Popen(
+    # #139: watchdog spawn — pytest death can't orphan the backend.
+    import _server_proc
+
+    proc = _server_proc.spawn(
         cmd,
         env=env, cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

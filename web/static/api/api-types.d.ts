@@ -53,7 +53,7 @@ export interface paths {
          * フォルダツリー取得（全木または浅い一覧）
          * @description `depth` 省略で全木を返す。`depth>=1` で `path` 直下の
          *     folder 型子ノードのみを浅く返す（`children: []`、`metadata`/
-         *     `subtree_facets` キーなし）。
+         *     `has_metadata`/`subtree_facets` キーなし）。
          *
          *     `since` に既知の `generation` を渡すと、一致時 304、
          *     不一致時は全木を返す（`since` 指定時は常に全木モード）。
@@ -310,7 +310,7 @@ export interface paths {
          *     ディレクトリは配下ごと再帰削除。ルート（空パス）・
          *     `.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。
          *     読書位置やクライアント側オフラインキャッシュは消えない
-         *     （孤立するが無害 — v1-semantics.md §8）。
+         *     （孤立するが無害 — v1-semantics.md §9）。
          */
         delete: operations["deleteLibraryFile"];
         options?: never;
@@ -632,7 +632,7 @@ export interface components {
         /**
          * @description `name` は flatten 規約により `/` を含み得る（"parent/child"）。
          *     `thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`
-         *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。
+         *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は全木 (`depth` 省略) の folder ノードで常時 bool — `depth>=1` の浅い一覧ではキー自体を返さない (上記 depth 説明参照)。
          *     `path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は
          *     サーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは
          *     未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`
@@ -771,6 +771,21 @@ export interface components {
                     /** @example metadata index building */
                     detail: string;
                 };
+            };
+        };
+        /**
+         * @description per-IP レート制限 (#559 AUTH-01)。`/api/v1/auth/token` は失敗交換
+         *     (401) をクライアント IP 毎に 60 秒窓 20 件までに制限し、超過で
+         *     スロットルする。`Retry-After` に残り秒数。成功交換はカウント
+         *     しない。`Cache-Control: no-store`。
+         */
+        TooManyRequests: {
+            headers: {
+                "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
             };
         };
         /** @description パラメータ不正 */
@@ -1112,15 +1127,17 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない */
+            /**
+             * @description 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は
+             *     返さない #403)。#62 で loose file / アーカイブ entry とも
+             *     `IMAGE_EXTENSIONS` に限定 — 画像以外は 404。
+             */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "image/*": string;
-                    "application/*": string;
-                    "text/*": string;
                 };
             };
             /** @description 単一 Range レスポンス */
@@ -1130,8 +1147,6 @@ export interface operations {
                 };
                 content: {
                     "image/*": string;
-                    "application/*": string;
-                    "text/*": string;
                 };
             };
             /** @description ETag 一致 */
@@ -1460,6 +1475,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            429: components["responses"]["TooManyRequests"];
         };
     };
     uploadLibraryFiles: {

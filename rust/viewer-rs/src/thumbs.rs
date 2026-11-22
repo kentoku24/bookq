@@ -41,7 +41,7 @@ use sha1::{Digest, Sha1};
 use crate::serve::{
     archive_not_modified, fmt_mtime, has_dot_component, http_date, is_image_entry,
     is_pdf_file, is_rar_path, is_within, not_implemented, not_modified, realpath,
-    resolve_archive, suffix_lower,
+    resolve_archive, suffix_lower, valid_archive_inner,
 };
 
 const CACHE_MAX_AGE: i64 = 86400;
@@ -107,7 +107,7 @@ fn stat_mtime_size(path: &Path) -> Option<(f64, f64)> {
 
 /// `_stat_archive_source` — inner guards → stat → pdf/image shape → key.
 fn stat_archive_source(archive: &Path, inner: &str) -> Result<(f64, f64, String), Response> {
-    if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+    if !valid_archive_inner(inner) {
         return Err(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
     }
     let Some((mtime, size)) = stat_mtime_size(archive) else {
@@ -187,7 +187,7 @@ fn load_source_bytes(
         }
         let archive = realpath(&archive)
             .map_err(|_| detail(StatusCode::NOT_FOUND, "File not found"))?;
-        if inner.is_empty() || inner.starts_with('/') || inner.split('/').any(|p| p == "..") {
+        if !valid_archive_inner(&inner) {
             return Err(detail(StatusCode::BAD_REQUEST, "Invalid image path"));
         }
         let Some((mtime, size)) = stat_mtime_size(&archive) else {

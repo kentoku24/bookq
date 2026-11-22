@@ -385,7 +385,7 @@
     var _errorSt = null;             // transient error overlay (ERROR frame / apply fail)
     var _suspended = false;
     var _tombstoneFlush = null;      // in-flight leave-flush {t, watchdog}
-    var _flushRetries = 0;           // consecutive resume_in_use retries
+    var _flushRetries = 0;           // consecutive live-leave flush retries (#594: tombstone drains use per-entry fails)
     var _plane = 'server-ws';
     var _dataT = null;
     var _switcher = (PT && typeof PT.createSwitcher === 'function')
@@ -665,7 +665,9 @@
 
     /* Oldest live entry wins the next flush; expired or malformed entries
      * are garbage-collected here so they cannot linger past their window
-     * (#585 minor). Returns {sessionId, memberId, resumeToken, at} or null. */
+     * (#585 minor). An entry whose flush budget is spent sits out for the
+     * rest of its window instead of starving younger tombstones behind it
+     * (#594). Returns {sessionId, memberId, resumeToken, at} or null. */
     function _tombstoneRead() {
       var map = _tombstoneMap();
       if (!map) return null;
@@ -679,6 +681,7 @@
           dirty = true;
           continue;
         }
+        if ((d.fails || 0) > FLUSH_RETRY_MAX) continue;
         if (!best || d.at < best.at) {
           best = {sessionId: sid, memberId: d.memberId,
                   resumeToken: d.resumeToken, at: d.at};
@@ -686,6 +689,21 @@
       }
       if (dirty) _tombstoneWriteMap(map);
       return best;
+    }
+
+    /* Charge one failed flush attempt to a single entry (#594). The
+     * budget lives in the persisted map so every tab shares it — a
+     * contested member cannot burn attempts twice across tabs, and a
+     * reload cannot refund the budget. Missing/already-cleared entries
+     * are a no-op (a sibling tab may have delivered it mid-flight). */
+    function _tombstoneBumpFails(sessionId) {
+      var map = _tombstoneMap();
+      if (!map || !(sessionId in map)) return;
+      var d = map[sessionId];
+      if (!d || typeof d !== 'object') return;
+      d.fails = (typeof d.fails === 'number' && isFinite(d.fails)
+        ? d.fails : 0) + 1;
+      _tombstoneWriteMap(map);
     }
 
     function _tombstoneWrite(member) {
@@ -734,7 +752,17 @@
         workEpoch: 0, baseRevision: 0, type: 'LEAVE', payload: {},
       };
       var rec = {t: t, watchdog: null, done: false};
-      var done = function (clear) {
+      /* done(clear, charge): `charge` spends this entry's retry budget
+       * (#594). ONLY an application-level transient — resume_in_use —
+       * may charge it: that is the one failure mode that is specific to
+       * THIS entry while siblings would succeed, so bounding it is what
+       * keeps a contested member from starving the queue. Transport
+       * failures (offline, close, watchdog, send throw) hit every queued
+       * entry equally — charging them would let a connectivity blip or
+       * black-holed server retire the LEAVE before its window ends and
+       * the peer would never learn we left (#598 review). They simply
+       * retry on FLUSH_RETRY_MS until the window lapses. */
+      var done = function (clear, charge) {
         if (rec.done) return;
         rec.done = true;
         if (clear) {
@@ -745,15 +773,8 @@
           _flushRetries = 0;
           _later(_maybeFlushLeave, FLUSH_DRAIN_MS);
         } else {
-          /* Silent failure (watchdog/close/send throw): the tombstone
-           * stays parked — retry on a bounded delay instead of waiting
-           * for the next lifecycle event (#585). The shared retry budget
-           * also covers resume_in_use rejects, so a persistently
-           * contested member cannot spin forever either. */
-          _flushRetries += 1;
-          if (_flushRetries <= FLUSH_RETRY_MAX) {
-            _later(_maybeFlushLeave, FLUSH_RETRY_MS);
-          }
+          if (charge) _tombstoneBumpFails(d.sessionId);
+          _later(_maybeFlushLeave, FLUSH_RETRY_MS);
         }
         if (_tombstoneFlush === rec) _tombstoneFlush = null;
         if (rec.watchdog !== null) {
@@ -781,12 +802,14 @@
         }
         if (f.type === 'REJECT' && f.requestId === resumeF.requestId) {
           if (f.reason === 'resume_in_use') {
-            /* Transient: the member's dead link has not been reaped
-             * server-side yet — close this attempt and let done(false)
-             * schedule the bounded retry. If a healthier link genuinely
-             * owns the member its owner sends LEAVE itself; the
-             * tombstone just idles until then. */
-            done(false);
+            /* Transient AND entry-specific: the member's dead link has
+             * not been reaped server-side yet — the one failure mode
+             * that can starve younger tombstones, so it alone spends
+             * this entry's budget (#594/#598). Close this attempt and
+             * let done(false, true) schedule the bounded retry. If a
+             * healthier link genuinely owns the member its owner sends
+             * LEAVE itself; the tombstone just idles until then. */
+            done(false, true);
             return;
           }
           /* bad_resume/resume_expired are terminal — drop only this
@@ -2162,6 +2185,7 @@
         if (!d || typeof d !== 'object' || !d.memberId || !d.resumeToken ||
             typeof d.at !== 'number' || !isFinite(d.at) ||
             t - d.at > w) continue;
+        if ((d.fails || 0) > FLUSH_RETRY_MAX) continue;
         if (!best || d.at < best.at) {
           best = {sessionId: sid, memberId: d.memberId,
                   resumeToken: d.resumeToken, at: d.at};

@@ -37,6 +37,47 @@ fn suffix_lower(name: &str) -> Option<String> {
     name.rfind('.').map(|i| name[i..].to_lowercase())
 }
 
+/// Media category an extension suffix belongs to. Listing and serving
+/// must agree on the category: every serving path keys off the ENTRY
+/// NAME's extension (`resolve_archive`/`is_archive_file`/`native_decodable`)
+/// while `/image/` loose files check the resolved target — a symlink is
+/// only listable when both sides land in the same bucket, otherwise it
+/// can be listed yet never served (or worse, listed as the wrong type).
+fn media_class(suf: Option<&str>) -> u8 {
+    match suf {
+        Some(s) if IMAGE_EXT.contains(&s) => 1,
+        Some(s) if ARCHIVE_EXT.contains(&s) => 2,
+        Some(s) if s == PDF_EXT => 3,
+        _ => 0,
+    }
+}
+
+/// #62 review: `/image/` serving resolves symlinks before the extension
+/// check, so a `*.png` symlink to an extensionless target would list
+/// here but 404 on serve. Classify symlink entries by their RESOLVED
+/// file name's suffix — but only when the entry name's own suffix lands
+/// in the same media category. Serving URLs carry the entry NAME, so a
+/// mismatched pair (`noext -> x.png`, `x.zip -> x.png`, `x.png -> x.zip`)
+/// can never be served consistently and must stay unlisted; the entry
+/// name itself is still what gets listed/stored when it does classify.
+pub fn classified_suffix(e: &fs::DirEntry, name: &str) -> Option<String> {
+    let name_suf = suffix_lower(name);
+    let is_link = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+    if !is_link {
+        return name_suf;
+    }
+    let resolved = fs::canonicalize(e.path())
+        .ok()?
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(suffix_lower)?;
+    if media_class(name_suf.as_deref()) == media_class(Some(resolved.as_str())) {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
 fn utf8_name(e: &fs::DirEntry) -> Option<String> {
     std::str::from_utf8(e.file_name().as_bytes())
         .ok()
@@ -152,7 +193,7 @@ fn scan_dir(base: &Path, visited: &mut HashSet<(u64, u64)>) -> Option<FsDir> {
             }
             dirnames.push(name);
         } else if is_file_e(&entry) {
-            match suffix_lower(&name).as_deref() {
+            match classified_suffix(&entry, &name).as_deref() {
                 Some(s) if IMAGE_EXT.contains(&s) => files.push(name),
                 Some(s) if ARCHIVE_EXT.contains(&s) => archives.push(name),
                 Some(PDF_EXT) => pdfs.push(name),
@@ -205,7 +246,7 @@ pub fn list_images(path: &Path) -> Option<Vec<String>> {
             continue;
         }
         let name = utf8_name(&entry)?;
-        if suffix_lower(&name)
+        if classified_suffix(&entry, &name)
             .map(|s| IMAGE_EXT.contains(&s.as_str()))
             .unwrap_or(false)
         {
@@ -395,4 +436,90 @@ pub fn tree_signature(root: &Path) -> Option<String> {
         out.push_str(&format!("{:02x}", b));
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// #62 review: listing must classify symlinks by the RESOLVED name's
+    /// suffix — `/image/` serving resolves before its extension check,
+    /// so a `*.png` symlink to an extensionless target would list but
+    /// 404 on serve. But serving URLs carry the ENTRY name's extension
+    /// for archives/PDFs/iOS decode, so name and target must agree on
+    /// the media category or the entry stays unlisted.
+    #[test]
+    fn list_images_classifies_symlinks_by_resolved_suffix() {
+        let d = std::env::temp_dir().join(format!(
+            "bookq-scans-symlink-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("real.png"), b"x").unwrap();
+        fs::write(d.join("real.jpg"), b"x").unwrap();
+        fs::write(d.join("target"), b"x").unwrap(); // extensionless
+        fs::write(d.join("doc.pdf"), b"x").unwrap();
+        std::os::unix::fs::symlink("real.png", d.join("link_ok.png")).unwrap();
+        std::os::unix::fs::symlink("target", d.join("link_bad.png")).unwrap();
+        std::os::unix::fs::symlink("missing.png", d.join("link_dead.png")).unwrap();
+        // Same media category on both sides → listable.
+        std::os::unix::fs::symlink("real.jpg", d.join("alias.jpeg")).unwrap();
+        // Name carries no servable extension → every serving path keys
+        // off the name, so it can never be served consistently.
+        std::os::unix::fs::symlink("real.png", d.join("noext")).unwrap();
+        // Cross-category pairs can be listed but never served.
+        std::os::unix::fs::symlink("doc.pdf", d.join("mislabel.png")).unwrap();
+        std::os::unix::fs::symlink("real.png", d.join("mislabel.zip")).unwrap();
+
+        let names = list_images(&d).unwrap();
+        assert!(names.iter().any(|n| n == "real.png"));
+        assert!(names.iter().any(|n| n == "real.jpg"));
+        assert!(names.iter().any(|n| n == "alias.jpeg"));
+        assert!(!names.iter().any(|n| n.starts_with("link_bad")));
+        assert!(!names.iter().any(|n| n.starts_with("link_dead")));
+        assert!(!names.iter().any(|n| n == "noext"));
+        assert!(!names.iter().any(|n| n.starts_with("mislabel")));
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// scan_fs bucket check: archive/pdf symlinks follow the same
+    /// name↔target category agreement as images.
+    #[test]
+    fn scan_fs_classifies_archive_symlinks_consistently() {
+        let d = std::env::temp_dir().join(format!(
+            "bookq-scans-arch-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("real.zip"), b"x").unwrap();
+        fs::write(d.join("real.pdf"), b"x").unwrap();
+        fs::write(d.join("pic.png"), b"x").unwrap();
+        // archive↔archive: listable (serve resolves the target).
+        std::os::unix::fs::symlink("real.zip", d.join("alias.cbz")).unwrap();
+        // pdf name → pdf target.
+        std::os::unix::fs::symlink("real.pdf", d.join("doc2.pdf")).unwrap();
+        // archive name → pdf target: disagree → unlisted.
+        std::os::unix::fs::symlink("real.pdf", d.join("wrong.zip")).unwrap();
+        // pdf name → archive target: disagree → unlisted.
+        std::os::unix::fs::symlink("real.zip", d.join("wrong.pdf")).unwrap();
+        // extensionless name → archive target: unlisted (name can't type it).
+        std::os::unix::fs::symlink("real.zip", d.join("noext")).unwrap();
+
+        let tree = scan_fs(&d).unwrap();
+        assert!(tree.archives.iter().any(|n| n == "real.zip"));
+        assert!(tree.archives.iter().any(|n| n == "alias.cbz"));
+        assert!(tree.pdfs.iter().any(|n| n == "real.pdf"));
+        assert!(tree.pdfs.iter().any(|n| n == "doc2.pdf"));
+        assert!(!tree.archives.iter().any(|n| n.starts_with("wrong")));
+        assert!(!tree.pdfs.iter().any(|n| n.starts_with("wrong")));
+        assert!(!tree.archives.iter().any(|n| n == "noext"));
+        assert!(!tree.pdfs.iter().any(|n| n == "noext"));
+        assert!(tree.files.iter().any(|n| n == "pic.png"));
+
+        let _ = fs::remove_dir_all(&d);
+    }
 }

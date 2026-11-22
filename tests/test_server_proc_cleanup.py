@@ -1,0 +1,164 @@
+"""Regression tests for tests/_server_proc.py + tests/_serve.py (#139).
+
+The orphan scenario is reproduced for real (no mocks): an intermediate
+process plays the pytest role — it calls ``_server_proc.spawn`` and is
+then SIGKILLed, which fixture teardowns can never intercept. The
+watchdog must still take the server subtree down.
+"""
+
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).parent))
+
+import _server_proc  # noqa: E402
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # Linux: an unreaped zombie still answers kill(pid, 0). When the
+    # middle process dies before its grandchild's wait() reaps it, the
+    # orphan reparents to PID 1 — if PID 1 doesn't reap (containers),
+    # the zombie persists and would read as alive forever (#601 review).
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return False
+    except OSError:
+        pass  # non-Linux or already gone
+    return True
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def _wait_dead(check, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not check():
+            return True
+        time.sleep(0.05)
+    return not check()
+
+
+def test_spawned_server_dies_with_parent_sigkill(tmp_path):
+    """Intermediate (pytest surrogate) is SIGKILLed → watchdog sees pipe
+    EOF → the spawned server must be gone within 3s (#139 acceptance)."""
+    pidfile = tmp_path / "server.pid"
+    child_cmd = [
+        sys.executable,
+        "-c",
+        "import os,time;"
+        f"open({str(pidfile)!r},'w').write(str(os.getpid()));"
+        "time.sleep(600)",
+    ]
+    intermediate = tmp_path / "intermediate.py"
+    intermediate.write_text(
+        "import subprocess, sys, time\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "import _server_proc\n"
+        f"_server_proc.spawn({child_cmd!r}, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        "time.sleep(600)\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, str(intermediate)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + 15
+        while not pidfile.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert pidfile.exists(), "spawned server never wrote its pid"
+        child_pid = int(pidfile.read_text().strip())
+        assert _pid_alive(child_pid)
+
+        parent.kill()  # SIGKILL — teardown code can never run
+        parent.wait(timeout=5)
+
+        assert _wait_dead(lambda: _pid_alive(child_pid), 3.0), (
+            f"server pid {child_pid} survived parent SIGKILL"
+        )
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=5)
+
+
+def test_stop_kills_whole_process_group(tmp_path):
+    """stop() must reap the group, not just the direct child: the server
+    cmd forks a grandchild that would survive a plain terminate()."""
+    gpidfile = tmp_path / "grandchild.pid"
+    child_cmd = [
+        sys.executable,
+        "-c",
+        # g.wait() keeps the middle process alive for the grandchild's
+        # lifetime AND reaps it — a bare sleep would leave the killed
+        # grandchild a zombie that os.kill(pid, 0) still reports alive.
+        "import subprocess,sys,pathlib;"
+        "g=subprocess.Popen([sys.executable,'-c','import time;time.sleep(600)']);"
+        f"pathlib.Path({str(gpidfile)!r}).write_text(str(g.pid));"
+        "g.wait()",
+    ]
+    proc = _server_proc.spawn(
+        child_cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    pgid = proc.pid  # launcher is the process-group leader
+    try:
+        # Wait until the grandchild actually exists — terminating
+        # earlier could pass vacuously with nothing to reap (#601
+        # review).
+        deadline = time.time() + 10
+        while not gpidfile.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert gpidfile.exists(), "server never spawned its grandchild"
+        gpid = int(gpidfile.read_text().strip())
+        assert _pid_alive(gpid), "grandchild not alive before stop()"
+
+        proc.terminate()
+        assert proc.poll() is not None
+        # Group-empty check catches grandchildren a direct-child kill
+        # would leave behind (reparented orphans keep the pgid alive).
+        assert _wait_dead(lambda: _group_alive(pgid), 5.0), (
+            f"process group {pgid} still has members after stop()"
+        )
+        assert _wait_dead(lambda: _pid_alive(gpid), 5.0), (
+            f"grandchild pid {gpid} survived stop()"
+        )
+    finally:
+        proc.stop()
+
+
+def test_spawned_process_exits_cleanly_and_unregisters(tmp_path):
+    """A server that exits on its own propagates liveness through the
+    launcher (spawn_backend's 'exited early' probe depends on it) and
+    leaves no registry entry behind."""
+    proc = _server_proc.spawn(
+        [sys.executable, "-c", "import sys; sys.exit(3)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + 10
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.05)
+    assert proc.poll() is not None, "launcher did not follow child exit"
+    assert proc.returncode == 3, f"child exit code not propagated: {proc.returncode}"
+    proc.stop()

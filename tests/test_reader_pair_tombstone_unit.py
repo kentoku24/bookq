@@ -239,10 +239,12 @@ def test_legacy_single_tombstone_still_flushes(browser):
     assert res["mapAfter"] == {}
 
 
-def test_silent_flush_failure_retries_on_bounded_budget(browser):
-    """A black-holed flush link (watchdog fires, no frames ever) used to
-    wait for the next lifecycle event — the whole resume window. It now
-    retries on a bounded budget, then keeps the tombstone parked."""
+def test_transport_failures_do_not_spend_entry_budget(browser):
+    """#598: a black-holed/offline flush link is an ENVIRONMENTAL failure —
+    it hits every queued entry equally, so it must not spend the entry's
+    retry budget. Only resume_in_use (entry-specific) is bounded (#594).
+    Transport failures retry on FLUSH_RETRY_MS until the window lapses,
+    and the tombstone stays parked (never cleared by silence)."""
     src = r"""
     async (h) => {
       const a = await h.bind('a', 'sess-a', 'mem-a');
@@ -259,11 +261,129 @@ def test_silent_flush_failure_retries_on_bounded_budget(browser):
     }
     """
     res = _run(browser, src)
-    # 1 initial attempt + FLUSH_RETRY_MAX(3) bounded retries = 4 transports
-    assert res["attempts"] == 4
-    # silent failures never clear the tombstone — it waits for the next
-    # lifecycle event or window expiry
+    # Uncharged: retries continue past the old 4-attempt cap — the entry
+    # is only bounded by its resume window, not by a failure counter.
+    assert res["attempts"] > 4
+    # silent failures never clear the tombstone and never write `fails`
     assert set(res["mapKept"]) == {"sess-a"}
+    assert "fails" not in res["mapKept"]["sess-a"]
+
+
+def test_offline_leave_delivers_after_reconnect(browser):
+    """#598 regression: leaving while offline must not burn the retry
+    budget — once the transport answers again the parked LEAVE goes out
+    and the tombstone clears, inside the same resume window."""
+    src = r"""
+    async (h) => {
+      const a = await h.bind('a', 'sess-a', 'mem-a');
+      a.t.onclose();
+      await a.c.leave();   // parks tombstone + flush attempt #1
+      const flushStart = h.transports.length - 1;
+      // "Offline": every flush transport dies on close before HELLO.
+      // Far more attempts than the old budget of 4.
+      for (let i = 0; i < 12; i++) {
+        const t = h.transports[h.transports.length - 1];
+        if (t && t._url && t.sent.length === 0 && !t.closed) t.onclose();
+        h.fireTimers();
+      }
+      const offlineAttempts = h.transports.length - flushStart;
+      // "Reconnect": the next flush transport answers HELLO -> RESUME ->
+      // ACK -> LEAVE like a healthy link.
+      const t = h.pendingFor('ws://fake/a');
+      if (t) {
+        t.onframe({v: 1, type: 'HELLO'});
+        const resume = t.sent[t.sent.length - 1];
+        t.onframe({v: 1, type: 'ACK', requestId: resume.requestId, data: {}});
+      }
+      h.fireTimers();
+      const lastFlush = h.transports[h.transports.length - 1];
+      h.results.offlineAttempts = offlineAttempts;
+      h.results.delivered = !!lastFlush &&
+        lastFlush.sent.some(f => f.type === 'LEAVE');
+      h.results.mapAfter = h.readMap();
+      a.c.destroy();
+    }
+    """
+    res = _run(browser, src)
+    assert res["offlineAttempts"] > 4          # survived past old budget
+    assert res["delivered"] is True            # LEAVE actually sent
+    assert res["mapAfter"] == {}               # tombstone cleared
+
+
+def test_window_expiry_stops_retries_and_gcs_entry(browser):
+    """#598 review: transport-failure retries are bounded by the resume
+    window, not a counter — advancing the clock past the window must
+    stop new flush transports AND garbage-collect the expired entry,
+    not leave it retrying forever."""
+    src = r"""
+    async (h) => {
+      const a = await h.bind('a', 'sess-a', 'mem-a');
+      a.t.onclose();
+      await a.c.leave();   // parks tombstone + flush attempt #1
+      for (let i = 0; i < 4; i++) h.fireTimers();  // a few silent retries
+      const before = h.transports.length;
+      h.setNow(h.now() + 70000);                  // past the 60s window
+      for (let i = 0; i < 6; i++) h.fireTimers();
+      h.results.attemptsAfterExpiry = h.transports.length - before;
+      h.results.mapAfter = h.readMap();
+      a.c.destroy();
+    }
+    """
+    res = _run(browser, src)
+    # _tombstoneRead GCs the expired entry and returns null — the pending
+    # retry fires once, opens nothing, and schedules nothing further.
+    assert res["attemptsAfterExpiry"] == 0
+    assert "sess-a" not in res["mapAfter"]
+
+
+def test_exhausted_oldest_tombstone_yields_to_younger(browser):
+    """#594: a persistently unflushable OLDEST entry must not starve
+    younger tombstones — once its per-entry budget is spent the drain
+    skips it and delivers the next session's LEAVE. The spent entry
+    stays parked until its window lapses."""
+    src = r"""
+    async (h) => {
+      // Seed the map directly: sess-a is oldest, sess-b younger. One
+      // client drains the queue serially through its own flush link.
+      h.persist.setItem('bookq.readerSync.leaveTombstone.v1', JSON.stringify({
+        'sess-a': {memberId: 'mem-a', resumeToken: 'tok-a', at: 90000},
+        'sess-b': {memberId: 'mem-b', resumeToken: 'tok-b', at: 99000},
+      }));
+      const c = window.PairClient.createClient(h.opts('drain'));
+
+      const sids = [];
+      // sess-a's member stays contested: every RESUME draws
+      // resume_in_use. Each rejection burns one of the entry's
+      // FLUSH_RETRY_MAX+1 (=4) attempts; the 5th flush must be sess-b.
+      for (let i = 0; i < 12; i++) {
+        const t = h.pendingFor('ws://fake/drain');
+        if (!t) { h.fireTimers(); continue; }
+        t.onframe({v: 1, type: 'HELLO'});
+        const resume = t.sent[t.sent.length - 1];
+        sids.push(resume.sessionId);
+        if (resume.sessionId === 'sess-b') {
+          t.onframe({v: 1, type: 'ACK', requestId: resume.requestId,
+                     data: {}});
+        } else {
+          t.onframe({v: 1, type: 'REJECT', requestId: resume.requestId,
+                     reason: 'resume_in_use'});
+        }
+        h.fireTimers();
+        if (sids[sids.length - 1] === 'sess-b' &&
+            !h.pendingFor('ws://fake/drain')) break;
+      }
+      h.results.sids = sids;
+      h.results.finalMap = h.readMap();
+      c.destroy();
+    }
+    """
+    res = _run(browser, src)
+    # sess-a burns exactly its 4-attempt budget, then sess-b is delivered
+    assert res["sids"] == ["sess-a"] * 4 + ["sess-b"]
+    # sess-b's entry cleared on delivery; sess-a stays parked with its
+    # spent budget until the window lapses
+    assert set(res["finalMap"]) == {"sess-a"}
+    assert res["finalMap"]["sess-a"]["fails"] == 4
 
 
 def test_peek_leave_tombstone_map_oldest_expiry_and_legacy(browser):

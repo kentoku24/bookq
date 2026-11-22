@@ -14,6 +14,10 @@ permissions:
   # paths-filter lists the PR's changed files via the API.
   pull-requests: read
 
+concurrency:
+  group: ios-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   # Job-level path gating (not on.pull_request.paths) so required checks
   # still report on unrelated PRs — see android.yml / #382.
@@ -28,8 +32,10 @@ jobs:
         # workflow_dispatch keeps running everything, as before.
         if: github.event_name == 'pull_request'
         # The UI tests boot the repo's viewer-rs binary and drive the
-        # real client — server or shell-asset changes can break iOS the
-        # same way they break Android, hence web/** (served payload, #503).
+        # native client — it consumes only /api/v1/* and /image/ (no
+        # WKWebView), so web/** shell assets cannot affect it. The
+        # api/** contract surface (openapi + vectors) and the server
+        # itself stay in scope.
         with:
           filters: |
             run:
@@ -37,7 +43,6 @@ jobs:
               - "api/**"
               - ".github/workflows/ios.yml"
               - ".github/scripts/ios-ui-test.sh"
-              - "web/**"
               - "rust/viewer-rs/**"
 
   # Job id doubles as the required-check context; it must be unique across
