@@ -11,6 +11,10 @@
 # (/image/.../doc.pdf/p001.png = 200 in the image-build job) and be
 # closed by hand.
 #
+# GITHUB_TOKEN-created PRs do not trigger workflow runs until a human
+# approves them (GitHub anti-recursion rule) — expect "Review pending"
+# deploy/CI gates on the opened PR; that approval click IS the review.
+#
 # Manual run: Actions → pdfium-update → Run workflow — same check on
 # demand; opens a PR when a newer release exists.
 name: pdfium-update
