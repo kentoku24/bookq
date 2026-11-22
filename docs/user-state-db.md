@@ -62,7 +62,9 @@ The DB holds the following feature families:
 - v2 → v3 is additive (`CREATE TABLE IF NOT EXISTS`); existing
   visibility/position rows survive. A v2 binary refuses a v3 DB, so take
   a `user-state` snapshot before deploying v3 and restore it to roll
-  back.
+  back. Rolling back to a pre-#608 image also requires
+  `BOOKQ_LEGACY_ALLOWED_EMAILS` because that binary authorizes logins
+  from the retired env (`docs/deployment.md` "rollback").
 - The DB file is chmod 0600 and its parent 0700 by the store init.
 
 `user-state` is persistent user data, not a cache — cleanup paths must

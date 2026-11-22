@@ -240,7 +240,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - **TEST_MODE の環境（dev / `--fixture`）**では mock user が常に認証済みになる。`test@example.com` を admin にすると、その環境の URL に到達できる全員が `/admin` に入れる。admin は使い捨て dev の検証に限定し、終わったら `users add test@example.com --role member` または `users remove test@example.com` に戻す。
 - admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や不要になった場合は `users remove` で掃除する。削除履歴の append-only 監査はフォローアップ。
 - `user-state` はユーザー/権限データを含む永続データ。既存のバックアップ対象に含め、リストア後は `users list` で不要なユーザー/role がないか確認する。
-- **デプロイ順序**: 新バイナリを起動して schema v3 を適用する。fresh DB は `users add` で admin を登録してからログインする。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。
+- **デプロイ順序**: 新バイナリを起動して schema v3 を適用する。fresh DB は `users add` で admin を登録してからログインする。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。**#608 より前の ref へ戻す場合は** v2 スナップショットの復元に加えて `BOOKQ_LEGACY_ALLOWED_EMAILS` が必要（下記「rollback」）。
 - Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
 
 ```bash
@@ -354,6 +354,23 @@ Python 実装は source tree から削除済みのため、`py-rollback` profile
 なお #503 以前の ref には Python `viewer` + `py-rollback` profile が残るため、
 当時の手順書どおりの切戻しも可能（古い ref からの再 build で `py-rollback`
 image が復活する）。
+
+`users` テーブル導入前（#608 より前）の ref へ戻す場合は追加の手順が要る。
+当時のイメージはログイン認可に `ALLOWED_EMAILS` を使うが、現行 compose は
+通常この env を渡さないため、v2 スナップショットを復元しただけでは全員
+ログインできない。rollback 専用 override を明示的に有効化して渡す:
+
+```bash
+# 1) v3 デプロイ前の v2 user-state スナップショットを復元（docs/user-state-db.md）
+# 2) 当時の allowlist を明示して pre-#608 ref を deploy
+BOOKQ_LEGACY_ALLOWED_EMAILS='a@example.com,b@example.com' \
+  ./prd.sh up --ref <#608 より前の ref>
+```
+
+`BOOKQ_LEGACY_ALLOWED_EMAILS` を設定したときだけ
+`docker-compose.legacy-allowlist.yml` が deploy に追加される。現行版（#608
+以降）は env を読まないため、通常の deploy / rollback では設定しないこと
+（未設定なら override は読み込まれず、`ALLOWED_EMAILS` はコンテナに渡らない）。
 
 #### runtime は distroless (#573)
 
