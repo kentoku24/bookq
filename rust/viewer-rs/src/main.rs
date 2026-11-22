@@ -22,6 +22,7 @@ use std::path::PathBuf;
 // path containment, tree assembly, index cache) that the v1 envelopes
 // are wired onto. v0 routes are deprecated and answer 501 via the fallback.
 mod admin;
+mod admin_cli;
 mod auth;
 #[cfg(test)]
 mod conformance_vectors;
@@ -1084,6 +1085,16 @@ async fn main() {
     // Handled before any tracing/runtime work so the probe stays quiet.
     if std::env::args().skip(1).any(|a| a == "--healthcheck") {
         std::process::exit(healthcheck::run());
+    }
+
+    // #608: the admin CLI is the only writer of `admin_users`. Dispatch it
+    // before tracing/index/store setup — it needs only BOOKQ_STATE_DIR.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("admin") {
+        let state_dir = PathBuf::from(
+            std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
+        );
+        std::process::exit(admin_cli::run(&argv[1..], &state_dir));
     }
 
     tracing_subscriber::fmt()
