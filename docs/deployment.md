@@ -8,7 +8,7 @@
 | プロジェクト名 | `bookq` | `bookq-dev-pool-01`〜`10`（ENV名はスロットにマッピング） |
 | tailnet ノード | `bookq` | `dev-01`〜`dev-10`（固定 10 個を使い回し） |
 | URL | `https://bookq.your-tailnet.ts.net` | `https://dev-XX.your-tailnet.ts.net`（XX=01..10） |
-| 認証 | Google OAuth + `users` テーブル（CLI で登録） | なし（`BOOKQ_TEST_MODE=true`） |
+| 認証 | Google OAuth + `users` テーブル（CLI / `/admin`） | なし（`BOOKQ_TEST_MODE=true`） |
 | 画像ツリー | 読み書き可でマウント (`:rw`) | 既定 read-only (`:ro`) — `BOOKQ_TEST_MODE=true` で認証を抜くため実ライブラリへの書き込みは opt-in (`./dev.sh up --writable-library`)。`--fixture` の合成ツリーは常に rw |
 | 起動/停止方法 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、Freeプランでノード再利用） |
 
@@ -203,7 +203,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 - `BASE_URL` が ts.net 以外になると、`prd deploy` の tailnet 登録名整合チェック (`heal_fqdn_collision`) は自動でスキップされる（無関係なため）。
 - `*.ts.net` 側は引き続きコンテンツを返すが、OAuth ログインは `BASE_URL`（独自ドメイン）へ遷移する — cookie はドメイン別のため、実質独自ドメインが canonical になる。tailscale sidecar はそのまま残してよい。
-- ユーザー管理は `users` テーブル / `users` CLI で行う（env allowlist は廃止済み）。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
+- ユーザー管理は `users` テーブルで行う。admin は `users` CLI のみ、member は CLI または `/admin` UI（env allowlist は廃止済み）。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
 - **認証付きメディア endpoint (`/image/`, `/thumb/`, `/view/`, `/api/thumb-sprite`) は `Cache-Control: private` で応答する** — `public` だと Cloudflare edge が応答をキャッシュし、未認証リクエストにも画像バイトが返る認証バイパスになる。保険として Cloudflare 側で当該 hostname に Cache Rule「Bypass cache」を張ってもよい。
 - Security → Bots の **Bot Fight Mode は OFF 推奨** — API クライアントや native アプリ (`Authorization: Bearer`) を bot 判定で弾きうる。
 - Cloudflare 無料プランの TOS §2.8 は画像主体コンテンツの proxy 配信を制限する条項がある。個人利用なら実害はほぼない想定だが、転送量で問題化した場合の fallback は VPS リレー等の別方式。
@@ -228,7 +228,9 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 ログインできるユーザーと admin は、`user-state` SQLite（`/var/lib/bookq/folder-visibility.sqlite3`、schema v3）の `users` テーブルで管理する。`role` は `admin` / `member`。**env のメール allowlist は廃止済み**。
 
-- 登録・role 変更・失効は **`viewer-rs users` CLI のみ**。HTTP の書込み経路はない。実行にはホスト/コンテナ操作権限が要る（`SECRET_KEY` と同じ信頼境界。distroless なので shell 不要）。
+- admin の登録・role 変更・失効は **`viewer-rs users` CLI のみ**。HTTP から admin 行は変更できない。CLI の実行にはホスト/コンテナ操作権限が要る（`SECRET_KEY` と同じ信頼境界。distroless なので shell 不要）。
+- member の追加・無効化・再有効化は `/admin` の UI からも行える（admin でログイン →「管理」）。UI の追加は常に member、既存 admin を指定した場合は拒否される。無効化は `disabled_at` による soft delete で、同じ画面から再有効化できる。POST は same-origin の Fetch Metadata / Origin を検証し、`/admin` は `Cache-Control: no-store`。
+   email は HTML エスケープして表示し、CSP で script を禁止している。
 - **fresh DB の `users` は空**。サーバー起動後、ログイン前に最初の admin を CLI で登録する。通常ユーザーは同じコマンドの既定 role=member で追加する。
 - 変更はサーバー再起動不要。membership は最大 1 秒（in-memory directory の refresh）、`/admin` の admin 判定は次のリクエストから即時。無効化は `disabled_at`（soft delete）で行い、行は履歴として残る。
 - `users remove` は **そのユーザーのログイン自体を止める**。`users add` で再活性化できる。
@@ -255,6 +257,8 @@ docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users check you@example
 docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add family@example.com
 docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users remove family@example.com
 ```
+
+`/admin` の UI で member を追加・無効化しても、`users list` / `users check` の結果は同じ DB に反映される。UI から追加した行は `created_by` に操作した admin の email、`note` に `admin-ui` が入る。
 
 - exit code: `0` 成功 / `1` not found・disabled（remove/check）/ `2` usage・入力不正 / `3` store error。
 - CLI は実行前に解決した DB パスを stderr に出す（`state: ...`）。`BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使うので、サーバーと同じ値を指していること。

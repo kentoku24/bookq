@@ -90,7 +90,7 @@ cp .env.example .env
 
 ### 5. ユーザーと admin の登録
 
-fresh DB の `users` は空なので、**ログイン検証の前に** 少なくとも admin を 1 名登録する（サーバー再起動は不要）。登録は稼働中のコンテナで CLI から行う — HTTP の書込み経路はない:
+fresh DB の `users` は空なので、**ログイン検証の前に** 少なくとも admin を 1 名登録する（サーバー再起動は不要）。admin の登録は稼働中のコンテナで CLI から行う（HTTP から admin は作成できない）:
 
 ```bash
 docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin --note "initial admin"
@@ -98,7 +98,7 @@ docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users list
 docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users check you@example.com
 ```
 
-一般ユーザーは `users add family@example.com`（既定 role=member）、失効は `users remove <email>`（ログイン自体を停止、`users add` で再活性化）。env の allowlist は廃止済みで、`users` CLI が唯一の登録経路。詳細は [docs/deployment.md](docs/deployment.md)「ユーザーと admin の管理」を参照。
+一般ユーザーは `users add family@example.com`（既定 role=member）、失効は `users remove <email>`（ログイン自体を停止、`users add` で再活性化）。admin でログイン後は `/admin` から member の追加・無効化・再有効化もできる（admin の変更は CLI のみ）。env の allowlist は廃止済み。詳細は [docs/deployment.md](docs/deployment.md)「ユーザーと admin の管理」を参照。
 
 ## API
 

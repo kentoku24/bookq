@@ -1,13 +1,15 @@
 //! `viewer-rs users …` — the offline user-directory CLI (#608).
 //!
-//! This is the **only** writer of `users`. It runs as the same binary as the
-//! server, so operators do not need a shell or extra image contents:
+//! This is the **only** writer of admin rows (members can also be changed
+//! from the `/admin` UI). It runs as the same binary as the server, so
+//! operators do not need a shell or extra image contents:
 //!
 //! ```text
 //! docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin
 //! ```
 //!
-//! Membership is DB-authoritative; this CLI is the only enrollment path;
+//! Membership is DB-authoritative; admins are enrolled only here, while
+//! members can also be added/disabled/re-enabled from the `/admin` UI;
 //! additions/removals take effect without a restart (the server refreshes
 //! its directory every second; `/admin` checks the DB per request).
 //!

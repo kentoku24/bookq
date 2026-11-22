@@ -22,6 +22,7 @@ use std::path::PathBuf;
 // path containment, tree assembly, index cache) that the v1 envelopes
 // are wired onto. v0 routes are deprecated and answer 501 via the fallback.
 mod auth;
+mod admin_ui;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
@@ -53,8 +54,9 @@ pub(crate) struct AppState {
     pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
-    /// #608: authoritative membership/role store on the user-state DB. Rows
-    /// are written only by the offline `viewer-rs users` CLI.
+    /// #608: authoritative membership/role store on the user-state DB. Admins
+    /// are written only by the offline `viewer-rs users` CLI; members can also
+    /// be added/disabled/re-enabled from the `/admin` UI.
     pub(crate) users: std::sync::Arc<users::UserStore>,
     /// #608: in-memory active members for the hot auth path (1s refresh).
     pub(crate) directory: std::sync::Arc<users::UserDirectory>,
@@ -389,9 +391,8 @@ fn admin_not_found() -> Response {
 /// Per-request admin lookup. Any failure (store error, blocking-task join
 /// error) denies; the caller never sees the difference from "not an admin".
 ///
-/// Authorization primitive for every future admin API: call `caller()` first,
-/// then this function. The `/admin` page gate below covers only the HTML
-/// route — a page check must never be reused as an API authorization check.
+/// Role lookup only: `admin_actor` below composes `caller()` + this check and
+/// is the shared gate for the `/admin` page and every mutation route.
 async fn admin_check(st: &AppState, email: &str) -> bool {
     let email = email.trim().to_lowercase();
     if email.is_empty() {
@@ -411,50 +412,80 @@ async fn admin_check(st: &AppState, email: &str) -> bool {
     }
 }
 
-/// `GET|HEAD /admin` — the admin-only shell (#608).
-///
-/// The gate is `auth::resolve` (active membership re-checked per request,
-/// #373) plus a per-request `users.role='admin'` lookup. A revoked admin is
-/// rejected on the next request even while the session cookie is still valid.
-/// The page itself is a static template: no session data is embedded and
-/// nothing here is cached by the Service Worker (navigations are not cached).
+/// Shared admin gate for the page and every mutation handler. Returns the
+/// acting identity on success; any failure is already a complete response.
+async fn admin_actor(
+    st: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<auth::Identity, Response> {
+    if corrupt_session(st, headers) {
+        let mut res = corrupt_session_response();
+        admin_private_headers(&mut res);
+        return Err(res);
+    }
+    let Some(user) = caller(st, headers) else {
+        return Err(admin_redirect_login());
+    };
+    if !admin_check(st, &user.email).await {
+        return Err(admin_not_found());
+    }
+    Ok(user)
+}
+
+fn admin_internal_error(msg: &'static str) -> Response {
+    let mut res = state::detail(StatusCode::INTERNAL_SERVER_ERROR, msg);
+    admin_private_headers(&mut res);
+    res
+}
+
+/// `GET|HEAD /admin` — user list + add form (#613).
 async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
-    {
-        return method_not_allowed("GET, HEAD");
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
+        return admin_method_not_allowed("GET, HEAD");
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
-    if corrupt_session(&st, &headers) {
-        return corrupt_session_response();
+    if let Err(res) = admin_actor(&st, &headers).await {
+        return res;
     }
-    let Some(user) = caller(&st, &headers) else {
-        return admin_redirect_login();
+    let status = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .ok()
+        .and_then(|q| q.0.get("status").cloned());
+
+    let store = st.users.clone();
+    let users = match tokio::task::spawn_blocking(move || store.list()).await {
+        Ok(Ok(users)) => users,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin user list unavailable");
+            return admin_internal_error("admin store unavailable");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin user list task failed");
+            return admin_internal_error("admin store unavailable");
+        }
     };
-    if !admin_check(&st, &user.email).await {
-        return admin_not_found();
-    }
 
     let web_dir = st.web_dir.clone();
-    let body = tokio::task::spawn_blocking(move || {
-        std::fs::read(web_dir.join("templates").join("admin.html"))
+    let template = match tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(web_dir.join("templates").join("admin.html"))
     })
     .await
-    .ok()
-    .and_then(|r| r.ok());
-    // A missing template is a deployment error, not "not found": an admin
-    // must see the difference in the server log, not a 404 page.
-    let Some(body) = body else {
-        let mut res = state::detail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "admin template unavailable",
-        );
-        admin_private_headers(&mut res);
-        return res;
+    {
+        Ok(Ok(template)) => template,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin template unavailable");
+            return admin_internal_error("admin template unavailable");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin template task failed");
+            return admin_internal_error("admin template unavailable");
+        }
     };
+
+    let body = admin_ui::render(&template, &users, status.as_deref());
     let mut res = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -463,19 +494,161 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
     admin_private_headers(&mut res);
     res.headers_mut()
         .insert("x-frame-options", HeaderValue::from_static("DENY"));
-    // The page has no scripts/forms/inline styles today; a future admin UI
-    // must relax this header deliberately rather than inherit an open page.
+    // Forms post to this same origin; scripts and inline styles stay off.
     res.headers_mut().insert(
         "content-security-policy",
         HeaderValue::from_static(
             "default-src 'self'; script-src 'none'; style-src 'self'; \
              img-src 'self'; object-src 'none'; base-uri 'none'; \
-             form-action 'none'; frame-ancestors 'none'",
+             form-action 'self'; frame-ancestors 'none'",
         ),
     );
     res.headers_mut()
         .insert("x-robots-tag", HeaderValue::from_static("noindex"));
     res
+}
+
+/// The only field the three mutation forms carry.
+#[derive(serde::Deserialize)]
+struct AdminEmailForm {
+    email: String,
+}
+
+/// The three member mutations. Admins are never targets (the store layer
+/// refuses them with `Change::AdminProtected`) — they stay CLI-only.
+#[derive(Clone, Copy)]
+enum MemberAction {
+    Add,
+    Disable,
+    Enable,
+}
+
+fn admin_forbidden() -> Response {
+    let mut res = state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    admin_private_headers(&mut res);
+    res
+}
+
+fn admin_bad_request() -> Response {
+    let mut res = state::detail(StatusCode::BAD_REQUEST, "invalid form");
+    admin_private_headers(&mut res);
+    res
+}
+
+fn admin_method_not_allowed(allow: &'static str) -> Response {
+    let mut res = method_not_allowed(allow);
+    admin_private_headers(&mut res);
+    res
+}
+
+fn admin_payload_too_large() -> Response {
+    let mut res = state::detail(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
+    admin_private_headers(&mut res);
+    res
+}
+
+/// 303 back to the list with a flash code (`admin_ui::flash_message` renders
+/// it; unknown codes are silently ignored). POST-redirect-GET keeps reloads
+/// from re-submitting the mutation.
+fn admin_redirect_status(status: &'static str) -> Response {
+    let mut res = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, format!("/admin?status={status}"))
+        .body(Body::empty())
+        .unwrap();
+    admin_private_headers(&mut res);
+    res
+}
+
+async fn admin_users_add(State(st): State<AppState>, req: Request<Body>) -> Response {
+    admin_member_action(st, req, MemberAction::Add).await
+}
+
+async fn admin_users_disable(State(st): State<AppState>, req: Request<Body>) -> Response {
+    admin_member_action(st, req, MemberAction::Disable).await
+}
+
+async fn admin_users_enable(State(st): State<AppState>, req: Request<Body>) -> Response {
+    admin_member_action(st, req, MemberAction::Enable).await
+}
+
+async fn admin_member_action(
+    st: AppState,
+    req: Request<Body>,
+    action: MemberAction,
+) -> Response {
+    // Gate order matters: identity → role → CSRF → body. Nothing is read
+    // (or written) for a caller who is not an admin on this same origin.
+    if *req.method() != axum::http::Method::POST {
+        return admin_method_not_allowed("POST");
+    }
+    let headers = req.headers().clone();
+    let actor = match admin_actor(&st, &headers).await {
+        Ok(actor) => actor,
+        Err(res) => return res,
+    };
+    if !admin_ui::same_origin_post(&headers) {
+        return admin_forbidden();
+    }
+    let form = match axum::extract::Form::<AdminEmailForm>::from_request(req, &()).await {
+        Ok(form) => form.0,
+        Err(rejection) => {
+            if rejection.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
+                return admin_payload_too_large();
+            }
+            return admin_bad_request();
+        }
+    };
+
+    let store = st.users.clone();
+    let email = form.email;
+    let actor_email = actor.email;
+    let result = tokio::task::spawn_blocking(move || match action {
+        MemberAction::Add | MemberAction::Enable => {
+            store.add_member(&email, &actor_email)
+        }
+        MemberAction::Disable => store.disable_member(&email, &actor_email),
+    })
+    .await;
+
+    let change = match result {
+        Ok(Ok(change)) => change,
+        Ok(Err(users::UserError::InvalidEmail)) => return admin_redirect_status("invalid"),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin user update failed");
+            return admin_internal_error("user update failed");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin user update task failed");
+            return admin_internal_error("user update failed");
+        }
+    };
+
+    let status = match (action, change) {
+        (MemberAction::Add | MemberAction::Enable, users::Change::Added) => "added",
+        (MemberAction::Add | MemberAction::Enable, users::Change::Activated) => {
+            "reactivated"
+        }
+        (MemberAction::Add | MemberAction::Enable, users::Change::AlreadyPresent) => {
+            "exists"
+        }
+        (MemberAction::Add | MemberAction::Enable, users::Change::AdminProtected) => {
+            "admin-readonly"
+        }
+        (MemberAction::Disable, users::Change::Disabled) => "disabled",
+        (MemberAction::Disable, users::Change::AlreadyDisabled) => "already-disabled",
+        (MemberAction::Disable, users::Change::NotFound) => "not-found",
+        (MemberAction::Disable, users::Change::AdminProtected) => "admin-readonly",
+        // The actor was demoted/disabled after the page was rendered (the
+        // store re-checks inside the write transaction): fail closed with the
+        // same generic 404 a non-admin gets, so the surface stays hidden.
+        (_, users::Change::NotAuthorized) => return admin_not_found(),
+        (_, other) => {
+            tracing::error!(?other, "unexpected admin store result");
+            return admin_internal_error("user update failed");
+        }
+    };
+    admin_redirect_status(status)
 }
 
 /// `GET /` — the Jinja shell: viewer page for identified callers, the
@@ -1225,8 +1398,9 @@ async fn main() {
         std::process::exit(healthcheck::run());
     }
 
-    // #608: the users CLI is the only writer of the user directory. Dispatch
-    // it before tracing/index/store setup — it needs only BOOKQ_STATE_DIR.
+    // #608: the users CLI is the only writer of admin rows (the `/admin` UI
+    // covers members). Dispatch it before tracing/index/store setup — it
+    // needs only BOOKQ_STATE_DIR.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("users") {
         let state_dir = PathBuf::from(
@@ -1367,6 +1541,15 @@ async fn main() {
         // `/admin/` does not fall through to the 501 fallback.
         .route("/admin", any(admin_page))
         .route("/admin/", any(admin_page))
+        // #613: member-only mutations. The body limit is scoped here so the
+        // three tiny form posts cannot be used as a memory sink.
+        .merge(
+            Router::new()
+                .route("/admin/users/add", any(admin_users_add))
+                .route("/admin/users/disable", any(admin_users_disable))
+                .route("/admin/users/enable", any(admin_users_enable))
+                .route_layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
         .route("/sw.js", any(serve_sw))
         .route("/favicon.ico", any(serve_favicon))
         .route("/static", any(serve_static))

@@ -19,7 +19,36 @@
   <a href="/auth/logout" class="admin-logout">ログアウト</a>
 </header>
 <main id="admin-content" class="admin-content">
-  <p class="admin-empty">管理機能はまだありません。</p>
+  {{ADMIN_FLASH}}
+  <section class="admin-section" aria-labelledby="admin-add-title">
+    <h2 id="admin-add-title">ユーザーを追加</h2>
+    <form class="admin-add" method="post" action="/admin/users/add">
+      <label for="admin-add-email">Google アカウントのメールアドレス</label>
+      <div class="admin-add-row">
+        <input id="admin-add-email" name="email" type="email" autocomplete="off"
+               spellcheck="false" maxlength="254" required>
+        <button type="submit" class="admin-btn admin-btn-primary">追加</button>
+      </div>
+    </form>
+    <p class="admin-hint">追加したユーザーは member として登録されます。admin の変更は CLI で行います。</p>
+  </section>
+  <section class="admin-section" aria-labelledby="admin-users-title">
+    <h2 id="admin-users-title">ユーザー一覧</h2>
+    <div class="admin-table-wrap">
+      <table class="admin-users">
+        <thead>
+          <tr>
+            <th scope="col">email</th>
+            <th scope="col">role</th>
+            <th scope="col">status</th>
+            <th scope="col">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+{{ADMIN_USERS}}        </tbody>
+      </table>
+    </div>
+  </section>
 </main>
 </body>
 </html>

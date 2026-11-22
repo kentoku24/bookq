@@ -1,10 +1,11 @@
 //! User directory (#608) — the authoritative membership + role store.
 //!
 //! Source of truth: the `users` table in the shared user-state SQLite DB
-//! (`state::user_state_path`). Rows are written **only** by the offline
-//! `viewer-rs users` CLI (host/container operator); there is no HTTP write
-//! path. Granting membership/admin therefore sits on the same trust boundary
-//! as reading `SECRET_KEY` / the OAuth client secret.
+//! (`state::user_state_path`). Admins are granted only by the offline
+//! `viewer-rs users` CLI (host/container operator). The `/admin` UI can add,
+//! disable and re-enable **members** over HTTP, but never changes an admin
+//! row; admin grants stay on the same trust boundary as reading
+//! `SECRET_KEY` / the OAuth client secret.
 //!
 //! Membership is loaded into an in-memory [`UserDirectory`] so the sync
 //! `auth::resolve` path does not do SQLite I/O on every image request. A
@@ -13,8 +14,9 @@
 //!
 //! There is no env allowlist. The first user (normally an admin) is enrolled
 //! with `viewer-rs users add <email> --role admin`; normal users use the same
-//! command with the default `member` role. A fresh DB starts empty, so no one
-//! can log in until the operator enrolls at least one user.
+//! command with the default `member` role. After the first admin exists,
+//! members may also be added from the `/admin` UI. A fresh DB starts empty, so
+//! no one can log in until the operator enrolls at least one user.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -28,8 +30,10 @@ use crate::state;
 
 /// RFC 5321 maximum mailbox length.
 pub(crate) const MAX_EMAIL_LEN: usize = 254;
-/// Bound for `created_by` / `note` — keeps `users list` TSV rows readable.
-pub(crate) const MAX_TEXT_LEN: usize = 200;
+/// Bound for `created_by` / `note`. Matches the RFC 5321 mailbox limit so an
+/// admin email can always be recorded as the actor; `users list` stays one
+/// TSV row per user.
+pub(crate) const MAX_TEXT_LEN: usize = 254;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -85,6 +89,11 @@ pub(crate) enum Change {
     Disabled,
     AlreadyDisabled,
     NotFound,
+    /// The `/admin` UI only manages members; admins (and corrupt roles) stay CLI-only.
+    AdminProtected,
+    /// The acting admin is no longer an active admin (checked inside the
+    /// mutation transaction, so a concurrent demotion cannot be bypassed).
+    NotAuthorized,
 }
 
 #[derive(Debug)]
@@ -172,6 +181,23 @@ fn now_secs() -> f64 {
 
 fn parse_role(raw: &str) -> Option<Role> {
     Role::parse(raw)
+}
+
+/// True when `actor` is an active admin, checked inside the caller's
+/// transaction so a concurrent CLI demotion/disable cannot race the write.
+fn actor_is_admin(tx: &rusqlite::Transaction<'_>, actor: &str) -> rusqlite::Result<bool> {
+    let Some(actor) = normalize_email(actor) else {
+        return Ok(false);
+    };
+    let found = tx
+        .query_row(
+            "SELECT 1 FROM users \
+             WHERE email = ?1 AND disabled_at IS NULL AND role = 'admin'",
+            [&actor],
+            |_| Ok(()),
+        )
+        .optional()?;
+    Ok(found.is_some())
 }
 
 pub(crate) struct UserStore {
@@ -315,6 +341,98 @@ impl UserStore {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    /// Add or re-enable a `member` from the `/admin` UI.
+    ///
+    /// Unlike [`Self::add`], this never changes an existing row's role and
+    /// refuses any row whose role is not `member` (including disabled
+    /// admins) with [`Change::AdminProtected`]. The actor must still be an
+    /// active admin at write time: that check, the target read, and the write
+    /// share one immediate transaction so a concurrent CLI demotion/disable
+    /// cannot be bypassed ([`Change::NotAuthorized`]).
+    pub(crate) fn add_member(&self, email: &str, created_by: &str) -> Result<Change, UserError> {
+        let email = normalize_email(email).ok_or(UserError::InvalidEmail)?;
+        let created_by =
+            normalize_text(created_by, "admin-ui").ok_or(UserError::InvalidText("created_by"))?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !actor_is_admin(&tx, &created_by)? {
+            tx.commit()?;
+            return Ok(Change::NotAuthorized);
+        }
+        let existing: Option<(String, Option<f64>)> = tx
+            .query_row(
+                "SELECT role, disabled_at FROM users WHERE email = ?1",
+                [&email],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let change = match existing {
+            None => {
+                tx.execute(
+                    "INSERT INTO users \
+                     (email, role, disabled_at, created_at, created_by, note) \
+                     VALUES (?1, 'member', NULL, ?2, ?3, 'admin-ui')",
+                    params![email, now_secs(), created_by],
+                )?;
+                Change::Added
+            }
+            Some((role, disabled_at)) => match parse_role(&role) {
+                Some(Role::Member) if disabled_at.is_some() => {
+                    tx.execute(
+                        "UPDATE users SET disabled_at = NULL WHERE email = ?1",
+                        [&email],
+                    )?;
+                    Change::Activated
+                }
+                Some(Role::Member) => Change::AlreadyPresent,
+                _ => Change::AdminProtected,
+            },
+        };
+        tx.commit()?;
+        Ok(change)
+    }
+
+    /// Disable a `member` from the `/admin` UI. Any row whose role is not
+    /// `member` (admins, corrupt roles) is refused with
+    /// [`Change::AdminProtected`]; unknown emails are [`Change::NotFound`].
+    ///
+    /// The actor must still be an active admin at write time: that check, the
+    /// target read, and the write share one immediate transaction so a
+    /// concurrent CLI demotion/disable cannot be bypassed
+    /// ([`Change::NotAuthorized`]).
+    pub(crate) fn disable_member(&self, email: &str, actor: &str) -> Result<Change, UserError> {
+        let email = normalize_email(email).ok_or(UserError::InvalidEmail)?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !actor_is_admin(&tx, actor)? {
+            tx.commit()?;
+            return Ok(Change::NotAuthorized);
+        }
+        let existing: Option<(String, Option<f64>)> = tx
+            .query_row(
+                "SELECT role, disabled_at FROM users WHERE email = ?1",
+                [&email],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let change = match existing {
+            None => Change::NotFound,
+            Some((role, disabled_at)) => match parse_role(&role) {
+                Some(Role::Member) if disabled_at.is_some() => Change::AlreadyDisabled,
+                Some(Role::Member) => {
+                    tx.execute(
+                        "UPDATE users SET disabled_at = ?2 WHERE email = ?1",
+                        params![email, now_secs()],
+                    )?;
+                    Change::Disabled
+                }
+                _ => Change::AdminProtected,
+            },
+        };
+        tx.commit()?;
+        Ok(change)
     }
 
     /// Idempotent grant/role set. An existing active row with the same role
@@ -565,6 +683,142 @@ mod tests {
     }
 
     #[test]
+    fn add_member_only_manages_members() {
+        let dir = temp_dir("member-ui");
+        let store = UserStore::new(&dir);
+        store
+            .add("admin@example.com", Role::Admin, "cli", "")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::Added
+        );
+        let row = store.find("m@example.com").unwrap().unwrap();
+        assert_eq!(row.role, Role::Member);
+        assert_eq!(row.created_by, "admin@example.com");
+        assert_eq!(row.note, "admin-ui");
+        assert_eq!(
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::AlreadyPresent
+        );
+
+        assert_eq!(
+            store
+                .disable_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::Disabled
+        );
+        assert!(!store.is_active("m@example.com").unwrap());
+        assert_eq!(
+            store
+                .disable_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::AlreadyDisabled
+        );
+        assert_eq!(
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::Activated
+        );
+        assert!(store.is_active("m@example.com").unwrap());
+
+        store.add("a@example.com", Role::Admin, "cli", "").unwrap();
+        assert_eq!(
+            store
+                .add_member("a@example.com", "admin@example.com")
+                .unwrap(),
+            Change::AdminProtected
+        );
+        assert_eq!(
+            store
+                .disable_member("a@example.com", "admin@example.com")
+                .unwrap(),
+            Change::AdminProtected
+        );
+        assert!(store.is_admin("a@example.com").unwrap());
+
+        store.disable("a@example.com").unwrap();
+        assert_eq!(
+            store
+                .add_member("a@example.com", "admin@example.com")
+                .unwrap(),
+            Change::AdminProtected
+        );
+        assert_eq!(
+            store
+                .disable_member("a@example.com", "admin@example.com")
+                .unwrap(),
+            Change::AdminProtected
+        );
+        assert!(!store.is_active("a@example.com").unwrap());
+        assert_eq!(
+            store
+                .disable_member("missing@example.com", "admin@example.com")
+                .unwrap(),
+            Change::NotFound
+        );
+
+        let long_admin = format!("{}@example.com", "a".repeat(201));
+        store.add(&long_admin, Role::Admin, "cli", "").unwrap();
+        assert_eq!(
+            store.add_member("long@example.com", &long_admin).unwrap(),
+            Change::Added
+        );
+        assert_eq!(
+            store.find("long@example.com").unwrap().unwrap().created_by,
+            long_admin
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn member_ui_requires_an_active_admin_actor() {
+        let dir = temp_dir("member-ui-actor");
+        let store = UserStore::new(&dir);
+        store
+            .add("actor@example.com", Role::Member, "cli", "")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .add_member("m@example.com", "actor@example.com")
+                .unwrap(),
+            Change::NotAuthorized
+        );
+        assert_eq!(
+            store
+                .disable_member("m@example.com", "actor@example.com")
+                .unwrap(),
+            Change::NotAuthorized
+        );
+
+        store
+            .add("admin@example.com", Role::Admin, "cli", "")
+            .unwrap();
+        assert_eq!(
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::Added
+        );
+        store.disable("admin@example.com").unwrap();
+        assert_eq!(
+            store
+                .disable_member("m@example.com", "admin@example.com")
+                .unwrap(),
+            Change::NotAuthorized
+        );
+        assert!(store.is_active("m@example.com").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invalid_input_does_not_write() {
         let dir = temp_dir("invalid");
         let store = UserStore::new(&dir);
@@ -583,6 +837,14 @@ mod tests {
         assert!(matches!(
             store.disable("not-an-email"),
             Err(UserError::InvalidEmail)
+        ));
+        assert!(matches!(
+            store.add_member("not-an-email", "a@b.com"),
+            Err(UserError::InvalidEmail)
+        ));
+        assert!(matches!(
+            store.add_member("c@d.com", "line\nbreak"),
+            Err(UserError::InvalidText("created_by"))
         ));
         assert!(store.list().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -612,7 +874,7 @@ mod tests {
         }
         let store = UserStore::new(&dir);
         // No env seed: a pre-users DB upgrades with an empty directory; the
-        // operator must enroll users via the CLI.
+        // operator must enroll the first admin via the CLI.
         assert!(store.list().unwrap().is_empty());
         assert!(!store.is_active("a@example.com").unwrap());
         let conn = rusqlite::Connection::open(&path).unwrap();

@@ -80,7 +80,7 @@ One production stack, any number of development stacks, designed so several agen
 
 ### Auth and the test-mode bypass
 
-viewer-rs (`rust/viewer-rs/src/auth.rs`, ported from ex-`app/auth.py`) does Google OAuth, storing the user dict in the signed session cookie. Access control is the `users` table (`role=admin|member`), enrolled only through `viewer-rs users`; there is no env allowlist. `auth::resolve` reads an in-memory `UserDirectory` refreshed every second, and the OAuth callback checks the DB directly. `BASE_URL` must be set explicitly because the redirect URI can't be derived correctly from behind the Tailscale proxy.
+viewer-rs (`rust/viewer-rs/src/auth.rs`, ported from ex-`app/auth.py`) does Google OAuth, storing the user dict in the signed session cookie. Access control is the `users` table (`role=admin|member`); admins are enrolled only through `viewer-rs users`, while the `/admin` UI can add/disable/re-enable members (never admin rows). There is no env allowlist. `auth::resolve` reads an in-memory `UserDirectory` refreshed every second, and the OAuth callback checks the DB directly. `BASE_URL` must be set explicitly because the redirect URI can't be derived correctly from behind the Tailscale proxy.
 
 `BOOKQ_TEST_MODE=true` makes `get_current_user` / `require_auth` return a mock user and skip all OAuth. It is read **once at import time** into a module-level `_TEST_MODE`, so it must be in the environment before the process starts. The whole test suite depends on this.
 

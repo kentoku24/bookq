@@ -628,7 +628,7 @@ body.fv-showall #visibility-status:not(:empty){display:flex}
 /* drop hint — 編集モード中のサイドバーへのドラッグ */
 #sidebar-scroll.lib-drop{outline:2px dashed #4a7ac4;outline-offset:-4px}
 
-/* ── admin (empty admin page, #608) ── */
+/* ── admin (#608, user management #613) ── */
 html,body.admin{height:100%;background:#0d0d0d;color:#ccc}
 body.admin{position:static;inset:auto;overflow-y:auto;user-select:text;-webkit-user-select:text}
 .admin-header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;min-height:52px;padding:4px 16px;background:rgba(20,20,20,.94);border-bottom:1px solid #2a2a2a}
@@ -636,4 +636,33 @@ body.admin{position:static;inset:auto;overflow-y:auto;user-select:text;-webkit-u
 .admin-header a{display:inline-flex;align-items:center;min-height:44px;padding:0 4px;color:#8ab4f8;font-size:13px;text-decoration:none}
 .admin-header a:hover{text-decoration:underline}
 .admin-content{max-width:720px;margin:0 auto;padding:32px 20px 48px}
-.admin-empty{font-size:13px;line-height:1.6;color:#888}
+.admin-section{margin:0 0 28px}
+.admin-section h2{font-size:14px;font-weight:600;color:#e0e0e0;margin:0 0 12px}
+.admin-flash{margin:0 0 20px;padding:12px 14px;border:1px solid #2f4f3a;border-radius:8px;background:rgba(46,160,67,.12);color:#b7e4c7;font-size:13px;line-height:1.6}
+.admin-flash-error{border-color:#6b3030;background:rgba(196,68,68,.12);color:#f3c1c1}
+.admin-flash-info{border-color:#3b4a5c;background:rgba(74,122,196,.12);color:#c7d8f0}
+.admin-add label{display:block;margin:0 0 6px;font-size:12px;color:#aaa}
+.admin-add-row{display:flex;gap:8px}
+.admin-add input{flex:1;min-width:0;min-height:44px;padding:0 12px;border:1px solid #3a3a3a;border-radius:8px;background:#151515;color:#eee;font-size:15px;font-family:inherit}
+.admin-add input:focus{outline:2px solid #4a7ac4;outline-offset:1px}
+.admin-btn{min-height:44px;padding:0 14px;border:1px solid #3a3a3a;border-radius:8px;background:#1d1d1d;color:#ddd;font-size:13px;cursor:pointer;white-space:nowrap;font-family:inherit}
+.admin-btn:hover{background:#262626}
+.admin-btn-primary:hover{background:#244a73}
+.admin-btn-danger:hover{background:#4a2424}
+.admin-btn-primary{border-color:#3b6ea5;background:#1d3a5c;color:#dce9fb}
+.admin-btn-danger{border-color:#6b3030;background:#3a1d1d;color:#f3c1c1}
+.admin-table-wrap{overflow-x:auto;border:1px solid #2a2a2a;border-radius:8px}
+.admin-users{width:100%;border-collapse:collapse;font-size:13px}
+.admin-users th,.admin-users td{padding:10px 12px;border-bottom:1px solid #242424;text-align:left;vertical-align:middle}
+.admin-users th{background:#151515;color:#999;font-weight:500;white-space:nowrap}
+.admin-users tr:last-child td{border-bottom:none}
+.admin-email{word-break:break-all;color:#ddd}
+.admin-role,.admin-status{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;line-height:1.6;white-space:nowrap}
+.admin-role-admin{background:#2a3f5c;color:#bcd6f7}
+.admin-role-member{background:#242424;color:#bbb}
+.admin-status-active{background:#1e3b2a;color:#a8dfb9}
+.admin-status-disabled{background:#3b2424;color:#e6b3b3}
+.admin-inline-form{display:inline;margin:0}
+.admin-note{font-size:12px;color:#777}
+.admin-hint{margin:10px 0 0;font-size:12px;line-height:1.6;color:#777}
+@media (max-width:480px){.admin-add-row{flex-direction:column}.admin-add-row .admin-btn{width:100%}}
