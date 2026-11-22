@@ -19,7 +19,8 @@
 #        IOS_TEST_RESULTS (default ios/build/ios-test-results),
 #        IOS_DEVICE_NAME (dedicated simulator name, default "bookq-ci-tests"),
 #        IOS_SIM_ERASE=1 (force `simctl erase` instead of app uninstall),
-#        IOS_PARALLEL_WORKERS (test-runner clones, default 2; 0 disables)
+#        IOS_PARALLEL_WORKERS (test-runner clones, default 2; 0 = scheme
+#          defaults, 1 rejected — bare-device run has no clone isolation)
 set -u
 set -o pipefail
 cd "$(dirname "$0")/../.."
@@ -31,6 +32,36 @@ SCHEME="Bookq"
 # CI は DERIVED_DATA_PATH を明示するので従来どおり。
 WT_TAG=$(printf '%s' "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | shasum -a 256 | cut -c1-8)
 DD="${DERIVED_DATA_PATH:-$HOME/Library/Developer/Xcode/DerivedData/Bookq-ci-$WT_TAG}"
+
+# IOS_PARALLEL_WORKERS — explicit -parallel-testing-worker-count,
+# parsed and validated up front so a typo fails before the results
+# cleanup / build below. See the test phase for how PARALLEL_ARGS is
+# used. Values <2 never reach xcodebuild: a single worker (or
+# -parallel-testing-enabled NO) runs the bundles on the bare
+# destination device with NO clone — app/UserDefaults state then leaks
+# between suites, breaking the isolation the per-worker clones
+# provide.
+#   unset → 2 (xcode-27 runner: 3 cores beside the host-side server)
+#   0     → no parallel flags; xctestrun/scheme defaults apply
+#           (lazy per-phase clones — the pre-#617 behavior)
+#   N>=2  → -parallel-testing-enabled YES -worker-count N
+IOS_PARALLEL_WORKERS="${IOS_PARALLEL_WORKERS:-2}"
+case "$IOS_PARALLEL_WORKERS" in
+  ''|*[!0-9]*)
+    echo "ERROR: IOS_PARALLEL_WORKERS must be a non-negative integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$IOS_PARALLEL_WORKERS" -eq 0 ]; then
+  PARALLEL_ARGS=()
+elif [ "$IOS_PARALLEL_WORKERS" -eq 1 ]; then
+  echo "ERROR: IOS_PARALLEL_WORKERS=1 runs on the bare device without" >&2
+  echo "  clone isolation — use 0 (scheme defaults) or >=2" >&2
+  exit 1
+else
+  PARALLEL_ARGS=(-parallel-testing-enabled YES
+                 -parallel-testing-worker-count "$IOS_PARALLEL_WORKERS")
+fi
 
 # 内蔵ディスクの事前チェック (CI には helper が無いので no-op)。
 if [[ -x "$HOME/.local/bin/disk-guard" ]]; then
@@ -314,25 +345,13 @@ fi
 #
 # Parallel testing distributes test classes across cloned simulators.
 # The xctestrun already marks both targets ParallelizationEnabled
-# (scheme parallelizable=YES); IOS_PARALLEL_WORKERS caps the runner
-# count — 2 fits the xcode-27 runner's 3 cores next to the host-side
-# bookq server, and 0 forces -parallel-testing-enabled NO. Hosted unit
-# tests (BookqTests, TEST_HOST=Bookq.app) always run in a single worker
-# on iOS Simulator regardless of the count — only the UITest classes
-# actually split.
-IOS_PARALLEL_WORKERS="${IOS_PARALLEL_WORKERS:-2}"
-case "$IOS_PARALLEL_WORKERS" in
-  ''|*[!0-9]*)
-    echo "ERROR: IOS_PARALLEL_WORKERS must be a non-negative integer" >&2
-    exit 1
-    ;;
-esac
-if [ "$IOS_PARALLEL_WORKERS" -gt 0 ]; then
-  PARALLEL_ARGS=(-parallel-testing-enabled YES
-                 -parallel-testing-worker-count "$IOS_PARALLEL_WORKERS")
-else
-  PARALLEL_ARGS=(-parallel-testing-enabled NO)
-fi
+# (scheme parallelizable=YES), so UITest classes split across clones
+# even without flags; IOS_PARALLEL_WORKERS (parsed above) pins the
+# runner count — 2 fits the xcode-27 runner's 3 cores next to the
+# host-side bookq server. Note worker counts <2 never reach xcodebuild:
+# a single runner (or -parallel-testing-enabled NO) executes on the
+# bare device with no clone, leaking app/UserDefaults state between
+# the two bundles — see the env block up top.
 #
 # Retry ONCE, and only when the failure looks infrastructural — real
 # assertion failures must never get a second chance to pass. Console
@@ -373,7 +392,7 @@ for attempt in 1 2; do
   if xcodebuild test-without-building \
       -xctestrun "$XCTESTRUN" \
       -destination "$DEST" \
-      "${PARALLEL_ARGS[@]}" \
+      "${PARALLEL_ARGS[@]+"${PARALLEL_ARGS[@]}"}" \
       -resultBundlePath "$BUNDLE" 2>&1 | tee "$log"; then
     exit 0
   fi

@@ -8,6 +8,13 @@ name: ios
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      # Sweep hook for #617 measurements — empty falls back to the
+      # script default (IOS_PARALLEL_WORKERS=2).
+      ios_parallel_workers:
+        description: "IOS_PARALLEL_WORKERS override (empty = script default 2; 0 = scheme defaults)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -197,6 +204,10 @@ jobs:
 
       - name: Run iOS tests
         if: steps.sdk.outputs.ok == 'true'
+        env:
+          # Empty on pull_request → script default. Dispatch-only sweep
+          # knob for #617 worker-count measurements.
+          IOS_PARALLEL_WORKERS: ${{ inputs.ios_parallel_workers }}
         run: |
           START=$(date +%s)
           set +e
