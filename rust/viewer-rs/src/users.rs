@@ -85,6 +85,8 @@ pub(crate) enum Change {
     Disabled,
     AlreadyDisabled,
     NotFound,
+    /// The `/admin` UI only manages members; admins stay CLI-only.
+    AdminProtected,
 }
 
 #[derive(Debug)]
@@ -315,6 +317,86 @@ impl UserStore {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    /// Add or re-enable a `member` from the `/admin` UI.
+    ///
+    /// Unlike [`Self::add`], this never changes an existing row's role and
+    /// refuses any row whose role is not `member` (including disabled
+    /// admins) with [`Change::AdminProtected`]. The check and write share one
+    /// immediate transaction so a concurrent CLI promotion cannot be
+    /// overwritten.
+    pub(crate) fn add_member(
+        &self,
+        email: &str,
+        created_by: &str,
+    ) -> Result<Change, UserError> {
+        let email = normalize_email(email).ok_or(UserError::InvalidEmail)?;
+        let created_by =
+            normalize_text(created_by, "admin-ui").ok_or(UserError::InvalidText("created_by"))?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<(String, Option<f64>)> = tx
+            .query_row(
+                "SELECT role, disabled_at FROM users WHERE email = ?1",
+                [&email],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let change = match existing {
+            None => {
+                tx.execute(
+                    "INSERT INTO users \
+                     (email, role, disabled_at, created_at, created_by, note) \
+                     VALUES (?1, 'member', NULL, ?2, ?3, 'admin-ui')",
+                    params![email, now_secs(), created_by],
+                )?;
+                Change::Added
+            }
+            Some((role, disabled_at)) => match parse_role(&role) {
+                Some(Role::Member) if disabled_at.is_some() => {
+                    tx.execute(
+                        "UPDATE users SET disabled_at = NULL WHERE email = ?1",
+                        [&email],
+                    )?;
+                    Change::Activated
+                }
+                Some(Role::Member) => Change::AlreadyPresent,
+                _ => Change::AdminProtected,
+            },
+        };
+        tx.commit()?;
+        Ok(change)
+    }
+
+    /// Disable a `member` from the `/admin` UI. Admin rows are refused.
+    pub(crate) fn disable_member(&self, email: &str) -> Result<Change, UserError> {
+        let email = normalize_email(email).ok_or(UserError::InvalidEmail)?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<(String, Option<f64>)> = tx
+            .query_row(
+                "SELECT role, disabled_at FROM users WHERE email = ?1",
+                [&email],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let change = match existing {
+            None => Change::NotFound,
+            Some((role, disabled_at)) => match parse_role(&role) {
+                Some(Role::Member) if disabled_at.is_some() => Change::AlreadyDisabled,
+                Some(Role::Member) => {
+                    tx.execute(
+                        "UPDATE users SET disabled_at = ?2 WHERE email = ?1",
+                        params![email, now_secs()],
+                    )?;
+                    Change::Disabled
+                }
+                _ => Change::AdminProtected,
+            },
+        };
+        tx.commit()?;
+        Ok(change)
     }
 
     /// Idempotent grant/role set. An existing active row with the same role
@@ -559,6 +641,68 @@ mod tests {
         assert_eq!(row.note, "note");
         assert_eq!(
             store.disable("missing@example.com").unwrap(),
+            Change::NotFound
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_member_only_manages_members() {
+        let dir = temp_dir("member-ui");
+        let store = UserStore::new(&dir);
+
+        assert_eq!(
+            store.add_member("m@example.com", "admin@example.com").unwrap(),
+            Change::Added
+        );
+        let row = store.find("m@example.com").unwrap().unwrap();
+        assert_eq!(row.role, Role::Member);
+        assert_eq!(row.created_by, "admin@example.com");
+        assert_eq!(row.note, "admin-ui");
+        assert_eq!(
+            store.add_member("m@example.com", "admin@example.com").unwrap(),
+            Change::AlreadyPresent
+        );
+
+        assert_eq!(
+            store.disable_member("m@example.com").unwrap(),
+            Change::Disabled
+        );
+        assert!(!store.is_active("m@example.com").unwrap());
+        assert_eq!(
+            store.disable_member("m@example.com").unwrap(),
+            Change::AlreadyDisabled
+        );
+        assert_eq!(
+            store.add_member("m@example.com", "admin@example.com").unwrap(),
+            Change::Activated
+        );
+        assert!(store.is_active("m@example.com").unwrap());
+
+        store
+            .add("a@example.com", Role::Admin, "cli", "")
+            .unwrap();
+        assert_eq!(
+            store.add_member("a@example.com", "admin@example.com").unwrap(),
+            Change::AdminProtected
+        );
+        assert_eq!(
+            store.disable_member("a@example.com").unwrap(),
+            Change::AdminProtected
+        );
+        assert!(store.is_admin("a@example.com").unwrap());
+
+        store.disable("a@example.com").unwrap();
+        assert_eq!(
+            store.add_member("a@example.com", "admin@example.com").unwrap(),
+            Change::AdminProtected
+        );
+        assert_eq!(
+            store.disable_member("a@example.com").unwrap(),
+            Change::AdminProtected
+        );
+        assert_eq!(
+            store.disable_member("missing@example.com").unwrap(),
             Change::NotFound
         );
         let _ = std::fs::remove_dir_all(&dir);
