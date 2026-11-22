@@ -183,7 +183,12 @@ def spawn_backend(
     cmd = [str(viewer_rs_binary())]
     health_path = "/api/v1/health"
 
-    proc = subprocess.Popen(
+    # #139: spawn under the parent-death watchdog (_server_proc) — a
+    # pytest SIGKILL/timeout can no longer orphan the backend holding
+    # its port. ServerProc is Popen-compatible for poll/terminate/wait.
+    import _server_proc
+
+    proc = _server_proc.spawn(
         cmd,
         env=env,
         cwd=str(REPO_ROOT),

@@ -85,7 +85,10 @@ def lib_server_auth(lib_root, tmp_path_factory):
             "BOOKQ_THUMB_CACHE_DIR": str(state / "thumbs"),
         }
     )
-    proc = subprocess.Popen(
+    # #139: watchdog spawn — pytest death can't orphan the backend.
+    import _server_proc
+
+    proc = _server_proc.spawn(
         [str(viewer_rs_binary())],
         env=env,
         cwd=str(REPO_ROOT),

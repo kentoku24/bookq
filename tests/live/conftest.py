@@ -58,7 +58,10 @@ def live_server(live_root, tmp_path_factory):
     if not bin_path.exists():
         subprocess.run(["cargo", "build", "-p", "viewer-rs"],
                        cwd=str(REPO_ROOT / "rust"), check=True)
-    proc = subprocess.Popen(
+    # #139: watchdog spawn — pytest death can't orphan the backend.
+    import _server_proc
+
+    proc = _server_proc.spawn(
         [str(bin_path)],
         env=env,
         cwd=str(REPO_ROOT),

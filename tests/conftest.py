@@ -90,6 +90,14 @@ def pytest_sessionstart(session):
 
 def pytest_sessionfinish(session, exitstatus):
     """Post-run nudge — warns when the run ends inside the low-space band."""
+    # #139: reap any spawned test server a crashed fixture abandoned —
+    # the watchdog covers SIGKILL, this covers everything else.
+    try:
+        import _server_proc
+
+        _server_proc.stop_all()
+    except Exception:
+        pass
     if os.environ.get("BOOKQ_SKIP_PREFLIGHT") == "1" or os.environ.get("CI"):
         return
     try:
