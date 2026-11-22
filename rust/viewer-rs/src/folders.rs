@@ -235,7 +235,12 @@ fn snapshot_path() -> PathBuf {
     PathBuf::from(std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()))
         .join("index-snapshot.json")
 }
-const SNAPSHOT_VERSION: i64 = 1;
+// v2: #602 — symlink classification switched to resolved-suffix with a
+// name↔target category agreement rule, and archive/pdf nodes gained a
+// library-boundary check. The FS signature hashes names+stat only, so a
+// v1 snapshot would keep serving the old (listable-but-unservable)
+// classification until the library itself changed.
+const SNAPSHOT_VERSION: i64 = 2;
 
 fn snapshot_save(c: &CacheData) {
     // #322: borrowed serialization — `json!` here used to deep-clone the
