@@ -8,7 +8,7 @@
 | プロジェクト名 | `bookq` | `bookq-dev-pool-01`〜`10`（ENV名はスロットにマッピング） |
 | tailnet ノード | `bookq` | `dev-01`〜`dev-10`（固定 10 個を使い回し） |
 | URL | `https://bookq.your-tailnet.ts.net` | `https://dev-XX.your-tailnet.ts.net`（XX=01..10） |
-| 認証 | Google OAuth + メール許可リスト | なし（`BOOKQ_TEST_MODE=true`） |
+| 認証 | Google OAuth + `users` テーブル（初回 `ALLOWED_EMAILS` seed） | なし（`BOOKQ_TEST_MODE=true`） |
 | 画像ツリー | 読み書き可でマウント (`:rw`) | 既定 read-only (`:ro`) — `BOOKQ_TEST_MODE=true` で認証を抜くため実ライブラリへの書き込みは opt-in (`./dev.sh up --writable-library`)。`--fixture` の合成ツリーは常に rw |
 | 起動/停止方法 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、Freeプランでノード再利用） |
 
