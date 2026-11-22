@@ -24,8 +24,8 @@ The DB holds the following feature families:
   trail.
 - Settings (`settings`) — added at schema v3. Reserved for internal
   one-off flags. The legacy `users_seeded=1` key from the #608 seed path
-  may exist in a deployed DB but is ignored now that enrollment is
-  CLI-only.
+  may exist in a deployed DB but is ignored: the #608 seed path was removed
+  (membership is enrolled by the CLI or, for members, the `/admin` UI).
 
 ## Authorization
 
@@ -39,7 +39,8 @@ The DB holds the following feature families:
   member can log in on the first attempt) and refreshes the directory
   before redirecting to `/`.
 - There is **no env allowlist**. The `users` table is the only
-  membership source; enroll/disable with `viewer-rs users`.
+  membership source; admins enroll/change via `viewer-rs users`; members
+  via the CLI or the `/admin` UI.
 - A fresh DB starts with an empty directory: the operator enrolls the
   first admin with `viewer-rs users add <email> --role admin` before
   anyone can log in. Normal users use the same command with the default

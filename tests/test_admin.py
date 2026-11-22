@@ -377,7 +377,7 @@ def test_retired_allowed_emails_env_neither_seeds_nor_authorizes(
         _wait_api(base_url, headers, 401)
         assert _request(base_url, "GET", "/admin", headers)[0] == 303
 
-        # CLI enrollment remains the only way in, with no restart needed.
+        # CLI enrollment still authorizes; the UI is member-only.
         cp = users_cli(state, "add", OUTSIDE)
         assert cp.returncode == 0, cp.stderr
         _wait_api(base_url, headers, 200)

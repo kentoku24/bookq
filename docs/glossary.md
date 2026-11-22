@@ -334,7 +334,7 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 
 ### Google OAuth認証 (Google OAuth Authentication)
 - **根拠**: `/auth/login` / `/auth/callback` / `/auth/logout` / `login()` / `auth_callback()` / `logout()` (app/auth.py) / `users` テーブル（admin は CLI enrollment、member は CLI または `/admin`）
-- **説明**: Google OAuth でサインインさせ、メール許可リスト外は403で拒否する。
+- **説明**: Google OAuth でサインインさせ、`users` テーブルに未登録または無効化済みのユーザーは拒否する。
 
 ### テストモードバイパス (Test Mode Bypass)
 - **根拠**: `BOOKQ_TEST_MODE` / `_TEST_MODE` (app/auth.py) / `get_current_user()` / `require_auth()`

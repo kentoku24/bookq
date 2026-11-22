@@ -14,8 +14,9 @@
 //!
 //! There is no env allowlist. The first user (normally an admin) is enrolled
 //! with `viewer-rs users add <email> --role admin`; normal users use the same
-//! command with the default `member` role. A fresh DB starts empty, so no one
-//! can log in until the operator enrolls at least one user.
+//! command with the default `member` role. After the first admin exists,
+//! members may also be added from the `/admin` UI. A fresh DB starts empty, so
+//! no one can log in until the operator enrolls at least one user.
 
 use std::collections::HashMap;
 use std::fmt;

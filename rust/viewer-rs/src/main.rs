@@ -54,8 +54,9 @@ pub(crate) struct AppState {
     pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
-    /// #608: authoritative membership/role store on the user-state DB. Rows
-    /// are written only by the offline `viewer-rs users` CLI.
+    /// #608: authoritative membership/role store on the user-state DB. Admins
+    /// are written only by the offline `viewer-rs users` CLI; members can also
+    /// be added/disabled/re-enabled from the `/admin` UI.
     pub(crate) users: std::sync::Arc<users::UserStore>,
     /// #608: in-memory active members for the hot auth path (1s refresh).
     pub(crate) directory: std::sync::Arc<users::UserDirectory>,

@@ -125,9 +125,10 @@ def test_user_state_is_not_a_cache_mount():
 
 # ── retired env allowlist (#610) ────────────────────────────────────────
 #
-# Membership lives in the `users` table and is enrolled only through the
-# `viewer-rs users` CLI. Normal deploys must not pass the retired env; a
-# pre-#608 rollback still needs it, so that path is an explicit opt-in.
+# Membership lives in the `users` table: admins only through the
+# `viewer-rs users` CLI, members through the CLI or the `/admin` UI. Normal
+# deploys must not pass the retired env; a pre-#608 rollback still needs it,
+# so that path is an explicit opt-in.
 
 
 def test_normal_compose_files_do_not_pass_retired_allowlist():
