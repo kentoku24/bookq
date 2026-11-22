@@ -228,7 +228,10 @@ mtime/size は `fmt_mtime` (`{:.0}`) で整数表記される
   `miss:`/不正 `bad:` セルも含む**)、`mtime` = stat できたセルの
   最新 mtime (全滅時 0)。digest にはフォルダパス・セル名一覧・
   セル毎の stat key (欠損は `miss:<name>`/`bad:<name>` marker)・
-  セルサイズ・行レイアウトが入る — 内容が1セルでも変われば ETag が変わる。
+  セルサイズ・行レイアウトが入る — **セルの stat key (path/mtime/
+  size) が変われば ETag が変わる**。画像バイト列は読まないため、
+  mtime/size を維持したまま内容だけ差し替えたセルは検出できない
+  (archive 指定時はセル毎ではなく archive ファイルの mtime/size のみ)。
 - **`If-None-Match` / `If-Modified-Since`**: どちらか一方でも条件を
   満たせば **304** (body 無し)。ETag 不一致でも IMS が新しければ 304 に
   なり得る (両者は独立判定 — SW は両ヘッダを送る)。archive 系は
