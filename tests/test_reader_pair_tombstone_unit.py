@@ -310,6 +310,32 @@ def test_offline_leave_delivers_after_reconnect(browser):
     assert res["mapAfter"] == {}               # tombstone cleared
 
 
+def test_window_expiry_stops_retries_and_gcs_entry(browser):
+    """#598 review: transport-failure retries are bounded by the resume
+    window, not a counter — advancing the clock past the window must
+    stop new flush transports AND garbage-collect the expired entry,
+    not leave it retrying forever."""
+    src = r"""
+    async (h) => {
+      const a = await h.bind('a', 'sess-a', 'mem-a');
+      a.t.onclose();
+      await a.c.leave();   // parks tombstone + flush attempt #1
+      for (let i = 0; i < 4; i++) h.fireTimers();  // a few silent retries
+      const before = h.transports.length;
+      h.setNow(h.now() + 70000);                  // past the 60s window
+      for (let i = 0; i < 6; i++) h.fireTimers();
+      h.results.attemptsAfterExpiry = h.transports.length - before;
+      h.results.mapAfter = h.readMap();
+      a.c.destroy();
+    }
+    """
+    res = _run(browser, src)
+    # _tombstoneRead GCs the expired entry and returns null — the pending
+    # retry fires once, opens nothing, and schedules nothing further.
+    assert res["attemptsAfterExpiry"] == 0
+    assert "sess-a" not in res["mapAfter"]
+
+
 def test_exhausted_oldest_tombstone_yields_to_younger(browser):
     """#594: a persistently unflushable OLDEST entry must not starve
     younger tombstones — once its per-entry budget is spent the drain
