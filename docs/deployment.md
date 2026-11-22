@@ -229,7 +229,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 ログインできるユーザーと admin は、`user-state` SQLite（`/var/lib/bookq/folder-visibility.sqlite3`、schema v3）の `users` テーブルで管理する。`role` は `admin` / `member`。**env のメール allowlist は廃止済み**。
 
 - admin の登録・role 変更・失効は **`viewer-rs users` CLI のみ**。HTTP から admin 行は変更できない。CLI の実行にはホスト/コンテナ操作権限が要る（`SECRET_KEY` と同じ信頼境界。distroless なので shell 不要）。
-- member の追加・無効化・再有効化は `/admin` の UI からも行える（admin でログイン →「管理」）。UI の追加は常に member、既存 admin を指定した場合は拒否される。無効化は `disabled_at` による soft delete で、同じ画面から再有効化できる。POST は same-origin の Fetch Metadata / Origin を検証し、`/admin` は `Cache-Control: no-store`。
+- member の追加・無効化・再有効化は `/admin` の UI からも行える（admin でログイン →「管理」）。UI の追加は常に member、既存 admin を指定した場合は拒否される。無効化は `disabled_at` による soft delete で、同じ画面から再有効化できる。POST は same-origin の Fetch Metadata / Origin を検証し、`/admin` は `Cache-Control: no-store, no-transform`。email は HTML エスケープして表示し、CSP で script を禁止している。
    email は HTML エスケープして表示し、CSP で script を禁止している。
 - **fresh DB の `users` は空**。サーバー起動後、ログイン前に最初の admin を CLI で登録する。通常ユーザーは同じコマンドの既定 role=member で追加する。
 - 変更はサーバー再起動不要。membership は最大 1 秒（in-memory directory の refresh）、`/admin` の admin 判定は次のリクエストから即時。無効化は `disabled_at`（soft delete）で行い、行は履歴として残る。
@@ -243,7 +243,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や不要になった場合は `users remove` で掃除する。削除履歴の append-only 監査はフォローアップ。
 - `user-state` はユーザー/権限データを含む永続データ。既存のバックアップ対象に含め、リストア後は `users list` で不要なユーザー/role がないか確認する。
 - **デプロイ順序**: 新バイナリを起動して schema v3 を適用する。fresh DB は `users add` で admin を登録してからログインする。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。**#608 より前の ref へ戻す場合は** v2 スナップショットの復元に加えて `BOOKQ_LEGACY_ALLOWED_EMAILS` が必要（下記「rollback」）。
-- Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
+- Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store, no-transform`）。Cloudflare の Scrape Shield「Email Address Obfuscation」は HTML 内のメールを `[email protected]` に置換するが、`no-transform` と `<!--email_off-->` で `/admin` は対象外にしている。
 
 ```bash
 # fresh DB / 最初の admin（デプロイ後、ログイン前）

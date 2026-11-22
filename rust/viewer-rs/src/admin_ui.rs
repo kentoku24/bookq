@@ -76,7 +76,7 @@ fn render_row(row: &UserRow) -> String {
         ),
     };
     format!(
-        "<tr data-user-email=\"{email}\"><td class=\"admin-email\">{email}</td>\
+        "<tr data-user-email=\"{email}\"><td class=\"admin-email\"><!--email_off-->{email}<!--/email_off--></td>\
          <td><span class=\"admin-role admin-role-{role}\">{role}</span></td>\
          <td><span class=\"admin-status admin-status-{state}\">{state}</span></td>\
          <td>{action}</td></tr>\n"
@@ -159,6 +159,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("member@example.com"))
             .unwrap();
+        assert!(member.contains("<!--email_off-->member@example.com<!--/email_off-->"));
         assert!(member.contains(r#"action="/admin/users/disable""#));
         assert!(!member.contains(r#"action="/admin/users/enable""#));
         assert!(member.contains(&format!(r#"data-user-email="member@example.com""#)));
