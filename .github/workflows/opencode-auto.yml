@@ -150,7 +150,7 @@ jobs:
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
       - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@fedc6f208aa2bd54c1019227214568083f6380ad
+        uses: anomalyco/opencode/github@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1
         env:
           OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
         with:
@@ -253,7 +253,7 @@ jobs:
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
       - name: Run opencode (official action)
-        uses: anomalyco/opencode/github@fedc6f208aa2bd54c1019227214568083f6380ad
+        uses: anomalyco/opencode/github@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1
         env:
           OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
         with:
