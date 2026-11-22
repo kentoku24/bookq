@@ -79,6 +79,11 @@ POST 後は 303 で `/admin?status=<code>` に戻す。email は URL に載せ�
 | `admin-readonly` | admin はこの画面から変更できません。CLI を使ってください |
 | `invalid` | email の形式が正しくありません |
 
+`enable` は `add_member` を再利用するため、未知 email への crafted
+`POST /admin/users/enable` は member 追加として扱われ `added` を返す。通常の
+UI では disabled member 行にのみ「再有効化」が出るため、この経路は管理操作
+からのみ到達する。
+
 未知の `status` はメッセージを出さない。メッセージはすべて固定文字列で、
 クエリ値をそのまま HTML に出さない。
 
@@ -238,7 +243,7 @@ variant 追加に伴う変更は不要（CLI の `add` / `disable` 経路では�
 - 本文パース失敗: 400、サイズ超過: 413（画面に戻さない）
 - store error: 500 + `tracing::warn!`。ユーザーには詳細を出さない
 - `AdminProtected`: `?status=admin-readonly`
-- `NotFound`（disable/enable 対象なし）: `?status=not-found`
+- `NotFound`（disable 対象なし）: `?status=not-found`
 - 二重送信: 冪等。`AlreadyPresent` / `AlreadyDisabled` をそれぞれの
   status に写像する
 

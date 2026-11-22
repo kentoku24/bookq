@@ -418,7 +418,9 @@ async fn admin_actor(
     headers: &axum::http::HeaderMap,
 ) -> Result<auth::Identity, Response> {
     if corrupt_session(st, headers) {
-        return Err(corrupt_session_response());
+        let mut res = corrupt_session_response();
+        admin_private_headers(&mut res);
+        return Err(res);
     }
     let Some(user) = caller(st, headers) else {
         return Err(admin_redirect_login());
@@ -441,7 +443,7 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
         *req.method(),
         axum::http::Method::GET | axum::http::Method::HEAD
     ) {
-        return method_not_allowed("GET, HEAD");
+        return admin_method_not_allowed("GET, HEAD");
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
@@ -532,6 +534,12 @@ fn admin_bad_request() -> Response {
     res
 }
 
+fn admin_method_not_allowed(allow: &'static str) -> Response {
+    let mut res = method_not_allowed(allow);
+    admin_private_headers(&mut res);
+    res
+}
+
 fn admin_payload_too_large() -> Response {
     let mut res = state::detail(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
     admin_private_headers(&mut res);
@@ -571,7 +579,7 @@ async fn admin_member_action(
     // Gate order matters: identity → role → CSRF → body. Nothing is read
     // (or written) for a caller who is not an admin on this same origin.
     if *req.method() != axum::http::Method::POST {
-        return method_not_allowed("POST");
+        return admin_method_not_allowed("POST");
     }
     let headers = req.headers().clone();
     let actor = match admin_actor(&st, &headers).await {

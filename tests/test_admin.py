@@ -513,6 +513,8 @@ def test_admin_invalid_email_and_xss_are_safe(ui_server, ui_state, ui_reset):
     status, headers, _ = _post_admin(ui_server, "add", "not-an-email")
     assert status == 303
     assert headers["location"] == "/admin?status=invalid"
+    listing = users_cli(ui_state, "list").stdout
+    assert "not-an-email" not in listing
 
     status, headers, _ = _post_admin(ui_server, "add", XSS_USER)
     assert status == 303
@@ -525,8 +527,13 @@ def test_admin_invalid_email_and_xss_are_safe(ui_server, ui_state, ui_reset):
 def test_admin_mutations_require_admin(ui_server, ui_state):
     users_cli(ui_state, "add", TEST_EMAIL, "--role", "member")
     try:
+        # CLI `remove` is a soft delete, so NEW_USER may still be listed from
+        # an earlier test: the invariant is that the rejected POST changes
+        # nothing, not that the row is absent.
+        listing = users_cli(ui_state, "list").stdout
         status, _, _ = _post_admin(ui_server, "add", NEW_USER)
         assert status == 404
+        assert users_cli(ui_state, "list").stdout == listing
     finally:
         users_cli(ui_state, "add", TEST_EMAIL, "--role", "admin")
 
@@ -535,9 +542,15 @@ def test_admin_action_get_is_405(ui_server, ui_reset):
     status, headers, _ = _request(ui_server, "GET", "/admin/users/add")
     assert status == 405
     assert headers["allow"] == "POST"
+    # #613 review: 405 is still an /admin response — keep it out of caches.
+    assert headers["cache-control"] == "no-store"
 
 
-def test_admin_csrf_matrix(ui_server, ui_reset):
+def test_admin_csrf_matrix(ui_server, ui_state, ui_reset):
+    # Snapshot before any request: NEW_USER may already exist from an earlier
+    # test (CLI `remove` is a soft delete), so "absent" is not the invariant —
+    # "unchanged" is.
+    listing = users_cli(ui_state, "list").stdout
     status, _, _ = _request(
         ui_server,
         "POST",
@@ -558,14 +571,33 @@ def test_admin_csrf_matrix(ui_server, ui_reset):
         )
         assert status == 403, override
 
+    assert users_cli(ui_state, "list").stdout == listing
     status, headers, _ = _post_admin(ui_server, "add", CSRF_USER)
     assert status == 303
     assert headers["location"] == "/admin?status=added"
+    # Positive control: the listing above is live, so the equality check can
+    # actually observe a write.
+    assert CSRF_USER in users_cli(ui_state, "list").stdout
 
 
 def test_admin_post_body_limit(ui_server, ui_reset):
     status, _, _ = _post_admin(ui_server, "add", "a" * 9000 + "@example.com")
     assert status == 413
+
+
+def test_admin_remaining_flash_branches(ui_server, ui_state, ui_reset):
+    assert _post_admin(ui_server, "disable", OUTSIDE)[0] == 303
+    status, headers, _ = _post_admin(ui_server, "disable", OUTSIDE)
+    assert status == 303
+    assert headers["location"] == "/admin?status=already-disabled"
+
+    status, headers, _ = _post_admin(ui_server, "disable", "missing@example.com")
+    assert status == 303
+    assert headers["location"] == "/admin?status=not-found"
+
+    status, headers, _ = _post_admin(ui_server, "enable", TEST_EMAIL)
+    assert status == 303
+    assert headers["location"] == "/admin?status=admin-readonly"
 
 
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────
@@ -673,10 +705,12 @@ def test_auth_admin_role_and_disable(auth_server, auth_state, auth_reset):
 
 def test_auth_corrupt_signed_session_is_500(auth_server, auth_reset):
     cookie = _corrupt_cookie()
-    status, _, _ = _request(
+    status, headers, _ = _request(
         auth_server, "GET", "/admin", {"Cookie": f"session={cookie}"}
     )
     assert status == 500
+    # #613 review: the gate's corrupt-session branch keeps /admin headers too.
+    assert headers["cache-control"] == "no-store"
 
 
 def test_auth_bearer_member_and_admin(auth_server, auth_state, auth_reset):
@@ -694,16 +728,11 @@ def test_auth_bearer_member_and_admin(auth_server, auth_state, auth_reset):
 
 
 def test_admin_post_without_cookie_goes_to_login(auth_server):
-    host = urllib.parse.urlsplit(auth_server).netloc
     status, headers, _ = _request(
         auth_server,
         "POST",
         "/admin/users/add",
-        {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": f"http://{host}",
-            "Sec-Fetch-Site": "same-origin",
-        },
+        _form_headers(auth_server),
         b"email=x%40example.com",
     )
     assert status == 303

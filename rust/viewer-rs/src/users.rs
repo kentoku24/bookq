@@ -28,8 +28,10 @@ use crate::state;
 
 /// RFC 5321 maximum mailbox length.
 pub(crate) const MAX_EMAIL_LEN: usize = 254;
-/// Bound for `created_by` / `note` — keeps `users list` TSV rows readable.
-pub(crate) const MAX_TEXT_LEN: usize = 200;
+/// Bound for `created_by` / `note`. Matches the RFC 5321 mailbox limit so an
+/// admin email can always be recorded as the actor; `users list` stays one
+/// TSV row per user.
+pub(crate) const MAX_TEXT_LEN: usize = 254;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Role {
@@ -711,6 +713,16 @@ mod tests {
         assert_eq!(
             store.disable_member("missing@example.com").unwrap(),
             Change::NotFound
+        );
+
+        let long_admin = format!("{}@example.com", "a".repeat(201));
+        assert_eq!(
+            store.add_member("long@example.com", &long_admin).unwrap(),
+            Change::Added
+        );
+        assert_eq!(
+            store.find("long@example.com").unwrap().unwrap().created_by,
+            long_admin
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
