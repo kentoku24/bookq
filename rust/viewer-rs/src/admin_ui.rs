@@ -24,7 +24,7 @@ fn flash_message(code: &str) -> Option<&'static str> {
 }
 
 /// Escape a value for HTML text and double-quoted attributes.
-pub(crate) fn escape_html(raw: &str) -> String {
+fn escape_html(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for c in raw.chars() {
         match c {
@@ -40,12 +40,14 @@ pub(crate) fn escape_html(raw: &str) -> String {
 }
 
 /// CSRF gate for `/admin/users/*`: the request must carry at least one of
-/// `Sec-Fetch-Site` / `Origin`, and every signal present must be same-origin.
-/// `oauth::same_site_initiation` already validates present signals; requiring
-/// one closes the "bare HTTP client / stripped header" case for mutations.
+/// `Sec-Fetch-Site` / `Origin`; every present signal must be valid UTF-8 and
+/// same-origin. `oauth::same_site_initiation` validates the present values.
 pub(crate) fn same_origin_post(headers: &HeaderMap) -> bool {
     let has_signal = headers.contains_key("sec-fetch-site") || headers.contains_key(header::ORIGIN);
-    has_signal && crate::oauth::same_site_initiation(headers)
+    let parsed = headers
+        .get("sec-fetch-site")
+        .is_none_or(|value| value.to_str().is_ok());
+    parsed && has_signal && crate::oauth::same_site_initiation(headers)
 }
 
 fn render_row(row: &UserRow) -> String {
@@ -69,8 +71,10 @@ fn render_row(row: &UserRow) -> String {
     )
 }
 
-/// Fill the admin shell's two placeholders. `status` is the query value; only
-/// known codes produce a flash, and the rendered message is escaped too.
+/// Fill the admin shell's `{{ADMIN_FLASH}}` and `{{ADMIN_USERS}}`
+/// placeholders. `status` is the query value; only known codes produce a
+/// flash, and the rendered message is escaped too. Rows are inserted last so
+/// a `{{...}}` sequence in an email cannot be re-substituted.
 pub(crate) fn render(template: &str, users: &[UserRow], status: Option<&str>) -> String {
     let flash = match status.and_then(flash_message) {
         Some(message) => format!(
@@ -80,6 +84,8 @@ pub(crate) fn render(template: &str, users: &[UserRow], status: Option<&str>) ->
         None => String::new(),
     };
     let rows: String = users.iter().map(render_row).collect();
+    // Flash first, rows last: row content must never be re-scanned for
+    // placeholders.
     template
         .replace("{{ADMIN_FLASH}}", &flash)
         .replace("{{ADMIN_USERS}}", &rows)
@@ -103,8 +109,8 @@ mod tests {
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
-        for (name, value) in pairs {
-            map.insert(*name, HeaderValue::from_static(*value));
+        for &(name, value) in pairs {
+            map.insert(name, HeaderValue::from_static(value));
         }
         map
     }
@@ -125,6 +131,7 @@ mod tests {
             user("member@example.com", Role::Member, true),
             user("disabled@example.com", Role::Member, false),
             user("admin@example.com", Role::Admin, true),
+            user("disabled-admin@example.com", Role::Admin, false),
         ];
         let body = render(template, &users, Some("added"));
         assert!(body.contains("ユーザーを追加しました。"));
@@ -150,6 +157,24 @@ mod tests {
             .unwrap();
         assert!(!admin.contains(r#"action="/admin/users/"#));
         assert!(admin.contains("CLI で管理"));
+
+        let disabled_admin = body
+            .lines()
+            .find(|line| line.contains("disabled-admin@example.com"))
+            .unwrap();
+        assert!(!disabled_admin.contains(r#"action="/admin/users/"#));
+        assert!(disabled_admin.contains("CLI で管理"));
+        assert!(disabled_admin.contains("admin-status-disabled"));
+    }
+
+    #[test]
+    fn escapes_quotes_in_hidden_inputs() {
+        let quoted = user(r#"q"uote@example.com"#, Role::Member, true);
+        let apostrophe = user("o'neil@example.com", Role::Member, true);
+        let body = render("{{ADMIN_USERS}}", &[quoted, apostrophe], None);
+        assert!(body.contains(r#"value="q&quot;uote@example.com""#));
+        assert!(!body.contains(r#"value="q"uote@example.com"#));
+        assert!(body.contains(r#"value="o&#39;neil@example.com""#));
     }
 
     #[test]
@@ -194,5 +219,9 @@ mod tests {
             ("origin", "https://bookq.example"),
             ("host", "bookq.example"),
         ])));
+
+        let mut invalid_utf8 = HeaderMap::new();
+        invalid_utf8.insert("sec-fetch-site", HeaderValue::from_bytes(b"\xff").unwrap());
+        assert!(!same_origin_post(&invalid_utf8));
     }
 }
