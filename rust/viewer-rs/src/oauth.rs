@@ -55,8 +55,8 @@
 //! `json.loads` raising → HTTP 500 before the handler runs) answers 500
 //! locally — the callers check `SessionLookup::Corrupt`.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -72,6 +72,7 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::{self, SessionKey, SessionLookup};
 use crate::state;
+use crate::users::{UserDirectory, UserStore};
 
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
@@ -161,7 +162,11 @@ pub struct AuthFlow {
     redirect_uri: String,
     session_key: SessionKey,
     secret_key: String,
-    allowed_emails: std::sync::Arc<HashSet<String>>,
+    /// Membership is DB-authoritative; the callback checks this store
+    /// directly so a just-added member can log in without waiting for the
+    /// directory refresh.
+    users: Arc<UserStore>,
+    directory: Arc<UserDirectory>,
     /// `app.state.auth_codes` — one-time PKCE codes (`token_urlsafe(32)`).
     codes: Mutex<HashMap<String, CodeEntry>>,
     /// `app.state.refresh_tokens` — rotating refresh tokens
@@ -170,9 +175,7 @@ pub struct AuthFlow {
 }
 
 impl AuthFlow {
-    pub fn from_env(
-        allowed_emails: std::sync::Arc<HashSet<String>>,
-    ) -> Configured {
+    pub fn from_env(users: Arc<UserStore>, directory: Arc<UserDirectory>) -> Configured {
         let mut missing = Vec::new();
         let mut get = |name: &'static str| match std::env::var(name) {
             Ok(v) if !v.is_empty() => Some(v),
@@ -206,7 +209,8 @@ impl AuthFlow {
             redirect_uri: format!("{}/auth/callback", base_url.trim_end_matches('/')),
             session_key,
             secret_key,
-            allowed_emails,
+            users,
+            directory,
             codes: Mutex::new(HashMap::new()),
             refresh: Mutex::new(HashMap::new()),
         })
@@ -692,7 +696,16 @@ pub async fn callback(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_lowercase();
-    if !flow.allowed_emails.contains(&email) {
+    // Membership is DB-authoritative. Check the store (not the second-older
+    // directory cache) so an operator's `users add` works on the first login.
+    let users = flow.users.clone();
+    let email_for_check = email.clone();
+    let active = tokio::task::spawn_blocking(move || users.is_active(&email_for_check))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(false);
+    if !active {
         // `session.clear()` → the null cookie only when a session was
         // actually present (initial_session_was_empty == False).
         let mut res = state::detail(StatusCode::FORBIDDEN, "Email not allowed");
@@ -703,6 +716,10 @@ pub async fn callback(
         append_vary_cookie(&mut res);
         return res;
     }
+    // The browser redirects to `/` immediately after this; refresh before
+    // minting the session so the new member does not see the login page.
+    let directory = flow.directory.clone();
+    let _ = tokio::task::spawn_blocking(move || directory.refresh()).await;
 
     let principal = Principal {
         email: email.clone(),
@@ -791,6 +808,17 @@ mod tests {
 
     fn flow() -> AuthFlow {
         let key = auth::session_key("test-secret").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "bookq-oauth-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let users = Arc::new(UserStore::new(&dir));
+        let directory = Arc::new(UserDirectory::new(users.clone()));
         AuthFlow {
             http: reqwest::Client::new(),
             client_id: "cid".into(),
@@ -798,7 +826,8 @@ mod tests {
             redirect_uri: "https://bookq.example/auth/callback".into(),
             session_key: key,
             secret_key: "test-secret".into(),
-            allowed_emails: std::sync::Arc::new(["a@example.com".to_string()].into_iter().collect()),
+            users,
+            directory,
             codes: Mutex::new(HashMap::new()),
             refresh: Mutex::new(HashMap::new()),
         }
@@ -949,8 +978,8 @@ mod tests {
                 picture: json!(""),
             },
         );
-        let allowlist: HashSet<String> = ["a@example.com".to_string()].into_iter().collect();
-        let id = auth::validate_bearer(&token, "test-secret", &allowlist).unwrap();
+        let members = UserDirectory::test_with(&[("a@example.com", crate::users::Role::Member)]);
+        let id = auth::validate_bearer(&token, "test-secret", &members).unwrap();
         assert_eq!(id.email, "a@example.com");
     }
 

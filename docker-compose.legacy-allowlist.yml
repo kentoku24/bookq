@@ -1,0 +1,19 @@
+# bookq — pre-#608 rollback bridge (#610)。
+#
+# #608 より前の viewer-rs はログイン認可に `ALLOWED_EMAILS` を使い、`users`
+# テーブルを知らない。#610 で通常の compose から env を外したため、その
+# ような旧 ref へ `./prd.sh up --ref <ref>` で戻すと、v2 の user-state を
+# 復元しても誰もログインできない。
+#
+# このファイルは rebuild.sh が BOOKQ_LEGACY_ALLOWED_EMAILS を明示したときだけ
+# deploy に追加する。旧 allowlist をカンマ区切りで渡して使う:
+#
+#   BOOKQ_LEGACY_ALLOWED_EMAILS='a@example.com,b@example.com' \
+#     ./prd.sh up --ref <#608 より前の ref>
+#
+# 現行版（#608 以降）の通常デプロイでは設定しないこと。現行バイナリは env を
+# 読まないが、設定されていると「allowlist が有効に見える」状態を避ける。
+services:
+  viewer-rs:
+    environment:
+      - ALLOWED_EMAILS=${BOOKQ_LEGACY_ALLOWED_EMAILS:?BOOKQ_LEGACY_ALLOWED_EMAILS is required for the pre-#608 rollback}

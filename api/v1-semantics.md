@@ -88,10 +88,9 @@
   復活させない)。`?folder` なし → delete-all tombstone_ts を記録。
 - **永続化** (#375): **user-state SQLite に永続** — `BOOKQ_STATE_DIR/
   folder-visibility.sqlite3` の `position_users`/`position_folders`
-  (schema v2、`api/user-state-schema.sql` が py/rs 共通の DDL 正本)。
-  FastAPI (`app/reading_positions.py`) と viewer-rs
-  (`rust/viewer-rs/src/state.rs`) が同じ DB を読み書きするため、
-  再起動・コンテナ再起動・strangler flip のいずれでも位置は失われない。
+  (schema v3、`api/user-state-schema.sql` が DDL 正本)。
+  viewer-rs (`rust/viewer-rs/src/state.rs`) が同じ DB を読み書きするため、
+  再起動・コンテナ再起動でも位置は失われない。
   規則実装は `PositionBook` (純粋 LWW/検証) と store に分離され、
   `tests/fixtures/positions_cases.json` が py/rs 共通の conformance fixture。
   v0 `/api/reading-position` は同ストアの「ユーザー最新1件」互換ビュー。
@@ -146,7 +145,7 @@ spec の `security` は cookie OR Bearer のどちらか。
       2 重使用防止のため single-flight 前提)
 - **access token**: HS256 JWT、claims `{sub,name,picture,iat,exp}`、`exp = iat+3600`。
   - identity の取得は claims をローカル decode する (`/api/me` 等は存在しない)
-  - server 側の検証: exp 必須・`sub` を email として allowlist (`ALLOWED_EMAILS`)
+  - server 側の検証: exp 必須・`sub` を email として `users` テーブルの active membership
     で再確認 — **allowlist が空なら全拒否 (fail-closed)**、email を allowlist から
     落とせば発行済み token も即無効
 - **`BOOKQ_TEST_MODE`**: `?client=native` はバイパス**されない** (Google OAuth を

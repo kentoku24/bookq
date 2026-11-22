@@ -33,7 +33,7 @@ Every pytest start runs `scripts/test-preflight.sh` (conftest `pytest_sessionsta
 Run the app locally without Docker or OAuth:
 
 ```bash
-BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 SECRET_KEY=dev-not-a-secret ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
+BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 SECRET_KEY=dev-not-a-secret GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```
 
 Bring up a throwaway development environment for the current worktree (Docker, no OAuth, reachable from the tailnet — each environment takes one of ten fixed slots (node `dev-XX`, XX = 01..10), so no port allocation or shared gateway):
@@ -80,7 +80,7 @@ One production stack, any number of development stacks, designed so several agen
 
 ### Auth and the test-mode bypass
 
-viewer-rs (`rust/viewer-rs/src/auth.rs`, ported from ex-`app/auth.py`) does Google OAuth, storing the user dict in the signed session cookie. Access control is an email allowlist: `ALLOWED_EMAILS` → `Settings.allowed_emails_set`, checked in the callback. `BASE_URL` must be set explicitly because the redirect URI can't be derived correctly from behind the Tailscale proxy.
+viewer-rs (`rust/viewer-rs/src/auth.rs`, ported from ex-`app/auth.py`) does Google OAuth, storing the user dict in the signed session cookie. Access control is the `users` table (`role=admin|member`), enrolled only through `viewer-rs users`; there is no env allowlist. `auth::resolve` reads an in-memory `UserDirectory` refreshed every second, and the OAuth callback checks the DB directly. `BASE_URL` must be set explicitly because the redirect URI can't be derived correctly from behind the Tailscale proxy.
 
 `BOOKQ_TEST_MODE=true` makes `get_current_user` / `require_auth` return a mock user and skip all OAuth. It is read **once at import time** into a module-level `_TEST_MODE`, so it must be in the environment before the process starts. The whole test suite depends on this.
 

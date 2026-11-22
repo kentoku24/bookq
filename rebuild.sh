@@ -354,10 +354,18 @@ deploy_prd() {
         profiles=(--profile public)
         info "CLOUDFLARE_TUNNEL_TOKEN 検出 — profile 'public' で cloudflared も起動します"
     fi
-    docker compose "${profiles[@]}" -f docker-compose.yml -f docker-compose.prd-image.yml up -d --no-build
+    # pre-#608 への rollback 専用ブリッジ (#610): 当時のイメージは
+    # ALLOWED_EMAILS で認可するが、通常 deploy では渡さない。明示的に
+    # BOOKQ_LEGACY_ALLOWED_EMAILS が設定されたときだけ override を足す。
+    local compose_files=(-f docker-compose.yml -f docker-compose.prd-image.yml)
+    if [ -n "${BOOKQ_LEGACY_ALLOWED_EMAILS:-}" ]; then
+        echo "⚠️  BOOKQ_LEGACY_ALLOWED_EMAILS が設定されています — pre-#608 イメージへの rollback 専用です。"
+        compose_files+=(-f docker-compose.legacy-allowlist.yml)
+    fi
+    docker compose "${profiles[@]}" "${compose_files[@]}" up -d --no-build
 
     local cid
-    cid="$(docker compose ps -q viewer-rs)"
+    cid="$(docker compose "${compose_files[@]}" ps -q viewer-rs)"
     [ -n "$cid" ] || die "viewer-rs コンテナが見つかりません。"
     wait_healthy "$cid"
 
@@ -377,7 +385,7 @@ deploy_prd() {
     expected_fqdn="$(printf '%s' "$base_url" | sed -E 's#^https?://##; s#/.*$##; s#:[0-9]+$##')"
     case "$expected_fqdn" in
         *.ts.net)
-            sidecar="$(docker compose -f docker-compose.yml -f docker-compose.prd-image.yml ps -q tailscale 2>/dev/null || true)"
+            sidecar="$(docker compose "${compose_files[@]}" ps -q tailscale 2>/dev/null || true)"
             if [ -n "$sidecar" ]; then
                 heal_fqdn_collision "$sidecar" "$expected_fqdn" || true
             fi

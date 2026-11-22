@@ -46,8 +46,6 @@
    ```bash
    openssl rand -hex 32  # → SECRET_KEY に設定
    ```
-4. アクセスを許可する Google アカウントのメールアドレスを `ALLOWED_EMAILS` に設定（カンマ区切りで複数指定可能）
-
 ### 1. Auth Key の取得
 
 https://login.tailscale.com/admin/settings/keys で **Reusable** な Auth Key を発行する。
@@ -76,11 +74,11 @@ cp .env.example .env
 2. Zero Trust ダッシュボード → Networks → Tunnels → Create a tunnel → cloudflared。発行 token を `.env` の `CLOUDFLARE_TUNNEL_TOKEN` に設定
 3. 同ダッシュボードで Public Hostname を登録: `<host>.<domain>` → service `HTTP` `viewer:8080`
 4. `.env` の `BASE_URL` を `https://<host>.<domain>` に変更
-5. Google Cloud Console で `https://<host>.<domain>/auth/callback` を承認済み redirect URI に追加（consent screen が Testing なら `ALLOWED_EMAILS` を Test users に登録必須）
+5. Google Cloud Console で `https://<host>.<domain>/auth/callback` を承認済み redirect URI に追加（consent screen が Testing ならログインする Google アカウントを Test users に登録必須）
 6. `./prd.sh up` — token があれば profile `public` で cloudflared も起動。`docker logs bookq-prd-cloudflared` に `Registered tunnel connection` が出れば接続確立
-7. tailnet 外の端末 (スマホ LTE 等) で `https://<host>.<domain>` を開き、Google ログイン → 閲覧を確認
+7. tailnet 外の端末 (スマホ LTE 等) で `https://<host>.<domain>` を開き、Google ログイン → 閲覧を確認（fresh DB は先に「5. ユーザーと admin の登録」で admin を 1 名登録）
 
-認可は引き続き OAuth + `ALLOWED_EMAILS`。詳細と運用注意 (Cloudflare edge キャッシュ対策・Bot Fight Mode・TOS §2.8) は [docs/deployment.md](docs/deployment.md)「独自ドメイン公開」を参照。
+認可は OAuth + `users` テーブル。詳細と運用注意 (Cloudflare edge キャッシュ対策・Bot Fight Mode・TOS §2.8) は [docs/deployment.md](docs/deployment.md)「独自ドメイン公開」を参照。
 
 ### 4'. 一般公開（Tailscale Funnel, #353）— 非推奨
 
@@ -89,6 +87,18 @@ cp .env.example .env
 公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
 
 注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
+
+### 5. ユーザーと admin の登録
+
+fresh DB の `users` は空なので、**ログイン検証の前に** 少なくとも admin を 1 名登録する（サーバー再起動は不要）。登録は稼働中のコンテナで CLI から行う — HTTP の書込み経路はない:
+
+```bash
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin --note "initial admin"
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users list
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users check you@example.com
+```
+
+一般ユーザーは `users add family@example.com`（既定 role=member）、失効は `users remove <email>`（ログイン自体を停止、`users add` で再活性化）。env の allowlist は廃止済みで、`users` CLI が唯一の登録経路。詳細は [docs/deployment.md](docs/deployment.md)「ユーザーと admin の管理」を参照。
 
 ## API
 
@@ -105,6 +115,7 @@ cp .env.example .env
 | `GET /auth/login` | 不要 | Google OAuth ログイン |
 | `GET /auth/callback` | 不要 | OAuth コールバック |
 | `GET /auth/logout` | 不要 | ログアウト |
+| `GET /admin` | 要（admin） | 管理ページ。admin ロールのユーザーのみ 200、それ以外は 404 |
 
 ## 拡大と俯瞰
 
@@ -252,7 +263,7 @@ curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Ha
 # 手元で一時起動して試す場合 (viewer-rs を直接起動)
 BOOKQ_TEST_MODE=true LIBRARY_DIR=/tmp/library BOOKQ_BIND=127.0.0.1:$PORT \
   SECRET_KEY=dev-not-a-secret \
-  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:$PORT BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
   BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs &
 curl -s http://127.0.0.1:$PORT/static/offline-harness.html | grep -q "Offline Harness" && echo ok
@@ -293,7 +304,7 @@ UI をさっと触るだけならこれが一番速い（OAuth もスキップ�
 # viewer-rs を直接起動 (cargo build -p viewer-rs が前提)
 BOOKQ_TEST_MODE=true LIBRARY_DIR=/path/to/images BOOKQ_BIND=127.0.0.1:8080 \
   SECRET_KEY=dev-not-a-secret \
-  ALLOWED_EMAILS=test@example.com GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
+  GOOGLE_CLIENT_ID=ci-dummy GOOGLE_CLIENT_SECRET=ci-dummy \
   BASE_URL=http://127.0.0.1:8080 BOOKQ_WEB_DIR=./web BOOKQ_STATE_DIR=/tmp/bookq-state \
   BOOKQ_THUMB_CACHE_DIR=/tmp/bookq-thumbs ./rust/target/debug/viewer-rs
 ```

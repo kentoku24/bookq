@@ -37,20 +37,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _viewer_rs_binary() -> Path:
-    """Same lazy build as tests/rs_spawn.py; kept local so this module
-    stays importable without touching sys.path."""
-    bin_path = REPO_ROOT / "rust" / "target" / "debug" / "viewer-rs"
-    if not bin_path.exists():
-        subprocess.run(["cargo", "build", "-p", "viewer-rs"],
-                       cwd=str(REPO_ROOT / "rust"), check=True)
-    return bin_path
+    """Share rs_spawn's build resolution so the CLI enrollment and the
+    spawned server are the same binary (honors BOOKQ_TARGET_DIR / the
+    shared target dir). A local path would silently test an older build
+    when only one of the two is rebuilt."""
+    from rs_spawn import viewer_rs_binary
+
+    return viewer_rs_binary()
 
 
 def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     """Live viewer-rs WITHOUT test-mode: real signed-cookie session auth.
 
     Same shape as conftest's server fixture but with a custom env — spawns
-    viewer-rs with the same SECRET_KEY/allowlist contract. The health probe
+    viewer-rs with the same SECRET_KEY contract. The health probe
     is the public v1 endpoint.
     """
     with socket.socket() as s:
@@ -61,7 +61,6 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     env["LIBRARY_DIR"] = str(library_tree)
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env["SECRET_KEY"] = AUTH_SECRET
-    env["ALLOWED_EMAILS"] = f"{ALICE['email']},{BOB['email']}"
     env.update({
         "BOOKQ_BIND": f"127.0.0.1:{port}",
         "GOOGLE_CLIENT_ID": "ci-dummy",
@@ -98,7 +97,12 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
 @pytest.fixture(scope="module")
 def auth_server(library_tree, tmp_path_factory):
     """Live server WITHOUT test-mode: real signed-cookie session auth."""
+    from rs_spawn import users_cli
+
     state_dir = tmp_path_factory.mktemp("reader-ws-auth-state")
+    for user in (ALICE, BOB):
+        cp = users_cli(state_dir, "add", user["email"])
+        assert cp.returncode == 0, cp.stderr
     proc, base_url = _spawn_server(library_tree, state_dir)
     yield base_url
     proc.terminate()

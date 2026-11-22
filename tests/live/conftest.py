@@ -52,7 +52,6 @@ def live_server(live_root, tmp_path_factory):
     env["GOOGLE_CLIENT_ID"] = "ci-dummy"
     env["GOOGLE_CLIENT_SECRET"] = "ci-dummy"
     env["BASE_URL"] = base
-    env["ALLOWED_EMAILS"] = "test@example.com"
     env["SECRET_KEY"] = "ci-not-a-secret"
     env["BOOKQ_WEB_DIR"] = str(REPO_ROOT / "web")
     bin_path = REPO_ROOT / "rust" / "target" / "debug" / "viewer-rs"

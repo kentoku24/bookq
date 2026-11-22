@@ -41,7 +41,6 @@ services:
       # session cookie 検証 + Bearer JWT 検証 + visibility owner HMAC。
       - SECRET_KEY=${SECRET_KEY}
       - BOOKQ_GIT_SHA=${GIT_SHA:-}
-      - ALLOWED_EMAILS=${ALLOWED_EMAILS}
       # OAuth 一式 (#400): /auth/* + /api/v1/auth/token に必須。未設定の
       # ままでは surface は 501 を返す（起動時 WARN）。
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}

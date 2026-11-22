@@ -3,8 +3,8 @@
 //! `_user_from_bearer` mirrors: `Authorization: Bearer <jwt>` where the JWT
 //! is HMAC-signed with SECRET_KEY (joserfc `OctKey` accepts HS256/384/512),
 //! `exp` is required, `sub` becomes the email (lowercased), and the email
-//! must sit in `ALLOWED_EMAILS` — an empty allowlist rejects everyone
-//! (fail-closed, never fail-open).
+//! must be an active member of the user directory — an empty directory
+//! rejects everyone (fail-closed, never fail-open).
 //!
 //! Auth order matches `user_from_connection`: the signed session cookie
 //! wins over Bearer. The cookie is verified natively via
@@ -17,7 +17,6 @@
 //! Everything we cannot positively identify delegates upstream so the
 //! Python side produces its own byte-exact 401.
 
-use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::{header, HeaderMap};
@@ -29,6 +28,8 @@ use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Sha256, Sha384, Sha512};
+
+use crate::users::UserDirectory;
 
 /// BOOKQ_TEST_MODE mock user (`app/auth.py:61`).
 pub const TEST_USER_EMAIL: &str = "test@example.com";
@@ -124,7 +125,7 @@ fn claims_valid(claims: &serde_json::Map<String, Value>, now: f64) -> bool {
 fn bearer_claims(
     token: &str,
     secret: &str,
-    allowlist: &HashSet<String>,
+    directory: &UserDirectory,
 ) -> Option<serde_json::Map<String, Value>> {
     if secret.is_empty() {
         return None;
@@ -147,16 +148,19 @@ fn bearer_claims(
         return None;
     }
     let email = obj.get("sub")?.as_str()?.to_lowercase();
-    if email.is_empty() || !allowlist.contains(&email) {
+    if email.is_empty() || !directory.is_member(&email) {
         return None;
     }
     Some(obj)
 }
 
 /// `_user_from_bearer` on an already-extracted token.
-/// `allowlist` is `ALLOWED_EMAILS` (trim+lowercase, empties dropped).
-pub fn validate_bearer(token: &str, secret: &str, allowlist: &HashSet<String>) -> Option<Identity> {
-    let claims = bearer_claims(token, secret, allowlist)?;
+pub fn validate_bearer(
+    token: &str,
+    secret: &str,
+    directory: &UserDirectory,
+) -> Option<Identity> {
+    let claims = bearer_claims(token, secret, directory)?;
     Some(Identity {
         email: claims.get("sub")?.as_str()?.to_lowercase(),
     })
@@ -172,7 +176,7 @@ pub fn resolve(
     test_mode: bool,
     secret: &str,
     session_key: Option<&SessionKey>,
-    allowlist: &HashSet<String>,
+    directory: &UserDirectory,
 ) -> Caller {
     if test_mode {
         return Caller::User(Identity {
@@ -186,14 +190,14 @@ pub fn resolve(
     match session_lookup(headers, session_key) {
         SessionLookup::User(u) => {
             match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
-                // #373: the Bearer path re-checks ALLOWED_EMAILS on every
-                // request; the session cookie gets the same evaluation so
-                // a removed email loses access now, not at cookie expiry.
-                // A disallowed session yields no identity — fall to
+                // #373: the Bearer path re-checks active membership on
+                // every request; the session cookie gets the same evaluation
+                // so a removed member loses access now, not at cookie
+                // expiry. A non-member session yields no identity — fall to
                 // Bearer exactly like `NoUser`.
                 Some(email) => {
                     let email = email.to_lowercase();
-                    if allowlist.contains(&email) {
+                    if directory.is_member(&email) {
                         return Caller::User(Identity { email });
                     }
                 }
@@ -203,7 +207,7 @@ pub fn resolve(
         SessionLookup::Corrupt => return Caller::Delegate,
         SessionLookup::Absent | SessionLookup::NoUser => {}
     }
-    match bearer_token(headers).and_then(|t| validate_bearer(t, secret, allowlist)) {
+    match bearer_token(headers).and_then(|t| validate_bearer(t, secret, directory)) {
         Some(id) => Caller::User(id),
         None => Caller::Delegate,
     }
@@ -397,7 +401,7 @@ pub fn resolve_ws_user(
     test_mode: bool,
     secret: &str,
     session_key: Option<&SessionKey>,
-    allowlist: &HashSet<String>,
+    directory: &UserDirectory,
 ) -> Option<Value> {
     if test_mode {
         let mut u = serde_json::Map::new();
@@ -409,10 +413,10 @@ pub fn resolve_ws_user(
     match session_lookup(headers, session_key) {
         SessionLookup::User(u) => {
             match u.get("email").and_then(|e| e.as_str()).filter(|e| !e.is_empty()) {
-                // #373: same ALLOWED_EMAILS re-evaluation as `resolve` —
-                // a removed email fails the handshake; the Bearer
-                // fallback below still applies.
-                Some(e) if !allowlist.contains(&e.to_lowercase()) => {}
+                // #373: same membership re-evaluation as `resolve` — a
+                // removed member fails the handshake; the Bearer fallback
+                // below still applies.
+                Some(e) if !directory.is_member(&e.to_lowercase()) => {}
                 // Any other non-null `user` is the caller upstream —
                 // return it whole.
                 _ => return Some(u),
@@ -423,7 +427,7 @@ pub fn resolve_ws_user(
         SessionLookup::Corrupt => return None,
         SessionLookup::Absent | SessionLookup::NoUser => {}
     }
-    let claims = bearer_claims(bearer_token(headers)?, secret, allowlist)?;
+    let claims = bearer_claims(bearer_token(headers)?, secret, directory)?;
     let email = claims.get("sub")?.as_str()?.to_lowercase();
     let mut u = serde_json::Map::new();
     u.insert("email".into(), Value::String(email.clone()));
@@ -450,8 +454,16 @@ mod tests {
 
     const SECRET: &str = "dev-not-a-secret";
 
-    fn allowlist() -> HashSet<String> {
-        ["a@example.com".to_string()].into_iter().collect()
+    fn members(emails: &[&str]) -> UserDirectory {
+        let entries: Vec<(&str, crate::users::Role)> = emails
+            .iter()
+            .map(|e| (*e, crate::users::Role::Member))
+            .collect();
+        UserDirectory::test_with(&entries)
+    }
+
+    fn allowlist() -> UserDirectory {
+        members(&["a@example.com"])
     }
 
     fn mint(claims: &str, alg: &str, secret: &str) -> String {
@@ -535,10 +547,10 @@ mod tests {
 
     #[test]
     fn allowlist_is_fail_closed() {
-        let empty: HashSet<String> = HashSet::new();
+        let empty = UserDirectory::empty();
         assert!(validate_bearer(&fresh(3600), SECRET, &empty).is_none());
-        // sub casing is normalized before the allowlist check.
-        let list: HashSet<String> = ["b@example.com".to_string()].into_iter().collect();
+        // sub casing is normalized before the membership check.
+        let list = members(&["b@example.com"]);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -632,8 +644,7 @@ mod tests {
     fn session_wins_over_bearer() {
         // Bearer identifies a DIFFERENT allowlisted user — the cookie
         // still wins, matching user_from_connection's session-first order.
-        let list: HashSet<String> =
-            ["a@example.com".into(), "b@example.com".into()].into_iter().collect();
+        let list = members(&["a@example.com", "b@example.com"]);
         let cookie = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
         let h = headers_with(
             Some(&format!("session={cookie}")),
@@ -680,8 +691,7 @@ mod tests {
     /// Bearer that may belong to someone else.
     #[test]
     fn signed_uninterpretable_user_delegates() {
-        let list: HashSet<String> =
-            ["a@example.com".into(), "b@example.com".into()].into_iter().collect();
+        let list = members(&["a@example.com", "b@example.com"]);
         for payload in [
             &b"{\"user\":{\"email\":null}}"[..],
             b"{\"user\":\"not-an-object\"}",
@@ -720,8 +730,7 @@ mod tests {
     fn invalid_session_falls_through_to_bearer() {
         // Tampered signature → Python sees session={} → Bearer applies.
         // A different allowlisted Bearer email proves the Bearer path ran.
-        let list: HashSet<String> =
-            ["a@example.com".into(), "b@example.com".into()].into_iter().collect();
+        let list = members(&["a@example.com", "b@example.com"]);
         let bearer = bearer_for("b@example.com", 3600);
         let cookie = sign_session("wrong-secret", USER_JSON.as_bytes(), now_ts());
         let h = headers_with(
@@ -735,7 +744,7 @@ mod tests {
     }
 
     /// #373: the session cookie gets the Bearer path's per-request
-    /// ALLOWED_EMAILS re-check — a removed email yields no identity.
+    /// membership re-check — a removed user yields no identity.
     #[test]
     fn disallowed_session_user_falls_to_bearer() {
         const REMOVED_JSON: &str =

@@ -623,3 +623,13 @@ body.fv-showall #visibility-status:not(:empty){display:flex}
 #tile-grid .tile,#tile-grid .card,#tile-grid .item{position:relative}
 /* drop hint — 編集モード中のサイドバーへのドラッグ */
 #sidebar-scroll.lib-drop{outline:2px dashed #4a7ac4;outline-offset:-4px}
+
+/* ── admin (empty admin page, #608) ── */
+html,body.admin{height:100%;background:#0d0d0d;color:#ccc}
+body.admin{position:static;inset:auto;overflow-y:auto;user-select:text;-webkit-user-select:text}
+.admin-header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;min-height:52px;padding:4px 16px;background:rgba(20,20,20,.94);border-bottom:1px solid #2a2a2a}
+.admin-header h1{flex:1;font-size:16px;font-weight:600;color:#e0e0e0;letter-spacing:-.01em}
+.admin-header a{display:inline-flex;align-items:center;min-height:44px;padding:0 4px;color:#8ab4f8;font-size:13px;text-decoration:none}
+.admin-header a:hover{text-decoration:underline}
+.admin-content{max-width:720px;margin:0 auto;padding:32px 20px 48px}
+.admin-empty{font-size:13px;line-height:1.6;color:#888}
