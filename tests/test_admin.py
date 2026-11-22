@@ -417,8 +417,10 @@ def test_auth_admin_role_and_disable(auth_server, auth_state, auth_reset):
 
     cp = users_cli(auth_state, "remove", TEST_EMAIL)
     assert cp.returncode == 0, cp.stderr
-    assert _request(auth_server, "GET", "/admin", headers)[0] == 404
-    # Membership revocation is bounded by the 1s directory refresh.
+    # Revoked membership may resolve as an authenticated non-admin (404) or,
+    # after the 1s directory refresh, as unauthenticated (303) — both deny.
+    status, _, _ = _request(auth_server, "GET", "/admin", headers)
+    assert status in (303, 404), status
     _wait_api(auth_server, headers, 401)
     body = _wait_home(auth_server, headers, want_link=False)
     assert b"login-box" in body
