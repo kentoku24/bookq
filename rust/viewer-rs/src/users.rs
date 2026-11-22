@@ -85,7 +85,7 @@ pub(crate) enum Change {
     Disabled,
     AlreadyDisabled,
     NotFound,
-    /// The `/admin` UI only manages members; admins stay CLI-only.
+    /// The `/admin` UI only manages members; admins (and corrupt roles) stay CLI-only.
     AdminProtected,
 }
 
@@ -326,11 +326,7 @@ impl UserStore {
     /// admins) with [`Change::AdminProtected`]. The check and write share one
     /// immediate transaction so a concurrent CLI promotion cannot be
     /// overwritten.
-    pub(crate) fn add_member(
-        &self,
-        email: &str,
-        created_by: &str,
-    ) -> Result<Change, UserError> {
+    pub(crate) fn add_member(&self, email: &str, created_by: &str) -> Result<Change, UserError> {
         let email = normalize_email(email).ok_or(UserError::InvalidEmail)?;
         let created_by =
             normalize_text(created_by, "admin-ui").ok_or(UserError::InvalidText("created_by"))?;
@@ -369,7 +365,9 @@ impl UserStore {
         Ok(change)
     }
 
-    /// Disable a `member` from the `/admin` UI. Admin rows are refused.
+    /// Disable a `member` from the `/admin` UI. Any row whose role is not
+    /// `member` (admins, corrupt roles) is refused with
+    /// [`Change::AdminProtected`]; unknown emails are [`Change::NotFound`].
     pub(crate) fn disable_member(&self, email: &str) -> Result<Change, UserError> {
         let email = normalize_email(email).ok_or(UserError::InvalidEmail)?;
         let mut conn = self.connect()?;
@@ -652,7 +650,9 @@ mod tests {
         let store = UserStore::new(&dir);
 
         assert_eq!(
-            store.add_member("m@example.com", "admin@example.com").unwrap(),
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
             Change::Added
         );
         let row = store.find("m@example.com").unwrap().unwrap();
@@ -660,7 +660,9 @@ mod tests {
         assert_eq!(row.created_by, "admin@example.com");
         assert_eq!(row.note, "admin-ui");
         assert_eq!(
-            store.add_member("m@example.com", "admin@example.com").unwrap(),
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
             Change::AlreadyPresent
         );
 
@@ -674,16 +676,18 @@ mod tests {
             Change::AlreadyDisabled
         );
         assert_eq!(
-            store.add_member("m@example.com", "admin@example.com").unwrap(),
+            store
+                .add_member("m@example.com", "admin@example.com")
+                .unwrap(),
             Change::Activated
         );
         assert!(store.is_active("m@example.com").unwrap());
 
-        store
-            .add("a@example.com", Role::Admin, "cli", "")
-            .unwrap();
+        store.add("a@example.com", Role::Admin, "cli", "").unwrap();
         assert_eq!(
-            store.add_member("a@example.com", "admin@example.com").unwrap(),
+            store
+                .add_member("a@example.com", "admin@example.com")
+                .unwrap(),
             Change::AdminProtected
         );
         assert_eq!(
@@ -694,13 +698,16 @@ mod tests {
 
         store.disable("a@example.com").unwrap();
         assert_eq!(
-            store.add_member("a@example.com", "admin@example.com").unwrap(),
+            store
+                .add_member("a@example.com", "admin@example.com")
+                .unwrap(),
             Change::AdminProtected
         );
         assert_eq!(
             store.disable_member("a@example.com").unwrap(),
             Change::AdminProtected
         );
+        assert!(!store.is_active("a@example.com").unwrap());
         assert_eq!(
             store.disable_member("missing@example.com").unwrap(),
             Change::NotFound
@@ -727,6 +734,14 @@ mod tests {
         assert!(matches!(
             store.disable("not-an-email"),
             Err(UserError::InvalidEmail)
+        ));
+        assert!(matches!(
+            store.add_member("not-an-email", "a@b.com"),
+            Err(UserError::InvalidEmail)
+        ));
+        assert!(matches!(
+            store.add_member("c@d.com", "line\nbreak"),
+            Err(UserError::InvalidText("created_by"))
         ));
         assert!(store.list().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
