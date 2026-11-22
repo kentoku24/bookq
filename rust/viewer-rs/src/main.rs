@@ -607,7 +607,7 @@ async fn admin_member_action(
         MemberAction::Add | MemberAction::Enable => {
             store.add_member(&email, &actor_email)
         }
-        MemberAction::Disable => store.disable_member(&email),
+        MemberAction::Disable => store.disable_member(&email, &actor_email),
     })
     .await;
 
@@ -639,6 +639,10 @@ async fn admin_member_action(
         (MemberAction::Disable, users::Change::AlreadyDisabled) => "already-disabled",
         (MemberAction::Disable, users::Change::NotFound) => "not-found",
         (MemberAction::Disable, users::Change::AdminProtected) => "admin-readonly",
+        // The actor was demoted/disabled after the page was rendered (the
+        // store re-checks inside the write transaction): fail closed with the
+        // same generic 404 a non-admin gets, so the surface stays hidden.
+        (_, users::Change::NotAuthorized) => return admin_not_found(),
         (_, other) => {
             tracing::error!(?other, "unexpected admin store result");
             return admin_internal_error("user update failed");
