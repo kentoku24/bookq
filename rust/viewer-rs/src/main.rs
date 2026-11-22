@@ -505,6 +505,139 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
     res
 }
 
+/// The only field the three mutation forms carry.
+#[derive(serde::Deserialize)]
+struct AdminEmailForm {
+    email: String,
+}
+
+/// The three member mutations. Admins are never targets (the store layer
+/// refuses them with `Change::AdminProtected`) — they stay CLI-only.
+#[derive(Clone, Copy)]
+enum MemberAction {
+    Add,
+    Disable,
+    Enable,
+}
+
+fn admin_forbidden() -> Response {
+    let mut res = state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    admin_private_headers(&mut res);
+    res
+}
+
+fn admin_bad_request() -> Response {
+    let mut res = state::detail(StatusCode::BAD_REQUEST, "invalid form");
+    admin_private_headers(&mut res);
+    res
+}
+
+fn admin_payload_too_large() -> Response {
+    let mut res = state::detail(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
+    admin_private_headers(&mut res);
+    res
+}
+
+/// 303 back to the list with a flash code (`admin_ui::flash_message` renders
+/// it; unknown codes are silently ignored). POST-redirect-GET keeps reloads
+/// from re-submitting the mutation.
+fn admin_redirect_status(status: &'static str) -> Response {
+    let mut res = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, format!("/admin?status={status}"))
+        .body(Body::empty())
+        .unwrap();
+    admin_private_headers(&mut res);
+    res
+}
+
+async fn admin_users_add(State(st): State<AppState>, req: Request<Body>) -> Response {
+    admin_member_action(st, req, MemberAction::Add).await
+}
+
+async fn admin_users_disable(State(st): State<AppState>, req: Request<Body>) -> Response {
+    admin_member_action(st, req, MemberAction::Disable).await
+}
+
+async fn admin_users_enable(State(st): State<AppState>, req: Request<Body>) -> Response {
+    admin_member_action(st, req, MemberAction::Enable).await
+}
+
+async fn admin_member_action(
+    st: AppState,
+    req: Request<Body>,
+    action: MemberAction,
+) -> Response {
+    // Gate order matters: identity → role → CSRF → body. Nothing is read
+    // (or written) for a caller who is not an admin on this same origin.
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    let headers = req.headers().clone();
+    let actor = match admin_actor(&st, &headers).await {
+        Ok(actor) => actor,
+        Err(res) => return res,
+    };
+    if !admin_ui::same_origin_post(&headers) {
+        return admin_forbidden();
+    }
+    let form = match axum::extract::Form::<AdminEmailForm>::from_request(req, &()).await {
+        Ok(form) => form.0,
+        Err(rejection) => {
+            if rejection.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
+                return admin_payload_too_large();
+            }
+            return admin_bad_request();
+        }
+    };
+
+    let store = st.users.clone();
+    let email = form.email;
+    let actor_email = actor.email;
+    let result = tokio::task::spawn_blocking(move || match action {
+        MemberAction::Add | MemberAction::Enable => {
+            store.add_member(&email, &actor_email)
+        }
+        MemberAction::Disable => store.disable_member(&email),
+    })
+    .await;
+
+    let change = match result {
+        Ok(Ok(change)) => change,
+        Ok(Err(users::UserError::InvalidEmail)) => return admin_redirect_status("invalid"),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin user update failed");
+            return admin_internal_error("user update failed");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin user update task failed");
+            return admin_internal_error("user update failed");
+        }
+    };
+
+    let status = match (action, change) {
+        (MemberAction::Add | MemberAction::Enable, users::Change::Added) => "added",
+        (MemberAction::Add | MemberAction::Enable, users::Change::Activated) => {
+            "reactivated"
+        }
+        (MemberAction::Add | MemberAction::Enable, users::Change::AlreadyPresent) => {
+            "exists"
+        }
+        (MemberAction::Add | MemberAction::Enable, users::Change::AdminProtected) => {
+            "admin-readonly"
+        }
+        (MemberAction::Disable, users::Change::Disabled) => "disabled",
+        (MemberAction::Disable, users::Change::AlreadyDisabled) => "already-disabled",
+        (MemberAction::Disable, users::Change::NotFound) => "not-found",
+        (MemberAction::Disable, users::Change::AdminProtected) => "admin-readonly",
+        (_, other) => {
+            tracing::error!(?other, "unexpected admin store result");
+            return admin_internal_error("user update failed");
+        }
+    };
+    admin_redirect_status(status)
+}
+
 /// `GET /` — the Jinja shell: viewer page for identified callers, the
 /// login page for everyone else (200, not a redirect).
 async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1393,6 +1526,15 @@ async fn main() {
         // `/admin/` does not fall through to the 501 fallback.
         .route("/admin", any(admin_page))
         .route("/admin/", any(admin_page))
+        // #613: member-only mutations. The body limit is scoped here so the
+        // three tiny form posts cannot be used as a memory sink.
+        .merge(
+            Router::new()
+                .route("/admin/users/add", any(admin_users_add))
+                .route("/admin/users/disable", any(admin_users_disable))
+                .route("/admin/users/enable", any(admin_users_enable))
+                .route_layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
         .route("/sw.js", any(serve_sw))
         .route("/favicon.ico", any(serve_favicon))
         .route("/static", any(serve_static))

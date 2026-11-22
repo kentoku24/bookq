@@ -456,6 +456,118 @@ def test_admin_status_message_and_unknown_ignored(ui_server, ui_reset):
     assert b"admin-flash-info" in body
 
 
+def test_admin_add_member_then_disable_and_enable(ui_server, ui_state, ui_reset):
+    status, headers, _ = _post_admin(ui_server, "add", NEW_USER)
+    assert status == 303
+    assert headers["location"] == "/admin?status=added"
+    cp = users_cli(ui_state, "check", NEW_USER)
+    assert cp.returncode == 0 and cp.stdout.strip() == "member"
+
+    _, _, body = _request(ui_server, "GET", "/admin")
+    row = _row(body, NEW_USER)
+    assert b"/admin/users/disable" in row
+    assert b"admin-status-active" in row
+
+    status, headers, _ = _post_admin(ui_server, "disable", NEW_USER)
+    assert status == 303
+    assert headers["location"] == "/admin?status=disabled"
+    cp = users_cli(ui_state, "check", NEW_USER)
+    assert cp.returncode == 1 and cp.stdout.strip() == "disabled"
+    _, _, body = _request(ui_server, "GET", "/admin")
+    row = _row(body, NEW_USER)
+    assert b"/admin/users/enable" in row
+    assert b"admin-status-disabled" in row
+
+    status, headers, _ = _post_admin(ui_server, "enable", NEW_USER)
+    assert status == 303
+    assert headers["location"] == "/admin?status=reactivated"
+    cp = users_cli(ui_state, "check", NEW_USER)
+    assert cp.returncode == 0 and cp.stdout.strip() == "member"
+
+
+def test_admin_add_existing_member_is_idempotent(ui_server, ui_state, ui_reset):
+    status, headers, _ = _post_admin(ui_server, "add", OUTSIDE)
+    assert status == 303
+    assert headers["location"] == "/admin?status=exists"
+    cp = users_cli(ui_state, "check", OUTSIDE)
+    assert cp.returncode == 0 and cp.stdout.strip() == "member"
+
+
+def test_admin_add_admin_is_rejected(ui_server, ui_state, ui_reset):
+    status, headers, _ = _post_admin(ui_server, "add", TEST_EMAIL)
+    assert status == 303
+    assert headers["location"] == "/admin?status=admin-readonly"
+    cp = users_cli(ui_state, "check", TEST_EMAIL)
+    assert cp.returncode == 0 and cp.stdout.strip() == "admin"
+
+
+def test_admin_disable_admin_is_rejected(ui_server, ui_state, ui_reset):
+    status, headers, _ = _post_admin(ui_server, "disable", TEST_EMAIL)
+    assert status == 303
+    assert headers["location"] == "/admin?status=admin-readonly"
+    cp = users_cli(ui_state, "check", TEST_EMAIL)
+    assert cp.returncode == 0 and cp.stdout.strip() == "admin"
+
+
+def test_admin_invalid_email_and_xss_are_safe(ui_server, ui_state, ui_reset):
+    status, headers, _ = _post_admin(ui_server, "add", "not-an-email")
+    assert status == 303
+    assert headers["location"] == "/admin?status=invalid"
+
+    status, headers, _ = _post_admin(ui_server, "add", XSS_USER)
+    assert status == 303
+    assert headers["location"] == "/admin?status=added"
+    _, _, body = _request(ui_server, "GET", "/admin")
+    assert b"<img@example.com>" not in body
+    assert b"&lt;img@example.com&gt;" in body
+
+
+def test_admin_mutations_require_admin(ui_server, ui_state):
+    users_cli(ui_state, "add", TEST_EMAIL, "--role", "member")
+    try:
+        status, _, _ = _post_admin(ui_server, "add", NEW_USER)
+        assert status == 404
+    finally:
+        users_cli(ui_state, "add", TEST_EMAIL, "--role", "admin")
+
+
+def test_admin_action_get_is_405(ui_server, ui_reset):
+    status, headers, _ = _request(ui_server, "GET", "/admin/users/add")
+    assert status == 405
+    assert headers["allow"] == "POST"
+
+
+def test_admin_csrf_matrix(ui_server, ui_reset):
+    status, _, _ = _request(
+        ui_server,
+        "POST",
+        "/admin/users/add",
+        {"Content-Type": "application/x-www-form-urlencoded"},
+        b"email=csrf-missing%40example.com",
+    )
+    assert status == 403
+
+    for override in (
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Origin": "https://evil.example"},
+        {"Origin": "null"},
+    ):
+        status, _, _ = _post_admin(
+            ui_server, "add", NEW_USER, _form_headers(ui_server, **override)
+        )
+        assert status == 403, override
+
+    status, headers, _ = _post_admin(ui_server, "add", CSRF_USER)
+    assert status == 303
+    assert headers["location"] == "/admin?status=added"
+
+
+def test_admin_post_body_limit(ui_server, ui_reset):
+    status, _, _ = _post_admin(ui_server, "add", "a" * 9000 + "@example.com")
+    assert status == 413
+
+
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────
 
 
@@ -579,6 +691,72 @@ def test_auth_bearer_member_and_admin(auth_server, auth_state, auth_reset):
     cp = users_cli(auth_state, "add", TEST_EMAIL, "--role", "admin")
     assert cp.returncode == 0, cp.stderr
     assert _request(auth_server, "GET", "/admin", member)[0] == 200
+
+
+def test_admin_post_without_cookie_goes_to_login(auth_server):
+    host = urllib.parse.urlsplit(auth_server).netloc
+    status, headers, _ = _request(
+        auth_server,
+        "POST",
+        "/admin/users/add",
+        {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": f"http://{host}",
+            "Sec-Fetch-Site": "same-origin",
+        },
+        b"email=x%40example.com",
+    )
+    assert status == 303
+    assert headers["location"] == "/"
+
+
+def test_admin_post_as_member_is_404(auth_server, auth_reset):
+    headers = _cookie_header(TEST_EMAIL)
+    headers.update(_form_headers(auth_server))
+    status, _, _ = _request(
+        auth_server,
+        "POST",
+        "/admin/users/add",
+        headers,
+        urllib.parse.urlencode({"email": OUTSIDE}).encode(),
+    )
+    assert status == 404
+
+
+def test_admin_ui_disable_blocks_login(auth_server, auth_state):
+    try:
+        users_cli(auth_state, "add", TEST_EMAIL, "--role", "admin")
+        users_cli(auth_state, "add", OUTSIDE)
+        time.sleep(1.2)
+        admin_headers = _cookie_header(TEST_EMAIL)
+        admin_headers.update(_form_headers(auth_server))
+        outside_headers = _cookie_header(OUTSIDE)
+        _wait_api(auth_server, outside_headers, 200)
+
+        status, headers, _ = _request(
+            auth_server,
+            "POST",
+            "/admin/users/disable",
+            admin_headers,
+            urllib.parse.urlencode({"email": OUTSIDE}).encode(),
+        )
+        assert status == 303
+        assert headers["location"] == "/admin?status=disabled"
+        _wait_api(auth_server, outside_headers, 401)
+
+        status, headers, _ = _request(
+            auth_server,
+            "POST",
+            "/admin/users/enable",
+            admin_headers,
+            urllib.parse.urlencode({"email": OUTSIDE}).encode(),
+        )
+        assert status == 303
+        assert headers["location"] == "/admin?status=reactivated"
+        _wait_api(auth_server, outside_headers, 200)
+    finally:
+        users_cli(auth_state, "add", TEST_EMAIL, "--role", "member")
+        users_cli(auth_state, "remove", OUTSIDE)
 
 
 def test_auth_mixed_session_bearer_uses_the_bearer_admin(auth_server, auth_state, auth_reset):
