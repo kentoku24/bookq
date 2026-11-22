@@ -203,7 +203,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 - `BASE_URL` が ts.net 以外になると、`prd deploy` の tailnet 登録名整合チェック (`heal_fqdn_collision`) は自動でスキップされる（無関係なため）。
 - `*.ts.net` 側は引き続きコンテンツを返すが、OAuth ログインは `BASE_URL`（独自ドメイン）へ遷移する — cookie はドメイン別のため、実質独自ドメインが canonical になる。tailscale sidecar はそのまま残してよい。
-- `ALLOWED_EMAILS` は据え置き前提。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
+- `ALLOWED_EMAILS` は初回 seed のみ。ユーザー管理は `users` テーブル / `users` CLI で行う。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
 - **認証付きメディア endpoint (`/image/`, `/thumb/`, `/view/`, `/api/thumb-sprite`) は `Cache-Control: private` で応答する** — `public` だと Cloudflare edge が応答をキャッシュし、未認証リクエストにも画像バイトが返る認証バイパスになる。保険として Cloudflare 側で当該 hostname に Cache Rule「Bypass cache」を張ってもよい。
 - Security → Bots の **Bot Fight Mode は OFF 推奨** — API クライアントや native アプリ (`Authorization: Bearer`) を bot 判定で弾きうる。
 - Cloudflare 無料プランの TOS §2.8 は画像主体コンテンツの proxy 配信を制限する条項がある。個人利用なら実害はほぼない想定だが、転送量で問題化した場合の fallback は VPS リレー等の別方式。
@@ -222,7 +222,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - 停止は `TS_FUNNEL` を外して `./prd.sh up` — entrypoint が `funnel --https=443 off` を明示して公開を確実に閉じる
 - funnel 未許可のままだと `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無くサイト全体 (tailnet 経路も) 停止するが、sidecar コンテナは healthcheck 無しで Up のまま — restart loop にはならず自動検知もされない (実測で承認待ち ~106 秒)。復旧は承認リンク (`login.tailscale.com/f/funnel?node=...`) を踏むか `TS_FUNNEL` を外して `prd.sh up`。`funnel` コマンド自体が非ゼロ終了した場合のみ restart loop になる
 - Tailscale Funnel は beta で調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。`*.ts.net` 証明書は CT log に記録されるため funnel 公開により tailnet 名は公開情報になる
-- 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）
+- 認可は OAuth + `users` テーブル（`ALLOWED_EMAILS` は初回 seed のみ。「公開到達・限定利用」）
 
 ### ユーザーと admin の管理（#608）
 

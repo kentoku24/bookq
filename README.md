@@ -80,7 +80,7 @@ cp .env.example .env
 6. `./prd.sh up` — token があれば profile `public` で cloudflared も起動。`docker logs bookq-prd-cloudflared` に `Registered tunnel connection` が出れば接続確立
 7. tailnet 外の端末 (スマホ LTE 等) で `https://<host>.<domain>` を開き、Google ログイン → 閲覧を確認
 
-認可は引き続き OAuth + `ALLOWED_EMAILS`。詳細と運用注意 (Cloudflare edge キャッシュ対策・Bot Fight Mode・TOS §2.8) は [docs/deployment.md](docs/deployment.md)「独自ドメイン公開」を参照。
+認可は OAuth + `users` テーブル（`ALLOWED_EMAILS` は初回 seed のみ）。詳細と運用注意 (Cloudflare edge キャッシュ対策・Bot Fight Mode・TOS §2.8) は [docs/deployment.md](docs/deployment.md)「独自ドメイン公開」を参照。
 
 ### 4'. 一般公開（Tailscale Funnel, #353）— 非推奨
 
