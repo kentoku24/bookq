@@ -355,8 +355,13 @@ fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
 /// shared/private caches, and stop MIME sniffing / referrer leakage even on
 /// the 404 path.
 fn admin_private_headers(res: &mut Response) {
-    res.headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // `no-transform` also stops Cloudflare Email Obfuscation from replacing
+    // the user list's addresses with "[email protected]" (#625). The CSP keeps
+    // Cloudflare's decode script disabled, so the obfuscated text would stick.
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-transform"),
+    );
     res.headers_mut()
         .insert(header::VARY, HeaderValue::from_static("Cookie"));
     res.headers_mut().insert(

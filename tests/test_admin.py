@@ -187,7 +187,7 @@ def test_member_is_not_admin(admin_server, admin_state, reset_test_user):
     # Generic body: the admin surface is not advertised.
     assert b"admin" not in body.lower()
     assert "管理".encode("utf-8") not in body
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "no-store, no-transform"
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["referrer-policy"] == "same-origin"
     assert "cookie" in headers.get("vary", "").lower()
@@ -208,7 +208,7 @@ def test_admin_role_opens_page_and_menu(admin_server, admin_state, reset_test_us
     assert status == 200
     assert "ユーザーを追加".encode("utf-8") in body
     assert headers["content-type"].startswith("text/html")
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "no-store, no-transform"
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["referrer-policy"] == "same-origin"
     assert headers["x-frame-options"] == "DENY"
@@ -427,12 +427,13 @@ def ui_reset(ui_state, ui_server):
 def test_admin_page_lists_users_and_forms(ui_server, ui_reset):
     status, headers, body = _request(ui_server, "GET", "/admin")
     assert status == 200
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "no-store, no-transform"
     csp = headers["content-security-policy"]
     assert "form-action 'self'" in csp
     assert "script-src 'none'" in csp
     assert b'action="/admin/users/add"' in body
     assert b'<form class="admin-add" method="post" action="/admin/users/add">' in body
+    assert b"<!--email_off-->" in body
     assert b'name="email"' in body
     assert b"admin-users" in body
 
@@ -556,7 +557,7 @@ def test_admin_action_get_is_405(ui_server, ui_reset):
     assert status == 405
     assert headers["allow"] == "POST"
     # #613 review: 405 is still an /admin response — keep it out of caches.
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "no-store, no-transform"
 
 
 def test_admin_csrf_matrix(ui_server, ui_state, ui_reset):
@@ -680,7 +681,7 @@ def test_auth_without_cookie_goes_to_login(auth_server, auth_reset):
     status, headers, _ = _request(auth_server, "GET", "/admin")
     assert status == 303
     assert headers["location"] == "/"
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "no-store, no-transform"
 
     status, _, body = _request(auth_server, "GET", "/")
     assert status == 200
@@ -757,7 +758,7 @@ def test_auth_corrupt_signed_session_is_500(auth_server, auth_reset):
     )
     assert status == 500
     # #613 review: the gate's corrupt-session branch keeps /admin headers too.
-    assert headers["cache-control"] == "no-store"
+    assert headers["cache-control"] == "no-store, no-transform"
 
 
 def test_auth_bearer_member_and_admin(auth_server, auth_state, auth_reset):
