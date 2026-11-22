@@ -625,33 +625,26 @@ def test_admin_remaining_flash_branches(ui_server, ui_state, ui_reset):
     assert headers["location"] == "/admin?status=admin-readonly"
 
 
-def test_admin_form_round_trip_in_browser(
-    browser, ui_server, ui_state, ui_reset
-):
+def test_admin_form_round_trip_in_browser(page, ui_server, ui_state, ui_reset):
     """#613: a real browser submits the plain HTML forms end to end."""
-    context = browser.new_context(viewport={"width": 1000, "height": 800})
-    page = context.new_page()
     row = page.locator(f'tr[data-user-email="{NEW_USER}"]')
-    try:
-        page.goto(ui_server + "/admin")
-        page.fill("#admin-add-email", NEW_USER)
-        page.locator('form.admin-add button[type="submit"]').click()
-        expect(page.locator(".admin-flash")).to_be_visible()
-        expect(row).to_be_visible()
-        cp = users_cli(ui_state, "check", NEW_USER)
-        assert cp.returncode == 0 and cp.stdout.strip() == "member"
+    page.goto(ui_server + "/admin")
+    page.fill("#admin-add-email", NEW_USER)
+    page.locator('form.admin-add button[type="submit"]').click()
+    expect(page.locator(".admin-flash")).to_be_visible()
+    expect(row).to_be_visible()
+    cp = users_cli(ui_state, "check", NEW_USER)
+    assert cp.returncode == 0 and cp.stdout.strip() == "member"
 
-        row.locator('form[action="/admin/users/disable"] button').click()
-        expect(row).to_contain_text("再有効化")
-        cp = users_cli(ui_state, "check", NEW_USER)
-        assert cp.returncode == 1 and cp.stdout.strip() == "disabled"
+    row.locator('form[action="/admin/users/disable"] button').click()
+    expect(row).to_contain_text("再有効化")
+    cp = users_cli(ui_state, "check", NEW_USER)
+    assert cp.returncode == 1 and cp.stdout.strip() == "disabled"
 
-        row.locator('form[action="/admin/users/enable"] button').click()
-        expect(row).to_contain_text("ログイン停止")
-        cp = users_cli(ui_state, "check", NEW_USER)
-        assert cp.returncode == 0 and cp.stdout.strip() == "member"
-    finally:
-        context.close()
+    row.locator('form[action="/admin/users/enable"] button').click()
+    expect(row).to_contain_text("ログイン停止")
+    cp = users_cli(ui_state, "check", NEW_USER)
+    assert cp.returncode == 0 and cp.stdout.strip() == "member"
 
 
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────
