@@ -33,6 +33,24 @@ set -u
 STATE="$STUB_STATE"
 case "${1:-}" in
   ps) printf 'fakecid123\\n'; exit 0 ;;
+  compose)
+    # prd deploy: `compose [profiles/-f...] <cmd>` — ps -q must name the
+    # service so viewer-rs and tailscale resolve to distinct cids.
+    case " $* " in
+      *" ps -q viewer-rs"*) printf 'viewercid\\n'; exit 0 ;;
+      *" ps -q tailscale"*) printf 'sidecarcid\\n'; exit 0 ;;
+      *" up "*) exit 0 ;;
+    esac
+    exit 0 ;;
+  inspect)
+    # wait_healthy asks for .State.Health; verify_prd_version asks for
+    # .Config.Image — answer each format distinctly.
+    for a in "$@"; do
+      case "$a" in
+        *Config.Image*) printf 'bookq/rs:%s\\n' "${PRD_EXPECT_SHA:-deadbeef}"; exit 0 ;;
+      esac
+    done
+    printf 'healthy\\n'; exit 0 ;;
   restart) touch "$STATE/restarted"; exit 0 ;;
   exec)
     for a in "$@"; do [ "$a" = "cert" ] && exit 0; done
@@ -51,23 +69,29 @@ set -u
 STATE="$STUB_STATE"
 url="${!#}"
 method="GET"
+data=""
 prev=""
 for a in "$@"; do
   [ "$prev" = "-X" ] && method="$a"
+  [ "$prev" = "-d" ] && data="$a"
   prev="$a"
 done
 case "$url" in
   *oauth/token*) printf '' ;;
   *tailnet/-/devices*)
     if [ -f "$STATE/devices_http_fail" ]; then
-      printf 'upstream boom\\n500'
+      # Valid JSON body + HTTP 500 — exercises the status check itself,
+      # not the JSON parser (#604 review).
+      cat "$STATE/devices.json"
+      printf '\\n500'
     else
       cat "$STATE/devices.json"
       printf '\\n200'
     fi ;;
   *api.tailscale.com*)
-    printf '%s %s\\n' "$method" "$url" >> "$STATE/calls.log"
+    printf '%s %s %s\\n' "$method" "$url" "$data" >> "$STATE/calls.log"
     printf '200' ;;
+  */api/v1/health*) printf '200' ;;
   *) printf '000' ;;
 esac
 exit 0
@@ -161,6 +185,10 @@ def run_heal(
             # TS_API_KEY without any real network or .env credential use.
             "TS_OAUTH_CLIENT_ID": "stub-client-id",
             "TS_OAUTH_CLIENT_SECRET": "stub-client-secret",
+            # Pin the remaining getv() inputs so ensure-ts-authkey.sh
+            # never falls through to the real .env (#604 review).
+            "TS_TAILNET": "-",
+            "TS_AUTHKEY_TAGS": "tag:bookq-dev",
         }
     )
     proc = subprocess.run(
@@ -188,17 +216,33 @@ def test_matching_name_short_circuits(tmp_path):
 
 def test_tagged_offline_ghost_is_deleted_and_self_renamed(tmp_path):
     """Ghost = tagged + holds expected name + confirmed offline → DELETE,
-    then self is renamed to the expected label and the sidecar restarts."""
+    then self is renamed to the expected label and the sidecar restarts.
+    A same-tag offline decoy with a DIFFERENT name must survive — DELETE
+    is scoped to the expected-FQDN holder, not the tag (#604 review)."""
+    devices = _devices(ghost_tags=["tag:bookq-dev"])
+    devices["devices"].append(
+        {
+            "id": "decoy-device-id",
+            "name": "other-99.tail.ts.net.",
+            "addresses": ["100.64.0.9"],
+            "tags": ["tag:bookq-dev"],
+        }
+    )
     proc, state = run_heal(
         tmp_path,
         status_before=_status(online=False),
-        devices=_devices(ghost_tags=["tag:bookq-dev"]),
+        devices=devices,
         status_after={"Self": {"DNSName": f"{EXPECTED}."}},
     )
     assert proc.returncode == 0, proc.stderr
     log = calls(state)
-    assert f"DELETE https://api.tailscale.com/api/v2/device/{GHOST_ID}" in log
-    assert f"POST https://api.tailscale.com/api/v2/device/{SELF_ID}/name" in log
+    delete_i = log.index(f"DELETE https://api.tailscale.com/api/v2/device/{GHOST_ID}")
+    # Rename POST carries the expected host label and runs AFTER the delete.
+    rename = f"POST https://api.tailscale.com/api/v2/device/{SELF_ID}/name"
+    assert f'{rename} {{"name":"dev-03"}}' in log
+    assert delete_i < log.index(rename)
+    # Decoy (same tag, different name) is never DELETEd.
+    assert "decoy-device-id" not in log
     assert (state / "restarted").exists()
     assert "復旧" in proc.stderr
 
@@ -260,6 +304,59 @@ def test_unparseable_devices_fails_closed(tmp_path):
     )
     assert proc.returncode == 1
     assert "DELETE" not in calls(state)
+
+
+def test_prd_deploy_invokes_heal_with_base_url_fqdn(tmp_path):
+    """`rebuild.sh prd deploy` derives expected_fqdn from BASE_URL and
+    calls the same heal_fqdn_collision — the production call path, not
+    only the dev entrypoint (#604 review)."""
+    bin_dir = tmp_path / "bin"
+    state = tmp_path / "state"
+    bin_dir.mkdir()
+    state.mkdir()
+    _stub(bin_dir, "docker", DOCKER_STUB)
+    _stub(bin_dir, "curl", CURL_STUB)
+    _stub(bin_dir, "sleep", SLEEP_STUB)
+
+    (state / "status_before.json").write_text(json.dumps(_status(online=False)))
+    (state / "status_after.json").write_text(
+        json.dumps({"Self": {"DNSName": f"{EXPECTED}."}})
+    )
+    (state / "devices.json").write_text(
+        json.dumps(_devices(ghost_tags=["tag:bookq-dev"]))
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}:{env['PATH']}",
+            "STUB_STATE": str(state),
+            # deploy_prd's required image/sha envs (values unused by stubs).
+            "PRD_RS_IMAGE": "bookq/rs:deadbeef",
+            "PRD_TAILSCALE_IMAGE": "bookq/tailscale:deadbeef",
+            "PRD_EXPECT_SHA": "deadbeef",
+            # BASE_URL host becomes the expected FQDN — actual stays
+            # ACTUAL so the collision path runs end to end.
+            "BASE_URL": f"https://{EXPECTED}",
+            "TS_API_KEY": "test-api-key",
+            "TS_OAUTH_CLIENT_ID": "stub-client-id",
+            "TS_OAUTH_CLIENT_SECRET": "stub-client-secret",
+            "TS_TAILNET": "-",
+            "TS_AUTHKEY_TAGS": "tag:bookq-dev",
+        }
+    )
+    proc = subprocess.run(
+        ["bash", str(REBUILD), "prd", "deploy"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    log = calls(state)
+    assert f"DELETE https://api.tailscale.com/api/v2/device/{GHOST_ID}" in log
+    assert f"POST https://api.tailscale.com/api/v2/device/{SELF_ID}/name" in log
+    assert (state / "restarted").exists()
 
 
 def test_ghost_already_gone_still_renames_self(tmp_path):
