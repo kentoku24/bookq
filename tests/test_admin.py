@@ -378,12 +378,12 @@ def test_auth_seeded_member_is_member_not_admin(auth_server, auth_reset):
 
 def test_auth_non_member_session_is_denied(auth_server, auth_reset):
     headers = _cookie_header(OUTSIDE)
+    _wait_api(auth_server, headers, 401)
     status, _, body = _request(auth_server, "GET", "/", headers)
     assert status == 200
     assert b"login-box" in body
     assert b'id="tile-grid"' not in body
     assert _request(auth_server, "GET", "/admin", headers)[0] == 303
-    _wait_api(auth_server, headers, 401)
 
 
 def test_auth_added_member_is_live(auth_server, auth_state, auth_reset):
