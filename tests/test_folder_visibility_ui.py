@@ -6,6 +6,7 @@ their exact root count and never see a hidden flag.
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -576,8 +577,22 @@ _ITEM_SEL = {"tile": ".tile", "list": ".item", "card": ".card"}
 _ART_SEL = {"tile": ".tile-img", "list": ".thumb", "card": ".card-img"}
 
 
-def _cs(el, prop):
-    return el.evaluate("(e,p)=>getComputedStyle(e)[p]", prop)
+def _cs(el, prop, timeout=5.0):
+    """Computed style with a retry for the grid's async re-renders.
+
+    Between `wait_for(state="attached")` and this call the visibility/view-mode
+    code can replace the tile nodes; reading a detached node yields "". A
+    locator re-resolves on each evaluate, so retry until the fresh node
+    settles instead of flaking under parallel load.
+    """
+    deadline = time.time() + timeout
+    value = ""
+    while time.time() < deadline:
+        value = el.evaluate("(e,p)=>getComputedStyle(e)[p]", prop)
+        if value:
+            return value
+        time.sleep(0.05)
+    return value
 
 
 def _set_view_mode(vpage, mode):
