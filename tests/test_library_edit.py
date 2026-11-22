@@ -23,7 +23,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 
-from rs_spawn import _viewer_rs_binary  # noqa: E402
+from rs_spawn import viewer_rs_binary  # noqa: E402
 
 UPLOAD_DIR_NAME = ".bookq-uploads"
 
@@ -86,7 +86,7 @@ def lib_server_auth(lib_root, tmp_path_factory):
         }
     )
     proc = subprocess.Popen(
-        [str(_viewer_rs_binary())],
+        [str(viewer_rs_binary())],
         env=env,
         cwd=str(REPO_ROOT),
         stdout=subprocess.DEVNULL,

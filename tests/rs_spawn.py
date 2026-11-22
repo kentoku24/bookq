@@ -124,7 +124,7 @@ def _stable_binary(bin_path: Path) -> Path:
     return bin_path
 
 
-def _viewer_rs_binary() -> Path:
+def viewer_rs_binary() -> Path:
     target = _target_dir()
     if target == REPO_ROOT / "rust" / "target":
         _ensure_shared_target()
@@ -138,7 +138,11 @@ def _viewer_rs_binary() -> Path:
 
 
 def spawn_backend(
-    *, library_dir: Path, state_dir: str | Path, test_mode: bool = True
+    *,
+    library_dir: Path,
+    state_dir: str | Path,
+    test_mode: bool = True,
+    env_extra: dict[str, str] | None = None,
 ) -> tuple:
     """Spawn the test backend against *library_dir*; returns (proc, base_url).
 
@@ -148,7 +152,8 @@ def spawn_backend(
 
     ``test_mode=False`` spawns with real signed-cookie/Bearer auth. There is
     no env allowlist; enroll users with ``users_cli()`` before requesting a
-    session (#610).
+    session (#610). ``env_extra`` adds/overrides env vars for targeted
+    regression tests (e.g. a retired variable must be ignored).
     """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -173,7 +178,9 @@ def spawn_backend(
             "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
         }
     )
-    cmd = [str(_viewer_rs_binary())]
+    if env_extra:
+        env.update(env_extra)
+    cmd = [str(viewer_rs_binary())]
     health_path = "/api/v1/health"
 
     proc = subprocess.Popen(
@@ -232,17 +239,17 @@ def users_cli(
     """Run `viewer-rs users …` against *state_dir* (#608).
 
     The CLI is the only writer of `users`; tests exercise the same binary/DB
-    path production uses. ``cargo build`` runs via ``_viewer_rs_binary()``
+    path production uses. ``cargo build`` runs via ``viewer_rs_binary()``
     (fresh check) so the CLI always matches the spawned backend.
     stdout/stderr are captured for exit-code/output tests. ``env_extra``
-    overrides the inherited env for tests that exercise seeding.
+    overrides the inherited env for targeted regression tests.
     """
     env = os.environ.copy()
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [str(_viewer_rs_binary()), "users", *args],
+        [str(viewer_rs_binary()), "users", *args],
         env=env,
         cwd=str(REPO_ROOT),
         capture_output=True,

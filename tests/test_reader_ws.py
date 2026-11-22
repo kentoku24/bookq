@@ -37,13 +37,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _viewer_rs_binary() -> Path:
-    """Same lazy build as tests/rs_spawn.py; kept local so this module
-    stays importable without touching sys.path."""
-    bin_path = REPO_ROOT / "rust" / "target" / "debug" / "viewer-rs"
-    if not bin_path.exists():
-        subprocess.run(["cargo", "build", "-p", "viewer-rs"],
-                       cwd=str(REPO_ROOT / "rust"), check=True)
-    return bin_path
+    """Share rs_spawn's build resolution so the CLI enrollment and the
+    spawned server are the same binary (honors BOOKQ_TARGET_DIR / the
+    shared target dir). A local path would silently test an older build
+    when only one of the two is rebuilt."""
+    from rs_spawn import viewer_rs_binary
+
+    return viewer_rs_binary()
 
 
 def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
