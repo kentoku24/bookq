@@ -1042,6 +1042,9 @@ mod tests {
         let tpl = "a{% if is_admin %}X{% endif %}b";
         assert_eq!(render_if_block(tpl, ADMIN_IF, true).unwrap(), "aXb");
         assert_eq!(render_if_block(tpl, ADMIN_IF, false).unwrap(), "ab");
+        let two = "a{% if is_admin %}X{% endif %}b{% if is_admin %}Y{% endif %}c";
+        assert_eq!(render_if_block(two, ADMIN_IF, true).unwrap(), "aXbYc");
+        assert_eq!(render_if_block(two, ADMIN_IF, false).unwrap(), "abc");
         assert!(render_if_block("a{% if is_admin %}X", ADMIN_IF, true).is_none());
 
         let mut c = ctx();
