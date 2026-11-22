@@ -586,7 +586,9 @@ def _cs(page, selector, prop, timeout=5.0):
     protocol steps a render can straddle; resolving inside one
     page.evaluate cannot — querySelector and getComputedStyle run in the
     same JS task. The retry now only covers the node genuinely being
-    absent (null), e.g. mid mode-switch (#607).
+    absent (null), e.g. mid mode-switch (#607). An unreadable result is a
+    test failure, not "" — value-vs-value comparisons (_cs(a) == _cs(b))
+    would otherwise pass vacuously on "" == "".
     """
     deadline = time.time() + timeout
     value = ""
@@ -598,7 +600,9 @@ def _cs(page, selector, prop, timeout=5.0):
         if value:
             return value
         time.sleep(0.05)
-    return value or ""
+    assert value, (
+        f"computed style unreadable after {timeout}s: "
+        f"{selector} [{prop}]")
 
 
 def _set_view_mode(vpage, mode):
