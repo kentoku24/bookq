@@ -224,53 +224,56 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - Tailscale Funnel は beta で調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。`*.ts.net` 証明書は CT log に記録されるため funnel 公開により tailnet 名は公開情報になる
 - 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）
 
-### 管理者の登録（admin モード, #608）
+### ユーザーと admin の管理（#608）
 
-`/admin` は **admin 登録されたユーザーだけ**が表示できる。管理者はライブラリ全体で共有され、既存の `user-state` SQLite（`/var/lib/bookq/folder-visibility.sqlite3`、schema v3）の `admin_users` テーブルに保存される。
+ログインできるユーザーと admin は、`user-state` SQLite（`/var/lib/bookq/folder-visibility.sqlite3`、schema v3）の `users` テーブルで管理する。`role` は `admin` / `member`。
 
-- 登録・失効・一覧・確認は **`viewer-rs admin` CLI のみ**。HTTP の書込み経路は存在しない。
-- 実行にはホスト/コンテナの操作権限が要る（`SECRET_KEY` を読めるのと同じ信頼境界）。distroless なので shell は不要で、バイナリを直接 exec する。
-- 反映は即時（サーバー再起動不要）。admin 判定はリクエストごとに DB を読むため、`remove` の次のリクエストから 404 になる。
-- admin は **`ALLOWED_EMAILS` に含まれる Google アカウント**である必要がある。`ALLOWED_EMAILS` は起動時に読み込まれるため、再起動して allowlist から外すと admin 行が残っていてもログインできない（各リクエストで再評価, #373）。
-- `admin remove` が失効させるのは admin 権限だけ。ライブラリ自体へのアクセスを止めるには `ALLOWED_EMAILS` から外して再起動する。
-- grant は既存の有効な session にも即時適用される（remove は次のリクエストで即時失効）。session 窃取が疑われる場合は `SECRET_KEY` をローテーションして全 session / Bearer を無効化する（全ユーザー再ログイン）。
-- 初期状態は 0 名（fail-closed）。初回ログインが自動で admin になることはない。
-- **TEST_MODE の環境（dev / `--fixture`）では mock user が常に認証済みになる**。`test@example.com` を admin に追加すると、その環境の URL に到達できる全員が `/admin` に入れる。admin は使い捨て dev の検証に限定し、終わったら `admin remove` する。
-- admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や `ALLOWED_EMAILS` から外した場合は、grant も `admin remove` で掃除する。削除履歴は残らない（append-only 監査はフォローアップ）。
+- **`ALLOWED_EMAILS` は初回 seed 専用**。`settings.users_seeded` が立つまで、env の email を `member` として投入する。seed 後は DB が唯一の正で、env を変えても認可は変わらない（再起動不要の DB 管理に移行）。
+- 初回 admin は CLI で付与する（自動昇格なし）。
+- 追加・role 変更・無効化は **`viewer-rs users` CLI のみ**。HTTP の書込み経路はない。実行にはホスト/コンテナ操作権限が要る（`SECRET_KEY` と同じ信頼境界。distroless なので shell 不要）。
+- 変更はサーバー再起動不要。membership は最大 1 秒（in-memory directory の refresh）、`/admin` の admin 判定は次のリクエストから即時。無効化は `disabled_at`（soft delete）で行い、行は履歴として残る。
+- `users remove` は **そのユーザーのログイン自体を止める**（admin 権限だけではない）。`users add` で再活性化できる。
+- `users list` は `email<TAB>role<TAB>status<TAB>created_at<TAB>created_by<TAB>note`。`status` は `active` / `disabled`。
+- `--note` / `--by` は DB と `users list` に出る。secret は書かず、チケット番号や目的だけにする。
+- `users check` は `admin` / `member` / `disabled` / `not found` を stdout に出す。active は exit 0、disabled/not found は exit 1。
+- **反映遅延**: 通常 API の membership は最大 1 秒。OAuth callback（初回ログイン）と `/admin` は DB を直接見るため即時。既存 session の API は最大 1 秒で 401 になる。
+- `ALLOWED_EMAILS` を変更しても seed 済み DB には反映されない。ユーザー変更は CLI で行う。DB を失った場合のみ、空 DB + env で再 seed される（バックアップから復元した場合はその時点に戻る）。
+- **TEST_MODE の環境（dev / `--fixture`）**では mock user が常に認証済みになる。`test@example.com` を admin にすると、その環境の URL に到達できる全員が `/admin` に入れる。admin は使い捨て dev の検証に限定し、終わったら `users add test@example.com --role member` または `users remove test@example.com` に戻す。
+- admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や不要になった場合は `users remove` で掃除する。削除履歴の append-only 監査はフォローアップ。
+- `user-state` はユーザー/権限データを含む永続データ。既存のバックアップ対象に含め、リストア後は `users list` で不要なユーザー/role がないか確認する。volume を失うと env seed（設定時）または CLI で再構築する。
+- **デプロイ順序**: 新バイナリを起動して schema v3 を適用し、`ALLOWED_EMAILS` を seed してから CLI を実行する。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。このブランチの旧 v3（`admin_users`）DB は、seed allowlist に含まれる admin だけを `users` に移行し、dormant 行は skip して `admin_users` を削除する。
+- Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
 
 ```bash
-# 追加（本番。コンテナ名は docker-compose.yml の container_name）
-docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin add you@example.com --note "initial admin"
+# 最初の admin（デプロイ後、ALLOWED_EMAILS の seed 済み）
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin --note "initial admin"
 
 # 確認
-docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin list
-docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin check you@example.com
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users list
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users check you@example.com
 
-# 失効
-docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin remove you@example.com
+# 一般ユーザーの追加 / 無効化
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add family@example.com
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users remove family@example.com
 ```
 
-- `admin list` は `email<TAB>created_at(RFC1123)<TAB>created_by<TAB>note`。空出力 = admin 0 名。`ALLOWED_EMAILS` に無い grant は stderr で警告する（stdout は TSV のまま）。
-- `--note` / `--by` は DB と `admin list` に出る。secret は書かず、チケット番号や目的だけにする。
-- 同じ email の再 `add` は `already admin`（exit 0）で、既存の note/by は書き換えない。note を変えたい場合は `remove` → `add`。
-- exit code: `0` 成功 / `1` not found（remove/check）/ `2` usage・入力不正 / `3` store error。
-- `BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使う。サーバーと同じ値を指していること（CLI は DB が無い場合に警告を出す）。
-- **デプロイ順序**: 新バイナリを起動して schema v3 を適用してから CLI を実行する。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。
-- `user-state` は admin の grant を含む永続データ。既存のバックアップ対象に含め、リストア後は `admin list` で不要な grant がないか確認する。volume を失うと admin は 0 名（fail-closed）になるので、CLI で再登録する。
-- Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
+- exit code: `0` 成功 / `1` not found・disabled（remove/check）/ `2` usage・入力不正 / `3` store error。
+- CLI は実行前に解決した DB パスを stderr に出す（`state: ...`）。`BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使うので、サーバーと同じ値を指していること。
+- `users add` は既存ユーザーの role を更新できる（`--role admin|member`、既定は `member`）。無効化済みユーザーは再活性化する。`created_at` / `created_by` / `note` は最初の作成時の値を保持する。
 
 開発環境:
 
 ```bash
 ./dev.sh list   # ENV → SLOT (dev-XX) を確認
-docker exec bookq-dev-viewer-dev-XX /usr/local/bin/viewer-rs admin add test@example.com
+docker exec bookq-dev-viewer-dev-XX /usr/local/bin/viewer-rs users add test@example.com --role admin
+docker exec bookq-dev-viewer-dev-XX /usr/local/bin/viewer-rs users add test@example.com --role member
 ```
 
 ローカル（Docker なし）:
 
 ```bash
 BOOKQ_STATE_DIR=/tmp/bookq-state \
-  cargo run --manifest-path rust/Cargo.toml -p viewer-rs -- admin add test@example.com
+  cargo run --manifest-path rust/Cargo.toml -p viewer-rs -- users add test@example.com --role admin
 ```
 
 ### やってはいけないこと

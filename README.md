@@ -46,7 +46,7 @@
    ```bash
    openssl rand -hex 32  # → SECRET_KEY に設定
    ```
-4. アクセスを許可する Google アカウントのメールアドレスを `ALLOWED_EMAILS` に設定（カンマ区切りで複数指定可能）
+4. **初回 seed する** Google アカウントのメールアドレスを `ALLOWED_EMAILS` に設定（カンマ区切り）。初回起動時に `users` テーブルへ `member` として投入され、以降のユーザー変更は DB / `users` CLI で行う（env の変更は seed 済み DB に影響しない）
 
 ### 1. Auth Key の取得
 
@@ -88,18 +88,19 @@ cp .env.example .env
 
 公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
 
-### 5. 管理者の登録（任意）
+注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
 
-`/admin` は **admin 登録されたユーザーだけ**が表示できる（未登録・非 admin には 404）。登録は稼働中のコンテナで CLI を実行する — HTTP の書込み経路はない:
+### 5. ユーザーと admin の登録
+
+最初の起動で `ALLOWED_EMAILS` の email が `member` として `users` テーブルに seed される。**seed 後は DB 管理**で、変更はサーバー再起動不要。最初の admin は稼働中のコンテナで CLI から付与する — HTTP の書込み経路はない:
 
 ```bash
-docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin add you@example.com --note "initial admin"
-docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin list
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin --note "initial admin"
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users list
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users check you@example.com
 ```
 
-対象は `ALLOWED_EMAILS` に含まれる Google アカウント。反映は即時（再起動不要）で、初期状態は 0 名（初回ログインが自動で admin になることはない）。失効は `admin remove <email>`。詳細は [docs/deployment.md](docs/deployment.md)「管理者の登録」を参照。
-
-注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
+一般ユーザーは `users add family@example.com`（既定 role=member）、失効は `users remove <email>`（ログイン自体を停止、`users add` で再活性化）。`ALLOWED_EMAILS` は初回 seed 専用で、変更しても既存 DB の認可には反映されない。詳細は [docs/deployment.md](docs/deployment.md)「ユーザーと admin の管理」を参照。
 
 ## API
 
@@ -116,7 +117,7 @@ docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin list
 | `GET /auth/login` | 不要 | Google OAuth ログイン |
 | `GET /auth/callback` | 不要 | OAuth コールバック |
 | `GET /auth/logout` | 不要 | ログアウト |
-| `GET /admin` | 要（admin） | 管理ページ。admin 登録ユーザーのみ 200、それ以外は 404 |
+| `GET /admin` | 要（admin） | 管理ページ。admin ロールのユーザーのみ 200、それ以外は 404 |
 
 ## 拡大と俯瞰
 
