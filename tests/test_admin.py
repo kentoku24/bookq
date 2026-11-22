@@ -29,15 +29,15 @@ OUTSIDE = "outside@example.com"
 SECRET = "ci-not-a-secret"
 
 
-def _request(server, method, path, headers=None):
+def _request(server, method, path, headers=None, body=None):
     """One raw HTTP request — no redirect following, so 303 is observable."""
     u = urllib.parse.urlsplit(server)
     conn = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
     try:
-        conn.request(method, path, headers=headers or {})
+        conn.request(method, path, body=body, headers=headers or {})
         resp = conn.getresponse()
-        body = resp.read()
-        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, body
+        data = resp.read()
+        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
     finally:
         conn.close()
 
@@ -120,6 +120,36 @@ def _cookie_header(email):
     return {"Cookie": f"session={_session_cookie(_user(email))}"}
 
 
+def _form_headers(server, **overrides):
+    host = urllib.parse.urlsplit(server).netloc
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": f"http://{host}",
+        "Sec-Fetch-Site": "same-origin",
+    }
+    headers.update(overrides)
+    return headers
+
+
+def _post_admin(server, action, email, headers=None):
+    data = urllib.parse.urlencode({"email": email}).encode("utf-8")
+    return _request(
+        server,
+        "POST",
+        f"/admin/users/{action}",
+        headers if headers is not None else _form_headers(server),
+        data,
+    )
+
+
+def _row(body, email):
+    needle = email.encode("utf-8")
+    for line in body.splitlines():
+        if needle in line and line.lstrip().startswith(b"<tr>"):
+            return line
+    raise AssertionError(f"row not found: {email}")
+
+
 # ── test-mode server: page / menu / CLI contract ────────────────────────────
 
 
@@ -171,7 +201,7 @@ def test_admin_role_opens_page_and_menu(admin_server, admin_state, reset_test_us
 
     status, headers, body = _request(admin_server, "GET", "/admin")
     assert status == 200
-    assert "管理機能はまだありません".encode("utf-8") in body
+    assert "ユーザーを追加".encode("utf-8") in body
     assert headers["content-type"].startswith("text/html")
     assert headers["cache-control"] == "no-store"
     assert headers["x-content-type-options"] == "nosniff"
@@ -299,7 +329,7 @@ def test_admin_template_is_not_public(admin_server):
     ):
         status, _, body = _request(admin_server, "GET", path)
         assert status != 200, path
-        assert "管理機能".encode("utf-8") not in body
+        assert "ユーザーを追加".encode("utf-8") not in body
 
 
 def test_cli_first_bootstrap_survives_restart(library_tree, tmp_path):
@@ -351,6 +381,68 @@ def test_retired_allowed_emails_env_neither_seeds_nor_authorizes(
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+# ── #613: /admin user management UI ────────────────────────────────────────
+
+NEW_USER = "new-member@example.com"
+CSRF_USER = "csrf-member@example.com"
+XSS_USER = "<img@example.com>"
+
+
+@pytest.fixture(scope="module")
+def ui_state(tmp_path_factory):
+    return tmp_path_factory.mktemp("admin-ui-state")
+
+
+@pytest.fixture(scope="module")
+def ui_server(library_tree, ui_state):
+    proc, base_url = spawn_backend(library_dir=library_tree, state_dir=ui_state)
+    yield base_url
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+@pytest.fixture
+def ui_reset(ui_state, ui_server):
+    """Admin actor + a member target; restore a safe state after each test."""
+    users_cli(ui_state, "add", TEST_EMAIL, "--role", "admin")
+    users_cli(ui_state, "add", OUTSIDE)
+    users_cli(ui_state, "remove", NEW_USER)
+    users_cli(ui_state, "remove", CSRF_USER)
+    users_cli(ui_state, "remove", XSS_USER)
+    yield
+    users_cli(ui_state, "add", TEST_EMAIL, "--role", "member")
+    users_cli(ui_state, "remove", OUTSIDE)
+    users_cli(ui_state, "remove", NEW_USER)
+    users_cli(ui_state, "remove", CSRF_USER)
+    users_cli(ui_state, "remove", XSS_USER)
+
+
+def test_admin_page_lists_users_and_forms(ui_server, ui_reset):
+    status, headers, body = _request(ui_server, "GET", "/admin")
+    assert status == 200
+    assert headers["cache-control"] == "no-store"
+    csp = headers["content-security-policy"]
+    assert "form-action 'self'" in csp
+    assert "script-src 'none'" in csp
+    assert b'action="/admin/users/add"' in body
+    assert b'name="email"' in body
+    assert b"admin-users" in body
+
+    member_row = _row(body, OUTSIDE)
+    assert b'action="/admin/users/disable"' in member_row
+    admin_row = _row(body, TEST_EMAIL)
+    assert b"/admin/users/disable" not in admin_row
+    assert b"/admin/users/enable" not in admin_row
+    assert b"CLI" in admin_row
+
+
+def test_admin_status_message_and_unknown_ignored(ui_server, ui_reset):
+    _, _, body = _request(ui_server, "GET", "/admin?status=added")
+    assert "ユーザーを追加しました".encode("utf-8") in body
+    _, _, body = _request(ui_server, "GET", "/admin?status=bogus")
+    assert b"admin-flash" not in body
 
 
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────

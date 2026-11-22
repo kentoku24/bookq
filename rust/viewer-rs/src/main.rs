@@ -412,50 +412,78 @@ async fn admin_check(st: &AppState, email: &str) -> bool {
     }
 }
 
-/// `GET|HEAD /admin` — the admin-only shell (#608).
-///
-/// The gate is `auth::resolve` (active membership re-checked per request,
-/// #373) plus a per-request `users.role='admin'` lookup. A revoked admin is
-/// rejected on the next request even while the session cookie is still valid.
-/// The page itself is a static template: no session data is embedded and
-/// nothing here is cached by the Service Worker (navigations are not cached).
+/// Shared admin gate for the page and every mutation handler. Returns the
+/// acting identity on success; any failure is already a complete response.
+async fn admin_actor(
+    st: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<auth::Identity, Response> {
+    if corrupt_session(st, headers) {
+        return Err(corrupt_session_response());
+    }
+    let Some(user) = caller(st, headers) else {
+        return Err(admin_redirect_login());
+    };
+    if !admin_check(st, &user.email).await {
+        return Err(admin_not_found());
+    }
+    Ok(user)
+}
+
+fn admin_internal_error(msg: &'static str) -> Response {
+    let mut res = state::detail(StatusCode::INTERNAL_SERVER_ERROR, msg);
+    admin_private_headers(&mut res);
+    res
+}
+
+/// `GET|HEAD /admin` — user list + add form (#613).
 async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response {
     if !matches!(
-            *req.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD
-        )
-    {
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
         return method_not_allowed("GET, HEAD");
     }
     let head = *req.method() == axum::http::Method::HEAD;
     let headers = req.headers().clone();
-    if corrupt_session(&st, &headers) {
-        return corrupt_session_response();
+    if let Err(res) = admin_actor(&st, &headers).await {
+        return res;
     }
-    let Some(user) = caller(&st, &headers) else {
-        return admin_redirect_login();
+    let status = Query::<HashMap<String, String>>::try_from_uri(req.uri())
+        .ok()
+        .and_then(|q| q.0.get("status").cloned());
+
+    let store = st.users.clone();
+    let users = match tokio::task::spawn_blocking(move || store.list()).await {
+        Ok(Ok(users)) => users,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin user list unavailable");
+            return admin_internal_error("admin store unavailable");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin user list task failed");
+            return admin_internal_error("admin store unavailable");
+        }
     };
-    if !admin_check(&st, &user.email).await {
-        return admin_not_found();
-    }
 
     let web_dir = st.web_dir.clone();
-    let body = tokio::task::spawn_blocking(move || {
-        std::fs::read(web_dir.join("templates").join("admin.html"))
+    let template = match tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(web_dir.join("templates").join("admin.html"))
     })
     .await
-    .ok()
-    .and_then(|r| r.ok());
-    // A missing template is a deployment error, not "not found": an admin
-    // must see the difference in the server log, not a 404 page.
-    let Some(body) = body else {
-        let mut res = state::detail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "admin template unavailable",
-        );
-        admin_private_headers(&mut res);
-        return res;
+    {
+        Ok(Ok(template)) => template,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin template unavailable");
+            return admin_internal_error("admin template unavailable");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin template task failed");
+            return admin_internal_error("admin template unavailable");
+        }
     };
+
+    let body = admin_ui::render(&template, &users, status.as_deref());
     let mut res = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -464,14 +492,13 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
     admin_private_headers(&mut res);
     res.headers_mut()
         .insert("x-frame-options", HeaderValue::from_static("DENY"));
-    // The page has no scripts/forms/inline styles today; a future admin UI
-    // must relax this header deliberately rather than inherit an open page.
+    // Forms post to this same origin; scripts and inline styles stay off.
     res.headers_mut().insert(
         "content-security-policy",
         HeaderValue::from_static(
             "default-src 'self'; script-src 'none'; style-src 'self'; \
              img-src 'self'; object-src 'none'; base-uri 'none'; \
-             form-action 'none'; frame-ancestors 'none'",
+             form-action 'self'; frame-ancestors 'none'",
         ),
     );
     res.headers_mut()
