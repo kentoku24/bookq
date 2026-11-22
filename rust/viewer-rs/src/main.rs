@@ -441,13 +441,9 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
             "admin template unavailable",
         );
     };
-    // HEAD must advertise the GET representation's length even though no body
-    // is sent (same contract `named_file` keeps for static responses).
-    let len = body.len();
     let mut res = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CONTENT_LENGTH, len.to_string())
         .body(if head { Body::empty() } else { Body::from(body) })
         .unwrap();
     admin_private_headers(&mut res);
