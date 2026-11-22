@@ -18,7 +18,8 @@
 # Env:   DERIVED_DATA_PATH (default ~/Library/.../Bookq-ci-<worktree>),
 #        IOS_TEST_RESULTS (default ios/build/ios-test-results),
 #        IOS_DEVICE_NAME (dedicated simulator name, default "bookq-ci-tests"),
-#        IOS_SIM_ERASE=1 (force `simctl erase` instead of app uninstall)
+#        IOS_SIM_ERASE=1 (force `simctl erase` instead of app uninstall),
+#        IOS_PARALLEL_WORKERS (test-runner clones, default 2; 0 disables)
 set -u
 set -o pipefail
 cd "$(dirname "$0")/../.."
@@ -303,13 +304,35 @@ if [ "$INJECTED" != 1 ]; then
 fi
 
 # One test-without-building invocation runs BOTH bundles from the
-# xctestrun (BookqTests + BookqUITests) in a single clone session —
-# halves the clone-creation surface where the "device remained in
-# Creating state" flake lives, and skips a second device setup.
-# Parallel testing stays ON (the default): the per-run device clone is
-# the test-isolation boundary — running directly on the booted device
-# lets app/UserDefaults state leak between suites (ProgressSyncTests
-# fail on leftovers from UI-test runs).
+# xctestrun (BookqTests + BookqUITests) in a single session — halves
+# the clone-creation surface where the "device remained in Creating
+# state" flake lives, and skips a second device setup. Tests execute
+# on per-worker clones of the prepared device — the clone is the
+# test-isolation boundary: running directly on the booted device lets
+# app/UserDefaults state leak between suites (ProgressSyncTests fail
+# on leftovers from UI-test runs).
+#
+# Parallel testing distributes test classes across cloned simulators.
+# The xctestrun already marks both targets ParallelizationEnabled
+# (scheme parallelizable=YES); IOS_PARALLEL_WORKERS caps the runner
+# count — 2 fits the xcode-27 runner's 3 cores next to the host-side
+# bookq server, and 0 forces -parallel-testing-enabled NO. Hosted unit
+# tests (BookqTests, TEST_HOST=Bookq.app) always run in a single worker
+# on iOS Simulator regardless of the count — only the UITest classes
+# actually split.
+IOS_PARALLEL_WORKERS="${IOS_PARALLEL_WORKERS:-2}"
+case "$IOS_PARALLEL_WORKERS" in
+  ''|*[!0-9]*)
+    echo "ERROR: IOS_PARALLEL_WORKERS must be a non-negative integer" >&2
+    exit 1
+    ;;
+esac
+if [ "$IOS_PARALLEL_WORKERS" -gt 0 ]; then
+  PARALLEL_ARGS=(-parallel-testing-enabled YES
+                 -parallel-testing-worker-count "$IOS_PARALLEL_WORKERS")
+else
+  PARALLEL_ARGS=(-parallel-testing-enabled NO)
+fi
 #
 # Retry ONCE, and only when the failure looks infrastructural — real
 # assertion failures must never get a second chance to pass. Console
@@ -350,6 +373,7 @@ for attempt in 1 2; do
   if xcodebuild test-without-building \
       -xctestrun "$XCTESTRUN" \
       -destination "$DEST" \
+      "${PARALLEL_ARGS[@]}" \
       -resultBundlePath "$BUNDLE" 2>&1 | tee "$log"; then
     exit 0
   fi
