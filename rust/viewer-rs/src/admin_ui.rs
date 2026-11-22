@@ -23,6 +23,14 @@ fn flash_message(code: &str) -> Option<&'static str> {
     }
 }
 
+fn flash_class(code: &str) -> &'static str {
+    match code {
+        "invalid" | "not-found" | "admin-readonly" => "admin-flash admin-flash-error",
+        "exists" | "already-disabled" => "admin-flash admin-flash-info",
+        _ => "admin-flash",
+    }
+}
+
 /// Escape a value for HTML text and double-quoted attributes.
 fn escape_html(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -78,7 +86,8 @@ fn render_row(row: &UserRow) -> String {
 pub(crate) fn render(template: &str, users: &[UserRow], status: Option<&str>) -> String {
     let flash = match status.and_then(flash_message) {
         Some(message) => format!(
-            r#"<p class="admin-flash" role="status">{}</p>"#,
+            r#"<p class="{}" role="status">{}</p>"#,
+            flash_class(status.unwrap_or("")),
             escape_html(message)
         ),
         None => String::new(),
@@ -136,6 +145,11 @@ mod tests {
         let body = render(template, &users, Some("added"));
         assert!(body.contains("ユーザーを追加しました。"));
         assert!(body.contains("admin-flash"));
+
+        let error = render("{{ADMIN_FLASH}}", &[], Some("admin-readonly"));
+        assert!(error.contains("admin-flash-error"));
+        let info = render("{{ADMIN_FLASH}}", &[], Some("exists"));
+        assert!(info.contains("admin-flash-info"));
 
         let member = body
             .lines()

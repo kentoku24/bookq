@@ -635,12 +635,16 @@ body.admin{position:static;inset:auto;overflow-y:auto;user-select:text;-webkit-u
 .admin-section{margin:0 0 28px}
 .admin-section h2{font-size:14px;font-weight:600;color:#e0e0e0;margin:0 0 12px}
 .admin-flash{margin:0 0 20px;padding:12px 14px;border:1px solid #2f4f3a;border-radius:8px;background:rgba(46,160,67,.12);color:#b7e4c7;font-size:13px;line-height:1.6}
+.admin-flash-error{border-color:#6b3030;background:rgba(196,68,68,.12);color:#f3c1c1}
+.admin-flash-info{border-color:#3b4a5c;background:rgba(74,122,196,.12);color:#c7d8f0}
 .admin-add label{display:block;margin:0 0 6px;font-size:12px;color:#aaa}
 .admin-add-row{display:flex;gap:8px}
-.admin-add input{flex:1;min-width:0;min-height:44px;padding:0 12px;border:1px solid #3a3a3a;border-radius:8px;background:#151515;color:#eee;font-size:15px}
+.admin-add input{flex:1;min-width:0;min-height:44px;padding:0 12px;border:1px solid #3a3a3a;border-radius:8px;background:#151515;color:#eee;font-size:15px;font-family:inherit}
 .admin-add input:focus{outline:2px solid #4a7ac4;outline-offset:1px}
-.admin-btn{min-height:44px;padding:0 14px;border:1px solid #3a3a3a;border-radius:8px;background:#1d1d1d;color:#ddd;font-size:13px;cursor:pointer;white-space:nowrap}
+.admin-btn{min-height:44px;padding:0 14px;border:1px solid #3a3a3a;border-radius:8px;background:#1d1d1d;color:#ddd;font-size:13px;cursor:pointer;white-space:nowrap;font-family:inherit}
 .admin-btn:hover{background:#262626}
+.admin-btn-primary:hover{background:#244a73}
+.admin-btn-danger:hover{background:#4a2424}
 .admin-btn-primary{border-color:#3b6ea5;background:#1d3a5c;color:#dce9fb}
 .admin-btn-danger{border-color:#6b3030;background:#3a1d1d;color:#f3c1c1}
 .admin-table-wrap{overflow-x:auto;border:1px solid #2a2a2a;border-radius:8px}

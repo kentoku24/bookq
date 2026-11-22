@@ -390,9 +390,8 @@ fn admin_not_found() -> Response {
 /// Per-request admin lookup. Any failure (store error, blocking-task join
 /// error) denies; the caller never sees the difference from "not an admin".
 ///
-/// Authorization primitive for every future admin API: call `caller()` first,
-/// then this function. The `/admin` page gate below covers only the HTML
-/// route — a page check must never be reused as an API authorization check.
+/// Role lookup only: `admin_actor` below composes `caller()` + this check and
+/// is the shared gate for the `/admin` page and every mutation route.
 async fn admin_check(st: &AppState, email: &str) -> bool {
     let email = email.trim().to_lowercase();
     if email.is_empty() {

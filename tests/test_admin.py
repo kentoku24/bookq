@@ -10,6 +10,10 @@ tests exercise the production binary end to end:
 Each test resets the shared module state to `test@example.com` = member and
 `outside@example.com` = absent. Do not share the session-scoped `server`
 fixture: its state dir is shared by unrelated tests.
+
+The #613 UI tests use their own `ui_server` / `ui_state` fixtures, where the
+mock user is an admin and `OUTSIDE` is an active member; they do not share
+the session-scoped `server` fixture.
 """
 
 import base64
@@ -427,6 +431,7 @@ def test_admin_page_lists_users_and_forms(ui_server, ui_reset):
     assert "form-action 'self'" in csp
     assert "script-src 'none'" in csp
     assert b'action="/admin/users/add"' in body
+    assert b'<form class="admin-add" method="post" action="/admin/users/add">' in body
     assert b'name="email"' in body
     assert b"admin-users" in body
 
@@ -439,10 +444,16 @@ def test_admin_page_lists_users_and_forms(ui_server, ui_reset):
 
 
 def test_admin_status_message_and_unknown_ignored(ui_server, ui_reset):
-    _, _, body = _request(ui_server, "GET", "/admin?status=added")
+    status, _, body = _request(ui_server, "GET", "/admin?status=added")
+    assert status == 200
     assert "ユーザーを追加しました".encode("utf-8") in body
-    _, _, body = _request(ui_server, "GET", "/admin?status=bogus")
+    status, _, body = _request(ui_server, "GET", "/admin?status=bogus")
+    assert status == 200
     assert b"admin-flash" not in body
+    _, _, body = _request(ui_server, "GET", "/admin?status=admin-readonly")
+    assert b"admin-flash-error" in body
+    _, _, body = _request(ui_server, "GET", "/admin?status=exists")
+    assert b"admin-flash-info" in body
 
 
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────
