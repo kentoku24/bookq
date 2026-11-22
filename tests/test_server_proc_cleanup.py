@@ -26,6 +26,16 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    # Linux: an unreaped zombie still answers kill(pid, 0). When the
+    # middle process dies before its grandchild's wait() reaps it, the
+    # orphan reparents to PID 1 — if PID 1 doesn't reap (containers),
+    # the zombie persists and would read as alive forever (#601 review).
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return False
+    except OSError:
+        pass  # non-Linux or already gone
     return True
 
 
