@@ -146,9 +146,8 @@ def spawn_backend(
     the same headroom covers a loaded machine — and `cargo build` runs
     before this is called.
 
-    ``test_mode=False`` spawns with real signed-cookie/Bearer auth (the
-    ``ALLOWED_EMAILS`` allowlist below still applies); used by the admin
-    authorization matrix (#608).
+    ``test_mode=False`` spawns with real signed-cookie/Bearer auth; the
+    ``ALLOWED_EMAILS`` env below is the one-time member seed (#608).
     """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -225,26 +224,25 @@ def spawn_backend(
     return proc, base_url
 
 
-def admin_cli(
+def users_cli(
     state_dir: str | Path,
     *args: str,
     env_extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run `viewer-rs admin …` against *state_dir* (#608).
+    """Run `viewer-rs users …` against *state_dir* (#608).
 
-    The CLI is the only writer of `admin_users`; tests exercise the same
-    binary/DB path production uses. ``cargo build`` runs via
-    ``_viewer_rs_binary()`` (fresh check) so the CLI always matches the
-    spawned backend. stdout/stderr are captured for exit-code/output tests.
-    ``env_extra`` overrides the inherited env for cases like the
-    ``ALLOWED_EMAILS`` advisory warning.
+    The CLI is the only writer of `users`; tests exercise the same binary/DB
+    path production uses. ``cargo build`` runs via ``_viewer_rs_binary()``
+    (fresh check) so the CLI always matches the spawned backend.
+    stdout/stderr are captured for exit-code/output tests. ``env_extra``
+    overrides the inherited env for tests that exercise seeding.
     """
     env = os.environ.copy()
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [str(_viewer_rs_binary()), "admin", *args],
+        [str(_viewer_rs_binary()), "users", *args],
         env=env,
         cwd=str(REPO_ROOT),
         capture_output=True,

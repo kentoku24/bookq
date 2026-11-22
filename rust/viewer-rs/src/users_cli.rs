@@ -1,26 +1,25 @@
-//! `viewer-rs admin …` — the offline admin-registry CLI (#608).
+//! `viewer-rs users …` — the offline user-directory CLI (#608).
 //!
-//! This is the **only** writer of `admin_users`. It runs as the same binary
-//! as the server, so operators do not need a shell or extra image contents:
+//! This is the **only** writer of `users`. It runs as the same binary as the
+//! server, so operators do not need a shell or extra image contents:
 //!
 //! ```text
-//! docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin add you@example.com
+//! docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin
 //! ```
 //!
-//! The store (`admin.rs`) normalizes emails and fails closed; this module
-//! owns argv parsing, human-readable output and exit codes. Keeping argv and
-//! stdout out of `admin.rs` lets the server module stay testable without
-//! touching process globals.
+//! Membership is DB-authoritative after the one-time `ALLOWED_EMAILS` seed;
+//! additions/removals take effect without a restart (the server refreshes
+//! its directory every second; `/admin` checks the DB per request).
 //!
-//! Exit codes: 0 ok, 1 not found (remove/check), 2 usage/invalid input,
-//! 3 store error. A schema that is newer than this binary panics in the
-//! shared store init (matching the server's refusal) and exits 101.
+//! Exit codes: 0 ok, 1 not found/disabled (check/remove), 2 usage/invalid
+//! input, 3 store error. A schema newer than this binary panics in the shared
+//! store init (matching the server's refusal) and exits 101.
 
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::admin::{self, AdminError, AdminStore, Change};
 use crate::state;
+use crate::users::{self, Change, Role, UserError, UserRow, UserStore};
 
 const EXIT_OK: i32 = 0;
 const EXIT_NOT_FOUND: i32 = 1;
@@ -28,25 +27,27 @@ const EXIT_USAGE: i32 = 2;
 const EXIT_STORE: i32 = 3;
 
 const USAGE: &str = "\
-usage: viewer-rs admin <command> [options]
+usage: viewer-rs users <command> [options]
 
 commands:
-  add <email> [--note TEXT] [--by ACTOR]   grant admin (idempotent)
-  remove <email>                           revoke admin
-  list                                     list grants (TSV; no output = none)
-  check <email>                            exit 0 if admin, 1 if not
+  add <email> [--role member|admin] [--note TEXT] [--by ACTOR]
+                                           add/reactivate a user (idempotent)
+  remove <email>                           disable a user (soft delete)
+  list                                     list users (TSV; no output = none)
+  check <email>                            admin|member|disabled|not found
 
 env:
   BOOKQ_STATE_DIR   user-state directory (default /var/lib/bookq)
 
 exit codes:
-  0 ok / 1 not found / 2 usage or invalid input / 3 store error
+  0 ok / 1 not found or disabled / 2 usage or invalid input / 3 store error
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Cmd {
     Add {
         email: String,
+        role: Role,
         note: String,
         created_by: String,
     },
@@ -64,7 +65,7 @@ fn usage_error(msg: &str) -> (i32, String) {
     (EXIT_USAGE, format!("error: {msg}\n\n{USAGE}"))
 }
 
-/// Parse the argv slice after `admin`. Kept pure so the parser matrix is
+/// Parse the argv slice after `users`. Kept pure so the parser matrix is
 /// unit-testable without touching the filesystem or process env.
 fn parse(args: &[String]) -> Result<Cmd, String> {
     let Some(head) = args.first().map(String::as_str) else {
@@ -77,6 +78,7 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
     match head {
         "add" => {
             let mut email: Option<String> = None;
+            let mut role = Role::Member;
             let mut note = String::new();
             let mut created_by = "cli".to_string();
             let mut i = 0;
@@ -85,16 +87,25 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
                 if arg == "--help" || arg == "-h" {
                     return Ok(Cmd::Help);
                 }
-                if arg == "--note" || arg == "--by" {
+                if matches!(arg, "--role" | "--note" | "--by") {
                     let Some(value) = rest.get(i + 1) else {
                         return Err(format!("{arg} requires a value"));
                     };
-                    if arg == "--note" {
-                        note = value.clone();
-                    } else {
-                        created_by = value.clone();
+                    match arg {
+                        "--role" => {
+                            role = Role::parse(value)
+                                .ok_or_else(|| format!("invalid role: {value}"))?
+                        }
+                        "--note" => note = value.clone(),
+                        "--by" => created_by = value.clone(),
+                        _ => unreachable!(),
                     }
                     i += 2;
+                    continue;
+                }
+                if let Some(value) = arg.strip_prefix("--role=") {
+                    role = Role::parse(value).ok_or_else(|| format!("invalid role: {value}"))?;
+                    i += 1;
                     continue;
                 }
                 if let Some(value) = arg.strip_prefix("--note=") {
@@ -120,6 +131,7 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
             };
             Ok(Cmd::Add {
                 email,
+                role,
                 note,
                 created_by,
             })
@@ -160,7 +172,7 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
 }
 
 /// Largest timestamp `httpdate` formats safely (9999-12-31T23:59:59Z).
-/// A corrupted/manual DB row with a huge REAL must not panic `admin list`.
+/// A corrupted/manual DB row with a huge REAL must not panic `users list`.
 const MAX_CREATED_AT: f64 = 253_402_300_799.0;
 
 /// `created_at` (epoch seconds) → RFC 1123 UTC. `httpdate` is already a
@@ -174,30 +186,25 @@ fn format_created_at(ts: f64) -> String {
     httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_secs_f64(secs))
 }
 
-/// Show what was actually stored/looked up, not the raw argv spelling.
-/// `add " Alice@Example.COM "` must report the canonical `alice@example.com`
-/// so an operator can catch a typo before it becomes a grant.
-fn display_email(email: &str) -> String {
-    admin::normalize_email(email).unwrap_or_else(|| email.to_string())
-}
-
-fn format_row(row: &admin::AdminRow) -> String {
+fn format_row(row: &UserRow) -> String {
     format!(
-        "{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}",
         row.email,
+        row.role,
+        if row.active() { "active" } else { "disabled" },
         format_created_at(row.created_at),
         row.created_by,
         row.note
     )
 }
 
-fn fail(err: &AdminError) -> i32 {
+fn fail(err: &UserError) -> i32 {
     match err {
-        AdminError::InvalidEmail | AdminError::InvalidText(_) => {
+        UserError::InvalidEmail | UserError::InvalidText(_) => {
             eprintln!("error: {err}\n\n{USAGE}");
             EXIT_USAGE
         }
-        AdminError::Sqlite(_) => {
+        UserError::Sqlite(_) => {
             eprintln!("error: {err}");
             EXIT_STORE
         }
@@ -215,29 +222,7 @@ fn warn_if_new_db(state_dir: &Path) {
     }
 }
 
-/// A grant for an email outside `ALLOWED_EMAILS` is inert: the server's
-/// per-request allowlist check rejects the login first. Warn (never refuse) —
-/// the allowlist can change later and the CLI may run with a different env.
-fn warn_if_not_allowed(email: &str) {
-    let Ok(allow) = std::env::var("ALLOWED_EMAILS") else {
-        return;
-    };
-    let Some(normalized) = admin::normalize_email(email) else {
-        return;
-    };
-    let listed = allow
-        .split(',')
-        .map(|e| e.trim().to_lowercase())
-        .any(|e| !e.is_empty() && e == normalized);
-    if !listed {
-        eprintln!(
-            "warning: {normalized} is not in ALLOWED_EMAILS — \
-             this grant is inert until the email is added there"
-        );
-    }
-}
-
-/// Run one `admin` invocation. Returns the process exit code; never panics on
+/// Run one `users` invocation. Returns the process exit code; never panics on
 /// user input. `state_dir` is passed explicitly so tests do not mutate env.
 pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
     let cmd = match parse(args) {
@@ -254,25 +239,34 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
     }
 
     // Make the target explicit: with prod/dev volumes on one host, a wrong
-    // BOOKQ_STATE_DIR is the easiest way to grant admin to a different env.
+    // BOOKQ_STATE_DIR is the easiest way to change a different env.
     eprintln!("state: {}", state::user_state_path(state_dir).display());
     warn_if_new_db(state_dir);
-    let store = AdminStore::new(state_dir);
+    // CLI-first must not consume the server's one-time ALLOWED_EMAILS seed.
+    let store = UserStore::new(state_dir, None);
     match cmd {
         Cmd::Add {
             email,
+            role,
             note,
             created_by,
         } => {
-            warn_if_not_allowed(&email);
-            let display = display_email(&email);
-            match store.add(&email, &created_by, &note) {
+            let display = users::display_email(&email);
+            match store.add(&email, role, &created_by, &note) {
                 Ok(Change::Added) => {
-                    println!("added {display}");
+                    println!("added {display} role={role}");
+                    EXIT_OK
+                }
+                Ok(Change::Updated) => {
+                    println!("updated {display} role={role}");
                     EXIT_OK
                 }
                 Ok(Change::AlreadyPresent) => {
-                    println!("already admin: {display}");
+                    println!("already {display} role={role}");
+                    EXIT_OK
+                }
+                Ok(Change::Activated) => {
+                    println!("reactivated {display} role={role}");
                     EXIT_OK
                 }
                 Ok(other) => {
@@ -283,14 +277,18 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
             }
         }
         Cmd::Remove { email } => {
-            let display = display_email(&email);
-            match store.remove(&email) {
-                Ok(Change::Removed) => {
-                    println!("removed {display}");
+            let display = users::display_email(&email);
+            match store.disable(&email) {
+                Ok(Change::Disabled) => {
+                    println!("disabled {display}");
+                    EXIT_OK
+                }
+                Ok(Change::AlreadyDisabled) => {
+                    println!("already disabled: {display}");
                     EXIT_OK
                 }
                 Ok(Change::NotFound) => {
-                    eprintln!("not admin: {display}");
+                    eprintln!("not found: {display}");
                     EXIT_NOT_FOUND
                 }
                 Ok(other) => {
@@ -303,10 +301,6 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
         Cmd::List => match store.list() {
             Ok(rows) => {
                 for row in rows {
-                    // Surface dormant grants: a row outside the current
-                    // ALLOWED_EMAILS cannot log in, but would activate if the
-                    // email were allowed later. Keep stdout a stable TSV.
-                    warn_if_not_allowed(&row.email);
                     println!("{}", format_row(&row));
                 }
                 EXIT_OK
@@ -314,23 +308,21 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
             Err(e) => fail(&e),
         },
         Cmd::Check { email } => {
-            // `is_admin` treats a malformed email as "not an admin" (the
-            // server wants that fail-closed behavior). The CLI distinguishes
-            // a typo from a real non-admin so scripts can tell them apart.
-            if admin::normalize_email(&email).is_none() {
+            if users::normalize_email(&email).is_none() {
                 eprintln!("error: invalid email\n\n{USAGE}");
                 return EXIT_USAGE;
             }
-            match store.is_admin(&email) {
-                Ok(true) => {
-                    // The grant exists, but it is inert if the server's
-                    // allowlist (and therefore login) cannot admit the email.
-                    warn_if_not_allowed(&email);
-                    println!("admin");
+            match store.find(&email) {
+                Ok(Some(row)) if row.active() => {
+                    println!("{}", row.role);
                     EXIT_OK
                 }
-                Ok(false) => {
-                    println!("not admin");
+                Ok(Some(_)) => {
+                    println!("disabled");
+                    EXIT_NOT_FOUND
+                }
+                Ok(None) => {
+                    println!("not found");
                     EXIT_NOT_FOUND
                 }
                 Err(e) => fail(&e),
@@ -352,7 +344,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "bookq-admin-cli-{tag}-{}-{}",
+            "bookq-users-cli-{tag}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -371,6 +363,7 @@ mod tests {
             parse(&args(&["add", "a@b.com"])),
             Ok(Cmd::Add {
                 email: "a@b.com".into(),
+                role: Role::Member,
                 note: String::new(),
                 created_by: "cli".into(),
             })
@@ -378,6 +371,8 @@ mod tests {
         assert_eq!(
             parse(&args(&[
                 "add",
+                "--role",
+                "admin",
                 "--note",
                 "initial",
                 "a@b.com",
@@ -385,6 +380,7 @@ mod tests {
             ])),
             Ok(Cmd::Add {
                 email: "a@b.com".into(),
+                role: Role::Admin,
                 note: "initial".into(),
                 created_by: "ticket-1".into(),
             })
@@ -408,6 +404,8 @@ mod tests {
             args(&["add", "a@b.com", "extra"]),
             args(&["add", "a@b.com", "--bogus"]),
             args(&["add", "a@b.com", "--note"]),
+            args(&["add", "a@b.com", "--role"]),
+            args(&["add", "a@b.com", "--role", "owner"]),
             args(&["remove"]),
             args(&["remove", "a@b.com", "extra"]),
             args(&["check", "a@b.com", "--by", "x"]),
@@ -419,19 +417,39 @@ mod tests {
     }
 
     #[test]
-    fn add_check_remove_roundtrip_and_exit_codes() {
+    fn add_change_role_disable_and_reactivate() {
         let dir = temp_dir("roundtrip");
-        assert_eq!(run(&args(&["add", "a@b.com"]), &dir), EXIT_OK);
-        assert!(AdminStore::new(&dir).is_admin("a@b.com").unwrap());
-        assert_eq!(run(&args(&["add", "A@B.com"]), &dir), EXIT_OK);
-        assert_eq!(run(&args(&["check", "a@b.com"]), &dir), EXIT_OK);
-        assert_eq!(run(&args(&["list"]), &dir), EXIT_OK);
-        assert_eq!(run(&args(&["remove", "a@b.com"]), &dir), EXIT_OK);
-        assert_eq!(run(&args(&["check", "a@b.com"]), &dir), EXIT_NOT_FOUND);
-        assert_eq!(run(&args(&["remove", "a@b.com"]), &dir), EXIT_NOT_FOUND);
+        let display = "a@b.com";
+
+        assert_eq!(run(&args(&["add", display]), &dir), EXIT_OK);
+        assert_eq!(run(&args(&["check", display]), &dir), EXIT_OK);
+        assert_eq!(run(&args(&["add", display]), &dir), EXIT_OK);
+        assert_eq!(
+            run(&args(&["add", display, "--role", "admin"]), &dir),
+            EXIT_OK
+        );
+        let rows = UserStore::new(&dir, None).list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].role, Role::Admin);
+        assert!(rows[0].active());
+
+        assert_eq!(run(&args(&["remove", display]), &dir), EXIT_OK);
+        assert_eq!(run(&args(&["check", display]), &dir), EXIT_NOT_FOUND);
+        let rows = UserStore::new(&dir, None).list().unwrap();
+        assert!(!rows[0].active());
+
+        assert_eq!(run(&args(&["add", display]), &dir), EXIT_OK);
+        let rows = UserStore::new(&dir, None).list().unwrap();
+        assert_eq!(rows[0].role, Role::Member);
+        assert!(rows[0].active());
+
         // Invalid input never reaches the store.
         assert_eq!(run(&args(&["add", "not-an-email"]), &dir), EXIT_USAGE);
         assert_eq!(run(&args(&["check", "not-an-email"]), &dir), EXIT_USAGE);
+        assert_eq!(
+            run(&args(&["add", display, "--role", "owner"]), &dir),
+            EXIT_USAGE
+        );
         assert_eq!(run(&args(&["wat"]), &dir), EXIT_USAGE);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -442,20 +460,24 @@ mod tests {
         assert_eq!(run(&args(&["list"]), &dir), EXIT_OK);
         assert_eq!(
             run(
-                &args(&["add", "a@b.com", "--note", "initial", "--by", "ticket-1"]),
+                &args(&[
+                    "add", "a@b.com", "--role", "admin", "--note", "initial", "--by", "ticket-1"
+                ]),
                 &dir
             ),
             EXIT_OK
         );
-        let rows = AdminStore::new(&dir).list().unwrap();
+        let rows = UserStore::new(&dir, None).list().unwrap();
         assert_eq!(rows.len(), 1);
         let line = format_row(&rows[0]);
         let cols: Vec<&str> = line.split('\t').collect();
-        assert_eq!(cols.len(), 4);
+        assert_eq!(cols.len(), 6);
         assert_eq!(cols[0], "a@b.com");
-        assert!(cols[1].ends_with("GMT"));
-        assert_eq!(cols[2], "ticket-1");
-        assert_eq!(cols[3], "initial");
+        assert_eq!(cols[1], "admin");
+        assert_eq!(cols[2], "active");
+        assert!(cols[3].ends_with("GMT"));
+        assert_eq!(cols[4], "ticket-1");
+        assert_eq!(cols[5], "initial");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -471,7 +493,10 @@ mod tests {
 
     #[test]
     fn output_email_is_normalized() {
-        assert_eq!(display_email(" Alice@Example.COM "), "alice@example.com");
-        assert_eq!(display_email("not-an-email"), "not-an-email");
+        assert_eq!(
+            users::display_email(" Alice@Example.COM "),
+            "alice@example.com"
+        );
+        assert_eq!(users::display_email("not-an-email"), "not-an-email");
     }
 }

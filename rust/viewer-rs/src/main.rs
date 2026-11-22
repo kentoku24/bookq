@@ -21,8 +21,6 @@ use std::path::PathBuf;
 // serve/tree/folders hold the contract-independent core (archive listing,
 // path containment, tree assembly, index cache) that the v1 envelopes
 // are wired onto. v0 routes are deprecated and answer 501 via the fallback.
-mod admin;
-mod admin_cli;
 mod auth;
 #[cfg(test)]
 mod conformance_vectors;
@@ -39,6 +37,8 @@ mod shell;
 mod state;
 mod thumbs;
 mod tree;
+mod users;
+mod users_cli;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -46,8 +46,6 @@ pub(crate) struct AppState {
     pub(crate) library: PathBuf,
     /// `BOOKQ_TEST_MODE` — mock-user posture for dev/test.
     pub(crate) test_mode: bool,
-    /// `ALLOWED_EMAILS` (trim+lowercase) — Bearer allowlist, fail-closed.
-    pub(crate) allowed_emails: std::sync::Arc<std::collections::HashSet<String>>,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
     /// M4+375: per-user reading positions in the shared user-state SQLite
@@ -55,9 +53,11 @@ pub(crate) struct AppState {
     pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
-    /// #608: admin registry on the same user-state DB. Rows are written only
-    /// by the offline `viewer-rs admin` CLI; every HTTP caller is read-only.
-    pub(crate) admin: std::sync::Arc<admin::AdminStore>,
+    /// #608: authoritative membership/role store on the user-state DB. Rows
+    /// are written only by the offline `viewer-rs users` CLI.
+    pub(crate) users: std::sync::Arc<users::UserStore>,
+    /// #608: in-memory active members for the hot auth path (1s refresh).
+    pub(crate) directory: std::sync::Arc<users::UserDirectory>,
     /// #400: the whole auth surface (`/auth/*` + `/api/v1/auth/token`).
     /// `Some` iff the OAuth config is complete, else the surface answers 501.
     pub(crate) auth_flow: Option<std::sync::Arc<oauth::AuthFlow>>,
@@ -113,7 +113,7 @@ fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identi
         st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
-        &st.allowed_emails,
+        &st.directory,
     ) {
         auth::Caller::User(u) => Some(u),
         auth::Caller::Delegate => None,
@@ -397,7 +397,7 @@ async fn admin_check(st: &AppState, email: &str) -> bool {
     if email.is_empty() {
         return false;
     }
-    let store = st.admin.clone();
+    let store = st.users.clone();
     match tokio::task::spawn_blocking(move || store.is_admin(&email)).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -413,8 +413,8 @@ async fn admin_check(st: &AppState, email: &str) -> bool {
 
 /// `GET|HEAD /admin` — the admin-only shell (#608).
 ///
-/// The gate is `auth::resolve` (so `ALLOWED_EMAILS` is re-checked per
-/// request, #373) plus a per-request `admin_users` lookup. A removed grant is
+/// The gate is `auth::resolve` (active membership re-checked per request,
+/// #373) plus a per-request `users.role='admin'` lookup. A revoked admin is
 /// rejected on the next request even while the session cookie is still valid.
 /// The page itself is a static template: no session data is embedded and
 /// nothing here is cached by the Service Worker (navigations are not cached).
@@ -496,11 +496,11 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
         st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
-        &st.allowed_emails,
+        &st.directory,
         &headers,
     );
     // #608: the admin menu entry is cosmetic, but derive it from the same
-    // strict identity path the `/admin` gate uses (`ALLOWED_EMAILS`
+    // strict identity path the `/admin` gate uses (active membership
     // re-checked), not from the shell's viewer branch.
     let admin_email = caller(&st, &headers).map(|u| u.email);
     // '/' is outside the gzip prefixes.
@@ -511,7 +511,7 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
             st2.test_mode,
             &st2.secret_key,
             &st2.visibility,
-            &st2.admin,
+            &st2.directory,
             admin_email.as_deref(),
             &user,
             &headers,
@@ -1046,7 +1046,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
         st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
-        &st.allowed_emails,
+        &st.directory,
     ) else {
         return StatusCode::FORBIDDEN.into_response();
     };
@@ -1224,14 +1224,14 @@ async fn main() {
         std::process::exit(healthcheck::run());
     }
 
-    // #608: the admin CLI is the only writer of `admin_users`. Dispatch it
-    // before tracing/index/store setup — it needs only BOOKQ_STATE_DIR.
+    // #608: the users CLI is the only writer of the user directory. Dispatch
+    // it before tracing/index/store setup — it needs only BOOKQ_STATE_DIR.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.first().map(String::as_str) == Some("admin") {
+    if argv.first().map(String::as_str) == Some("users") {
         let state_dir = PathBuf::from(
             std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
         );
-        std::process::exit(admin_cli::run(&argv[1..], &state_dir));
+        std::process::exit(users_cli::run(&argv[1..], &state_dir));
     }
 
     tracing_subscriber::fmt()
@@ -1250,18 +1250,25 @@ async fn main() {
     let test_mode = std::env::var("BOOKQ_TEST_MODE")
         .unwrap_or_default()
         .eq_ignore_ascii_case("true");
-    let allowed_emails: std::sync::Arc<std::collections::HashSet<String>> =
-        std::sync::Arc::new(
-            std::env::var("ALLOWED_EMAILS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|e| e.trim().to_lowercase())
-                .filter(|e| !e.is_empty())
-                .collect(),
-        );
+    // `ALLOWED_EMAILS` is a one-time seed; after `settings.users_seeded`
+    // the `users` table is authoritative (see users.rs).
+    let seed_emails: Vec<String> = std::env::var("ALLOWED_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let state_dir = PathBuf::from(
+        std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
+    );
+    let users_store = std::sync::Arc::new(users::UserStore::new(
+        &state_dir,
+        Some(seed_emails),
+    ));
+    let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
     // #400: the auth surface needs the full OAuth config — missing config
     // answers 501 (warned at startup).
-    let auth_flow = match oauth::AuthFlow::from_env(allowed_emails.clone()) {
+    let auth_flow = match oauth::AuthFlow::from_env(users_store.clone(), directory.clone()) {
         oauth::Configured::Ready(flow) => Some(std::sync::Arc::new(flow)),
         oauth::Configured::Missing(missing) => {
             tracing::warn!(
@@ -1278,18 +1285,15 @@ async fn main() {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
     }
-    let state_dir = PathBuf::from(
-        std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
-    );
     let st = AppState {
         library: library.clone(),
         test_mode,
-        allowed_emails,
         auth_flow,
         index: index.clone(),
         position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
-        admin: std::sync::Arc::new(admin::AdminStore::new(&state_dir)),
+        users: users_store,
+        directory: directory.clone(),
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
@@ -1314,18 +1318,45 @@ async fn main() {
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
-    // #608: TEST_MODE trusts every caller as the mock user. An admin row in
+    // #608: TEST_MODE trusts every caller as the mock user. An admin role in
     // that posture makes `/admin` reachable by anyone who can hit the URL, so
     // surface the combination loudly at boot (dev/test only by design).
     if st.test_mode {
-        match st.admin.list() {
-            Ok(rows) if !rows.is_empty() => tracing::warn!(
-                admins = rows.len(),
-                "BOOKQ_TEST_MODE is enabled with admin_users rows — \
-                 /admin trusts the mock user; remove admin grants after dev checks"
-            ),
+        match st.users.list() {
+            Ok(rows) => {
+                let admins = rows
+                    .iter()
+                    .filter(|r| r.active() && r.role == users::Role::Admin)
+                    .count();
+                if admins > 0 {
+                    tracing::warn!(
+                        admins,
+                        "BOOKQ_TEST_MODE is enabled with admin users — \
+                         /admin trusts the mock user; remove admin roles after dev checks"
+                    );
+                }
+            }
             _ => {}
         }
+    }
+
+    // Keep the hot auth path in memory; the CLI writes the DB, so a 1s
+    // refresh bounds member changes without a per-request SQLite read.
+    {
+        let dir = directory.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let dir = dir.clone();
+                if let Ok(Err(e)) =
+                    tokio::task::spawn_blocking(move || dir.refresh()).await
+                {
+                    tracing::debug!(error = %e, "user directory refresh failed");
+                }
+            }
+        });
     }
 
     // warmup_metadata_index — lifespan kicks the same cold-miss path.
@@ -1418,7 +1449,6 @@ async fn main() {
 #[cfg(test)]
 mod handler_tests {
     use super::*;
-    use std::collections::HashSet;
 
     /// #465 follow-up: a local 405 must carry the RFC 9110 `Allow` header
     /// naming the endpoint's declared methods (schemathesis ST204).
@@ -1499,14 +1529,16 @@ mod handler_tests {
         ));
         let index = std::sync::Arc::new(folders::IndexState::new());
         let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
+        let users_store = std::sync::Arc::new(users::UserStore::new(&dir, None));
+        let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
         AppState {
             library: dir.join("dl"),
             test_mode,
-            allowed_emails: std::sync::Arc::new(HashSet::new()),
             index,
             position_store: std::sync::Arc::new(state::PositionStore::new(&dir)),
             visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
-            admin: std::sync::Arc::new(admin::AdminStore::new(&dir)),
+            users: users_store,
+            directory,
             session_key: None,
             secret_key: "test-secret".into(),
             auth_flow: None,

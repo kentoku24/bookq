@@ -11,6 +11,7 @@
 //! and the `NoCacheStaticFiles` cache-control. `/static/*` and `/sw.js` sit
 //! under the gzip prefixes; `/` and `/favicon.ico` do not.
 
+use crate::users::UserDirectory;
 use crate::{auth, serve, state};
 use axum::{
     body::Body,
@@ -18,7 +19,6 @@ use axum::{
     response::Response,
 };
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,7 +45,7 @@ pub(crate) fn index_caller(
     test_mode: bool,
     secret: &str,
     session_key: Option<&auth::SessionKey>,
-    allowlist: &HashSet<String>,
+    directory: &UserDirectory,
     headers: &HeaderMap,
 ) -> ShellUser {
     if test_mode {
@@ -57,18 +57,23 @@ pub(crate) fn index_caller(
         auth::SessionLookup::Corrupt => return ShellUser::Corrupt,
         auth::SessionLookup::User(u) => {
             // `{% if not user %}`: the session value's own truthiness decides
-            // the branch — an empty object renders the login page, any
-            // truthy non-dict renders the viewer with null globals.
+            // the branch. A truthy user is the viewer only when its email is
+            // an active directory member; otherwise fall through to a Bearer
+            // (a non-member/no-email session must not render the shell).
             if !json_truthy(&u) {
                 return ShellUser::Login;
             }
-            return ShellUser::Viewer {
-                user_key: user_key(&u),
-            };
+            if let Some(key) = user_key(&u) {
+                if directory.is_member(&key) {
+                    return ShellUser::Viewer {
+                        user_key: Some(key),
+                    };
+                }
+            }
         }
         auth::SessionLookup::Absent | auth::SessionLookup::NoUser => {}
     }
-    match auth::bearer_token(headers).and_then(|t| auth::validate_bearer(t, secret, allowlist)) {
+    match auth::bearer_token(headers).and_then(|t| auth::validate_bearer(t, secret, directory)) {
         Some(id) => {
             let key = id.email.trim().to_lowercase();
             ShellUser::Viewer {
@@ -364,8 +369,8 @@ pub(crate) fn index(
     test_mode: bool,
     secret: &str,
     visibility: &state::VisibilityStore,
-    admin: &crate::admin::AdminStore,
-    // `auth::resolve`'s identity email (allowlist re-checked); None hides.
+    directory: &UserDirectory,
+    // `auth::resolve`'s identity email (membership re-checked); None hides.
     admin_email: Option<&str>,
     user: &ShellUser,
     headers: &HeaderMap,
@@ -429,14 +434,15 @@ pub(crate) fn index(
         .unwrap_or("")
         .to_lowercase()
         .contains("android");
-    // Cosmetic only: a store error hides the entry (fail closed), while
-    // `/admin` remains the actual gate. `admin_email` comes from
-    // `auth::resolve`; require it to match the identity the shell actually
-    // rendered (mixed session+Bearer requests can resolve differently), and a
-    // de-allowlisted admin sees no link either.
+    // Cosmetic only: the link is a convenience; `/admin` remains the actual
+    // gate. `admin_email` comes from `auth::resolve`; require it to match the
+    // identity the shell actually rendered (mixed session+Bearer requests can
+    // resolve differently). The directory is refreshed every second, so a
+    // revoked admin may keep seeing the link until the next refresh, but
+    // clicking it always re-checks the DB and returns 404.
     let is_admin = match (user_key.as_deref(), admin_email) {
         (Some(viewer), Some(email)) if viewer.eq_ignore_ascii_case(email) => {
-            admin.is_admin(email).ok().unwrap_or(false)
+            directory.is_admin(email)
         }
         _ => false,
     };

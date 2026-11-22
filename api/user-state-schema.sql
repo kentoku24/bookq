@@ -48,17 +48,27 @@ CREATE TABLE IF NOT EXISTS position_folders (
   PRIMARY KEY (user_key, folder)
 );
 
--- Admin registry (#608): library-global set of authenticated users allowed
--- to reach /admin and (in follow-ups) privileged operations. Rows are
--- written only by the offline CLI (`viewer-rs admin`); there is no HTTP
--- write path. `email` is normalized (trim+lowercase) before every write;
--- COLLATE NOCASE is belt-and-braces for manual SQL. Removal is a DELETE —
--- an append-only grant/revoke audit table is a follow-up.
-CREATE TABLE IF NOT EXISTS admin_users (
-  email      TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
-  created_at REAL NOT NULL,              -- Unix epoch seconds
-  created_by TEXT NOT NULL,              -- 'cli' / a ticket ref / an actor
-  note       TEXT NOT NULL DEFAULT ''
+-- User directory (#608): the authoritative membership + role store.
+-- Rows are written only by the offline CLI (`viewer-rs users`); there is no
+-- HTTP write path. `email` is normalized (trim+lowercase) before every
+-- write; COLLATE NOCASE is belt-and-braces for manual SQL.
+--
+-- `ALLOWED_EMAILS` is a one-time seed on first init (guarded by the
+-- `settings.users_seeded` marker), then the DB is authoritative. A disabled
+-- user keeps the row (`disabled_at`) for audit instead of being deleted.
+CREATE TABLE IF NOT EXISTS users (
+  email       TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
+  role        TEXT NOT NULL DEFAULT 'member'
+              CHECK (role IN ('admin', 'member')),
+  disabled_at REAL,                       -- NULL = active
+  created_at  REAL NOT NULL,              -- Unix epoch seconds
+  created_by  TEXT NOT NULL,              -- 'seed' / 'cli' / a ticket ref
+  note        TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 PRAGMA user_version = 3;

@@ -696,24 +696,39 @@ pub async fn delete_user_positions(
 // the single source viewer-rs applies. USER_STATE_SCHEMA_VERSION must equal
 // the file's `PRAGMA user_version` stamp; a DB stamped newer than it is
 // refused rather than silently downgraded. v2 added the reading-position
-// tables (#375); v3 added the admin registry (#608) — the constant versions
+// tables (#375); v3 added the user directory (#608) — the constant versions
 // the whole user-state DB.
 const VIS_SCHEMA: &str = include_str!("../../../api/user-state-schema.sql");
 pub(crate) const USER_STATE_SCHEMA_VERSION: i64 = 3;
 
 /// The one user-state DB filename — shared by every store (`VisibilityStore`,
-/// `PositionStore`, `AdminStore`) so a future rename cannot split them.
+/// `PositionStore`, `UserStore`) so a future rename cannot split them.
 pub(crate) fn user_state_path(state_dir: &Path) -> PathBuf {
     state_dir.join("folder-visibility.sqlite3")
 }
 
 /// Shared user-state DB connect: WAL + busy_timeout, lazy idempotent
 /// schema apply under `init`, fresh connection per call. Used by
-/// `VisibilityStore`, `PositionStore` and `AdminStore` on the same file.
+/// `VisibilityStore`, `PositionStore` and `UserStore` on the same file.
 pub(crate) fn connect_user_state(
     path: &Path,
     init: &Mutex<bool>,
 ) -> rusqlite::Result<rusqlite::Connection> {
+    connect_user_state_with(path, init, |_| Ok(()))
+}
+
+/// [`connect_user_state`] plus a one-time `after` hook that runs after the
+/// DDL and before `init` is marked done. `UserStore` uses it for the one-time
+/// seed / legacy `admin_users` migration; an error leaves `init` unset so the
+/// next call retries (the DDL is idempotent).
+pub(crate) fn connect_user_state_with<F>(
+    path: &Path,
+    init: &Mutex<bool>,
+    after: F,
+) -> rusqlite::Result<rusqlite::Connection>
+where
+    F: FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>,
+{
     {
         let mut done = init.lock().unwrap();
         if !*done {
@@ -742,6 +757,7 @@ pub(crate) fn connect_user_state(
                  expects v{USER_STATE_SCHEMA_VERSION} — bump \
                  USER_STATE_SCHEMA_VERSION with the DDL"
             );
+            after(&conn)?;
             drop(conn);
             let _ = std::fs::set_permissions(
                 path,
@@ -1640,14 +1656,16 @@ mod tests {
         let index = std::sync::Arc::new(crate::folders::IndexState::new());
         let library = dir.join("lib");
         let registry = crate::reader_sync::Registry::new(index.clone(), library.clone());
+        let users_store = std::sync::Arc::new(crate::users::UserStore::new(dir, None));
+        let directory = std::sync::Arc::new(crate::users::UserDirectory::new(users_store.clone()));
         crate::AppState {
             library,
             test_mode: true,
-            allowed_emails: std::sync::Arc::new(std::collections::HashSet::new()),
             index,
             position_store: std::sync::Arc::new(PositionStore::new(dir)),
             visibility: std::sync::Arc::new(VisibilityStore::new(dir)),
-            admin: std::sync::Arc::new(crate::admin::AdminStore::new(dir)),
+            users: users_store,
+            directory,
             session_key: None,
             secret_key: "test-secret".into(),
             auth_flow: None,
