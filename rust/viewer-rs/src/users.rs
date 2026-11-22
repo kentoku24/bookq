@@ -1,10 +1,11 @@
 //! User directory (#608) — the authoritative membership + role store.
 //!
 //! Source of truth: the `users` table in the shared user-state SQLite DB
-//! (`state::user_state_path`). Rows are written **only** by the offline
-//! `viewer-rs users` CLI (host/container operator); there is no HTTP write
-//! path. Granting membership/admin therefore sits on the same trust boundary
-//! as reading `SECRET_KEY` / the OAuth client secret.
+//! (`state::user_state_path`). Admins are granted only by the offline
+//! `viewer-rs users` CLI (host/container operator). The `/admin` UI can add,
+//! disable and re-enable **members** over HTTP, but never changes an admin
+//! row; admin grants stay on the same trust boundary as reading
+//! `SECRET_KEY` / the OAuth client secret.
 //!
 //! Membership is loaded into an in-memory [`UserDirectory`] so the sync
 //! `auth::resolve` path does not do SQLite I/O on every image request. A

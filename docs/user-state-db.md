@@ -16,8 +16,9 @@ The DB holds the following feature families:
   delete tombstones.
 - User directory (`users`) — added at schema v3 (#608). The
   authoritative membership + role store (`role='admin'|'member'`).
-  Rows are written **only** by the offline `viewer-rs users` CLI; there
-  is no HTTP write path. `email` is normalized (trim + lowercase)
+  Admins are written **only** by the offline `viewer-rs users` CLI. The
+  `/admin` UI can add, disable and re-enable members over HTTP, but it
+  cannot change an admin row. `email` is normalized (trim + lowercase)
   before every write. A removed user is soft-disabled via
   `disabled_at`, not deleted, so the row survives as a minimal audit
   trail.
