@@ -1,0 +1,177 @@
+name: ci-metrics
+run-name: "ci-metrics ${{ github.event_name }} run#${{ github.run_id }}"
+
+# CI ボトルネック定期計測 (#627): 毎日 CI メトリクスを収集し、単一の
+# `ci-metrics` ラベル付き tracking issue を upsert する。シグナル検知時のみ
+# analyze ジョブが opencode を実行して診断コメントを投稿する（コード変更禁止）。
+# 詳細は docs/ci-metrics.md 参照。
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 07:00 JST — PR の少ない時間帯
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ci-metrics
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Collect CI metrics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_metrics.py collect
+
+      - name: Upload metrics JSON
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-metrics
+          path: ci-metrics.json
+          if-no-files-found: error
+
+  report:
+    needs: collect
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      action: ${{ steps.report.outputs.action }}
+      needs_analysis: ${{ steps.report.outputs.needs_analysis }}
+      issue_number: ${{ steps.report.outputs.issue_number }}
+      summary: ${{ steps.report.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download metrics JSON
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-metrics
+          path: .
+
+      - name: Upsert tracking issue
+        id: report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_METRICS_RESULT: ci-metrics.json
+          CI_METRICS_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/ci_metrics.py report
+
+  # シグナル検知時のみ実行。tracking issue + metrics JSON を読んでトップ
+  # bottleneck・証拠 (run/job リンク)・推奨次の一手を 1 コメントで投稿する。
+  # 定期実行では走らないのでコストはシグナル時のみ。
+  analyze:
+    needs: report
+    if: needs.report.outputs.needs_analysis == 'true' && needs.report.outputs.issue_number != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download metrics JSON
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-metrics
+          path: .
+
+      - name: Build prompt.txt (heredoc from env — NO shell expansion)
+        env:
+          ISSUE_NUMBER: ${{ needs.report.outputs.issue_number }}
+          SUMMARY: ${{ needs.report.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > prompt.txt <<'TEMPLATE'
+          A CI metrics job for bookq (a personal manga/image viewer) measures
+          GitHub Actions bottlenecks daily and upserts a single tracking issue
+          labelled `ci-metrics` with a last-7d vs prior-7d job table
+          (duration/queue p50/p90, failure rate, run counts) plus a step
+          hotspot for heavy jobs (ios-test, safari-gate, pytest/rs).
+
+          The signal gate fired (duration p90 regression >1.5x, macOS queue
+          p90 >15min, failure rate >10%, or a new workflow/job appeared).
+          The tracking issue below plus the ci-metrics.json artifact in the
+          workflow run contain the full evidence bundle.
+
+          Your task:
+          1. Read the issue (number given at the bottom of this prompt):
+             gh issue view <that number> --comments
+          2. Download the metrics artifact for evidence:
+             gh run download <this run id> -n ci-metrics
+             (the triggering run URL is at the bottom of this prompt)
+          3. Identify the top bottleneck with evidence (workflow/job links
+             from ci-metrics.json run_url/job html_url fields), whether it is
+             a regression vs baseline or a new/absolute signal, and the
+             recommended next step (e.g. concurrency tuning, parallel testing,
+             flake quarantine — cite past issues #616/#617/#618 when relevant).
+          4. Post your findings as ONE comment on that issue via
+             `gh issue comment <that number>` covering: top bottleneck,
+             evidence, recommended next step.
+
+          Constraints: do NOT modify code, do NOT open PRs, do NOT close or
+          relabel the issue, do NOT file new issues.
+          TEMPLATE
+          printf '\nIssue number: %s\nMetrics summary: %s\nMetrics run: %s\n' \
+            "$ISSUE_NUMBER" "$SUMMARY" "$RUN_URL" >> prompt.txt
+
+      - name: Configure git auth (GH_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "bookq-ci-metrics"
+          git config user.email "bot@users.noreply.github.com"
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install opencode CLI
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      # OPENCODE_ZEN_API_KEY (static secret) expired — exchange the job's OIDC
+      # token for a 1h OpenCode API key instead (client_id is a public cred id).
+      - name: Sign in to OpenCode
+        env:
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
+      - name: Run opencode analysis
+        env:
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - name: Report analysis failure on issue
+        if: failure() && needs.report.outputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ needs.report.outputs.issue_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "⚠️ 分析ジョブ (analyze) が失敗しました。run: ${RUN_URL} — 診断バンドルは issue 本文を参照してください。"
