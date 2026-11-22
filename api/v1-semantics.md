@@ -88,10 +88,9 @@
   復活させない)。`?folder` なし → delete-all tombstone_ts を記録。
 - **永続化** (#375): **user-state SQLite に永続** — `BOOKQ_STATE_DIR/
   folder-visibility.sqlite3` の `position_users`/`position_folders`
-  (schema v2、`api/user-state-schema.sql` が py/rs 共通の DDL 正本)。
-  FastAPI (`app/reading_positions.py`) と viewer-rs
-  (`rust/viewer-rs/src/state.rs`) が同じ DB を読み書きするため、
-  再起動・コンテナ再起動・strangler flip のいずれでも位置は失われない。
+  (schema v3、`api/user-state-schema.sql` が DDL 正本)。
+  viewer-rs (`rust/viewer-rs/src/state.rs`) が同じ DB を読み書きするため、
+  再起動・コンテナ再起動でも位置は失われない。
   規則実装は `PositionBook` (純粋 LWW/検証) と store に分離され、
   `tests/fixtures/positions_cases.json` が py/rs 共通の conformance fixture。
   v0 `/api/reading-position` は同ストアの「ユーザー最新1件」互換ビュー。

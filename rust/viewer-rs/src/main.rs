@@ -37,6 +37,8 @@ mod shell;
 mod state;
 mod thumbs;
 mod tree;
+mod users;
+mod users_cli;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -44,8 +46,6 @@ pub(crate) struct AppState {
     pub(crate) library: PathBuf,
     /// `BOOKQ_TEST_MODE` — mock-user posture for dev/test.
     pub(crate) test_mode: bool,
-    /// `ALLOWED_EMAILS` (trim+lowercase) — Bearer allowlist, fail-closed.
-    pub(crate) allowed_emails: std::sync::Arc<std::collections::HashSet<String>>,
     /// `/api/folders` index cache (`metadata_index_cache`).
     pub(crate) index: std::sync::Arc<folders::IndexState>,
     /// M4+375: per-user reading positions in the shared user-state SQLite
@@ -53,6 +53,11 @@ pub(crate) struct AppState {
     pub(crate) position_store: std::sync::Arc<state::PositionStore>,
     /// M4: shared user-state SQLite store (`FolderVisibilityStore`).
     pub(crate) visibility: std::sync::Arc<state::VisibilityStore>,
+    /// #608: authoritative membership/role store on the user-state DB. Rows
+    /// are written only by the offline `viewer-rs users` CLI.
+    pub(crate) users: std::sync::Arc<users::UserStore>,
+    /// #608: in-memory active members for the hot auth path (1s refresh).
+    pub(crate) directory: std::sync::Arc<users::UserDirectory>,
     /// #400: the whole auth surface (`/auth/*` + `/api/v1/auth/token`).
     /// `Some` iff the OAuth config is complete, else the surface answers 501.
     pub(crate) auth_flow: Option<std::sync::Arc<oauth::AuthFlow>>,
@@ -108,7 +113,7 @@ fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identi
         st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
-        &st.allowed_emails,
+        &st.directory,
     ) {
         auth::Caller::User(u) => Some(u),
         auth::Caller::Delegate => None,
@@ -342,6 +347,137 @@ fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
     )
 }
 
+// ── #608: /admin ───────────────────────────────────────────────────────────
+
+/// Headers shared by every `/admin` response: keep per-user HTML out of
+/// shared/private caches, and stop MIME sniffing / referrer leakage even on
+/// the 404 path.
+fn admin_private_headers(res: &mut Response) {
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res.headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Cookie"));
+    res.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    res.headers_mut()
+        .insert("referrer-policy", HeaderValue::from_static("same-origin"));
+}
+
+/// Unauthenticated browser navigation → the login page at `/`.
+/// `/admin` is a page, not an API: a 401 JSON would be a dead end.
+fn admin_redirect_login() -> Response {
+    let mut res = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/")
+        .body(Body::empty())
+        .unwrap();
+    admin_private_headers(&mut res);
+    res
+}
+
+/// A non-admin gets the same generic 404 shape as a missing page — the
+/// admin surface is not advertised. The store error path uses this too
+/// (fail closed) and only the server log records the cause.
+fn admin_not_found() -> Response {
+    let mut res = state::detail(StatusCode::NOT_FOUND, "Not Found");
+    admin_private_headers(&mut res);
+    res
+}
+
+/// Per-request admin lookup. Any failure (store error, blocking-task join
+/// error) denies; the caller never sees the difference from "not an admin".
+///
+/// Authorization primitive for every future admin API: call `caller()` first,
+/// then this function. The `/admin` page gate below covers only the HTML
+/// route — a page check must never be reused as an API authorization check.
+async fn admin_check(st: &AppState, email: &str) -> bool {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() {
+        return false;
+    }
+    let store = st.users.clone();
+    match tokio::task::spawn_blocking(move || store.is_admin(&email)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin store unavailable — denying admin access");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin check task failed — denying admin access");
+            false
+        }
+    }
+}
+
+/// `GET|HEAD /admin` — the admin-only shell (#608).
+///
+/// The gate is `auth::resolve` (active membership re-checked per request,
+/// #373) plus a per-request `users.role='admin'` lookup. A revoked admin is
+/// rejected on the next request even while the session cookie is still valid.
+/// The page itself is a static template: no session data is embedded and
+/// nothing here is cached by the Service Worker (navigations are not cached).
+async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed("GET, HEAD");
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    if corrupt_session(&st, &headers) {
+        return corrupt_session_response();
+    }
+    let Some(user) = caller(&st, &headers) else {
+        return admin_redirect_login();
+    };
+    if !admin_check(&st, &user.email).await {
+        return admin_not_found();
+    }
+
+    let web_dir = st.web_dir.clone();
+    let body = tokio::task::spawn_blocking(move || {
+        std::fs::read(web_dir.join("templates").join("admin.html"))
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    // A missing template is a deployment error, not "not found": an admin
+    // must see the difference in the server log, not a 404 page.
+    let Some(body) = body else {
+        let mut res = state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "admin template unavailable",
+        );
+        admin_private_headers(&mut res);
+        return res;
+    };
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(if head { Body::empty() } else { Body::from(body) })
+        .unwrap();
+    admin_private_headers(&mut res);
+    res.headers_mut()
+        .insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // The page has no scripts/forms/inline styles today; a future admin UI
+    // must relax this header deliberately rather than inherit an open page.
+    res.headers_mut().insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'none'; style-src 'self'; \
+             img-src 'self'; object-src 'none'; base-uri 'none'; \
+             form-action 'none'; frame-ancestors 'none'",
+        ),
+    );
+    res.headers_mut()
+        .insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    res
+}
+
 /// `GET /` — the Jinja shell: viewer page for identified callers, the
 /// login page for everyone else (200, not a redirect).
 async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -360,9 +496,13 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
         st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
-        &st.allowed_emails,
+        &st.directory,
         &headers,
     );
+    // #608: the admin menu entry is cosmetic, but derive it from the same
+    // strict identity path the `/admin` gate uses (active membership
+    // re-checked), not from the shell's viewer branch.
+    let admin_email = caller(&st, &headers).map(|u| u.email);
     // '/' is outside the gzip prefixes.
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || {
@@ -371,6 +511,8 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
             st2.test_mode,
             &st2.secret_key,
             &st2.visibility,
+            &st2.directory,
+            admin_email.as_deref(),
             &user,
             &headers,
             thumb_perf,
@@ -904,7 +1046,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
         st.test_mode,
         &st.secret_key,
         st.session_key.as_ref(),
-        &st.allowed_emails,
+        &st.directory,
     ) else {
         return StatusCode::FORBIDDEN.into_response();
     };
@@ -1082,6 +1224,16 @@ async fn main() {
         std::process::exit(healthcheck::run());
     }
 
+    // #608: the users CLI is the only writer of the user directory. Dispatch
+    // it before tracing/index/store setup — it needs only BOOKQ_STATE_DIR.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("users") {
+        let state_dir = PathBuf::from(
+            std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
+        );
+        std::process::exit(users_cli::run(&argv[1..], &state_dir));
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -1098,18 +1250,25 @@ async fn main() {
     let test_mode = std::env::var("BOOKQ_TEST_MODE")
         .unwrap_or_default()
         .eq_ignore_ascii_case("true");
-    let allowed_emails: std::sync::Arc<std::collections::HashSet<String>> =
-        std::sync::Arc::new(
-            std::env::var("ALLOWED_EMAILS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|e| e.trim().to_lowercase())
-                .filter(|e| !e.is_empty())
-                .collect(),
-        );
+    // `ALLOWED_EMAILS` is a one-time seed; after `settings.users_seeded`
+    // the `users` table is authoritative (see users.rs).
+    let seed_emails: Vec<String> = std::env::var("ALLOWED_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let state_dir = PathBuf::from(
+        std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
+    );
+    let users_store = std::sync::Arc::new(users::UserStore::new(
+        &state_dir,
+        Some(seed_emails),
+    ));
+    let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
     // #400: the auth surface needs the full OAuth config — missing config
     // answers 501 (warned at startup).
-    let auth_flow = match oauth::AuthFlow::from_env(allowed_emails.clone()) {
+    let auth_flow = match oauth::AuthFlow::from_env(users_store.clone(), directory.clone()) {
         oauth::Configured::Ready(flow) => Some(std::sync::Arc::new(flow)),
         oauth::Configured::Missing(missing) => {
             tracing::warn!(
@@ -1126,17 +1285,15 @@ async fn main() {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
     }
-    let state_dir = PathBuf::from(
-        std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
-    );
     let st = AppState {
         library: library.clone(),
         test_mode,
-        allowed_emails,
         auth_flow,
         index: index.clone(),
         position_store: std::sync::Arc::new(state::PositionStore::new(&state_dir)),
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
+        users: users_store,
+        directory: directory.clone(),
         session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
         secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
         registry: registry.clone(),
@@ -1161,6 +1318,47 @@ async fn main() {
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
+    // #608: TEST_MODE trusts every caller as the mock user. An admin role in
+    // that posture makes `/admin` reachable by anyone who can hit the URL, so
+    // surface the combination loudly at boot (dev/test only by design).
+    if st.test_mode {
+        match st.users.list() {
+            Ok(rows) => {
+                let admins = rows
+                    .iter()
+                    .filter(|r| r.active() && r.role == users::Role::Admin)
+                    .count();
+                if admins > 0 {
+                    tracing::warn!(
+                        admins,
+                        "BOOKQ_TEST_MODE is enabled with admin users — \
+                         /admin trusts the mock user; remove admin roles after dev checks"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Keep the hot auth path in memory; the CLI writes the DB, so a 1s
+    // refresh bounds member changes without a per-request SQLite read.
+    {
+        let dir = directory.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let dir = dir.clone();
+                if let Ok(Err(e)) =
+                    tokio::task::spawn_blocking(move || dir.refresh()).await
+                {
+                    tracing::debug!(error = %e, "user directory refresh failed");
+                }
+            }
+        });
+    }
+
     // warmup_metadata_index — lifespan kicks the same cold-miss path.
     index.spawn_warmup(library.clone());
     tracing::info!(
@@ -1173,6 +1371,10 @@ async fn main() {
         .route("/healthz", get(|| async { "ok\n" }))
         // #401: shell + static surfaces — public.
         .route("/", any(shell_index))
+        // #608: admin-only page. Both spellings map to the same gate so
+        // `/admin/` does not fall through to the 501 fallback.
+        .route("/admin", any(admin_page))
+        .route("/admin/", any(admin_page))
         .route("/sw.js", any(serve_sw))
         .route("/favicon.ico", any(serve_favicon))
         .route("/static", any(serve_static))
@@ -1247,7 +1449,6 @@ async fn main() {
 #[cfg(test)]
 mod handler_tests {
     use super::*;
-    use std::collections::HashSet;
 
     /// #465 follow-up: a local 405 must carry the RFC 9110 `Allow` header
     /// naming the endpoint's declared methods (schemathesis ST204).
@@ -1328,13 +1529,16 @@ mod handler_tests {
         ));
         let index = std::sync::Arc::new(folders::IndexState::new());
         let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
+        let users_store = std::sync::Arc::new(users::UserStore::new(&dir, None));
+        let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
         AppState {
             library: dir.join("dl"),
             test_mode,
-            allowed_emails: std::sync::Arc::new(HashSet::new()),
             index,
             position_store: std::sync::Arc::new(state::PositionStore::new(&dir)),
             visibility: std::sync::Arc::new(state::VisibilityStore::new(&dir)),
+            users: users_store,
+            directory,
             session_key: None,
             secret_key: "test-secret".into(),
             auth_flow: None,
