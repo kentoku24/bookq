@@ -513,8 +513,9 @@ def test_admin_invalid_email_and_xss_are_safe(ui_server, ui_state, ui_reset):
     status, headers, _ = _post_admin(ui_server, "add", "not-an-email")
     assert status == 303
     assert headers["location"] == "/admin?status=invalid"
-    listing = users_cli(ui_state, "list").stdout
-    assert "not-an-email" not in listing
+    listing = users_cli(ui_state, "list")
+    assert listing.returncode == 0, listing.stderr
+    assert "not-an-email" not in listing.stdout
 
     status, headers, _ = _post_admin(ui_server, "add", XSS_USER)
     assert status == 303
@@ -527,13 +528,14 @@ def test_admin_invalid_email_and_xss_are_safe(ui_server, ui_state, ui_reset):
 def test_admin_mutations_require_admin(ui_server, ui_state):
     users_cli(ui_state, "add", TEST_EMAIL, "--role", "member")
     try:
-        # CLI `remove` is a soft delete, so NEW_USER may still be listed from
-        # an earlier test: the invariant is that the rejected POST changes
-        # nothing, not that the row is absent.
-        listing = users_cli(ui_state, "list").stdout
+        before = users_cli(ui_state, "list")
+        assert before.returncode == 0, before.stderr
+        assert TEST_EMAIL in before.stdout
         status, _, _ = _post_admin(ui_server, "add", NEW_USER)
         assert status == 404
-        assert users_cli(ui_state, "list").stdout == listing
+        after = users_cli(ui_state, "list")
+        assert after.returncode == 0, after.stderr
+        assert after.stdout == before.stdout
     finally:
         users_cli(ui_state, "add", TEST_EMAIL, "--role", "admin")
 
@@ -550,7 +552,8 @@ def test_admin_csrf_matrix(ui_server, ui_state, ui_reset):
     # Snapshot before any request: NEW_USER may already exist from an earlier
     # test (CLI `remove` is a soft delete), so "absent" is not the invariant —
     # "unchanged" is.
-    listing = users_cli(ui_state, "list").stdout
+    listing = users_cli(ui_state, "list")
+    assert listing.returncode == 0, listing.stderr
     status, _, _ = _request(
         ui_server,
         "POST",
@@ -571,13 +574,17 @@ def test_admin_csrf_matrix(ui_server, ui_state, ui_reset):
         )
         assert status == 403, override
 
-    assert users_cli(ui_state, "list").stdout == listing
+    unchanged = users_cli(ui_state, "list")
+    assert unchanged.returncode == 0, unchanged.stderr
+    assert unchanged.stdout == listing.stdout
     status, headers, _ = _post_admin(ui_server, "add", CSRF_USER)
     assert status == 303
     assert headers["location"] == "/admin?status=added"
     # Positive control: the listing above is live, so the equality check can
     # actually observe a write.
-    assert CSRF_USER in users_cli(ui_state, "list").stdout
+    control = users_cli(ui_state, "list")
+    assert control.returncode == 0, control.stderr
+    assert CSRF_USER in control.stdout
 
 
 def test_admin_post_body_limit(ui_server, ui_reset):

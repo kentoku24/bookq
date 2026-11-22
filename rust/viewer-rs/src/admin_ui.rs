@@ -200,6 +200,23 @@ mod tests {
     }
 
     #[test]
+    fn flash_messages_are_complete() {
+        for code in [
+            "added",
+            "reactivated",
+            "exists",
+            "disabled",
+            "already-disabled",
+            "not-found",
+            "admin-readonly",
+            "invalid",
+        ] {
+            assert!(flash_message(code).is_some(), "{code}");
+        }
+        assert!(flash_message("bogus").is_none());
+    }
+
+    #[test]
     fn same_origin_post_matrix() {
         assert!(same_origin_post(&headers(&[(
             "sec-fetch-site",
