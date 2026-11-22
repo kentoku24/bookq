@@ -62,7 +62,7 @@
   再試行 (SW api キャッシュにも入らない)。
 - **`depth`**: `<1` → 400、非整数 → 422。`depth=1` (shallow) は直下の
   `type=="folder"` 子のみで各ノードの `children` は `[]` (null ではない)、
-  `metadata`/`subtree_facets` キーなし — **フルツリーではないので offline
+  `metadata`/`has_metadata`/`subtree_facets` キーなし — **フルツリーではないので offline
   永続化に使わないこと**。
 - **`name`**: single-child flatten で `parent/child` を含む (そのまま path として使う)。
 - **v0 `/api/folders` との ETag 分離**: `key_ns` で v0/v1 の cache key を分離

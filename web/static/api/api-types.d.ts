@@ -53,7 +53,7 @@ export interface paths {
          * フォルダツリー取得（全木または浅い一覧）
          * @description `depth` 省略で全木を返す。`depth>=1` で `path` 直下の
          *     folder 型子ノードのみを浅く返す（`children: []`、`metadata`/
-         *     `subtree_facets` キーなし）。
+         *     `has_metadata`/`subtree_facets` キーなし）。
          *
          *     `since` に既知の `generation` を渡すと、一致時 304、
          *     不一致時は全木を返す（`since` 指定時は常に全木モード）。
@@ -632,7 +632,7 @@ export interface components {
         /**
          * @description `name` は flatten 規約により `/` を含み得る（"parent/child"）。
          *     `thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`
-         *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。
+         *     に解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は全木 (`depth` 省略) の folder ノードで常時 bool — `depth>=1` の浅い一覧ではキー自体を返さない (上記 depth 説明参照)。
          *     `path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は
          *     サーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは
          *     未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`
