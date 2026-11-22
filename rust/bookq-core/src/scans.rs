@@ -37,6 +37,23 @@ fn suffix_lower(name: &str) -> Option<String> {
     name.rfind('.').map(|i| name[i..].to_lowercase())
 }
 
+/// #62 review: `/image/` serving resolves symlinks before the extension
+/// check, so a `*.png` symlink to an extensionless target would list
+/// here but 404 on serve. Classify symlink entries by their RESOLVED
+/// file name's suffix to keep listing and serving consistent; the
+/// entry name itself is still what gets listed/stored.
+pub fn classified_suffix(e: &fs::DirEntry, name: &str) -> Option<String> {
+    let is_link = e.file_type().map(|t| t.is_symlink()).unwrap_or(false);
+    if !is_link {
+        return suffix_lower(name);
+    }
+    fs::canonicalize(e.path())
+        .ok()?
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(suffix_lower)
+}
+
 fn utf8_name(e: &fs::DirEntry) -> Option<String> {
     std::str::from_utf8(e.file_name().as_bytes())
         .ok()
@@ -152,7 +169,7 @@ fn scan_dir(base: &Path, visited: &mut HashSet<(u64, u64)>) -> Option<FsDir> {
             }
             dirnames.push(name);
         } else if is_file_e(&entry) {
-            match suffix_lower(&name).as_deref() {
+            match classified_suffix(&entry, &name).as_deref() {
                 Some(s) if IMAGE_EXT.contains(&s) => files.push(name),
                 Some(s) if ARCHIVE_EXT.contains(&s) => archives.push(name),
                 Some(PDF_EXT) => pdfs.push(name),
@@ -205,7 +222,7 @@ pub fn list_images(path: &Path) -> Option<Vec<String>> {
             continue;
         }
         let name = utf8_name(&entry)?;
-        if suffix_lower(&name)
+        if classified_suffix(&entry, &name)
             .map(|s| IMAGE_EXT.contains(&s.as_str()))
             .unwrap_or(false)
         {
@@ -395,4 +412,37 @@ pub fn tree_signature(root: &Path) -> Option<String> {
         out.push_str(&format!("{:02x}", b));
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// #62 review: listing must classify symlinks by the RESOLVED name's
+    /// suffix — `/image/` serving resolves before its extension check,
+    /// so a `*.png` symlink to an extensionless target would list but
+    /// 404 on serve.
+    #[test]
+    fn list_images_classifies_symlinks_by_resolved_suffix() {
+        let d = std::env::temp_dir().join(format!(
+            "bookq-scans-symlink-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("real.png"), b"x").unwrap();
+        fs::write(d.join("target"), b"x").unwrap(); // extensionless
+        std::os::unix::fs::symlink("real.png", d.join("link_ok.png")).unwrap();
+        std::os::unix::fs::symlink("target", d.join("link_bad.png")).unwrap();
+        std::os::unix::fs::symlink("missing.png", d.join("link_dead.png")).unwrap();
+
+        let names = list_images(&d).unwrap();
+        assert!(names.iter().any(|n| n == "real.png"));
+        assert!(names.iter().any(|n| n == "link_ok.png"));
+        assert!(!names.iter().any(|n| n.starts_with("link_bad")));
+        assert!(!names.iter().any(|n| n.starts_with("link_dead")));
+
+        let _ = fs::remove_dir_all(&d);
+    }
 }

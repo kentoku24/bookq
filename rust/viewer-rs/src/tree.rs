@@ -694,9 +694,12 @@ pub fn shallow_live(target: &Path) -> Option<Vec<Value>> {
         if md.is_dir() {
             dirs.push(name);
         } else if md.is_file() {
-            match suffix_lower(&name).as_str() {
-                s if crate::serve::ARCHIVE_EXTENSIONS.contains(&s) => archives.push(name),
-                s if crate::serve::PDF_EXTENSIONS.contains(&s) => pdfs.push(name),
+            // #62 review: classify symlinks by resolved suffix — serving
+            // resolves before its extension check, so name-based listing
+            // would expose entries that can't be served.
+            match bookq_core::classified_suffix(&entry, &name).as_deref() {
+                Some(s) if crate::serve::ARCHIVE_EXTENSIONS.contains(&s) => archives.push(name),
+                Some(s) if crate::serve::PDF_EXTENSIONS.contains(&s) => pdfs.push(name),
                 _ => {}
             }
         }
@@ -739,14 +742,6 @@ pub fn shallow_live(target: &Path) -> Option<Vec<Value>> {
         ]));
     }
     Some(out)
-}
-
-fn suffix_lower(name: &str) -> String {
-    Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!(".{}", e.to_lowercase()))
-        .unwrap_or_default()
 }
 
 /// Count archive+pdf nodes — the steady-state fill generation (1 + count).
