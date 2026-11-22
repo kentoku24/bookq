@@ -303,6 +303,10 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
         Cmd::List => match store.list() {
             Ok(rows) => {
                 for row in rows {
+                    // Surface dormant grants: a row outside the current
+                    // ALLOWED_EMAILS cannot log in, but would activate if the
+                    // email were allowed later. Keep stdout a stable TSV.
+                    warn_if_not_allowed(&row.email);
                     println!("{}", format_row(&row));
                 }
                 EXIT_OK

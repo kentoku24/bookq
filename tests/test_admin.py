@@ -322,6 +322,13 @@ def test_auth_allowlist_recheck_blocks_admin_row(auth_server, auth_state):
     assert cp.returncode == 0
     assert cp.stdout.strip() == "admin"
     assert "not in ALLOWED_EMAILS" in cp.stderr
+
+    # `list` keeps stdout a stable TSV and warns about dormant grants on stderr.
+    cp = admin_cli(auth_state, "list", env_extra={"ALLOWED_EMAILS": TEST_EMAIL})
+    assert cp.returncode == 0
+    assert outside in cp.stdout
+    assert "not in ALLOWED_EMAILS" in cp.stderr
+
     try:
         cookie = _session_cookie(_user(outside))
         status, headers, _ = _request(

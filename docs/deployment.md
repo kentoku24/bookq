@@ -250,7 +250,7 @@ docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin check you@example
 docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin remove you@example.com
 ```
 
-- `admin list` は `email<TAB>created_at(RFC1123)<TAB>created_by<TAB>note`。空出力 = admin 0 名。
+- `admin list` は `email<TAB>created_at(RFC1123)<TAB>created_by<TAB>note`。空出力 = admin 0 名。`ALLOWED_EMAILS` に無い grant は stderr で警告する（stdout は TSV のまま）。
 - 同じ email の再 `add` は `already admin`（exit 0）で、既存の note/by は書き換えない。note を変えたい場合は `remove` → `add`。
 - exit code: `0` 成功 / `1` not found（remove/check）/ `2` usage・入力不正 / `3` store error。
 - `BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使う。サーバーと同じ値を指していること（CLI は DB が無い場合に警告を出す）。
