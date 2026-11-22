@@ -577,22 +577,32 @@ _ITEM_SEL = {"tile": ".tile", "list": ".item", "card": ".card"}
 _ART_SEL = {"tile": ".tile-img", "list": ".thumb", "card": ".card-img"}
 
 
-def _cs(el, prop, timeout=5.0):
-    """Computed style with a retry for the grid's async re-renders.
+def _cs(page, selector, prop, timeout=5.0):
+    """Computed style of the LIVE node matching selector.
 
-    Between `wait_for(state="attached")` and this call the visibility/view-mode
-    code can replace the tile nodes; reading a detached node yields "". A
-    locator re-resolves on each evaluate, so retry until the fresh node
-    settles instead of flaking under parallel load.
+    Renders replace #tile-grid's children wholesale (innerHTML), so an
+    element resolved before a re-render reads "" via getComputedStyle on
+    the detached node. locator.evaluate resolves and invokes in two
+    protocol steps a render can straddle; resolving inside one
+    page.evaluate cannot — querySelector and getComputedStyle run in the
+    same JS task. The retry now only covers the node genuinely being
+    absent (null), e.g. mid mode-switch (#607). An unreadable result is a
+    test failure, not "" — value-vs-value comparisons (_cs(a) == _cs(b))
+    would otherwise pass vacuously on "" == "".
     """
     deadline = time.time() + timeout
     value = ""
     while time.time() < deadline:
-        value = el.evaluate("(e,p)=>getComputedStyle(e)[p]", prop)
+        value = page.evaluate(
+            "([sel, prop]) => { const el = document.querySelector(sel);"
+            " return el ? getComputedStyle(el)[prop] : null; }",
+            [selector, prop])
         if value:
             return value
         time.sleep(0.05)
-    return value
+    assert value, (
+        f"computed style unreadable after {timeout}s: "
+        f"{selector} [{prop}]")
 
 
 def _set_view_mode(vpage, mode):
@@ -605,22 +615,27 @@ def _set_view_mode(vpage, mode):
     )
 
 
-def _assert_no_dimming(hidden, sibling, mode):
+def _item_sel(mode, path):
+    return f'#tile-grid {_ITEM_SEL[mode]}[data-path="{path}"]'
+
+
+def _assert_no_dimming(vpage, hidden_sel, sibling_sel, mode):
     """Hidden vs visible sibling share artwork/name computed styles —
     is-hidden* contributes badges/buttons only, never dimming."""
     if mode == "list":
-        h_thumb = hidden.locator(".thumb")
-        s_thumb = sibling.locator(".thumb")
-        assert h_thumb.count() == 1
-        assert _cs(h_thumb, "opacity") == _cs(s_thumb, "opacity") == "0.75"
-        assert _cs(h_thumb, "filter") == "none"
-        assert _cs(hidden.locator(".name"), "color") == _cs(
-            sibling.locator(".name"), "color")
+        h_thumb_sel = hidden_sel + " .thumb"
+        s_thumb_sel = sibling_sel + " .thumb"
+        assert vpage.locator(h_thumb_sel).count() == 1
+        assert _cs(vpage, h_thumb_sel, "opacity") == \
+            _cs(vpage, s_thumb_sel, "opacity") == "0.75"
+        assert _cs(vpage, h_thumb_sel, "filter") == "none"
+        assert _cs(vpage, hidden_sel + " .name", "color") == _cs(
+            vpage, sibling_sel + " .name", "color")
     else:
-        art = hidden.locator(_ART_SEL[mode])
-        assert art.count() == 1
-        assert _cs(art, "opacity") == "1"
-        assert _cs(art, "filter") == "none"
+        art_sel = hidden_sel + " " + _ART_SEL[mode]
+        assert vpage.locator(art_sel).count() == 1
+        assert _cs(vpage, art_sel, "opacity") == "1"
+        assert _cs(vpage, art_sel, "filter") == "none"
 
 
 def _assert_hidden_badge_and_toggle(item):
@@ -637,12 +652,13 @@ def test_show_all_hidden_not_dimmed_browse(vpage, vis_env, mode):
     vpage.wait_for_selector(".tile")
     _show_all(vpage)
     _set_view_mode(vpage, mode)
-    sel = _ITEM_SEL[mode]
-    hidden = vpage.locator(f'#tile-grid {sel}[data-path="hide_me"]')
-    sibling = vpage.locator(f'#tile-grid {sel}[data-path="hide_me_b"]')
+    hidden_sel = _item_sel(mode, "hide_me")
+    sibling_sel = _item_sel(mode, "hide_me_b")
+    hidden = vpage.locator(hidden_sel)
+    sibling = vpage.locator(sibling_sel)
     hidden.wait_for(state="attached")
     sibling.wait_for(state="attached")
-    _assert_no_dimming(hidden, sibling, mode)
+    _assert_no_dimming(vpage, hidden_sel, sibling_sel, mode)
     _assert_hidden_badge_and_toggle(hidden)
 
 
@@ -656,17 +672,18 @@ def test_show_all_hidden_not_dimmed_search(vpage, vis_env, mode):
     vpage.fill("#search-input", "hide")
     vpage.wait_for_function(
         "document.getElementById('folder-count').textContent === '4 件'")
-    sel = _ITEM_SEL[mode]
-    hidden = vpage.locator(f'#tile-grid {sel}[data-path="hide_me"]')
-    sibling = vpage.locator(f'#tile-grid {sel}[data-path="hide_me_b"]')
+    hidden_sel = _item_sel(mode, "hide_me")
+    sibling_sel = _item_sel(mode, "hide_me_b")
+    hidden = vpage.locator(hidden_sel)
+    sibling = vpage.locator(sibling_sel)
     hidden.wait_for(state="attached")
     sibling.wait_for(state="attached")
     if mode == "list":
         assert hidden.locator(".thumb").count() == 0
-        assert _cs(hidden.locator(".name"), "color") == _cs(
-            sibling.locator(".name"), "color")
+        assert _cs(vpage, hidden_sel + " .name", "color") == _cs(
+            vpage, sibling_sel + " .name", "color")
     else:
-        _assert_no_dimming(hidden, sibling, mode)
+        _assert_no_dimming(vpage, hidden_sel, sibling_sel, mode)
     _assert_hidden_badge_and_toggle(hidden)
 
 
@@ -677,9 +694,10 @@ def test_show_all_hidden_descendant_not_dimmed(vpage, vis_env, mode):
     vpage.wait_for_selector(".tile")
     _show_all(vpage)
     _set_view_mode(vpage, mode)
-    sel = _ITEM_SEL[mode]
-    root_el = vpage.locator(f'#tile-grid {sel}[data-path="hide_series"]')
-    sibling = vpage.locator(f'#tile-grid {sel}[data-path="keep_a"]')
+    root_sel = _item_sel(mode, "hide_series")
+    sibling_sel = _item_sel(mode, "keep_a")
+    root_el = vpage.locator(root_sel)
+    sibling = vpage.locator(sibling_sel)
     root_el.wait_for(state="attached")
     sibling.wait_for(state="attached")
     if mode == "tile":
@@ -692,24 +710,25 @@ def test_show_all_hidden_descendant_not_dimmed(vpage, vis_env, mode):
         expect(multi).to_have_css("opacity", "1")
         expect(multi).to_have_css("filter", "none")
     else:
-        _assert_no_dimming(root_el, sibling, mode)
+        _assert_no_dimming(vpage, root_sel, sibling_sel, mode)
     ref_name = ref_thumb = None
     if mode == "list":
-        ref_name = _cs(sibling.locator(".name"), "color")
-        ref_thumb = _cs(sibling.locator(".thumb"), "opacity")
+        ref_name = _cs(vpage, sibling_sel + " .name", "color")
+        ref_thumb = _cs(vpage, sibling_sel + " .thumb", "opacity")
     root_el.click()
-    child = vpage.locator(f'#tile-grid {sel}[data-path="hide_series/vol1"]')
+    child_sel = _item_sel(mode, "hide_series/vol1")
+    child = vpage.locator(child_sel)
     child.wait_for(state="attached")
     assert "is-hidden-descendant" in (child.get_attribute("class") or "")
     if mode == "list":
-        assert _cs(child.locator(".thumb"), "opacity") == ref_thumb
-        assert _cs(child.locator(".thumb"), "filter") == "none"
-        assert _cs(child.locator(".name"), "color") == ref_name
+        assert _cs(vpage, child_sel + " .thumb", "opacity") == ref_thumb
+        assert _cs(vpage, child_sel + " .thumb", "filter") == "none"
+        assert _cs(vpage, child_sel + " .name", "color") == ref_name
     else:
-        art = child.locator(_ART_SEL[mode])
-        assert art.count() == 1
-        assert _cs(art, "opacity") == "1"
-        assert _cs(art, "filter") == "none"
+        art_sel = child_sel + " " + _ART_SEL[mode]
+        assert vpage.locator(art_sel).count() == 1
+        assert _cs(vpage, art_sel, "opacity") == "1"
+        assert _cs(vpage, art_sel, "filter") == "none"
     assert "上位フォルダが非表示" in child.locator(
         ".visibility-badge").inner_text()
     assert child.locator(".visibility-toggle").count() == 0
