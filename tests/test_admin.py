@@ -150,7 +150,7 @@ def _post_admin(server, action, email, headers=None):
 def _row(body, email):
     needle = email.encode("utf-8")
     for line in body.splitlines():
-        if needle in line and line.lstrip().startswith(b"<tr>"):
+        if needle in line and line.lstrip().startswith(b"<tr"):
             return line
     raise AssertionError(f"row not found: {email}")
 
@@ -631,30 +631,23 @@ def test_admin_form_round_trip_in_browser(
     """#613: a real browser submits the plain HTML forms end to end."""
     context = browser.new_context(viewport={"width": 1000, "height": 800})
     page = context.new_page()
+    row = page.locator(f'tr[data-user-email="{NEW_USER}"]')
     try:
         page.goto(ui_server + "/admin")
         page.fill("#admin-add-email", NEW_USER)
-        page.get_by_role("button", name="追加").click()
+        page.locator('form.admin-add button[type="submit"]').click()
         expect(page.locator(".admin-flash")).to_be_visible()
-        expect(page.locator("tr", has_text=NEW_USER)).to_be_visible()
+        expect(row).to_be_visible()
         cp = users_cli(ui_state, "check", NEW_USER)
         assert cp.returncode == 0 and cp.stdout.strip() == "member"
 
-        page.locator("tr", has_text=NEW_USER).get_by_role(
-            "button", name="ログイン停止"
-        ).click()
-        expect(
-            page.locator("tr", has_text=NEW_USER)
-        ).to_contain_text("再有効化")
+        row.locator('form[action="/admin/users/disable"] button').click()
+        expect(row).to_contain_text("再有効化")
         cp = users_cli(ui_state, "check", NEW_USER)
         assert cp.returncode == 1 and cp.stdout.strip() == "disabled"
 
-        page.locator("tr", has_text=NEW_USER).get_by_role(
-            "button", name="再有効化"
-        ).click()
-        expect(
-            page.locator("tr", has_text=NEW_USER)
-        ).to_contain_text("ログイン停止")
+        row.locator('form[action="/admin/users/enable"] button').click()
+        expect(row).to_contain_text("ログイン停止")
         cp = users_cli(ui_state, "check", NEW_USER)
         assert cp.returncode == 0 and cp.stdout.strip() == "member"
     finally:
