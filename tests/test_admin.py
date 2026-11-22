@@ -113,7 +113,7 @@ def test_without_row_is_generic_404(admin_server, no_admin):
     assert status == 404
     # Generic body: the admin surface is not advertised.
     assert b"admin" not in body.lower()
-    assert b"\xe7\xae\xa1\xe7\x90\x86" not in body  # 管理
+    assert "管理".encode("utf-8") not in body
     assert headers["cache-control"] == "no-store"
     assert "cookie" in headers.get("vary", "").lower()
 
