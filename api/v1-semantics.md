@@ -175,7 +175,7 @@ spec の `security` は cookie OR Bearer のどちらか。
 ## 7. media decode
 
 decode を要する endpoint (`GET /thumb/{path}`、`GET /view/{path}` の
-normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
+normalize 分岐、`GET /api/v1/thumb-sprite` のラスタセル) の形式契約
 (#406、#563 で `.avif` を native 化。正本:
 `rust/viewer-rs/src/thumbs.rs::NATIVE_DECODE`)。
 
@@ -206,7 +206,7 @@ normalize 分岐、`GET /api/thumb-sprite` のラスタセル) の形式契約
 
 ## 8. media ETag / Range
 
-`/image` `/thumb` `/view` `/api/thumb-sprite` の条件付き取得契約
+`/image` `/thumb` `/view` `/api/v1/thumb-sprite` の条件付き取得契約
 (#277 — それまで実装だけに存在した ETag 書式の正本化)。
 mtime/size は `fmt_mtime` (`{:.0}`) で整数表記される
 (`/image` loose/archive の size は u64 そのまま — 同じ整数値)。
@@ -221,22 +221,37 @@ mtime/size は `fmt_mtime` (`{:.0}`) で整数表記される
 | `GET /thumb/{path}` | `"<mtime>-<size>-<width>-<digest[..16]>"` | ソース cache-key の SHA1 |
 | `GET /view/{path}` passthrough 分岐 | `"<mtime>-<size>-view-<digest[..16]>"` | ソース cache-key の SHA1 |
 | `GET /view/{path}` normalize 分岐 | `"<mtime>-<size>-view-<wtag>-<digest[..16]>"` | `?w=` 有りは cache-key に `|w<w>` が乗る。`wtag` は `"full"` または clamp 後の幅 |
-| `GET /api/thumb-sprite` | `"<mtime>-<size>-<cell>-s<digest[..16]>"` | セル内容 key の SHA1 |
+| `GET /api/v1/thumb-sprite` | `"<mtime>-<size>-<cell>-s<digest[..16]>"` | セル内容 key の SHA1 |
 
-- **`If-None-Match`**: ETag 一致で **304** (body 無し)。
-- **`If-Modified-Since`**: archive 系は `int(mtime)` 切り捨てで比較
-  (`archive_not_modified`)、`/image` loose file は float mtime を
-  そのまま比較 (`file_not_modified`) — サブ秒の差で 304 が揺れ得る
-  非対称は既知のまま (ETag 側が主経路)。
-- **`Last-Modified`**: 全 media 応答に付与 (HTTP-date)。
-- **`Range: bytes=`**: `/image` のみ単一 Range に対応 (206 +
-  `Content-Range`)。複数 Range・不正構文は契約外 — 複数 Range は
-  200 フル、構文エラーは 400 (`text/plain` になり得る — §6 参照)、
-  長さ超過は 416。`/thumb` `/view` `/api/thumb-sprite` は Range 対象外
-  (生成物のため)。
+- **スプライト ETag の入力**: archive 指定時は archive ファイル自体の
+  mtime/size。通常フォルダ時は `size` = 要求セル数 (**欠損
+  `miss:`/不正 `bad:` セルも含む**)、`mtime` = stat できたセルの
+  最新 mtime (全滅時 0)。digest にはフォルダパス・セル名一覧・
+  セル毎の stat key (欠損は `miss:<name>`/`bad:<name>` marker)・
+  セルサイズ・行レイアウトが入る — 内容が1セルでも変われば ETag が変わる。
+- **`If-None-Match` / `If-Modified-Since`**: どちらか一方でも条件を
+  満たせば **304** (body 無し)。ETag 不一致でも IMS が新しければ 304 に
+  なり得る (両者は独立判定 — SW は両ヘッダを送る)。archive 系は
+  `int(mtime)` 切り捨てで比較 (`archive_not_modified`)、`/image` loose
+  file は float mtime をそのまま比較 (`file_not_modified`) — サブ秒の
+  差で 304 が揺れ得る非対称は既知のまま (ETag 側が主経路)。
+- **304 応答ヘッダ**: `X-Content-Type-Options: nosniff` のみ —
+  ETag/Last-Modified は付かない。
+- **`Last-Modified`**: 200/206 の media 応答に付与 (HTTP-date)。304 には付かない。
+- **`Range: bytes=`**: `/image` loose file のみ単一 Range に対応
+  (206 + `Content-Range`)。archive entry / PDF page は
+  `parse_archive_range` で**不正・充足不能な Range を無視して 200 フル**
+  を返す (/thumb `/view` `/api/v1/thumb-sprite` は Range 対象外 — 生成物)。
+  loose file 側の詳細: 複数 Range・構文エラーは契約外 (複数 Range は
+  200 フル、構文エラーは 400 `text/plain` になり得る — §6 参照)、
+  **end が EOF を超える場合は 416 ではなく末尾までの 206**、
+  416 は `start >= size` の場合のみ。
 - **archive inner path の字句ガード**: `/image/{archive}/{inner}` と
   `/thumb` `/view` の archive 分岐は `serve.rs::valid_archive_inner`
   (空・先頭 `/`・`..` セグメントを拒否 → 400) を共有する (#277)。
+  ただし適用は `resolve_archive` の正規化**後** — 空・`.` セグメントは
+  先に除去され、`..` を含む URL は archive 分岐に入らず plain-file
+  経路へ落ちる (受信 URL への字句適用ではない点に注意)。
 
 ## 9. library edit
 
