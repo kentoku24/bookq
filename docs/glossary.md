@@ -333,7 +333,7 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **説明**: Service Worker を scope `/` で登録できるようルートから配信する。
 
 ### Google OAuth認証 (Google OAuth Authentication)
-- **根拠**: `/auth/login` / `/auth/callback` / `/auth/logout` / `login()` / `auth_callback()` / `logout()` (app/auth.py) / `ALLOWED_EMAILS` → `allowed_emails_set`
+- **根拠**: `/auth/login` / `/auth/callback` / `/auth/logout` / `login()` / `auth_callback()` / `logout()` (app/auth.py) / `users` テーブル（CLI enrollment）
 - **説明**: Google OAuth でサインインさせ、メール許可リスト外は403で拒否する。
 
 ### テストモードバイパス (Test Mode Bypass)

@@ -145,7 +145,7 @@ spec の `security` は cookie OR Bearer のどちらか。
       2 重使用防止のため single-flight 前提)
 - **access token**: HS256 JWT、claims `{sub,name,picture,iat,exp}`、`exp = iat+3600`。
   - identity の取得は claims をローカル decode する (`/api/me` 等は存在しない)
-  - server 側の検証: exp 必須・`sub` を email として allowlist (`ALLOWED_EMAILS`)
+  - server 側の検証: exp 必須・`sub` を email として `users` テーブルの active membership
     で再確認 — **allowlist が空なら全拒否 (fail-closed)**、email を allowlist から
     落とせば発行済み token も即無効
 - **`BOOKQ_TEST_MODE`**: `?client=native` はバイパス**されない** (Google OAuth を
