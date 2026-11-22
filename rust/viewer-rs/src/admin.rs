@@ -86,10 +86,7 @@ pub(crate) fn normalize_email(raw: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed.len() > MAX_EMAIL_LEN {
         return None;
     }
-    if trimmed
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control())
-    {
+    if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
     }
     let mut parts = trimmed.split('@');
@@ -260,7 +257,10 @@ mod tests {
     #[test]
     fn normalize_text_rejects_multiline_and_long_values() {
         assert_eq!(normalize_text("", "cli"), Some("cli".to_string()));
-        assert_eq!(normalize_text("  ticket-123 ", ""), Some("ticket-123".to_string()));
+        assert_eq!(
+            normalize_text("  ticket-123 ", ""),
+            Some("ticket-123".to_string())
+        );
         assert_eq!(normalize_text("line\nbreak", ""), None);
         assert_eq!(normalize_text("tab\there", ""), None);
         let long = "x".repeat(MAX_TEXT_LEN + 1);
@@ -275,9 +275,7 @@ mod tests {
         assert!(store.list().unwrap().is_empty());
 
         assert_eq!(
-            store
-                .add(" Alice@Example.COM ", "cli", "initial")
-                .unwrap(),
+            store.add(" Alice@Example.COM ", "cli", "initial").unwrap(),
             Change::Added
         );
         assert!(store.is_admin("alice@example.com").unwrap());
@@ -298,10 +296,7 @@ mod tests {
         // "Restart": a fresh store on the same file sees the row.
         let store2 = AdminStore::new(&dir);
         assert!(store2.is_admin("alice@example.com").unwrap());
-        assert_eq!(
-            store2.remove("ALICE@EXAMPLE.COM").unwrap(),
-            Change::Removed
-        );
+        assert_eq!(store2.remove("ALICE@EXAMPLE.COM").unwrap(), Change::Removed);
         assert!(!store2.is_admin("alice@example.com").unwrap());
         assert_eq!(
             store2.remove("alice@example.com").unwrap(),
@@ -425,9 +420,8 @@ mod tests {
             conn.pragma_update(None, "user_version", 99).unwrap();
         }
         let store = AdminStore::new(&dir);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            store.is_admin("a@b.com")
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.is_admin("a@b.com")));
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -200,6 +200,28 @@ fn warn_if_new_db(state_dir: &Path) {
     }
 }
 
+/// A grant for an email outside `ALLOWED_EMAILS` is inert: the server's
+/// per-request allowlist check rejects the login first. Warn (never refuse) —
+/// the allowlist can change later and the CLI may run with a different env.
+fn warn_if_not_allowed(email: &str) {
+    let Ok(allow) = std::env::var("ALLOWED_EMAILS") else {
+        return;
+    };
+    let Some(normalized) = admin::normalize_email(email) else {
+        return;
+    };
+    let listed = allow
+        .split(',')
+        .map(|e| e.trim().to_lowercase())
+        .any(|e| !e.is_empty() && e == normalized);
+    if !listed {
+        eprintln!(
+            "warning: {normalized} is not in ALLOWED_EMAILS — \
+             this grant is inert until the email is added there"
+        );
+    }
+}
+
 /// Run one `admin` invocation. Returns the process exit code; never panics on
 /// user input. `state_dir` is passed explicitly so tests do not mutate env.
 pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
@@ -223,21 +245,24 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
             email,
             note,
             created_by,
-        } => match store.add(&email, &created_by, &note) {
-            Ok(Change::Added) => {
-                println!("added {email}");
-                EXIT_OK
+        } => {
+            warn_if_not_allowed(&email);
+            match store.add(&email, &created_by, &note) {
+                Ok(Change::Added) => {
+                    println!("added {email}");
+                    EXIT_OK
+                }
+                Ok(Change::AlreadyPresent) => {
+                    println!("already admin: {email}");
+                    EXIT_OK
+                }
+                Ok(other) => {
+                    eprintln!("error: unexpected store result: {other:?}");
+                    EXIT_STORE
+                }
+                Err(e) => fail(&e),
             }
-            Ok(Change::AlreadyPresent) => {
-                println!("already admin: {email}");
-                EXIT_OK
-            }
-            Ok(other) => {
-                eprintln!("error: unexpected store result: {other:?}");
-                EXIT_STORE
-            }
-            Err(e) => fail(&e),
-        },
+        }
         Cmd::Remove { email } => match store.remove(&email) {
             Ok(Change::Removed) => {
                 println!("removed {email}");
