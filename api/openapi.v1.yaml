@@ -875,7 +875,7 @@ paths:
   # ライブラリへの書き込み面。対応形式は .zip .cbz .rar .cbr .epub .pdf
   # (serve.rs::ARCHIVE_EXTENSIONS + PDF_EXTENSIONS)。衝突は `name (1).ext`
   # 形式の自動リネーム、書き込みは tmp + atomic rename。意味論の正本は
-  # `v1-semantics.md` §8。
+  # `v1-semantics.md` §9。
   /api/v1/library/files:
     post:
       tags: [library]
@@ -974,7 +974,7 @@ paths:
         ディレクトリは配下ごと再帰削除。ルート（空パス）・
         `.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。
         読書位置やクライアント側オフラインキャッシュは消えない
-        （孤立するが無害 — v1-semantics.md §8）。
+        （孤立するが無害 — v1-semantics.md §9）。
       parameters:
         - name: path
           in: query

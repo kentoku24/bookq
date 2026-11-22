@@ -310,7 +310,7 @@ export interface paths {
          *     ディレクトリは配下ごと再帰削除。ルート（空パス）・
          *     `.bookq-uploads` 配下・存在しないパスはそれぞれ 400/400/404。
          *     読書位置やクライアント側オフラインキャッシュは消えない
-         *     （孤立するが無害 — v1-semantics.md §8）。
+         *     （孤立するが無害 — v1-semantics.md §9）。
          */
         delete: operations["deleteLibraryFile"];
         options?: never;
