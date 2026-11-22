@@ -57,13 +57,22 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zlib1g-dev pkg-config libdav1d-dev
 
       # libpdfium (PDFium engine for the native PDF pipeline, #402) — must
-      # track pdfium-render's `pdfium_latest` bindings (8125 at 0.9.5).
+      # track pdfium-render's `pdfium_latest` bindings. Version AND
+      # checksum are read from Dockerfile.viewer-rs at run time so the
+      # weekly pdfium-update PR never has to touch this workflow file
+      # (GITHUB_TOKEN can't push .github/workflows/ changes — #603 review).
       # Without it the render tests degrade to the 501-decline asserts.
       - name: libpdfium for native PDF tests
         run: |
+          set -euo pipefail
           mkdir -p /tmp/pdfium-test/lib
-          curl -fsSL -o /tmp/pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8125/pdfium-linux-x64.tgz
+          pdfium_ver=$(grep -oP '^ARG PDFIUM_VERSION=\K[0-9]+' Dockerfile.viewer-rs)
+          pdfium_sha=$(grep -oP '^ARG PDFIUM_SHA256_AMD64=\K[0-9a-f]+' Dockerfile.viewer-rs)
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/${pdfium_ver}/pdfium-linux-x64.tgz"
+          echo "${pdfium_sha}  /tmp/pdfium.tgz" | sha256sum -c -
           tar xzf /tmp/pdfium.tgz -C /tmp/pdfium-test
+          echo "PDFIUM_LIB_PATH=$(find /tmp/pdfium-test/lib -name 'libpdfium*' | head -1)" >> "$GITHUB_ENV"
           ls -la /tmp/pdfium-test/lib/
 
       - uses: Swatinem/rust-cache@v2
@@ -72,8 +81,6 @@ jobs:
 
       - name: cargo test
         working-directory: rust
-        env:
-          PDFIUM_DYNAMIC_LIB_PATH: /tmp/pdfium-test/lib
         run: cargo test --workspace
 
   # Builds the viewer-rs image once and runs the gateway contract suite
