@@ -224,6 +224,50 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - Tailscale Funnel は beta で調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。`*.ts.net` 証明書は CT log に記録されるため funnel 公開により tailnet 名は公開情報になる
 - 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）
 
+### 管理者の登録（admin モード, #608）
+
+`/admin` は **admin 登録されたユーザーだけ**が表示できる。管理者はライブラリ全体で共有され、既存の `user-state` SQLite（`/var/lib/bookq/folder-visibility.sqlite3`、schema v3）の `admin_users` テーブルに保存される。
+
+- 登録・失効・一覧・確認は **`viewer-rs admin` CLI のみ**。HTTP の書込み経路は存在しない。
+- 実行にはホスト/コンテナの操作権限が要る（`SECRET_KEY` を読めるのと同じ信頼境界）。distroless なので shell は不要で、バイナリを直接 exec する。
+- 反映は即時（サーバー再起動不要）。admin 判定はリクエストごとに DB を読むため、`remove` の次のリクエストから 404 になる。
+- admin は **`ALLOWED_EMAILS` に含まれる Google アカウント**である必要がある。allowlist から外すと admin 行が残っていてもログインできない（per-request 再評価, #373）。
+- 初期状態は 0 名（fail-closed）。初回ログインが自動で admin になることはない。
+
+```bash
+# 追加（本番。コンテナ名は docker-compose.yml の container_name）
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin add you@example.com --note "initial admin"
+
+# 確認
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin list
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin check you@example.com
+
+# 失効
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin remove you@example.com
+```
+
+- `admin list` は `email<TAB>created_at(RFC1123)<TAB>created_by<TAB>note`。空出力 = admin 0 名。
+- 同じ email の再 `add` は `already admin`（exit 0）で、既存の note/by は書き換えない。note を変えたい場合は `remove` → `add`。
+- exit code: `0` 成功 / `1` not found（remove/check）/ `2` usage・入力不正 / `3` store error。
+- `BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使う。サーバーと同じ値を指していること（CLI は DB が無い場合に警告を出す）。
+- **デプロイ順序**: 新バイナリを起動して schema v3 を適用してから CLI を実行する。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。
+- `user-state` は admin の grant を含む永続データ。既存のバックアップ対象に含め、リストア後は `admin list` で不要な grant がないか確認する。
+- Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
+
+開発環境:
+
+```bash
+./dev.sh list   # ENV → SLOT (dev-XX) を確認
+docker exec bookq-dev-viewer-dev-XX /usr/local/bin/viewer-rs admin add test@example.com
+```
+
+ローカル（Docker なし）:
+
+```bash
+BOOKQ_STATE_DIR=/tmp/bookq-state \
+  cargo run --manifest-path rust/Cargo.toml -p viewer-rs -- admin add test@example.com
+```
+
 ### やってはいけないこと
 
 **worktree で素の `docker compose up` を打たない。** compose はディレクトリ名からプロジェクト名を作るので、worktree では別プロジェクトが立ち上がる。そこには tailscale サイドカーも含まれ、ホスト名 `bookq` を要求して本番のノードと名前を争う（Tailscale が `bookq-1` にリネームするため、`BASE_URL` と証明書が食い違って本番が壊れる）。

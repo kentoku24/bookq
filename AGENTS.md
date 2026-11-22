@@ -95,7 +95,8 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 
 - viewer-rs はホストポートを公開しない。到達経路は tailscale サイドカーの `tailscale serve` (HTTPS :443 → viewer-rs:8080)。一般公開は opt-in の cloudflared (compose profile `public`、`CLOUDFLARE_TUNNEL_TOKEN` 設定で `rebuild.sh prd deploy` が有効化) が第 2 の経路になる (#349)。`TS_FUNNEL=1` の Tailscale Funnel (#353) も存在するが、公式の変更不可な帯域上限 (実測 ~数十KB/s/接続) で画像配信には使えない — 公開には使わないこと。`viewer-rs` が `bookq_default` ネットワーク外だと 502 になる。
 - 開発環境は `./dev.sh up` で管理 (10スロットプール、project `bookq-dev-pool-XX` 形式。真実は docker label `com.bookq.name` / `com.bookq.pool_slot` のみ)。本番 `docker compose up` を worktree で直接叩かないこと。
-- ユーザー設定 (隠しルート等) と読書位置は `user-state` volume の `/var/lib/bookq` (`folder-visibility.sqlite3`、スキーマ v2) に永続化される。隠しルートはユーザー別ではなくライブラリ共有 (グローバル)、読書位置は認証ユーザー別。キャッシュではないのでキャッシュ掃除経路で消さないこと。
+- ユーザー設定 (隠しルート等) と読書位置は `user-state` volume の `/var/lib/bookq` (`folder-visibility.sqlite3`、スキーマ v3) に永続化される。隠しルートはユーザー別ではなくライブラリ共有 (グローバル)、読書位置は認証ユーザー別。キャッシュではないのでキャッシュ掃除経路で消さないこと。
+- admin ユーザーも同じ DB の `admin_users` (v3)。登録/失効は `viewer-rs admin add|remove|list|check` のみ (HTTP 書込みなし、`docker exec` で実行)。`/admin` は admin 以外 404・未認証は 303 `/`。詳細は `docs/deployment.md`「管理者の登録」。
 
 ### iOS Simulator / エージェントによる実機確認
 
