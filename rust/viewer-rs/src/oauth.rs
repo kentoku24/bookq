@@ -869,21 +869,35 @@ pub async fn callback(
     // directory cache) so an operator's `users add` works on the first login.
     let users = flow.users.clone();
     let email_for_check = email.clone();
-    let active = tokio::task::spawn_blocking(move || users.is_active(&email_for_check))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or(false);
+    let membership = tokio::task::spawn_blocking(move || users.is_active(&email_for_check)).await;
+    // Fail closed on lookup errors, but keep the cause distinct from a
+    // genuine non-member denial — #559 telemetry exists to spot probing,
+    // and a store outage must not read like one.
+    let (active, lookup_error) = match membership {
+        Ok(Ok(v)) => (v, None),
+        Ok(Err(e)) => (false, Some(e.to_string())),
+        Err(e) => (false, Some(e.to_string())),
+    };
     if !active {
         // #559 telemetry: membership denials were invisible — the exact
         // signal needed to spot credential-stuffing against real
         // Google accounts.
-        tracing::warn!(
-            client_ip = %client_ip(headers),
-            email = %email,
-            reason = "email_not_allowed",
-            "auth callback rejected"
-        );
+        if let Some(err) = &lookup_error {
+            tracing::warn!(
+                client_ip = %client_ip(headers),
+                email = %email,
+                error = %err,
+                reason = "membership_check_failed",
+                "auth callback rejected"
+            );
+        } else {
+            tracing::warn!(
+                client_ip = %client_ip(headers),
+                email = %email,
+                reason = "email_not_allowed",
+                "auth callback rejected"
+            );
+        }
         // `session.clear()` → the null cookie only when a session was
         // actually present (initial_session_was_empty == False).
         let mut res = state::detail(StatusCode::FORBIDDEN, "Email not allowed");
