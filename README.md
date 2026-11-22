@@ -86,6 +86,8 @@ cp .env.example .env
 
 `.env` に `TS_FUNNEL=1` を設定すると tailscale funnel になり同じ `https://<your-tailscale-hostname>` が public にも開けるが、**公式に変更不可の帯域上限があり (実測 ~数十KB/s/接続) 画像ビューア用途では使い物にならない**。公開には Cloudflare Tunnel を使うこと。手順・詳細は [docs/deployment.md](docs/deployment.md)「一般公開（Tailscale Funnel）」を参照。停止は `TS_FUNNEL` を外して `./prd.sh up`。
 
+公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
+
 ### 5. 管理者の登録（任意）
 
 `/admin` は **admin 登録されたユーザーだけ**が表示できる（未登録・非 admin には 404）。登録は稼働中のコンテナで CLI を実行する — HTTP の書込み経路はない:
@@ -96,8 +98,6 @@ docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin list
 ```
 
 対象は `ALLOWED_EMAILS` に含まれる Google アカウント。反映は即時（再起動不要）で、初期状態は 0 名（初回ログインが自動で admin になることはない）。失効は `admin remove <email>`。詳細は [docs/deployment.md](docs/deployment.md)「管理者の登録」を参照。
-
-公開経路の構成図: [docs/bookq-public-funnel.html](docs/bookq-public-funnel.html) (client → Funnel edge → sidecar → viewer、ソース参照つき)。GitHub 上ではソース表示になるため clone してブラウザで開く。
 
 注意: Tailscale Funnel は beta で、公式に調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。また `*.ts.net` 証明書は CT log に記録されるため、funnel 公開により tailnet 名は公開情報になる。
 
