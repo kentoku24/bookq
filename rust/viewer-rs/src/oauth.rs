@@ -108,6 +108,139 @@ struct RefreshEntry {
     exp: f64,
 }
 
+/* #559 (AUTH-01): per-client-IP throttling for the auth surface.
+ * viewer-rs has no host port — every request arrives via the
+ * tailscale/cloudflared sidecar, so the client identity comes only
+ * from proxy-set headers (the TCP peer is the sidecar for everyone).
+ * Two fixed windows: token-exchange FAILURES (legit traffic never
+ * accrues them, so native-app retries can't false-positive) and login
+ * initiations (generous — only script floods reach it). */
+const AUTH_FAIL_WINDOW_S: f64 = 60.0;
+const AUTH_FAIL_MAX: u32 = 20;
+const AUTH_LOGIN_WINDOW_S: f64 = 60.0;
+const AUTH_LOGIN_MAX: u32 = 120;
+/// Bound on tracked IPs — evict windows that lapsed long ago.
+const AUTH_RATE_MAX_IPS: usize = 4096;
+
+#[derive(Default)]
+struct HitEntry {
+    start: f64,
+    count: u32,
+}
+
+pub struct AuthRateLimit {
+    fails: Mutex<HashMap<String, HitEntry>>,
+    logins: Mutex<HashMap<String, HitEntry>>,
+}
+
+impl AuthRateLimit {
+    pub fn new() -> Self {
+        Self {
+            fails: Mutex::new(HashMap::new()),
+            logins: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Over the token-failure budget? Peek only — does not count.
+    /// `Some(retry_after_secs)` while throttled.
+    pub fn token_throttled(&self, ip: &str) -> Option<u32> {
+        let now = now_secs_f64();
+        let map = self.fails.lock().unwrap();
+        let e = map.get(ip)?;
+        if now - e.start >= AUTH_FAIL_WINDOW_S || e.count < AUTH_FAIL_MAX {
+            return None;
+        }
+        Some(
+            ((e.start + AUTH_FAIL_WINDOW_S - now).ceil().max(1.0)) as u32,
+        )
+    }
+
+    /// Record one failed token exchange for `ip`.
+    pub fn token_fail(&self, ip: &str) {
+        let now = now_secs_f64();
+        let mut map = self.fails.lock().unwrap();
+        if map.len() > AUTH_RATE_MAX_IPS {
+            map.retain(|_, v| now - v.start < AUTH_FAIL_WINDOW_S * 4.0);
+        }
+        // Hard cap: a flood of fresh IPs must not grow the map without
+        // bound — the retain above only drops entries idle for 4
+        // windows, so an all-fresh map would otherwise keep growing
+        // (#599 review). Past the cap, untracked IPs simply aren't
+        // counted: tracking them has diminishing value once an attacker
+        // can rotate addresses anyway, and legit IPs are unaffected.
+        if map.len() >= AUTH_RATE_MAX_IPS && !map.contains_key(ip) {
+            return;
+        }
+        let e = map
+            .entry(ip.to_string())
+            .or_insert(HitEntry { start: now, count: 0 });
+        if now - e.start >= AUTH_FAIL_WINDOW_S {
+            e.start = now;
+            e.count = 0;
+        }
+        e.count += 1;
+    }
+
+    /// Count one login initiation; `Some(retry_after_secs)` once the
+    /// per-IP budget is spent.
+    pub fn login_hit(&self, ip: &str) -> Option<u32> {
+        let now = now_secs_f64();
+        let mut map = self.logins.lock().unwrap();
+        if map.len() > AUTH_RATE_MAX_IPS {
+            map.retain(|_, v| now - v.start < AUTH_LOGIN_WINDOW_S * 4.0);
+        }
+        // Same hard cap as token_fail — see the comment there.
+        if map.len() >= AUTH_RATE_MAX_IPS && !map.contains_key(ip) {
+            return None;
+        }
+        let e = map
+            .entry(ip.to_string())
+            .or_insert(HitEntry { start: now, count: 0 });
+        if now - e.start >= AUTH_LOGIN_WINDOW_S {
+            e.start = now;
+            e.count = 0;
+        }
+        if e.count >= AUTH_LOGIN_MAX {
+            return Some(
+                ((e.start + AUTH_LOGIN_WINDOW_S - now).ceil().max(1.0)) as u32,
+            );
+        }
+        e.count += 1;
+        None
+    }
+}
+
+/// #559: client identity for auth throttling/logging. Only proxy-set
+/// headers are meaningful — `CF-Connecting-IP` is edge-managed on the
+/// public (cloudflared) path; XFF's LAST entry is what our sidecar
+/// appended. Everything else collapses to "unknown".
+pub fn client_ip(headers: &HeaderMap) -> String {
+    let pick = |name: &str| -> Option<&str> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    // Prefer XFF's LAST entry over `cf-connecting-ip`: on the tailnet
+    // path a client can spoof the CF header but cannot rewrite the
+    // entry our sidecar appended — trusting CF first let tailnet
+    // clients rotate fake IPs and bypass the auth throttle (#599
+    // review). On the public (cloudflared) path CF edge manages both
+    // headers so either order yields the same client IP.
+    let ip = pick("x-forwarded-for")
+        .and_then(|xff| {
+            xff.rsplit(',')
+                .map(str::trim)
+                .find(|s| !s.is_empty())
+        })
+        .or_else(|| pick("cf-connecting-ip"));
+    ip.unwrap_or("unknown")
+        .chars()
+        .take(64)
+        .collect()
+}
+
 trait HasExp {
     fn exp(&self) -> f64;
 }
@@ -172,6 +305,8 @@ pub struct AuthFlow {
     /// `app.state.refresh_tokens` — rotating refresh tokens
     /// (`token_urlsafe(48)`).
     refresh: Mutex<HashMap<String, RefreshEntry>>,
+    /// #559: per-IP auth throttling (token failures + login hits).
+    rate: AuthRateLimit,
 }
 
 impl AuthFlow {
@@ -213,6 +348,7 @@ impl AuthFlow {
             directory,
             codes: Mutex::new(HashMap::new()),
             refresh: Mutex::new(HashMap::new()),
+            rate: AuthRateLimit::new(),
         })
     }
 
@@ -556,7 +692,23 @@ fn uri_host(s: &str) -> Option<String> {
 
 /// `GET /auth/login` — validate native params (400s first), then 302 to
 /// Google's consent screen with the tx state in `bookq_oauth`.
-pub fn login(flow: &AuthFlow, query: &HashMap<String, String>) -> Response {
+pub fn login(
+    flow: &AuthFlow,
+    query: &HashMap<String, String>,
+    client_ip: &str,
+) -> Response {
+    // #559: unlimited `bookq_oauth` issuance was part of AUTH-01 — cap
+    // initiations per client IP (generous: legit logins never reach it).
+    if let Some(retry) = flow.rate.login_hit(client_ip) {
+        let mut res = state::detail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many login attempts",
+        );
+        if let Ok(v) = HeaderValue::from_str(&retry.to_string()) {
+            res.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return res;
+    }
     let native = match native_params(query) {
         Ok(n) => n,
         Err(resp) => return resp,
@@ -627,6 +779,13 @@ pub async fn callback(
         .and_then(Value::as_str)
         == Some(oauth_state.as_str());
     if !tx_valid {
+        // #559 telemetry: forged/expired/replayed tx cookies are an
+        // auth anomaly — previously invisible in logs.
+        tracing::warn!(
+            client_ip = %client_ip(headers),
+            reason = "oauth_tx_mismatch",
+            "auth callback rejected"
+        );
         return access_denied();
     }
     let native = tx
@@ -667,6 +826,11 @@ pub async fn callback(
         _ => None,
     };
     let Some(access_token) = access_token else {
+        tracing::warn!(
+            client_ip = %client_ip(headers),
+            reason = "provider_token_exchange_failed",
+            "auth callback rejected"
+        );
         return access_denied();
     };
     let userinfo_resp = flow
@@ -682,6 +846,11 @@ pub async fn callback(
     let Some(userinfo) = userinfo.filter(|u| u.is_object()) else {
         // authlib fills token["userinfo"] from verified claims; a
         // provider answer with no usable userinfo is upstream's 502.
+        tracing::warn!(
+            client_ip = %client_ip(headers),
+            reason = "userinfo_failed",
+            "auth callback rejected"
+        );
         let mut res = state::detail(
             StatusCode::BAD_GATEWAY,
             "Auth provider error: no userinfo",
@@ -700,12 +869,35 @@ pub async fn callback(
     // directory cache) so an operator's `users add` works on the first login.
     let users = flow.users.clone();
     let email_for_check = email.clone();
-    let active = tokio::task::spawn_blocking(move || users.is_active(&email_for_check))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or(false);
+    let membership = tokio::task::spawn_blocking(move || users.is_active(&email_for_check)).await;
+    // Fail closed on lookup errors, but keep the cause distinct from a
+    // genuine non-member denial — #559 telemetry exists to spot probing,
+    // and a store outage must not read like one.
+    let (active, lookup_error) = match membership {
+        Ok(Ok(v)) => (v, None),
+        Ok(Err(e)) => (false, Some(e.to_string())),
+        Err(e) => (false, Some(e.to_string())),
+    };
     if !active {
+        // #559 telemetry: membership denials were invisible — the exact
+        // signal needed to spot credential-stuffing against real
+        // Google accounts.
+        if let Some(err) = &lookup_error {
+            tracing::warn!(
+                client_ip = %client_ip(headers),
+                email = %email,
+                error = %err,
+                reason = "membership_check_failed",
+                "auth callback rejected"
+            );
+        } else {
+            tracing::warn!(
+                client_ip = %client_ip(headers),
+                email = %email,
+                reason = "email_not_allowed",
+                "auth callback rejected"
+            );
+        }
         // `session.clear()` → the null cookie only when a session was
         // actually present (initial_session_was_empty == False).
         let mut res = state::detail(StatusCode::FORBIDDEN, "Email not allowed");
@@ -778,7 +970,20 @@ pub fn logout(_flow: &AuthFlow, session_lookup: &SessionLookup) -> Response {
 
 /// `POST /api/v1/auth/token` — public bootstrap; `exchange_token` +
 /// `Cache-Control: no-store` on the JSONResponse.
-pub fn token(flow: &AuthFlow, body_bytes: &[u8]) -> Response {
+pub fn token(flow: &AuthFlow, body_bytes: &[u8], client_ip: &str) -> Response {
+    // #559: repeated failed exchanges are throttled per client IP —
+    // legit traffic never produces 401s, so the budget can't
+    // false-positive on normal app retries.
+    if let Some(retry) = flow.rate.token_throttled(client_ip) {
+        let mut res = state::detail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many failed token exchanges",
+        );
+        if let Ok(v) = HeaderValue::from_str(&retry.to_string()) {
+            res.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return no_store(res);
+    }
     let body: Value = match serde_json::from_slice(body_bytes) {
         Ok(v) => v,
         Err(_) => {
@@ -786,6 +991,28 @@ pub fn token(flow: &AuthFlow, body_bytes: &[u8]) -> Response {
         }
     };
     let (status, payload) = flow.exchange(&body);
+    if status == StatusCode::UNAUTHORIZED {
+        // AUTH-01 telemetry: invalid code / invalid refresh / PKCE
+        // failures were previously invisible — the `detail` string
+        // distinguishes which check rejected the attempt.
+        flow.rate.token_fail(client_ip);
+        // NB: keep `Value::as_str` out of the macro args — inside
+        // tracing! `Value` resolves to `tracing::field::Value`.
+        let grant = body
+            .get("grant_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let detail = payload
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        tracing::warn!(
+            client_ip = %client_ip,
+            grant = %grant,
+            detail = %detail,
+            "auth token exchange rejected"
+        );
+    }
     let res = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
@@ -830,6 +1057,7 @@ mod tests {
             directory,
             codes: Mutex::new(HashMap::new()),
             refresh: Mutex::new(HashMap::new()),
+            rate: AuthRateLimit::new(),
         }
     }
 
@@ -1057,7 +1285,7 @@ mod tests {
     #[test]
     fn login_redirects_and_sets_tx_cookie() {
         let f = flow();
-        let res = login(&f, &HashMap::new());
+        let res = login(&f, &HashMap::new(), "1.1.1.1");
         assert_eq!(res.status(), StatusCode::FOUND);
         let loc = res.headers().get(header::LOCATION).unwrap().to_str().unwrap();
         assert!(loc.starts_with(AUTH_ENDPOINT));
@@ -1124,7 +1352,7 @@ mod tests {
     #[test]
     fn token_endpoint_response_shape() {
         let f = flow();
-        let res = token(&f, b"not json");
+        let res = token(&f, b"not json", "unknown");
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             res.headers().get(header::CACHE_CONTROL).unwrap(),
@@ -1156,5 +1384,102 @@ mod tests {
         );
         // No bookq_oauth clear — the in-flight GET flow stays retriable.
         assert!(res.headers().get_all(header::SET_COOKIE).iter().next().is_none());
+    }
+
+    /* ── #559 AUTH-01: per-IP auth throttling ── */
+
+    #[test]
+    fn rate_limit_token_failures_throttle_per_ip() {
+        let f = flow();
+        // AUTH_FAIL_MAX failures from one IP trip the throttle; a
+        // different IP is unaffected (no NAT collateral).
+        for _ in 0..AUTH_FAIL_MAX {
+            f.rate.token_fail("1.2.3.4");
+        }
+        assert!(f.rate.token_throttled("1.2.3.4").is_some());
+        assert!(f.rate.token_throttled("5.6.7.8").is_none());
+    }
+
+    #[test]
+    fn rate_limit_token_window_resets() {
+        let f = flow();
+        for _ in 0..AUTH_FAIL_MAX {
+            f.rate.token_fail("1.2.3.4");
+        }
+        assert!(f.rate.token_throttled("1.2.3.4").is_some());
+        // Age the window past AUTH_FAIL_WINDOW_S — the budget refills.
+        {
+            let mut m = f.rate.fails.lock().unwrap();
+            m.get_mut("1.2.3.4").unwrap().start -= AUTH_FAIL_WINDOW_S + 1.0;
+        }
+        assert!(f.rate.token_throttled("1.2.3.4").is_none());
+    }
+
+    #[test]
+    fn rate_limit_login_cap_is_generous() {
+        let f = flow();
+        for _ in 0..AUTH_LOGIN_MAX {
+            assert!(f.rate.login_hit("9.9.9.9").is_none());
+        }
+        let retry = f.rate.login_hit("9.9.9.9");
+        assert!(retry.is_some());
+        assert!(retry.unwrap() >= 1);
+    }
+
+    #[test]
+    fn token_endpoint_throttles_after_failures() {
+        let f = flow();
+        let body = br#"{"grant_type":"refresh_token","refresh_token":"bogus"}"#;
+        // AUTH_FAIL_MAX bogus refresh attempts → 401 each, then 429.
+        for _ in 0..AUTH_FAIL_MAX {
+            let res = token(&f, body, "6.6.6.6");
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        let res = token(&f, body, "6.6.6.6");
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(res.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(
+            res.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        // A different IP still gets a normal 401 — the throttle is
+        // per-client, not global.
+        let res = token(&f, body, "7.7.7.7");
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn token_endpoint_success_does_not_consume_budget() {
+        let f = flow();
+        // Malformed requests (no grant_type match → 400) must not
+        // accrue failure budget — only 401s count.
+        for _ in 0..(AUTH_FAIL_MAX * 2) {
+            let res = token(&f, b"{}", "8.8.8.8");
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(f.rate.token_throttled("8.8.8.8").is_none());
+    }
+
+    #[test]
+    fn rate_limit_map_hard_caps_at_max_ips() {
+        let f = flow();
+        // Fill the map to the cap with distinct IPs, then verify a new
+        // IP is not tracked (fail-open for untracked keys keeps memory
+        // bounded under a fresh-IP flood — #599 review).
+        for i in 0..AUTH_RATE_MAX_IPS {
+            f.rate.token_fail(&format!("10.0.{}.{}", i / 256, i % 256));
+        }
+        assert_eq!(f.rate.fails.lock().unwrap().len(), AUTH_RATE_MAX_IPS);
+        f.rate.token_fail("203.0.113.99");
+        assert!(!f.rate.fails.lock().unwrap().contains_key("203.0.113.99"));
+        // A tracked IP still counts normally at the cap.
+        f.rate.token_fail("10.0.0.0");
+        assert!(f.rate.fails.lock().unwrap().contains_key("10.0.0.0"));
+        // login_hit has the same cap on its own map.
+        for i in 0..AUTH_RATE_MAX_IPS {
+            assert!(f.rate.login_hit(&format!("10.1.{}.{}", i / 256, i % 256)).is_none());
+        }
+        assert!(f.rate.login_hit("203.0.113.98").is_none());
+        assert!(!f.rate.logins.lock().unwrap().contains_key("203.0.113.98"));
     }
 }

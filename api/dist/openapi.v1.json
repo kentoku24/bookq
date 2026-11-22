@@ -133,6 +133,32 @@
         },
         "description": "user-state ストアの読み書き失敗（fail-closed。ディスク/DB 障害時）"
       },
+      "TooManyRequests": {
+        "content": {
+          "application/json": {
+            "examples": {
+              "default": {
+                "summary": "失敗交換スロットル",
+                "value": {
+                  "detail": "too many failed token exchanges"
+                }
+              }
+            },
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "per-IP レート制限 (#559 AUTH-01)。`/api/v1/auth/token` は失敗交換\n(401) をクライアント IP 毎に 60 秒窓 20 件までに制限し、超過で\nスロットルする。`Retry-After` に残り秒数。成功交換はカウント\nしない。`Cache-Control: no-store`。\n",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "description": "制限解除までの秒数",
+              "type": "integer"
+            }
+          }
+        }
+      },
       "ValidationError": {
         "content": {
           "application/json": {
@@ -1302,6 +1328,9 @@
           },
           "401": {
             "description": "コード / verifier / refresh token 不正"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "security": [],

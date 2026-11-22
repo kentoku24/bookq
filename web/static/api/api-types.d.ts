@@ -773,6 +773,21 @@ export interface components {
                 };
             };
         };
+        /**
+         * @description per-IP レート制限 (#559 AUTH-01)。`/api/v1/auth/token` は失敗交換
+         *     (401) をクライアント IP 毎に 60 秒窓 20 件までに制限し、超過で
+         *     スロットルする。`Retry-After` に残り秒数。成功交換はカウント
+         *     しない。`Cache-Control: no-store`。
+         */
+        TooManyRequests: {
+            headers: {
+                "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description パラメータ不正 */
         BadRequest: {
             headers: {
@@ -1460,6 +1475,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            429: components["responses"]["TooManyRequests"];
         };
     };
     uploadLibraryFiles: {

@@ -969,7 +969,7 @@ async fn auth_login(State(st): State<AppState>, req: Request<Body>) -> Response 
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
-    oauth::login(&flow, &q)
+    oauth::login(&flow, &q, &oauth::client_ip(req.headers()))
 }
 
 async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1024,6 +1024,7 @@ async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response 
         return corrupt_session_response();
     }
     let headers = req.headers().clone();
+    let ip = oauth::client_ip(&headers);
     let (_parts, body) = req.into_parts();
     let body = match http_body_util::BodyExt::collect(body).await {
         Ok(c) => c.to_bytes(),
@@ -1031,7 +1032,7 @@ async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response 
             return state::detail(StatusCode::BAD_REQUEST, "invalid body");
         }
     };
-    let res = oauth::token(&flow, &body);
+    let res = oauth::token(&flow, &body, &ip);
     serve::maybe_gzip(&headers, res, true).await
 }
 
