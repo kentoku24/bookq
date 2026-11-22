@@ -115,6 +115,8 @@ def test_without_row_is_generic_404(admin_server, no_admin):
     assert b"admin" not in body.lower()
     assert "管理".encode("utf-8") not in body
     assert headers["cache-control"] == "no-store"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["referrer-policy"] == "same-origin"
     assert "cookie" in headers.get("vary", "").lower()
 
     status, _, body = _request(admin_server, "GET", "/")
@@ -122,20 +124,46 @@ def test_without_row_is_generic_404(admin_server, no_admin):
     assert b'id="admin-link"' not in body
 
 
+def test_admin_template_is_not_public(admin_server):
+    # The page lives under templates/ and is only served by the gated route.
+    # These are the obvious alternate paths an attacker would try.
+    for path in (
+        "/templates/admin.html",
+        "/static/admin.html",
+        "/static/%2e%2e/templates/admin.html",
+    ):
+        status, _, body = _request(admin_server, "GET", path)
+        assert status != 200, path
+        assert "管理機能".encode("utf-8") not in body
+
+
 def test_add_makes_page_live_without_restart(admin_server, admin_state, no_admin):
+    # Mixed case/whitespace must be stored canonically and reported as such,
+    # so an operator sees the exact grant rather than the argv spelling.
     cp = admin_cli(
-        admin_state, "add", TEST_EMAIL, "--note", "initial", "--by", "tester"
+        admin_state,
+        "add",
+        " Test@Example.COM ",
+        "--note",
+        "initial",
+        "--by",
+        "tester",
     )
     assert cp.returncode == 0, cp.stderr
-    assert "added" in cp.stdout
+    assert cp.stdout.strip() == "added test@example.com"
 
     status, headers, body = _request(admin_server, "GET", "/admin")
     assert status == 200
     assert "管理機能はまだありません".encode("utf-8") in body
     assert headers["content-type"].startswith("text/html")
     assert headers["cache-control"] == "no-store"
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["referrer-policy"] == "same-origin"
     assert headers["x-frame-options"] == "DENY"
-    assert "frame-ancestors 'none'" in headers["content-security-policy"]
+    csp = headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "script-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
     assert headers["x-robots-tag"] == "noindex"
     assert "cookie" in headers.get("vary", "").lower()
 
@@ -175,9 +203,9 @@ def test_remove_revokes_immediately(admin_server, admin_state, no_admin):
     assert admin_cli(admin_state, "add", TEST_EMAIL).returncode == 0
     assert _request(admin_server, "GET", "/admin")[0] == 200
 
-    cp = admin_cli(admin_state, "remove", TEST_EMAIL)
+    cp = admin_cli(admin_state, "remove", " TEST@Example.com ")
     assert cp.returncode == 0, cp.stderr
-    assert "removed" in cp.stdout
+    assert cp.stdout.strip() == "removed test@example.com"
     assert _request(admin_server, "GET", "/admin")[0] == 404
 
     cp = admin_cli(admin_state, "check", TEST_EMAIL)

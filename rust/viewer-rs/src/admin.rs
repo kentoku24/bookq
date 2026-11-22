@@ -83,7 +83,7 @@ impl From<rusqlite::Error> for AdminError {
 /// DB key canonical.
 pub(crate) fn normalize_email(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.len() > MAX_EMAIL_LEN {
+    if trimmed.is_empty() {
         return None;
     }
     if trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -95,7 +95,10 @@ pub(crate) fn normalize_email(raw: &str) -> Option<String> {
     if local.is_empty() || domain.is_empty() || parts.next().is_some() {
         return None;
     }
-    Some(trimmed.to_lowercase())
+    // Lowercasing can expand a character (e.g. U+0130 → "i" + U+0307), so the
+    // 254-byte limit is checked on the value that is actually stored.
+    let normalized = trimmed.to_lowercase();
+    (normalized.len() <= MAX_EMAIL_LEN).then_some(normalized)
 }
 
 /// Normalize free-form metadata (`created_by` / `note`). Empty values fall
@@ -252,6 +255,12 @@ mod tests {
         for raw in cases {
             assert_eq!(normalize_email(raw), None, "{raw:?}");
         }
+
+        // Lowercasing can grow the byte length: U+0130 is 2 bytes, but its
+        // lowercase form is "i" + U+0307 (3 bytes). Reject on the stored form.
+        let raw = format!("{}@a.com", "İ".repeat(85));
+        assert!(raw.len() < MAX_EMAIL_LEN);
+        assert_eq!(normalize_email(&raw), None);
     }
 
     #[test]

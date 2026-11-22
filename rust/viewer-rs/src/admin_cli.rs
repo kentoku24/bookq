@@ -159,11 +159,26 @@ fn parse(args: &[String]) -> Result<Cmd, String> {
     }
 }
 
+/// Largest timestamp `httpdate` formats safely (9999-12-31T23:59:59Z).
+/// A corrupted/manual DB row with a huge REAL must not panic `admin list`.
+const MAX_CREATED_AT: f64 = 253_402_300_799.0;
+
 /// `created_at` (epoch seconds) → RFC 1123 UTC. `httpdate` is already a
 /// dependency (HTTP header formatting); no date crate is pulled in.
 fn format_created_at(ts: f64) -> String {
-    let secs = if ts.is_finite() && ts > 0.0 { ts } else { 0.0 };
+    let secs = if ts.is_finite() && ts > 0.0 {
+        ts.min(MAX_CREATED_AT)
+    } else {
+        0.0
+    };
     httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_secs_f64(secs))
+}
+
+/// Show what was actually stored/looked up, not the raw argv spelling.
+/// `add " Alice@Example.COM "` must report the canonical `alice@example.com`
+/// so an operator can catch a typo before it becomes a grant.
+fn display_email(email: &str) -> String {
+    admin::normalize_email(email).unwrap_or_else(|| email.to_string())
 }
 
 fn format_row(row: &admin::AdminRow) -> String {
@@ -247,13 +262,14 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
             created_by,
         } => {
             warn_if_not_allowed(&email);
+            let display = display_email(&email);
             match store.add(&email, &created_by, &note) {
                 Ok(Change::Added) => {
-                    println!("added {email}");
+                    println!("added {display}");
                     EXIT_OK
                 }
                 Ok(Change::AlreadyPresent) => {
-                    println!("already admin: {email}");
+                    println!("already admin: {display}");
                     EXIT_OK
                 }
                 Ok(other) => {
@@ -263,21 +279,24 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
                 Err(e) => fail(&e),
             }
         }
-        Cmd::Remove { email } => match store.remove(&email) {
-            Ok(Change::Removed) => {
-                println!("removed {email}");
-                EXIT_OK
+        Cmd::Remove { email } => {
+            let display = display_email(&email);
+            match store.remove(&email) {
+                Ok(Change::Removed) => {
+                    println!("removed {display}");
+                    EXIT_OK
+                }
+                Ok(Change::NotFound) => {
+                    eprintln!("not admin: {display}");
+                    EXIT_NOT_FOUND
+                }
+                Ok(other) => {
+                    eprintln!("error: unexpected store result: {other:?}");
+                    EXIT_STORE
+                }
+                Err(e) => fail(&e),
             }
-            Ok(Change::NotFound) => {
-                eprintln!("not admin: {email}");
-                EXIT_NOT_FOUND
-            }
-            Ok(other) => {
-                eprintln!("error: unexpected store result: {other:?}");
-                EXIT_STORE
-            }
-            Err(e) => fail(&e),
-        },
+        }
         Cmd::List => match store.list() {
             Ok(rows) => {
                 for row in rows {
@@ -435,5 +454,14 @@ mod tests {
         assert_eq!(format_created_at(0.0), "Thu, 01 Jan 1970 00:00:00 GMT");
         assert_eq!(format_created_at(-1.0), "Thu, 01 Jan 1970 00:00:00 GMT");
         assert_eq!(format_created_at(f64::NAN), "Thu, 01 Jan 1970 00:00:00 GMT");
+        // A corrupted huge REAL must not panic Duration::from_secs_f64.
+        assert_eq!(format_created_at(1e30), format_created_at(MAX_CREATED_AT));
+        assert!(format_created_at(1e30).ends_with("GMT"));
+    }
+
+    #[test]
+    fn output_email_is_normalized() {
+        assert_eq!(display_email(" Alice@Example.COM "), "alice@example.com");
+        assert_eq!(display_email("not-an-email"), "not-an-email");
     }
 }

@@ -349,12 +349,20 @@ fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
 
 // ── #608: /admin ───────────────────────────────────────────────────────────
 
-/// Headers that keep a per-user HTML response out of shared/private caches.
+/// Headers shared by every `/admin` response: keep per-user HTML out of
+/// shared/private caches, and stop MIME sniffing / referrer leakage even on
+/// the 404 path.
 fn admin_private_headers(res: &mut Response) {
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res.headers_mut()
         .insert(header::VARY, HeaderValue::from_static("Cookie"));
+    res.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    res.headers_mut()
+        .insert("referrer-policy", HeaderValue::from_static("same-origin"));
 }
 
 /// Unauthenticated browser navigation → the login page at `/`.
@@ -380,6 +388,10 @@ fn admin_not_found() -> Response {
 
 /// Per-request admin lookup. Any failure (store error, blocking-task join
 /// error) denies; the caller never sees the difference from "not an admin".
+///
+/// Authorization primitive for every future admin API: call `caller()` first,
+/// then this function. The `/admin` page gate below covers only the HTML
+/// route — a page check must never be reused as an API authorization check.
 async fn admin_check(st: &AppState, email: &str) -> bool {
     let email = email.trim().to_lowercase();
     if email.is_empty() {
@@ -436,10 +448,12 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
     // A missing template is a deployment error, not "not found": an admin
     // must see the difference in the server log, not a 404 page.
     let Some(body) = body else {
-        return state::detail(
+        let mut res = state::detail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "admin template unavailable",
         );
+        admin_private_headers(&mut res);
+        return res;
     };
     let mut res = Response::builder()
         .status(StatusCode::OK)
@@ -449,9 +463,15 @@ async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response 
     admin_private_headers(&mut res);
     res.headers_mut()
         .insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // The page has no scripts/forms/inline styles today; a future admin UI
+    // must relax this header deliberately rather than inherit an open page.
     res.headers_mut().insert(
         "content-security-policy",
-        HeaderValue::from_static("frame-ancestors 'none'"),
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'none'; style-src 'self'; \
+             img-src 'self'; object-src 'none'; base-uri 'none'; \
+             form-action 'none'; frame-ancestors 'none'",
+        ),
     );
     res.headers_mut()
         .insert("x-robots-tag", HeaderValue::from_static("noindex"));
@@ -1294,6 +1314,20 @@ async fn main() {
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
+    // #608: TEST_MODE trusts every caller as the mock user. An admin row in
+    // that posture makes `/admin` reachable by anyone who can hit the URL, so
+    // surface the combination loudly at boot (dev/test only by design).
+    if st.test_mode {
+        match st.admin.list() {
+            Ok(rows) if !rows.is_empty() => tracing::warn!(
+                admins = rows.len(),
+                "BOOKQ_TEST_MODE is enabled with admin_users rows — \
+                 /admin trusts the mock user; remove admin grants after dev checks"
+            ),
+            _ => {}
+        }
+    }
+
     // warmup_metadata_index — lifespan kicks the same cold-miss path.
     index.spawn_warmup(library.clone());
     tracing::info!(

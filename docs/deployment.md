@@ -231,8 +231,11 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - 登録・失効・一覧・確認は **`viewer-rs admin` CLI のみ**。HTTP の書込み経路は存在しない。
 - 実行にはホスト/コンテナの操作権限が要る（`SECRET_KEY` を読めるのと同じ信頼境界）。distroless なので shell は不要で、バイナリを直接 exec する。
 - 反映は即時（サーバー再起動不要）。admin 判定はリクエストごとに DB を読むため、`remove` の次のリクエストから 404 になる。
-- admin は **`ALLOWED_EMAILS` に含まれる Google アカウント**である必要がある。allowlist から外すと admin 行が残っていてもログインできない（per-request 再評価, #373）。
+- admin は **`ALLOWED_EMAILS` に含まれる Google アカウント**である必要がある。`ALLOWED_EMAILS` は起動時に読み込まれるため、再起動して allowlist から外すと admin 行が残っていてもログインできない（各リクエストで再評価, #373）。
+- `admin remove` が失効させるのは admin 権限だけ。ライブラリ自体へのアクセスを止めるには `ALLOWED_EMAILS` から外して再起動する。
 - 初期状態は 0 名（fail-closed）。初回ログインが自動で admin になることはない。
+- **TEST_MODE の環境（dev / `--fixture`）では mock user が常に認証済みになる**。`test@example.com` を admin に追加すると、その環境の URL に到達できる全員が `/admin` に入れる。admin は使い捨て dev の検証に限定し、終わったら `admin remove` する。
+- admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や `ALLOWED_EMAILS` から外した場合は、grant も `admin remove` で掃除する。削除履歴は残らない（append-only 監査はフォローアップ）。
 
 ```bash
 # 追加（本番。コンテナ名は docker-compose.yml の container_name）
@@ -251,7 +254,7 @@ docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs admin remove you@exampl
 - exit code: `0` 成功 / `1` not found（remove/check）/ `2` usage・入力不正 / `3` store error。
 - `BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使う。サーバーと同じ値を指していること（CLI は DB が無い場合に警告を出す）。
 - **デプロイ順序**: 新バイナリを起動して schema v3 を適用してから CLI を実行する。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。
-- `user-state` は admin の grant を含む永続データ。既存のバックアップ対象に含め、リストア後は `admin list` で不要な grant がないか確認する。
+- `user-state` は admin の grant を含む永続データ。既存のバックアップ対象に含め、リストア後は `admin list` で不要な grant がないか確認する。volume を失うと admin は 0 名（fail-closed）になるので、CLI で再登録する。
 - Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
 
 開発環境:
