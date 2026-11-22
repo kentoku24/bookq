@@ -80,6 +80,26 @@ def _flush_frames(page):
     )
 
 
+def _force_cold_boot(page):
+    """Wipe offline stores and reload — forces the loadFolders shallow→full
+    boot path when a leaked bookq-offline snapshot/works record would flip
+    _onOnline onto the revalidate path (full GET only, no depth=1 stage,
+    and a 304 leaves etagByKey unseeded). Needed on Safari's shared
+    profile, where the first-goto scrub can leave IDB behind when the
+    previous page's teardown lags (#606). OfflineStore.clear() also cancels
+    pending deferred tree writes via its generation guard; delTree is a
+    second pass for anything that landed in between. sessionStorage.clear()
+    re-arms bookq_auto_sync_done — it survives reload in the same tab."""
+    page.evaluate(
+        """async () => {
+            await window.OfflineStore.clear();
+            await window.OfflineTree.delTree();
+            sessionStorage.clear();
+        }"""
+    )
+    page.reload()
+
+
 CLOCK_ADVANCE_JS = """() => {
     if (!window.__realNow) window.__realNow = Date.now.bind(Date);
     window.__clockOff = (window.__clockOff || 0) + 300001;
@@ -113,6 +133,14 @@ def test_startup_fetches_folders_exactly_twice_and_seeds_etag(browser, server):
     context, page = _new_page(browser)
     try:
         page.goto(server + "/")
+        page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
+        page.wait_for_function(
+            "() => sessionStorage.getItem('bookq_auto_sync_done') === '1'",
+            timeout=5000,
+        )
+        _stop_fill_poll(page)
+        _wait_dom_quiet(page)
+        _force_cold_boot(page)
         page.wait_for_function("() => window.treeLoaded === true", timeout=15000)
         page.wait_for_function(
             "() => sessionStorage.getItem('bookq_auto_sync_done') === '1'",
