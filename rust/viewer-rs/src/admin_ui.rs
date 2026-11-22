@@ -40,8 +40,8 @@ fn escape_html(raw: &str) -> String {
 }
 
 /// CSRF gate for `/admin/users/*`: the request must carry at least one of
-/// `Sec-Fetch-Site` / `Origin`; every present signal must be valid UTF-8 and
-/// same-origin. `oauth::same_site_initiation` validates the present values.
+/// `Sec-Fetch-Site` / `Origin`. A malformed `Sec-Fetch-Site` is rejected, and
+/// `oauth::same_site_initiation` validates the present same-origin signals.
 pub(crate) fn same_origin_post(headers: &HeaderMap) -> bool {
     let has_signal = headers.contains_key("sec-fetch-site") || headers.contains_key(header::ORIGIN);
     let parsed = headers
