@@ -25,6 +25,7 @@ import time
 import urllib.parse
 
 import pytest
+from playwright.sync_api import expect
 
 from rs_spawn import spawn_backend, users_cli
 
@@ -622,6 +623,42 @@ def test_admin_remaining_flash_branches(ui_server, ui_state, ui_reset):
     status, headers, _ = _post_admin(ui_server, "enable", TEST_EMAIL)
     assert status == 303
     assert headers["location"] == "/admin?status=admin-readonly"
+
+
+def test_admin_form_round_trip_in_browser(
+    browser, ui_server, ui_state, ui_reset
+):
+    """#613: a real browser submits the plain HTML forms end to end."""
+    context = browser.new_context(viewport={"width": 1000, "height": 800})
+    page = context.new_page()
+    try:
+        page.goto(ui_server + "/admin")
+        page.fill("#admin-add-email", NEW_USER)
+        page.get_by_role("button", name="追加").click()
+        expect(page.locator(".admin-flash")).to_be_visible()
+        expect(page.locator("tr", has_text=NEW_USER)).to_be_visible()
+        cp = users_cli(ui_state, "check", NEW_USER)
+        assert cp.returncode == 0 and cp.stdout.strip() == "member"
+
+        page.locator("tr", has_text=NEW_USER).get_by_role(
+            "button", name="ログイン停止"
+        ).click()
+        expect(
+            page.locator("tr", has_text=NEW_USER)
+        ).to_contain_text("再有効化")
+        cp = users_cli(ui_state, "check", NEW_USER)
+        assert cp.returncode == 1 and cp.stdout.strip() == "disabled"
+
+        page.locator("tr", has_text=NEW_USER).get_by_role(
+            "button", name="再有効化"
+        ).click()
+        expect(
+            page.locator("tr", has_text=NEW_USER)
+        ).to_contain_text("ログイン停止")
+        cp = users_cli(ui_state, "check", NEW_USER)
+        assert cp.returncode == 0 and cp.stdout.strip() == "member"
+    finally:
+        context.close()
 
 
 # ── real-auth server: membership / role / Bearer matrix ─────────────────────
