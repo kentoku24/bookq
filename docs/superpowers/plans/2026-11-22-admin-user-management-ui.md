@@ -1383,11 +1383,13 @@ git commit -m "docs(admin): 管理画面の member 操作と admin の CLI 限�
 
 ```bash
 cd rust
-cargo fmt --all
+# Only format files this feature touched. The crate has pre-existing
+# unformatted files; `cargo fmt --all` would create unrelated diffs.
+rustfmt --edition 2021 viewer-rs/src/users.rs viewer-rs/src/admin_ui.rs
 cargo test -p viewer-rs
 ```
 
-Expected: `test result: ok` for all viewer-rs tests.
+Expected: `test result: ok` for all viewer-rs tests. Do not run `cargo fmt --all`; it would reformat unrelated files that were already unformatted at the parent commit.
 
 - [ ] **Step 2: Run the browser suite**
 
@@ -1412,8 +1414,8 @@ Record the result in the PR. Do not put folder names in the PR or logs.
 
 ```bash
 git status --short
-git add -A
-git commit -m "chore(admin): cargo fmt (#613)"
+git add rust/viewer-rs/src/users.rs rust/viewer-rs/src/admin_ui.rs
+git commit -m "chore(admin): touched Rust files を整形 (#613)"
 ```
 
 Only run this if `cargo fmt` changed files.
