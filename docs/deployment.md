@@ -230,6 +230,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 - admin の登録・role 変更・失効は **`viewer-rs users` CLI のみ**。HTTP から admin 行は変更できない。CLI の実行にはホスト/コンテナ操作権限が要る（`SECRET_KEY` と同じ信頼境界。distroless なので shell 不要）。
 - member の追加・無効化・再有効化は `/admin` の UI からも行える（admin でログイン →「管理」）。UI の追加は常に member、既存 admin を指定した場合は拒否される。無効化は `disabled_at` による soft delete で、同じ画面から再有効化できる。POST は same-origin の Fetch Metadata / Origin を検証し、`/admin` は `Cache-Control: no-store`。
+   email は HTML エスケープして表示し、CSP で script を禁止している。
 - **fresh DB の `users` は空**。サーバー起動後、ログイン前に最初の admin を CLI で登録する。通常ユーザーは同じコマンドの既定 role=member で追加する。
 - 変更はサーバー再起動不要。membership は最大 1 秒（in-memory directory の refresh）、`/admin` の admin 判定は次のリクエストから即時。無効化は `disabled_at`（soft delete）で行い、行は履歴として残る。
 - `users remove` は **そのユーザーのログイン自体を止める**。`users add` で再活性化できる。

@@ -459,7 +459,12 @@ def test_admin_status_message_and_unknown_ignored(ui_server, ui_reset):
 def test_admin_add_member_then_disable_and_enable(ui_server, ui_state, ui_reset):
     status, headers, _ = _post_admin(ui_server, "add", NEW_USER)
     assert status == 303
-    assert headers["location"] == "/admin?status=added"
+    # `ui_reset` soft-deletes the target on setup, so a rerun after a failed
+    # attempt legitimately reactivates it instead of adding a fresh row.
+    assert headers["location"] in (
+        "/admin?status=added",
+        "/admin?status=reactivated",
+    )
     cp = users_cli(ui_state, "check", NEW_USER)
     assert cp.returncode == 0 and cp.stdout.strip() == "member"
 
@@ -519,7 +524,12 @@ def test_admin_invalid_email_and_xss_are_safe(ui_server, ui_state, ui_reset):
 
     status, headers, _ = _post_admin(ui_server, "add", XSS_USER)
     assert status == 303
-    assert headers["location"] == "/admin?status=added"
+    # `ui_reset` soft-deletes the target on setup, so a rerun after a failed
+    # attempt legitimately reactivates it instead of adding a fresh row.
+    assert headers["location"] in (
+        "/admin?status=added",
+        "/admin?status=reactivated",
+    )
     _, _, body = _request(ui_server, "GET", "/admin")
     assert b"<img@example.com>" not in body
     assert b"&lt;img@example.com&gt;" in body
@@ -579,7 +589,12 @@ def test_admin_csrf_matrix(ui_server, ui_state, ui_reset):
     assert unchanged.stdout == listing.stdout
     status, headers, _ = _post_admin(ui_server, "add", CSRF_USER)
     assert status == 303
-    assert headers["location"] == "/admin?status=added"
+    # `ui_reset` soft-deletes the target on setup, so a rerun after a failed
+    # attempt legitimately reactivates it instead of adding a fresh row.
+    assert headers["location"] in (
+        "/admin?status=added",
+        "/admin?status=reactivated",
+    )
     # Positive control: the listing above is live, so the equality check can
     # actually observe a write.
     control = users_cli(ui_state, "list")
@@ -593,7 +608,9 @@ def test_admin_post_body_limit(ui_server, ui_reset):
 
 
 def test_admin_remaining_flash_branches(ui_server, ui_state, ui_reset):
-    assert _post_admin(ui_server, "disable", OUTSIDE)[0] == 303
+    status, headers, _ = _post_admin(ui_server, "disable", OUTSIDE)
+    assert status == 303
+    assert headers["location"] == "/admin?status=disabled"
     status, headers, _ = _post_admin(ui_server, "disable", OUTSIDE)
     assert status == 303
     assert headers["location"] == "/admin?status=already-disabled"

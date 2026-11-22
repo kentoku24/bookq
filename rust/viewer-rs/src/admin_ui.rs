@@ -48,13 +48,17 @@ fn escape_html(raw: &str) -> String {
 }
 
 /// CSRF gate for `/admin/users/*`: the request must carry at least one of
-/// `Sec-Fetch-Site` / `Origin`. A malformed `Sec-Fetch-Site` is rejected, and
-/// `oauth::same_site_initiation` validates the present same-origin signals.
+/// `Sec-Fetch-Site` / `Origin`. A malformed `Sec-Fetch-Site` or `Origin` is
+/// rejected, and `oauth::same_site_initiation` validates the present
+/// same-origin signals.
 pub(crate) fn same_origin_post(headers: &HeaderMap) -> bool {
     let has_signal = headers.contains_key("sec-fetch-site") || headers.contains_key(header::ORIGIN);
     let parsed = headers
         .get("sec-fetch-site")
-        .is_none_or(|value| value.to_str().is_ok());
+        .is_none_or(|value| value.to_str().is_ok())
+        && headers
+            .get(header::ORIGIN)
+            .is_none_or(|value| value.to_str().is_ok());
     parsed && has_signal && crate::oauth::same_site_initiation(headers)
 }
 
@@ -254,5 +258,10 @@ mod tests {
         let mut invalid_utf8 = HeaderMap::new();
         invalid_utf8.insert("sec-fetch-site", HeaderValue::from_bytes(b"\xff").unwrap());
         assert!(!same_origin_post(&invalid_utf8));
+
+        let mut invalid_origin = HeaderMap::new();
+        invalid_origin.insert("origin", HeaderValue::from_bytes(b"\xff").unwrap());
+        invalid_origin.insert("host", HeaderValue::from_static("bookq.example"));
+        assert!(!same_origin_post(&invalid_origin));
     }
 }
