@@ -1112,15 +1112,17 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない */
+            /**
+             * @description 画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は
+             *     返さない #403)。#62 で loose file / アーカイブ entry とも
+             *     `IMAGE_EXTENSIONS` に限定 — 画像以外は 404。
+             */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "image/*": string;
-                    "application/*": string;
-                    "text/*": string;
                 };
             };
             /** @description 単一 Range レスポンス */
@@ -1130,8 +1132,6 @@ export interface operations {
                 };
                 content: {
                     "image/*": string;
-                    "application/*": string;
-                    "text/*": string;
                 };
             };
             /** @description ETag 一致 */

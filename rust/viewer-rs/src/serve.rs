@@ -677,6 +677,14 @@ pub fn image(library: &Path, path: &str, headers: &HeaderMap) -> Response {
         Some(m) => m,
         None => return detail(StatusCode::NOT_FOUND, "File not found"),
     };
+    // #62: loose files get the same policy as archive entries —
+    // IMAGE_EXTENSIONS only. Checked on the RESOLVED path so a symlink
+    // named *.png pointing at an .html target can't launder the type;
+    // 404 (not 403) keeps non-image names undiscoverable, matching
+    // `is_image_entry`'s archive-entry rejection.
+    if !IMAGE_EXTENSIONS.contains(&suffix_lower(&file_path).as_str()) {
+        return detail(StatusCode::NOT_FOUND, "File not found");
+    }
     let mtime = stat
         .modified()
         .ok()

@@ -3160,42 +3160,20 @@
         "responses": {
           "200": {
             "content": {
-              "application/*": {
-                "schema": {
-                  "format": "binary",
-                  "type": "string"
-                }
-              },
               "image/*": {
                 "schema": {
                   "format": "binary",
-                  "type": "string"
-                }
-              },
-              "text/*": {
-                "schema": {
                   "type": "string"
                 }
               }
             },
-            "description": "画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は返さない"
+            "description": "画像バイナリ (複数 Range 指定時も 200 フル — multipart/byteranges は\n返さない #403)。#62 で loose file / アーカイブ entry とも\n`IMAGE_EXTENSIONS` に限定 — 画像以外は 404。\n"
           },
           "206": {
             "content": {
-              "application/*": {
-                "schema": {
-                  "format": "binary",
-                  "type": "string"
-                }
-              },
               "image/*": {
                 "schema": {
                   "format": "binary",
-                  "type": "string"
-                }
-              },
-              "text/*": {
-                "schema": {
                   "type": "string"
                 }
               }

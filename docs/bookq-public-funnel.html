@@ -5652,7 +5652,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>公開面の認可</h3>
         </div>
         <ul>
-          <li>URL は公開だが /auth/login → Google OAuth → ALLOWED_EMAILS 判定で閉じている (auth.py:146-180)</li>
+          <li>URL は公開だが /auth/login → Google OAuth → users テーブル判定で閉じている</li>
           <li>callback で email を allowlist と照合、不許可は 403 + session 破棄</li>
           <li>許可ユーザーは署名付き session cookie で継続認証 (auth.py:202-208)</li>
         </ul>

@@ -30,7 +30,7 @@ pub use pdf::{
 };
 pub use meta::{meta_walk, parse_metadata_batch, ComicRec};
 pub use scans::{
-    list_images, natural_cmp, scan_fs, sort_file_cmp, tree_signature, FsDir,
+    classified_suffix, list_images, natural_cmp, scan_fs, sort_file_cmp, tree_signature, FsDir,
 };
 
 // ── Kanji numeral tables (mirrors app/scanner.py) ────────────────────────────

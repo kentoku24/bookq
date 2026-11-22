@@ -11,6 +11,7 @@
 //! and the `NoCacheStaticFiles` cache-control. `/static/*` and `/sw.js` sit
 //! under the gzip prefixes; `/` and `/favicon.ico` do not.
 
+use crate::users::UserDirectory;
 use crate::{auth, serve, state};
 use axum::{
     body::Body,
@@ -18,7 +19,6 @@ use axum::{
     response::Response,
 };
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,7 +45,7 @@ pub(crate) fn index_caller(
     test_mode: bool,
     secret: &str,
     session_key: Option<&auth::SessionKey>,
-    allowlist: &HashSet<String>,
+    directory: &UserDirectory,
     headers: &HeaderMap,
 ) -> ShellUser {
     if test_mode {
@@ -57,18 +57,23 @@ pub(crate) fn index_caller(
         auth::SessionLookup::Corrupt => return ShellUser::Corrupt,
         auth::SessionLookup::User(u) => {
             // `{% if not user %}`: the session value's own truthiness decides
-            // the branch — an empty object renders the login page, any
-            // truthy non-dict renders the viewer with null globals.
+            // the branch. A truthy user is the viewer only when its email is
+            // an active directory member; otherwise fall through to a Bearer
+            // (a non-member/no-email session must not render the shell).
             if !json_truthy(&u) {
                 return ShellUser::Login;
             }
-            return ShellUser::Viewer {
-                user_key: user_key(&u),
-            };
+            if let Some(key) = user_key(&u) {
+                if directory.is_member(&key) {
+                    return ShellUser::Viewer {
+                        user_key: Some(key),
+                    };
+                }
+            }
         }
         auth::SessionLookup::Absent | auth::SessionLookup::NoUser => {}
     }
-    match auth::bearer_token(headers).and_then(|t| auth::validate_bearer(t, secret, allowlist)) {
+    match auth::bearer_token(headers).and_then(|t| auth::validate_bearer(t, secret, directory)) {
         Some(id) => {
             let key = id.email.trim().to_lowercase();
             ShellUser::Viewer {
@@ -123,6 +128,9 @@ pub(crate) struct IndexCtx<'a> {
     pub snapshot: Value,
     pub test_mode: bool,
     pub ua_android: bool,
+    /// #608: show the admin menu entry. Server-side only — the link is a
+    /// convenience, `/admin` is the authorization boundary.
+    pub is_admin: bool,
     /// `(thumbnail_probe_js, thumbnail_perf_html)` when `?thumb_perf=1`.
     pub perf: Option<(&'a str, &'a str)>,
 }
@@ -135,6 +143,7 @@ const TM_EXPR: &str = "{{ 'true' if test_mode else 'false' }}";
 const OWNER_EXPR: &str = "{{ visibility_owner | tojson }}";
 const SNAP_EXPR: &str = "{{ visibility_snapshot | tojson }}";
 const PUKEY_EXPR: &str = "{{ progress_user_key | tojson }}";
+const ADMIN_IF: &str = "{% if is_admin %}";
 const PERF_IF: &str = "{% if thumbnail_perf %}";
 const PROBE_EXPR: &str = "{{ thumbnail_probe | safe }}";
 const INCLUDE_EXPR: &str = "{% include \"thumbnail_perf.html\" %}";
@@ -163,6 +172,7 @@ pub(crate) fn render_index(src: &str, ctx: &IndexCtx) -> Option<String> {
         .replace(OWNER_EXPR, &jinja_tojson(&opt_json(&ctx.owner)))
         .replace(SNAP_EXPR, &jinja_tojson(&ctx.snapshot))
         .replace(PUKEY_EXPR, &jinja_tojson(&opt_json(&ctx.user_key)));
+    out = render_if_block(&out, ADMIN_IF, ctx.is_admin)?;
 
     // {% if thumbnail_perf %}…{% endif %} — flat blocks; inner substitutions.
     while let Some(start) = out.find(PERF_IF) {
@@ -181,6 +191,26 @@ pub(crate) fn render_index(src: &str, ctx: &IndexCtx) -> Option<String> {
         out.replace_range(start..body_start + rel_end + ENDIF_TAG.len(), &rendered);
     }
     guarded(&out)
+}
+
+/// Render a flat `{% if X %}…{% endif %}` block: keep the body when `keep`,
+/// drop the whole block otherwise. Nested blocks are not supported (the
+/// template guard turns an unhandled construct into a 500 rather than
+/// emitting raw Jinja). Multiple sibling blocks are handled.
+fn render_if_block(src: &str, tag: &str, keep: bool) -> Option<String> {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(start) = rest.find(tag) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + tag.len()..];
+        let end = after.find(ENDIF_TAG)?;
+        if keep {
+            out.push_str(&after[..end]);
+        }
+        rest = &after[end + ENDIF_TAG.len()..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// Jinja `keep_trailing_newline=False`: drop exactly one final `\n`.
@@ -339,6 +369,9 @@ pub(crate) fn index(
     test_mode: bool,
     secret: &str,
     visibility: &state::VisibilityStore,
+    directory: &UserDirectory,
+    // `auth::resolve`'s identity email (membership re-checked); None hides.
+    admin_email: Option<&str>,
     user: &ShellUser,
     headers: &HeaderMap,
     thumb_perf: bool,
@@ -401,6 +434,18 @@ pub(crate) fn index(
         .unwrap_or("")
         .to_lowercase()
         .contains("android");
+    // Cosmetic only: the link is a convenience; `/admin` remains the actual
+    // gate. `admin_email` comes from `auth::resolve`; require it to match the
+    // identity the shell actually rendered (mixed session+Bearer requests can
+    // resolve differently). The directory is refreshed every second, so a
+    // revoked admin may keep seeing the link until the next refresh, but
+    // clicking it always re-checks the DB and returns 404.
+    let is_admin = match (user_key.as_deref(), admin_email) {
+        (Some(viewer), Some(email)) if viewer.eq_ignore_ascii_case(email) => {
+            directory.is_admin(email)
+        }
+        _ => false,
+    };
 
     let ctx = IndexCtx {
         user_key,
@@ -408,6 +453,7 @@ pub(crate) fn index(
         snapshot,
         test_mode,
         ua_android,
+        is_admin,
         perf: probe.as_deref().zip(perf_tpl.as_deref()),
     };
     let login = !viewer;
@@ -969,6 +1015,7 @@ mod tests {
             snapshot: serde_json::json!({"owner":"deadbeef","revision":7,"hiddenRoots":["x"]}),
             test_mode: false,
             ua_android: false,
+            is_admin: false,
             perf: None,
         }
     }
@@ -995,7 +1042,28 @@ mod tests {
         ));
         assert!(out.contains("window.__BOOKQ_PROGRESS_USER__ = \"alice@example.com\";"));
         assert!(!out.contains("thumbnail-perf-panel"));
+        // Non-admin: the server-side block is dropped entirely.
+        assert!(!out.contains("id=\"admin-link\""));
+        assert!(!out.contains("{% if is_admin %}"));
         assert!(out.ends_with("</html>\n"));
+    }
+
+    #[test]
+    fn admin_menu_entry_is_conditional() {
+        let tpl = "a{% if is_admin %}X{% endif %}b";
+        assert_eq!(render_if_block(tpl, ADMIN_IF, true).unwrap(), "aXb");
+        assert_eq!(render_if_block(tpl, ADMIN_IF, false).unwrap(), "ab");
+        let two = "a{% if is_admin %}X{% endif %}b{% if is_admin %}Y{% endif %}c";
+        assert_eq!(render_if_block(two, ADMIN_IF, true).unwrap(), "aXbYc");
+        assert_eq!(render_if_block(two, ADMIN_IF, false).unwrap(), "abc");
+        assert!(render_if_block("a{% if is_admin %}X", ADMIN_IF, true).is_none());
+
+        let mut c = ctx();
+        c.is_admin = true;
+        let out = render_index(TEMPLATE, &c).unwrap();
+        assert!(out.contains("<a id=\"admin-link\" role=\"menuitem\" href=\"/admin\">"));
+        assert!(!out.contains("{% if is_admin %}"));
+        assert!(!out.contains("{% endif %}"));
     }
 
     #[test]

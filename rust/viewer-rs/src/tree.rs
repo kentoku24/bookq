@@ -287,22 +287,34 @@ fn pdf_node(path: &Path, pname: &str, interner: &mut Interner) -> Node {
 /// `None` means the FS walk failed (scan_fs error → caller proxies upstream).
 pub fn scan_tree(base: &Path, interner: &mut Interner) -> Option<Vec<Node>> {
     let fs = bookq_core::scan_fs(base)?;
-    Some(assemble(&fs, base, interner))
+    // #602 review: archive/pdf nodes are OPENED for their inner listing,
+    // and a symlinked archive can resolve outside the library where
+    // serving would 403 — the tree would still leak the inner names.
+    // Canonicalize the root once and drop nodes whose target escapes it
+    // (same rule `image()` applies via `is_within`).
+    let root = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    Some(assemble(&fs, base, &root, interner))
 }
 
-fn assemble(dir: &FsDir, base: &Path, interner: &mut Interner) -> Vec<Node> {
+fn assemble(dir: &FsDir, base: &Path, root: &Path, interner: &mut Interner) -> Vec<Node> {
     let mut entries: Vec<Node> = Vec::new();
     for f in &dir.files {
         entries.push(image_node(f, interner));
     }
     for a in &dir.archives {
-        entries.push(archive_node(&base.join(a), a, interner));
+        let p = base.join(a);
+        if crate::serve::is_within(root, &p) {
+            entries.push(archive_node(&p, a, interner));
+        }
     }
     for p in &dir.pdfs {
-        entries.push(pdf_node(&base.join(p), p, interner));
+        let path = base.join(p);
+        if crate::serve::is_within(root, &path) {
+            entries.push(pdf_node(&path, p, interner));
+        }
     }
     for (dname, sub) in &dir.subdirs {
-        let mut child = assemble(sub, &base.join(dname), interner);
+        let mut child = assemble(sub, &base.join(dname), root, interner);
         if dir.files.is_empty()
             && dir.archives.is_empty()
             && dir.pdfs.is_empty()
@@ -694,17 +706,22 @@ pub fn shallow_live(target: &Path) -> Option<Vec<Value>> {
         if name.starts_with('.') {
             continue;
         }
-        // entry.metadata() follows symlinks — matches Path.is_dir()/is_file().
-        let md = match entry.metadata() {
+        // fs::metadata follows symlinks — matches Path.is_dir()/is_file()
+        // and scan_fs's is_dir_e/is_file_e. DirEntry::metadata() is lstat
+        // and would hide every symlinked entry from this listing.
+        let md = match std::fs::metadata(entry.path()) {
             Ok(m) => m,
             Err(_) => continue,
         };
         if md.is_dir() {
             dirs.push(name);
         } else if md.is_file() {
-            match suffix_lower(&name).as_str() {
-                s if crate::serve::ARCHIVE_EXTENSIONS.contains(&s) => archives.push(name),
-                s if crate::serve::PDF_EXTENSIONS.contains(&s) => pdfs.push(name),
+            // #62 review: classify symlinks by resolved suffix — serving
+            // resolves before its extension check, so name-based listing
+            // would expose entries that can't be served.
+            match bookq_core::classified_suffix(&entry, &name).as_deref() {
+                Some(s) if crate::serve::ARCHIVE_EXTENSIONS.contains(&s) => archives.push(name),
+                Some(s) if crate::serve::PDF_EXTENSIONS.contains(&s) => pdfs.push(name),
                 _ => {}
             }
         }
@@ -747,14 +764,6 @@ pub fn shallow_live(target: &Path) -> Option<Vec<Value>> {
         ]));
     }
     Some(out)
-}
-
-fn suffix_lower(name: &str) -> String {
-    Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!(".{}", e.to_lowercase()))
-        .unwrap_or_default()
 }
 
 /// Count archive+pdf nodes — the steady-state fill generation (1 + count).
@@ -1036,5 +1045,67 @@ mod tests {
         assert!(sn.get("subtree_facets").is_none());
         // Listing fields the shallow UI still needs stay.
         assert_eq!(sn["thumb"], "p1.png");
+    }
+
+    // ── #602 review: archive/pdf nodes must stay inside the library ────
+    // A symlinked archive resolving outside the root is classified by
+    // suffix but must NOT be opened for its inner listing — serving
+    // would 403 while the tree leaked the entry names.
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_drops_archive_symlinks_escaping_library() {
+        let outside = tmpdir("outside");
+        fs::write(outside.join("secret.zip"), b"not a real zip").unwrap();
+        fs::write(outside.join("secret.pdf"), b"not a real pdf").unwrap();
+
+        let d = tmpdir("lib");
+        fs::write(d.join("real.zip"), b"not a real zip").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("secret.zip"),
+            d.join("escape.zip"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("secret.pdf"),
+            d.join("escape.pdf"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("real.zip", d.join("inside.zip")).unwrap();
+        // keep base from flattening: a second real dir
+        touch(&d, "pics/001.png");
+
+        let nodes = scan(&d);
+        let ns = names(&nodes);
+        assert!(ns.iter().any(|n| n == "inside.zip"), "{ns:?}");
+        assert!(ns.iter().any(|n| n == "real.zip"), "{ns:?}");
+        assert!(!ns.iter().any(|n| n.starts_with("escape")), "{ns:?}");
+
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    // ── #602 review: shallow_live must follow symlinks ─────────────────
+    // DirEntry::metadata() is lstat — symlinked dirs/archives vanished
+    // from the uncached shallow listing while scan_fs (is_dir_e /
+    // is_file_e) included them.
+
+    #[test]
+    #[cfg(unix)]
+    fn shallow_live_lists_symlinked_entries() {
+        let d = tmpdir("live");
+        touch(&d, "real/sub/001.png");
+        fs::write(d.join("book.zip"), b"x").unwrap();
+        std::os::unix::fs::symlink("real", d.join("linkdir")).unwrap();
+        std::os::unix::fs::symlink("book.zip", d.join("alias.zip")).unwrap();
+
+        let out = shallow_live(&d).unwrap();
+        let listed: Vec<&str> = out.iter().filter_map(|n| n["name"].as_str()).collect();
+        assert!(listed.contains(&"linkdir"), "{listed:?}");
+        assert!(listed.contains(&"alias.zip"), "{listed:?}");
+        assert!(listed.contains(&"real"), "{listed:?}");
+        assert!(listed.contains(&"book.zip"), "{listed:?}");
+
+        let _ = fs::remove_dir_all(&d);
     }
 }
