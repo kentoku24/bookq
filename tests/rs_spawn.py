@@ -137,12 +137,17 @@ def _viewer_rs_binary() -> Path:
     return _stable_binary(target / "debug" / "viewer-rs")
 
 
-def spawn_backend(*, library_dir: Path, state_dir: str | Path) -> tuple:
+def spawn_backend(
+    *, library_dir: Path, state_dir: str | Path, test_mode: bool = True
+) -> tuple:
     """Spawn the test backend against *library_dir*; returns (proc, base_url).
 
     Free port, env, then a 30s health probe. Cold Rust boots are fast but
     the same headroom covers a loaded machine — and `cargo build` runs
     before this is called.
+
+    ``test_mode=False`` spawns with real signed-cookie/Bearer auth; the
+    ``ALLOWED_EMAILS`` env below is the one-time member seed (#608).
     """
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -150,7 +155,10 @@ def spawn_backend(*, library_dir: Path, state_dir: str | Path) -> tuple:
     base_url = f"http://127.0.0.1:{port}"
 
     env = os.environ.copy()
-    env["BOOKQ_TEST_MODE"] = "true"
+    if test_mode:
+        env["BOOKQ_TEST_MODE"] = "true"
+    else:
+        env.pop("BOOKQ_TEST_MODE", None)
     env["LIBRARY_DIR"] = str(library_dir)
     env["BOOKQ_STATE_DIR"] = str(state_dir)
     env.update(
@@ -214,3 +222,30 @@ def spawn_backend(*, library_dir: Path, state_dir: str | Path) -> tuple:
             pass
         time.sleep(0.25)
     return proc, base_url
+
+
+def users_cli(
+    state_dir: str | Path,
+    *args: str,
+    env_extra: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run `viewer-rs users …` against *state_dir* (#608).
+
+    The CLI is the only writer of `users`; tests exercise the same binary/DB
+    path production uses. ``cargo build`` runs via ``_viewer_rs_binary()``
+    (fresh check) so the CLI always matches the spawned backend.
+    stdout/stderr are captured for exit-code/output tests. ``env_extra``
+    overrides the inherited env for tests that exercise seeding.
+    """
+    env = os.environ.copy()
+    env["BOOKQ_STATE_DIR"] = str(state_dir)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [str(_viewer_rs_binary()), "users", *args],
+        env=env,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )

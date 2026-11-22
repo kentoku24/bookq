@@ -8,7 +8,7 @@
 | プロジェクト名 | `bookq` | `bookq-dev-pool-01`〜`10`（ENV名はスロットにマッピング） |
 | tailnet ノード | `bookq` | `dev-01`〜`dev-10`（固定 10 個を使い回し） |
 | URL | `https://bookq.your-tailnet.ts.net` | `https://dev-XX.your-tailnet.ts.net`（XX=01..10） |
-| 認証 | Google OAuth + メール許可リスト | なし（`BOOKQ_TEST_MODE=true`） |
+| 認証 | Google OAuth + `users` テーブル（初回 `ALLOWED_EMAILS` seed） | なし（`BOOKQ_TEST_MODE=true`） |
 | 画像ツリー | 読み書き可でマウント (`:rw`) | 既定 read-only (`:ro`) — `BOOKQ_TEST_MODE=true` で認証を抜くため実ライブラリへの書き込みは opt-in (`./dev.sh up --writable-library`)。`--fixture` の合成ツリーは常に rw |
 | 起動/停止方法 | `./prd.sh up` / `./prd.sh down`（メインのチェックアウトのみ） | `./dev.sh up` / `./dev.sh down`（どこからでも、Freeプランでノード再利用） |
 
@@ -203,7 +203,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 - `BASE_URL` が ts.net 以外になると、`prd deploy` の tailnet 登録名整合チェック (`heal_fqdn_collision`) は自動でスキップされる（無関係なため）。
 - `*.ts.net` 側は引き続きコンテンツを返すが、OAuth ログインは `BASE_URL`（独自ドメイン）へ遷移する — cookie はドメイン別のため、実質独自ドメインが canonical になる。tailscale sidecar はそのまま残してよい。
-- `ALLOWED_EMAILS` は据え置き前提。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
+- `ALLOWED_EMAILS` は初回 seed のみ。ユーザー管理は `users` テーブル / `users` CLI で行う。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
 - **認証付きメディア endpoint (`/image/`, `/thumb/`, `/view/`, `/api/thumb-sprite`) は `Cache-Control: private` で応答する** — `public` だと Cloudflare edge が応答をキャッシュし、未認証リクエストにも画像バイトが返る認証バイパスになる。保険として Cloudflare 側で当該 hostname に Cache Rule「Bypass cache」を張ってもよい。
 - Security → Bots の **Bot Fight Mode は OFF 推奨** — API クライアントや native アプリ (`Authorization: Bearer`) を bot 判定で弾きうる。
 - Cloudflare 無料プランの TOS §2.8 は画像主体コンテンツの proxy 配信を制限する条項がある。個人利用なら実害はほぼない想定だが、転送量で問題化した場合の fallback は VPS リレー等の別方式。
@@ -222,7 +222,59 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - 停止は `TS_FUNNEL` を外して `./prd.sh up` — entrypoint が `funnel --https=443 off` を明示して公開を確実に閉じる
 - funnel 未許可のままだと `funnel --bg` が承認を待ち同一プロセス内でブロックする (exit しない)。その間 :443 proxy が無くサイト全体 (tailnet 経路も) 停止するが、sidecar コンテナは healthcheck 無しで Up のまま — restart loop にはならず自動検知もされない (実測で承認待ち ~106 秒)。復旧は承認リンク (`login.tailscale.com/f/funnel?node=...`) を踏むか `TS_FUNNEL` を外して `prd.sh up`。`funnel` コマンド自体が非ゼロ終了した場合のみ restart loop になる
 - Tailscale Funnel は beta で調整不可の帯域上限あり (数値非公開、実測 ~数十KB/s/接続)。`*.ts.net` 証明書は CT log に記録されるため funnel 公開により tailnet 名は公開情報になる
-- 認可は引き続き OAuth + `ALLOWED_EMAILS`（「公開到達・限定利用」）
+- 認可は OAuth + `users` テーブル（`ALLOWED_EMAILS` は初回 seed のみ。「公開到達・限定利用」）
+
+### ユーザーと admin の管理（#608）
+
+ログインできるユーザーと admin は、`user-state` SQLite（`/var/lib/bookq/folder-visibility.sqlite3`、schema v3）の `users` テーブルで管理する。`role` は `admin` / `member`。
+
+- **`ALLOWED_EMAILS` は初回 seed 専用**。`settings.users_seeded` が立つまで、env の email を `member` として投入する。seed 後は DB が唯一の正で、env を変えても認可は変わらない（再起動不要の DB 管理に移行）。
+- 初回 admin は CLI で付与する（自動昇格なし）。
+- 追加・role 変更・無効化は **`viewer-rs users` CLI のみ**。HTTP の書込み経路はない。実行にはホスト/コンテナ操作権限が要る（`SECRET_KEY` と同じ信頼境界。distroless なので shell 不要）。
+- 変更はサーバー再起動不要。membership は最大 1 秒（in-memory directory の refresh）、`/admin` の admin 判定は次のリクエストから即時。無効化は `disabled_at`（soft delete）で行い、行は履歴として残る。
+- `users remove` は **そのユーザーのログイン自体を止める**（admin 権限だけではない）。`users add` で再活性化できる。
+- `users list` は `email<TAB>role<TAB>status<TAB>created_at<TAB>created_by<TAB>note`。`status` は `active` / `disabled`。
+- `--note` / `--by` は DB と `users list` に出る。secret は書かず、チケット番号や目的だけにする。
+- `users check` は `admin` / `member` / `disabled` / `not found` を stdout に出す。active は exit 0、disabled/not found は exit 1。
+- **反映遅延**: 通常 API の membership は最大 1 秒。OAuth callback（初回ログイン）と `/admin` は DB を直接見るため即時。既存 session の API は最大 1 秒で 401 になる。
+- `ALLOWED_EMAILS` を変更しても seed 済み DB には反映されない。ユーザー変更は CLI で行う。DB を失った場合のみ、空 DB + env で再 seed される（バックアップから復元した場合はその時点に戻る）。
+- **TEST_MODE の環境（dev / `--fixture`）**では mock user が常に認証済みになる。`test@example.com` を admin にすると、その環境の URL に到達できる全員が `/admin` に入れる。admin は使い捨て dev の検証に限定し、終わったら `users add test@example.com --role member` または `users remove test@example.com` に戻す。
+- admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や不要になった場合は `users remove` で掃除する。削除履歴の append-only 監査はフォローアップ。
+- `user-state` はユーザー/権限データを含む永続データ。既存のバックアップ対象に含め、リストア後は `users list` で不要なユーザー/role がないか確認する。volume を失うと env seed（設定時）または CLI で再構築する。
+- **デプロイ順序**: 新バイナリを起動して schema v3 を適用し、`ALLOWED_EMAILS` を seed してから CLI を実行する。旧バイナリは v3 DB を拒否するため、ロールバックは v3 デプロイ前の `user-state` スナップショットを復元する（`docs/user-state-db.md`）。このブランチの旧 v3（`admin_users`）DB は、seed allowlist に含まれる admin だけを `users` に移行し、dormant 行は skip して `admin_users` を削除する。
+- Cloudflare の Cache Rule を使っている場合は `/admin` も bypass 対象にする（レスポンスは `Cache-Control: no-store`）。
+
+```bash
+# 最初の admin（デプロイ後、ALLOWED_EMAILS の seed 済み）
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add you@example.com --role admin --note "initial admin"
+
+# 確認
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users list
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users check you@example.com
+
+# 一般ユーザーの追加 / 無効化
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users add family@example.com
+docker exec bookq-prd-viewer-rs /usr/local/bin/viewer-rs users remove family@example.com
+```
+
+- exit code: `0` 成功 / `1` not found・disabled（remove/check）/ `2` usage・入力不正 / `3` store error。
+- CLI は実行前に解決した DB パスを stderr に出す（`state: ...`）。`BOOKQ_STATE_DIR` が未設定だと `/var/lib/bookq` を使うので、サーバーと同じ値を指していること。
+- `users add` は既存ユーザーの role を更新できる（`--role admin|member`、既定は `member`）。無効化済みユーザーは再活性化する。`created_at` / `created_by` / `note` は最初の作成時の値を保持する。
+
+開発環境:
+
+```bash
+./dev.sh list   # ENV → SLOT (dev-XX) を確認
+docker exec bookq-dev-viewer-dev-XX /usr/local/bin/viewer-rs users add test@example.com --role admin
+docker exec bookq-dev-viewer-dev-XX /usr/local/bin/viewer-rs users add test@example.com --role member
+```
+
+ローカル（Docker なし）:
+
+```bash
+BOOKQ_STATE_DIR=/tmp/bookq-state \
+  cargo run --manifest-path rust/Cargo.toml -p viewer-rs -- users add test@example.com --role admin
+```
 
 ### やってはいけないこと
 
