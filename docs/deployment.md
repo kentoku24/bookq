@@ -203,7 +203,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 
 - `BASE_URL` が ts.net 以外になると、`prd deploy` の tailnet 登録名整合チェック (`heal_fqdn_collision`) は自動でスキップされる（無関係なため）。
 - `*.ts.net` 側は引き続きコンテンツを返すが、OAuth ログインは `BASE_URL`（独自ドメイン）へ遷移する — cookie はドメイン別のため、実質独自ドメインが canonical になる。tailscale sidecar はそのまま残してよい。
-- ユーザー管理は `users` テーブル / `users` CLI で行う（env allowlist は廃止済み）。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
+- ユーザー管理は `users` テーブルで行う。admin は `users` CLI のみ、member は CLI または `/admin` UI（env allowlist は廃止済み）。「公開到達・限定利用」であり、per-user 分離がない設計のため一般公開はスコープ外。
 - **認証付きメディア endpoint (`/image/`, `/thumb/`, `/view/`, `/api/thumb-sprite`) は `Cache-Control: private` で応答する** — `public` だと Cloudflare edge が応答をキャッシュし、未認証リクエストにも画像バイトが返る認証バイパスになる。保険として Cloudflare 側で当該 hostname に Cache Rule「Bypass cache」を張ってもよい。
 - Security → Bots の **Bot Fight Mode は OFF 推奨** — API クライアントや native アプリ (`Authorization: Bearer`) を bot 判定で弾きうる。
 - Cloudflare 無料プランの TOS §2.8 は画像主体コンテンツの proxy 配信を制限する条項がある。個人利用なら実害はほぼない想定だが、転送量で問題化した場合の fallback は VPS リレー等の別方式。

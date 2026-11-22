@@ -1393,8 +1393,9 @@ async fn main() {
         std::process::exit(healthcheck::run());
     }
 
-    // #608: the users CLI is the only writer of the user directory. Dispatch
-    // it before tracing/index/store setup — it needs only BOOKQ_STATE_DIR.
+    // #608: the users CLI is the only writer of admin rows (the `/admin` UI
+    // covers members). Dispatch it before tracing/index/store setup — it
+    // needs only BOOKQ_STATE_DIR.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("users") {
         let state_dir = PathBuf::from(

@@ -25,7 +25,7 @@ The DB holds the following feature families:
 - Settings (`settings`) — added at schema v3. Reserved for internal
   one-off flags. The legacy `users_seeded=1` key from the #608 seed path
   may exist in a deployed DB but is ignored: the #608 seed path was removed
-  (membership is enrolled by the CLI or, for members, the `/admin` UI).
+  (admins via the CLI, members via the CLI or the `/admin` UI).
 
 ## Authorization
 

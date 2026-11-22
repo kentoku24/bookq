@@ -785,7 +785,7 @@ mod tests {
         }
         let store = UserStore::new(&dir);
         // No env seed: a pre-users DB upgrades with an empty directory; the
-        // operator must enroll users via the CLI.
+        // operator must enroll the first admin via the CLI.
         assert!(store.list().unwrap().is_empty());
         assert!(!store.is_active("a@example.com").unwrap());
         let conn = rusqlite::Connection::open(&path).unwrap();

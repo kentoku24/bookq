@@ -69,8 +69,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- Reserved for internal one-off flags. The legacy `users_seeded` key from
--- the #608 seed path may exist; it is ignored now that enrollment is
--- CLI-only.
+-- the #608 seed path may exist; it is ignored: the seed path was removed
+-- (admins are enrolled via the CLI, members via the CLI or `/admin`).
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL

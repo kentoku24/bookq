@@ -238,8 +238,8 @@ def users_cli(
 ) -> subprocess.CompletedProcess:
     """Run `viewer-rs users …` against *state_dir* (#608).
 
-    The CLI is the only writer of `users`; tests exercise the same binary/DB
-    path production uses. ``cargo build`` runs via ``viewer_rs_binary()``
+    The CLI writes through the same store the `/admin` UI uses; tests drive
+    the CLI directly. ``cargo build`` runs via ``viewer_rs_binary()``
     (fresh check) so the CLI always matches the spawned backend.
     stdout/stderr are captured for exit-code/output tests. ``env_extra``
     overrides the inherited env for targeted regression tests.
