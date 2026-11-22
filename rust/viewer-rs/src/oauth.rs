@@ -161,6 +161,15 @@ impl AuthRateLimit {
         if map.len() > AUTH_RATE_MAX_IPS {
             map.retain(|_, v| now - v.start < AUTH_FAIL_WINDOW_S * 4.0);
         }
+        // Hard cap: a flood of fresh IPs must not grow the map without
+        // bound — the retain above only drops entries idle for 4
+        // windows, so an all-fresh map would otherwise keep growing
+        // (#599 review). Past the cap, untracked IPs simply aren't
+        // counted: tracking them has diminishing value once an attacker
+        // can rotate addresses anyway, and legit IPs are unaffected.
+        if map.len() >= AUTH_RATE_MAX_IPS && !map.contains_key(ip) {
+            return;
+        }
         let e = map
             .entry(ip.to_string())
             .or_insert(HitEntry { start: now, count: 0 });
@@ -178,6 +187,10 @@ impl AuthRateLimit {
         let mut map = self.logins.lock().unwrap();
         if map.len() > AUTH_RATE_MAX_IPS {
             map.retain(|_, v| now - v.start < AUTH_LOGIN_WINDOW_S * 4.0);
+        }
+        // Same hard cap as token_fail — see the comment there.
+        if map.len() >= AUTH_RATE_MAX_IPS && !map.contains_key(ip) {
+            return None;
         }
         let e = map
             .entry(ip.to_string())
@@ -208,14 +221,19 @@ pub fn client_ip(headers: &HeaderMap) -> String {
             .map(str::trim)
             .filter(|s| !s.is_empty())
     };
-    // XFF: trust the LAST non-empty entry — what our sidecar appended.
-    let ip = pick("cf-connecting-ip").or_else(|| {
-        pick("x-forwarded-for").and_then(|xff| {
+    // Prefer XFF's LAST entry over `cf-connecting-ip`: on the tailnet
+    // path a client can spoof the CF header but cannot rewrite the
+    // entry our sidecar appended — trusting CF first let tailnet
+    // clients rotate fake IPs and bypass the auth throttle (#599
+    // review). On the public (cloudflared) path CF edge manages both
+    // headers so either order yields the same client IP.
+    let ip = pick("x-forwarded-for")
+        .and_then(|xff| {
             xff.rsplit(',')
                 .map(str::trim)
                 .find(|s| !s.is_empty())
         })
-    });
+        .or_else(|| pick("cf-connecting-ip"));
     ip.unwrap_or("unknown")
         .chars()
         .take(64)
@@ -1397,5 +1415,28 @@ mod tests {
             assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         }
         assert!(f.rate.token_throttled("8.8.8.8").is_none());
+    }
+
+    #[test]
+    fn rate_limit_map_hard_caps_at_max_ips() {
+        let f = flow();
+        // Fill the map to the cap with distinct IPs, then verify a new
+        // IP is not tracked (fail-open for untracked keys keeps memory
+        // bounded under a fresh-IP flood — #599 review).
+        for i in 0..AUTH_RATE_MAX_IPS {
+            f.rate.token_fail(&format!("10.0.{}.{}", i / 256, i % 256));
+        }
+        assert_eq!(f.rate.fails.lock().unwrap().len(), AUTH_RATE_MAX_IPS);
+        f.rate.token_fail("203.0.113.99");
+        assert!(!f.rate.fails.lock().unwrap().contains_key("203.0.113.99"));
+        // A tracked IP still counts normally at the cap.
+        f.rate.token_fail("10.0.0.0");
+        assert!(f.rate.fails.lock().unwrap().contains_key("10.0.0.0"));
+        // login_hit has the same cap on its own map.
+        for i in 0..AUTH_RATE_MAX_IPS {
+            assert!(f.rate.login_hit(&format!("10.1.{}.{}", i / 256, i % 256)).is_none());
+        }
+        assert!(f.rate.login_hit("203.0.113.98").is_none());
+        assert!(!f.rate.logins.lock().unwrap().contains_key("203.0.113.98"));
     }
 }
