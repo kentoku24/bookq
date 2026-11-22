@@ -1,6 +1,9 @@
 # pdfium-update — weekly check for a newer bblanchon/pdfium-binaries
 # release and open a PR bumping ARG PDFIUM_VERSION + per-arch SHA256 in
-# Dockerfile.viewer-rs and the cargo-test libpdfium pin in rust.yml (#581).
+# Dockerfile.viewer-rs (#581). rust.yml derives the same version and
+# checksum from that file at run time, so this PR only touches the
+# Dockerfile — GITHUB_TOKEN can push it (workflow-file changes would be
+# rejected without a `workflows`-scoped token).
 #
 # Dependabot can't see ARG bumps or the tarball checksum, so this closes
 # the gap the issue called out (8125 was 3 releases / 3 weeks stale).
@@ -8,7 +11,8 @@
 # (/image/.../doc.pdf/p001.png = 200 in the image-build job) and be
 # closed by hand.
 #
-# Manual dry-run: Actions → pdfium-update → Run workflow.
+# Manual run: Actions → pdfium-update → Run workflow — same check on
+# demand; opens a PR when a newer release exists.
 name: pdfium-update
 
 on:
@@ -42,6 +46,12 @@ jobs:
             --jq '{tag: .tag_name, assets: [.assets[] | {name, digest}]}' \
             > /tmp/pdfium-rel.json
           latest=$(python3 -c "import json;print(json.load(open('/tmp/pdfium-rel.json'))['tag'].split('/')[-1])")
+          # The tag is upstream-controlled and lands in sed/branch/PR
+          # text — accept only a bare version number (#603 review).
+          if ! [[ "$latest" =~ ^[0-9]+$ ]]; then
+            echo "::error::unexpected pdfium tag '$latest' — refusing to use it"
+            exit 1
+          fi
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
           if [ "$latest" = "$current" ]; then
@@ -82,10 +92,7 @@ jobs:
             -e "s/^ARG PDFIUM_SHA256_AMD64=.*/ARG PDFIUM_SHA256_AMD64=${SHA_AMD64}/" \
             -e "s/^ARG PDFIUM_SHA256_ARM64=.*/ARG PDFIUM_SHA256_ARM64=${SHA_ARM64}/" \
             "$dockerfile"
-          # rust.yml's cargo-test libpdfium download tracks the same release.
-          sed -i "s|releases/download/chromium/[0-9]*/|releases/download/chromium/${LATEST}/|" \
-            .github/workflows/rust.yml
-          git diff -- "$dockerfile" .github/workflows/rust.yml
+          git diff -- "$dockerfile"
 
       - name: Open update PR
         if: steps.rel.outputs.changed == 'true'
@@ -105,11 +112,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add Dockerfile.viewer-rs .github/workflows/rust.yml
+          git add Dockerfile.viewer-rs
           git commit -m "chore(deps): pdfium ${CURRENT} → ${LATEST} (#581)"
-          # force-with-lease: a stale remote branch from a previously
-          # closed/unmerged PR would otherwise fail the push forever.
-          git push --force-with-lease -u origin "$branch"
+          # force-with-lease with an explicit remote SHA: a branch left
+          # behind by a closed/unmerged PR has no local tracking ref, so
+          # bare --force-with-lease would reject the push as stale info
+          # (#603 review). Absent branch → plain push (cannot conflict).
+          remote_sha=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
+          if [ -n "$remote_sha" ]; then
+            git push "--force-with-lease=refs/heads/$branch:$remote_sha" -u origin "$branch"
+          else
+            git push -u origin "$branch"
+          fi
           gh pr create --repo "$GITHUB_REPOSITORY" --base main \
             --title "chore(deps): pdfium ${CURRENT} → ${LATEST} (#581)" \
             --body "$(cat <<EOF
