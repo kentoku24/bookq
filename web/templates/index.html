@@ -62,6 +62,9 @@
     <div id="header-menu" role="menu" aria-labelledby="header-menu-btn" hidden>
       <button id="filter-btn" type="button" role="menuitem" title="絞り込み" aria-label="フィルタ">🔽 絞り込み</button>
       <button id="lib-edit-btn" type="button" role="menuitem" title="ライブラリ編集" aria-label="ライブラリ編集" aria-pressed="false">✏️ ライブラリ編集</button>
+      {% if is_admin %}
+      <a id="admin-link" role="menuitem" href="/admin">⚙️ 管理</a>
+      {% endif %}
       <hr role="separator">
       <button id="menu-view-tile" type="button" role="menuitemradio" aria-checked="true">タイル</button>
       <button id="menu-view-list" type="button" role="menuitemradio" aria-checked="false">リスト</button>

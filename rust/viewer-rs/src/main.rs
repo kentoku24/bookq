@@ -347,6 +347,119 @@ fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
     )
 }
 
+// ── #608: /admin ───────────────────────────────────────────────────────────
+
+/// Headers that keep a per-user HTML response out of shared/private caches.
+fn admin_private_headers(res: &mut Response) {
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res.headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Cookie"));
+}
+
+/// Unauthenticated browser navigation → the login page at `/`.
+/// `/admin` is a page, not an API: a 401 JSON would be a dead end.
+fn admin_redirect_login() -> Response {
+    let mut res = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/")
+        .body(Body::empty())
+        .unwrap();
+    admin_private_headers(&mut res);
+    res
+}
+
+/// A non-admin gets the same generic 404 shape as a missing page — the
+/// admin surface is not advertised. The store error path uses this too
+/// (fail closed) and only the server log records the cause.
+fn admin_not_found() -> Response {
+    let mut res = state::detail(StatusCode::NOT_FOUND, "Not Found");
+    admin_private_headers(&mut res);
+    res
+}
+
+/// Per-request admin lookup. Any failure (store error, blocking-task join
+/// error) denies; the caller never sees the difference from "not an admin".
+async fn admin_check(st: &AppState, email: &str) -> bool {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() {
+        return false;
+    }
+    let store = st.admin.clone();
+    match tokio::task::spawn_blocking(move || store.is_admin(&email)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "admin store unavailable — denying admin access");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "admin check task failed — denying admin access");
+            false
+        }
+    }
+}
+
+/// `GET|HEAD /admin` — the admin-only shell (#608).
+///
+/// The gate is `auth::resolve` (so `ALLOWED_EMAILS` is re-checked per
+/// request, #373) plus a per-request `admin_users` lookup. A removed grant is
+/// rejected on the next request even while the session cookie is still valid.
+/// The page itself is a static template: no session data is embedded and
+/// nothing here is cached by the Service Worker (navigations are not cached).
+async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if !matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+    {
+        return method_not_allowed("GET, HEAD");
+    }
+    let head = *req.method() == axum::http::Method::HEAD;
+    let headers = req.headers().clone();
+    if corrupt_session(&st, &headers) {
+        return corrupt_session_response();
+    }
+    let Some(user) = caller(&st, &headers) else {
+        return admin_redirect_login();
+    };
+    if !admin_check(&st, &user.email).await {
+        return admin_not_found();
+    }
+
+    let web_dir = st.web_dir.clone();
+    let body = tokio::task::spawn_blocking(move || {
+        std::fs::read(web_dir.join("templates").join("admin.html"))
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    // A missing template is a deployment error, not "not found": an admin
+    // must see the difference in the server log, not a 404 page.
+    let Some(body) = body else {
+        return state::detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "admin template unavailable",
+        );
+    };
+    let mut res = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(if head { Body::empty() } else { Body::from(body) })
+        .unwrap();
+    admin_private_headers(&mut res);
+    res.headers_mut().insert(
+        "x-frame-options",
+        HeaderValue::from_static("DENY"),
+    );
+    res.headers_mut().insert(
+        "content-security-policy",
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    res.headers_mut()
+        .insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    res
+}
+
 /// `GET /` — the Jinja shell: viewer page for identified callers, the
 /// login page for everyone else (200, not a redirect).
 async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -368,6 +481,10 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
         &st.allowed_emails,
         &headers,
     );
+    // #608: the admin menu entry is cosmetic, but derive it from the same
+    // strict identity path the `/admin` gate uses (`ALLOWED_EMAILS`
+    // re-checked), not from the shell's viewer branch.
+    let admin_email = caller(&st, &headers).map(|u| u.email);
     // '/' is outside the gzip prefixes.
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || {
@@ -376,6 +493,8 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
             st2.test_mode,
             &st2.secret_key,
             &st2.visibility,
+            &st2.admin,
+            admin_email.as_deref(),
             &user,
             &headers,
             thumb_perf,
@@ -1189,6 +1308,10 @@ async fn main() {
         .route("/healthz", get(|| async { "ok\n" }))
         // #401: shell + static surfaces — public.
         .route("/", any(shell_index))
+        // #608: admin-only page. Both spellings map to the same gate so
+        // `/admin/` does not fall through to the 501 fallback.
+        .route("/admin", any(admin_page))
+        .route("/admin/", any(admin_page))
         .route("/sw.js", any(serve_sw))
         .route("/favicon.ico", any(serve_favicon))
         .route("/static", any(serve_static))
