@@ -233,6 +233,7 @@ viewer は**ホストにポートを公開していない**。既定では `tail
 - 反映は即時（サーバー再起動不要）。admin 判定はリクエストごとに DB を読むため、`remove` の次のリクエストから 404 になる。
 - admin は **`ALLOWED_EMAILS` に含まれる Google アカウント**である必要がある。`ALLOWED_EMAILS` は起動時に読み込まれるため、再起動して allowlist から外すと admin 行が残っていてもログインできない（各リクエストで再評価, #373）。
 - `admin remove` が失効させるのは admin 権限だけ。ライブラリ自体へのアクセスを止めるには `ALLOWED_EMAILS` から外して再起動する。
+- grant は既存の有効な session にも即時適用される（remove は次のリクエストで即時失効）。session 窃取が疑われる場合は `SECRET_KEY` をローテーションして全 session / Bearer を無効化する（全ユーザー再ログイン）。
 - 初期状態は 0 名（fail-closed）。初回ログインが自動で admin になることはない。
 - **TEST_MODE の環境（dev / `--fixture`）では mock user が常に認証済みになる**。`test@example.com` を admin に追加すると、その環境の URL に到達できる全員が `/admin` に入れる。admin は使い捨て dev の検証に限定し、終わったら `admin remove` する。
 - admin は email をキーにする（アプリ全体の identity と同じ）。メールボックスの所有が変わった場合や `ALLOWED_EMAILS` から外した場合は、grant も `admin remove` で掃除する。削除履歴は残らない（append-only 監査はフォローアップ）。
