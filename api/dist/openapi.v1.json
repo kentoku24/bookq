@@ -391,7 +391,7 @@
         "type": "object"
       },
       "TreeNode": {
-        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。\n`path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は\nサーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは\n未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`\n始まりの絶対 URL で、クライアントは `?w=` のみを付与する。\n`hidden` は `visibility=annotate` 時のみ付く。\n",
+        "description": "`name` は flatten 規約により `/` を含み得る（\"parent/child\"）。\n`thumb`/`thumbs` はフォルダ相対名で `/image/<fullPath>/<name>`\nに解決する。`metadata`/`subtree_facets` は値がある時のみ存在。`has_metadata` は folder ノードで常時 bool。\n`path`/`coverUrl`/`coverUrls`/`kind`/`work`/`hidden` は\nサーバ解決済みフィールド (T03, 加算的・optional)。旧クライアントは\n未知フィールドを無視する。`coverUrl`/`coverUrls[]` は `/thumb/…`\n始まりの絶対 URL で、クライアントは `?w=` のみを付与する。\n`hidden` は `visibility=annotate` 時のみ付く。\n",
         "properties": {
           "archive": {
             "description": "書庫仮想フォルダ",
@@ -2818,7 +2818,7 @@
     },
     "/api/v1/tree": {
       "get": {
-        "description": "`depth` 省略で全木を返す。`depth>=1` で `path` 直下の\nfolder 型子ノードのみを浅く返す（`children: []`、`metadata`/\n`subtree_facets` キーなし）。\n\n`since` に既知の `generation` を渡すと、一致時 304、\n不一致時は全木を返す（`since` 指定時は常に全木モード）。\n\n`visibility` 省略時 (既定) の挙動は不変 — 隠しルートを除外せず\n従来どおりの未フィルタ木を返す (旧クライアント互換)。\n`visibility=apply` は隠しルートをサーバ側で除外する。\n`visibility=annotate` は除外せず隠しノードに `hidden: true` を付ける。\n意味論の正本は `api/v1-semantics.md` §1 (apply の 503 fail-closed、\nETag への visibility リビジョン含有を含む)。\n",
+        "description": "`depth` 省略で全木を返す。`depth>=1` で `path` 直下の\nfolder 型子ノードのみを浅く返す（`children: []`、`metadata`/\n`has_metadata`/`subtree_facets` キーなし）。\n\n`since` に既知の `generation` を渡すと、一致時 304、\n不一致時は全木を返す（`since` 指定時は常に全木モード）。\n\n`visibility` 省略時 (既定) の挙動は不変 — 隠しルートを除外せず\n従来どおりの未フィルタ木を返す (旧クライアント互換)。\n`visibility=apply` は隠しルートをサーバ側で除外する。\n`visibility=annotate` は除外せず隠しノードに `hidden: true` を付ける。\n意味論の正本は `api/v1-semantics.md` §1 (apply の 503 fail-closed、\nETag への visibility リビジョン含有を含む)。\n",
         "operationId": "getTree",
         "parameters": [
           {
