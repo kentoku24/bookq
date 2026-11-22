@@ -253,6 +253,9 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
         return EXIT_OK;
     }
 
+    // Make the target explicit: with prod/dev volumes on one host, a wrong
+    // BOOKQ_STATE_DIR is the easiest way to grant admin to a different env.
+    eprintln!("state: {}", state::user_state_path(state_dir).display());
     warn_if_new_db(state_dir);
     let store = AdminStore::new(state_dir);
     match cmd {
@@ -316,6 +319,9 @@ pub(crate) fn run(args: &[String], state_dir: &Path) -> i32 {
             }
             match store.is_admin(&email) {
                 Ok(true) => {
+                    // The grant exists, but it is inert if the server's
+                    // allowlist (and therefore login) cannot admit the email.
+                    warn_if_not_allowed(&email);
                     println!("admin");
                     EXIT_OK
                 }

@@ -221,6 +221,9 @@ def test_invalid_input_and_empty_list(admin_state, no_admin):
     cp = admin_cli(admin_state, "list")
     assert cp.returncode == 0
     assert cp.stdout == ""
+    # The resolved DB path is always echoed to stderr so a wrong
+    # BOOKQ_STATE_DIR is visible before a grant lands in another env.
+    assert str(admin_state) in cp.stderr
 
     cp = admin_cli(admin_state, "check", TEST_EMAIL)
     assert cp.returncode == 1
@@ -308,6 +311,17 @@ def test_auth_allowlist_recheck_blocks_admin_row(auth_server, auth_state):
     assert cp.returncode == 0, cp.stderr
     # The CLI warns (does not refuse) when the grant is not in ALLOWED_EMAILS.
     assert "not in ALLOWED_EMAILS" in cp.stderr
+
+    # `check` reports the grant but must not hide that it is inert.
+    cp = admin_cli(
+        auth_state,
+        "check",
+        outside,
+        env_extra={"ALLOWED_EMAILS": TEST_EMAIL},
+    )
+    assert cp.returncode == 0
+    assert cp.stdout.strip() == "admin"
+    assert "not in ALLOWED_EMAILS" in cp.stderr
     try:
         cookie = _session_cookie(_user(outside))
         status, headers, _ = _request(
@@ -346,6 +360,40 @@ def test_auth_bearer_admin_is_200(auth_server, auth_state, auth_no_admin):
     )
     assert status == 200
     assert "管理機能はまだありません".encode("utf-8") in body
+
+
+def test_shell_admin_link_tracks_the_rendered_identity(auth_server, auth_state, auth_no_admin):
+    # Mixed credentials: the session renders a viewer for a non-allowlisted
+    # email, while the Bearer is a valid admin. `/admin` authenticates as the
+    # Bearer, but the cosmetic link on `/` must follow the identity the shell
+    # actually rendered (the session), not the Bearer.
+    assert admin_cli(auth_state, "add", TEST_EMAIL).returncode == 0
+    cookie = _session_cookie(_user("outside@example.com"))
+    token = _bearer(TEST_EMAIL)
+
+    status, _, body = _request(
+        auth_server,
+        "GET",
+        "/",
+        {
+            "Cookie": f"session={cookie}",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert status == 200
+    assert b'id="admin-link"' not in body
+
+    # A script can send both; the Bearer authorizes `/admin`.
+    status, _, body = _request(
+        auth_server,
+        "GET",
+        "/admin",
+        {
+            "Cookie": f"session={cookie}",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    assert status == 200
 
 
 # ── persistence across a real restart ───────────────────────────────────────

@@ -431,10 +431,15 @@ pub(crate) fn index(
         .contains("android");
     // Cosmetic only: a store error hides the entry (fail closed), while
     // `/admin` remains the actual gate. `admin_email` comes from
-    // `auth::resolve`, so a de-allowlisted admin sees no link either.
-    let is_admin = admin_email
-        .and_then(|email| admin.is_admin(email).ok())
-        .unwrap_or(false);
+    // `auth::resolve`; require it to match the identity the shell actually
+    // rendered (mixed session+Bearer requests can resolve differently), and a
+    // de-allowlisted admin sees no link either.
+    let is_admin = match (user_key.as_deref(), admin_email) {
+        (Some(viewer), Some(email)) if viewer.eq_ignore_ascii_case(email) => {
+            admin.is_admin(email).ok().unwrap_or(false)
+        }
+        _ => false,
+    };
 
     let ctx = IndexCtx {
         user_key,
