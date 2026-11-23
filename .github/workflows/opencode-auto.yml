@@ -151,6 +151,13 @@ jobs:
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
+      # uv must exist BEFORE the agent runs: codegen.sh and the documented
+      # pytest command both go through `uv run` (#636).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - name: Run opencode (official action)
         id: agent
         uses: anomalyco/opencode/github@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1
@@ -165,6 +172,8 @@ jobs:
             - Small incremental commits with conventional-commit messages.
             - Open a PR titled "<type>(ai): <要約> (#${{ github.event.issue.number || github.event.client_payload.issue_number }})" whose body references
               #${{ github.event.issue.number || github.event.client_payload.issue_number }} and includes testing considerations.
+            - If you change files under api/ or scripts/api/, run ./scripts/api/codegen.sh
+              and commit the regenerated artifacts (api/dist/, web/static/api/api-types.d.ts).
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -179,9 +188,6 @@ jobs:
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
 
       - name: Playwright version
         id: pw
@@ -270,6 +276,13 @@ jobs:
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
+      # uv must exist BEFORE the agent runs: codegen.sh and the documented
+      # pytest command both go through `uv run` (#636).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - name: Run opencode (official action)
         id: agent
         uses: anomalyco/opencode/github@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1
@@ -299,9 +312,6 @@ jobs:
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
 
       - name: Playwright version
         id: pw
@@ -391,6 +401,8 @@ jobs:
           hyphens, alnum only, <=50 chars), small incremental conventional commits,
           PR titled "<type>(ai): <要約> (#N)" referencing the issue, PR body must
           include testing considerations.
+          If you change files under api/ or scripts/api/, run ./scripts/api/codegen.sh
+          and commit the regenerated artifacts (api/dist/, web/static/api/api-types.d.ts).
           TEMPLATE
           printf '\nIssue number: %s\n\nIssue title:\n%s\n\nIssue body:\n%s\n' "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY" >> prompt.txt
 
@@ -468,6 +480,13 @@ jobs:
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
+      # uv must exist BEFORE the agent runs: codegen.sh and the documented
+      # pytest command both go through `uv run` (#636).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - name: Run opencode CLI
         id: agent
         env:
@@ -488,9 +507,6 @@ jobs:
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
 
       - name: Playwright version
         id: pw
@@ -720,6 +736,13 @@ jobs:
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
+      # uv must exist BEFORE the agent runs: codegen.sh and the documented
+      # pytest command both go through `uv run` (#636).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - name: Run opencode CLI
         id: agent
         env:
@@ -740,9 +763,6 @@ jobs:
 
       - name: cargo build (test fixture binary)
         run: cargo build -p viewer-rs --manifest-path rust/Cargo.toml
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
 
       - name: Playwright version
         id: pw
