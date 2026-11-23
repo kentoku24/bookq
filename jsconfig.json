@@ -24,6 +24,7 @@
     "web/static/api/**/*",
     "web/static/progress/**/*",
     "web/static/browse/visibility.js",
+    "web/static/browse/matchSort.js",
     "web/static/offline/storeAdapter.js",
     "web/static/search/facets.js"
   ],
