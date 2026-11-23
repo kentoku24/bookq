@@ -39,7 +39,7 @@ const POSITION_MAX_USERS: usize = 100;
 const POSITION_MAX_FOLDERS: usize = 512;
 const POSITION_TS_FUTURE_SLACK_MS: i64 = 300_000;
 const MAX_ROOT_LENGTH: usize = 2048;
-const BUSY_TIMEOUT_MS: u64 = 5000;
+const BUSY_TIMEOUT_MS: i64 = 5000;
 
 fn now_secs() -> f64 {
     SystemTime::now()

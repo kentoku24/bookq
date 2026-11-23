@@ -25,7 +25,7 @@ rand = "0.9"
 # Google OAuth round-trip (token exchange + userinfo) — webpki roots so
 # the slim image needs no ca-certificates package (#400).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 sha2 = "0.10"
 # default-features off: default pulls ~40 unused crates (ravif/rav1e AVIF
 # encoder, exr, tiff, qoi, moxcms, rayon). `avif-native` is decode-only
