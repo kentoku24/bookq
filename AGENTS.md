@@ -80,7 +80,7 @@ issue タイトルからスラッグを生成する:
 
 ### API spec / codegen
 
-- `api/` または `scripts/api/` 配下を変更したら `./scripts/api/codegen.sh` を実行し、生成物 (`api/dist/*.json`、`web/static/api/api-types.d.ts`) を同じコミットに含めること。生成物の手編集は禁止 — `api-spec-lint` の codegen-drift ジョブが stale な生成物を検出して PR を落とす (#636)。codegen.sh は `npx` (openapi-typescript) と `uv run` (pyyaml) を使う — CI では両方 agent フェーズ前に用意済み。
+- `api/` または `scripts/api/` 配下を変更したら `./scripts/api/codegen.sh` を実行し、生成物 (`api/dist/*.json`、`web/static/api/api-types.d.ts`) を同じコミットに含めること。生成物の手編集は禁止 — `api-spec-lint` の codegen-drift ジョブが stale な生成物を検出して PR を落とす (#636)。codegen.sh は `npx` (openapi-typescript) と `uv run` (pyyaml) を使う — CI では両方 agent フェーズ前に用意済み。契約の正本規約は `api/README.md`。
 
 ### テスト
 
@@ -122,10 +122,6 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
 - **エミュレータ標準フローは `.claude/skills/android-emulator/SKILL.md`**。AVD (`bookq_tab`) は ~9GB・Gradle/Kotlin daemon は 2〜4GB を常駐させるため、検証終了時・テスト合間に必ず `adb -s <serial> emu kill` / `./gradlew --stop` で止めること。自分が起動したプロセスだけを止め、他セッションの環境を殺さない (停止前に `adb devices` / `docker ps` / `ps` で所有確認)。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
-
-### API spec / codegen
-
-- `api/openapi.v1.yaml` / `api/asyncapi.yaml`（spec 本体・`examples:` 含む）を変更したら、必ず `./scripts/api/codegen.sh` を実行し、生成物（`api/dist/`・`web/static/api/api-types.d.ts`）も同じコミットに含めること。codegen-drift CI（`api-spec-lint.yml`）が stale 生成物を fail させ、AI 著者 branch での再生成漏れが繰り返し発生している (#636)。契約の正本規約は `api/README.md`。
 
 ### 自動化ワークフロー (improvement-scan)
 
