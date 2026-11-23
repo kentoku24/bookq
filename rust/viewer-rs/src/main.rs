@@ -172,9 +172,9 @@ async fn vary_session_cookie(
 /// required by index.html's per-request boot snippets and the `onerror=`
 /// handlers JS-built tiles emit — a nonce-based policy is follow-up work.
 /// Everything else stays locked down: no objects, no base-uri hijack, no
-/// framing, same-origin forms only.
+/// framing, same-origin forms only. `script-src` is injected per-response
+/// (see `app_csp`) so TEST_MODE can add `'unsafe-eval'`.
 const APP_CSP_BASE: &str = "default-src 'self'; \
-    script-src 'self' 'unsafe-inline'; \
     style-src 'self' 'unsafe-inline'; \
     font-src 'self'; \
     worker-src 'self'; \
@@ -188,7 +188,17 @@ const APP_CSP_BASE: &str = "default-src 'self'; \
 /// `connect-src`) appended — `BOOKQ_CSP_EXTRA_ORIGINS` exists for the
 /// `?api_base=` mock-dev flow (#237), which fetches API + images
 /// cross-origin. Request params are never reflected into the policy.
-fn app_csp(extra: &[String]) -> String {
+/// `test_mode` adds `'unsafe-eval'` to `script-src`: TEST_MODE is already
+/// the auth-bypassing dev posture, and Playwright's `evaluate` /
+/// `wait_for_function` drive pages via string eval, which CSP otherwise
+/// blocks. The app itself never evals, so every other directive — and the
+/// production policy — stays strict.
+fn app_csp(extra: &[String], test_mode: bool) -> String {
+    let script_src = if test_mode {
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    } else {
+        "script-src 'self' 'unsafe-inline'"
+    };
     let mut img = String::from("img-src 'self' data: blob:");
     let mut conn = String::from("connect-src 'self' ws: wss:");
     for o in extra {
@@ -197,7 +207,7 @@ fn app_csp(extra: &[String]) -> String {
         conn.push(' ');
         conn.push_str(o);
     }
-    format!("{APP_CSP_BASE}; {img}; {conn}")
+    format!("{APP_CSP_BASE}; {script_src}; {img}; {conn}")
 }
 
 /// A `BOOKQ_CSP_EXTRA_ORIGINS` entry must be a bare `scheme://host[:port]`
@@ -257,7 +267,7 @@ fn set_header_if_absent(h: &mut axum::http::HeaderMap, name: &'static str, value
 /// Non-HTML responses get no CSP: `/sw.js`'s own response headers feed the
 /// worker global scope, where `default-src 'none'` would break
 /// `importScripts`, and XFO already covers framing for media/JSON.
-fn apply_security_headers(res: &mut Response, extra_origins: &[String]) {
+fn apply_security_headers(res: &mut Response, extra_origins: &[String], test_mode: bool) {
     let h = res.headers_mut();
     for (n, v) in [
         ("x-content-type-options", "nosniff"),
@@ -275,7 +285,7 @@ fn apply_security_headers(res: &mut Response, extra_origins: &[String]) {
         // The CSP is built per-response (operator extras), so it cannot
         // ride the &'static insert helper.
         if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
-            if let Ok(v) = HeaderValue::from_str(&app_csp(extra_origins)) {
+            if let Ok(v) = HeaderValue::from_str(&app_csp(extra_origins, test_mode)) {
                 h.insert(header::CONTENT_SECURITY_POLICY, v);
             }
         }
@@ -289,7 +299,7 @@ async fn security_headers(
     next: axum::middleware::Next,
 ) -> Response {
     let mut res = next.run(req).await;
-    apply_security_headers(&mut res, &st.csp_extra);
+    apply_security_headers(&mut res, &st.csp_extra, st.test_mode);
     res
 }
 
@@ -1801,7 +1811,7 @@ mod handler_tests {
         // response headers feed the worker scope where default-src 'none'
         // would break importScripts.
         let mut res = state::detail(StatusCode::OK, "ok");
-        apply_security_headers(&mut res, &[]);
+        apply_security_headers(&mut res, &[], false);
         assert_eq!(res.headers()["x-content-type-options"], "nosniff");
         assert_eq!(res.headers()["x-frame-options"], "DENY");
         assert_eq!(res.headers()["referrer-policy"], "same-origin");
@@ -1817,7 +1827,7 @@ mod handler_tests {
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
             .body(Body::empty())
             .unwrap();
-        apply_security_headers(&mut res, &[]);
+        apply_security_headers(&mut res, &[], false);
         let csp = res.headers()["content-security-policy"]
             .to_str()
             .unwrap()
@@ -1833,6 +1843,22 @@ mod handler_tests {
         }
         assert_eq!(res.headers()["x-robots-tag"], "noindex");
 
+        // TEST_MODE relaxes only script-src with 'unsafe-eval' — Playwright
+        // drives pages via string eval; every other directive is unchanged.
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res, &[], true);
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval'"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+
         // A handler-set CSP (admin's stricter policy, SVG sandbox) is
         // never clobbered.
         let mut res = Response::builder()
@@ -1841,7 +1867,7 @@ mod handler_tests {
             .header("content-security-policy", "default-src 'none'")
             .body(Body::empty())
             .unwrap();
-        apply_security_headers(&mut res, &[]);
+        apply_security_headers(&mut res, &[], false);
         assert_eq!(
             res.headers()["content-security-policy"],
             "default-src 'none'"
@@ -1860,7 +1886,7 @@ mod handler_tests {
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
             .body(Body::empty())
             .unwrap();
-        apply_security_headers(&mut res, &extra);
+        apply_security_headers(&mut res, &extra, false);
         let csp = res.headers()["content-security-policy"]
             .to_str()
             .unwrap()
@@ -1873,7 +1899,7 @@ mod handler_tests {
 
         // Non-HTML responses never carry CSP, extras or not.
         let mut res = state::detail(StatusCode::OK, "ok");
-        apply_security_headers(&mut res, &extra);
+        apply_security_headers(&mut res, &extra, false);
         assert!(!res.headers().contains_key("content-security-policy"));
     }
 
