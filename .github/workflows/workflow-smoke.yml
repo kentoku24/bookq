@@ -245,12 +245,17 @@ jobs:
   # Apple-Silicon macOS runner. Safari.app accepts exactly ONE WebDriver
   # session globally, so a shard can never parallelize — the suite is split
   # across runners with --num-shards/--shard-id instead of pytest -n.
-  # 3 shards: the account's macOS concurrency is ~4 runners and ios-test
-  # (xcode-27) consumes one more on the same PR, so N+1 must stay within the
-  # pool. 4 safari legs + ios-test = 5 left one leg queued ~15min until the
-  # platform cancelled it (#558 hit this repeatedly — rerun loops cost far
-  # more than the extra ~1.5min a third split adds per leg). Each shard runs
-  # ~4x/3 the tests (~13min) — still inside the 60min timeout.
+  # 2 shards: the account's macOS concurrency is ~4-5 runners shared with
+  # ios-test (xcode-27). 3 legs per PR meant two overlapping PRs needed 6
+  # slots and always queued a leg — the same failure #558 hit at 4 legs +
+  # ios-test. ios-test is now gated to ios/api/workflow changes only
+  # (#646), so the binding constraint is safari-gate itself: 2 legs x 2
+  # PRs = 4 slots fits the pool (a co-firing ios-test makes 5, still
+  # within it). Each leg runs ~1/2 the suite (~13min) — far inside the
+  # 60min timeout. Uncontended wall-clock grows ~4min vs 3 shards, but
+  # under the bot's burst-PR pattern queue waits (observed p90 ~52min)
+  # dominate, so fewer slots per PR wins on average; one fewer setup
+  # also saves ~1.5 runner-min per run.
   safari-gate:
     needs: changes-workflow-smoke
     if: github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true'
@@ -259,7 +264,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -291,8 +296,8 @@ jobs:
       - name: Enable safaridriver
         run: sudo safaridriver --enable
 
-      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/3)
-        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 3 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
+      - name: Run browser tests on real Safari (shard ${{ matrix.shard }}/2)
+        run: BROWSER=safari BOOKQ_TEST_MODE=true uv run --with pytest --with playwright --with-requirements requirements-dev.txt pytest tests/ -q -m browser --num-shards 2 --shard-id ${{ matrix.shard }} --reruns 1 --reruns-delay 2
 
   # Required-check anchor for the safari matrix (#540): matrix legs report
   # `safari-gate (N)` when they run but a single bare `safari-gate` when the
