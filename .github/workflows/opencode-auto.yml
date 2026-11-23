@@ -224,9 +224,9 @@ jobs:
           # Classify the failure for triage (#635): oc-fail-classify.sh maps
           # the causal failed step (+ log patterns) to push/env/test/agent/
           # infra/no-output and prints "<class>|<hint>". It always exits 0.
+          # This job has no pushpr/preflight steps — only agent/testgate ids.
           line=$(bash .github/scripts/oc-fail-classify.sh "${{ github.run_id }}" "$REPO" "${{ github.job }}" \
-            "pushpr=${{ steps.pushpr.outcome }}" "testgate=${{ steps.testgate.outcome }}" \
-            "preflight=${{ steps.preflight.outcome }}" "agent=${{ steps.agent.outcome }}" || true)
+            "testgate=${{ steps.testgate.outcome }}" "agent=${{ steps.agent.outcome }}" || true)
           if [ -z "$line" ]; then line="unknown|分類取得失敗"; fi
           fclass="${line%%|*}"
           fhint="${line#*|}"
@@ -344,9 +344,9 @@ jobs:
           # Classify the failure for triage (#635): oc-fail-classify.sh maps
           # the causal failed step (+ log patterns) to push/env/test/agent/
           # infra/no-output and prints "<class>|<hint>". It always exits 0.
+          # This job has no pushpr/preflight steps — only agent/testgate ids.
           line=$(bash .github/scripts/oc-fail-classify.sh "${{ github.run_id }}" "$REPO" "${{ github.job }}" \
-            "pushpr=${{ steps.pushpr.outcome }}" "testgate=${{ steps.testgate.outcome }}" \
-            "preflight=${{ steps.preflight.outcome }}" "agent=${{ steps.agent.outcome }}" || true)
+            "testgate=${{ steps.testgate.outcome }}" "agent=${{ steps.agent.outcome }}" || true)
           if [ -z "$line" ]; then line="unknown|分類取得失敗"; fi
           fclass="${line%%|*}"
           fhint="${line#*|}"
@@ -365,19 +365,11 @@ jobs:
     if: vars.USE_DIRECT_RUN == 'true' && needs.gate.outputs.allow == 'yes' && needs.gate.outputs.route == 'implement'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # workflows:write is required for pushes that add/change files under
-    # .github/workflows/ — without it GitHub rejects them ("...without
-    # `workflows` permission"), which made every ci:-flavored issue
-    # un-implementable (#635). Scoped to this job only: the LLM agent runs
-    # here, so this is the minimum blast radius. Job-level permissions
-    # REPLACE the top-level set, so every needed scope is restated.
-    permissions:
-      id-token: write
-      contents: write
-      issues: write
-      pull-requests: write
-      workflows: write
-      actions: read
+    # NOTE: no job-level permissions override — the top-level set already
+    # covers this job. `workflows` is NOT a valid GITHUB_TOKEN scope (it
+    # exists only for GitHub Apps), so pushes touching .github/workflows/
+    # are rejected server-side regardless; the push step warns about that
+    # case explicitly (#635).
     # chromium-only gate (webkit has pre-existing storage-API env failures; Safari parity is Tier2 manual QA)
     # No job-level concurrency: the workflow-level group already serializes per
     # issue, and a job group equal to it deadlocks (job fails with 0 steps).
@@ -557,6 +549,12 @@ jobs:
           # already exists (agent pushed mid-run, or residue the pre-clean
           # step missed), a lease-guarded force push lets the latest attempt
           # win while a concurrent update still rejects safely (#635).
+          # GITHUB_TOKEN has no `workflows` scope — a diff touching
+          # .github/workflows/ is rejected server-side. Warn so the log
+          # explains the coming failure instead of looking like a race.
+          if git diff --name-only origin/main...HEAD -- .github/workflows/ | grep -q .; then
+            echo "::warning::diff includes .github/workflows/ — GITHUB_TOKEN cannot push workflow changes; this push will be rejected"
+          fi
           git fetch origin --quiet || true
           if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
             git push --force-with-lease="refs/heads/$branch:$(git rev-parse "refs/remotes/origin/$branch")" origin "$branch"
@@ -778,6 +776,12 @@ jobs:
           fi
           # Same push guard as implement-direct (#635): refresh refs, then
           # lease-guarded force push when the remote branch already exists.
+          # GITHUB_TOKEN has no `workflows` scope — a diff touching
+          # .github/workflows/ is rejected server-side; warn so the log
+          # explains the coming failure instead of looking like a race.
+          if git diff --name-only origin/main...HEAD -- .github/workflows/ | grep -q .; then
+            echo "::warning::diff includes .github/workflows/ — GITHUB_TOKEN cannot push workflow changes; this push will be rejected"
+          fi
           git fetch origin --quiet || true
           if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
             git push --force-with-lease="refs/heads/$branch:$(git rev-parse "refs/remotes/origin/$branch")" origin "$branch"

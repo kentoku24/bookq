@@ -58,7 +58,7 @@ if [ -n "$failed_step" ]; then
       if has 'no commits and no PR|agent produced nothing'; then
         emit no-output "エージェントが成果を残せなかった（worktree 分離・push 拒否・空 PR の可能性）"
       elif has 'refusing to allow a GitHub App|without .?workflows.? permission'; then
-        emit push "変更が .github/workflows/ を含み GITHUB_TOKEN に workflows 権限が不足（job permissions を確認）"
+        emit push "変更が .github/workflows/ を含む — GITHUB_TOKEN に workflows スコープは存在しないため push 不可。workflow 変更は GitHub App token か手動適用が必要"
       else
         emit push "git push / PR 作成ステップで失敗（non-fast-forward・権限・workflows 制限）"
       fi
@@ -81,7 +81,7 @@ if [ -n "$failed_step" ]; then
       # the agent cannot force-push (opencode.json) so it may give up.
       if has 'refusing to allow a GitHub App|failed to push some refs|remote rejected|non-fast-forward'; then
         if has 'refusing to allow a GitHub App|without .?workflows.? permission'; then
-          emit push "agent の git push が .github/workflows/ 権限で拒否 — job permissions を確認"
+          emit push "agent の git push が .github/workflows/ 変更で拒否 — GITHUB_TOKEN では push 不可（App token か手動適用が必要）"
         else
           emit push "agent の git push が拒否（non-fast-forward / 権限 — branch 競合の可能性）"
         fi
