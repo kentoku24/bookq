@@ -101,6 +101,23 @@ def test_aggregate_failure_rate_and_macos():
     assert st["n_conclusion"] == 2
 
 
+def test_aggregate_skipped_cancelled_excluded_from_failure_rate():
+    # cancelled/skipped carry no verdict — they must not count as failures
+    # nor dilute the denominator (ios.yml cancel-in-progress regression).
+    samples = [
+        _sample(start=NOW - timedelta(days=1), conclusion="success"),
+        _sample(start=NOW - timedelta(days=1), conclusion="failure"),
+        _sample(start=NOW - timedelta(days=1), conclusion="cancelled"),
+        _sample(start=NOW - timedelta(days=1), conclusion="skipped"),
+        _sample(start=NOW - timedelta(days=1), conclusion="timed_out"),
+    ]
+    agg = cm.aggregate_jobs(samples)
+    st = agg["ci / pytest"]
+    assert st["n_conclusion"] == 3          # success + failure + timed_out
+    assert st["n_failed"] == 2              # failure + timed_out
+    assert st["failure_rate"] == pytest.approx(2 / 3)
+
+
 def test_aggregate_steps_null_excluded():
     steps = [
         {"workflow": "ci", "job_name": "ios-test", "step_name": "Run iOS tests",

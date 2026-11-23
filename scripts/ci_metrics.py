@@ -128,8 +128,10 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
     """Aggregate job samples by `workflow / job` key.
 
     Samples with null started_at/completed_at are excluded from
-    duration/queue stats (never counted as 0). Failure rate counts every
-    sample that carries a conclusion.
+    duration/queue stats (never counted as 0). Failure rate counts only
+    verdict-bearing conclusions — `skipped`/`cancelled` carry no test
+    outcome, so they stay out of both numerator and denominator (e.g.
+    ios.yml's cancel-in-progress would otherwise inflate the rate).
     """
     by_key: dict[str, dict] = {}
     for s in samples:
@@ -152,9 +154,9 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
         que = seconds_between(s.get("created_at"), s.get("started_at"))
         if que is not None:
             b["queues"].append(que)
-        if s.get("conclusion"):
+        if s.get("conclusion") and s.get("conclusion") not in ("skipped", "cancelled"):
             b["n_conclusion"] += 1
-            if s.get("conclusion") in ("failure", "timed_out", "cancelled"):
+            if s.get("conclusion") in ("failure", "timed_out"):
                 b["n_failed"] += 1
         if s.get("run_id") is not None:
             b["run_ids"].add(s.get("run_id"))
@@ -586,6 +588,10 @@ def cmd_report(args) -> int:
     cur_samples, base_samples = split_periods(metrics.get("jobs") or [], now)
     current = aggregate_jobs(cur_samples)
     baseline = aggregate_jobs(base_samples)
+    # Hotspot table is labelled "current window" — restrict step samples
+    # to the same 7d period as the job table.
+    cur_steps, _ = split_periods(metrics.get("steps") or [], now)
+    metrics_view = {**metrics, "steps": cur_steps}
     needs, reasons = decide_analysis(current, baseline)
     signals = [r for r in reasons if r.startswith("signal:")]
     summary = "; ".join(signals[:3]) if signals else (
@@ -600,7 +606,7 @@ def cmd_report(args) -> int:
     if not listed:
         emit_outputs("error", False, None, summary)
         return 1
-    body = render_issue_body(metrics, current, baseline, reasons, run_url, run_id)
+    body = render_issue_body(metrics_view, current, baseline, reasons, run_url, run_id)
     if number is None:
         title = issue_title()
         if dry_run:
