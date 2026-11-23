@@ -302,11 +302,15 @@ native フローは TEST_MODE でも Google OAuth を通る（`?client=native` �
   （Android の testTag 相当。Browse/Search/Reader/Offline の主要操作をカバー）。
 - CI: `.github/workflows/ios.yml`（`xcode-27` イメージ = Xcode 27 /
   iOS 27 SDK 搭載の arm64 preview runner。pull_request +
-  workflow_dispatch）。paths-filter で `ios/**` `api/**`
-  `rust/viewer-rs/**` とワークフロー/スクリプト自身に限定し、
+  workflow_dispatch + 毎日 03:00 JST の schedule）。paths-filter で
+  `ios/**` `api/**` とワークフロー/スクリプト自身に限定し、
   非対象 PR では skipped になる（required check 互換）。
   `web/**` は対象外 — アプリは WKWebView を持たず `/api/v1/*` と
   `/image/` のみを消費するため、シェルアセット変更は iOS に影響しない。
+  `rust/viewer-rs/**` も対象外 — サーバー内部実装は api/** 契約の
+  内側にあり、ubuntu レーン（contract checks + pytest vectors）と
+  Android parity suite が client-visible な振る舞いを検証する。
+  iOS 固有の取りこぼしは nightly schedule が drift 検出する。
   PR 単位の `concurrency` で superseded push は cancel される。
   `.github/scripts/ios-ui-test.sh`
   がシミュレータ選択（iPhone 13 優先・最新 runtime へフォールバック）→

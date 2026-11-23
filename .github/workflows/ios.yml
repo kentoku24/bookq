@@ -8,6 +8,14 @@ name: ios
 on:
   pull_request:
   workflow_dispatch:
+  # Nightly full-suite drift check on main. PR gating no longer covers
+  # rust/viewer-rs-only changes — server internals sit behind the api/**
+  # contract and are exercised by the cheap ubuntu lanes (contract checks,
+  # pytest vectors) plus the Android parity suite — so the integrated
+  # state is verified once a day off-peak (03:00 JST) instead of on every
+  # server PR.
+  schedule:
+    - cron: "0 18 * * *"
 
 permissions:
   contents: read
@@ -33,9 +41,11 @@ jobs:
         if: github.event_name == 'pull_request'
         # The UI tests boot the repo's viewer-rs binary and drive the
         # native client — it consumes only /api/v1/* and /image/ (no
-        # WKWebView), so web/** shell assets cannot affect it. The
-        # api/** contract surface (openapi + vectors) and the server
-        # itself stay in scope.
+        # WKWebView), so neither web/** shell assets nor rust/viewer-rs
+        # internals reach it directly. Server behavior is verified behind
+        # the api/** contract by the ubuntu lanes (contract checks +
+        # pytest vectors) and the Android parity suite; the nightly
+        # schedule run is the drift safety net for iOS-specific handling.
         with:
           filters: |
             run:
@@ -43,7 +53,6 @@ jobs:
               - "api/**"
               - ".github/workflows/ios.yml"
               - ".github/scripts/ios-ui-test.sh"
-              - "rust/viewer-rs/**"
 
   # Job id doubles as the required-check context; it must be unique across
   # workflows — a bare `test` collides with rust.yml's test job and GitHub
@@ -51,7 +60,7 @@ jobs:
   # a failure in the other (#540).
   ios-test:
     needs: changes-ios
-    if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || needs.changes-ios.outputs.run == 'true'
     # xcode-27 image (public preview): the only hosted arm64 image that
     # ships Xcode 27 / iOS 27 SDK — macos-latest (macos-26) is 26.x-only.
     runs-on: xcode-27
