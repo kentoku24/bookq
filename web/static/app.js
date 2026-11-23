@@ -799,6 +799,9 @@
   // 検索入力は browse/matchSort.js (window.BrowseMatchSort) が担う —
   // 現在フォルダ直下の子をクライアント側で relevance ソートするだけで、
   // サーバー検索 (/api/v1/search) の結果ビューは持たない。
+  // deploy watchdog (index.html stale()) の混在検査マーカー — 旧 app.js
+  // (SearchFacets.doSearch 前提) が SWR キャッシュから残った場合に検出する。
+  window.BOOKQ_LOCAL_SEARCH = true;
   let searchTimer = null;
   let activeFilters = { artist: [], tag: [], sort: 'relevance' };
   let facets = { artists: [], tags: [] };
@@ -1854,8 +1857,12 @@
       }));
     }
     // Stage 1: shallow first paint (direct children only, no facets).
+    // preservePath reloads already show a full tree — re-applying the
+    // shallow depth=1 tree would drop an unresolvable deep currentBrowsePath
+    // to null (clearing the query via syncLevel) until the full response
+    // lands. Keep the current listing until the full tree arrives instead.
     let shallowOk = false;
-    try {
+    if (!(preservePath && treeLoaded)) try {
       const res = await _fetch(globalThis.BookqApi.treeUrl({depth: 1}), {credentials: 'same-origin'});
       if (!_isLoadCurrent(_loadGen, _connGen)) return;
       if (!res.ok) throw new Error("http "+res.status);

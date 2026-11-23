@@ -114,6 +114,36 @@ def test_reload_keeps_active_sort_query(page):
         page.unroute("**/api/v1/**")
 
 
+def test_reload_keeps_query_at_deep_level(page):
+    """⋯再読み込み while searching DEEPER than root's direct children:
+    the shallow depth=1 tree can't resolve the current path, so the reload
+    must not flash the root listing — the query and sorted order survive
+    until the full tree re-applies the same level."""
+    # Wait out the initial shallow window — the fix only skips the reload's
+    # shallow stage once a full tree is already displayed (treeLoaded).
+    page.wait_for_function("window.treeLoaded === true")
+    # group/episodes is depth-2 — invisible to the depth=1 shallow tree.
+    page.locator('.tile[data-path="group"]').click()
+    page.wait_for_selector('.tile[data-path="group/episodes"]')
+    page.locator('.tile[data-path="group/episodes"]').click()
+    page.wait_for_selector('.tile[data-path="group/episodes/ch-1"]')
+
+    page.locator("#search-input").fill("ch-1")
+    page.wait_for_timeout(500)
+    tiles = page.locator("#tile-grid .tile")
+    assert tiles.count() == 4, "sort keeps every child — no filtering"
+    assert tiles.first.get_attribute("data-path") == "group/episodes/ch-1"
+
+    open_header_menu(page)
+    page.locator("#menu-reload").click()
+    page.wait_for_timeout(1500)  # refresh POST + full tree reload
+
+    assert page.locator("#search-input").input_value() == "ch-1"
+    tiles = page.locator("#tile-grid .tile")
+    assert tiles.count() == 4
+    assert tiles.first.get_attribute("data-path") == "group/episodes/ch-1"
+
+
 # ── filter bottom sheet ─────────────────────────────────────────────────────────
 
 
