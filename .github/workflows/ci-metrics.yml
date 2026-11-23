@@ -14,6 +14,9 @@ on:
 permissions:
   contents: read
   issues: write
+  # collect/report の gh api (actions/runs|jobs) と analyze の
+  # gh run download (artifacts) に必須。未指定だと none になり 403。
+  actions: read
 
 concurrency:
   group: ci-metrics
@@ -80,6 +83,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      actions: read   # gh run download (metrics artifact)
       id-token: write
     steps:
       - uses: actions/checkout@v7
