@@ -49,6 +49,7 @@ issue タイトルからスラッグを生成する:
 - コミットメッセージは conventional commits 形式
 - PR 本文には**テストに関する考慮事項**を必ず記載する (実施したテスト、影響範囲、確認方法)
 - live 実データ回帰 (`BOOKQ_LIVE_ROOT=... ./scripts/live-regress.sh`) の実施有無も PR 本文に記載する。live のフォルダ名はコード・ログ・レポートに出さない (tests/live/README.md の漏洩防止ルール遵守)
+- テスト実行は §7「テスト」記載の `uv run --with ...` コマンドのみを使うこと。bare `python`/`pytest` は依存不足 (playwright/pytest/PIL 等) で失敗する (#635)
 
 ## 5. research タスク
 
@@ -131,4 +132,5 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - 作業開始時チェックリスト: `git worktree list` で既存確認 → なければ `git worktree add .worktrees/<name> -b ai/<N>-<slug> origin/main` (plan-track は `-b ai/<slug>`) → その worktree に移動して作業。`origin/main` から切り、ローカル HEAD から切らないこと。
 - 1 worktree = 1 dev 環境名。worktree 作成時に `./dev.sh up <name>` でスロット占有を宣言し、マージ時に `./dev.sh down <name>` + `git worktree remove` で解放する (10スロットプールのため同時10以下を仮定)。
 - 読み取り専用 (調査・レビュー) のみ同居可。`web/static/app.js` の同時編集は直列化すること。
+- CI (opencode-auto) の使い捨て checkout では `.worktrees/` を作らず checkout 直下で直接作業すること — 機械ステップはこの checkout の git 状態のみを評価するため、worktree 内のコミットは「成果なし」と誤判定される (#635)。
 - 残置掃除は `./scripts/cleanup-worktrees.sh` (既定 dry-run、`--apply` で削除)。マージ済み・clean のみ対象、detached/dirty/dev 環境は手動。
