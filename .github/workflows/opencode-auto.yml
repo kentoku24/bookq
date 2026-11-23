@@ -402,6 +402,23 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
+      # Cheap sanity before any step that shells out: branch cleanup uses
+      # git/gh, CLI install + sign-in use curl/jq, the agent and delivery
+      # step need the rest. Failures here classify as env and cost seconds
+      # instead of a full agent run (#635).
+      - name: Preflight — toolchain sanity before agent run
+        id: preflight
+        run: |
+          set -uo pipefail
+          rc=0
+          for cmd in git gh node python3 jq curl; do
+            command -v "$cmd" >/dev/null 2>&1 || { echo "::error::preflight: $cmd missing"; rc=1; }
+          done
+          git ls-remote origin HEAD >/dev/null 2>&1 || { echo "::error::preflight: git ls-remote origin failed (auth/network)"; rc=1; }
+          command -v uv >/dev/null 2>&1 || echo "::warning::preflight: uv not on PATH yet (setup-uv runs later in this job)"
+          command -v cargo >/dev/null 2>&1 || echo "::warning::preflight: cargo not on PATH (test gate installs its own toolchain)"
+          exit $rc
+
       # Failed attempts leave ai/<N>-* branches on the remote. The agent
       # cannot force-push (opencode.json denies it), so every retry would
       # hit non-fast-forward (#635). Delete residue that no open PR
@@ -450,22 +467,6 @@ jobs:
             -d subject_token="$oidc" | jq -r .access_token)
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
-
-      # Cheap sanity before burning LLM tokens: tools the agent and the
-      # delivery step need, plus git auth. Failures here classify as env
-      # and cost seconds instead of a full agent run (#635).
-      - name: Preflight — toolchain sanity before agent run
-        id: preflight
-        run: |
-          set -uo pipefail
-          rc=0
-          for cmd in git gh node python3 jq curl; do
-            command -v "$cmd" >/dev/null 2>&1 || { echo "::error::preflight: $cmd missing"; rc=1; }
-          done
-          git ls-remote origin HEAD >/dev/null 2>&1 || { echo "::error::preflight: git ls-remote origin failed (auth/network)"; rc=1; }
-          command -v uv >/dev/null 2>&1 || echo "::warning::preflight: uv not on PATH yet (setup-uv runs later in this job)"
-          command -v cargo >/dev/null 2>&1 || echo "::warning::preflight: cargo not on PATH (test gate installs its own toolchain)"
-          exit $rc
 
       - name: Run opencode CLI
         id: agent
@@ -553,9 +554,12 @@ jobs:
             exit 1
           fi
           # Refresh remote-tracking refs, then push. If the remote branch
-          # already exists (agent pushed mid-run, or residue the pre-clean
-          # step missed), a lease-guarded force push lets the latest attempt
-          # win while a concurrent update still rejects safely (#635).
+          # already exists (agent pushed mid-run, collaborator commits added
+          # during the test gate, or residue the pre-clean step missed),
+          # merge it into HEAD first so those commits are preserved — the
+          # push then fast-forwards. No force-push: a lease taken from the
+          # just-fetched remote would still overwrite commits local HEAD
+          # never contained (#635, review).
           # GITHUB_TOKEN has no `workflows` scope — a diff touching
           # .github/workflows/ is rejected server-side. Warn so the log
           # explains the coming failure instead of looking like a race.
@@ -564,10 +568,14 @@ jobs:
           fi
           git fetch origin --quiet || true
           if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
-            git push --force-with-lease="refs/heads/$branch:$(git rev-parse "refs/remotes/origin/$branch")" origin "$branch"
-          else
-            git push origin "$branch"
+            if ! git merge-base --is-ancestor "origin/$branch" HEAD; then
+              git merge --no-edit "origin/$branch" || {
+                echo "::error::cannot merge origin/$branch into $branch — resolve conflicts manually"
+                exit 1
+              }
+            fi
           fi
+          git push origin "$branch"
           gh pr create --repo "$REPO" --base main --head "$branch" \
             --title "feat(ai): resolve issue #${ISSUE_NUMBER}" \
             --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
@@ -646,6 +654,23 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
+      # Cheap sanity before any step that shells out: branch cleanup uses
+      # git/gh, CLI install + sign-in use curl/jq, the agent and delivery
+      # step need the rest. Failures here classify as env and cost seconds
+      # instead of a full agent run (#635).
+      - name: Preflight — toolchain sanity before agent run
+        id: preflight
+        run: |
+          set -uo pipefail
+          rc=0
+          for cmd in git gh node python3 jq curl; do
+            command -v "$cmd" >/dev/null 2>&1 || { echo "::error::preflight: $cmd missing"; rc=1; }
+          done
+          git ls-remote origin HEAD >/dev/null 2>&1 || { echo "::error::preflight: git ls-remote origin failed (auth/network)"; rc=1; }
+          command -v uv >/dev/null 2>&1 || echo "::warning::preflight: uv not on PATH yet (setup-uv runs later in this job)"
+          command -v cargo >/dev/null 2>&1 || echo "::warning::preflight: cargo not on PATH (test gate installs its own toolchain)"
+          exit $rc
+
       # Failed attempts leave ai/<N>-* branches on the remote. The agent
       # cannot force-push (opencode.json denies it), so every retry would
       # hit non-fast-forward (#635). Delete residue that no open PR
@@ -694,22 +719,6 @@ jobs:
             -d subject_token="$oidc" | jq -r .access_token)
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
-
-      # Cheap sanity before burning LLM tokens: tools the agent and the
-      # delivery step need, plus git auth. Failures here classify as env
-      # and cost seconds instead of a full agent run (#635).
-      - name: Preflight — toolchain sanity before agent run
-        id: preflight
-        run: |
-          set -uo pipefail
-          rc=0
-          for cmd in git gh node python3 jq curl; do
-            command -v "$cmd" >/dev/null 2>&1 || { echo "::error::preflight: $cmd missing"; rc=1; }
-          done
-          git ls-remote origin HEAD >/dev/null 2>&1 || { echo "::error::preflight: git ls-remote origin failed (auth/network)"; rc=1; }
-          command -v uv >/dev/null 2>&1 || echo "::warning::preflight: uv not on PATH yet (setup-uv runs later in this job)"
-          command -v cargo >/dev/null 2>&1 || echo "::warning::preflight: cargo not on PATH (test gate installs its own toolchain)"
-          exit $rc
 
       - name: Run opencode CLI
         id: agent
@@ -788,8 +797,9 @@ jobs:
             echo "::error::no commits and no PR for #${ISSUE_NUMBER} — agent produced nothing"
             exit 1
           fi
-          # Same push guard as implement-direct (#635): refresh refs, then
-          # lease-guarded force push when the remote branch already exists.
+          # Same push guard as implement-direct (#635): refresh refs, merge
+          # any remote-only commits into HEAD, then a plain fast-forward
+          # push — never force-push over commits we don't contain.
           # GITHUB_TOKEN has no `workflows` scope — a diff touching
           # .github/workflows/ is rejected server-side; warn so the log
           # explains the coming failure instead of looking like a race.
@@ -798,10 +808,14 @@ jobs:
           fi
           git fetch origin --quiet || true
           if git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
-            git push --force-with-lease="refs/heads/$branch:$(git rev-parse "refs/remotes/origin/$branch")" origin "$branch"
-          else
-            git push origin "$branch"
+            if ! git merge-base --is-ancestor "origin/$branch" HEAD; then
+              git merge --no-edit "origin/$branch" || {
+                echo "::error::cannot merge origin/$branch into $branch — resolve conflicts manually"
+                exit 1
+              }
+            fi
           fi
+          git push origin "$branch"
           gh pr create --repo "$REPO" --base main --head "$branch" \
             --title "docs(ai): research report for issue #${ISSUE_NUMBER}" \
             --body "Closes #${ISSUE_NUMBER}. Automated via opencode-auto (direct run)."
