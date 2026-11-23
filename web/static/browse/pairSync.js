@@ -40,8 +40,9 @@
  *   list/card・階層遷移・初回適用は従来どおり即時適用。
  *
  *   UI_SYNC は committed reader state ではない（revision/apply_log/dedup を
- *   汚さない SIGNAL 同型の ephemeral 中継）。searchMode 中は送受信とも停止
- *   （検索結果の同期はスコープ外）。順序は単一 WS link が保証するので
+ *   汚さない SIGNAL 同型の ephemeral 中継）。クエリソート中
+ *   (BrowseMatchSort.isActive) は送受信とも停止 — 並び順がローカルで
+ *   ずれるため scroll 位置の対応が取れない。順序は単一 WS link が保証するので
  *   seq は持たない。
  *
  *   follower のミラー sidebar は最初の有効 frame で自動的に開き、disarm
@@ -81,7 +82,7 @@
   var _appliedHold = null;   // 直近に適用した remote 由来 state {path,top,mode}
   var _trailT = null;
   var _suppressUntil = 0;    // echo 抑止の期限（Date.now ベース）
-  var _pendingMsg = null;    // 未適用の最新 remote {msg, at}（未 arm/searchMode 等）
+  var _pendingMsg = null;    // 未適用の最新 remote {msg, at}（未 arm/クエリソート中 等）
   var _mirrorOpened = false; // このモジュールが開いた sidebar か（disarm で畳む対象）
   var _userClosed = false;   // armed 中にユーザーがミラー sidebar を閉じた
   var _prevPresenceSig = '';
@@ -110,7 +111,13 @@
     var s = _sidebar();
     return !!(s && s.classList && s.classList.contains('open'));
   }
-  function _searchMode() { return !!_w().searchMode; }
+  /* クエリソート中は一覧の並びがローカルでずれる — scroll 位置の対応が
+   * 取れないので mirror の送受信を止める (旧 searchMode ゲートの後継)。 */
+  function _queryActive() {
+    var BMS = _w().BrowseMatchSort;
+    return !!(BMS && typeof BMS.isActive === 'function' && BMS.isActive());
+  }
+
   function _paired(st) {
     var p = st && st.presence;
     return !!p && Object.keys(p).length >= 2;
@@ -225,7 +232,7 @@
   /* ── 送信 ── */
 
   function _sendGate() {
-    return _armed && _unlocked && _sidebarOpen() && !_searchMode() &&
+    return _armed && _unlocked && _sidebarOpen() && !_queryActive() &&
       !!_scroller() && !!_pc();
   }
 
@@ -570,7 +577,7 @@
     var st = _pc() && _pc().state;
     return !!(f.sc && c && f.sc === _scroller() && _armed && st &&
       st.phase === 'selecting' && st.sessionId === c.sid &&
-      _role() === c.role && !_searchMode() &&
+      _role() === c.role && !_queryActive() &&
       !document.hidden && _sidebarOpen() && !_reducedMotion() &&
       (_w().viewMode || 'tile') === c.mode &&
       (_w().currentBrowsePath || null) === c.path);
@@ -686,8 +693,8 @@
       _stashPending(msg, at);
       return;
     }
-    if (_searchMode() || !_pathResolvable(msg.path)) {
-      // 最新のみ保持 — searchMode 解除後 / tree 到着後に observer・次 msg で再適用。
+    if (_queryActive() || !_pathResolvable(msg.path)) {
+      // 最新のみ保持 — クエリ解除 / tree 到着後に observer・次 msg で再適用。
       _resetFollow();
       _stashPending(msg, at);
       return;
@@ -778,7 +785,7 @@
   function _reapplyLastRemote() {
     var sc = _scroller(), m = _lastRemoteMsg;
     if (!_armed || !sc || !m) return;
-    if (_searchMode() || _localBusy() || !_sidebarOpen()) return;
+    if (_queryActive() || _localBusy() || !_sidebarOpen()) return;
     if ((m.path || null) !== (_w().currentBrowsePath || null) ||
         (m.mode || 'tile') !== (_w().viewMode || 'tile')) return;
     if (!_holdMatch(_payload())) return;

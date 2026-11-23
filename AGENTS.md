@@ -118,6 +118,12 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - **エミュレータ標準フローは `.claude/skills/android-emulator/SKILL.md`**。AVD (`bookq_tab`) は ~9GB・Gradle/Kotlin daemon は 2〜4GB を常駐させるため、検証終了時・テスト合間に必ず `adb -s <serial> emu kill` / `./gradlew --stop` で止めること。自分が起動したプロセスだけを止め、他セッションの環境を殺さない (停止前に `adb devices` / `docker ps` / `ps` で所有確認)。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
 
+### 自動化ワークフロー (improvement-scan)
+
+- `.github/workflows/improvement-scan.yml` が週次でボトルネック調査→改善 Issue 起票を行う（`discovery` ラベル、タイトル `[discovery] <area>:` 接頭辞）。詳細は `docs/discovery-scan.md`。
+- 起票 Issue には `ai/*` ラベルが**付いていない** — 人間がトリアージして初めて bot パイプラインに乗る。bot 側から `ai/implement` / `ai/research` を自発的に付与しないこと。
+- 実行ログは `[meta] improvement-scan 実行ログ` Issue に積まれる。
+
 ## 8. 並行作業の隔離
 
 - 書き込みを伴う作業は単発でも必ず別 worktree (`ai/<N>-<slug> OR ai/<slug>` ごとに1つ、`.worktrees/` 内)。1 issue/plan = 1 worktree を維持する (2026-10-05 以降、単発作業の除外なし)。

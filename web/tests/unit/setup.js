@@ -10,4 +10,5 @@ import '../../static/thumbs/resolveCover.js';
 import '../../static/viewer/pairModel.js';
 import '../../static/viewer/spread.js';
 import '../../static/search/facets.js';
+import '../../static/browse/matchSort.js';
 import '../../static/browse/hash.js';

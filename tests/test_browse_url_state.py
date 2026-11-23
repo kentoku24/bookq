@@ -238,7 +238,7 @@ def test_page_turn_after_browse_push_does_not_grow_history(page):
 
 # ── Consistency — empty/failure branches, resume hop, pull-refresh ────────
 # Every path that clears/rewrites the hash to no-hash must also reset the
-# browse state (currentBrowsePath = null, urlStack = [], searchMode cleared)
+# browse state (currentBrowsePath = null, urlStack = [], query cleared)
 # so the screen matches the canonical root URL (stale-stack hazard).
 
 

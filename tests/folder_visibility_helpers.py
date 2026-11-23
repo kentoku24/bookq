@@ -51,8 +51,9 @@ def make_png(path: Path, w: int = 40, h: int = 60, rgb: tuple = (200, 60, 60)) -
 
 
 def _metadata_toml(title: str) -> str:
-    """Minimal parseable metadata.toml — /api/search scores title_jp/title_en/
-    artist/tags only (rust search port); folder names alone never match.
+    """Minimal parseable metadata.toml — facet filters and client matchSort
+    score title_jp/title_en/artist/tags; folder names alone never match
+    metadata fields.
     """
     return (
         "[source]\n"

@@ -21,7 +21,7 @@ function captureFetch(responder) {
 }
 
 beforeEach(() => {
-  for (const k of ['Connectivity', 'searchResults', 'searchMode', 'activeFilters',
+  for (const k of ['Connectivity', 'activeFilters',
     'facets', 'facetLoadGen', 'searchTimer', 'refreshOfflineMap', 'renderView',
     'FolderVisibility', 'tree', 'offlineMap', 'offlineRecordMap', 'getLeafPathsFor',
     'progressBarHtml', 'BrowseRender', 'StoreAdapter', 'offlineControlsHtml',

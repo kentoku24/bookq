@@ -36,8 +36,9 @@ def test_initial_load_shows_root_folder_tiles(page, root_folder_names):
 
 
 def test_search_filters_current_level(page):
-    # The search now calls /api/search; with no metadata.toml in the fixture,
-    # it returns 0 results. Verify the UI handles this gracefully.
+    # The search input sorts the current folder's children client-side
+    # (browse/matchSort.js) — no /api/search call, no result-view switch.
+    # Verify the UI stays on the browse grid and restores on clear.
     page.locator("#search-input").fill("manga")
     page.wait_for_timeout(600)  # debounce 300ms + API roundtrip
     expect(page.locator("#tile-grid")).not_to_be_empty()  # UI shows something

@@ -174,12 +174,12 @@ def test_filter_sheet_at_root_lists_all_artists(facet_page, facet_server):
     ]
 
 
-def test_filter_sheet_in_search_mode_lists_all_artists(facet_page, facet_server):
-    """Search mode: the sheet lists whole-library options, not the stale browse subtree.
+def test_filter_sheet_with_active_query_lists_current_folder_artists(facet_page, facet_server):
+    """With a sort query typed, the sheet still scopes to the current folder.
 
-    currentBrowsePath stays at COMEDY after drilling down, but /api/v1/search applies
-    filters library-wide — so opening the sheet mid-search must list all 5
-    artists, not just COMEDY's 3.
+    The query only reorders the browse level (browse/matchSort.js) — it does
+    not switch to a library-wide result view, so opening the sheet mid-query
+    must list COMEDY's 3 subtree artists, not all 5.
     """
     page = facet_page
     _goto_root(page, facet_server)
@@ -187,17 +187,15 @@ def test_filter_sheet_in_search_mode_lists_all_artists(facet_page, facet_server)
     expect(page.locator('.tile[data-path="COMEDY/atelier-sun"]')).to_have_count(1)
 
     page.locator("#search-input").fill("dead")
-    page.wait_for_timeout(600)  # 300 ms debounce + fetch
+    page.wait_for_timeout(600)  # 300 ms debounce + render
 
     _open_filter_sheet(page)
     artists = page.locator("#facet-artists .chip")
-    expect(artists).to_have_count(5)
+    expect(artists).to_have_count(3)
     assert artists.all_inner_texts() == [
-        "annex artist",
         "atelier-sun",
         "example-artist",
         "other artist",
-        "sample artist",
     ]
 
 

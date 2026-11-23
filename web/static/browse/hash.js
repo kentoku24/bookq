@@ -355,9 +355,8 @@
     var dead = !!path && !node; // a path was requested but doesn't resolve — dead/nonexistent folder
     try { window.currentBrowsePath = (path && node) ? path : null; } catch(e) { console.warn(e); }
     if (typeof window.updateBrowseHeader === 'function') try { window.updateBrowseHeader(); } catch(e) { console.warn(e); }
-    try { window.searchMode = false; } catch(e) { console.warn(e); }
-    var si = document.getElementById("search-input");
-    if (si) si.value = "";
+    // 検索クエリは updateBrowseHeader → BrowseMatchSort.syncLevel が
+    // レベル変化時にクリアする (同一レベル restore では維持が正しい)。
     // 位置は BrowseScroll.decide が一元管理する: 保存位置（従来の rAF 復元）か
     // アンカー（ビューア復帰 / 最大既読 / 上端）のどちらか一方だけを書く。
     var savedTop;

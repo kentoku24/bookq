@@ -271,11 +271,10 @@
     }, CONFIRM_MS);
   }
 
-  // render.js のタイル HTML へ差し込むバッジ (編集 OFF/検索中では空文字)。
-  // 検索タイルは browse ツリーの実体と _fullPath がずれることがあるので
-  // 検索結果には削除ボタンを出さない。
+  // render.js のタイル HTML へ差し込むバッジ (編集 OFF では空文字)。
+  // クエリソート中のタイルも実 browse ノードなので削除ボタンを出してよい。
   function delBadgeHtml() {
-    if (!_editing || window.searchMode) return "";
+    if (!_editing) return "";
     return '<button type="button" class="lib-del" aria-label="削除" title="削除 (2タップで確定)">🗑</button>';
   }
 

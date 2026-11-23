@@ -491,7 +491,6 @@
   window.invalidateLeafPaths = invalidateLeafPaths;
   window.loadFolders = loadFolders;
   window.loadFacets = loadFacets;
-  window.doSearch = doSearch;
   window.fetchLatestFolders = fetchLatestFolders;
   window.revalidateFoldersForOnline = revalidateFoldersForOnline;
   // First user gesture of the session — persist() must be called from one, and
@@ -797,8 +796,9 @@
   let hintTimer = null;
 
   // ── Search / Filter state ──
-  let searchMode = false;
-  let searchResults = [];
+  // 検索入力は browse/matchSort.js (window.BrowseMatchSort) が担う —
+  // 現在フォルダ直下の子をクライアント側で relevance ソートするだけで、
+  // サーバー検索 (/api/v1/search) の結果ビューは持たない。
   let searchTimer = null;
   let activeFilters = { artist: [], tag: [], sort: 'relevance' };
   let facets = { artists: [], tags: [] };
@@ -1171,8 +1171,7 @@
       // a stale #/view/… hash off screen while the grid is up).
       window.ViewerNavigation.request({type: "browse", via: "sidebar"});
     } else {
-      if (searchMode) window.BrowseRender.renderBrowse({mode: 'list', results: searchResults});
-      else window.BrowseRender.renderBrowse({mode: viewMode, results: null});
+      window.BrowseRender.renderBrowse({mode: viewMode});
     }
   }
   menuBtn.addEventListener("click", toggleSidebar);
@@ -1509,10 +1508,17 @@
     if (filtersActive()){
       // Shallow window: nodes carry no subtree_facets, so nodeMatchesFilters
       // would false out everything — never filter, show all + 読込中 badge.
-      if (_shallowMode) return children;
+      if (_shallowMode) return _sortBrowseChildren(children, path);
       children = children.filter(nodeMatchesFilters);
     }
-    return children;
+    return _sortBrowseChildren(children, path);
+  }
+  // クエリ一致度ソート (browse/matchSort.js)。フィルタ適用後の表示対象
+  // だけを並べ替える — 非表示・フィルタ外の要素が復活することはない。
+  // render/scroll/facet はこの戻り値をそのまま使うのでソート順が共有される。
+  function _sortBrowseChildren(children, path){
+    var BMS = window.BrowseMatchSort;
+    return (BMS && typeof BMS.apply === "function") ? BMS.apply(children, path) : children;
   }
   function getBrowseChildren(){
     return getBrowseChildrenAt(currentBrowsePath);
@@ -1520,6 +1526,10 @@
   try { window.getBrowseChildrenAt = getBrowseChildrenAt; } catch(e) { console.warn(e); }
 
   function updateBrowseHeader(){
+    // ブラウズレベル確定の単一関門 — 全ナビゲーション経路 (drill-down /
+    // 戻る / pop / hash restore / pair sync / tree 適用) がここを通るので、
+    // レベルが変わった時だけ検索クエリをクリアする (matchSort.syncLevel)。
+    try { if (window.BrowseMatchSort) window.BrowseMatchSort.syncLevel(currentBrowsePath); } catch(e) { console.warn(e); }
     const h = document.getElementById("browse-header");
     if (!h) return;
     if (!currentBrowsePath){
@@ -1642,15 +1652,13 @@
   // Single delegated #tile-grid listener + closest() — replaces the
   // per-tile addEventListener loops (N listeners → 1). The selector arg is
   // kept for caller compat; the handler matches the browse union
-  // (.tile/.item[data-path]/.card) and no-ops while searchMode (search tiles
-  // own their delegated handler below). Parent-level images-tiles
+  // (.tile/.item[data-path]/.card). Parent-level images-tiles
   // (data-read-child / root data-read-self) open the viewer directly;
   // plain folder tiles keep the old loadImages-vs-navigateToFolder branching.
   function _bindBrowseClicks(selector){
     if(!tileGrid.__ccBrowseDelegated){
       tileGrid.__ccBrowseDelegated = true;
       tileGrid.addEventListener("click", e=>{
-        if(window.searchMode) return;
         const el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
         if(!el || !tileGrid.contains(el)) return;
         if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
@@ -1674,25 +1682,7 @@
       });
     }
   }
-  function _bindSearchClicks(selector){
-    if(!tileGrid.__ccSearchDelegated){
-      tileGrid.__ccSearchDelegated = true;
-      tileGrid.addEventListener("click", e=>{
-        if(!window.searchMode) return;
-        const el = e.target.closest ? e.target.closest('.tile,.item[data-path],.card') : null;
-        if(!el || !tileGrid.contains(el)) return;
-        if(e.target.closest('.offline-btn') || e.target.closest('.ux-pop') || e.target.closest('.visibility-toggle')) return;
-        const path = el.dataset.path;
-        if (!path) return;
-        navOpenWork(path, "search");
-        searchInput.value = "";
-        searchMode = false;
-        searchResults = [];
-        clearTimeout(searchTimer);
-      });
-    }
-  }
-  try { window._bindBrowseClicks = _bindBrowseClicks; window._bindSearchClicks = _bindSearchClicks; } catch(e) { console.warn(e); }
+  try { window._bindBrowseClicks = _bindBrowseClicks; } catch(e) { console.warn(e); }
 
   // ── thumb prefetch: per-work cache via OfflineCore.imageUrl (per-segment encodePath) ──
   const PREFETCH_CONCURRENCY = 3;
@@ -2022,11 +2012,10 @@
   try { if (typeof window !== 'undefined'){ window.getParentPath = getParentPath; window.findNodeByPath = findNodeByPath; window.getSiblingLeafFolders = getSiblingLeafFolders; window.getBrowseChildren = getBrowseChildren; window.buildNodeMap = buildNodeMap; window.setFullPathsAndIndex = setFullPathsAndIndex; window.setFullPathsAndIndexAsync = setFullPathsAndIndexAsync; window.emptyBrowseMessage = emptyBrowseMessage; window.progressBarHtml = progressBarHtml; window._coverUrl = _coverUrl; } } catch(e) { console.warn(e); }
 
 
-  // ── Search / Filter / Facets ──
-  // search/facets.js (window.SearchFacets) owns facet loading and search,
+  // ── Facets ──
+  // search/facets.js (window.SearchFacets) owns facet loading,
   // including the !res.ok HTTP-error handling. app.js only delegates.
   async function loadFacets(path, deps) { return window.SearchFacets.loadFacets(path, deps); }
-  async function doSearch(deps) { return window.SearchFacets.doSearch(deps); }
 
   // ── H4(a): keyboard activation of browse items ──
   // Tiles/cards/list-items are focusable divs (tabindex=0 role=button); the
@@ -2076,7 +2065,7 @@
             activeFilters[filter] = activeFilters[filter].filter(v => v !== value);
             updateFilterChips();
             clearTimeout(searchTimer);
-            searchTimer = setTimeout(doSearch, 300);
+            searchTimer = setTimeout(() => { try { renderView(); } catch(e) { console.warn(e); } }, 300);
           }
         });
       });
@@ -2139,10 +2128,9 @@
 
   function openFilterSheet() {
     document.querySelectorAll(".facet-chips").forEach(c => { c.innerHTML = ""; });
-    // In search mode /api/search applies filters library-wide, so the facet
-    // sheet must list whole-library options — not whatever folder was last
-    // browsed (a stale currentBrowsePath would scope options to its subtree).
-    loadFacets(searchMode ? "" : currentBrowsePath);
+    // ファセットは常に現在のブラウズ階層にスコープされる (検索クエリによる
+    // ソートは階層を変えないので currentBrowsePath のまま)。
+    loadFacets(currentBrowsePath);
     setInert(bottomSheet, false);
     // H4(c): aria-modal=true promises the background isn't reachable while
     // the sheet is open — the sidebar sits behind it (H1 keeps it open), so
@@ -2201,12 +2189,7 @@
     sortRadios.forEach(r => r.checked = r.value === 'relevance');
     renderFacetOptions();
     updateFilterChips();
-    if (searchMode) {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(doSearch, 300);
-    } else {
-      renderView();
-    }
+    renderView();
   });
 
   filterApplyBtn.addEventListener("click", () => {
@@ -2214,12 +2197,7 @@
     sortRadios.forEach(r => { if (r.checked) activeFilters.sort = r.value; });
     closeFilterSheet();
     updateFilterChips();
-    if (searchMode) {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(doSearch, 300);
-    } else {
-      renderView();
-    }
+    renderView();
   });
 
   // ── unified render ──
@@ -2238,7 +2216,6 @@
     tileGrid.classList.toggle("card-mode", viewMode === "card");
     window.BrowseRender.renderBrowse({
       mode: viewMode,
-      results: searchMode ? searchResults : null,
       scrollAnchor: (opts && 'scrollAnchor' in opts) ? opts.scrollAnchor : undefined,
     });
     updateResumeButton();
@@ -2254,8 +2231,6 @@
     window.syncSidebarA11y = syncSidebarA11y;
   } catch(e) { console.warn(e); }
   try {
-    Object.defineProperty(window, 'searchMode', {get(){return searchMode;}, set(v){searchMode=v;}, configurable:true});
-    Object.defineProperty(window, 'searchResults', {get(){return searchResults;}, set(v){searchResults=v;}, configurable:true});
     Object.defineProperty(window, 'activeFilters', {get(){return activeFilters;}, set(v){activeFilters=v;}, configurable:true});
     Object.defineProperty(window, 'facets', {get(){return facets;}, set(v){facets=v;}, configurable:true});
     Object.defineProperty(window, 'facetLoadGen', {get(){return facetLoadGen;}, set(v){facetLoadGen=v;}, configurable:true});
@@ -2343,9 +2318,7 @@
     urlRestoring = false;
     currentFolder = null; chapterList = []; chapterBoundaries = [];
     currentBrowsePath = null; urlStackReplace(location.pathname + location.search);
-    searchMode = false;
-    const si = document.getElementById("search-input");
-    if (si) si.value = "";
+    try { if (window.BrowseMatchSort) window.BrowseMatchSort.clear(); } catch(e) { console.warn(e); }
     sidebar.classList.add("open"); viewer.classList.add("sidebar-open");
     syncSidebarA11y();
     renderView();
@@ -2357,12 +2330,10 @@
     // 1) in-flight の非同期ロード・復元を世代で無効化
     try { urlRestoreGen++; urlRestoring = false; } catch(e){}
     try { window.facetLoadGen++; } catch(e){}
-    try { if (window.SearchFacets && typeof window.SearchFacets.invalidateSearch === "function") window.SearchFacets.invalidateSearch(); } catch(e){}
-    // 2) shallow/判定待ちキュー・検索状態をクリア
+    // 2) shallow/判定待ちキュー・検索クエリをクリア
     _pendingNav = null;
-    searchMode = false; searchResults = [];
+    try { if (window.BrowseMatchSort) window.BrowseMatchSort.clear(); } catch(e) { console.warn(e); }
     clearTimeout(searchTimer);
-    if (searchInput) searchInput.value = "";
     // 3) viewer を先に teardown — PairedView の solo 復元 hook が解除時に
     //    隠した画像を再生成しないよう pairStrip を先に捨てる
     teardownViewer();
@@ -3822,8 +3793,11 @@
   }
 
   searchInput.addEventListener("input", () => {
+    // setQuery は即時 — クエリが効くレベル (現在の currentBrowsePath) を
+    // 入力時点で捕捉するため、デバウンスの中には入れない。描画だけ 300ms 待つ。
+    try { if (window.BrowseMatchSort) window.BrowseMatchSort.setQuery(searchInput.value); } catch(e) { console.warn(e); }
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(doSearch, 300);
+    searchTimer = setTimeout(() => { try { renderView(); } catch(e) { console.warn(e); } }, 300);
   });
 
   // ── on-device page-turn profiler (?perf=1) ──
@@ -4007,8 +3981,7 @@
     closeSidebar();
   } else {
     openSidebar();
-    if (searchMode) window.SearchFacets.renderSearchList();
-    else if (viewMode === 'tile') window.BrowseRender.renderTiles();
+    if (viewMode === 'tile') window.BrowseRender.renderTiles();
     else if (viewMode === 'list') window.BrowseRender.renderList();
     else if (viewMode === 'card') window.BrowseRender.renderCards();
   }
@@ -4204,7 +4177,6 @@
   }
   function ensurePopUnderlay(){
     if (navUnderlay || navAnimBusy) return;
-    if (window.searchMode) return;
     if (prefersReducedMotion()) return;
     const parent = browseParentOf(currentBrowsePath);
     const u = _mountPopUnderlay(parent);
@@ -4250,7 +4222,6 @@
   function _startPopAnim(parent){
     if (navAnimBusy || !sidebar || !sidebar.classList.contains('open')) return false;
     if (prefersReducedMotion()) return false;
-    if (window.searchMode) return false;
     const u = _mountPopUnderlay(parent);
     if (!u) return false;
     u.style.transform = 'translate3d(' + (-NAV_UNDERLAY_PARALLAX * _navWidth()) + 'px,0,0)';
@@ -5005,11 +4976,8 @@
       const res = await _connFetch()(globalThis.BookqApi.endpoints.indexRefresh, {method: "POST"});
       if (!res.ok) throw new Error("http " + res.status);
       await loadFolders({preservePath: true});
-      // 検索中はツリー更新だけでは searchResults が古いままなので、
-      // 現クエリ+フィルタで取り直す（visibility切替時と同じ再検索経路）。
-      if (searchMode && typeof doSearch === "function") {
-        try { await doSearch(); } catch(e2) { console.warn(e2); }
-      }
+      // 検索クエリは同一レベルなので syncLevel が維持する — 新しい tree で
+      // renderView が再ソートする (サーバー再検索は不要)。
     } catch(e) {
       console.warn(e);
       try { showErrorToast("再読み込みに失敗しました"); } catch(e2) { console.warn(e2); }
@@ -5248,12 +5216,6 @@
             if (p && FV.isHidden(p)) { redirectHiddenToTop(); return; }
           }
         }
-        // 検索結果はサーバ側で hidden roots を除いている — モード/スナップ
-        // ショットの切替で一覧が変わるので検索中は再取得する（doSearch が
-        // 自身で renderView まで行う）。
-        if (searchMode && typeof doSearch === "function"){
-          try { doSearch(); return; } catch(e2){ console.warn(e2); }
-        }
       }
       renderView();
     } catch(e){ console.warn(e); }
@@ -5264,10 +5226,8 @@
   function _syncChrome(){
     var online = !window.Connectivity || window.Connectivity.isOnline();
     try {
-      if (searchInput){
-        searchInput.disabled = !online;
-        searchInput.placeholder = online ? "検索…" : "オフラインのため検索できません";
-      }
+      // 検索はクライアント側ソートなのでオフラインでも有効 — input は常に
+      // 有効のまま (spec §6 機能ゲート表も「検索 ✓/✓/✓」)。
       var pb = document.getElementById("pair-btn");
       if (pb){
         pb.disabled = !online;

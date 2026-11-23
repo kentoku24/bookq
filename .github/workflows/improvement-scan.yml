@@ -1,0 +1,229 @@
+# improvement-scan — 定期ボトルネック調査 → 改善 Issue 起票のメタワークフロー。
+#
+# 週1回 (月曜 06:37 JST) + 手動 dispatch で起動。scan ジョブが
+# .github/scripts/discovery-collect.sh で決定的シグナルを収集し、
+# opencode (direct-run 経路) が signals.md + repo + gh を調査して
+# ボトルネックを発見、`[discovery]` Issue を最大3件起票する。
+# 起票 Issue には ai/* ラベルを付けない — 人間トリアージが
+# ai/implement / ai/research へのルーティングを決める。
+#
+# issue #630 参照。前提: vars.USE_DIRECT_RUN=true (opencode-auto.yml と同じ
+# direct-run 経路)。追加シークレット不要 (OIDC → OpenCode キー交換は既存と同一)。
+#
+# GITHUB_TOKEN 起点の issues:opened はワークフローを再発火しないため、
+# bot 起票 → bot 実行の無限ループは構造上起きない。
+name: improvement-scan
+run-name: "improvement-scan ${{ github.event_name }} run#${{ github.run_id }}"
+
+on:
+  schedule:
+    - cron: "37 21 * * 0"
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: "Optional focus hint for this run (e.g. 'iOS UITest flakes', 'api-contract failures')"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: improvement-scan
+  cancel-in-progress: false
+
+jobs:
+  # ------------------------------------------------------------------
+  # scan — collect deterministic signals, then let opencode investigate
+  # and file improvement issues. No code changes, no test gate: the agent
+  # only reads the repo and manipulates issues via `gh`.
+  # ------------------------------------------------------------------
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Collect signals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/discovery-collect.sh signals.md
+
+      - name: Ensure discovery label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create discovery --repo "$GITHUB_REPOSITORY" \
+            --color 1F6FEB \
+            --description "Filed by improvement-scan bottleneck discovery" || true
+
+      - name: Build prompt.txt (heredoc from env — NO shell expansion)
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FOCUS: ${{ inputs.focus }}
+        run: |
+          cat > prompt.txt <<'TEMPLATE'
+          You are the improvement-scan agent for this repository
+          (kentoku24/bookq). Once per scheduled run you investigate the
+          repository and GitHub state, find BOTTLENECKS, and file
+          improvement issues. You do NOT modify code, create branches,
+          or open PRs — issue operations via `gh` only.
+
+          Inputs available to you:
+          - signals.md (repo root) — deterministic metrics collected by CI.
+            READ IT FIRST.
+          - Full repository checkout — read code and docs as needed.
+          - `gh` CLI authenticated via GH_TOKEN (github-actions[bot]).
+            GH_REPO is set; pass --repo "$GH_REPO" or rely on cwd.
+
+          Existing automation — do NOT re-propose these (full inventory in
+          signals.md section 1): opencode-auto (issue -> implement/research),
+          openresearch-bridge, prod-monitor, dependabot-auto-merge,
+          api-contract / api-spec-lint / api-breaking, ios / android / rust /
+          workflow-smoke CI, pdfium-update, and this improvement-scan itself.
+          Issue #627 already covers periodic CI bottleneck *measurement* —
+          only propose measurement work that #627/#628 does not already do.
+
+          Task:
+          1. Read signals.md. Derive candidate bottlenecks from evidence:
+             slow or flaky workflows, failing checks, stale queues (old open
+             issues/PRs), security or dependency posture, perf TODOs in
+             docs/performance.md, code hotspots.
+          2. For each candidate — quality over quantity, evidence required:
+             a. DEDUP FIRST: search open AND recently closed issues
+                (gh issue list --repo "$GH_REPO" --state all --search
+                "<keywords>" --limit 20, and
+                gh issue list --repo "$GH_REPO" --label discovery --state all
+                --limit 100). Skip anything already covered; skip
+                wontfix/duplicate closures.
+             b. If an OPEN issue already covers it: post ONE comment with
+                the new evidence (gh issue comment). Do not create a new
+                issue for it.
+             c. Otherwise file ONE new issue in the format below.
+          3. Write discovery-report.md at the repo root (do NOT commit it)
+             summarizing: candidates considered, issues filed (numbers),
+             comments added, duplicates skipped — and why nothing was filed
+             if that is the outcome.
+
+          Issue format (REQUIRED):
+          - Title: "[discovery] <area>: <short finding>"
+            area is one of: ci | test | perf | deps | security | infra |
+            web | ios | android | rust | docs
+          - Labels: `discovery` plus the best-fit area label. Run
+            `gh label list --repo "$GH_REPO"` first and use only existing
+            labels (e.g. ci, infra, security, rust, frontend, backend,
+            documentation, enhancement, bug, dependencies).
+            NEVER apply ai/implement or ai/research — a human decides
+            routing.
+          - Body (Japanese is fine; match repo convention):
+              ## 概要 — the bottleneck in 1-3 sentences
+              ## 証拠 — concrete numbers, run URLs, file:line refs (cite
+                       signals.md data or your own gh/api queries;
+                       no speculation)
+              ## 分析 — why this is a bottleneck (latency / flake cost /
+                       queue growth / risk)
+              ## 提案 — concrete improvement sketch (approach + rough
+                       effort, not a full design)
+              ## メタ — Discovery-run: <the "Run URL:" value appended
+                       at the end of this prompt> ; Signals: <generated
+                       timestamp from signals.md>
+
+          Hard rules:
+          - At most 3 NEW issues per run. Fewer is better; an empty run
+            is a valid outcome.
+          - Every claim needs evidence from signals.md or a command you ran.
+          - Do NOT modify files, commit, push, or open PRs.
+          - Do NOT file issues about things already tracked — check
+            signals.md section 4b and search before filing.
+          - Keep gh API usage reasonable (under ~30 calls).
+          TEMPLATE
+          printf '\nRun URL: %s\nFocus hint: %s\n' "$RUN_URL" "${FOCUS:-none}" >> prompt.txt
+
+      - name: Install opencode CLI
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      # OPENCODE_ZEN_API_KEY (static secret) expired — exchange the job's OIDC
+      # token for a 1h OpenCode API key instead (client_id is a public cred id).
+      - name: Sign in to OpenCode
+        env:
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r .value)
+          token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_0ae3b774-477c-413f-9c37-0afec7f727ba \
+            -d subject_token="$oidc" | jq -r .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
+      - name: Run opencode CLI
+        env:
+          OPENCODE_API_KEY: ${{ env.OPENCODE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: opencode run --auto -m opencode-go/muse-spark-1.3-contributor "$(cat prompt.txt)"
+
+      - name: Upload discovery report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: discovery-report
+          path: discovery-report.md
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------
+  # report — post the run summary to the meta issue, success or failure.
+  # ------------------------------------------------------------------
+  report:
+    needs: scan
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: discovery-report
+        continue-on-error: true
+
+      - name: Comment run summary on meta issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+        run: |
+          set -euo pipefail
+          META_TITLE='[meta] improvement-scan 実行ログ'
+          num=$(gh issue list --repo "$REPO" --state all --limit 100 \
+            --search "in:title improvement-scan" --json number,title \
+            --jq '[.[] | select(.title | startswith("[meta]"))][0].number // empty')
+          if [ -z "$num" ]; then
+            num=$(gh issue create --repo "$REPO" --title "$META_TITLE" \
+              --body '<!-- improvement-scan-meta -->
+
+          improvement-scan ワークフローの実行ログ。各 run の結果サマリをコメントする。' \
+              | grep -oE '[0-9]+$' | tail -n1)
+          fi
+          echo "meta issue: #$num"
+
+          body="## improvement-scan run ${GITHUB_RUN_ID}
+          - scan result: ${SCAN_RESULT}
+          - run: ${RUN_URL}"
+          if [ -f discovery-report.md ]; then
+            body+=$'\n\n### discovery-report.md\n\n'"$(cat discovery-report.md)"
+          else
+            body+=$'\n\n(discovery-report.md was not produced)'
+          fi
+          gh issue comment "$num" --repo "$REPO" --body "$body"

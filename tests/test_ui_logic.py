@@ -391,8 +391,9 @@ def slow_page(request, slow_proxy):
 @pytest.fixture(scope="module")
 def search_library(tmp_path_factory) -> Path:
     """Dedicated library tree WITH metadata.toml (the shared conftest tree
-    has none, so /api/search would return 0 results there). "other" keeps
-    "sample" from being collapsed by the single-child flattening rule."""
+    has none, so metadata-field matching can't be exercised there).
+    "other" keeps "sample" from being collapsed by the single-child
+    flattening rule."""
     root = tmp_path_factory.mktemp("search_library")
     folder = root / "sample"
     folder.mkdir()
@@ -434,37 +435,35 @@ def search_page(request, search_server):
     context.close()
 
 
-def test_search_results_show_thumbnail(search_page):
-    """H10: a search result whose metadata has no embedded thumbnail renders a tile
-    <img> backed by the folder's tree thumbnail (/thumb/...?w=200), not the 📁
-    placeholder.
+def test_search_sorts_metadata_match_to_front(search_page):
+    """The search input sorts the current folder's children client-side
+    (browse/matchSort.js): a metadata title match floats "sample" above
+    "other", both tiles stay, and no /api/v1/search request fires.
 
-    RED pre-fix (placeholder div), GREEN post-fix (tree-thumb fallback).
+    "sample" has metadata.toml (title_jp=テスト作品) but no embedded
+    thumbnail — its tile still renders the tree-thumb fallback (/thumb/...).
     """
-    with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
+    hits = {"search": 0}
+    def _handler(route):
+        if "/api/v1/search" in route.request.url:
+            hits["search"] += 1
+        route.continue_()
+    search_page.route("**/api/v1/**", _handler)
+    try:
         search_page.locator("#search-input").fill("テスト")
-    # .tile-metadata only exists on SEARCH tiles (the root grid's tiles lack
-    # it), so this proves the search render — not a stale root tile.
-    search_page.wait_for_selector("#tile-grid .tile-metadata", timeout=5000)
-    assert search_page.locator("#tile-grid .tile").count() == 1
+        search_page.wait_for_timeout(500)  # 300 ms debounce + render
 
-    tile = search_page.locator("#tile-grid .tile").first
-    img = tile.locator("img.tile-img")
-    assert img.count() == 1, "search tile has no <img> — still rendering the placeholder"
-    src = img.get_attribute("src")
-    assert src and src.startswith("/thumb/"), f"expected tree-thumb src, got {src!r}"
-    assert tile.locator(".tile-placeholder").count() == 0
+        tiles = search_page.locator("#tile-grid .tile")
+        assert tiles.count() == 2, "sort keeps every child — no filtering"
+        assert tiles.first.get_attribute("data-path") == "sample"
 
-    # The fallback thumb should actually be served and decodable.
-    img.scroll_into_view_if_needed()
-    search_page.wait_for_function(
-        """(src) => {
-          const i = document.querySelector('#tile-grid .tile img.tile-img');
-          return i && i.getAttribute('src') === src && i.complete && i.naturalWidth > 0;
-        }""",
-        arg=src,
-        timeout=3000,
-    )
+        img = tiles.first.locator("img.tile-img")
+        assert img.count() == 1, "sorted tile has no <img> — placeholder instead"
+        src = img.get_attribute("src")
+        assert src and src.startswith("/thumb/"), f"expected tree-thumb src, got {src!r}"
+        assert hits["search"] == 0, "client-side sort must not call /api/v1/search"
+    finally:
+        search_page.unroute("**/api/v1/**")
 
 
 # ── F-key: closing the sidebar must hide+inert the resume pill ────────────────
@@ -503,36 +502,30 @@ def test_f_key_close_inerts_resume_pill(page):
     )
 
 
-# ── Search cards: tree-thumb fallback in card view mode ───────────────────────
+# ── Search sort in card view mode ─────────────────────────────────────────────
 
 
-def test_search_cards_show_thumbnail(search_page):
-    """H10 in card view mode: a search result whose metadata has no embedded thumbnail
-    must render a .card <img> backed by the folder's tree thumbnail
-    (/thumb/...?w=400), not the 📁 placeholder — renderSearchCards has to mirror
-    renderSearchTiles/renderCards.
-
-    RED pre-fix (placeholder div only), GREEN post-fix.
-    """
+def test_search_cards_sort_metadata_match(search_page):
+    """Card view: the same client-side sort floats the metadata-matching
+    folder to the front — sorted tiles are ordinary browse cards, so the
+    cover fallback and click behavior are unchanged."""
     # ⋯menu → カード (direct pick; no more cycling).
     open_header_menu(search_page)
     search_page.locator("#menu-view-card").click()
     search_page.wait_for_selector("#tile-grid.card-mode")
 
-    with search_page.expect_response(lambda r: "/api/v1/search" in r.url):
-        search_page.locator("#search-input").fill("テスト")
-    search_page.wait_for_selector("#tile-grid .card", timeout=5000)
-    # Exactly one result ("sample") — the root grid would show 2+ cards, so
-    # count disambiguates search-rendered cards from a stale root render.
-    assert search_page.locator("#tile-grid .card").count() == 1
+    search_page.locator("#search-input").fill("テスト")
+    search_page.wait_for_timeout(500)  # 300 ms debounce + render
 
-    card = search_page.locator("#tile-grid .card").first
-    assert card.get_attribute("data-path") == "sample"
-    img = card.locator("img.card-img")
-    assert img.count() == 1, "search card has no <img> — still rendering the placeholder"
+    cards = search_page.locator("#tile-grid .card")
+    assert cards.count() == 2, "sort keeps every child — no filtering"
+    assert cards.first.get_attribute("data-path") == "sample"
+
+    img = cards.first.locator("img.card-img")
+    assert img.count() == 1, "sorted card has no <img> — still rendering the placeholder"
     src = img.get_attribute("src")
     assert src and src.startswith("/thumb/"), f"expected tree-thumb src, got {src!r}"
-    assert card.locator(".tile-placeholder").count() == 0
+    assert cards.first.locator(".tile-placeholder").count() == 0
 
 
 # ── H7 positive: a genuine current-page failure DOES show ⚠ ───────────────────

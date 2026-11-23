@@ -1,4 +1,4 @@
-/* bookq browse/render — browse tile/list/card & search renders.
+/* bookq browse/render — browse tile/list/card renders.
  * Plain global script. Delegates to window.* helpers at call-time.
  */
 (function () {
@@ -222,7 +222,6 @@
     if(grid.__ccBrowseDelegated) return;
     grid.__ccBrowseDelegated = true;
     grid.addEventListener("click", function(e){
-      if(window.searchMode) return;
       var el = _browseClickEl(e);
       if(!el) return;
       _handleBrowseClick(e, el);
@@ -770,13 +769,13 @@
   }
   function renderBrowse(opts){
     var mode=opts&&opts.mode?opts.mode:(window.viewMode||'tile');
-    var results=opts&&'results' in opts?opts.results:(window.searchMode?window.searchResults:null);
-    var isSearch=Array.isArray(results);
-    if(mode==='tile'){ if(isSearch) { if(window.renderSearchTiles) window.renderSearchTiles(); else renderTiles(); } else renderTiles(); }
-    else if(mode==='card'){ if(isSearch) { if(window.renderSearchCards) window.renderSearchCards(); else renderCards(); } else renderCards(); }
-    else { if(isSearch) { if(window.renderSearchList) window.renderSearchList(); else renderList(); } else renderList(); }
-    // 検索結果の描画には適用しない。undefined は「位置を決めない」の合図。
-    if(!isSearch && opts && opts.scrollAnchor !== undefined) _applyScrollAnchor(opts.scrollAnchor);
+    // ブラウズ一覧のみ — クエリによる並べ替えは getBrowseChildrenAt 内で
+    // 行われ、ここには通常のフォルダタイルとして届く (検索結果ビューは無い)。
+    if(mode==='tile'){ renderTiles(); }
+    else if(mode==='card'){ renderCards(); }
+    else { renderList(); }
+    // scrollAnchor が渡された描画だけが位置を決める。undefined は「位置を決めない」の合図。
+    if(opts && opts.scrollAnchor !== undefined) _applyScrollAnchor(opts.scrollAnchor);
   }
   window.multiThumbSpec=multiThumbSpec;
   window.FillPoll={noteFullLoad:noteFullLoad,stop:fillPollStop,state:fillPollState};
