@@ -78,6 +78,10 @@ issue タイトルからスラッグを生成する:
 - `web/static/browse/hash.js` `applyUrlState` (490L, 単一 `hashchange` リスナ) — ビューア状態は URL ハッシュ `#/view/<folder>?p=<page>`、ブラウズ階層は `#/browse/<path>` で管理。`web/static/app.js` (3252L composition root IIFE) は `window.parseViewerHash / window.applyUrlState` へ委譲し `window.urlRestoring` / `window.urlRestoreGen` でミラー共有。`hashchange` のみをリッスンし `popstate` と二重登録しないこと。`urlRestoring` / `urlRestoreGen` トークンで競合する非同期 load をガードする。
 - `web/templates/index.html` — ~230行 shell (`{% if not user %}` でログイン/ビューア分岐)。inline snippet は `__BOOKQ_TEST_MODE__`・thumb_perf probe・stale-shell watchdog (最後尾)。watchdog は inline 必須 — navigate は NetworkFirst で常に最新、`/static/*` は SWR で旧 precache を返し得るため、swappable な asset 内では自身の staleness を検出できない。不整合検出時は `bookq-shell-*` 内の `.js` エントリのみ削除 (`/`・offline.html・画像は残す — オフライン起動を壊さない) → SW update 促進 → sessionStorage ガード付きで不整合連続中はタブ毎に最大1回 reload (健全ロードでガードは解除)。test mode と `navigator.onLine===false` では修復しない。JS は外部分割: `web/static/app.js` 3252L composition root + ~20 modules (`offline-core.js`, `thumbs/resolveCover.js`, `browse/hash.js`, `browse/render.js`, `browse/scroll.js`, `search/facets.js`, `offline/storeAdapter.js`, `thumbs/prefetch.js`, `viewer/spread.js`, `viewer/navigation.js`, `viewer/gesture.js`, `viewer/zoom.js`, `viewer/overview.js`, `viewer/pairUI.js`, `viewer/pairModel.js`, `viewer/pairedView.js`, `viewer/pairTransport.js`, `viewer/pairClient.js`, `viewer/pairController.js`, `browse/pairSync.js` + vendor `qrcode.min.js`/`jsQR.min.js` + 未認証側 `login.js`; `index.html` の defer 順; CSS は `style.css` 内包)。ビルドステップなし。編集後は再起動不要 (viewer-rs が `BOOKQ_WEB_DIR` を直接 serve し、template 変更を即時反映)。
 
+### API spec / codegen
+
+- `api/` または `scripts/api/` 配下を変更したら `./scripts/api/codegen.sh` を実行し、生成物 (`api/dist/*.json`、`web/static/api/api-types.d.ts`) を同じコミットに含めること。生成物の手編集は禁止 — `api-spec-lint` の codegen-drift ジョブが stale な生成物を検出して PR を落とす (#636)。codegen.sh は `npx` (openapi-typescript) と `uv run` (pyyaml) を使う — CI では両方 agent フェーズ前に用意済み。契約の正本規約は `api/README.md`。
+
 ### テスト
 
 ```bash
@@ -118,10 +122,6 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - 実機検証は CP08-J1: `./dev.sh up <name>` → `./gradlew :app:installDebug` → `adb shell am start -n dev.bookq.reader.debug/dev.bookq.reader.MainActivity --es serverURL $(./dev.sh url <name>)`。端末に Tailscale アプリ必須。
 - **エミュレータ標準フローは `.claude/skills/android-emulator/SKILL.md`**。AVD (`bookq_tab`) は ~9GB・Gradle/Kotlin daemon は 2〜4GB を常駐させるため、検証終了時・テスト合間に必ず `adb -s <serial> emu kill` / `./gradlew --stop` で止めること。自分が起動したプロセスだけを止め、他セッションの環境を殺さない (停止前に `adb devices` / `docker ps` / `ps` で所有確認)。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
-
-### API spec / codegen
-
-- `api/openapi.v1.yaml` / `api/asyncapi.yaml`（spec 本体・`examples:` 含む）を変更したら、必ず `./scripts/api/codegen.sh` を実行し、生成物（`api/dist/`・`web/static/api/api-types.d.ts`）も同じコミットに含めること。codegen-drift CI（`api-spec-lint.yml`）が stale 生成物を fail させ、AI 著者 branch での再生成漏れが繰り返し発生している (#636)。契約の正本規約は `api/README.md`。
 
 ### 自動化ワークフロー (improvement-scan)
 

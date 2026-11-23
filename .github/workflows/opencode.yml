@@ -72,6 +72,10 @@ jobs:
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
 
+      # uv before the agent: AGENTS.md's codegen rule makes agents run
+      # scripts/api/codegen.sh (uv run) when touching api/ (#636).
+      - uses: astral-sh/setup-uv@v7
+
       # v1.18.21 (latest release tag at time of pinning)
       - uses: anomalyco/opencode/github@c0ad18b402eb2827fc1ee71c171b1177b3fc02d1
         with:
@@ -130,6 +134,10 @@ jobs:
             -d subject_token="$oidc" | jq -r .access_token)
           echo "::add-mask::$token"
           echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
+      # uv before the agent: AGENTS.md's codegen rule makes agents run
+      # scripts/api/codegen.sh (uv run) when touching api/ (#636).
+      - uses: astral-sh/setup-uv@v7
 
       - name: Run opencode CLI
         env:
