@@ -289,16 +289,18 @@ pub enum SecretKeyPosture {
 }
 
 pub fn secret_key_posture(secret: &str) -> SecretKeyPosture {
-    // Trim applies ONLY to the placeholder comparison: callers use the raw
-    // value, so a whitespace-padded placeholder is still the publicly known
-    // key — but a whitespace-only key is *not* missing. It is a weak
-    // non-empty key: auth stays enabled (session_key/bearer_claims see a
-    // non-empty secret), so it must warn as Weak, not claim fail-closed.
+    // Trim applies to the placeholder comparison and the length check:
+    // callers use the raw value, so a whitespace-padded placeholder is
+    // still the publicly known key — but a whitespace-only key is *not*
+    // missing. It is a weak non-empty key: auth stays enabled
+    // (session_key/bearer_claims see a non-empty secret), so it must warn
+    // as Weak, not claim fail-closed — and length must be measured on the
+    // trimmed value or a 40-space key would pass as "Strong".
     if secret.trim() == SECRET_KEY_PLACEHOLDER {
         SecretKeyPosture::Public
     } else if secret.is_empty() {
         SecretKeyPosture::Missing
-    } else if secret.len() < 32 {
+    } else if secret.trim().len() < 32 {
         SecretKeyPosture::Weak
     } else {
         SecretKeyPosture::Strong
@@ -509,6 +511,12 @@ mod tests {
         // session_key()/bearer_claims() keep auth enabled with a weak key.
         assert!(matches!(
             secret_key_posture("   "),
+            SecretKeyPosture::Weak
+        ));
+        // Whitespace-only is weak at ANY length — raw len() would call a
+        // 40-space key "Strong" while it is trivially guessable.
+        assert!(matches!(
+            secret_key_posture(&" ".repeat(40)),
             SecretKeyPosture::Weak
         ));
         assert!(matches!(
