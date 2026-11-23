@@ -155,8 +155,6 @@ jobs:
       # pytest command both go through `uv run` (#636).
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
 
       - name: Run opencode (official action)
         id: agent
@@ -280,8 +278,6 @@ jobs:
       # pytest command both go through `uv run` (#636).
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
 
       - name: Run opencode (official action)
         id: agent
@@ -484,8 +480,6 @@ jobs:
       # pytest command both go through `uv run` (#636).
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
 
       - name: Run opencode CLI
         id: agent
@@ -740,8 +734,6 @@ jobs:
       # pytest command both go through `uv run` (#636).
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
 
       - name: Run opencode CLI
         id: agent
