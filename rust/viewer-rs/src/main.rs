@@ -1433,6 +1433,33 @@ async fn main() {
     let state_dir = PathBuf::from(
         std::env::var("BOOKQ_STATE_DIR").unwrap_or_else(|_| "/var/lib/bookq".into()),
     );
+    // #632: SECRET_KEY signs session cookies, verifies Bearer JWTs and keys
+    // the visibility owner HMAC. The .env.example placeholder is public
+    // knowledge — refuse to boot with it; empty stays fail-closed (warned),
+    // short keys warn (dev's `dev-not-a-secret` trips this by design).
+    let secret_key = std::env::var("SECRET_KEY").unwrap_or_default();
+    match auth::secret_key_posture(&secret_key) {
+        auth::SecretKeyPosture::Public => {
+            tracing::error!(
+                "SECRET_KEY is the .env.example placeholder — generate a random key \
+                 (openssl rand -hex 32) and set it in .env"
+            );
+            std::process::exit(1);
+        }
+        auth::SecretKeyPosture::Missing => {
+            tracing::warn!(
+                "SECRET_KEY unset — session cookies and Bearer JWT auth are disabled \
+                 (fail-closed); set it outside BOOKQ_TEST_MODE"
+            );
+        }
+        auth::SecretKeyPosture::Weak => {
+            tracing::warn!(
+                "SECRET_KEY is shorter than 32 chars — use `openssl rand -hex 32` \
+                 for anything beyond local dev"
+            );
+        }
+        auth::SecretKeyPosture::Strong => {}
+    }
     // No env allowlist: the users table is the only membership source.
     // A fresh DB starts empty; enroll the first admin with `viewer-rs users`.
     let users_store = std::sync::Arc::new(users::UserStore::new(&state_dir));
@@ -1465,8 +1492,8 @@ async fn main() {
         visibility: std::sync::Arc::new(state::VisibilityStore::new(&state_dir)),
         users: users_store,
         directory: directory.clone(),
-        session_key: auth::session_key(&std::env::var("SECRET_KEY").unwrap_or_default()),
-        secret_key: std::env::var("SECRET_KEY").unwrap_or_default(),
+        session_key: auth::session_key(&secret_key),
+        secret_key,
         registry: registry.clone(),
         pair_reports: std::sync::Arc::new(pair_report::PairReports::new(
             std::collections::HashMap::new(),

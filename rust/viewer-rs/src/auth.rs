@@ -270,6 +270,43 @@ pub fn session_key(secret: &str) -> Option<SessionKey> {
     }
 }
 
+/// `.env.example`'s shipped SECRET_KEY placeholder. It is public knowledge,
+/// so a deploy that forgets to change it hands out forgeable session
+/// cookies and Bearer JWTs for any active member (#632).
+pub const SECRET_KEY_PLACEHOLDER: &str = "change-me-to-a-random-64-char-string";
+
+/// What startup should do with SECRET_KEY (#632, OWASP A07/A02).
+pub enum SecretKeyPosture {
+    /// Unset — fail-closed today (auth surface 501s, authed routes 401);
+    /// warn so the lockout is visible in logs.
+    Missing,
+    /// Non-empty but short — functional, weaker key material.
+    Weak,
+    /// The publicly known placeholder — must not boot.
+    Public,
+    /// Acceptable.
+    Strong,
+}
+
+pub fn secret_key_posture(secret: &str) -> SecretKeyPosture {
+    // Trim applies to the placeholder comparison and the length check:
+    // callers use the raw value, so a whitespace-padded placeholder is
+    // still the publicly known key — but a whitespace-only key is *not*
+    // missing. It is a weak non-empty key: auth stays enabled
+    // (session_key/bearer_claims see a non-empty secret), so it must warn
+    // as Weak, not claim fail-closed — and length must be measured on the
+    // trimmed value or a 40-space key would pass as "Strong".
+    if secret.trim() == SECRET_KEY_PLACEHOLDER {
+        SecretKeyPosture::Public
+    } else if secret.is_empty() {
+        SecretKeyPosture::Missing
+    } else if secret.trim().len() < 32 {
+        SecretKeyPosture::Weak
+    } else {
+        SecretKeyPosture::Strong
+    }
+}
+
 /// The raw `session` cookie value — last wins, matching starlette's
 /// `HTTPConnection.cookies` (a dict update across all Cookie headers,
 /// left to right). First-wins would let `session=<valid>; session=<x>`
@@ -453,6 +490,44 @@ mod tests {
     use sha2::Sha256;
 
     const SECRET: &str = "dev-not-a-secret";
+
+    /// #632: the shipped placeholder is public knowledge and must never
+    /// boot; empty fails closed (Missing), short keys only warn (Weak) so
+    /// dev's `dev-not-a-secret` keeps working.
+    #[test]
+    fn secret_key_posture_flags_public_missing_and_weak() {
+        assert!(matches!(
+            secret_key_posture(SECRET_KEY_PLACEHOLDER),
+            SecretKeyPosture::Public
+        ));
+        // Copy-paste whitespace around the placeholder is still the
+        // publicly known value.
+        assert!(matches!(
+            secret_key_posture("  change-me-to-a-random-64-char-string \n"),
+            SecretKeyPosture::Public
+        ));
+        assert!(matches!(secret_key_posture(""), SecretKeyPosture::Missing));
+        // Whitespace-only is NOT missing — the raw value is non-empty, so
+        // session_key()/bearer_claims() keep auth enabled with a weak key.
+        assert!(matches!(
+            secret_key_posture("   "),
+            SecretKeyPosture::Weak
+        ));
+        // Whitespace-only is weak at ANY length — raw len() would call a
+        // 40-space key "Strong" while it is trivially guessable.
+        assert!(matches!(
+            secret_key_posture(&" ".repeat(40)),
+            SecretKeyPosture::Weak
+        ));
+        assert!(matches!(
+            secret_key_posture(SECRET),
+            SecretKeyPosture::Weak
+        ));
+        assert!(matches!(
+            secret_key_posture("0123456789abcdef0123456789abcdef"),
+            SecretKeyPosture::Strong
+        ));
+    }
 
     fn members(emails: &[&str]) -> UserDirectory {
         let entries: Vec<(&str, crate::users::Role)> = emails
