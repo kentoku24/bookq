@@ -36,10 +36,6 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **根拠**: `restoreBrowse()` / `returnToBrowse()` / `updateBrowseHeader()` / URL `#/browse/<path>`
 - **説明**: フォルダを辿ってそのサブツリーだけを表示する階層ナビゲーション。
 
-### 検索結果表示 (Search Results View)
-- **根拠**: `doSearch()` / `GET /api/search` （該当なし時は「No results found」）
-- **説明**: 検索語に一致する作品をライブラリ全体から一覧表示する画面状態。
-
 ### 閲覧表示・リーダー (Reader View)
 - **根拠**: `loadImages()` / `snapTo()` / `#img-container` / `#img-track`
 - **説明**: 選んだ作品のページを右開きで読む画面状態。
@@ -87,8 +83,8 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **説明**: フィルタボトムシートを開くボタンで、適用中の絞り込みがあるときは色が変わる。
 
 ### 検索ボックス (Search Box)
-- **根拠**: `#search-input` （placeholder「Search...」） / `doSearch()`
-- **説明**: ライブラリ全体を対象に検索語を入力する入力欄。
+- **根拠**: `#search-input` （placeholder「検索…」） / `window.BrowseMatchSort.setQuery()`
+- **説明**: 現在フォルダ直下の子要素をクエリで relevance ソートする入力欄。結果ビューへの切替はなく、一覧そのものが並び替わる。
 
 ### フィルタチップ (Filter Chips)
 - **根拠**: `#filter-chips` （チップ 🎨アーティスト / 🏷️タグ、✕ で解除）
@@ -234,21 +230,17 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **根拠**: `renderTiles()` / `thumbs` （`scan_tree()` が直下2個以上のとき最大9件添付）
 - **説明**: サブフォルダのサムネイルを最大9枚のグリッドで見せるタイル表示。
 
-### ライブラリ検索 (Library Search)
-- **根拠**: `doSearch()` / `GET /api/search` （debounce 300ms）
-- **説明**: 検索ボックスの入力を300msデバウンスしてライブラリ全体を検索する。
+### 現在フォルダ内検索 (In-Folder Search)
+- **根拠**: `window.BrowseMatchSort` (web/static/browse/matchSort.js) （debounce 300ms）
+- **説明**: 検索ボックスの入力を300msデバウンスして、現在フォルダ直下の子要素をクライアント側で一致度順に並べ替える。全要素を残し（フィルタしない）、フォルダ名とメタデータ（title/artist/tags）を対象とする。フォルダ移動でクエリはクリアされる。
 
 ### ファセット絞り込み (Facet Filtering)
 - **根拠**: `loadFacets()` / `nodeMatchesFilters()` / `GET /api/metadata/facets?path=`
 - **説明**: アーティスト・タグで、ブラウズ中のサブツリーに限定して絞り込む。
 
-### ソート指定 (Sort Options)
-- **根拠**: `#facet-sort` / `GET /api/search` の `sort` パラメータ（sort=relevance のみ）
-- **説明**: 検索結果の並び順は関連度のみ。同点時は自然順で安定化する。
-
 ### 関連度スコアリング (Relevance Scoring)
-- **根拠**: `_calculate_relevance()` (app/metadata.py) （title+10 / artist+8 / tag+3、複数フィールドボーナス +2/field）
-- **説明**: 検索語のヒットフィールドごとに重み付けし、複数フィールド一致にボーナスを与える。
+- **根拠**: `BrowseMatchSort._scoreNode()` (web/static/browse/matchSort.js) （name+10 / title+10 / artist+8 / tag+3、name は完全一致+6・前方一致+3、複数フィールドボーナス +2/field）
+- **説明**: 検索語のヒットフィールドごとに重み付けし、複数フィールド一致にボーナスを与える。同点はツリーの自然順で安定化する。
 
 ### 右開ナビゲーション (RTL Manga Navigation)
 - **根拠**: `goNext()` / `goPrev()` / `#zone-prev` / `#zone-next` / `PREFETCH_AHEAD = 8` / `PREFETCH_BEHIND = 3` / `EVICT_AHEAD = 14` / `EVICT_BEHIND = 6` / `POOL_SIZE = 6`
@@ -313,8 +305,8 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 - **説明**: フォルダツリーにメタデータと subtree_facets を添付して返す（索引は300秒キャッシュ）。
 
 ### 検索API (Search API)
-- **根拠**: `GET /api/search` / `search()` （パラメータ q / artist / tag / sort=relevance）
-- **説明**: 自由語とファセット条件で検索し、関連度順に並び替える。
+- **根拠**: `GET /api/v1/search` / `search()` （パラメータ q / artist / tag / sort=relevance）
+- **説明**: 自由語とファセット条件でライブラリ全体を検索し、関連度順に並び替える。web クライアントは現在フォルダ内ソート (browse/matchSort.js) に移行したため呼び出さないが、API としては存続する。
 
 ### ファセットAPI (Facets API)
 - **根拠**: `GET /api/metadata/facets?path=` / `get_facets()` / `facets_for()` (app/metadata.py)
@@ -556,9 +548,9 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 | キーボード操作 | Keyboard Shortcuts | 3. 操作・機能 |
 | 空状態群 | Empty States | 1. 画面 |
 | 検索API | Search API | 4. サーバー・API概念 |
-| 検索結果表示 | Search Results View | 1. 画面 |
 | 検索ボックス | Search Box | 2. UI要素 |
 | 件数表示 | Folder Count | 2. UI要素 |
+| 現在フォルダ内検索 | In-Folder Search | 3. 操作・機能 |
 | 更新インジケータ | Refresh Indicator | 2. UI要素 |
 | コミックメタデータ | Comic Metadata | 4. サーバー・API概念 |
 | コンテインフィット | Contain-fit Sizing | 3. 操作・機能 |
@@ -579,7 +571,6 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 | 進捗リング | Progress Ring | 5. オフライン・PWA |
 | スクロール位置復元 | Scroll Position Restore | 3. 操作・機能 |
 | スピナー | Spinner | 2. UI要素 |
-| ソート指定 | Sort Options | 3. 操作・機能 |
 | タイルグリッド | Tile Grid | 2. UI要素 |
 | タップゾーン群 | Tap Zones | 2. UI要素 |
 | 単一子フラット化 | Single-child Flattening | 3. 操作・機能 |
@@ -633,7 +624,6 @@ bookq の画面・UI要素・機能・API・状態に正式な和名と英名を
 | 容量バー | Storage Bar | 2. UI要素 |
 | 容量バー更新 | Storage Bar Update | 5. オフライン・PWA |
 | 容量不足時の最古作品削除確認 | Quota Eviction Confirm | 5. オフライン・PWA |
-| ライブラリ検索 | Library Search | 3. 操作・機能 |
 | リーフ列挙 | Leaf Enumeration | 5. オフライン・PWA |
 | レンジバイパス | Range Bypass | 5. オフライン・PWA |
 | 履歴スタック | History Stack | 6. 状態管理・ストレージ |
