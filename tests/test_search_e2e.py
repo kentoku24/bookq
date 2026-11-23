@@ -154,10 +154,25 @@ def test_reload_keeps_query_at_deep_level(page):
     # 202 → backoff-retry window on every adapter — SafariPage has no
     # network events (page.on("response") raises SafariUnsupported → skip).
     applied_before = page.evaluate("() => window.__cc_fullTreeApplied || 0")
+    # The guard must skip the depth=1 FETCH itself, not just its apply —
+    # DOM asserts alone can't see a wasted request that never lands. Resource
+    # timing (same buffer test_perf_budget.py uses) is evaluate-based so it
+    # works on the Safari adapter; startTime filtering survives buffer
+    # eviction and excludes the initial load's own depth=1 entry.
+    page.evaluate("window.__rtT0 = performance.now()")
     open_header_menu(page)
     page.locator("#menu-reload").click()
     page.wait_for_function(
         f"window.__cc_fullTreeApplied > {applied_before}", timeout=20000
+    )
+    tree_urls = page.evaluate(
+        "() => performance.getEntriesByType('resource')"
+        ".filter(e => e.startTime >= window.__rtT0)"
+        ".map(e => e.name).filter(u => u.includes('/api/v1/tree'))"
+    )
+    assert tree_urls, "reload did not fetch /api/v1/tree at all"
+    assert not any("depth=" in u for u in tree_urls), (
+        "preservePath reload must skip the depth=1 shallow fetch"
     )
     page.wait_for_timeout(300)  # render settle
 
