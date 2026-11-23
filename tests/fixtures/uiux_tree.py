@@ -266,7 +266,7 @@ def build(root: Path) -> None:
             rgb = page_color(base, 0, 1)
             make_png(wdir / "1.png", rgb=rgb)
 
-    # Metadata fixtures: make /api/search + /api/metadata/facets return data.
+    # Metadata fixtures: make /api/v1/facets + client matchSort return data.
     for folder, title in [("simple_manga", "シンプル漫画"), ("series", "シリーズ"),
                           ("mixed_ar", "混在アスペクト")]:
         mdir = root / folder

@@ -1,9 +1,11 @@
 """E2E tests for the search / filter / view-mode UI (#476 v1 port).
-Covers: search input, filter bottom sheet, view-mode cycling (tile↔list↔card),
-pull-to-refresh, and graceful rendering without metadata.
+Covers: search input (client-side current-folder sort), filter bottom sheet,
+view-mode cycling (tile↔list↔card), pull-to-refresh, and graceful rendering
+without metadata.
 
-The UI calls the v1 surface (GET /api/v1/tree, /api/v1/search, /api/v1/facets),
-so route watches assert on v1 URL patterns.
+The browse tree calls the v1 surface (GET /api/v1/tree, /api/v1/facets).
+The search input no longer calls /api/v1/search — it sorts the current
+folder's children in place via browse/matchSort.js.
 
 Run:
     uv run --with pytest --with playwright pytest tests/test_search_e2e.py -v
@@ -33,32 +35,62 @@ def test_search_input_font_size_meets_ios_threshold(page):
     assert size >= 16
 
 
-def test_search_filters_local_folders(page):
-    """Search calls the /api/v1/search endpoint.
-    With no metadata.toml files in the fixture the API returns 0 results,
-    so the grid shows an empty-state message.
-    """
-    # Type a query that won't match any metadata field
-    page.locator("#search-input").fill("nonexistent")
-    # wait for 300 ms debounce + fetch
+def test_search_sorts_current_level_without_api_call(page):
+    """Typing a query sorts the CURRENT folder's children client-side:
+    matches move to the front, every child stays, order restores on clear,
+    and no /api/v1/search request is made."""
+    hits = {"search": 0}
+    def _handler(route):
+        if "/api/v1/search" in route.request.url:
+            hits["search"] += 1
+        route.continue_()
+    page.route("**/api/v1/**", _handler)
+    try:
+        original = [t.get_attribute("data-path") for t in page.locator(".tile").all()]
+        assert "simple_manga" in original
+
+        page.locator("#search-input").fill("simple")
+        page.wait_for_timeout(500)  # 300 ms debounce + render
+
+        # The match sorts first; ALL children remain (no filtering).
+        paths = [t.get_attribute("data-path") for t in page.locator(".tile").all()]
+        assert paths[0] == "simple_manga"
+        assert sorted(paths) == sorted(original)
+        # Parent-level spec: root count includes the ONE images-tile ("mixed").
+        expect(page.locator("#folder-count")).to_have_text("18 件")
+
+        # Clearing restores the original tree order.
+        page.locator("#search-input").fill("")
+        page.wait_for_timeout(500)
+        paths = [t.get_attribute("data-path") for t in page.locator(".tile").all()]
+        assert paths == original
+        expect(page.locator(".tile").first).to_be_visible()
+
+        assert hits["search"] == 0, "client-side sort must not call /api/v1/search"
+    finally:
+        page.unroute("**/api/v1/**")
+
+
+def test_search_query_clears_on_folder_navigation(page):
+    """Drilling into a folder clears the query — the new level renders in
+    natural tree order and the input is emptied."""
+    page.locator("#search-input").fill("simple")
     page.wait_for_timeout(500)
-    # Search mode should show the empty-state fallback
-    expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+    assert page.locator(".tile").first.get_attribute("data-path") == "simple_manga"
 
-    # Clear the search input
-    page.locator("#search-input").fill("")
+    page.locator('.tile[data-path="series"]').click()
+    page.wait_for_selector('.tile[data-path="series/vol1"]')
+    assert page.locator("#search-input").input_value() == ""
+    paths = [t.get_attribute("data-path") for t in page.locator(".tile").all()]
+    assert paths == ["series/vol1", "series/vol2"]
+
+
+def test_reload_keeps_active_sort_query(page):
+    """⋯再読み込み during an active query keeps the same browse level, so
+    the query survives and the fresh tree re-sorts — no server re-search."""
+    page.locator("#search-input").fill("simple")
     page.wait_for_timeout(500)
-    # Folders restored
-    expect(page.locator(".tile").first).to_be_visible()
-    # Parent-level spec: root count includes the ONE images-tile ("mixed").
-    expect(page.locator("#folder-count")).to_have_text("18 件")
-
-
-def test_reload_reruns_active_search(page):
-    """⋯再読み込み during an active search must re-run the query — the index
-    refresh + tree reload alone would leave stale searchResults on screen."""
-    page.locator("#search-input").fill("nonexistent")
-    expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+    assert page.locator(".tile").first.get_attribute("data-path") == "simple_manga"
 
     hits = {"search": 0, "refresh": 0}
     def _handler(route):
@@ -72,13 +104,12 @@ def test_reload_reruns_active_search(page):
     try:
         open_header_menu(page)
         page.locator("#menu-reload").click()
-        page.wait_for_timeout(1500)  # refresh POST + tree + debounced re-search
+        page.wait_for_timeout(1500)  # refresh POST + tree reload
         assert hits["refresh"] >= 1, "index/refresh POST did not fire"
-        assert hits["search"] >= 1, (
-            "active search was not re-run after reload — results would stay stale"
-        )
-        # Search view is still up (empty-state for this query).
-        expect(page.locator("#tile-grid")).to_contain_text("一致する結果がありません")
+        assert hits["search"] == 0, "reload must not call /api/v1/search"
+        # Query + sorted order survive the reload (same browse level).
+        assert page.locator("#search-input").input_value() == "simple"
+        assert page.locator(".tile").first.get_attribute("data-path") == "simple_manga"
     finally:
         page.unroute("**/api/v1/**")
 

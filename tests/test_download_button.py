@@ -148,66 +148,25 @@ def test_01_offline_btn_visible_6_modes(page, server):
     except Exception:
         pass
 
-    # search modes: mock /api/search to return results with offline-btn
-    page.evaluate(
-        """() => {
-            window._origFetchSearch = window.fetch;
-            window.fetch = async (input, init) => {
-                const u = typeof input === 'string' ? input : (input && input.url) || '';
-                if (u.includes('/api/v1/search')) {
-                    const payload = {query:'simple', total:2, results:[{folder_path:'simple_manga', folder_name:'simple_manga', has_metadata:false, artist:[], tags:[]},{folder_path:'group/episodes/ch-1', folder_name:'ch-1', has_metadata:false, artist:[], tags:[]}]};
-                    return new Response(JSON.stringify(payload), {status:200, headers:{'Content-Type':'application/json'}});
-                }
-                return window._origFetchSearch(input, init);
-            };
-        }"""
-    )
-    # also need to mock facets? not needed
-    try:
-        # tile search
-        page.evaluate("() => { window.viewMode='tile'; window.renderView(); }")
-        page.wait_for_selector(".offline-btn", timeout=2200)
+    # query sort: the search input reorders the same browse tiles client-side
+    # (browse/matchSort.js — no /api/v1/search). offline-btn must stay put.
+    for _mode in ("tile", "list", "card"):
+        page.evaluate(f"() => {{ window.viewMode='{_mode}'; window.renderView(); }}")
         page.fill("#search-input", "simple")
-        page.wait_for_selector(".offline-btn", timeout=3200)
+        page.wait_for_timeout(500)  # 300 ms debounce + render
         expect(page.locator(".offline-btn").first).to_be_visible(timeout=5000)
+        assert_btn_visible(f"sorted-{_mode}")
         try:
-            page.screenshot(path=str(EVIDENCE_DIR / "search-tile.png"))
+            page.screenshot(path=str(EVIDENCE_DIR / f"sorted-{_mode}.png"))
         except Exception:
             pass
-        assert_btn_visible("search-tile")
-
-        # list search
-        page.evaluate("() => { window.viewMode='list'; window.renderView(); }")
-        page.wait_for_selector(".offline-btn", timeout=2400)
-        expect(page.locator(".offline-btn").first).to_be_visible(timeout=5000)
-        try:
-            page.screenshot(path=str(EVIDENCE_DIR / "search-list.png"))
-        except Exception:
-            pass
-        assert_btn_visible("search-list")
-
-        # card search
-        page.evaluate("() => { window.viewMode='card'; window.renderView(); }")
-        page.wait_for_selector(".offline-btn", timeout=2400)
-        expect(page.locator(".offline-btn").first).to_be_visible(timeout=5000)
-        try:
-            page.screenshot(path=str(EVIDENCE_DIR / "search-card.png"))
-        except Exception:
-            pass
-        assert_btn_visible("search-card")
-    finally:
-        page.evaluate("() => { try { if(window._origFetchSearch) window.fetch = window._origFetchSearch; } catch {} }")
-        try:
-            page.unroute("**/api/v1/search**")
-        except Exception:
-            pass
-        # clear search
-        try:
-            page.evaluate("() => { const el=document.getElementById('search-input'); if(el){ el.value=''; el.dispatchEvent(new Event('input',{bubbles:true})); } }")
-            page.wait_for_selector(".offline-btn", timeout=2600)
-        except Exception:
-            pass
-        page.evaluate("() => { try { window.viewMode='tile'; window.renderView(); } catch {} }")
+    # clear the query → natural order restored
+    try:
+        page.evaluate("() => { const el=document.getElementById('search-input'); if(el){ el.value=''; el.dispatchEvent(new Event('input',{bubbles:true})); } }")
+        page.wait_for_selector(".offline-btn", timeout=2600)
+    except Exception:
+        pass
+    page.evaluate("() => { try { window.viewMode='tile'; window.renderView(); } catch {} }")
 
 
 # ── ② single tap starts download immediately ────────────────────────────────

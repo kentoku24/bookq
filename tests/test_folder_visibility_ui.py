@@ -1,4 +1,4 @@
-"""E2E for the hidden-roots UI (tile/list/card × browse/search, mode toggle).
+"""E2E for the hidden-roots UI (tile/list/card × browse/query-sort, mode toggle).
 
 Dedicated synthetic library + dedicated BOOKQ_STATE_DIR + own viewer-rs via
 tests/folder_visibility_helpers.py — the shared conftest server/tree keep
@@ -168,7 +168,9 @@ def test_descendant_badges_and_read_child_dup(vpage, vis_env):
     assert vpage.locator("#tile-grid .visibility-toggle").count() == 0
 
 
-def test_hidden_filtered_from_search_in_all_modes(vpage, vis_env):
+def test_hidden_filtered_with_active_query_in_all_modes(vpage, vis_env):
+    """Query sort keeps the browse grid — hidden roots stay filtered out
+    (getBrowseChildrenAt applies visibility before matchSort reorders)."""
     vis_put(vis_env, "hide_me", True)
     vis_put(vis_env, "hide_series", True)
     vpage.reload()
@@ -663,27 +665,27 @@ def test_show_all_hidden_not_dimmed_browse(vpage, vis_env, mode):
 
 
 @pytest.mark.parametrize("mode", ["tile", "list", "card"])
-def test_show_all_hidden_not_dimmed_search(vpage, vis_env, mode):
+def test_show_all_hidden_not_dimmed_sorted(vpage, vis_env, mode):
+    """showAll + query: every root child stays visible (sort, not filter) —
+    7 folders/archives + hide_mixed read-child + 1 root images-tile = 9 件,
+    hide* sorted to front."""
     vis_put(vis_env, "hide_me", True)
     vpage.reload()
     vpage.wait_for_selector(".tile")
     _show_all(vpage)
     _set_view_mode(vpage, mode)
     vpage.fill("#search-input", "hide")
-    vpage.wait_for_function(
-        "document.getElementById('folder-count').textContent === '4 件'")
+    vpage.wait_for_timeout(700)  # 300ms debounce + render
+    n = vpage.locator(
+        "#tile-grid .tile,#tile-grid .item,#tile-grid .card").count()
+    assert vpage.locator("#folder-count").inner_text() == f"{n} 件"
     hidden_sel = _item_sel(mode, "hide_me")
     sibling_sel = _item_sel(mode, "hide_me_b")
     hidden = vpage.locator(hidden_sel)
     sibling = vpage.locator(sibling_sel)
     hidden.wait_for(state="attached")
     sibling.wait_for(state="attached")
-    if mode == "list":
-        assert hidden.locator(".thumb").count() == 0
-        assert _cs(vpage, hidden_sel + " .name", "color") == _cs(
-            vpage, sibling_sel + " .name", "color")
-    else:
-        _assert_no_dimming(vpage, hidden_sel, sibling_sel, mode)
+    _assert_no_dimming(vpage, hidden_sel, sibling_sel, mode)
     _assert_hidden_badge_and_toggle(hidden)
 
 

@@ -291,9 +291,10 @@ def test_leader_close_disarms_and_follower_returns_to_reader(browser, server):
         ctx_l.close(); ctx_f.close()
 
 
-def test_search_mode_suspends_mirror(browser, server):
-    """Leader searching stops its scroll relay — the follower keeps the last
-    mirrored level (search-result sync is out of scope for v1)."""
+def test_query_sort_suspends_mirror(browser, server):
+    """Leader typing a query stops its scroll relay — the follower keeps the
+    last mirrored level (the sorted order is local-only, so scroll positions
+    would not correspond across devices)."""
     ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
     try:
         _open(pl, "long", "p005.png")
@@ -304,21 +305,23 @@ def test_search_mode_suspends_mirror(browser, server):
         pl.eval_on_selector(
             "#search-input",
             "el => { el.value='manga'; el.dispatchEvent(new Event('input')); }")
-        pl.wait_for_function("() => window.searchMode === true",
-                             timeout=10000)
+        pl.wait_for_function(
+            "() => window.BrowseMatchSort && window.BrowseMatchSort.isActive()",
+            timeout=10000)
         ft0 = _scroll(pf)
         fp0 = _browse_path(pf)
-        # the leader's result list scrolls — nothing may reach the follower
+        # the leader's sorted list scrolls — nothing may reach the follower
         _set_scroll(pl, 500)
         time.sleep(1.2)
         assert _scroll(pf) == ft0
         assert _browse_path(pf) == fp0
-        # clearing search re-enables the relay on the leader's next render
+        # clearing the query re-enables the relay on the leader's next render
         pl.eval_on_selector(
             "#search-input",
             "el => { el.value=''; el.dispatchEvent(new Event('input')); }")
-        pl.wait_for_function("() => window.searchMode === false",
-                             timeout=10000)
+        pl.wait_for_function(
+            "() => !window.BrowseMatchSort.isActive()",
+            timeout=10000)
         _set_scroll(pl, 90)
         lt, ft, expected = _wait_follower_offset(pl, pf)
         assert ft == pytest.approx(expected, abs=2)

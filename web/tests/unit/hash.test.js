@@ -22,7 +22,7 @@ function viewerState() {
 beforeEach(() => {
   for (const k of ['tree', 'treeLoaded', 'currentFolder', 'images', 'chapterList',
     'chapterBoundaries', 'currentIdx', 'currentBrowsePath', 'viewMode', 'urlRestoring',
-    'urlRestoreGen', 'searchMode', 'loadImages', 'renderView', 'updateBrowseHeader',
+    'urlRestoreGen', 'loadImages', 'renderView', 'updateBrowseHeader',
     'navigateToFolder', 'redirectHiddenToTop', 'fvGuardPath', 'FolderVisibility',
     'PairedView', 'PairController', 'PairUI', 'BrowseScroll', 'getNodeAt',
     'getParentPath', 'getScrollKey', 'scrollPositions', 'resetStrip', 'teardownViewer',
@@ -228,6 +228,15 @@ describe('applyUrlState (hashchange listener)', () => {
     const render = vi.fn();
     window.updateBrowseHeader = header;
     window.renderView = render;
+    // 本番の updateBrowseHeader は BrowseMatchSort.syncLevel を呼び、
+    // レベル変化でクエリをクリアする — stub でも同じ配線を再現する。
+    const BMS = globalThis.BrowseMatchSort;
+    window.currentBrowsePath = 'old-level';
+    BMS.setQuery('vol');
+    window.updateBrowseHeader = () => {
+      header();
+      BMS.syncLevel(window.currentBrowsePath);
+    };
     try {
       setHash('#/browse/series');
       fireHash();
@@ -235,7 +244,8 @@ describe('applyUrlState (hashchange listener)', () => {
       expect(window.currentBrowsePath).toBe('series');
       expect(header).toHaveBeenCalled();
       expect(render).toHaveBeenCalled();
-      expect(window.searchMode).toBe(false);
+      // レベルが変わったのでクエリはクリア済み
+      expect(BMS.isActive()).toBe(false);
 
       // viewer state present + empty hash → resetToTop clears browse path
       viewerState();

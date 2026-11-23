@@ -105,7 +105,12 @@ SETUP_JS = r"""
   }
 
   window.__BOOKQ_TEST_MODE__ = 'true';
-  window.searchMode = false;
+  // pairSync のクエリソート・ゲート (BrowseMatchSort.isActive) を再現する
+  // 可変フラグ — __queryActive を立てると mirror 送受信が止まる。
+  window.__queryActive = false;
+  window.BrowseMatchSort = {
+    isActive: function () { return window.__queryActive === true; },
+  };
   window.currentBrowsePath = null;
   window.viewMode = 'tile';
   window.scrollPositions = {};
@@ -935,13 +940,13 @@ def test_release_outside_scroller_ends_local_hold(pair_page):
 
 def test_tick_gate_stops_writes_without_new_frames(pair_page):
     pg = pair_page
-    triggers = ("() => { window.searchMode = true; }",
+    triggers = ("() => { window.__queryActive = true; }",
                 "() => window.__arm('follower', {sessionId: 'S2'})",
                 "() => window.__arm('follower', {status: 'reconnecting'})",
                 "() => window.__arm('leader')")
     for trigger in triggers:
         _rearm(pg)
-        pg.evaluate("() => { window.searchMode = false; }")
+        pg.evaluate("() => { window.__queryActive = false; }")
         _apply(pg, 100)
         pg.evaluate("() => window.__clock.advance(60)")
         _apply(pg, 160)
