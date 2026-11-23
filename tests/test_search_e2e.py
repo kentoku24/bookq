@@ -130,18 +130,56 @@ def test_reload_keeps_query_at_deep_level(page):
 
     page.locator("#search-input").fill("ch-1")
     page.wait_for_timeout(500)
-    tiles = page.locator("#tile-grid .tile")
-    assert tiles.count() == 4, "sort keeps every child — no filtering"
-    assert tiles.first.get_attribute("data-path") == "group/episodes/ch-1"
 
-    open_header_menu(page)
-    page.locator("#menu-reload").click()
-    page.wait_for_timeout(1500)  # refresh POST + full tree reload
+    # Natural tree order is ch-1, ch-2, ch-10, ch-11 — the query must yield
+    # a DIFFERENT order (ch-1 exact > ch-10/ch-11 prefix > ch-2) or the
+    # assertion can't distinguish sorting from the untouched listing.
+    want_order = [
+        "group/episodes/ch-1",
+        "group/episodes/ch-10",
+        "group/episodes/ch-11",
+        "group/episodes/ch-2",
+    ]
 
-    assert page.locator("#search-input").input_value() == "ch-1"
-    tiles = page.locator("#tile-grid .tile")
-    assert tiles.count() == 4
-    assert tiles.first.get_attribute("data-path") == "group/episodes/ch-1"
+    def _assert_sorted():
+        tiles = page.locator("#tile-grid .tile")
+        assert tiles.count() == 4, "sort keeps every child — no filtering"
+        assert [t.get_attribute("data-path") for t in tiles.all()] == want_order
+
+    _assert_sorted()
+
+    # Prove the reload actually completed instead of sleeping fixed time:
+    # index/refresh can leave the index rebuilding (first full fetch → 202,
+    # then a backoff retry), and only a bare 200 /api/v1/tree response means
+    # the full tree stage ran. The depth=1 shallow request must never fire —
+    # re-applying it is exactly the regression this test guards.
+    hits = {"full200": 0, "shallow": 0}
+
+    def _on_response(resp):
+        url = resp.url
+        if "/api/v1/tree" not in url:
+            return
+        if "depth=" in url:
+            hits["shallow"] += 1
+        elif "?" not in url and resp.status == 200:
+            hits["full200"] += 1
+
+    page.on("response", _on_response)
+    try:
+        open_header_menu(page)
+        page.locator("#menu-reload").click()
+        for _ in range(150):  # up to ~15s for the 202 retry backoff
+            if hits["full200"] >= 1:
+                break
+            page.wait_for_timeout(100)
+        assert hits["full200"] >= 1, "reload never received a 200 full tree"
+        assert hits["shallow"] == 0, "preservePath reload must skip depth=1 shallow"
+        page.wait_for_timeout(300)  # tree apply + render settle
+
+        assert page.locator("#search-input").input_value() == "ch-1"
+        _assert_sorted()
+    finally:
+        page.remove_listener("response", _on_response)
 
 
 # ── filter bottom sheet ─────────────────────────────────────────────────────────
