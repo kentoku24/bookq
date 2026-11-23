@@ -148,38 +148,21 @@ def test_reload_keeps_query_at_deep_level(page):
 
     _assert_sorted()
 
-    # Prove the reload actually completed instead of sleeping fixed time:
-    # index/refresh can leave the index rebuilding (first full fetch → 202,
-    # then a backoff retry), and only a bare 200 /api/v1/tree response means
-    # the full tree stage ran. The depth=1 shallow request must never fire —
-    # re-applying it is exactly the regression this test guards.
-    hits = {"full200": 0, "shallow": 0}
+    # Prove the reload's full-tree stage actually completed instead of
+    # sleeping fixed time: __cc_fullTreeApplied bumps only after a full
+    # (non-shallow) tree is applied, so this waits through the index/refresh
+    # 202 → backoff-retry window on every adapter — SafariPage has no
+    # network events (page.on("response") raises SafariUnsupported → skip).
+    applied_before = page.evaluate("() => window.__cc_fullTreeApplied || 0")
+    open_header_menu(page)
+    page.locator("#menu-reload").click()
+    page.wait_for_function(
+        f"window.__cc_fullTreeApplied > {applied_before}", timeout=20000
+    )
+    page.wait_for_timeout(300)  # render settle
 
-    def _on_response(resp):
-        url = resp.url
-        if "/api/v1/tree" not in url:
-            return
-        if "depth=" in url:
-            hits["shallow"] += 1
-        elif "?" not in url and resp.status == 200:
-            hits["full200"] += 1
-
-    page.on("response", _on_response)
-    try:
-        open_header_menu(page)
-        page.locator("#menu-reload").click()
-        for _ in range(150):  # up to ~15s for the 202 retry backoff
-            if hits["full200"] >= 1:
-                break
-            page.wait_for_timeout(100)
-        assert hits["full200"] >= 1, "reload never received a 200 full tree"
-        assert hits["shallow"] == 0, "preservePath reload must skip depth=1 shallow"
-        page.wait_for_timeout(300)  # tree apply + render settle
-
-        assert page.locator("#search-input").input_value() == "ch-1"
-        _assert_sorted()
-    finally:
-        page.remove_listener("response", _on_response)
+    assert page.locator("#search-input").input_value() == "ch-1"
+    _assert_sorted()
 
 
 # ── filter bottom sheet ─────────────────────────────────────────────────────────

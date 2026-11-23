@@ -1883,6 +1883,10 @@
       // never delay first paint.
       if (!await restoreTree(data, {shallow:false})) return false;
       if (!_isLoadCurrent(_loadGen, _connGen)) return false;
+      // Test/debug marker: bumps only when a FULL tree was applied — e2e
+      // waits on this instead of fixed sleeps or network events (Safari
+      // adapter has neither response events nor reliable timing).
+      try { window.__cc_fullTreeApplied = (window.__cc_fullTreeApplied || 0) + 1; } catch(e) {}
       _commitFolderEtag(data, null);
       // Stamp only a genuinely-online load: an offline cold start must keep
       // _onlineRevalidateLast=0 so the reconnect revalidation fires instead
