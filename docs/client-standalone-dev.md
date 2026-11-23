@@ -32,6 +32,15 @@ open 'http://localhost:8080/?api_base=http://127.0.0.1:4010'
 `app/static/offline-core.js` (image/thumb/view) の両方を re-base する
 (既定は空文字 = same-origin、通常動作は不変)。
 
+viewer-rs がシェルを配信する場合、CSP がクロスオリジンの API/画像取得を
+遮断するため、モックのオリジンを `BOOKQ_CSP_EXTRA_ORIGINS` で明示許可する
+(カンマ区切りで複数可。裸の `scheme://host[:port]` のみ有効):
+
+```bash
+BOOKQ_CSP_EXTRA_ORIGINS=http://127.0.0.1:4010 ./dev.sh up
+# または .env に BOOKQ_CSP_EXTRA_ORIGINS=http://127.0.0.1:4010
+```
+
 Playwright ではサーバ実装を完全に迂回できる
 (`tests/test_spec_examples_mock.py` が実例):
 
