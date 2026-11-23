@@ -86,6 +86,9 @@ jobs:
       - name: pool slot regression tests
         run: bash .github/scripts/test_pool_slot.sh
 
+      - name: oc-fail-classify regression tests
+        run: bash .github/scripts/test_oc_fail_classify.sh
+
   # #503/#532 rs-only: the suite oracles viewer-rs (all routes
   # native). Split on the `browser` marker;
   # rust-cache keeps the per-lane cargo build warm (each lane spawns its
