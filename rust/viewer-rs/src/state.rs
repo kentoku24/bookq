@@ -1664,6 +1664,7 @@ mod tests {
             upload_root: None,
             place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            csp_extra: Vec::new(),
         }
     }
 

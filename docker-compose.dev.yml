@@ -49,6 +49,8 @@ services:
       - BOOKQ_STATE_DIR=/var/lib/bookq
       - BOOKQ_WEB_DIR=/web
       - SECRET_KEY=dev-not-a-secret
+      # ?api_base= モック開発 (#237) 用 — 空なら CSP は same-origin のみ。
+      - BOOKQ_CSP_EXTRA_ORIGINS=${BOOKQ_CSP_EXTRA_ORIGINS:-}
 
     # dev.sh はこのラベルだけを情報源にする（状態ファイルを持たない）。
     labels:

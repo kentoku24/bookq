@@ -92,6 +92,10 @@ pub(crate) struct AppState {
     /// the load→verify→write cycle races otherwise and corrupts the
     /// blob/offset pair.
     pub(crate) session_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// #631: operator-declared extra CSP origins (`BOOKQ_CSP_EXTRA_ORIGINS`)
+    /// appended to `img-src`/`connect-src` on HTML responses — exists for
+    /// the `?api_base=` mock-dev flow (#237). Empty in production.
+    pub(crate) csp_extra: Vec<String>,
 }
 
 /// A local 405 carries the RFC 9110 `Allow` header.
@@ -161,6 +165,141 @@ async fn vary_session_cookie(
         res.headers_mut()
             .append(header::VARY, HeaderValue::from_static("Cookie"));
     }
+    res
+}
+
+/// CSP for the HTML surfaces (`/`, `/static/*.html`). `unsafe-inline` is
+/// required by index.html's per-request boot snippets and the `onerror=`
+/// handlers JS-built tiles emit — a nonce-based policy is follow-up work.
+/// Everything else stays locked down: no objects, no base-uri hijack, no
+/// framing, same-origin forms only. `script-src` is injected per-response
+/// (see `app_csp`) so TEST_MODE can add `'unsafe-eval'`.
+const APP_CSP_BASE: &str = "default-src 'self'; \
+    style-src 'self' 'unsafe-inline'; \
+    font-src 'self'; \
+    worker-src 'self'; \
+    manifest-src 'self'; \
+    object-src 'none'; \
+    base-uri 'none'; \
+    form-action 'self'; \
+    frame-ancestors 'none'";
+
+/// The app CSP with operator-declared extra origins (`img-src` +
+/// `connect-src`) appended — `BOOKQ_CSP_EXTRA_ORIGINS` exists for the
+/// `?api_base=` mock-dev flow (#237), which fetches API + images
+/// cross-origin. Request params are never reflected into the policy.
+/// `test_mode` adds `'unsafe-eval'` to `script-src`: TEST_MODE is already
+/// the auth-bypassing dev posture, and Playwright's `evaluate` /
+/// `wait_for_function` drive pages via string eval, which CSP otherwise
+/// blocks. The app itself never evals, so every other directive — and the
+/// production policy — stays strict.
+fn app_csp(extra: &[String], test_mode: bool) -> String {
+    let script_src = if test_mode {
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    } else {
+        "script-src 'self' 'unsafe-inline'"
+    };
+    let mut img = String::from("img-src 'self' data: blob:");
+    let mut conn = String::from("connect-src 'self' ws: wss:");
+    for o in extra {
+        img.push(' ');
+        img.push_str(o);
+        conn.push(' ');
+        conn.push_str(o);
+    }
+    format!("{APP_CSP_BASE}; {script_src}; {img}; {conn}")
+}
+
+/// A `BOOKQ_CSP_EXTRA_ORIGINS` entry must be a bare `scheme://host[:port]`
+/// origin — the charset whitelist excludes `'`/`;`/space/slash so a bad
+/// value can never inject CSP syntax (callers still drop + warn).
+fn csp_origin_valid(s: &str) -> bool {
+    let s = s.trim();
+    let Some(rest) = ["https://", "http://", "wss://", "ws://"]
+        .iter()
+        .find_map(|p| s.strip_prefix(p))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+}
+
+/// Comma-separated `BOOKQ_CSP_EXTRA_ORIGINS` → validated bare origins.
+/// Invalid entries are dropped with a warning.
+fn parse_csp_extra_origins(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let o = part.trim();
+        if o.is_empty() {
+            continue;
+        }
+        if csp_origin_valid(o) {
+            out.push(o.to_string());
+        } else {
+            tracing::warn!(
+                origin = %o,
+                "BOOKQ_CSP_EXTRA_ORIGINS entry is not a bare origin — ignored"
+            );
+        }
+    }
+    out
+}
+
+/// Insert `name: value` unless the handler already set it — the /admin
+/// CSP and the SVG sandbox CSP are stricter and must win (#631).
+fn set_header_if_absent(h: &mut axum::http::HeaderMap, name: &'static str, value: &'static str) {
+    let name = axum::http::HeaderName::from_static(name);
+    if !h.contains_key(&name) {
+        h.insert(name, HeaderValue::from_static(value));
+    }
+}
+
+/// Baseline hardening headers on every response (#631, OWASP A05). TLS
+/// terminates at the tailscale/cloudflared sidecar, but HSTS still reaches
+/// the client on that path and is ignored over plain HTTP, so it is safe
+/// to emit unconditionally (no `includeSubDomains` — sibling hosts on a
+/// custom domain must not be affected). `X-Frame-Options: DENY` plus CSP
+/// `frame-ancestors 'none'` close clickjacking on the upload/delete
+/// controls; `nosniff` covers JSON, static assets and error bodies alike.
+/// Non-HTML responses get no CSP: `/sw.js`'s own response headers feed the
+/// worker global scope, where `default-src 'none'` would break
+/// `importScripts`, and XFO already covers framing for media/JSON.
+fn apply_security_headers(res: &mut Response, extra_origins: &[String], test_mode: bool) {
+    let h = res.headers_mut();
+    for (n, v) in [
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "same-origin"),
+        ("x-frame-options", "DENY"),
+        ("strict-transport-security", "max-age=31536000"),
+    ] {
+        set_header_if_absent(h, n, v);
+    }
+    let is_html = h
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"));
+    if is_html {
+        // The CSP is built per-response (operator extras), so it cannot
+        // ride the &'static insert helper.
+        if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
+            if let Ok(v) = HeaderValue::from_str(&app_csp(extra_origins, test_mode)) {
+                h.insert(header::CONTENT_SECURITY_POLICY, v);
+            }
+        }
+        set_header_if_absent(h, "x-robots-tag", "noindex");
+    }
+}
+
+async fn security_headers(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut res = next.run(req).await;
+    apply_security_headers(&mut res, &st.csp_extra, st.test_mode);
     res
 }
 
@@ -1483,6 +1622,11 @@ async fn main() {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
     }
+    // #631 follow-up: explicit operator opt-in for the `?api_base=` mock-dev
+    // flow (#237) — validated bare origins only, never the request param.
+    let csp_extra = parse_csp_extra_origins(
+        &std::env::var("BOOKQ_CSP_EXTRA_ORIGINS").unwrap_or_default(),
+    );
     let st = AppState {
         library: library.clone(),
         test_mode,
@@ -1515,6 +1659,7 @@ async fn main() {
         upload_root: library::probe_upload_root(&library),
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        csp_extra,
     };
     // #608: TEST_MODE trusts every caller as the mock user. An admin role in
     // that posture makes `/admin` reachable by anyone who can hit the URL, so
@@ -1640,6 +1785,13 @@ async fn main() {
             st.clone(),
             vary_session_cookie,
         ))
+        // #631: baseline hardening headers — outermost so it sees the
+        // final response (post-gzip) and never clobbers stricter per-route
+        // values (admin CSP, SVG sandbox).
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            security_headers,
+        ))
         .with_state(st);
 
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");
@@ -1675,6 +1827,144 @@ mod handler_tests {
         assert_eq!(
             unauthenticated().status(),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// #631: every response gets the baseline headers; HTML additionally
+    /// gets the app CSP + noindex, and a stricter handler-set CSP wins.
+    #[test]
+    fn security_headers_baseline_and_html_csp() {
+        // Non-HTML (JSON/error shape): baseline only, no CSP — /sw.js's
+        // response headers feed the worker scope where default-src 'none'
+        // would break importScripts.
+        let mut res = state::detail(StatusCode::OK, "ok");
+        apply_security_headers(&mut res, &[], false);
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(res.headers()["x-frame-options"], "DENY");
+        assert_eq!(res.headers()["referrer-policy"], "same-origin");
+        assert_eq!(
+            res.headers()["strict-transport-security"],
+            "max-age=31536000"
+        );
+        assert!(!res.headers().contains_key("content-security-policy"));
+
+        // HTML: app CSP + noindex on top of the baseline.
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res, &[], false);
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        for needle in [
+            "default-src 'self'",
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "form-action 'self'",
+        ] {
+            assert!(csp.contains(needle), "CSP missing {needle}: {csp}");
+        }
+        assert_eq!(res.headers()["x-robots-tag"], "noindex");
+
+        // TEST_MODE relaxes only script-src with 'unsafe-eval' — Playwright
+        // drives pages via string eval; every other directive is unchanged.
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res, &[], true);
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.contains("script-src 'self' 'unsafe-inline' 'unsafe-eval'"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+
+        // A handler-set CSP (admin's stricter policy, SVG sandbox) is
+        // never clobbered.
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header("content-security-policy", "default-src 'none'")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res, &[], false);
+        assert_eq!(
+            res.headers()["content-security-policy"],
+            "default-src 'none'"
+        );
+    }
+
+    /// #631 follow-up: `BOOKQ_CSP_EXTRA_ORIGINS` entries reach only
+    /// img-src/connect-src on HTML responses — operator opt-in for the
+    /// `?api_base=` mock flow (#237); the request param itself is never
+    /// reflected.
+    #[test]
+    fn csp_extra_origins_extend_only_html_directives() {
+        let extra = vec!["http://127.0.0.1:4010".to_string()];
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res, &extra, false);
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.contains("img-src 'self' data: blob: http://127.0.0.1:4010"));
+        assert!(csp.contains("connect-src 'self' ws: wss: http://127.0.0.1:4010"));
+        // Extras must not leak into unrelated directives.
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline' http"));
+        assert!(!csp.contains("default-src 'self' http"));
+
+        // Non-HTML responses never carry CSP, extras or not.
+        let mut res = state::detail(StatusCode::OK, "ok");
+        apply_security_headers(&mut res, &extra, false);
+        assert!(!res.headers().contains_key("content-security-policy"));
+    }
+
+    /// #631 follow-up: only bare scheme://host[:port] origins survive —
+    /// anything that could inject CSP syntax or smuggle a path is dropped.
+    #[test]
+    fn csp_extra_origin_validation() {
+        for ok in [
+            "http://127.0.0.1:4010",
+            "https://mock.example.com",
+            "ws://localhost:4010",
+            "wss://[::1]:8443",
+            "http://192.168.1.20:4010",
+        ] {
+            assert!(csp_origin_valid(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "http://127.0.0.1:4010/api",   // path
+            "http://127.0.0.1:4010?x=1",   // query
+            "javascript:alert(1)",          // wrong scheme
+            "http://",                      // no host
+            "http://host';object-src *",    // CSP injection attempt
+            "http://user@host:1",           // userinfo
+            "127.0.0.1:4010",               // no scheme
+            "http://host name:1",           // space
+        ] {
+            assert!(!csp_origin_valid(bad), "{bad} should be invalid");
+        }
+        // Comma-separated parse keeps valid, drops invalid.
+        let parsed = parse_csp_extra_origins(
+            " http://127.0.0.1:4010 , bogus entry ,https://ok.example.com ",
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                "http://127.0.0.1:4010".to_string(),
+                "https://ok.example.com".to_string()
+            ]
         );
     }
 
@@ -1760,6 +2050,7 @@ mod handler_tests {
             upload_root: None,
             place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            csp_extra: Vec::new(),
         }
     }
 
