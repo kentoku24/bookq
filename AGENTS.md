@@ -118,6 +118,10 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - **エミュレータ標準フローは `.claude/skills/android-emulator/SKILL.md`**。AVD (`bookq_tab`) は ~9GB・Gradle/Kotlin daemon は 2〜4GB を常駐させるため、検証終了時・テスト合間に必ず `adb -s <serial> emu kill` / `./gradlew --stop` で止めること。自分が起動したプロセスだけを止め、他セッションの環境を殺さない (停止前に `adb devices` / `docker ps` / `ps` で所有確認)。
 - 依存バージョンは `gradle/libs.versions.toml`（公開 7 日以上の stable、floating 禁止）。
 
+### API spec / codegen
+
+- `api/openapi.v1.yaml` / `api/asyncapi.yaml`（spec 本体・`examples:` 含む）を変更したら、必ず `./scripts/api/codegen.sh` を実行し、生成物（`api/dist/`・`web/static/api/api-types.d.ts`）も同じコミットに含めること。codegen-drift CI（`api-spec-lint.yml`）が stale 生成物を fail させ、AI 著者 branch での再生成漏れが繰り返し発生している (#636)。契約の正本規約は `api/README.md`。
+
 ### 自動化ワークフロー (improvement-scan)
 
 - `.github/workflows/improvement-scan.yml` が週次でボトルネック調査→改善 Issue 起票を行う（`discovery` ラベル、タイトル `[discovery] <area>:` 接頭辞）。詳細は `docs/discovery-scan.md`。
