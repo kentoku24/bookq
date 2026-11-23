@@ -23,9 +23,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
 
-from rs_spawn import viewer_rs_binary  # noqa: E402
+from rs_spawn import users_cli, viewer_rs_binary  # noqa: E402
 
 UPLOAD_DIR_NAME = ".bookq-uploads"
+TEST_EMAIL = "test@example.com"  # BOOKQ_TEST_MODE mock user (auth::TEST_USER_EMAIL)
 
 
 def _zip_bytes(member: str = "p.png") -> bytes:
@@ -52,11 +53,18 @@ def lib_root(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def lib_server(lib_root, tmp_path_factory):
+def lib_state(tmp_path_factory):
+    return tmp_path_factory.mktemp("lib-edit-state")
+
+
+@pytest.fixture(scope="module")
+def lib_server(lib_root, lib_state):
     from rs_spawn import spawn_backend
 
-    state = tmp_path_factory.mktemp("lib-edit-state")
-    proc, base_url = spawn_backend(library_dir=lib_root, state_dir=state)
+    # #633: DELETE /api/v1/library/files is admin-only — enroll the mock
+    # user as admin BEFORE spawn so the directory loads the role at boot.
+    users_cli(lib_state, "add", TEST_EMAIL, "--role", "admin")
+    proc, base_url = spawn_backend(library_dir=lib_root, state_dir=lib_state)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)
@@ -295,6 +303,46 @@ def test_delete_symlink_escape_forbidden(lib_server, lib_root, tmp_path):
     )
     assert r.status_code == 403, r.text
     assert (outside / "secret.cbz").exists()
+
+
+def test_delete_requires_admin_but_upload_stays_open(lib_server, lib_state, lib_root):
+    """#633: DELETE /api/v1/library/files is admin-only; member upload is unaffected."""
+    users_cli(lib_state, "add", TEST_EMAIL, "--role", "member")
+    try:
+        # UserDirectory refreshes ~1s — probe a nonexistent path until the
+        # member role propagates (admin→404 on missing file, member→403; a
+        # real path would delete while the admin role is still cached).
+        deadline = time.time() + 10
+        while True:
+            r = httpx.delete(
+                f"{lib_server}/api/v1/library/files",
+                params={"path": "__role_probe__.cbz"},
+            )
+            if r.status_code == 403:
+                break
+            assert r.status_code == 404, (r.status_code, r.text)
+            assert time.time() < deadline, "member role never propagated"
+            time.sleep(0.3)
+
+        victim = lib_root / "series" / "work.cbz"
+        assert victim.exists()
+        r = httpx.delete(
+            f"{lib_server}/api/v1/library/files",
+            params={"path": "series/work.cbz"},
+        )
+        assert r.status_code == 403, r.text
+        assert victim.exists()
+
+        # Uploads stay member-open.
+        r = httpx.post(
+            f"{lib_server}/api/v1/library/files",
+            params={"dir": "series"},
+            files={"file": ("member-upload.cbz", _zip_bytes(), "application/zip")},
+        )
+        assert r.status_code == 200, r.text
+        assert (lib_root / "series" / "member-upload.cbz").exists()
+    finally:
+        users_cli(lib_state, "add", TEST_EMAIL, "--role", "admin")
 
 
 # ── chunked upload sessions ─────────────────────────────────────────────────

@@ -144,6 +144,7 @@ const OWNER_EXPR: &str = "{{ visibility_owner | tojson }}";
 const SNAP_EXPR: &str = "{{ visibility_snapshot | tojson }}";
 const PUKEY_EXPR: &str = "{{ progress_user_key | tojson }}";
 const ADMIN_IF: &str = "{% if is_admin %}";
+const ADMIN_EXPR: &str = "{{ is_admin }}";
 const PERF_IF: &str = "{% if thumbnail_perf %}";
 const PROBE_EXPR: &str = "{{ thumbnail_probe | safe }}";
 const INCLUDE_EXPR: &str = "{% include \"thumbnail_perf.html\" %}";
@@ -171,7 +172,10 @@ pub(crate) fn render_index(src: &str, ctx: &IndexCtx) -> Option<String> {
         .replace(TM_EXPR, if ctx.test_mode { "true" } else { "false" })
         .replace(OWNER_EXPR, &jinja_tojson(&opt_json(&ctx.owner)))
         .replace(SNAP_EXPR, &jinja_tojson(&ctx.snapshot))
-        .replace(PUKEY_EXPR, &jinja_tojson(&opt_json(&ctx.user_key)));
+        .replace(PUKEY_EXPR, &jinja_tojson(&opt_json(&ctx.user_key)))
+        // #633: JS-visible admin flag — cosmetic only (hides the delete
+        // badge); the DELETE route re-checks the role per request.
+        .replace(ADMIN_EXPR, if ctx.is_admin { "\"true\"" } else { "\"false\"" });
     out = render_if_block(&out, ADMIN_IF, ctx.is_admin)?;
 
     // {% if thumbnail_perf %}…{% endif %} — flat blocks; inner substitutions.

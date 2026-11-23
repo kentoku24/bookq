@@ -1004,10 +1004,12 @@ async fn api_version(State(st): State<AppState>, req: Request<Body>) -> Response
 
 /// `/api/v1/library/files` — POST multipart upload / DELETE file-or-dir.
 /// `dir` (upload) and `path` (delete) are query params; the body streams.
+/// #633: DELETE is admin-only (destructive on shared library content);
+/// uploads stay open to any member.
 async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     match *req.method() {
         axum::http::Method::POST => {
             let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
@@ -1021,6 +1023,9 @@ async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Respon
             library::post_files(&st, &dir, mp).await
         }
         axum::http::Method::DELETE => {
+            if !admin_check(&st, &user.email).await {
+                return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+            }
             let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
                 .map(|q| q.0)
                 .unwrap_or_default();

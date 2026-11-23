@@ -273,8 +273,11 @@
 
   // render.js のタイル HTML へ差し込むバッジ (編集 OFF では空文字)。
   // クエリソート中のタイルも実 browse ノードなので削除ボタンを出してよい。
+  // #633: DELETE /api/v1/library/files は admin 限定 — member には 🗑 を
+  // 出さない (サーバ側でも 403。フラグは cosmetic)。
   function delBadgeHtml() {
     if (!_editing) return "";
+    if (window.__BOOKQ_IS_ADMIN__ !== "true") return "";
     return '<button type="button" class="lib-del" aria-label="削除" title="削除 (2タップで確定)">🗑</button>';
   }
 
