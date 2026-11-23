@@ -270,6 +270,37 @@ pub fn session_key(secret: &str) -> Option<SessionKey> {
     }
 }
 
+/// `.env.example`'s shipped SECRET_KEY placeholder. It is public knowledge,
+/// so a deploy that forgets to change it hands out forgeable session
+/// cookies and Bearer JWTs for any active member (#632).
+pub const SECRET_KEY_PLACEHOLDER: &str = "change-me-to-a-random-64-char-string";
+
+/// What startup should do with SECRET_KEY (#632, OWASP A07/A02).
+pub enum SecretKeyPosture {
+    /// Unset — fail-closed today (auth surface 501s, authed routes 401);
+    /// warn so the lockout is visible in logs.
+    Missing,
+    /// Non-empty but short — functional, weaker key material.
+    Weak,
+    /// The publicly known placeholder — must not boot.
+    Public,
+    /// Acceptable.
+    Strong,
+}
+
+pub fn secret_key_posture(secret: &str) -> SecretKeyPosture {
+    let trimmed = secret.trim();
+    if trimmed == SECRET_KEY_PLACEHOLDER {
+        SecretKeyPosture::Public
+    } else if trimmed.is_empty() {
+        SecretKeyPosture::Missing
+    } else if trimmed.len() < 32 {
+        SecretKeyPosture::Weak
+    } else {
+        SecretKeyPosture::Strong
+    }
+}
+
 /// The raw `session` cookie value — last wins, matching starlette's
 /// `HTTPConnection.cookies` (a dict update across all Cookie headers,
 /// left to right). First-wins would let `session=<valid>; session=<x>`
@@ -453,6 +484,33 @@ mod tests {
     use sha2::Sha256;
 
     const SECRET: &str = "dev-not-a-secret";
+
+    /// #632: the shipped placeholder is public knowledge and must never
+    /// boot; empty fails closed (Missing), short keys only warn (Weak) so
+    /// dev's `dev-not-a-secret` keeps working.
+    #[test]
+    fn secret_key_posture_flags_public_missing_and_weak() {
+        assert!(matches!(
+            secret_key_posture(SECRET_KEY_PLACEHOLDER),
+            SecretKeyPosture::Public
+        ));
+        // Copy-paste whitespace around the placeholder is still the
+        // publicly known value.
+        assert!(matches!(
+            secret_key_posture("  change-me-to-a-random-64-char-string \n"),
+            SecretKeyPosture::Public
+        ));
+        assert!(matches!(secret_key_posture(""), SecretKeyPosture::Missing));
+        assert!(matches!(secret_key_posture("   "), SecretKeyPosture::Missing));
+        assert!(matches!(
+            secret_key_posture(SECRET),
+            SecretKeyPosture::Weak
+        ));
+        assert!(matches!(
+            secret_key_posture("0123456789abcdef0123456789abcdef"),
+            SecretKeyPosture::Strong
+        ));
+    }
 
     fn members(emails: &[&str]) -> UserDirectory {
         let entries: Vec<(&str, crate::users::Role)> = emails
