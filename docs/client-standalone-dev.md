@@ -34,11 +34,13 @@ open 'http://localhost:8080/?api_base=http://127.0.0.1:4010'
 
 viewer-rs がシェルを配信する場合、CSP がクロスオリジンの API/画像取得を
 遮断するため、モックのオリジンを `BOOKQ_CSP_EXTRA_ORIGINS` で明示許可する
-(カンマ区切りで複数可。裸の `scheme://host[:port]` のみ有効):
+(カンマ区切りで複数可。裸の `scheme://host[:port]` のみ有効)。
+`localhost:8080` で開くには `--local` が必要 (`./dev.sh up` だけでは
+tailnet の HTTPS URL のみでポートは公開されない):
 
 ```bash
-BOOKQ_CSP_EXTRA_ORIGINS=http://127.0.0.1:4010 ./dev.sh up
-# または .env に BOOKQ_CSP_EXTRA_ORIGINS=http://127.0.0.1:4010
+BOOKQ_CSP_EXTRA_ORIGINS=http://127.0.0.1:4010 ./dev.sh up --local
+# shell env ではなく .env に書く場合はメイン checkout の .env が参照される
 ```
 
 Playwright ではサーバ実装を完全に迂回できる

@@ -293,6 +293,12 @@ compose_env_defaults() {
         TS_AUTHKEY="$(find_authkey || true)"
     fi
     export TS_AUTHKEY
+    # #631: BOOKQ_CSP_EXTRA_ORIGINS (?api_base= mock dev) — worktree の .env は
+    # 無いのでメイン checkout の .env からも解決する。
+    if [ -z "${BOOKQ_CSP_EXTRA_ORIGINS:-}" ]; then
+        BOOKQ_CSP_EXTRA_ORIGINS="$(dotenv_value BOOKQ_CSP_EXTRA_ORIGINS || true)"
+    fi
+    [ -z "${BOOKQ_CSP_EXTRA_ORIGINS:-}" ] || export BOOKQ_CSP_EXTRA_ORIGINS
 }
 
 compose() {
