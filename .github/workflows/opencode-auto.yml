@@ -417,7 +417,14 @@ jobs:
           git ls-remote --heads origin "refs/heads/ai/${ISSUE_NUMBER}-*" |
             while read -r _sha ref; do
               branch="${ref#refs/heads/}"
-              if [ -z "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+              # A failed `gh pr list` prints nothing — indistinguishable from
+              # "no open PR". Fail-safe: keep the branch rather than risk
+              # deleting the head of a live PR.
+              prs=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number') || {
+                echo "::warning::gh pr list failed for $branch — keeping branch (fail-safe)"
+                continue
+              }
+              if [ -z "$prs" ]; then
                 echo "deleting stale branch $branch"
                 git push origin --delete "$branch" || echo "::warning::failed to delete $branch"
               else
@@ -654,7 +661,14 @@ jobs:
           git ls-remote --heads origin "refs/heads/ai/${ISSUE_NUMBER}-*" |
             while read -r _sha ref; do
               branch="${ref#refs/heads/}"
-              if [ -z "$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+              # A failed `gh pr list` prints nothing — indistinguishable from
+              # "no open PR". Fail-safe: keep the branch rather than risk
+              # deleting the head of a live PR.
+              prs=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[].number') || {
+                echo "::warning::gh pr list failed for $branch — keeping branch (fail-safe)"
+                continue
+              }
+              if [ -z "$prs" ]; then
                 echo "deleting stale branch $branch"
                 git push origin --delete "$branch" || echo "::warning::failed to delete $branch"
               else
