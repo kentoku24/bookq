@@ -50,6 +50,7 @@
 <script>window.__BOOKQ_VISIBILITY_OWNER__ = {{ visibility_owner | tojson }};</script>
 <script>window.__BOOKQ_VISIBILITY_SNAPSHOT__ = {{ visibility_snapshot | tojson }};</script>
 <script>window.__BOOKQ_PROGRESS_USER__ = {{ progress_user_key | tojson }};</script>
+<script>window.__BOOKQ_IS_ADMIN__ = {{ is_admin }};</script>
 {% if thumbnail_perf %}<script>{{ thumbnail_probe | safe }}</script>
 {% endif %}</head>
 <body>
