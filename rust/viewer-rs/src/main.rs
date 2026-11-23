@@ -164,6 +164,69 @@ async fn vary_session_cookie(
     res
 }
 
+/// CSP for the HTML surfaces (`/`, `/static/*.html`). `unsafe-inline` is
+/// required by index.html's per-request boot snippets and the `onerror=`
+/// handlers JS-built tiles emit — a nonce-based policy is follow-up work.
+/// Everything else stays locked down: no objects, no base-uri hijack, no
+/// framing, same-origin forms only.
+const APP_CSP: &str = "default-src 'self'; \
+    script-src 'self' 'unsafe-inline'; \
+    style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: blob:; \
+    font-src 'self'; \
+    connect-src 'self' ws: wss:; \
+    worker-src 'self'; \
+    manifest-src 'self'; \
+    object-src 'none'; \
+    base-uri 'none'; \
+    form-action 'self'; \
+    frame-ancestors 'none'";
+
+/// Insert `name: value` unless the handler already set it — the /admin
+/// CSP and the SVG sandbox CSP are stricter and must win (#631).
+fn set_header_if_absent(h: &mut axum::http::HeaderMap, name: &'static str, value: &'static str) {
+    let name = axum::http::HeaderName::from_static(name);
+    if !h.contains_key(&name) {
+        h.insert(name, HeaderValue::from_static(value));
+    }
+}
+
+/// Baseline hardening headers on every response (#631, OWASP A05). TLS
+/// terminates at the tailscale/cloudflared sidecar, but HSTS still reaches
+/// the client on that path and is ignored over plain HTTP, so it is safe
+/// to emit unconditionally (no `includeSubDomains` — sibling hosts on a
+/// custom domain must not be affected). `X-Frame-Options: DENY` plus CSP
+/// `frame-ancestors 'none'` close clickjacking on the upload/delete
+/// controls; `nosniff` covers JSON, static assets and error bodies alike.
+/// Non-HTML responses get no CSP: `/sw.js`'s own response headers feed the
+/// worker global scope, where `default-src 'none'` would break
+/// `importScripts`, and XFO already covers framing for media/JSON.
+fn apply_security_headers(res: &mut Response) {
+    let h = res.headers_mut();
+    for (n, v) in [
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "same-origin"),
+        ("x-frame-options", "DENY"),
+        ("strict-transport-security", "max-age=31536000"),
+    ] {
+        set_header_if_absent(h, n, v);
+    }
+    let is_html = h
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"));
+    if is_html {
+        set_header_if_absent(h, "content-security-policy", APP_CSP);
+        set_header_if_absent(h, "x-robots-tag", "noindex");
+    }
+}
+
+async fn security_headers(_req: Request<Body>, next: axum::middleware::Next) -> Response {
+    let mut res = next.run(_req).await;
+    apply_security_headers(&mut res);
+    res
+}
+
 /// `/api/v1/reading-positions` — M4+375: per-folder LWW + tombstones,
 /// native on the shared user-state SQLite store (same rows the Python
 /// viewer reads/writes, so py/rs cannot diverge — #263 resolved).
@@ -1613,6 +1676,10 @@ async fn main() {
             st.clone(),
             vary_session_cookie,
         ))
+        // #631: baseline hardening headers — outermost so it sees the
+        // final response (post-gzip) and never clobbers stricter per-route
+        // values (admin CSP, SVG sandbox).
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(st);
 
     let addr: SocketAddr = bind.parse().expect("BOOKQ_BIND must be host:port");
@@ -1648,6 +1715,61 @@ mod handler_tests {
         assert_eq!(
             unauthenticated().status(),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// #631: every response gets the baseline headers; HTML additionally
+    /// gets the app CSP + noindex, and a stricter handler-set CSP wins.
+    #[test]
+    fn security_headers_baseline_and_html_csp() {
+        // Non-HTML (JSON/error shape): baseline only, no CSP — /sw.js's
+        // response headers feed the worker scope where default-src 'none'
+        // would break importScripts.
+        let mut res = state::detail(StatusCode::OK, "ok");
+        apply_security_headers(&mut res);
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(res.headers()["x-frame-options"], "DENY");
+        assert_eq!(res.headers()["referrer-policy"], "same-origin");
+        assert_eq!(
+            res.headers()["strict-transport-security"],
+            "max-age=31536000"
+        );
+        assert!(!res.headers().contains_key("content-security-policy"));
+
+        // HTML: app CSP + noindex on top of the baseline.
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res);
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        for needle in [
+            "default-src 'self'",
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+            "base-uri 'none'",
+            "form-action 'self'",
+        ] {
+            assert!(csp.contains(needle), "CSP missing {needle}: {csp}");
+        }
+        assert_eq!(res.headers()["x-robots-tag"], "noindex");
+
+        // A handler-set CSP (admin's stricter policy, SVG sandbox) is
+        // never clobbered.
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header("content-security-policy", "default-src 'none'")
+            .body(Body::empty())
+            .unwrap();
+        apply_security_headers(&mut res);
+        assert_eq!(
+            res.headers()["content-security-policy"],
+            "default-src 'none'"
         );
     }
 
