@@ -289,12 +289,16 @@ pub enum SecretKeyPosture {
 }
 
 pub fn secret_key_posture(secret: &str) -> SecretKeyPosture {
-    let trimmed = secret.trim();
-    if trimmed == SECRET_KEY_PLACEHOLDER {
+    // Trim applies ONLY to the placeholder comparison: callers use the raw
+    // value, so a whitespace-padded placeholder is still the publicly known
+    // key — but a whitespace-only key is *not* missing. It is a weak
+    // non-empty key: auth stays enabled (session_key/bearer_claims see a
+    // non-empty secret), so it must warn as Weak, not claim fail-closed.
+    if secret.trim() == SECRET_KEY_PLACEHOLDER {
         SecretKeyPosture::Public
-    } else if trimmed.is_empty() {
+    } else if secret.is_empty() {
         SecretKeyPosture::Missing
-    } else if trimmed.len() < 32 {
+    } else if secret.len() < 32 {
         SecretKeyPosture::Weak
     } else {
         SecretKeyPosture::Strong
@@ -501,7 +505,12 @@ mod tests {
             SecretKeyPosture::Public
         ));
         assert!(matches!(secret_key_posture(""), SecretKeyPosture::Missing));
-        assert!(matches!(secret_key_posture("   "), SecretKeyPosture::Missing));
+        // Whitespace-only is NOT missing — the raw value is non-empty, so
+        // session_key()/bearer_claims() keep auth enabled with a weak key.
+        assert!(matches!(
+            secret_key_posture("   "),
+            SecretKeyPosture::Weak
+        ));
         assert!(matches!(
             secret_key_posture(SECRET),
             SecretKeyPosture::Weak
