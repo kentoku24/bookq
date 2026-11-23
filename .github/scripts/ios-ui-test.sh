@@ -314,9 +314,10 @@ fi
 # Retry ONCE, and only when the failure looks infrastructural — real
 # assertion failures must never get a second chance to pass. Console
 # signatures cover transport/clone errors; app.launch() flakes such as
-# "does not have a process ID" are recorded only inside the xcresult,
-# so failure messages there are inspected as a second signal: retry
-# only when EVERY recorded failure is launch/transport-class.
+# "does not have a process ID" / "Failed to terminate" are recorded
+# only inside the xcresult, so failure messages there are inspected as
+# a second signal: retry only when EVERY recorded failure is
+# launch/transport-class.
 BUNDLE="$RESULTS/tests.xcresult"
 
 infra_failure() {
@@ -327,8 +328,8 @@ infra_failure() {
 import json, re, sys
 INFRA = re.compile(
     r"does not have a process ID|[Ff]ailed to launch|[Uu]nable to launch|"
-    r"[Ll]ost connection|[Ff]ailed to install|testmanagerd|"
-    r"process exited", re.I)
+    r"[Ff]ailed to terminate|[Ll]ost connection|[Ff]ailed to install|"
+    r"testmanagerd|process exited", re.I)
 try:
     root = json.load(sys.stdin)
 except Exception:
