@@ -134,6 +134,10 @@
                                   // the choice falls back to 開始/参加
   let connectPending = false;   // a connect() call is in flight — the
                                 // つながる pick must not double-fire
+  let awaitingAutoMatch = false; // the waiting leader came from connect()
+                                 // (match-origin): only then can another
+                                 // device's connect() actually find it —
+                                 // matchable() excludes CREATE sessions
   /* A rapid second launcher tap lands on the freshly-shown overlay as a
    * backdrop click and instantly closes the panel while the session keeps
    * connecting (#160-A). Swallow backdrop dismissals for a short grace —
@@ -458,13 +462,18 @@
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
       drawQR(s);
-      // Past the match window nobody can find this session via 🔗 —
-      // say so instead of promising a join that can no longer happen.
+      // Only a MATCH-origin wait (つながる) is discoverable by another
+      // device's connect() — matchable() excludes CREATE sessions, so a
+      // guest invite or legacy create can ONLY be joined via the code or
+      // QR. Don't promise an auto-join that can never happen; past the
+      // match window the same fallback applies to a match-origin wait.
       if (!leaderSince) leaderSince = Date.now();
-      const left = MATCH_WINDOW_MS - (Date.now() - leaderSince);
+      const left = awaitingAutoMatch
+        ? MATCH_WINDOW_MS - (Date.now() - leaderSince) : 0;
       els.leaderNote.textContent = left > 0
         ? 'もう1台が接続ボタンを押すと自動でつながります'
-        : '自動接続の受付は終了しました。コードまたはQRで参加できます';
+        : (awaitingAutoMatch ? '自動接続の受付は終了しました。' : '') +
+          'コードまたはQRで参加できます';
       if (leaderNoteTimer) { clearTimeout(leaderNoteTimer); leaderNoteTimer = null; }
       if (left > 0) {
         leaderNoteTimer = setTimeout(() => {
@@ -825,6 +834,7 @@
       if (!ctl || typeof ctl.connect !== 'function' || connectPending) {
         return;
       }
+      awaitingAutoMatch = true;
       let res;
       try { res = ctl.connect(); } catch (err) { res = null; }
       if (res && typeof res.then === 'function') {
@@ -846,6 +856,7 @@
       if (ctl && typeof ctl.connect === 'function' && !connectUnsupported) {
         fireConnect();
       } else if (ctl) {
+        awaitingAutoMatch = false;
         ctl.create();
       }
     });
@@ -853,6 +864,7 @@
      * mints the guestToken the composite `/#/join/<code>?gt=` QR needs,
      * so the invite action must not go through connect()'s match path. */
     els.guestInvite.addEventListener('click', () => {
+      awaitingAutoMatch = false;
       if (ctl && typeof ctl.create === 'function') ctl.create();
     });
     els.joinOpen.addEventListener('click', () => {

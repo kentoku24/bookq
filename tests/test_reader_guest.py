@@ -633,6 +633,11 @@ def test_guest_invite_button_qr_pairs(browser, guest_server):
         url = pl.evaluate(
             "() => document.getElementById('pair-qr').dataset.qrUrl")
         assert "/#/join/" in url and "?gt=" in url, url
+        # CREATE-origin sessions are never MATCH candidates, so the leader
+        # note must point at code/QR — not an auto-connect that can't fire
+        note = pl.text_content("#pair-leader-note")
+        assert "コードまたはQR" in note, note
+        assert "接続ボタン" not in note, note
         # guest device: fresh context, NO cookies — opens the QR URL
         ctx_g = browser.new_context(
             viewport={"width": 900, "height": 600}, has_touch=True)
