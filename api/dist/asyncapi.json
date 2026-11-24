@@ -532,35 +532,19 @@
           {
             "properties": {
               "payload": {
-                "description": "2 経路のどちらか一方: `code`（6桁数字・member ペアリング）\nまたは `guestToken`（ゲストアクセス — CREATE ACK の\n`data.guestToken`。未ログイン端末の `/#/guest/<token>`\nQR リンクが解決する bearer で、grant はペアセッション\n終了または発行から 8 時間で失効）。\n",
-                "oneOf": [
-                  {
-                    "properties": {
-                      "code": {
-                        "pattern": "^\\d{6}$",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "code"
-                    ],
-                    "type": "object"
+                "description": "`code`（6桁数字・member ペアリング）または\n`guestToken`（ゲストアクセス — CREATE ACK の\n`data.guestToken`。未ログイン端末の `/#/guest/<token>`\nQR リンクが解決する bearer で、grant はペアセッション\n終了または発行から 8 時間で失効）のどちらか一方を必須とする。\n",
+                "properties": {
+                  "code": {
+                    "pattern": "^\\d{6}$",
+                    "type": "string"
                   },
-                  {
-                    "properties": {
-                      "guestToken": {
-                        "maxLength": 128,
-                        "minLength": 16,
-                        "pattern": "^[A-Za-z0-9_-]+$",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "guestToken"
-                    ],
-                    "type": "object"
+                  "guestToken": {
+                    "maxLength": 128,
+                    "minLength": 16,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
                   }
-                ],
+                },
                 "type": "object"
               },
               "type": {
