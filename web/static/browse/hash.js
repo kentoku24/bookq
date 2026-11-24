@@ -445,7 +445,7 @@
         }
         return;
       }
-      fetch('/api/v1/guest/redeem', {
+      fetch(globalThis.BookqApi.endpoints.guestRedeem, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({token: gtoken}),
