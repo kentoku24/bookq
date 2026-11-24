@@ -29,6 +29,7 @@ use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Sha256, Sha384, Sha512};
 
+use crate::guest::GuestStore;
 use crate::users::UserDirectory;
 
 /// BOOKQ_TEST_MODE mock user (`app/auth.py:61`).
@@ -42,6 +43,10 @@ pub struct Identity {
 pub enum Caller {
     /// Serve natively under this identity.
     User(Identity),
+    /// Guest-link identity (`bookq_guest` cookie) — resolves to the pair
+    /// leader's email but is read-only: `guest_write_guard` rejects its
+    /// writes and `/admin` before handlers run.
+    Guest(Identity),
     /// Not positively identified — proxy so upstream applies its own
     /// cookie → Bearer → 401 chain.
     Delegate,
@@ -166,9 +171,20 @@ pub fn validate_bearer(
     })
 }
 
+/// The `bookq_guest` cookie's owner email when the grant is valid —
+/// `None` for absent/invalid/expired tokens. Membership is NOT checked
+/// here; callers apply `directory.is_member` like every other path.
+pub(crate) fn guest_email(headers: &HeaderMap, store: &GuestStore) -> Option<String> {
+    let token = cookie_value(headers, "bookq_guest")?;
+    let grant = store.resolve(&token)?;
+    let email = grant.owner_email.trim().to_lowercase();
+    (!email.is_empty()).then_some(email)
+}
+
 /// Resolve the caller for a native handler. `test_mode` returns the mock
 /// user; a verifiable `session` cookie identifies the caller natively
-/// (Python prefers it over Bearer); `Bearer` validates locally; anything
+/// (Python prefers it over Bearer); `Bearer` validates locally; a valid
+/// `bookq_guest` grant identifies the caller as `Caller::Guest`; anything
 /// else delegates upstream. `session_key` is `None` when SECRET_KEY is
 /// empty — the single fail-closed guard shared with the WS handshake.
 pub fn resolve(
@@ -177,6 +193,7 @@ pub fn resolve(
     secret: &str,
     session_key: Option<&SessionKey>,
     directory: &UserDirectory,
+    guest: &GuestStore,
 ) -> Caller {
     if test_mode {
         return Caller::User(Identity {
@@ -209,7 +226,14 @@ pub fn resolve(
     }
     match bearer_token(headers).and_then(|t| validate_bearer(t, secret, directory)) {
         Some(id) => Caller::User(id),
-        None => Caller::Delegate,
+        None => match guest_email(headers, guest) {
+            // Same membership re-evaluation as session/Bearer — a removed
+            // owner invalidates every outstanding guest grant.
+            Some(email) if directory.is_member(&email) => {
+                Caller::Guest(Identity { email })
+            }
+            _ => Caller::Delegate,
+        },
     }
 }
 
@@ -439,6 +463,7 @@ pub fn resolve_ws_user(
     secret: &str,
     session_key: Option<&SessionKey>,
     directory: &UserDirectory,
+    guest: &GuestStore,
 ) -> Option<Value> {
     if test_mode {
         let mut u = serde_json::Map::new();
@@ -464,22 +489,38 @@ pub fn resolve_ws_user(
         SessionLookup::Corrupt => return None,
         SessionLookup::Absent | SessionLookup::NoUser => {}
     }
-    let claims = bearer_claims(bearer_token(headers)?, secret, directory)?;
-    let email = claims.get("sub")?.as_str()?.to_lowercase();
-    let mut u = serde_json::Map::new();
-    u.insert("email".into(), Value::String(email.clone()));
-    let name = claims.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    u.insert(
-        "name".into(),
-        Value::String(if name.is_empty() {
-            email.clone()
-        } else {
-            name.to_string()
-        }),
-    );
-    let picture = claims.get("picture").and_then(|v| v.as_str()).unwrap_or("");
-    u.insert("picture".into(), Value::String(picture.to_string()));
-    Some(Value::Object(u))
+    if let Some(claims) = bearer_token(headers)
+        .and_then(|t| bearer_claims(t, secret, directory))
+    {
+        let email = claims.get("sub")?.as_str()?.to_lowercase();
+        let mut u = serde_json::Map::new();
+        u.insert("email".into(), Value::String(email.clone()));
+        let name = claims.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        u.insert(
+            "name".into(),
+            Value::String(if name.is_empty() {
+                email.clone()
+            } else {
+                name.to_string()
+            }),
+        );
+        let picture = claims.get("picture").and_then(|v| v.as_str()).unwrap_or("");
+        u.insert("picture".into(), Value::String(picture.to_string()));
+        return Some(Value::Object(u));
+    }
+    // Guest-link fallback — the grant's owner email becomes the identity
+    // (membership re-checked like every other path); the display name is
+    // fixed so the leader sees "ゲスト" in presence/JOIN_REQUEST.
+    if let Some(email) = guest_email(headers, guest) {
+        if directory.is_member(&email) {
+            let mut u = serde_json::Map::new();
+            u.insert("email".into(), Value::String(email));
+            u.insert("name".into(), Value::String("ゲスト".into()));
+            u.insert("picture".into(), Value::String("".into()));
+            return Some(Value::Object(u));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -695,9 +736,10 @@ mod tests {
     fn session_cookie_identifies_caller() {
         let cookie = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
         let h = headers_with(Some(&format!("session={cookie}")), None);
-        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()) {
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, "a@example.com"), // lowercased
             Caller::Delegate => panic!("valid session delegated"),
+            Caller::Guest(_) => panic!("session resolved as guest"),
         }
     }
 
@@ -709,9 +751,10 @@ mod tests {
         let cookie = sign_session(SECRET, payload, now_ts());
         assert!(cookie.split('.').next().unwrap().contains('+'));
         let h = headers_with(Some(&format!("session={cookie}")), None);
-        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()) {
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, "a@example.com"),
             Caller::Delegate => panic!("standard-b64 session delegated"),
+            Caller::Guest(_) => panic!("session resolved as guest"),
         }
     }
 
@@ -725,9 +768,10 @@ mod tests {
             Some(&format!("session={cookie}")),
             Some(&format!("Bearer {}", bearer_for("b@example.com", 3600))),
         );
-        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &list) {
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &list, &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, "a@example.com"),
             Caller::Delegate => panic!("valid session delegated"),
+            Caller::Guest(_) => panic!("session resolved as guest"),
         }
     }
 
@@ -742,7 +786,7 @@ mod tests {
         // → Delegate.
         let h = headers_with(Some(&format!("session={good}; session={forged}")), None);
         assert!(matches!(
-            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()),
             Caller::Delegate
         ));
         // Forged first, across separate Cookie headers: the valid one wins.
@@ -755,9 +799,10 @@ mod tests {
             header::COOKIE,
             header::HeaderValue::from_str(&format!("session={good}")).unwrap(),
         );
-        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()) {
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, "a@example.com"),
             Caller::Delegate => panic!("last valid session lost"),
+            Caller::Guest(_) => panic!("session resolved as guest"),
         }
     }
 
@@ -778,7 +823,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &list),
+                    resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &list, &GuestStore::new()),
                     Caller::Delegate
                 ),
                 "payload {payload:?} fell through to bearer"
@@ -796,7 +841,7 @@ mod tests {
             Some(&format!("Bearer {}", bearer_for("a@example.com", 3600))),
         );
         assert!(matches!(
-            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()),
             Caller::Delegate
         ));
     }
@@ -812,9 +857,10 @@ mod tests {
             Some(&format!("session={cookie}")),
             Some(&format!("Bearer {bearer}")),
         );
-        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &list) {
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &list, &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, "b@example.com"),
             Caller::Delegate => panic!("bearer after bad session delegated"),
+            Caller::Guest(_) => panic!("bearer resolved as guest"),
         }
     }
 
@@ -828,7 +874,7 @@ mod tests {
         // No Bearer → the request is simply unauthenticated.
         let h = headers_with(Some(&format!("session={cookie}")), None);
         assert!(matches!(
-            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()),
             Caller::Delegate
         ));
         // A valid Bearer still wins — the disallowed session yields no
@@ -837,9 +883,10 @@ mod tests {
             Some(&format!("session={cookie}")),
             Some(&format!("Bearer {}", bearer_for("a@example.com", 3600))),
         );
-        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()) {
+        match resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, "a@example.com"),
             Caller::Delegate => panic!("bearer after disallowed session delegated"),
+            Caller::Guest(_) => panic!("bearer resolved as guest"),
         }
     }
 
@@ -851,14 +898,14 @@ mod tests {
         let cookie = sign_session(SECRET, REMOVED_JSON.as_bytes(), now_ts());
         let h = headers_with(Some(&format!("session={cookie}")), None);
         assert!(
-            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist())
+            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new())
                 .is_none()
         );
         // An allowlisted session still resolves.
         let good = sign_session(SECRET, USER_JSON.as_bytes(), now_ts());
         let h = headers_with(Some(&format!("session={good}")), None);
         assert!(
-            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist())
+            resolve_ws_user(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new())
                 .is_some()
         );
     }
@@ -879,14 +926,14 @@ mod tests {
         let cookie = sign_session(SECRET, b"{\"other\":1}", now_ts());
         let h = headers_with(Some(&format!("session={cookie}")), None);
         assert!(matches!(
-            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()),
             Caller::Delegate
         ));
         // Signed but older than SESSION_MAX_AGE.
         let old = sign_session(SECRET, USER_JSON.as_bytes(), now_ts() - (86400 * 8) as u64);
         let h = headers_with(Some(&format!("session={old}")), None);
         assert!(matches!(
-            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist()),
+            resolve(&h, false, SECRET, session_key(SECRET).as_ref(), &allowlist(), &GuestStore::new()),
             Caller::Delegate
         ));
     }
@@ -894,9 +941,10 @@ mod tests {
     #[test]
     fn resolve_test_mode_returns_mock() {
         let h = headers_with(None, None);
-        match resolve(&h, true, "", None, &allowlist()) {
+        match resolve(&h, true, "", None, &allowlist(), &GuestStore::new()) {
             Caller::User(u) => assert_eq!(u.email, TEST_USER_EMAIL),
             Caller::Delegate => panic!("test mode delegated"),
+            Caller::Guest(_) => panic!("test mode resolved as guest"),
         }
     }
 }

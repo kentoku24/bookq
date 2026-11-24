@@ -40,13 +40,15 @@ pub(crate) enum ShellUser {
 }
 
 /// Order mirrors `user_from_connection`: TEST_MODE mock → session `user` →
-/// Bearer. A signed non-dict/undecodable session is corrupt (500).
+/// Bearer → `bookq_guest` grant. A signed non-dict/undecodable session is
+/// corrupt (500).
 pub(crate) fn index_caller(
     test_mode: bool,
     secret: &str,
     session_key: Option<&auth::SessionKey>,
     directory: &UserDirectory,
     headers: &HeaderMap,
+    guest: &crate::guest::GuestStore,
 ) -> ShellUser {
     if test_mode {
         return ShellUser::Viewer {
@@ -80,7 +82,12 @@ pub(crate) fn index_caller(
                 user_key: (!key.is_empty()).then_some(key),
             }
         }
-        None => ShellUser::Login,
+        None => match auth::guest_email(headers, guest) {
+            Some(email) if directory.is_member(&email) => ShellUser::Viewer {
+                user_key: Some(email),
+            },
+            _ => ShellUser::Login,
+        },
     }
 }
 

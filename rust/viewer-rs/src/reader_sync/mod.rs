@@ -24,6 +24,7 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, watch, Mutex, Notify};
 
 use crate::folders::IndexState;
+use crate::guest::{GrantStatus, GuestStore, GUEST_TTL_SECONDS};
 
 // ── wire constants (parent #75 §3.5 initial values) ───────────────────────
 
@@ -113,7 +114,7 @@ fn new_id() -> String {
     rand_bytes(8).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand_bytes(24))
 }
@@ -418,6 +419,10 @@ impl PairSession {
 pub struct Registry {
     pub inner: Mutex<Inner>,
     pub wake: Arc<Notify>,
+    /// Guest-access grants (QR-link bearer tokens). Same clone sits in
+    /// `Inner` for session-lifecycle hooks; this field is the synchronous
+    /// accessor auth/redeem paths use.
+    guest: GuestStore,
     pub index: Arc<IndexState>,
     pub library: PathBuf,
     pub manifest_cache: Mutex<catalog::ManifestCache>,
@@ -440,6 +445,7 @@ pub struct Inner {
     sessions: Vec<PairSession>, // insertion-ordered — presence/member order is wire-visible
     links: HashMap<String, Link>,
     by_code: HashMap<String, String>, // code -> session id
+    guest: GuestStore,
     bulk_max: usize,
     no_response_timeout: Duration,
     resume_window: Duration,
@@ -449,17 +455,20 @@ pub struct Inner {
 impl Registry {
     pub fn new(index: Arc<IndexState>, library: PathBuf) -> Arc<Self> {
         let wake = Arc::new(Notify::new());
+        let guest = GuestStore::new();
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 sessions: Vec::new(),
                 links: HashMap::new(),
                 by_code: HashMap::new(),
+                guest: guest.clone(),
                 bulk_max: SEND_BULK_MAX_BYTES,
                 no_response_timeout: Duration::from_secs_f64(NO_RESPONSE_TIMEOUT),
                 resume_window: Duration::from_secs_f64(RESUME_WINDOW_SECONDS),
                 wake: wake.clone(),
             }),
             wake,
+            guest,
             index,
             library,
             manifest_cache: Mutex::new(catalog::ManifestCache::new()),
@@ -475,6 +484,12 @@ impl Registry {
 
     pub fn send_queue_max(&self) -> usize {
         self.send_queue_max
+    }
+
+    /// Synchronous guest-grant lookup for the auth/redeem paths — the
+    /// store's own mutex means no `inner` lock is needed.
+    pub fn guest(&self) -> &GuestStore {
+        &self.guest
     }
     #[cfg(test)]
     pub fn set_test_resolver(&self, f: TestResolver) {
@@ -1029,6 +1044,14 @@ impl Inner {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let owner_email = self
+            .links
+            .get(link_id)
+            .and_then(|l| l.user.as_ref())
+            .and_then(|u| u.get("email"))
+            .and_then(|v| v.as_str())
+            .map(|e| e.trim().to_lowercase())
+            .filter(|e| !e.is_empty());
         let member = Member::new("leader", name, &sid, link_id, "active");
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
@@ -1038,19 +1061,24 @@ impl Inner {
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
         }
-        self.ack(
-            link_id,
-            req,
-            Some(protocol::frame(&[
-                ("sessionId", Value::String(sid.clone())),
-                ("code", Value::String(code)),
-                ("memberId", Value::String(mid.clone())),
-                ("role", Value::String("leader".into())),
-                ("resumeToken", Value::String(resume_token)),
-                ("expiresInSec", Value::from(reg.code_ttl.as_secs() as i64)),
-            ])),
-            Some(&sid),
-        );
+        // Guest-access grant for the QR link — bound to this session so
+        // `end_session` revokes it no matter which teardown path fires.
+        let guest_token = owner_email.map(|email| {
+            self.guest
+                .issue(&email, &sid, Duration::from_secs(GUEST_TTL_SECONDS))
+        });
+        let mut data = vec![
+            ("sessionId", Value::String(sid.clone())),
+            ("code", Value::String(code)),
+            ("memberId", Value::String(mid.clone())),
+            ("role", Value::String("leader".into())),
+            ("resumeToken", Value::String(resume_token)),
+            ("expiresInSec", Value::from(reg.code_ttl.as_secs() as i64)),
+        ];
+        if let Some(gt) = guest_token {
+            data.push(("guestToken", Value::String(gt)));
+        }
+        self.ack(link_id, req, Some(protocol::frame(&data)), Some(&sid));
         self.broadcast_state(&sid);
         tracing::info!(
             "reader-sync link={} member={} created session",
@@ -1063,6 +1091,12 @@ impl Inner {
     }
 
     fn join(&mut self, link_id: &str, req: &Map<String, Value>) {
+        if req["payload"]["guestToken"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+        {
+            return self.join_guest(link_id, req);
+        }
         let code = req["payload"]["code"].as_str().unwrap_or("").to_string();
         let Some(sid) = self.by_code.get(&code).cloned() else {
             self.reject(link_id, req_id(req), Some("JOIN"), REASON_BAD_CODE, None);
@@ -1090,6 +1124,53 @@ impl Inner {
             return;
         }
         self.bind_follower(link_id, req, &sid);
+    }
+
+    /// `JOIN{guestToken}` — the QR-link path. The grant names its session
+    /// directly (no `by_code` lookup); the session-side gates mirror the
+    /// code path: session must exist and no join may be live yet
+    /// (`code_consumed` is set by `bind_follower` for both paths).
+    fn join_guest(&mut self, link_id: &str, req: &Map<String, Value>) {
+        let token = req["payload"]["guestToken"].as_str().unwrap_or("");
+        let grant = match self.guest.status(token) {
+            GrantStatus::Valid(g) => g,
+            GrantStatus::Expired => {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("JOIN"),
+                    REASON_CODE_EXPIRED,
+                    None,
+                );
+                return;
+            }
+            GrantStatus::Unknown => {
+                self.reject(link_id, req_id(req), Some("JOIN"), REASON_BAD_CODE, None);
+                return;
+            }
+        };
+        let sid = grant.session_id;
+        match self.session(&sid).map(|s| s.code_consumed) {
+            None => {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("JOIN"),
+                    REASON_NO_SESSION,
+                    Some(&sid),
+                );
+            }
+            Some(true) => {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("JOIN"),
+                    REASON_CODE_CONSUMED,
+                    Some(&sid),
+                );
+            }
+            Some(false) => self.bind_follower(link_id, req, &sid),
+        }
     }
 
     fn bind_follower(&mut self, link_id: &str, req: &Map<String, Value>, sid: &str) {
@@ -2226,6 +2307,9 @@ impl Inner {
         let Some(pos) = self.sessions.iter().position(|s| s.id == sid) else {
             return;
         };
+        // Guest grants die with their session — every teardown path
+        // (LEAVE/REJECT/expiry/end_all/shutdown) funnels through here.
+        self.guest.revoke_session(sid);
         let mut session = self.sessions.remove(pos);
         if self.by_code.get(&session.code).is_some_and(|v| *v == sid) {
             self.by_code.remove(&session.code);

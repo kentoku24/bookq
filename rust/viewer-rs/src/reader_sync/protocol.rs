@@ -232,13 +232,21 @@ fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError
         }
         "JOIN" => {
             // str.isdigit() is Unicode-aware (Arabic-Indic digits etc. pass)
-            // and len() counts chars, not bytes.
-            let ok = p
+            // and len() counts chars, not bytes. The payload is a union:
+            // the 6-digit member code OR the guest-access grant token a
+            // CREATE ACK hands out for `/#/guest/<token>` links.
+            let code_ok = p
                 .get("code")
                 .and_then(|v| v.as_str())
-                .is_some_and(|s| s.chars().count() == 6 && s.chars().all(|c| c.is_numeric()));
-            if !ok {
-                return fail(ERR_MALFORMED, "JOIN.code must be a 6-digit str");
+                .is_some_and(|s| {
+                    s.chars().count() == 6 && s.chars().all(|c| c.is_numeric())
+                });
+            let guest_ok = p
+                .get("guestToken")
+                .and_then(|v| v.as_str())
+                .is_some_and(crate::guest::valid_token_shape);
+            if !code_ok && !guest_ok {
+                return fail(ERR_MALFORMED, "JOIN needs code or guestToken");
             }
         }
         "OPEN_WORK" => {

@@ -116,6 +116,9 @@ fn harvest(b: &mut HashMap<String, Value>, linkname: &str, frame: &Value,
                 if let Some(tok) = data["resumeToken"].as_str() {
                     b.insert(format!("{sender}.token"), tok.into());
                 }
+                if let Some(tok) = data["guestToken"].as_str() {
+                    b.insert(format!("{sender}.guestToken"), tok.into());
+                }
             }
         }
         if let Some(c) = frame["data"]["code"].as_str() {

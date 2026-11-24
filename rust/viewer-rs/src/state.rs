@@ -1665,6 +1665,7 @@ mod tests {
             place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             csp_extra: Vec::new(),
+            guest_redeem_limit: crate::guest::RedeemRateLimit::default(),
         }
     }
 

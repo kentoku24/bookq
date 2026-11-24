@@ -26,6 +26,7 @@ mod admin_ui;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+mod guest;
 // #573: `--healthcheck` — the image has no shell for a compose probe.
 mod healthcheck;
 mod library;
@@ -96,6 +97,8 @@ pub(crate) struct AppState {
     /// appended to `img-src`/`connect-src` on HTML responses — exists for
     /// the `?api_base=` mock-dev flow (#237). Empty in production.
     pub(crate) csp_extra: Vec<String>,
+    /// Per-IP fixed-window limiter for `POST /api/v1/guest/redeem`.
+    pub(crate) guest_redeem_limit: guest::RedeemRateLimit,
 }
 
 /// A local 405 carries the RFC 9110 `Allow` header.
@@ -112,7 +115,9 @@ fn unauthenticated() -> Response {
     state::detail(StatusCode::UNAUTHORIZED, "authentication required")
 }
 
-/// Resolve the caller for a route: `None` means unauthenticated.
+/// Resolve the caller for a route: `None` means unauthenticated. A guest
+/// grant resolves to the leader's identity for reads — writes are stopped
+/// earlier by `guest_write_guard`.
 fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
     match auth::resolve(
         headers,
@@ -120,8 +125,9 @@ fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identi
         &st.secret_key,
         st.session_key.as_ref(),
         &st.directory,
+        st.registry.guest(),
     ) {
-        auth::Caller::User(u) => Some(u),
+        auth::Caller::User(u) | auth::Caller::Guest(u) => Some(u),
         auth::Caller::Delegate => None,
     }
 }
@@ -150,7 +156,7 @@ async fn vary_session_cookie(
     let signed = !matches!(
         auth::session_lookup(req.headers(), st.session_key.as_ref()),
         auth::SessionLookup::Absent
-    );
+    ) || auth::cookie_value(req.headers(), "bookq_guest").is_some();
     // starlette only emits `Vary: Cookie` when the route touches
     // `request.session`. The public static/shell assets never do, so a
     // signed-in browser's static fetches carry no Vary —
@@ -166,6 +172,43 @@ async fn vary_session_cookie(
             .append(header::VARY, HeaderValue::from_static("Cookie"));
     }
     res
+}
+
+/// Read-only enforcement for `bookq_guest` callers. A guest grant resolves
+/// to the pair leader's identity so every read works, but writes and the
+/// whole `/admin` surface answer 403 before the handler runs — pair sync
+/// is WebSocket and unaffected. `/api/v1/guest/redeem` is exempt: it is
+/// how the cookie is minted and refreshed. Resolution goes through
+/// `auth::resolve` itself so session→Bearer→guest precedence (including
+/// the expired-session-cookie edge) can't drift from the handlers'.
+async fn guest_write_guard(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    let safe_method = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let admin_path = path == "/admin" || path.starts_with("/admin/");
+    if (safe_method && !admin_path) || path == "/api/v1/guest/redeem" {
+        return next.run(req).await;
+    }
+    if matches!(
+        auth::resolve(
+            req.headers(),
+            st.test_mode,
+            &st.secret_key,
+            st.session_key.as_ref(),
+            &st.directory,
+            st.registry.guest(),
+        ),
+        auth::Caller::Guest(_)
+    ) {
+        return state::detail(StatusCode::FORBIDDEN, "guest access is read-only");
+    }
+    next.run(req).await
 }
 
 /// CSP for the HTML surfaces (`/`, `/static/*.html`). `unsafe-inline` is
@@ -815,11 +858,24 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
         st.session_key.as_ref(),
         &st.directory,
         &headers,
+        st.registry.guest(),
     );
     // #608: the admin menu entry is cosmetic, but derive it from the same
     // strict identity path the `/admin` gate uses (active membership
-    // re-checked), not from the shell's viewer branch.
-    let admin_email = caller(&st, &headers).map(|u| u.email);
+    // re-checked), not from the shell's viewer branch. Guests resolve to
+    // the leader's identity for reads — the menu must not leak to them
+    // (`/admin` itself is already 403 via guest_write_guard).
+    let admin_email = match auth::resolve(
+        &headers,
+        st.test_mode,
+        &st.secret_key,
+        st.session_key.as_ref(),
+        &st.directory,
+        st.registry.guest(),
+    ) {
+        auth::Caller::User(u) => Some(u.email),
+        _ => None,
+    };
     // '/' is outside the gzip prefixes.
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || {
@@ -1327,7 +1383,16 @@ async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response
     if matches!(lookup, auth::SessionLookup::Corrupt) {
         return corrupt_session_response();
     }
-    oauth::logout(&flow, &lookup)
+    let mut res = oauth::logout(&flow, &lookup);
+    // Also drop any guest grant cookie — logout is the explicit
+    // "I'm done here" gesture and shouldn't leave a live bearer behind.
+    res.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "bookq_guest=; path=/; Max-Age=0; httponly; samesite=lax; secure",
+        ),
+    );
+    res
 }
 
 async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1358,6 +1423,97 @@ async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response 
     serve::maybe_gzip(&headers, res, true).await
 }
 
+/// `POST /api/v1/guest/redeem` — exchange a pair-session guest token for
+/// the `bookq_guest` cookie. Already-authenticated callers (session or
+/// Bearer → `Caller::User`) get `{"ok":true}` without a cookie so a logged-in
+/// user scanning the QR keeps their own identity; guest-cookie holders
+/// re-redeeming get last-wins refresh.
+async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    // Same cross-site gate as the OAuth initiation endpoints — a foreign
+    // page must not mint a guest cookie into this browser.
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    ) {
+        return corrupt_session_response();
+    }
+    if !st.guest_redeem_limit.check(&oauth::client_ip(req.headers())) {
+        return state::detail(StatusCode::TOO_MANY_REQUESTS, "too many requests");
+    }
+    let headers = req.headers().clone();
+    let (_parts, body) = req.into_parts();
+    let body = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return state::detail(StatusCode::BAD_REQUEST, "invalid body");
+        }
+    };
+    if matches!(
+        auth::resolve(
+            &headers,
+            st.test_mode,
+            &st.secret_key,
+            st.session_key.as_ref(),
+            &st.directory,
+            st.registry.guest(),
+        ),
+        auth::Caller::User(_)
+    ) {
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("{\"ok\":true}"))
+            .unwrap();
+        res.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        return serve::maybe_gzip(&headers, res, true).await;
+    }
+    let token = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("token")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        });
+    let Some(token) = token.filter(|t| guest::valid_token_shape(t)) else {
+        return state::detail(StatusCode::BAD_REQUEST, "invalid token");
+    };
+    match st.registry.guest().status(&token) {
+        guest::GrantStatus::Valid(grant) => {
+            let max_age = grant.remaining_secs();
+            let mut res = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(format!(
+                    "{{\"ok\":true,\"expiresInSec\":{max_age}}}"
+                )))
+                .unwrap();
+            res.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&format!(
+                "bookq_guest={token}; path=/; Max-Age={max_age}; httponly; samesite=lax; secure"
+            )) {
+                res.headers_mut().append(header::SET_COOKIE, v);
+            }
+            serve::maybe_gzip(&headers, res, true).await
+        }
+        guest::GrantStatus::Expired => {
+            state::detail(StatusCode::UNAUTHORIZED, "guest link expired")
+        }
+        guest::GrantStatus::Unknown => {
+            state::detail(StatusCode::UNAUTHORIZED, "guest link invalid")
+        }
+    }
+}
+
 // ── M8: /ws/reader-sync ────────────────────────────────────────────────────
 
 /// `/ws/reader-sync` — non-upgrade requests fall through to the
@@ -1370,6 +1526,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
         &st.secret_key,
         st.session_key.as_ref(),
         &st.directory,
+        st.registry.guest(),
     ) else {
         return StatusCode::FORBIDDEN.into_response();
     };
@@ -1665,6 +1822,7 @@ async fn main() {
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         csp_extra,
+        guest_redeem_limit: guest::RedeemRateLimit::default(),
     };
     // #608: TEST_MODE trusts every caller as the mock user. An admin role in
     // that posture makes `/admin` reachable by anyone who can hit the URL, so
@@ -1757,6 +1915,7 @@ async fn main() {
         .route("/auth/callback", any(auth_callback))
         .route("/auth/logout", any(auth_logout))
         .route("/api/v1/auth/token", any(auth_token))
+        .route("/api/v1/guest/redeem", any(guest_redeem))
         // TEST_MODE-only dual-reader verification hooks (#405) — always
         // 404 outside test mode, never part of the OpenAPI contract.
         .route("/api/v1/pair-report", any(pair_report::handle_report))
@@ -1786,6 +1945,12 @@ async fn main() {
             tracing::warn!(path = %req.uri().path(), "unknown route: answered 501");
             state::detail(StatusCode::NOT_IMPLEMENTED, "not found")
         }))
+        // Innermost: runs after vary_session_cookie so its 403s still get
+        // `Vary: Cookie`, and before every handler.
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            guest_write_guard,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),
             vary_session_cookie,
@@ -2056,6 +2221,7 @@ mod handler_tests {
             place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             csp_extra: Vec::new(),
+            guest_redeem_limit: guest::RedeemRateLimit::default(),
         }
     }
 
