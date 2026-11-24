@@ -431,6 +431,70 @@ def test_upload_session_unknown_id(lib_server):
     assert r.status_code == 404
 
 
+@pytest.fixture(scope="module")
+def lib_server_two_users(lib_root, tmp_path_factory):
+    """Real-auth backend with two enrolled members — upload sessions are
+    owner-bound, so the cross-member probes need distinct identities."""
+    from test_reader_ws import ALICE, BOB, _spawn_server
+
+    state = tmp_path_factory.mktemp("lib-edit-two-users-state")
+    for user in (ALICE, BOB):
+        cp = users_cli(state, "add", user["email"])
+        assert cp.returncode == 0, cp.stderr
+    proc, base_url = _spawn_server(lib_root, state)
+    yield base_url
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
+def test_upload_session_owner_bound(lib_server_two_users):
+    """Shannon AUTHZ-VULN-01: the session id is bearer material only to its
+    creator — another member's GET/PUT/DELETE/finalize all answer 404."""
+    from test_reader_ws import ALICE, BOB, _session_cookie
+
+    base = lib_server_two_users
+    alice = {"Cookie": f"session={_session_cookie(ALICE)}"}
+    bob = {"Cookie": f"session={_session_cookie(BOB)}"}
+
+    r = httpx.post(
+        f"{base}/api/v1/library/uploads",
+        json={"dir": "series", "name": "idor.rar", "size": 4},
+        headers=alice,
+        timeout=10,
+    )
+    assert r.status_code == 201, r.text
+    uid = r.json()["upload_id"]
+    try:
+        # Owner still works.
+        assert httpx.get(
+            f"{base}/api/v1/library/uploads/{uid}", headers=alice
+        ).status_code == 200
+
+        # Every other member op is a plain 404 — no existence oracle.
+        assert httpx.get(
+            f"{base}/api/v1/library/uploads/{uid}", headers=bob
+        ).status_code == 404
+        r = httpx.put(
+            f"{base}/api/v1/library/uploads/{uid}",
+            content=b"data",
+            headers={**bob, "Upload-Offset": "0"},
+        )
+        assert r.status_code == 404
+        assert httpx.delete(
+            f"{base}/api/v1/library/uploads/{uid}", headers=bob
+        ).status_code == 404
+        assert httpx.post(
+            f"{base}/api/v1/library/uploads/{uid}/finalize", headers=bob
+        ).status_code == 404
+
+        # And the session is still alive for its owner afterwards.
+        assert httpx.get(
+            f"{base}/api/v1/library/uploads/{uid}", headers=alice
+        ).status_code == 200
+    finally:
+        httpx.delete(f"{base}/api/v1/library/uploads/{uid}", headers=alice)
+
+
 # ── cross-cutting: staging hidden, index refresh, readability, auth ─────────
 
 

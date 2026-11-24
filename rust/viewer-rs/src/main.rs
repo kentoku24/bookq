@@ -1173,9 +1173,9 @@ async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Respon
 const LIBRARY_INIT_BODY_MAX: usize = 64 * 1024;
 
 async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     if *req.method() != axum::http::Method::POST {
         return method_not_allowed("POST");
     }
@@ -1187,7 +1187,7 @@ async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Resp
             return state::detail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
         }
     };
-    library::uploads_init(&st, &body).await
+    library::uploads_init(&st, &body, &user.email).await
 }
 
 /// `/api/v1/library/uploads/{id}` — GET state / PUT chunk / DELETE cancel.
@@ -1196,17 +1196,17 @@ async fn library_upload(
     AxumPath(id): AxumPath<String>,
     req: Request<Body>,
 ) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     match *req.method() {
-        axum::http::Method::GET => library::upload_get(&st, &id).await,
+        axum::http::Method::GET => library::upload_get(&st, &id, &user.email).await,
         axum::http::Method::PUT => {
             let headers = req.headers().clone();
             let (_parts, body) = req.into_parts();
-            library::upload_append(&st, &id, &headers, body).await
+            library::upload_append(&st, &id, &user.email, &headers, body).await
         }
-        axum::http::Method::DELETE => library::upload_cancel(&st, &id).await,
+        axum::http::Method::DELETE => library::upload_cancel(&st, &id, &user.email).await,
         _ => method_not_allowed("GET, PUT, DELETE"),
     }
 }
@@ -1217,13 +1217,13 @@ async fn library_upload_finalize(
     AxumPath(id): AxumPath<String>,
     req: Request<Body>,
 ) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     if *req.method() != axum::http::Method::POST {
         return method_not_allowed("POST");
     }
-    library::upload_finalize(&st, &id).await
+    library::upload_finalize(&st, &id, &user.email).await
 }
 
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
