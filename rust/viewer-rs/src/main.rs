@@ -8,7 +8,7 @@
 use axum::{
     body::Body,
     extract::{FromRequest, FromRequestParts, Path as AxumPath, Query, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
     Router,
@@ -209,6 +209,35 @@ async fn guest_write_guard(
         return state::detail(StatusCode::FORBIDDEN, "guest access is read-only");
     }
     next.run(req).await
+}
+
+/// `x-bookq-guest: 1` on every response a `bookq_guest` caller receives —
+/// the Service Worker refuses Cache API stores for marked responses, so
+/// a revoked grant can't be re-served out of the device's own caches.
+async fn guest_response_marker(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let is_guest = matches!(
+        auth::resolve(
+            req.headers(),
+            st.test_mode,
+            &st.secret_key,
+            st.session_key.as_ref(),
+            &st.directory,
+            st.registry.guest(),
+        ),
+        auth::Caller::Guest(_)
+    );
+    let mut res = next.run(req).await;
+    if is_guest {
+        res.headers_mut().insert(
+            HeaderName::from_static("x-bookq-guest"),
+            HeaderValue::from_static("1"),
+        );
+    }
+    res
 }
 
 /// CSP for the HTML surfaces (`/`, `/static/*.html`). `unsafe-inline` is
@@ -1447,12 +1476,11 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
         return state::detail(StatusCode::TOO_MANY_REQUESTS, "too many requests");
     }
     let headers = req.headers().clone();
-    let (_parts, body) = req.into_parts();
-    let body = match http_body_util::BodyExt::collect(body).await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => {
-            return state::detail(StatusCode::BAD_REQUEST, "invalid body");
-        }
+    // `Bytes::from_request` honors the route-layer DefaultBodyLimit — an
+    // unauthenticated endpoint must not slurp an unbounded body.
+    let body = match axum::body::Bytes::from_request(req, &st).await {
+        Ok(b) => b,
+        Err(rej) => return rej.into_response(),
     };
     if matches!(
         auth::resolve(
@@ -1487,6 +1515,12 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
     };
     match st.registry.guest().status(&token) {
         guest::GrantStatus::Valid(grant) => {
+            // Same membership re-check the auth paths run — a grant whose
+            // owner was since disabled must not mint a cookie (the shell
+            // would reject it anyway and login.js would loop redeeming).
+            if !st.directory.is_member(&grant.owner_email) {
+                return state::detail(StatusCode::UNAUTHORIZED, "guest link invalid");
+            }
             let max_age = grant.remaining_secs();
             let mut res = Response::builder()
                 .status(StatusCode::OK)
@@ -1928,7 +1962,13 @@ async fn main() {
         .route("/auth/callback", any(auth_callback))
         .route("/auth/logout", any(auth_logout))
         .route("/api/v1/auth/token", any(auth_token))
-        .route("/api/v1/guest/redeem", any(guest_redeem))
+        // Unauthenticated endpoint: cap the body well under the 2MiB
+        // default so redeem can't be a memory sink.
+        .merge(
+            Router::new()
+                .route("/api/v1/guest/redeem", any(guest_redeem))
+                .route_layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
         // TEST_MODE-only dual-reader verification hooks (#405) — always
         // 404 outside test mode, never part of the OpenAPI contract.
         .route("/api/v1/pair-report", any(pair_report::handle_report))
@@ -1963,6 +2003,12 @@ async fn main() {
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),
             guest_write_guard,
+        ))
+        // Marks guest responses for the SW cache policy — must wrap every
+        // route, so it sits between the guard and vary layers.
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            guest_response_marker,
         ))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),

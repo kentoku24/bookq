@@ -32,8 +32,10 @@ pub(crate) enum ShellUser {
     Login,
     /// Truthy user. `user_key` is `user_key_for_email(user.get("email"))`:
     /// `strip().lower()` of a string email, else `None` — the viewer shell
-    /// still renders, with `null` embedded globals.
-    Viewer { user_key: Option<String> },
+    /// still renders, with `null` embedded globals. `guest` marks a
+    /// `bookq_guest` grant: its `user_key` is namespaced `guest:<email>`
+    /// so guest positions never land in the owner's browser store.
+    Viewer { user_key: Option<String>, guest: bool },
     /// A signed session whose payload is not a dict — Python's middleware
     /// raises on `json.loads`, producing a 500. Answered locally (#532).
     Corrupt,
@@ -53,6 +55,7 @@ pub(crate) fn index_caller(
     if test_mode {
         return ShellUser::Viewer {
             user_key: Some(auth::TEST_USER_EMAIL.to_string()),
+            guest: false,
         };
     }
     match auth::session_lookup(headers, session_key) {
@@ -69,6 +72,7 @@ pub(crate) fn index_caller(
                 if directory.is_member(&key) {
                     return ShellUser::Viewer {
                         user_key: Some(key),
+                        guest: false,
                     };
                 }
             }
@@ -80,11 +84,13 @@ pub(crate) fn index_caller(
             let key = id.email.trim().to_lowercase();
             ShellUser::Viewer {
                 user_key: (!key.is_empty()).then_some(key),
+                guest: false,
             }
         }
         None => match auth::guest_email(headers, guest) {
             Some(email) if directory.is_member(&email) => ShellUser::Viewer {
-                user_key: Some(email),
+                user_key: Some(format!("guest:{email}")),
+                guest: true,
             },
             _ => ShellUser::Login,
         },
@@ -138,6 +144,9 @@ pub(crate) struct IndexCtx<'a> {
     /// #608: show the admin menu entry. Server-side only — the link is a
     /// convenience, `/admin` is the authorization boundary.
     pub is_admin: bool,
+    /// `bookq_guest` caller — the shell hides member-only affordances
+    /// (auto-match) and namespaces guest positions away from the owner.
+    pub is_guest: bool,
     /// `(thumbnail_probe_js, thumbnail_perf_html)` when `?thumb_perf=1`.
     pub perf: Option<(&'a str, &'a str)>,
 }
@@ -152,6 +161,7 @@ const SNAP_EXPR: &str = "{{ visibility_snapshot | tojson }}";
 const PUKEY_EXPR: &str = "{{ progress_user_key | tojson }}";
 const ADMIN_IF: &str = "{% if is_admin %}";
 const ADMIN_EXPR: &str = "{{ is_admin }}";
+const GUEST_EXPR: &str = "{{ is_guest }}";
 const PERF_IF: &str = "{% if thumbnail_perf %}";
 const PROBE_EXPR: &str = "{{ thumbnail_probe | safe }}";
 const INCLUDE_EXPR: &str = "{% include \"thumbnail_perf.html\" %}";
@@ -182,7 +192,8 @@ pub(crate) fn render_index(src: &str, ctx: &IndexCtx) -> Option<String> {
         .replace(PUKEY_EXPR, &jinja_tojson(&opt_json(&ctx.user_key)))
         // #633: JS-visible admin flag — cosmetic only (hides the delete
         // badge); the DELETE route re-checks the role per request.
-        .replace(ADMIN_EXPR, if ctx.is_admin { "\"true\"" } else { "\"false\"" });
+        .replace(ADMIN_EXPR, if ctx.is_admin { "\"true\"" } else { "\"false\"" })
+        .replace(GUEST_EXPR, if ctx.is_guest { "\"true\"" } else { "\"false\"" });
     out = render_if_block(&out, ADMIN_IF, ctx.is_admin)?;
 
     // {% if thumbnail_perf %}…{% endif %} — flat blocks; inner substitutions.
@@ -388,9 +399,9 @@ pub(crate) fn index(
     thumb_perf: bool,
     head: bool,
 ) -> Response {
-    let (viewer, user_key) = match user {
-        ShellUser::Login => (false, None),
-        ShellUser::Viewer { user_key } => (true, user_key.clone()),
+    let (viewer, user_key, is_guest) = match user {
+        ShellUser::Login => (false, None, false),
+        ShellUser::Viewer { user_key, guest } => (true, user_key.clone(), *guest),
         ShellUser::Corrupt => {
             return state::detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -465,6 +476,7 @@ pub(crate) fn index(
         test_mode,
         ua_android,
         is_admin,
+        is_guest,
         perf: probe.as_deref().zip(perf_tpl.as_deref()),
     };
     let login = !viewer;
@@ -1027,6 +1039,7 @@ mod tests {
             test_mode: false,
             ua_android: false,
             is_admin: false,
+            is_guest: false,
             perf: None,
         }
     }

@@ -234,7 +234,9 @@ fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError
             // str.isdigit() is Unicode-aware (Arabic-Indic digits etc. pass)
             // and len() counts chars, not bytes. The payload is a union:
             // the 6-digit member code OR the guest-access grant token a
-            // CREATE ACK hands out for `/#/guest/<token>` links.
+            // CREATE ACK hands out for the QR's `?gt=<token>` links —
+            // exactly one of them (both present is ambiguous, neither is
+            // empty).
             let code_ok = p
                 .get("code")
                 .and_then(|v| v.as_str())
@@ -245,8 +247,8 @@ fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError
                 .get("guestToken")
                 .and_then(|v| v.as_str())
                 .is_some_and(crate::guest::valid_token_shape);
-            if !code_ok && !guest_ok {
-                return fail(ERR_MALFORMED, "JOIN needs code or guestToken");
+            if code_ok == guest_ok {
+                return fail(ERR_MALFORMED, "JOIN needs exactly one of code/guestToken");
             }
         }
         "OPEN_WORK" => {
