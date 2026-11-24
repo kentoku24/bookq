@@ -52,10 +52,11 @@ MATCH (別経路): origin='match' のオープン待ち受け。payload.pick の
 bearer になる。
 
 ```
-CREATE ACK{…, guestToken}  →  クライアントが QR `/#/guest/<token>` を表示
+CREATE ACK{…, guestToken}  →  クライアントが QR
+  `/#/join/<code>?gt=<token>` を表示（native・メンバーは code をそのまま解釈）
 未ログイン端末: GET / → login page → POST /api/v1/guest/redeem{token}
   → 200 + Set-Cookie: bookq_guest=<token> → viewer shell
-  → hash `#/guest/<token>` → redeem 再検証 → JOIN{guestToken}
+  → hash `?gt=<token>` → redeem 再検証 → JOIN{guestToken}
 ログイン済み端末: redeem は {"ok":true} のみ（cookie 無し・identity 保持）
 → 同じく JOIN{guestToken} で follower 参加
 ```

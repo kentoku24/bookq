@@ -1548,7 +1548,7 @@
     },
     "/api/v1/guest/redeem": {
       "post": {
-        "description": "dual-reader のペアリング QR (`/#/guest/<token>`) を未ログイン端末が\n開いたときの入口。`token` はペア `CREATE` ACK の `data.guestToken`\n（または QR URL フラグメント）で、妥当なら `bookq_guest` cookie\n（HttpOnly・SameSite=Lax）を発行し、以後のリクエストはリーダーの\nidentity で**読み取り専用**に解決される。grant はペアセッション終了\n（リーダー切断）または発行から 8 時間の TTL で失効する。\n\n既に session / Bearer で認証済みの呼び出しには cookie を発行せず\n`{\"ok\":true}` のみ返す（ログイン済みユーザーが QR を読んでも\n自分の identity を保持する）。guest cookie 保持者の再 redeem は\nlast-wins で cookie を更新する。\n\n`bookq_guest` で解決される identity は read-only: 非\nGET/HEAD/OPTIONS と `/admin*` は 403。`reader-sync-protocol.md`\nの guest 節を参照。\n",
+        "description": "dual-reader のペアリング QR (`/#/join/<code>?gt=<token>`) を\n未ログイン端末が開いたときの入口。`token` はペア `CREATE` ACK の\n`data.guestToken`\n（または QR URL フラグメント）で、妥当なら `bookq_guest` cookie\n（HttpOnly・SameSite=Lax）を発行し、以後のリクエストはリーダーの\nidentity で**読み取り専用**に解決される。grant はペアセッション終了\n（リーダー切断）または発行から 8 時間の TTL で失効する。\n\n既に session / Bearer で認証済みの呼び出しには cookie を発行せず\n`{\"ok\":true}` のみ返す（ログイン済みユーザーが QR を読んでも\n自分の identity を保持する）。guest cookie 保持者の再 redeem は\nlast-wins で cookie を更新する。\n\n`bookq_guest` で解決される identity は read-only: 非\nGET/HEAD/OPTIONS と `/admin*` は 403。`reader-sync-protocol.md`\nの guest 節を参照。\n",
         "operationId": "redeemGuestToken",
         "requestBody": {
           "content": {

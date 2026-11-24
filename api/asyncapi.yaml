@@ -106,8 +106,9 @@ components:
               `{sessionId, code, memberId, role, resumeToken, expiresInSec,
               guestToken?}` — `guestToken` は owner email が解決できる
               ときのみ発行されるゲストアクセストークン
-              （`/#/guest/<token>` QR / `JOIN{guestToken}` / `bookq_guest`
-              cookie の bearer。read-only・セッション連動失効）。
+              （QR の `/#/join/<code>?gt=<token>` リンク /
+              `JOIN{guestToken}` / `bookq_guest` cookie の bearer。
+              read-only・セッション連動失効）。
     Reject:
       payload:
         type: object
@@ -284,9 +285,10 @@ components:
               description: |
                 `code`（6桁数字・member ペアリング）または
                 `guestToken`（ゲストアクセス — CREATE ACK の
-                `data.guestToken`。未ログイン端末の `/#/guest/<token>`
-                QR リンクが解決する bearer で、grant はペアセッション
-                終了または発行から 8 時間で失効）のどちらか一方を必須とする。
+                `data.guestToken`。未ログイン端末が QR の
+                `/#/join/<code>?gt=<token>` リンク経由で解決する
+                bearer で、grant はペアセッション終了または発行から
+                8 時間で失効）のどちらか一方を必須とする。
               properties:
                 code: {type: string, pattern: '^\d{6}$'}
                 guestToken: {type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}

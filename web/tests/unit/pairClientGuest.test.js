@@ -106,19 +106,20 @@ describe('pairClient guest access', () => {
     await p;
     expect(client.state.guestToken).toBe(TOKEN);
     expect(client.state.code).toBe('123456');
-    // a fresh entry cycle clears it (joinGuest resets session state)
-    const t2 = fakeTransport();
-    const c2 = makeClient(t2);
-    const p2 = c2.joinGuest('h'.repeat(32));
-    t2.emit({ v: 1, type: 'HELLO' });
-    const j2 = t2.sent.find((f) => f.type === 'JOIN');
-    t2.emit({
+    // A new entry cycle on the SAME client clears it — _startEntry's
+    // _resetSession must drop the grant so a code-joined member doesn't
+    // keep exposing the old leader's guest token on state.
+    const p2 = client.join('654321');
+    expect(client.state.guestToken).toBeNull();   // cleared synchronously
+    t.emit({ v: 1, type: 'HELLO' });
+    const j2 = t.sent.find((f) => f.type === 'JOIN'
+      && f.payload.code === '654321');
+    t.emit({
       v: 1, type: 'ACK', request: 'JOIN', requestId: j2.requestId,
       data: { sessionId: 's2', memberId: 'm2', role: 'follower' },
     });
     await p2;
-    expect(c2.state.guestToken).toBeNull();
-    c2.destroy();
+    expect(client.state.guestToken).toBeNull();
   });
 
   it('joinGuest supersedes an in-flight entry like join() does', async () => {

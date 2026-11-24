@@ -1180,7 +1180,7 @@
       return _startEntry('JOIN', {code: code}, null);
     }
 
-    /* Guest-access join: the QR's `/#/guest/<token>` deep link resolves
+    /* Guest-access join: the QR's `/#/join/<code>?gt=<token>` deep link resolves
      * to JOIN{guestToken} — same follower binding as join(code), but the
      * grant names the session directly (no 6-digit code, no approval
      * round-trip semantics change: the leader still APPROVEs the pending

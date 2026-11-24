@@ -288,8 +288,9 @@ export interface paths {
         put?: never;
         /**
          * ゲストアクセストークンを bookq_guest cookie に交換
-         * @description dual-reader のペアリング QR (`/#/guest/<token>`) を未ログイン端末が
-         *     開いたときの入口。`token` はペア `CREATE` ACK の `data.guestToken`
+         * @description dual-reader のペアリング QR (`/#/join/<code>?gt=<token>`) を
+         *     未ログイン端末が開いたときの入口。`token` はペア `CREATE` ACK の
+         *     `data.guestToken`
          *     （または QR URL フラグメント）で、妥当なら `bookq_guest` cookie
          *     （HttpOnly・SameSite=Lax）を発行し、以後のリクエストはリーダーの
          *     identity で**読み取り専用**に解決される。grant はペアセッション終了

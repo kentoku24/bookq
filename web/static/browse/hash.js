@@ -412,17 +412,39 @@
   }
 
   function applyUrlState() {
-    // #/guest/<token> — guest-access deep link (unlogged-in QR): consumed
-    // ONCE via replaceState like #/join/. Reaching this shell already
-    // means a bookq_guest cookie (or a full login) exists — the redeem
-    // POST refreshes the grant's Max-Age and re-validates it is still
-    // live, then joinGuest binds the follower pair. A dead link toasts
-    // instead of joining.
-    var gm = (location.hash || '').match(/^#\/guest\/([A-Za-z0-9_-]{16,128})$/);
+    // #/join/<code>?gt=<token> — guest-access deep link (unlogged-in QR):
+    // the plain code rides along so native apps/member scans still parse
+    // it. Consumed ONCE via replaceState like #/join/. Reaching this shell
+    // already means a bookq_guest cookie (or a full login) exists — the
+    // redeem POST refreshes the grant's Max-Age and re-validates it is
+    // still live, then joinGuest binds the follower pair. A dead link
+    // toasts instead of joining.
+    var gm = (location.hash || '').match(/^#\/join\/\d{6}\?gt=([A-Za-z0-9_-]{16,128})$/);
     if (gm) {
       var gtoken = gm[1];
       try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
       try { urlStackReplace(location.pathname + location.search); } catch (e) {}
+      var pc = window.PairController;
+      var pst = (pc && pc.state) || null;
+      // Same guard as #/join — checked BEFORE redeem: swapping the guest
+      // cookie for a different invite must not starve the running pair of
+      // its auth (revoking the new invite's session would kill it).
+      if (pst && pst.status && pst.status !== 'idle' &&
+          pst.status !== 'ended' && pst.status !== 'error') {
+        if (window.PairUI && typeof window.PairUI.open === 'function') {
+          window.PairUI.open();
+        }
+        return;
+      }
+      // Stale-shell skew: an older script set can pass the shell-version
+      // watchdog yet lack joinGuest — redeeming anyway would swap the
+      // cookie and strand the link, so bail with a reload nudge.
+      if (!pc || typeof pc.joinGuest !== 'function') {
+        if (typeof window.showErrorToast === 'function') {
+          window.showErrorToast('ページを再読み込みしてください');
+        }
+        return;
+      }
       fetch('/api/v1/guest/redeem', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -434,26 +456,13 @@
           }
           return;
         }
-        var pc = window.PairController;
-        var pst = (pc && pc.state) || null;
-        // Same guard as #/join: an active session is never torn down by a
-        // link click — surface the panel and let the user leave first.
-        if (pst && pst.status && pst.status !== 'idle' &&
-            pst.status !== 'ended' && pst.status !== 'error') {
+        try {
+          var jr = pc.joinGuest(gtoken);
+          if (jr && typeof jr.catch === 'function') jr.catch(function () {});
           if (window.PairUI && typeof window.PairUI.open === 'function') {
             window.PairUI.open();
           }
-          return;
-        }
-        if (pc && typeof pc.joinGuest === 'function') {
-          try {
-            var jr = pc.joinGuest(gtoken);
-            if (jr && typeof jr.catch === 'function') jr.catch(function () {});
-            if (window.PairUI && typeof window.PairUI.open === 'function') {
-              window.PairUI.open();
-            }
-          } catch (e) {}
-        }
+        } catch (e) {}
       }).catch(function () {
         if (typeof window.showErrorToast === 'function') {
           window.showErrorToast('ゲストリンクが無効か期限切れです');

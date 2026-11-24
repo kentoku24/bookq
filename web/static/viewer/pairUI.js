@@ -388,9 +388,14 @@
     /* The idle choice follows controller capability (#160): a MATCH-aware
      * client offers 「近くの相手とつながる / コードで参加」; a legacy
      * client — or one whose connect() answered {unsupported} — keeps the
-     * classic 開始/参加 pair. */
-    const matchable = !!(ctl && typeof ctl.connect === 'function' &&
+     * classic 開始/参加 pair. A guest caller can never lead — CREATE and
+     * MATCH are rejected `not_leader` on a guest link — so the leader
+     * button is hidden outright, leaving only コードで参加. */
+    const isGuest = window.__BOOKQ_GUEST__ === true;
+    const matchable = !isGuest &&
+                      !!(ctl && typeof ctl.connect === 'function' &&
                          !connectUnsupported);
+    if (els.create) show(els.create, !isGuest);
     els.createLabel.textContent = matchable ? '近くの相手とつながる' : '開始';
     els.createSub.textContent = matchable
       ? '自動でマッチング（なければ待機開始）'
@@ -624,27 +629,16 @@
     ctl.join(v);
   }
 
-  /* A member scanning the guest QR joins via the same grant token —
-   * joinGuest binds them as follower under THEIR OWN identity (the
-   * "ゲスト" name only applies to uncredentialed bookq_guest callers). */
-  function submitGuestJoin(token) {
-    if (!/^[A-Za-z0-9_-]{16,128}$/.test(token) || !ctl || joinPending) return;
-    joinPending = true;
-    lastJoinError = null;
-    joinNoticeShown = false;
-    joinError('');
-    ctl.joinGuest(token);
-  }
-
   // ── QR display (leader) ──
 
   function drawQR(s) {
     if (!els.qr) return;
-    // Guest-access link wins: an unlogged-in device scanning this QR
-    // redeems `/#/guest/<token>` and pairs without an account. The 6-digit
-    // code stays visible next to it for member-to-member pairing.
-    const url = (s && s.guestToken)
-      ? location.origin + '/#/guest/' + s.guestToken
+    // One QR serves both readers: the `?gt=` guest token rides the
+    // `/#/join/<code>` deep link, so an unlogged-in browser redeems the
+    // guest grant while native apps and member scans still extract the
+    // plain 6-digit code (they can't use — and don't need — the grant).
+    const url = (s && s.code && s.guestToken)
+      ? location.origin + '/#/join/' + s.code + '?gt=' + s.guestToken
       : (s && s.code ? location.origin + '/#/join/' + s.code : null);
     if (!url || typeof window.qrcode !== 'function') {
       els.qr.hidden = true;
@@ -723,16 +717,11 @@
         const img = cx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
         const res = window.jsQR(img.data, img.width, img.height);
         if (res) {
-          // accept a bare 6-digit code, the #/join/ deep-link URL, and
-          // the #/guest/ guest-access deep-link (the QR now prefers it)
-          const g = res.data.match(/#\/guest\/([A-Za-z0-9_-]{16,128})/);
+          // accept a bare 6-digit code and the #/join/<code> deep-link
+          // (the QR's `?gt=` guest token is for unlogged-in browsers —
+          // a logged-in member always joins via the code itself)
           const code = /^\d{6}$/.test(res.data) ? res.data
             : (res.data.match(/#\/join\/(\d{6})/) || [])[1];
-          if (g) {
-            stopScan();
-            submitGuestJoin(g[1]);
-            return;
-          }
           if (code) {
             stopScan();
             els.codeInput.value = code;

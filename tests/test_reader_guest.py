@@ -555,12 +555,13 @@ def test_guest_qr_url_pairs_and_turns(browser, guest_server):
             timeout=timeout)
         guest_token = pl.evaluate(
             "() => window.PairController.state.guestToken")
-        assert guest_token
+        code = pl.evaluate("() => window.PairController.state.code")
+        assert guest_token and code
         # guest device: fresh context, NO cookies — opens the QR URL
         ctx_g = browser.new_context(
             viewport={"width": 900, "height": 600}, has_touch=True)
         pg = ctx_g.new_page()
-        pg.goto(f"{guest_server}/#/guest/{guest_token}")
+        pg.goto(f"{guest_server}/#/join/{code}?gt={guest_token}")
         pg.wait_for_selector(".tile", timeout=timeout)
         for p in (pl, pg):
             p.wait_for_function(
@@ -614,10 +615,11 @@ def test_guest_qr_url_revoked_to_login(browser, guest_server):
             timeout=timeout)
         guest_token = pl.evaluate(
             "() => window.PairController.state.guestToken")
+        code = pl.evaluate("() => window.PairController.state.code")
         ctx_g = browser.new_context(
             viewport={"width": 900, "height": 600}, has_touch=True)
         pg = ctx_g.new_page()
-        pg.goto(f"{guest_server}/#/guest/{guest_token}")
+        pg.goto(f"{guest_server}/#/join/{code}?gt={guest_token}")
         pg.wait_for_selector(".tile", timeout=timeout)
         pg.wait_for_function(
             "() => window.PairController.state.status === 'connected'"

@@ -583,7 +583,7 @@
     join: function (code) {
       return _visReady().then(function () { return _ensureClient().join(code); });
     },
-    /* Guest-access join (`/#/guest/<token>` deep link): same follower
+    /* Guest-access join (`/#/join/<code>?gt=<token>` deep link): same follower
      * binding as join(code) but keyed by the grant token instead of the
      * 6-digit code. */
     joinGuest: function (token) {

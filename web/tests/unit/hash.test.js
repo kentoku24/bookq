@@ -268,11 +268,12 @@ describe('applyUrlState (hashchange listener)', () => {
   });
 });
 
-describe('applyUrlState — #/guest/ deep link', () => {
+describe('applyUrlState — #/join/<code>?gt=<token> deep link', () => {
   function fireHash() {
     window.dispatchEvent(new Event('hashchange'));
   }
   const TOKEN = 'g'.repeat(32);
+  const GH = '#/join/123456?gt=' + TOKEN;
   const flush = () => new Promise((r) => setTimeout(r, 0));
 
   beforeEach(() => {
@@ -289,7 +290,7 @@ describe('applyUrlState — #/guest/ deep link', () => {
     const open = vi.fn();
     window.PairController = { state: { status: 'idle' }, joinGuest };
     window.PairUI = { open };
-    setHash('#/guest/' + TOKEN);
+    setHash(GH);
     fireHash();
     expect(location.hash).toBe('');   // consumed once via replaceState
     await flush();
@@ -309,7 +310,7 @@ describe('applyUrlState — #/guest/ deep link', () => {
     const joinGuest = vi.fn(() => Promise.resolve());
     window.PairController = { state: { status: 'idle' }, joinGuest };
     window.PairUI = { open: vi.fn() };
-    setHash('#/guest/' + TOKEN);
+    setHash(GH);
     fireHash();
     await flush();
     expect(joinGuest).not.toHaveBeenCalled();
@@ -322,7 +323,7 @@ describe('applyUrlState — #/guest/ deep link', () => {
     vi.stubGlobal('fetch', fetchMock);
     const joinGuest = vi.fn(() => Promise.resolve());
     window.PairController = { state: { status: 'idle' }, joinGuest };
-    setHash('#/guest/' + TOKEN);
+    setHash(GH);
     fireHash();
     await flush();
     expect(joinGuest).not.toHaveBeenCalled();
@@ -330,7 +331,7 @@ describe('applyUrlState — #/guest/ deep link', () => {
     vi.unstubAllGlobals();
   });
 
-  it('active session is never torn down — panel opens instead', async () => {
+  it('active session is never torn down — panel opens, NO redeem', async () => {
     const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);
     const joinGuest = vi.fn(() => Promise.resolve());
@@ -339,13 +340,26 @@ describe('applyUrlState — #/guest/ deep link', () => {
       state: { status: 'connected' }, joinGuest,
     };
     window.PairUI = { open };
-    setHash('#/guest/' + TOKEN);
+    setHash(GH);
     fireHash();
     await flush();
-    // redeem still ran (refreshes Max-Age) but join was refused
-    expect(fetchMock).toHaveBeenCalled();
+    // The guard runs BEFORE redeem: clicking another invite must not swap
+    // the guest cookie out from under the running pair.
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(joinGuest).not.toHaveBeenCalled();
     expect(open).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('stale shell without joinGuest — no redeem, reload toast', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    window.PairController = { state: { status: 'idle' } };   // no joinGuest
+    setHash(GH);
+    fireHash();
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
@@ -353,7 +367,7 @@ describe('applyUrlState — #/guest/ deep link', () => {
     const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);
     window.PairController = { state: { status: 'idle' }, joinGuest: vi.fn() };
-    setHash('#/guest/short');
+    setHash('#/join/123456?gt=short');
     fireHash();
     await flush();
     expect(fetchMock).not.toHaveBeenCalled();

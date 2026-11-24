@@ -62,7 +62,7 @@
         "payload": {
           "properties": {
             "data": {
-              "description": "リクエスト種別ごとの結果。CREATE は\n`{sessionId, code, memberId, role, resumeToken, expiresInSec,\nguestToken?}` — `guestToken` は owner email が解決できる\nときのみ発行されるゲストアクセストークン\n（`/#/guest/<token>` QR / `JOIN{guestToken}` / `bookq_guest`\ncookie の bearer。read-only・セッション連動失効）。\n",
+              "description": "リクエスト種別ごとの結果。CREATE は\n`{sessionId, code, memberId, role, resumeToken, expiresInSec,\nguestToken?}` — `guestToken` は owner email が解決できる\nときのみ発行されるゲストアクセストークン\n（QR の `/#/join/<code>?gt=<token>` リンク /\n`JOIN{guestToken}` / `bookq_guest` cookie の bearer。\nread-only・セッション連動失効）。\n",
               "type": "object"
             },
             "request": {
@@ -532,7 +532,7 @@
           {
             "properties": {
               "payload": {
-                "description": "`code`（6桁数字・member ペアリング）または\n`guestToken`（ゲストアクセス — CREATE ACK の\n`data.guestToken`。未ログイン端末の `/#/guest/<token>`\nQR リンクが解決する bearer で、grant はペアセッション\n終了または発行から 8 時間で失効）のどちらか一方を必須とする。\n",
+                "description": "`code`（6桁数字・member ペアリング）または\n`guestToken`（ゲストアクセス — CREATE ACK の\n`data.guestToken`。未ログイン端末が QR の\n`/#/join/<code>?gt=<token>` リンク経由で解決する\nbearer で、grant はペアセッション終了または発行から\n8 時間で失効）のどちらか一方を必須とする。\n",
                 "properties": {
                   "code": {
                     "pattern": "^\\d{6}$",
