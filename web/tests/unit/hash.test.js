@@ -276,15 +276,16 @@ describe('applyUrlState — #/join/<code>?gt=<token> deep link', () => {
   const GH = '#/join/123456?gt=' + TOKEN;
   const flush = () => new Promise((r) => setTimeout(r, 0));
 
+  // No stubbing — setup.js loads the generated api/endpoints.js, so these
+  // tests redeem against the REAL BookqApiEndpoints.guestRedeem constant
+  // (a drift between the generator and this URL fails here, not in prod).
   beforeEach(() => {
     window.treeLoaded = true;
     window.showErrorToast = vi.fn();
-    globalThis.BookqApiEndpoints = { guestRedeem: '/api/v1/guest/redeem' };
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    delete globalThis.BookqApiEndpoints;
   });
 
   it('redeems the token then joinGuest + opens the pair panel', async () => {

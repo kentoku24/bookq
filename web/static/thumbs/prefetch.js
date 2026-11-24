@@ -169,6 +169,9 @@
             var _cf = (window.Connectivity && window.Connectivity.fetch) || fetch;
             var r = await _cf(url, { credentials: 'same-origin', signal: signal || undefined });
             if (!r.ok) continue;
+            // Guest-grant content must not outlive the grant in Cache API —
+            // the marker mirrors sw.js's guestMarked() gate.
+            if (r.headers.get('X-Bookq-Guest') === '1') continue;
             var cacheClone = r.clone();
             var sizeClone = r.clone();
             if (!alive()) return;

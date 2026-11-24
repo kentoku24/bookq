@@ -523,6 +523,10 @@
       if (res.status === 304 || !res.ok){ _fillPollBackoff(); return null; }
       var etag = null;
       try { etag = res.headers ? res.headers.get("ETag") : null; } catch(e){}
+      // Guest-grant tree must not persist past revocation — flag it so the
+      // onTree handler can skip the IDB snapshot write.
+      var gm = false;
+      try { gm = res.headers && res.headers.get("X-Bookq-Guest") === "1"; } catch(e){}
       if (typeof res.text === "function"){
         return res.text().then(function(text){
           // The tree JSON can be multi-MB on a real library — parsing it is a
@@ -531,11 +535,11 @@
           // own scroll (measured 180-235ms LoAF frames), so wait for settle.
           return _whenSettled().then(function(){
             var body; try { body = JSON.parse(text); } catch(e){ body = null; }
-            return {body: body, etag: etag, raw: text};
+            return {body: body, etag: etag, raw: text, guestMarked: gm};
           });
         });
       }
-      return res.json().then(function(body){ return {body: body, etag: etag, raw: null}; });
+      return res.json().then(function(body){ return {body: body, etag: etag, raw: null, guestMarked: gm}; });
     }).then(function(out){
       if (!out) return; // 304 / HTTP error already backed off above
       // A loadFolders that ran while this tick waited to settle re-seeded
@@ -553,7 +557,7 @@
         if (typeof gen === "number" && isFinite(gen)) _fillPoll.gen = gen;
         if (out.etag) _fillPoll.etag = out.etag;
         _fillPoll.delay = FILL_POLL_BASE_MS;
-        try { _fillPoll.onTree(globalThis.BookqApi.nodesOf(body), out.raw, {treeEnvelope:true}); } catch(e){ console.warn(e); }
+        try { _fillPoll.onTree(globalThis.BookqApi.nodesOf(body), out.raw, {treeEnvelope:true, guestMarked: !!out.guestMarked}); } catch(e){ console.warn(e); }
         _fillPollSchedule();
         return;
       }
@@ -567,7 +571,7 @@
         if (g !== null) _fillPoll.gen = g;
         if (!hadBaseline){ _fillPoll.delay = FILL_POLL_BASE_MS; _fillPollSchedule(); return; }
         _fillPoll.delay = FILL_POLL_BASE_MS;
-        try { _fillPoll.onTree(body, out.raw); } catch(e){ console.warn(e); }
+        try { _fillPoll.onTree(body, out.raw, {guestMarked: !!out.guestMarked}); } catch(e){ console.warn(e); }
         _fillPollSchedule();
         return;
       }

@@ -522,6 +522,7 @@
         _storage.setItem(STORAGE_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
+          guestToken: _guestToken,
         }));
       } catch (e) { /* storage is best-effort */ }
       _persistWrite();
@@ -563,6 +564,7 @@
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
+          guestToken: _guestToken,
           hb: _now(), tabId: _tabId,
         }));
       } catch (e) { /* best-effort */ }
@@ -600,11 +602,13 @@
       try {
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: d.sessionId, memberId: d.memberId, role: d.role,
-          resumeToken: d.resumeToken, hb: _now(), tabId: _tabId,
+          resumeToken: d.resumeToken, guestToken: d.guestToken || null,
+          hb: _now(), tabId: _tabId,
         }));
       } catch (e) {}
       return {sessionId: d.sessionId, memberId: d.memberId,
-              role: d.role, resumeToken: d.resumeToken};
+              role: d.role, resumeToken: d.resumeToken,
+              guestToken: d.guestToken || null};
     }
 
     /* The persist record names another tab with a fresh heartbeat — that
@@ -1228,6 +1232,9 @@
         _resetSession();
         _member = {sessionId: creds.sessionId, memberId: creds.memberId,
                    role: creds.role || null, resumeToken: creds.resumeToken};
+        // The leader's QR guest token rides with the stored creds — a
+        // RESUME must not degrade the composite `?gt=` QR into code-only.
+        _guestToken = creds.guestToken || null;
         _roleIntent = _member.role;
       }
       if (_offlineSince === null) _offlineSince = _now();

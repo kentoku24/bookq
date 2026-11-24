@@ -148,11 +148,35 @@ async function cacheFirst(req) {
   }
   if (!fresh) return hit;
   if (fresh.status === 304) return hit;
+  // A 401/403 means the grant/session is gone — the cached copy is now
+  // unauthorized content, not a fallback. Evict it (wherever caches.match
+  // found it) and surface the real status so pages don't keep showing a
+  // dead grant's bytes.
+  if (fresh.status === 401 || fresh.status === 403) {
+    await evictEverywhere(req);
+    return fresh;
+  }
   if (fresh.ok && fresh.status !== 206) {
     if (!guestMarked(fresh)) await c.put(req, fresh.clone()).catch(() => {});
     return fresh;
   }
   return hit;
+}
+
+// `caches.match` answers from ANY Cache-API bucket, so a revoke-time evict
+// has to sweep them all (the copy may sit in a per-work cache or the
+// fallback bucket, not necessarily `cacheName`).
+async function evictEverywhere(req) {
+  try {
+    for (const name of await caches.keys()) {
+      try { await (await caches.open(name)).delete(req); } catch { /* next */ }
+    }
+    for (const alt of thumbWidthFallbacks(req.url)) {
+      for (const name of await caches.keys()) {
+        try { await (await caches.open(name)).delete(alt); } catch { /* next */ }
+      }
+    }
+  } catch { /* best-effort */ }
 }
 
 // A cache-fallback response means the network leg itself failed — mark it so

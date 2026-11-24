@@ -374,7 +374,11 @@
           if(!r.ok) throw new Error("fetch "+f+" in "+lp);
           cacheClone=r.clone();
           sizeClone=r.clone();
-          try{ await cache.put(url, cacheClone); putSucceeded=true; } catch(putErr){ throw putErr; }
+          // Guest-grant content must not outlive the grant in Cache API —
+          // the marker mirrors sw.js's guestMarked() gate. The response is
+          // still counted/fine to read; it is only persistence that stops.
+          var guestMarked = r.headers.get('X-Bookq-Guest') === '1';
+          if(!guestMarked) { try{ await cache.put(url, cacheClone); putSucceeded=true; } catch(putErr){ throw putErr; } }
           var len2 = await responseBytes(sizeClone);
           bytes += len2;
           cachedCount++;

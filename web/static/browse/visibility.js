@@ -47,6 +47,10 @@
   var _retrying = false;         // error 再試行の進行フラグ — status は error のまま（loading へ戻すと drain が再入する）
   var _topLevel = new Set();     // root-level node _fullPath set — app.js republishes on every (re)index
   var _refreshFlight = null;
+  // Guest sessions are read-only by grant — the show-all swipe and the
+  // hidden-entry toggles are member affordances (their writes would 403
+  // anyway), so the whole mode stays unreachable for guests.
+  var _guest = (typeof window !== "undefined" && window.__BOOKQ_GUEST__ === "true");
   var _refreshQueued = false;
   var _coalesceTimer = 0;
   var _readyResolve = null;
@@ -482,7 +486,7 @@
 
   // ── mode: memory only, never persisted ──
   function setShowAll(v){
-    v = !!v;
+    v = !!v && !_guest;
     if (_showAll === v) return;
     _showAll = v;
     _updateStatusDom();
@@ -675,7 +679,7 @@
     }
     _bindDelegatedToggle();
     _bindRefreshTriggers();
-    _bindEntryGesture();
+    if (!_guest) _bindEntryGesture();
     refresh();
   }
 

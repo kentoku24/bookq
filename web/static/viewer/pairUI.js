@@ -391,7 +391,7 @@
      * classic 開始/参加 pair. A guest caller can never lead — CREATE and
      * MATCH are rejected `not_leader` on a guest link — so the leader
      * button is hidden outright, leaving only コードで参加. */
-    const isGuest = window.__BOOKQ_GUEST__ === true;
+    const isGuest = window.__BOOKQ_GUEST__ === 'true';
     const matchable = !isGuest &&
                       !!(ctl && typeof ctl.connect === 'function' &&
                          !connectUnsupported);
