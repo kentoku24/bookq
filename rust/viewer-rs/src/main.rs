@@ -1482,6 +1482,19 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
         Ok(b) => b,
         Err(rej) => return rej.into_response(),
     };
+    // Validate the body BEFORE the authed short-circuit — the OpenAPI
+    // contract declares requestBody required, and schema-violating
+    // requests must get 400s no matter who is calling.
+    let token = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| {
+            v.get("token")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        });
+    let Some(token) = token.filter(|t| guest::valid_token_shape(t)) else {
+        return state::detail(StatusCode::BAD_REQUEST, "invalid token");
+    };
     if matches!(
         auth::resolve(
             &headers,
@@ -1503,16 +1516,6 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
         );
         return serve::maybe_gzip(&headers, res, true).await;
     }
-    let token = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| {
-            v.get("token")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-        });
-    let Some(token) = token.filter(|t| guest::valid_token_shape(t)) else {
-        return state::detail(StatusCode::BAD_REQUEST, "invalid token");
-    };
     match st.registry.guest().status(&token) {
         guest::GrantStatus::Valid(grant) => {
             // Same membership re-check the auth paths run — a grant whose
