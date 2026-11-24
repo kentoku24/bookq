@@ -19,7 +19,8 @@ def _iso(dt):
 
 
 def _sample(workflow="ci", job="pytest", *, start, dur_s=600, queue_s=30,
-            conclusion="success", labels=None, run_id=1):
+            conclusion="success", labels=None, run_id=1,
+            run_conclusion=None):
     s = parse_start = start
     created = _iso(s - timedelta(seconds=queue_s))
     started = _iso(s)
@@ -31,6 +32,7 @@ def _sample(workflow="ci", job="pytest", *, start, dur_s=600, queue_s=30,
         "labels": labels or [],
         "is_macos": cm.is_macos(labels or []),
         "conclusion": conclusion,
+        "run_conclusion": run_conclusion,
         "created_at": created,
         "started_at": started,
         "completed_at": completed,
@@ -99,6 +101,35 @@ def test_aggregate_failure_rate_and_macos():
     assert st["failure_rate"] == pytest.approx(0.5)
     assert st["macos"] is True
     assert st["n_conclusion"] == 2
+
+
+def test_aggregate_cancelled_and_skipped_excluded_from_failure_rate():
+    """#651: superseded runs must not inflate failure rates.
+
+    - job `cancelled` (killed mid-flight) → n_cancelled
+    - job `failure` inside a cancelled RUN (an `always()` aggregate that
+      read cancelled needs) → n_cancelled, the same artifact
+    - job `skipped` (path-gated out) → n_skipped, no verdict at all
+    - job `success` inside a cancelled run still counts — it finished
+      before the cancel and is a real verdict
+    """
+    base = NOW - timedelta(days=1)
+    samples = [
+        _sample(start=base, conclusion="success"),
+        _sample(start=base, conclusion="failure"),
+        _sample(start=base, conclusion="cancelled"),
+        _sample(start=base, conclusion="failure",
+                run_conclusion="cancelled"),
+        _sample(start=base, conclusion="skipped"),
+        _sample(start=base, conclusion="success",
+                run_conclusion="cancelled"),
+    ]
+    st = cm.aggregate_jobs(samples)["ci / pytest"]
+    assert st["n_failed"] == 1
+    assert st["n_conclusion"] == 3
+    assert st["n_cancelled"] == 2
+    assert st["n_skipped"] == 1
+    assert st["failure_rate"] == pytest.approx(1 / 3)
 
 
 def test_aggregate_steps_null_excluded():

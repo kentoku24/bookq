@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 SCHEMA = 1
@@ -128,8 +129,12 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
     """Aggregate job samples by `workflow / job` key.
 
     Samples with null started_at/completed_at are excluded from
-    duration/queue stats (never counted as 0). Failure rate counts every
-    sample that carries a conclusion.
+    duration/queue stats (never counted as 0). Failure rate counts only
+    verdict-bearing conclusions: `cancelled`/`skipped` jobs and jobs whose
+    whole run was cancelled are tracked separately (`n_cancelled` /
+    `n_skipped`) — a superseded run is churn, not a test failure, and an
+    `always()` aggregate that "fails" on cancelled needs is the same
+    artifact (#651).
     """
     by_key: dict[str, dict] = {}
     for s in samples:
@@ -142,6 +147,8 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
             "queues": [],
             "n_conclusion": 0,
             "n_failed": 0,
+            "n_cancelled": 0,
+            "n_skipped": 0,
             "run_ids": set(),
         })
         if s.get("is_macos"):
@@ -152,9 +159,17 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
         que = seconds_between(s.get("created_at"), s.get("started_at"))
         if que is not None:
             b["queues"].append(que)
-        if s.get("conclusion"):
+        concl = s.get("conclusion")
+        if concl == "skipped":
+            b["n_skipped"] += 1
+        elif concl == "cancelled" or (
+            concl in ("failure", "timed_out")
+            and s.get("run_conclusion") == "cancelled"
+        ):
+            b["n_cancelled"] += 1
+        elif concl:
             b["n_conclusion"] += 1
-            if s.get("conclusion") in ("failure", "timed_out", "cancelled"):
+            if concl in ("failure", "timed_out"):
                 b["n_failed"] += 1
         if s.get("run_id") is not None:
             b["run_ids"].add(s.get("run_id"))
@@ -175,6 +190,8 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
             "failure_rate": (b["n_failed"] / n_fail_denom) if n_fail_denom else None,
             "n_failed": b["n_failed"],
             "n_conclusion": n_fail_denom,
+            "n_cancelled": b["n_cancelled"],
+            "n_skipped": b["n_skipped"],
             "n_runs": len(b["run_ids"]),
         }
     return out
@@ -380,13 +397,29 @@ def cmd_collect(args) -> int:
     step_samples: list[dict] = []
     heavy_fetched = 0
     heavy_skipped = False
-    for run in runs:
+
+    def fetch_run_jobs(run_id):
+        data, ok = gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
+        if not ok or not isinstance(data, dict):
+            return []
+        return data.get("jobs") or []
+
+    # One jobs-list call per run dominates collect time (~2k runs/14d) —
+    # fetch them concurrently, order preserved, so the page cap can cover
+    # the full window without blowing the job timeout (#651).
+    if args.workers > 1:
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            jobs_per_run = list(
+                pool.map(lambda r: fetch_run_jobs(r.get("id")), runs))
+    else:
+        jobs_per_run = [fetch_run_jobs(r.get("id")) for r in runs]
+
+    for run, jobs in zip(runs, jobs_per_run):
         run_id = run.get("id")
         workflow = run.get("name") or run.get("path") or "?"
         run_created = run.get("created_at")
         run_url = run.get("html_url") or ""
-        jobs_data, _ = gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
-        jobs = (jobs_data or {}).get("jobs", []) if isinstance(jobs_data, dict) else []
+        run_conclusion = run.get("conclusion")
         for job in jobs:
             name = job.get("name") or "?"
             labels = job.get("labels") or []
@@ -394,6 +427,7 @@ def cmd_collect(args) -> int:
                 "run_id": run_id,
                 "run_created_at": run_created,
                 "run_url": run_url,
+                "run_conclusion": run_conclusion,
                 "workflow": workflow,
                 "job_name": name,
                 "labels": labels,
@@ -518,6 +552,9 @@ def render_issue_body(metrics: dict, current: dict[str, dict],
     if not baseline:
         lines += ["> ⚠️ No baseline (first run?) — absolute values only, "
                   "regression comparison unavailable.", ""]
+    if metrics.get("runs_truncated"):
+        lines += ["> ⚠️ Run list hit the --max-pages cap — the job windows "
+                  "below may be incomplete (oldest runs dropped).", ""]
     lines += [
         "### Jobs: last 7d vs prior 7d",
         "",
@@ -642,10 +679,14 @@ def main() -> int:
     cp_.add_argument("--days", type=int, default=14,
                      help="lookback window in days (default 14 = 7d current + 7d baseline)")
     cp_.add_argument("--out", help="output JSON path (default: $CI_METRICS_OUT or ci-metrics.json)")
-    cp_.add_argument("--max-pages", type=int, default=10,
-                     help="max run-list pages (100 runs each)")
+    cp_.add_argument("--max-pages", type=int, default=30,
+                     help="max run-list pages (100 runs each); 30 covers "
+                          "~3000 runs — the repo does ~2500/14d, so 10 "
+                          "silently truncated the baseline window (#651)")
     cp_.add_argument("--max-step-jobs", type=int, default=200,
                      help="max heavy jobs to fetch steps for")
+    cp_.add_argument("--workers", type=int, default=8,
+                     help="parallel jobs-list fetches (1 = serial)")
     cp_.set_defaults(func=cmd_collect)
 
     rp = sub.add_parser("report", help="upsert the ci-metrics tracking issue")

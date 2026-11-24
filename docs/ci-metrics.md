@@ -17,15 +17,24 @@
 collect/report 2サブコマンド構成）。
 
 - **collect**: `gh api repos/{repo}/actions/runs` をページネーションで取得し、
-  run 毎に jobs、重い job（`ios-test` / `safari-gate` / `pytest` / `rust` 等）のみ
-  steps を取得。job の `created_at` / `started_at` / `completed_at` から
+  run 毎に jobs（`--workers` 既定 8 で並列 fetch）、重い job
+  （`ios-test` / `safari-gate` / `pytest` / `rust` 等）のみ steps を取得。
+  job の `created_at` / `started_at` / `completed_at` から
   duration（started→completed）と queue（created→started）を算出。
   null 時刻の job は集計から除外（0 扱いで統計を歪めない）。
-  `--max-pages`（既定 10）と `--max-step-jobs`（既定 200）で API コールに上限。
+  `--max-pages`（既定 30 = ~3000 runs）・`--max-step-jobs`（既定 200）・
+  `--workers`（既定 8、1 で直列）で API コール数と時間に上限。
+  打ち切り時は `runs_truncated` が issue 本文に警告表示される（#651:
+  旧既定 10 = 1000 runs では repo の ~2500 runs/14d に対し prior-7d が
+  常に欠落し baseline が永久に空だった）。
 - **report**: 直近 7 日 vs 前 7 日の workflow×job 別テーブル
   （n / duration p50・p90 / queue p50・p90 / fail率）+ step hotspot を issue 本文に
   render し、毎回上書き更新。履歴は analyze コメントが担う。
   state marker `<!-- ci-metrics:run:<run_id> -->` で最終更新を管理。
+  fail率の分母は verdict のある conclusion（success/failure/timed_out）のみ —
+  job `cancelled`・run 全体が `cancelled` の job（`always()` 集計ジョブが
+  cancelled needs を failure と誤報告する artifact を含む、#651）と
+  `skipped` は `n_cancelled` / `n_skipped` に別計上し failure に数えない。
 
 ## シグナル (`decide_analysis`)
 
