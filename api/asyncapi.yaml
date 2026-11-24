@@ -288,10 +288,14 @@ components:
                 `data.guestToken`。未ログイン端末が QR の
                 `/#/join/<code>?gt=<token>` リンク経由で解決する
                 bearer で、grant はペアセッション終了または発行から
-                8 時間で失効）のどちらか一方を必須とする。
+                8 時間で失効）のどちらか一方を必須とする
+                （キー存在の XOR — 両方あり・両方なしは malformed）。
               properties:
                 code: {type: string, pattern: '^\d{6}$'}
                 guestToken: {type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
+              oneOf:
+                - required: [code]
+                - required: [guestToken]
         - type: object
           properties:
             type: {const: MATCH}

@@ -670,6 +670,30 @@ def test_guest_redeem_missing_token_400(guest_server):
     assert r.status_code == 400
 
 
+def test_guest_join_both_keys_malformed(guest_server):
+    """JOIN accepts exactly one credential KEY — presence XOR, not
+    validity XOR. `{code: <bad>, guestToken: <valid>}` must not slip
+    through and silently join on the token."""
+    with _minted(guest_server) as (_ws, data, token):
+        ws = _ws_user(guest_server, BOB)
+        try:
+            assert _recv(ws)["type"] == "HELLO"
+            ws.send(_req("JOIN",
+                         {"code": "bad", "guestToken": token}, rid="jx"))
+            rej = _expect(ws, "REJECT")
+            assert rej["reason"] == "malformed"
+            assert rej["request"] == "JOIN"
+            ws.send(_req("JOIN", {"code": "654321",
+                                  "guestToken": token}, rid="jy"))
+            rej = _expect(ws, "REJECT")
+            assert rej["reason"] == "malformed"
+            # neither key → malformed too
+            ws.send(_req("JOIN", {}, rid="jz"))
+            assert _expect(ws, "REJECT")["reason"] == "malformed"
+        finally:
+            ws.close()
+
+
 def test_guest_join_code_forbidden(guest_server):
     """A guest-authenticated link can only ride its own grant — the
     6-digit-code JOIN path is members-only (`forbidden`), so a redeemed
@@ -784,6 +808,19 @@ def test_owner_disable_revokes_grant_and_ends_session(guest_server):
         assert _redeem(guest_server, token).status_code == 401
         with pytest.raises(InvalidHandshake):
             _ws_guest(guest_server, token)
+        # Re-enable must NOT resurrect the dead grant — revoke_owner is a
+        # permanent delete, not a membership-condition re-check.
+        r = httpx.post(
+            guest_server + "/admin/users/add",
+            headers=admin_headers,
+            content=b"email=" + ALICE["email"].encode(),
+            timeout=10,
+            follow_redirects=False,
+        )
+        assert r.status_code in (303, 200), r.status_code
+        assert _redeem(guest_server, token).status_code == 401
+        assert _get(guest_server, "/api/v1/tree?depth=1",
+                    cookie=cookie).status_code == 401
     finally:
         try:
             guest_ws.close()
