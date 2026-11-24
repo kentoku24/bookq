@@ -395,6 +395,44 @@ describe('applyUrlState — #/join/<code>?gt=<token> deep link', () => {
     vi.unstubAllGlobals();
   });
 
+  it('redeem failure with no navigation restores the invite hash', async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error('net')));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    window.urlRestoreGen = 7;
+    setHash(GH);
+    fireHash();
+    await flush();
+    // Same urlRestoreGen → the invite still owns the bar; restore it so a
+    // manual reload can retry the redeem.
+    expect(location.hash).toBe(GH);
+    delete window.urlRestoreGen;
+    vi.unstubAllGlobals();
+  });
+
+  it('redeem failure after navigation does NOT clobber the new view URL', async () => {
+    let rejectFetch;
+    const fetchMock = vi.fn(
+      () => new Promise((_, rej) => { rejectFetch = rej; }));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    window.urlRestoreGen = 7;
+    setHash(GH);
+    fireHash();
+    expect(location.hash).toBe('');            // invite consumed
+    // User opens a work while the redeem is still in flight — loadImages
+    // claims a new generation.
+    window.urlRestoreGen = 8;
+    setHash('#/view/works%2Fw1?p=0');
+    rejectFetch(new Error('net'));
+    await flush();
+    // The stale invite must not overwrite the work's URL.
+    expect(location.hash).toBe('#/view/works%2Fw1?p=0');
+    expect(window.showErrorToast).toHaveBeenCalled();
+    delete window.urlRestoreGen;
+    vi.unstubAllGlobals();
+  });
+
   it('active session is never torn down — panel opens, NO redeem', async () => {
     const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
     vi.stubGlobal('fetch', fetchMock);

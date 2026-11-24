@@ -211,15 +211,80 @@ describe('guestToken storage hygiene', () => {
       },
     });
     await p;
-    // Tab-scoped creds keep the grant: a same-tab RESUME re-arms the
-    // composite `?gt=` QR.
+    // Tab-scoped creds keep the grant + the join code: a same-tab RESUME
+    // re-arms the composite `?gt=` QR (the code alone is not bearer
+    // material — it is shown openly in the leader panel).
     const creds = JSON.parse(session.m['bookq.readerSync.v1']);
     expect(creds.guestToken).toBe(TOKEN);
+    expect(creds.code).toBe('123456');
     // The cross-tab localStorage record must NOT carry the bearer — it is
-    // shared across tabs, survives the browser, and is XSS-readable. A
-    // foreign tab's adoption degrades to the code-only QR instead.
+    // shared across tabs, survives the browser, and is XSS-readable. The
+    // code alone is fine there: a foreign tab's adoption degrades to the
+    // code-only QR instead of '------' with no QR at all.
     const rec = JSON.parse(persist.m['bookq.readerSync.persist.v1']);
     expect(rec).toBeTruthy();
     expect(rec.guestToken).toBeUndefined();
+    expect(rec.code).toBe('123456');
+  });
+
+  it('same-tab RESUME restores code + guestToken — composite QR survives a reload', async () => {
+    const session = memStore(), persist = memStore();
+    session.m['bookq.readerSync.v1'] = JSON.stringify({
+      sessionId: 's9', memberId: 'm9', role: 'leader',
+      resumeToken: 'rt9', guestToken: TOKEN, code: '123456',
+    });
+    const t = fakeTransport();
+    const c = globalThis.PairClient.createClient({
+      url: 'ws://test/ws/reader-sync',
+      transportFactory: () => t,
+      storage: session, persistStorage: persist, events: null,
+    });
+    const p = c.resume();
+    t.emit({ v: 1, type: 'HELLO' });
+    const resume = t.sent.find((f) => f.type === 'RESUME');
+    expect(resume).toBeTruthy();
+    // Server reality: the RESUME ACK carries neither code nor guestToken.
+    t.emit({
+      v: 1, type: 'ACK', request: 'RESUME', requestId: resume.requestId,
+      data: {
+        sessionId: 's9', memberId: 'm9', role: 'leader',
+        resumeToken: 'rt9b',
+      },
+    });
+    await p;
+    expect(c.state.code).toBe('123456');
+    expect(c.state.guestToken).toBe(TOKEN);
+  });
+
+  it('foreign-tab adoption restores code WITHOUT guestToken — code-only QR', async () => {
+    // The dead owner wrote a persist record: code survives (not bearer
+    // material) but the grant token correctly never left sessionStorage.
+    const session = memStore(), persist = memStore();
+    persist.m['bookq.readerSync.persist.v1'] = JSON.stringify({
+      sessionId: 's9', memberId: 'm9', role: 'leader',
+      resumeToken: 'rt9', code: '123456',
+      hb: Date.now() - 20000,               // > RESUME_HB_STALE_MS, < window
+      tabId: 'dead-tab',
+    });
+    const t = fakeTransport();
+    const c = globalThis.PairClient.createClient({
+      url: 'ws://test/ws/reader-sync',
+      transportFactory: () => t,
+      storage: session, persistStorage: persist, events: null,
+    });
+    const p = c.resume();
+    t.emit({ v: 1, type: 'HELLO' });
+    const resume = t.sent.find((f) => f.type === 'RESUME');
+    expect(resume).toBeTruthy();
+    t.emit({
+      v: 1, type: 'ACK', request: 'RESUME', requestId: resume.requestId,
+      data: {
+        sessionId: 's9', memberId: 'm9', role: 'leader',
+        resumeToken: 'rt9b',
+      },
+    });
+    await p;
+    expect(c.state.code).toBe('123456');      // code-only QR restorable
+    expect(c.state.guestToken).toBeNull();    // grant stays with dead tab
   });
 });

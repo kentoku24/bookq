@@ -456,6 +456,11 @@
       }
       try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
       try { urlStackReplace(location.pathname + location.search); } catch (e) {}
+      // Generation token for the .catch URL restore: loadImages claims a
+      // new urlRestoreGen on every navigation, so a redeem that fails
+      // AFTER the user already opened another work must not clobber the
+      // new view URL with the stale invite hash.
+      var navGen = window.urlRestoreGen;
       fetch(globalThis.BookqApiEndpoints.guestRedeem, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -477,9 +482,14 @@
       }).catch(function () {
         // Transient failure — the invite itself may be fine. Put the deep
         // link back via replaceState (fires no hashchange, so no
-        // auto-retry loop) so a manual reload can retry the redeem, and
-        // say it was the network, not the link.
-        try { history.replaceState(null, "", guestHash); } catch (e) {}
+        // auto-retry loop) so a manual reload can retry the redeem —
+        // unless the user navigated meanwhile (a bumped urlRestoreGen
+        // means this hash no longer owns the address bar), and say it
+        // was the network, not the link.
+        if (typeof window.urlRestoreGen !== 'number' ||
+            window.urlRestoreGen === navGen) {
+          try { history.replaceState(null, "", guestHash); } catch (e) {}
+        }
         if (typeof window.showErrorToast === 'function') {
           window.showErrorToast('ネットワークエラーです。もう一度お試しください');
         }

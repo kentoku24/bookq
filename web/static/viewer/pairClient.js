@@ -522,7 +522,7 @@
         _storage.setItem(STORAGE_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
-          guestToken: _guestToken,
+          guestToken: _guestToken, code: _code,
         }));
       } catch (e) { /* storage is best-effort */ }
       _persistWrite();
@@ -569,6 +569,7 @@
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
+          code: _code,
           hb: _now(), tabId: _tabId,
         }));
       } catch (e) { /* best-effort */ }
@@ -606,12 +607,12 @@
       try {
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: d.sessionId, memberId: d.memberId, role: d.role,
-          resumeToken: d.resumeToken,
+          resumeToken: d.resumeToken, code: d.code,
           hb: _now(), tabId: _tabId,
         }));
       } catch (e) {}
       return {sessionId: d.sessionId, memberId: d.memberId,
-              role: d.role, resumeToken: d.resumeToken};
+              role: d.role, resumeToken: d.resumeToken, code: d.code};
     }
 
     /* The persist record names another tab with a fresh heartbeat — that
@@ -1235,9 +1236,14 @@
         _resetSession();
         _member = {sessionId: creds.sessionId, memberId: creds.memberId,
                    role: creds.role || null, resumeToken: creds.resumeToken};
-        // The leader's QR guest token rides with the stored creds — a
-        // RESUME must not degrade the composite `?gt=` QR into code-only.
+        // The leader's QR guest token + join code ride with the stored
+        // creds — a RESUME ACK carries neither, so without this restore a
+        // reload degrades the leader panel to '------' and no QR. A
+        // same-tab resume keeps the composite `?gt=` QR; a foreign tab's
+        // adoption (persist record) has the code but no guestToken —
+        // code-only QR, exactly the documented degradation.
         _guestToken = creds.guestToken || null;
+        _code = creds.code || null;
         _roleIntent = _member.role;
       }
       if (_offlineSince === null) _offlineSince = _now();

@@ -302,7 +302,11 @@ mtime/size は `fmt_mtime` (`{:.0}`) で整数表記される
   削除するので finalize は冪等ではない (2 回目は **404**)。
 - **セッション寿命**: `<library>/.bookq-uploads/<id>/{meta.json,blob}` に
   永続 (再起動をまたぐ)。`BOOKQ_UPLOAD_SESSION_TTL_SECS` (既定 7 日) を
-  超えたものは起動時・init 時に sweep される。
+  超えたものは起動時・init 時に sweep される。セッションは作成者の
+  email に紐付く — `owner` を持たないアップグレード前セッションは誰の
+  操作にも応じず (fail closed)、TTL sweep で回収される。進行中の分割
+  アップロードはデプロイをまたいで再開できないので、デプロイ前に完了
+  または破棄しておくこと。
 - **index 反映**: 確定・削除の成功後にバックグラウンド refresh が走り、
   signature 変化を検証して generation が進む。同期で確実に反映したい
   クライアントは `POST /api/v1/index/refresh` を使う。
