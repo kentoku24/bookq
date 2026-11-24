@@ -196,7 +196,12 @@ async fn guest_write_guard(
     );
     let admin_path = path == "/admin" || path.starts_with("/admin/");
     let library_path = path == "/api/v1/library" || path.starts_with("/api/v1/library/");
-    if (safe_method && !admin_path && !library_path) || path == "/api/v1/guest/redeem" {
+    // Reading positions resolve to the leader's identity for a guest —
+    // denying even safe methods keeps their private history off the wire.
+    let positions_path = path == "/api/v1/reading-positions";
+    if (safe_method && !admin_path && !library_path && !positions_path)
+        || path == "/api/v1/guest/redeem"
+    {
         return next.run(req).await;
     }
     if matches!(
@@ -232,23 +237,30 @@ async fn guest_response_marker(
     req: Request<Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    let is_guest = matches!(
-        auth::resolve(
-            req.headers(),
-            st.test_mode,
-            &st.secret_key,
-            st.session_key.as_ref(),
-            &st.directory,
-            st.registry.guest(),
+    let (is_guest, dead_guest_only) = match auth::resolve(
+        req.headers(),
+        st.test_mode,
+        &st.secret_key,
+        st.session_key.as_ref(),
+        &st.directory,
+        st.registry.guest(),
+    ) {
+        auth::Caller::Guest(_) => (true, false),
+        auth::Caller::User(_) => (false, false),
+        // A guest cookie that resolved to anonymous is a dead grant —
+        // base this on the resolution outcome, not cookie presence, so a
+        // stale `session` cookie can't mask the revoked-guest eviction.
+        auth::Caller::Delegate => (
+            false,
+            auth::cookie_value(req.headers(), "bookq_guest").is_some(),
         ),
-        auth::Caller::Guest(_)
-    );
-    // Pure-guest authentication context: the grant cookie was presented
-    // but resolved to nothing, and no member session cookie muddies the
-    // picture — a 401/403 here is a dead grant, not an expired login.
-    let dead_guest_only = !is_guest
-        && auth::cookie_value(req.headers(), "bookq_guest").is_some()
-        && auth::cookie_value(req.headers(), "session").is_none();
+    };
+    // Public, per-user-free assets stay cacheable for guests — same set
+    // `vary_session_cookie` exempts. Everything else gets no-store.
+    let session_free = {
+        let p = req.uri().path();
+        p == "/sw.js" || p == "/favicon.ico" || p == "/static" || p.starts_with("/static/")
+    };
     let mut res = next.run(req).await;
     let mark = is_guest
         || (dead_guest_only
@@ -263,7 +275,7 @@ async fn guest_response_marker(
             HeaderValue::from_static("1"),
         );
     }
-    if is_guest {
+    if is_guest && !session_free {
         res.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("private, no-store"),
@@ -851,7 +863,10 @@ async fn admin_member_action(
     let store = st.users.clone();
     let email = form.email;
     let actor_email = actor.email;
-    let target_email = email.clone();
+    // `end_owner_sessions` matches stored (normalized) owner emails — a raw
+    // form value with case/space differences would silently skip revocation.
+    let target_email =
+        users::normalize_email(&email).unwrap_or_else(|| email.trim().to_lowercase());
     let result = tokio::task::spawn_blocking(move || match action {
         MemberAction::Add | MemberAction::Enable => {
             store.add_member(&email, &actor_email)
@@ -1938,7 +1953,8 @@ async fn main() {
     };
 
     let index = std::sync::Arc::new(folders::IndexState::new());
-    let registry = reader_sync::Registry::new(index.clone(), library.clone());
+    let registry =
+        reader_sync::Registry::new(index.clone(), library.clone(), Some(directory.clone()));
     {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
@@ -2366,7 +2382,7 @@ mod handler_tests {
                 .as_nanos()
         ));
         let index = std::sync::Arc::new(folders::IndexState::new());
-        let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
+        let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"), None);
         let users_store = std::sync::Arc::new(users::UserStore::new(&dir));
         let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
         AppState {

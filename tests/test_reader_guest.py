@@ -228,20 +228,15 @@ def test_guest_redeem_authed_no_cookie(guest_server):
 def test_guest_cookie_browses_as_owner(guest_server):
     with _minted(guest_server) as (_ws, _data, token):
         cookie = f"bookq_guest={token}"
-        now = int(time.time() * 1000)
-        for user, folder in ((ALICE, "alice_book"), (BOB, "bob_book")):
-            r = httpx.put(
-                guest_server + "/api/v1/reading-positions",
-                params={"folder": folder},
-                json={"page": 3, "total": 9, "ts": now},
-                headers={"Cookie": f"session={_session_cookie(user)}"},
-                timeout=10,
-            )
-            assert r.status_code == 200, r.text
+        # Per-user surfaces stay member-only even though the guest
+        # resolves to the owner's identity for library reads — positions
+        # would leak the owner's private reading history.
         r = _get(guest_server, "/api/v1/reading-positions", cookie=cookie)
-        assert r.status_code == 200
-        folders = {p["folder"] for p in r.json()["positions"]}
-        assert "alice_book" in folders and "bob_book" not in folders
+        assert r.status_code == 403
+        # Folder visibility is a library-global store, not per-user —
+        # guests still need it to honor hidden roots while browsing.
+        assert _get(guest_server, "/api/v1/folder-visibility",
+                    cookie=cookie).status_code == 200
         r = _get(guest_server, "/", cookie=cookie)
         assert r.status_code == 200
         assert "tile-grid" in r.text and "login-box" not in r.text

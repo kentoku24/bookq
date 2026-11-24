@@ -424,6 +424,7 @@
     var gm = (location.hash || '').match(/^#\/join\/\d{6}\?gt=([A-Za-z0-9_-]{16,128})$/);
     if (gm) {
       var gtoken = gm[1];
+      var guestHash = location.hash;
       var pc = window.PairController;
       // Capability gate FIRST — a script set can pass the shell-version
       // watchdog while still missing pieces of the guest path: an old
@@ -474,8 +475,13 @@
           }
         } catch (e) {}
       }).catch(function () {
+        // Transient failure — the invite itself may be fine. Put the deep
+        // link back via replaceState (fires no hashchange, so no
+        // auto-retry loop) so a manual reload can retry the redeem, and
+        // say it was the network, not the link.
+        try { history.replaceState(null, "", guestHash); } catch (e) {}
         if (typeof window.showErrorToast === 'function') {
-          window.showErrorToast('ゲストリンクが無効か期限切れです');
+          window.showErrorToast('ネットワークエラーです。もう一度お試しください');
         }
       });
       return;

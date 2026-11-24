@@ -184,12 +184,23 @@ impl RedeemRateLimit {
             s.global_start = Some(now);
             s.global_count = 0;
         }
-        let e = s.per_ip.entry(ip.to_string()).or_insert((now, 0));
-        if now.duration_since(e.0) >= Self::WINDOW {
-            *e = (now, 0);
+        // Hard cap: a map full of fresh windows stops tracking NEW keys —
+        // they still consume the global budget, so rotation stays bounded
+        // without the map growing past MAX_TRACKED_IPS.
+        if !s.per_ip.contains_key(ip) && s.per_ip.len() < Self::MAX_TRACKED_IPS {
+            s.per_ip.insert(ip.to_string(), (now, 0));
         }
-        e.1 += 1;
-        let ok = e.1 <= Self::MAX_ATTEMPTS && s.global_count < Self::MAX_GLOBAL_ATTEMPTS;
+        let per_ip_ok = match s.per_ip.get_mut(ip) {
+            Some(e) => {
+                if now.duration_since(e.0) >= Self::WINDOW {
+                    *e = (now, 0);
+                }
+                e.1 += 1;
+                e.1 <= Self::MAX_ATTEMPTS
+            }
+            None => true,
+        };
+        let ok = per_ip_ok && s.global_count < Self::MAX_GLOBAL_ATTEMPTS;
         if ok {
             s.global_count += 1;
         }

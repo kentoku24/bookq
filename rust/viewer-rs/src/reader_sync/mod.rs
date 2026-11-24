@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, watch, Mutex, Notify};
 
 use crate::folders::IndexState;
 use crate::guest::{GrantStatus, GuestStore, GUEST_TTL_SECONDS};
+use crate::users::UserDirectory;
 
 // ── wire constants (parent #75 §3.5 initial values) ───────────────────────
 
@@ -547,6 +548,9 @@ pub struct Inner {
     links: HashMap<String, Link>,
     by_code: HashMap<String, String>, // code -> session id
     guest: GuestStore,
+    /// Membership snapshot for the tick's guest-grant revalidation — `None`
+    /// in tests/harnesses that don't wire the user store.
+    directory: Option<Arc<UserDirectory>>,
     bulk_max: usize,
     no_response_timeout: Duration,
     resume_window: Duration,
@@ -554,7 +558,11 @@ pub struct Inner {
 }
 
 impl Registry {
-    pub fn new(index: Arc<IndexState>, library: PathBuf) -> Arc<Self> {
+    pub fn new(
+        index: Arc<IndexState>,
+        library: PathBuf,
+        directory: Option<Arc<UserDirectory>>,
+    ) -> Arc<Self> {
         let wake = Arc::new(Notify::new());
         let guest = GuestStore::new();
         Arc::new(Self {
@@ -563,6 +571,7 @@ impl Registry {
                 links: HashMap::new(),
                 by_code: HashMap::new(),
                 guest: guest.clone(),
+                directory,
                 bulk_max: SEND_BULK_MAX_BYTES,
                 no_response_timeout: Duration::from_secs_f64(NO_RESPONSE_TIMEOUT),
                 resume_window: Duration::from_secs_f64(RESUME_WINDOW_SECONDS),
@@ -1394,6 +1403,9 @@ impl Inner {
         s.code_consumed = true; // single-use while a join is live
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
+            // A successful bind forgives earlier fishing attempts — the
+            // throttle only punishes links that never get in.
+            l.join_fails = 0;
         }
         let leader = self
             .session(sid)
@@ -2566,12 +2578,25 @@ impl Inner {
             }
             // Guest links re-validate their grant every tick — WS auth was
             // a handshake-time snapshot, so a revoked/expired grant must
-            // drop the socket rather than coast until disconnect.
+            // drop the socket rather than coast until disconnect. When a
+            // directory is wired the grant OWNER's membership is checked
+            // too: the `viewer-rs users remove` CLI path can't reach
+            // end_owner_sessions, so without this a removed member's guest
+            // sockets would survive (and their grants resurrect on
+            // re-enable).
             if link.guest {
                 let valid = link
                     .guest_token
                     .as_deref()
-                    .is_some_and(|t| matches!(self.guest.status(t), GrantStatus::Valid(_)));
+                    .and_then(|t| match self.guest.status(t) {
+                        GrantStatus::Valid(g) => Some(g),
+                        _ => None,
+                    })
+                    .is_some_and(|g| {
+                        self.directory
+                            .as_ref()
+                            .map_or(true, |d| d.is_member(&g.owner_email))
+                    });
                 if !valid {
                     self.close_link(&lid, "guest_revoked", WS_CLOSE_POLICY);
                     continue;
@@ -2704,7 +2729,11 @@ mod tests {
     }
 
     fn reg_for_test() -> Arc<Registry> {
-        Registry::new(Arc::new(IndexState::new()), PathBuf::from("/nonexistent"))
+        Registry::new(
+            Arc::new(IndexState::new()),
+            PathBuf::from("/nonexistent"),
+            None,
+        )
     }
 
     #[tokio::test]
@@ -2911,6 +2940,43 @@ mod tests {
         let _ = next_json(&mut rg); // HELLO
         // A normal link is untouched.
         let (l1, _r1) = mk_link(&mut inner);
+        inner.tick();
+        gclose.changed().await.unwrap();
+        assert_eq!(gclose.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);
+        assert!(inner.links.get(&l1).is_some_and(|l| l.alive));
+    }
+
+    #[tokio::test]
+    async fn tick_closes_guest_link_when_owner_not_member() {
+        // The `viewer-rs users remove` CLI path can't reach
+        // end_owner_sessions — the tick's membership re-check is what
+        // stops a removed owner's still-Valid grant (and socket) from
+        // surviving until a re-enable resurrects it.
+        let directory = Arc::new(crate::users::UserDirectory::test_with(&[(
+            "member@example.com",
+            crate::users::Role::Member,
+        )]));
+        let reg = Registry::new(
+            Arc::new(IndexState::new()),
+            PathBuf::from("/nonexistent"),
+            Some(directory),
+        );
+        let mut inner = reg.inner.lock().await;
+        // Grant is Valid but its owner isn't a member → dies on tick.
+        let ghost = reg
+            .guest()
+            .issue("ghost@example.com", "s1", Duration::from_secs(3600))
+            .unwrap();
+        let (_lg, mut rg, mut gclose) =
+            mk_link_full(&mut inner, Some(Value::Null), true, Some(ghost));
+        let _ = next_json(&mut rg); // HELLO
+        // A member-owned grant survives the same tick.
+        let member = reg
+            .guest()
+            .issue("member@example.com", "s1", Duration::from_secs(3600))
+            .unwrap();
+        let (l1, _r1, _c1) =
+            mk_link_full(&mut inner, Some(Value::Null), true, Some(member));
         inner.tick();
         gclose.changed().await.unwrap();
         assert_eq!(gclose.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);

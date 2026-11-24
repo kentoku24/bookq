@@ -289,7 +289,11 @@ async fn run_case(doc: &Value, case: &Value) {
         );
     }
 
-    let reg = Registry::new(Arc::new(IndexState::new()), PathBuf::from("/nonexistent"));
+    let reg = Registry::new(
+        Arc::new(IndexState::new()),
+        PathBuf::from("/nonexistent"),
+        None,
+    );
     if rkey.is_some() {
         let specs_c = specs.clone();
         let b = bindings.clone();
