@@ -175,12 +175,15 @@ async fn vary_session_cookie(
 }
 
 /// Read-only enforcement for `bookq_guest` callers. A guest grant resolves
-/// to the pair leader's identity so every read works, but writes and the
-/// whole `/admin` surface answer 403 before the handler runs — pair sync
-/// is WebSocket and unaffected. `/api/v1/guest/redeem` is exempt: it is
-/// how the cookie is minted and refreshed. Resolution goes through
-/// `auth::resolve` itself so session→Bearer→guest precedence (including
-/// the expired-session-cookie edge) can't drift from the handlers'.
+/// to the pair leader's identity so every read works, but writes, the
+/// whole `/admin` surface, and `/api/v1/library/*` answer 403 before the
+/// handler runs — pair sync is WebSocket and unaffected. The library
+/// surface is denied outright (not just its writes): its GETs have side
+/// effects (upload slots/finalize state) a read-only caller must not
+/// trigger. `/api/v1/guest/redeem` is exempt: it is how the cookie is
+/// minted and refreshed. Resolution goes through `auth::resolve` itself
+/// so session→Bearer→guest precedence (including the expired-session-
+/// cookie edge) can't drift from the handlers'.
 async fn guest_write_guard(
     State(st): State<AppState>,
     req: Request<Body>,
@@ -192,7 +195,8 @@ async fn guest_write_guard(
         axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
     );
     let admin_path = path == "/admin" || path.starts_with("/admin/");
-    if (safe_method && !admin_path) || path == "/api/v1/guest/redeem" {
+    let library_path = path == "/api/v1/library" || path.starts_with("/api/v1/library/");
+    if (safe_method && !admin_path && !library_path) || path == "/api/v1/guest/redeem" {
         return next.run(req).await;
     }
     if matches!(
@@ -212,8 +216,11 @@ async fn guest_write_guard(
 }
 
 /// `x-bookq-guest: 1` on every response a `bookq_guest` caller receives —
-/// the Service Worker refuses Cache API stores for marked responses, so
-/// a revoked grant can't be re-served out of the device's own caches.
+/// the Service Worker and page-side writers refuse to persist marked
+/// responses, so a revoked grant can't be re-served out of the device's
+/// own caches. `Cache-Control: private, no-store` closes the other half
+/// of the hole: the browser's HTTP cache ignores the custom header and
+/// would happily re-serve 200/206/304 content past revocation.
 async fn guest_response_marker(
     State(st): State<AppState>,
     req: Request<Body>,
@@ -232,9 +239,14 @@ async fn guest_response_marker(
     );
     let mut res = next.run(req).await;
     if is_guest {
-        res.headers_mut().insert(
+        let h = res.headers_mut();
+        h.insert(
             HeaderName::from_static("x-bookq-guest"),
             HeaderValue::from_static("1"),
+        );
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
         );
     }
     res
@@ -819,6 +831,7 @@ async fn admin_member_action(
     let store = st.users.clone();
     let email = form.email;
     let actor_email = actor.email;
+    let target_email = email.clone();
     let result = tokio::task::spawn_blocking(move || match action {
         MemberAction::Add | MemberAction::Enable => {
             store.add_member(&email, &actor_email)
@@ -864,6 +877,16 @@ async fn admin_member_action(
             return admin_internal_error("user update failed");
         }
     };
+    if matches!(action, MemberAction::Disable) && matches!(change, users::Change::Disabled) {
+        // Grants are bearer material, not capability lookups — a disable
+        // must revoke them outright or disable→re-enable would resurrect
+        // live guest links. Their sessions end too (a guest's whole
+        // reading surface is the pair session).
+        let ended = st.registry.end_owner_sessions(&target_email).await;
+        if ended > 0 {
+            tracing::info!(email = %target_email, ended, "ended pair sessions for disabled member");
+        }
+    }
     admin_redirect_status(status)
 }
 
@@ -1393,7 +1416,26 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
-    oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await
+    let mut res = oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await;
+    // A completed real login supersedes any stale guest grant cookie —
+    // `Vary`/marker plumbing would keep tagging this browser's responses
+    // as guest-served (and the cache-exclusion would degrade caching)
+    // until the cookie died on its own.
+    if res.status().is_redirection() {
+        clear_guest_cookie(&mut res);
+    }
+    res
+}
+
+/// `bookq_guest=; Max-Age=0` — drop the guest grant cookie. Shared by the
+/// logout paths (every one of them) and the post-login stale-cookie sweep.
+fn clear_guest_cookie(res: &mut Response) {
+    res.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "bookq_guest=; path=/; Max-Age=0; httponly; samesite=lax; secure",
+        ),
+    );
 }
 
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1401,26 +1443,33 @@ async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response
         return method_not_allowed("GET, HEAD");
     }
     // #373: logout is a state-changing GET — refuse cross-site
-    // initiations (forced logout CSRF).
+    // initiations (forced logout CSRF). The guest cookie is NOT cleared
+    // on this path: honoring a forged navigation's Set-Cookie would be a
+    // forced guest-logout primitive — the same thing this gate exists to
+    // prevent.
     if !oauth::same_site_initiation(req.headers()) {
         return state::detail(StatusCode::FORBIDDEN, "Forbidden");
     }
+    // The grant is server-side state — kill it, not just the cookie copy
+    // in this browser, so a lifted token can't outlive the sign-out.
+    if let Some(token) = auth::cookie_value(req.headers(), "bookq_guest") {
+        st.registry.guest().revoke_token(&token);
+    }
     let Some(flow) = st.auth_flow.clone() else {
-        return auth_unconfigured();
+        let mut res = auth_unconfigured();
+        clear_guest_cookie(&mut res);
+        return res;
     };
     let lookup = auth::session_lookup(req.headers(), st.session_key.as_ref());
     if matches!(lookup, auth::SessionLookup::Corrupt) {
-        return corrupt_session_response();
+        let mut res = corrupt_session_response();
+        clear_guest_cookie(&mut res);
+        return res;
     }
     let mut res = oauth::logout(&flow, &lookup);
     // Also drop any guest grant cookie — logout is the explicit
     // "I'm done here" gesture and shouldn't leave a live bearer behind.
-    res.headers_mut().append(
-        header::SET_COOKIE,
-        HeaderValue::from_static(
-            "bookq_guest=; path=/; Max-Age=0; httponly; samesite=lax; secure",
-        ),
-    );
+    clear_guest_cookie(&mut res);
     res
 }
 
@@ -1535,6 +1584,12 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
             );
+            // The response carries a credential (Set-Cookie) — never let
+            // a shared cache store it, matching `/api/v1/auth/token`.
+            res.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
             if let Ok(v) = HeaderValue::from_str(&format!(
                 "bookq_guest={token}; path=/; Max-Age={max_age}; httponly; samesite=lax; secure"
             )) {
@@ -1542,10 +1597,9 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
             }
             serve::maybe_gzip(&headers, res, true).await
         }
-        guest::GrantStatus::Expired => {
-            state::detail(StatusCode::UNAUTHORIZED, "guest link expired")
-        }
-        guest::GrantStatus::Unknown => {
+        // Expired and unknown answer identically — distinguishing them
+        // would be a token-state oracle.
+        guest::GrantStatus::Expired | guest::GrantStatus::Unknown => {
             state::detail(StatusCode::UNAUTHORIZED, "guest link invalid")
         }
     }
@@ -1568,6 +1622,14 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
         ),
         auth::Caller::Guest(_)
     );
+    // The grant bearer rides on the link so `tick` can re-validate it —
+    // a revoked/expired grant drops the socket rather than coasting on
+    // the handshake-time snapshot.
+    let guest_token = if is_guest {
+        auth::cookie_value(req.headers(), "bookq_guest")
+    } else {
+        None
+    };
     let Some(user) = auth::resolve_ws_user(
         req.headers(),
         st.test_mode,
@@ -1582,7 +1644,9 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
     match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &st).await {
         Ok(wsu) => {
             let st2 = st.clone();
-            wsu.on_upgrade(move |socket| reader_sync_conn(socket, st2, user, is_guest))
+            wsu.on_upgrade(move |socket| {
+                reader_sync_conn(socket, st2, user, is_guest, guest_token)
+            })
         }
         Err(rej) => rej.into_response(),
     }
@@ -1595,6 +1659,7 @@ async fn reader_sync_conn(
     st: AppState,
     user: serde_json::Value,
     is_guest: bool,
+    guest_token: Option<String>,
 ) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
@@ -1607,6 +1672,7 @@ async fn reader_sync_conn(
         close_tx,
         Some(user),
         is_guest,
+        guest_token,
         std::time::Instant::now(),
         reg.heartbeat_interval(),
     );
@@ -1675,6 +1741,15 @@ async fn reader_sync_drain(
                     }
                 }
                 true
+            }
+            reader_sync::OutItem::Close(code, reason) => {
+                let _ = ws_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code,
+                        reason: reason.into(),
+                    })))
+                    .await;
+                false
             }
         }
     }
@@ -2414,6 +2489,7 @@ mod handler_tests {
             close_tx,
             None,
             false,
+            None,
             std::time::Instant::now(),
             st.registry.heartbeat_interval(),
         );

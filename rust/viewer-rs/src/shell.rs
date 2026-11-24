@@ -435,9 +435,19 @@ pub(crate) fn index(
         (None, None)
     };
 
-    let owner = user_key
-        .as_deref()
-        .map(|k| state::visibility_owner(k, secret));
+    // For guests the owner HMAC must key on the raw owner email, not the
+    // `guest:`-prefixed position key — `GET /api/v1/folder-visibility`
+    // computes it from `caller()`'s resolved identity (the owner), so a
+    // prefixed key here would never match the server's owner value.
+    let owner_key = if is_guest {
+        user_key
+            .as_deref()
+            .and_then(|k| k.strip_prefix("guest:"))
+            .or(user_key.as_deref())
+    } else {
+        user_key.as_deref()
+    };
+    let owner = owner_key.map(|k| state::visibility_owner(k, secret));
     let snapshot = owner
         .as_ref()
         .and_then(|o| {
