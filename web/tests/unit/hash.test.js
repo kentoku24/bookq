@@ -220,6 +220,53 @@ describe('applyUrlState (hashchange listener)', () => {
     expect(location.hash).toBe('');   // consumed — never reaches parsers
   });
 
+  it('#/join/<code> joins despite a foreign tab pair — no shared cookie at stake', () => {
+    // Regression: a closed tab's persist record reports a FRESH heartbeat
+    // for RESUME_HB_STALE_MS after pagehide. pairActive() would see that
+    // foreign 'live' pair and refuse, eating the consumed link — the
+    // 6-digit gate must consult only THIS tab (pairActiveLocal), so a
+    // sibling's pair or a dead tab's leftover never blocks a code join.
+    window.treeLoaded = true;
+    const join = vi.fn(() => Promise.resolve());
+    window.PairController = {
+      state: { status: 'idle' },
+      join,
+      pairActiveLocal: vi.fn(() => false),   // this tab is free…
+      pairActive: vi.fn(() => true),         // …a sibling owns the record
+    };
+    setHash('#/join/314159');
+    fireHash();
+    expect(join).toHaveBeenCalledWith('314159');
+  });
+
+  it('#/join/<code> blocked while THIS tab is occupied — panel, no join', () => {
+    window.treeLoaded = true;
+    const join = vi.fn(() => Promise.resolve());
+    const open = vi.fn();
+    window.PairController = {
+      state: { status: 'idle' },
+      join,
+      pairActiveLocal: vi.fn(() => true),    // own pair or boot resume
+    };
+    window.PairUI = { open };
+    setHash('#/join/314159');
+    fireHash();
+    expect(join).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalled();
+  });
+
+  it('#/join/<code> stale controller falls back to status check', () => {
+    window.treeLoaded = true;
+    const join = vi.fn(() => Promise.resolve());
+    const open = vi.fn();
+    window.PairController = { state: { status: 'connected' }, join };
+    window.PairUI = { open };
+    setHash('#/join/314159');
+    fireHash();
+    expect(join).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalled();
+  });
+
   it('browse hash restores browse path; bare hash resets to top', () => {
     window.treeLoaded = true;
     window.viewMode = 'tile';

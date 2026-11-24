@@ -488,14 +488,17 @@
       try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
       try { urlStackReplace(location.pathname + location.search); } catch (e) {}
       var pc = window.PairController;
-      // Already in a session: joining here would tear the link down
-      // without a LEAVE, leaving the partner in 'peer-away' for the whole
-      // resume window. Just surface the current session panel instead —
-      // leaving an active pair is an explicit gesture, never a link click.
-      // pairActive also covers the boot-resume window and a foreign live
-      // tab; a stale controller lacking it falls back to the status check.
-      var occupied = !!(pc && (typeof pc.pairActive === 'function'
-        ? pc.pairActive()
+      // Already in a session IN THIS TAB: joining here would tear the
+      // link down without a LEAVE, leaving the partner in 'peer-away'
+      // for the whole resume window. Just surface the current session
+      // panel instead — leaving an active pair is an explicit gesture,
+      // never a link click. pairActiveLocal also covers the boot-resume
+      // window; a FOREIGN tab's pair is irrelevant here (no shared
+      // cookie rides a code join — only the guest gate consults it), so
+      // a closed tab's still-fresh heartbeat can't eat the link. A stale
+      // controller lacking it falls back to the status check.
+      var occupied = !!(pc && (typeof pc.pairActiveLocal === 'function'
+        ? pc.pairActiveLocal()
         : (function () {
             var pst = pc.state || null;
             return pst && pst.status && pst.status !== 'idle' &&

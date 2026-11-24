@@ -597,19 +597,27 @@
         return c.joinGuest(token);
       });
     },
-    /* Live-or-pending pair anywhere the origin's auth could depend on —
-     * hash.js's guest-redeem gate consults it BEFORE swapping the
-     * bookq_guest cookie: the member bind (even on an 'error' surface,
-     * where _errorSt can outlive the last STATE), saved creds / a stale-
-     * owner record meaning this tab's boot rejoin is still in flight, and
-     * a foreign tab currently heartbeating the pair (the cookie is
-     * origin-wide — another tab's redeem would silently re-auth ours). */
-    pairActive: function () {
+    /* Live-or-pending pair in THIS tab — the member bind (even on an
+     * 'error' surface, where _errorSt can outlive the last STATE), and
+     * saved creds / a dead-owner record meaning this tab's boot rejoin
+     * is still in flight. The #/join/<code> gate uses this view: a code
+     * join swaps no shared cookie, so a foreign tab's heartbeat must
+     * not block it — a closed tab's persist record reads 'live' for
+     * RESUME_HB_STALE_MS after pagehide and would eat the link. */
+    pairActiveLocal: function () {
       var st = _client ? _client.state : null;
       if (st && (st.sessionId || st.memberId)) return true;
       if (st && st.status && st.status !== 'idle' &&
           st.status !== 'ended' && st.status !== 'error') return true;
-      if (!!_readCreds() || !!_hasPersistedResume()) return true;
+      return !!(_readCreds() || _hasPersistedResume());
+    },
+    /* Live-or-pending pair anywhere the origin's auth could depend on —
+     * hash.js's guest-redeem gate consults it BEFORE swapping the
+     * bookq_guest cookie: pairActiveLocal plus a foreign tab currently
+     * heartbeating the pair (the cookie is origin-wide — another tab's
+     * redeem would silently re-auth ours). */
+    pairActive: function () {
+      if (api.pairActiveLocal()) return true;
       var PC = window.PairClient;
       return !!(PC && typeof PC.peekActivePair === 'function' &&
                 PC.peekActivePair());
