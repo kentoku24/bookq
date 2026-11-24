@@ -16,25 +16,33 @@
 本体は `scripts/ci_metrics.py`（stdlib + `gh` CLI のみ、prod_monitor.py と同型の
 collect/report 2サブコマンド構成）。
 
-- **collect**: `gh api repos/{repo}/actions/runs` をページネーションで取得し、
-  run 毎に jobs（`--workers` 既定 8 で並列 fetch）、重い job
-  （`ios-test` / `safari-gate` / `pytest` / `rust` 等）のみ steps を取得。
+- **collect**: `gh api repos/{repo}/actions/runs` を `created=<start>..<end>`
+  の時間範囲で取得する。`created` フィルタは検索基盤経由で **1 クエリ
+  1,000 件が上限**（total_count は正しく全件を数えるが page 11 以降は空）の
+  ため、`total_count > 1000` のウィンドウは時間軸でバイセクションして
+  葉が上限以下になるまで分割する（#651: 従来の `created>=` 単一クエリでは
+  直近 ~3.7 日分しか取れず baseline が永久に空だった）。
+  run 毎に jobs を `--workers`（既定 8）で並列 fetch — steps は jobs 一覧の
+  レスポンスに埋め込み済みなので job 詳細の追加コールは不要。
+  重い job（`ios-test` / `safari-gate` / `pytest` / `rust` 等）の steps のみ
+  `--max-step-jobs`（既定 200）まで記録し step hotspot に使う。
   job の `created_at` / `started_at` / `completed_at` から
   duration（started→completed）と queue（created→started）を算出。
   null 時刻の job は集計から除外（0 扱いで統計を歪めない）。
-  `--max-pages`（既定 30 = ~3000 runs）・`--max-step-jobs`（既定 200）・
-  `--workers`（既定 8、1 で直列）で API コール数と時間に上限。
-  打ち切り時は `runs_truncated` が issue 本文に警告表示される（#651:
-  旧既定 10 = 1000 runs では repo の ~2500 runs/14d に対し prior-7d が
-  常に欠落し baseline が永久に空だった）。
+  jobs 取得の API 失敗は `jobs_fetch_failures` として計上し、
+  run 取得の未完了（API エラー・分割深さ上限）は `runs_truncated` として
+  どちらも issue 本文に警告表示される。
 - **report**: 直近 7 日 vs 前 7 日の workflow×job 別テーブル
   （n / duration p50・p90 / queue p50・p90 / fail率）+ step hotspot を issue 本文に
   render し、毎回上書き更新。履歴は analyze コメントが担う。
   state marker `<!-- ci-metrics:run:<run_id> -->` で最終更新を管理。
   fail率の分母は verdict のある conclusion（success/failure/timed_out）のみ —
-  job `cancelled`・run 全体が `cancelled` の job（`always()` 集計ジョブが
-  cancelled needs を failure と誤報告する artifact を含む、#651）と
-  `skipped` は `n_cancelled` / `n_skipped` に別計上し failure に数えない。
+  job `cancelled`・`skipped` と **cancelled run 内の全 job**（success 含む）は
+  `n_cancelled` / `n_skipped` に別計上する。cancelled run は中断された計測
+  であり verdict を一切数えない — キャンセル前に失敗した job も、supersede
+  した新しい run が同一 or より新しいコードを再テストするため deterministic
+  な失敗はそちらで再検出される（`always()` 集計ジョブが cancelled needs を
+  failure と誤報告する artifact 対策を兼ねる、#651）。
 
 ## シグナル (`decide_analysis`)
 

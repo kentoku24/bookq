@@ -49,8 +49,9 @@ DURATION_REGRESSION_RATIO = 1.5
 MACOS_QUEUE_P90_S = 15 * 60
 FAILURE_RATE_THRESHOLD = 0.10
 
-# Heavy jobs get per-step timings; light jobs only contribute run/job times
-# (API call budget: one extra call per heavy job).
+# Heavy jobs get per-step timings; light jobs only contribute run/job times.
+# Steps are embedded in the jobs-list response, so --max-step-jobs bounds
+# report size, not API calls.
 HEAVY_JOB_SUBSTRINGS = ("ios-test", "safari-gate", "safari", "pytest", "rust", "viewer")
 
 
@@ -129,12 +130,14 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
     """Aggregate job samples by `workflow / job` key.
 
     Samples with null started_at/completed_at are excluded from
-    duration/queue stats (never counted as 0). Failure rate counts only
-    verdict-bearing conclusions: `cancelled`/`skipped` jobs and jobs whose
-    whole run was cancelled are tracked separately (`n_cancelled` /
-    `n_skipped`) — a superseded run is churn, not a test failure, and an
-    `always()` aggregate that "fails" on cancelled needs is the same
-    artifact (#651).
+    duration/queue stats (never counted as 0). A cancelled run is an
+    aborted measurement: NONE of its job verdicts count — not even a job
+    that genuinely failed before the cancel, because the superseding run
+    re-tests the same-or-newer code and deterministic failures resurface
+    there. Job `cancelled`/`skipped` conclusions and every job in a
+    cancelled run are tracked separately (`n_cancelled` / `n_skipped`);
+    failure rate counts only verdict-bearing conclusions
+    (success/failure/timed_out) (#651).
     """
     by_key: dict[str, dict] = {}
     for s in samples:
@@ -162,10 +165,7 @@ def aggregate_jobs(samples: list[dict]) -> dict[str, dict]:
         concl = s.get("conclusion")
         if concl == "skipped":
             b["n_skipped"] += 1
-        elif concl == "cancelled" or (
-            concl in ("failure", "timed_out")
-            and s.get("run_conclusion") == "cancelled"
-        ):
+        elif concl == "cancelled" or s.get("run_conclusion") == "cancelled":
             b["n_cancelled"] += 1
         elif concl:
             b["n_conclusion"] += 1
@@ -361,23 +361,79 @@ def ensure_label(dry_run: bool) -> bool:
 # collect
 # ---------------------------------------------------------------------------
 
-def fetch_paginated(base_path: str, max_pages: int, per_page: int = 100) -> tuple[list, bool]:
-    """Fetch `base_path` pages 1..max_pages. Returns (items, truncated)."""
-    items: list = []
-    sep = "&" if "?" in base_path else "?"
-    for page in range(1, max_pages + 1):
-        data, ok = gh_api(f"{base_path}{sep}per_page={per_page}&page={page}")
-        if not ok or data is None:
-            break
-        batch = data.get("workflow_runs", data.get("jobs", [])) if isinstance(data, dict) else data
-        if not batch:
-            break
-        items.extend(batch)
-        if len(batch) < per_page:
-            break
-    else:
-        return items, True
-    return items, False
+# GitHub's `created` run filter is search-backed: a single query can only
+# ever return the newest 1,000 results (page 11+ comes back empty while
+# total_count keeps counting). Dense windows are bisected on time until
+# each leaf fits under the cap, or flagged incomplete (#651).
+RUNS_SEARCH_CAP = 1000
+RUNS_MAX_SPLIT_DEPTH = 10  # 14d / 2^10 ≈ 20min leaves — far below the cap
+
+
+def _fetch_run_page(path: str) -> tuple[list, int | None, bool]:
+    """One page of the runs list. Returns (runs, total_count, ok)."""
+    data, ok = gh_api(path)
+    if not ok or not isinstance(data, dict):
+        return [], None, False
+    return data.get("workflow_runs") or [], data.get("total_count"), True
+
+
+def _dedupe_runs(runs: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for r in runs:
+        rid = r.get("id")
+        if rid is not None:
+            if rid in seen:
+                continue
+            seen.add(rid)
+        out.append(r)
+    return out
+
+
+def _created_range(start: datetime, end: datetime) -> str:
+    f = "%Y-%m-%dT%H:%M:%SZ"
+    return f"{start.strftime(f)}..{end.strftime(f)}"
+
+
+def fetch_runs_range(repo: str, start: datetime, end: datetime,
+                     max_pages: int, depth: int = 0) -> tuple[list[dict], bool]:
+    """All workflow runs created in [start, end], deduped by id.
+
+    Returns (runs, complete). `complete` is False when an API error or the
+    1,000-result search cap (past RUNS_MAX_SPLIT_DEPTH) left part of the
+    window unfetched — callers must surface that, not read it as "no runs".
+    """
+    base = f"repos/{repo}/actions/runs?created={_created_range(start, end)}"
+    first, total, ok = _fetch_run_page(f"{base}&per_page=100&page=1")
+    if not ok:
+        return [], False
+    if total is not None and total > RUNS_SEARCH_CAP:
+        if depth < RUNS_MAX_SPLIT_DEPTH:
+            mid = start + (end - start) / 2
+            left, lok = fetch_runs_range(repo, start, mid, max_pages, depth + 1)
+            right, rok = fetch_runs_range(repo, mid, end, max_pages, depth + 1)
+            return _dedupe_runs(left + right), lok and rok
+        # Still over the cap at max depth: paginate the newest slice the
+        # search will give and flag the unfetched tail below.
+    items = list(first)
+    complete = True
+    if len(first) == 100:
+        for page in range(2, max_pages + 1):
+            batch, t, ok = _fetch_run_page(f"{base}&per_page=100&page={page}")
+            if t is not None:
+                total = t
+            if not ok:
+                complete = False
+                break
+            if not batch:
+                break
+            items.extend(batch)
+            if len(batch) < 100:
+                break
+        else:
+            complete = False  # ran out of pages with every page full
+        if total is not None and total > RUNS_SEARCH_CAP:
+            complete = False  # search cap hides the tail even if pages looked full
+    return _dedupe_runs(items), complete
 
 
 def cmd_collect(args) -> int:
@@ -389,8 +445,11 @@ def cmd_collect(args) -> int:
     since = now - timedelta(days=args.days)
     since_s = since.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    runs_path = f"repos/{repo}/actions/runs?created=>={since_s}"
-    runs, runs_truncated = fetch_paginated(runs_path, args.max_pages)
+    # `created` run queries are search-backed and capped at 1,000 results —
+    # fetch_runs_range bisects the window until every leaf fits, so the
+    # prior-7d baseline is actually collected instead of silently dropped.
+    runs, runs_complete = fetch_runs_range(repo, since, now, args.max_pages)
+    runs_truncated = not runs_complete
     print(f"fetched {len(runs)} runs since {since_s}", file=sys.stderr)
 
     job_samples: list[dict] = []
@@ -399,10 +458,12 @@ def cmd_collect(args) -> int:
     heavy_skipped = False
 
     def fetch_run_jobs(run_id):
+        """Returns (jobs, ok) — ok=False marks an API failure, distinct
+        from a run that genuinely lists zero jobs."""
         data, ok = gh_api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
         if not ok or not isinstance(data, dict):
-            return []
-        return data.get("jobs") or []
+            return None, False
+        return data.get("jobs") or [], True
 
     # One jobs-list call per run dominates collect time (~2k runs/14d) —
     # fetch them concurrently, order preserved, so the page cap can cover
@@ -414,13 +475,16 @@ def cmd_collect(args) -> int:
     else:
         jobs_per_run = [fetch_run_jobs(r.get("id")) for r in runs]
 
-    for run, jobs in zip(runs, jobs_per_run):
+    jobs_fetch_failures = 0
+    for run, (jobs, jobs_ok) in zip(runs, jobs_per_run):
+        if not jobs_ok:
+            jobs_fetch_failures += 1
         run_id = run.get("id")
         workflow = run.get("name") or run.get("path") or "?"
         run_created = run.get("created_at")
         run_url = run.get("html_url") or ""
         run_conclusion = run.get("conclusion")
-        for job in jobs:
+        for job in jobs or []:
             name = job.get("name") or "?"
             labels = job.get("labels") or []
             sample = {
@@ -446,11 +510,14 @@ def cmd_collect(args) -> int:
             if heavy_fetched >= args.max_step_jobs:
                 heavy_skipped = True
                 continue
-            detail, ok = gh_api(f"repos/{repo}/actions/jobs/{job.get('id')}")
-            if not ok or not isinstance(detail, dict):
+            # Steps are embedded in the jobs-list response — no per-job
+            # detail call needed, which keeps step data ahead of any
+            # rate-limit cutoff and saves ~1 call per heavy job (#651).
+            steps = job.get("steps") or []
+            if not steps:
                 continue
             heavy_fetched += 1
-            for st in detail.get("steps") or []:
+            for st in steps:
                 step_samples.append({
                     "workflow": workflow,
                     "job_name": name,
@@ -467,6 +534,7 @@ def cmd_collect(args) -> int:
         "since": since_s,
         "runs_fetched": len(runs),
         "runs_truncated": runs_truncated,
+        "jobs_fetch_failures": jobs_fetch_failures,
         "heavy_steps_truncated": heavy_skipped,
         "jobs": job_samples,
         "steps": step_samples,
@@ -553,8 +621,12 @@ def render_issue_body(metrics: dict, current: dict[str, dict],
         lines += ["> ⚠️ No baseline (first run?) — absolute values only, "
                   "regression comparison unavailable.", ""]
     if metrics.get("runs_truncated"):
-        lines += ["> ⚠️ Run list hit the --max-pages cap — the job windows "
-                  "below may be incomplete (oldest runs dropped).", ""]
+        lines += ["> ⚠️ Run list incomplete (API error or >1,000-result "
+                  "`created` windows at max split depth) — the oldest "
+                  "runs in the window may be missing.", ""]
+    if metrics.get("jobs_fetch_failures"):
+        lines += [f"> ⚠️ {metrics['jobs_fetch_failures']} job-list fetches "
+                  "failed — some runs contribute no job rows.", ""]
     lines += [
         "### Jobs: last 7d vs prior 7d",
         "",
@@ -680,11 +752,11 @@ def main() -> int:
                      help="lookback window in days (default 14 = 7d current + 7d baseline)")
     cp_.add_argument("--out", help="output JSON path (default: $CI_METRICS_OUT or ci-metrics.json)")
     cp_.add_argument("--max-pages", type=int, default=30,
-                     help="max run-list pages (100 runs each); 30 covers "
-                          "~3000 runs — the repo does ~2500/14d, so 10 "
-                          "silently truncated the baseline window (#651)")
+                     help="max pages per `created` window (100 runs each); "
+                          "windows over the 1,000-result search cap are "
+                          "bisected automatically (#651)")
     cp_.add_argument("--max-step-jobs", type=int, default=200,
-                     help="max heavy jobs to fetch steps for")
+                     help="max heavy jobs whose embedded steps are recorded")
     cp_.add_argument("--workers", type=int, default=8,
                      help="parallel jobs-list fetches (1 = serial)")
     cp_.set_defaults(func=cmd_collect)

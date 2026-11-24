@@ -104,14 +104,13 @@ def test_aggregate_failure_rate_and_macos():
 
 
 def test_aggregate_cancelled_and_skipped_excluded_from_failure_rate():
-    """#651: superseded runs must not inflate failure rates.
+    """#651: a cancelled run is an aborted measurement — no verdict counts.
 
     - job `cancelled` (killed mid-flight) → n_cancelled
-    - job `failure` inside a cancelled RUN (an `always()` aggregate that
-      read cancelled needs) → n_cancelled, the same artifact
+    - ANY verdict inside a cancelled run — the `always()` aggregate
+      artifact, a failure that predated the cancel, even a success →
+      n_cancelled: the superseding run re-tests the same-or-newer code
     - job `skipped` (path-gated out) → n_skipped, no verdict at all
-    - job `success` inside a cancelled run still counts — it finished
-      before the cancel and is a real verdict
     """
     base = NOW - timedelta(days=1)
     samples = [
@@ -126,10 +125,10 @@ def test_aggregate_cancelled_and_skipped_excluded_from_failure_rate():
     ]
     st = cm.aggregate_jobs(samples)["ci / pytest"]
     assert st["n_failed"] == 1
-    assert st["n_conclusion"] == 3
-    assert st["n_cancelled"] == 2
+    assert st["n_conclusion"] == 2
+    assert st["n_cancelled"] == 3
     assert st["n_skipped"] == 1
-    assert st["failure_rate"] == pytest.approx(1 / 3)
+    assert st["failure_rate"] == pytest.approx(0.5)
 
 
 def test_aggregate_steps_null_excluded():
@@ -295,31 +294,114 @@ def test_render_body_baseline_missing_note():
 
 
 # ---------------------------------------------------------------------------
-# collect pagination boundary (mocked gh_api)
+# collect run-range fetch (mocked gh_api) — `created` queries cap at 1,000
 # ---------------------------------------------------------------------------
 
-def test_fetch_paginated_stops_on_short_page(monkeypatch):
+def _runs_payload(ids, total=None):
+    return {"total_count": len(ids) if total is None else total,
+            "workflow_runs": [{"id": i} for i in ids]}
+
+
+def _page_of(path):
+    # "page=N" is the last query param; rsplit avoids matching per_page=100.
+    return int(path.rsplit("page=", 1)[1])
+
+
+_RANGE_START = datetime(2026, 11, 10, tzinfo=timezone.utc)
+_RANGE_END = datetime(2026, 11, 24, tzinfo=timezone.utc)
+
+
+def test_fetch_runs_range_short_window_single_call(monkeypatch):
     calls = []
 
     def fake_gh_api(path):
         calls.append(path)
-        if "page=1" in path:
-            return {"jobs": [{"id": 1}]}, True
-        return {"jobs": []}, True
+        return _runs_payload([1, 2, 3], total=3), True
 
     monkeypatch.setattr(cm, "gh_api", fake_gh_api)
-    items, truncated = cm.fetch_paginated("repos/o/r/actions/runs/1/jobs", 5, per_page=100)
-    assert len(items) == 1 and truncated is False
-    assert len(calls) == 1
+    runs, complete = cm.fetch_runs_range("o/r", _RANGE_START, _RANGE_END, 30)
+    assert [r["id"] for r in runs] == [1, 2, 3]
+    assert complete is True
+    assert len(calls) == 1  # short first page → no further pages
+    assert "created=2026-11-10T00:00:00Z..2026-11-24T00:00:00Z" in calls[0]
 
 
-def test_fetch_paginated_truncates_at_max_pages(monkeypatch):
+def test_fetch_runs_range_paginates_full_pages(monkeypatch):
     def fake_gh_api(path):
-        return {"jobs": [{"id": 1}] * 100}, True
+        page = _page_of(path)
+        if page == 1:
+            return _runs_payload(list(range(100)), total=150), True
+        if page == 2:
+            return _runs_payload(list(range(100, 150)), total=150), True
+        return _runs_payload([], total=150), True
 
     monkeypatch.setattr(cm, "gh_api", fake_gh_api)
-    items, truncated = cm.fetch_paginated("repos/o/r/actions/runs/1/jobs", 3, per_page=100)
-    assert len(items) == 300 and truncated is True
+    runs, complete = cm.fetch_runs_range("o/r", _RANGE_START, _RANGE_END, 30)
+    assert len(runs) == 150 and complete is True
+
+
+def test_fetch_runs_range_subdivides_over_search_cap(monkeypatch):
+    """total_count > 1,000 means the `created` query can never return the
+    tail — the window must be bisected until leaves fit (#651 review)."""
+    calls = []
+
+    def fake_gh_api(path):
+        calls.append(path)
+        if "2026-11-10T00:00:00Z..2026-11-24T00:00:00Z" in path:
+            # Parent window: 1,500 runs — over the search cap. Only the
+            # probe page is fetched before the split.
+            return _runs_payload(list(range(100)), total=1500), True
+        # Child windows fit: short first page, one call each.
+        return _runs_payload([9000 + len(calls)], total=1), True
+
+    monkeypatch.setattr(cm, "gh_api", fake_gh_api)
+    runs, complete = cm.fetch_runs_range("o/r", _RANGE_START, _RANGE_END, 30)
+    assert complete is True
+    assert len(runs) == 2
+    # 1 parent probe + 2 leaf probes; the parent's 100 items are discarded
+    # because the children re-cover the whole range.
+    assert len(calls) == 3
+    child_ranges = [c.split("created=")[1].split("&")[0] for c in calls[1:]]
+    assert child_ranges[0] == "2026-11-10T00:00:00Z..2026-11-17T00:00:00Z"
+    assert child_ranges[1] == "2026-11-17T00:00:00Z..2026-11-24T00:00:00Z"
+
+
+def test_fetch_runs_range_dedupes_boundary_runs(monkeypatch):
+    """Adjacent `created` ranges share their midpoint — a run created
+    exactly there can appear in both children."""
+
+    def fake_gh_api(path):
+        if "2026-11-10T00:00:00Z..2026-11-24T00:00:00Z" in path:
+            return _runs_payload(list(range(100)), total=1500), True
+        return _runs_payload([7, 8], total=2), True
+
+    monkeypatch.setattr(cm, "gh_api", fake_gh_api)
+    runs, complete = cm.fetch_runs_range("o/r", _RANGE_START, _RANGE_END, 30)
+    assert complete is True
+    assert [r["id"] for r in runs] == [7, 8]
+
+
+def test_fetch_runs_range_api_error_marks_incomplete(monkeypatch):
+    def fake_gh_api(path):
+        if _page_of(path) == 1:
+            return _runs_payload(list(range(100)), total=150), True
+        return None, False
+
+    monkeypatch.setattr(cm, "gh_api", fake_gh_api)
+    runs, complete = cm.fetch_runs_range("o/r", _RANGE_START, _RANGE_END, 30)
+    assert len(runs) == 100 and complete is False
+
+
+def test_fetch_runs_range_depth_cap_flags_incomplete(monkeypatch):
+    monkeypatch.setattr(cm, "RUNS_MAX_SPLIT_DEPTH", 2)
+
+    def fake_gh_api(path):
+        # Every window claims >cap — recursion bottoms out at max depth.
+        return _runs_payload(list(range(100)), total=5000), True
+
+    monkeypatch.setattr(cm, "gh_api", fake_gh_api)
+    runs, complete = cm.fetch_runs_range("o/r", _RANGE_START, _RANGE_END, 30)
+    assert complete is False
 
 
 def test_find_open_issue_gh_failure_is_not_no_issue(monkeypatch):
