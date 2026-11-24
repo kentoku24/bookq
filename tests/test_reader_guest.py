@@ -614,6 +614,46 @@ def test_guest_qr_url_pairs_and_turns(browser, guest_server):
         ctx_l.close()
 
 
+def test_guest_invite_button_qr_pairs(browser, guest_server):
+    """The REAL invite path: member taps 🔗 → 「ゲストを招待」 — a CREATE
+    (MATCH never mints a guestToken), then the QR's encoded composite URL
+    is what an unlogged-in device opens to pair."""
+    timeout = 20000
+    ctx_l, pl = _authed_page(browser, guest_server, ALICE)
+    ctx_g = None
+    try:
+        pl.click("#pair-btn")
+        pl.wait_for_selector("#pair-guest-invite", state="visible",
+                             timeout=timeout)
+        pl.click("#pair-guest-invite")
+        pl.wait_for_function(
+            "() => { var q = document.getElementById('pair-qr');"
+            " return q && !q.hidden && !!q.dataset.qrUrl; }",
+            timeout=timeout)
+        url = pl.evaluate(
+            "() => document.getElementById('pair-qr').dataset.qrUrl")
+        assert "/#/join/" in url and "?gt=" in url, url
+        # guest device: fresh context, NO cookies — opens the QR URL
+        ctx_g = browser.new_context(
+            viewport={"width": 900, "height": 600}, has_touch=True)
+        pg = ctx_g.new_page()
+        pg.goto(url)
+        pg.wait_for_selector(".tile", timeout=timeout)
+        for p in (pl, pg):
+            p.wait_for_function(
+                "() => window.PairController.state.status === 'connected'"
+                " || window.PairController.state.status === 'loading'",
+                timeout=timeout)
+        assert pl.evaluate(
+            "() => window.PairController.state.role") == "leader"
+        assert pg.evaluate(
+            "() => window.PairController.state.role") == "follower"
+    finally:
+        if ctx_g is not None:
+            ctx_g.close()
+        ctx_l.close()
+
+
 def test_guest_qr_url_revoked_to_login(browser, guest_server):
     """Leader disconnect kills the grant — the guest's next load lands
     back on the login page (access lost, not just pairing ended)."""

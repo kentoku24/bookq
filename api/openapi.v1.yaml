@@ -939,17 +939,14 @@ paths:
                   value: {ok: true}
         "400": {$ref: "#/components/responses/BadRequest"}
         "401":
-          description: token が未知または TTL 失効（`{"detail":"guest link invalid|expired"}`）
+          description: |
+            token が未知・TTL 失効・または owner が無効化済み。応答は
+            常に `{"detail":"guest link invalid"}` — 失効と未知を区別
+            すると token 状態の oracle になるため実装は区別しない。
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
-              examples:
-                unknown:
-                  summary: 未知 token
-                  value: {detail: "guest link invalid"}
-                expired:
-                  summary: TTL 失効
-                  value: {detail: "guest link expired"}
+              example: {detail: "guest link invalid"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "405": {description: POST 以外のメソッド}
         "429": {$ref: "#/components/responses/TooManyRequests"}

@@ -159,10 +159,15 @@
             '<span id="pair-create-label">開始</span>' +
             '<span class="pair-sub" id="pair-create-sub">' +
               'この端末が leader になりコードを発行</span></button>' +
+          '<button id="pair-guest-invite" type="button" class="pair-action">' +
+            '<span>ゲストを招待</span>' +
+            '<span class="pair-sub">QR で未ログイン端末を招待（この端末が leader）</span></button>' +
           '<button id="pair-join-open" type="button" class="pair-action">' +
             '<span id="pair-join-open-label">参加</span>' +
             '<span class="pair-sub" id="pair-join-open-sub">' +
               '相手のコードを入力</span></button>' +
+          '<p id="pair-guest-note" class="pair-note" hidden>' +
+            'ゲストは招待リンク（QR の URL）からのみ参加できます</p>' +
         '</div>' +
         '<div id="pair-sec-join" class="pair-sec" hidden>' +
           '<video id="pair-scan-video" playsinline muted autoplay hidden></video>' +
@@ -270,6 +275,8 @@
       createSub: _el('pair-create-sub'),
       joinOpenLabel: _el('pair-join-open-label'),
       joinOpenSub: _el('pair-join-open-sub'),
+      guestInvite: _el('pair-guest-invite'),
+      guestNote: _el('pair-guest-note'),
       secJoin: _el('pair-sec-join'),
       secLeader: _el('pair-sec-leader'),
       secWaiting: _el('pair-sec-waiting'),
@@ -389,13 +396,19 @@
      * client offers 「近くの相手とつながる / コードで参加」; a legacy
      * client — or one whose connect() answered {unsupported} — keeps the
      * classic 開始/参加 pair. A guest caller can never lead — CREATE and
-     * MATCH are rejected `not_leader` on a guest link — so the leader
-     * button is hidden outright, leaving only コードで参加. */
+     * MATCH are rejected `not_leader` on a guest link — and their JOIN
+     * path is the invite URL, never a 6-digit code (the server rejects
+     * guest JOIN{code} outright), so every code surface hides for them:
+     * leader button, join form entry, and the guest-invite action itself.
+     * Only the explanatory note remains. */
     const isGuest = window.__BOOKQ_GUEST__ === 'true';
     const matchable = !isGuest &&
                       !!(ctl && typeof ctl.connect === 'function' &&
                          !connectUnsupported);
     if (els.create) show(els.create, !isGuest);
+    if (els.joinOpen) show(els.joinOpen, !isGuest);
+    if (els.guestInvite) show(els.guestInvite, !isGuest);
+    if (els.guestNote) show(els.guestNote, isGuest);
     els.createLabel.textContent = matchable ? '近くの相手とつながる' : '開始';
     els.createSub.textContent = matchable
       ? '自動でマッチング（なければ待機開始）'
@@ -620,7 +633,10 @@
 
   function submitJoin() {
     const v = els.codeInput.value;
-    if (!/^\d{6}$/.test(v) || !ctl || joinPending) return;
+    // Guests join via the invite URL only — the server rejects guest
+    // JOIN{code}, so don't even offer the attempt.
+    if (!/^\d{6}$/.test(v) || !ctl || joinPending ||
+        window.__BOOKQ_GUEST__ === 'true') return;
     joinPending = true;   // cleared when the join view re-opens
     // A fresh attempt retires the carried-over failure notice (#158).
     lastJoinError = null;
@@ -642,9 +658,14 @@
       : (s && s.code ? location.origin + '/#/join/' + s.code : null);
     if (!url || typeof window.qrcode !== 'function') {
       els.qr.hidden = true;
+      els.qr.dataset.qrUrl = '';
       qrDrawnFor = null;
       return;
     }
+    // Expose the encoded URL on the canvas: the browser e2e drives the
+    // real 「ゲストを招待」 button and needs the actual link a scanner
+    // would read — re-deriving it in the test would miss format drift.
+    els.qr.dataset.qrUrl = url;
     if (qrDrawnFor === url) { els.qr.hidden = false; return; }
     // 'L' keeps module count low for the longer URL payload so cells
     // stay scannable on a ~170px canvas.
@@ -827,6 +848,12 @@
       } else if (ctl) {
         ctl.create();
       }
+    });
+    /* 「ゲストを招待」 — explicit CREATE (never MATCH): only a CREATE ACK
+     * mints the guestToken the composite `/#/join/<code>?gt=` QR needs,
+     * so the invite action must not go through connect()'s match path. */
+    els.guestInvite.addEventListener('click', () => {
+      if (ctl && typeof ctl.create === 'function') ctl.create();
     });
     els.joinOpen.addEventListener('click', () => {
       joinView = true;
