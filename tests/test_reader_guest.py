@@ -390,6 +390,25 @@ def test_guest_cannot_leader_ops(guest_server):
         _close_pair(leader_ws, sid, guest_ws)
 
 
+def test_guest_cannot_create_or_match(guest_server):
+    """An unbound guest link must never lead: CREATE/MATCH would mint a
+    fresh grant bound to the guest's own session, surviving the leader's
+    disconnect."""
+    with _minted(guest_server) as (_ws, _data, token):
+        g = _ws_guest(guest_server, token)
+        try:
+            assert _recv(g)["type"] == "HELLO"
+            for rtype in ("CREATE", "MATCH"):
+                g.send(_req(rtype, rid="x"))
+                assert _expect(g, "REJECT")["reason"] == "not_leader"
+            # The link is unharmed — a normal JOIN{guestToken} still works.
+            g.send(_req("JOIN", {"guestToken": token}, rid="jg"))
+            assert _expect(g, "ACK")["data"]["role"] == "follower"
+            g.send(_req("LEAVE", rid="lv"))
+        finally:
+            g.close()
+
+
 # ── 11: read-only enforcement ───────────────────────────────────────
 
 

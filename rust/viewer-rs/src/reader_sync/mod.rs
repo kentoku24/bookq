@@ -174,6 +174,11 @@ pub struct Link {
     pub next_ping_due: Instant,
     pub ping_seq: u64,
     pub user: Option<Value>,
+    /// `bookq_guest` grant link — read-only follower only: CREATE/MATCH
+    /// are rejected in `dispatch` so a guest can never lead a session
+    /// (leading would mint a fresh guest grant bound to their own
+    /// session, surviving the leader's disconnect).
+    pub guest: bool,
     close: watch::Sender<Option<(u16, String)>>,
 }
 
@@ -182,6 +187,7 @@ impl Link {
         outq: mpsc::Sender<OutItem>,
         close: watch::Sender<Option<(u16, String)>>,
         user: Option<Value>,
+        guest: bool,
         now: Instant,
         heartbeat: Duration,
     ) -> Self {
@@ -199,6 +205,7 @@ impl Link {
             next_ping_due: now + heartbeat,
             ping_seq: 0,
             user,
+            guest,
             close,
         }
     }
@@ -884,6 +891,15 @@ impl Inner {
             .unwrap_or(Bind::Unbound);
 
         if matches!(t.as_str(), "CREATE" | "JOIN" | "RESUME" | "MATCH") {
+            // Guest links never lead: CREATE (and MATCH's create
+            // fallback) would mint a guest grant bound to the guest's
+            // own session — surviving the leader's disconnect.
+            if matches!(t.as_str(), "CREATE" | "MATCH")
+                && self.links.get(link_id).is_some_and(|l| l.guest)
+            {
+                self.reject(link_id, req_id(req), Some(&t), REASON_NOT_LEADER, None);
+                return;
+            }
             if !matches!(bind, Bind::Unbound) {
                 let rtype = t.clone();
                 self.reject(
@@ -2433,6 +2449,7 @@ mod tests {
             tx,
             close_tx,
             Some(Value::Null),
+            false,
             Instant::now(),
             Duration::from_secs_f64(HEARTBEAT_INTERVAL),
         );

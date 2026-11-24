@@ -1520,6 +1520,17 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
 /// `WebSocketUpgrade` extractor's rejection; unauthenticated handshakes
 /// answer HTTP 403.
 async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Response {
+    let is_guest = matches!(
+        auth::resolve(
+            req.headers(),
+            st.test_mode,
+            &st.secret_key,
+            st.session_key.as_ref(),
+            &st.directory,
+            st.registry.guest(),
+        ),
+        auth::Caller::Guest(_)
+    );
     let Some(user) = auth::resolve_ws_user(
         req.headers(),
         st.test_mode,
@@ -1534,7 +1545,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
     match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &st).await {
         Ok(wsu) => {
             let st2 = st.clone();
-            wsu.on_upgrade(move |socket| reader_sync_conn(socket, st2, user))
+            wsu.on_upgrade(move |socket| reader_sync_conn(socket, st2, user, is_guest))
         }
         Err(rej) => rej.into_response(),
     }
@@ -1546,6 +1557,7 @@ async fn reader_sync_conn(
     socket: axum::extract::ws::WebSocket,
     st: AppState,
     user: serde_json::Value,
+    is_guest: bool,
 ) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
@@ -1557,6 +1569,7 @@ async fn reader_sync_conn(
         outq_tx,
         close_tx,
         Some(user),
+        is_guest,
         std::time::Instant::now(),
         reg.heartbeat_interval(),
     );
@@ -2351,6 +2364,7 @@ mod handler_tests {
             tx,
             close_tx,
             None,
+            false,
             std::time::Instant::now(),
             st.registry.heartbeat_interval(),
         );
