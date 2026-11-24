@@ -271,4 +271,37 @@ mod tests {
         }
         assert!(!rl.check("192.168.1.1"));
     }
+
+    #[test]
+    fn rate_limit_map_hard_cap() {
+        let rl = RedeemRateLimit::default();
+        // Saturate the map with fresh windows directly — routing 4096 keys
+        // through check() would burn the global budget and hide the cap.
+        {
+            let mut s = rl.inner.lock().unwrap();
+            let now = Instant::now();
+            for i in 0..RedeemRateLimit::MAX_TRACKED_IPS {
+                s.per_ip.insert(
+                    format!(
+                        "10.{:02}.{:02}.{:02}",
+                        (i >> 16) & 255,
+                        (i >> 8) & 255,
+                        i & 255
+                    ),
+                    (now, 0),
+                );
+            }
+        }
+        // A NEW key isn't tracked past the cap — it rides the global budget.
+        assert!(rl.check("192.0.2.1"));
+        for _ in 1..RedeemRateLimit::MAX_GLOBAL_ATTEMPTS {
+            assert!(rl.check("192.0.2.1"));
+        }
+        assert!(!rl.check("192.0.2.1"));
+        // The map never grew past the cap.
+        assert_eq!(
+            rl.inner.lock().unwrap().per_ip.len(),
+            RedeemRateLimit::MAX_TRACKED_IPS
+        );
+    }
 }

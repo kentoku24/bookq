@@ -9,10 +9,10 @@
   }
   if (!gm) return;
   var token = gm[1];
-  function fail() {
+  function fail(msg) {
     var err = document.getElementById('login-err');
     if (err) {
-      err.textContent = 'ゲストリンクが無効か期限切れです';
+      err.textContent = msg;
       err.hidden = false;
     }
   }
@@ -28,7 +28,11 @@
       // would be a no-op and strand us on the login page.)
       location.reload();
     } else {
-      fail();
+      fail('ゲストリンクが無効か期限切れです');
     }
-  }).catch(fail);
+  }).catch(function () {
+    // Network failure — the invite itself may be fine; the hash survives
+    // so a reload retries the redeem.
+    fail('ネットワークエラーです。もう一度お試しください');
+  });
 })();

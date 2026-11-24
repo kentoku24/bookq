@@ -1594,6 +1594,11 @@
   }
   try { window.fvGuardPath = _fvGuard; } catch(e) { console.warn(e); }
   function navigateToFolder(path){
+    // Folder navigation supersedes any in-flight URL restore/load — claim
+    // a new restore generation so a pending guest-redeem .catch (hash.js)
+    // can't restore the stale invite hash over the browsed URL. (pushState
+    // fires no hashchange, so nothing else bumps the token on this path.)
+    try { urlRestoreGen++; } catch(e) { console.warn(e); }
     var FV = window.FolderVisibility;
     if (FV){
       // guardPath: 判定不能（idle/loading / error 無snapshot）はキューだけ、

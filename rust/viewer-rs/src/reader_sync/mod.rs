@@ -2582,21 +2582,30 @@ impl Inner {
             // directory is wired the grant OWNER's membership is checked
             // too: the `viewer-rs users remove` CLI path can't reach
             // end_owner_sessions, so without this a removed member's guest
-            // sockets would survive (and their grants resurrect on
-            // re-enable).
+            // sockets would survive — and their grants resurrect on
+            // re-enable.
             if link.guest {
-                let valid = link
+                let grant = link
                     .guest_token
                     .as_deref()
                     .and_then(|t| match self.guest.status(t) {
                         GrantStatus::Valid(g) => Some(g),
                         _ => None,
-                    })
-                    .is_some_and(|g| {
-                        self.directory
-                            .as_ref()
-                            .map_or(true, |d| d.is_member(&g.owner_email))
                     });
+                let valid = match &grant {
+                    Some(g) => match &self.directory {
+                        // Permanent, like end_owner_sessions' revoke_owner —
+                        // closing the socket alone would let a re-enable
+                        // resurrect the bearer grant (the CLI path never
+                        // reaches revoke_owner).
+                        Some(d) if !d.is_member(&g.owner_email) => {
+                            self.guest.revoke_owner(&g.owner_email);
+                            false
+                        }
+                        _ => true,
+                    },
+                    None => false,
+                };
                 if !valid {
                     self.close_link(&lid, "guest_revoked", WS_CLOSE_POLICY);
                     continue;
@@ -2967,8 +2976,14 @@ mod tests {
             .guest()
             .issue("ghost@example.com", "s1", Duration::from_secs(3600))
             .unwrap();
+        // A second, never-socketed grant for the same owner must die too —
+        // revoke_owner is permanent, so a re-enable can't resurrect either.
+        let ghost2 = reg
+            .guest()
+            .issue("ghost@example.com", "s1", Duration::from_secs(3600))
+            .unwrap();
         let (_lg, mut rg, mut gclose) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some(ghost));
+            mk_link_full(&mut inner, Some(Value::Null), true, Some(ghost.clone()));
         let _ = next_json(&mut rg); // HELLO
         // A member-owned grant survives the same tick.
         let member = reg
@@ -2976,11 +2991,24 @@ mod tests {
             .issue("member@example.com", "s1", Duration::from_secs(3600))
             .unwrap();
         let (l1, _r1, _c1) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some(member));
+            mk_link_full(&mut inner, Some(Value::Null), true, Some(member.clone()));
         inner.tick();
         gclose.changed().await.unwrap();
         assert_eq!(gclose.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);
         assert!(inner.links.get(&l1).is_some_and(|l| l.alive));
+        // Both ghost grants are revoked outright; the member's stays Valid.
+        assert!(matches!(
+            reg.guest().status(&ghost),
+            GrantStatus::Unknown
+        ));
+        assert!(matches!(
+            reg.guest().status(&ghost2),
+            GrantStatus::Unknown
+        ));
+        assert!(matches!(
+            reg.guest().status(&member),
+            GrantStatus::Valid(_)
+        ));
     }
 
     #[tokio::test]

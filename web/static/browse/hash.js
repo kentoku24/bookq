@@ -484,11 +484,13 @@
         // link back via replaceState (fires no hashchange, so no
         // auto-retry loop) so a manual reload can retry the redeem —
         // unless the user navigated meanwhile (a bumped urlRestoreGen
-        // means this hash no longer owns the address bar), and say it
-        // was the network, not the link.
+        // means this hash no longer owns the address bar) — and mirror
+        // the urlStack entry the consume path replaced, and say it was
+        // the network, not the link.
         if (typeof window.urlRestoreGen !== 'number' ||
             window.urlRestoreGen === navGen) {
           try { history.replaceState(null, "", guestHash); } catch (e) {}
+          try { urlStackReplace(location.pathname + location.search + location.hash); } catch (e) {}
         }
         if (typeof window.showErrorToast === 'function') {
           window.showErrorToast('ネットワークエラーです。もう一度お試しください');
