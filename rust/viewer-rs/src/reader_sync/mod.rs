@@ -244,6 +244,11 @@ pub struct Link {
     /// missing gets its transport closed.
     join_fails: u32,
     join_fails_since: Instant,
+    /// An ordered `OutItem::Close` is already queued — the link is
+    /// terminating and the frames ahead of it (END etc.) must flush
+    /// first. `tick` must not let a bypassing watch close race ahead and
+    /// truncate them.
+    close_queued: bool,
     close: watch::Sender<Option<(u16, String)>>,
 }
 
@@ -275,6 +280,7 @@ impl Link {
             guest_token,
             join_fails: 0,
             join_fails_since: now,
+            close_queued: false,
             close,
         }
     }
@@ -361,8 +367,10 @@ impl Link {
         if self
             .outq
             .try_send(OutItem::Close(code, reason.to_string()))
-            .is_err()
+            .is_ok()
         {
+            self.close_queued = true;
+        } else {
             self.request_transport_close(code, reason);
         }
     }
@@ -604,8 +612,11 @@ impl Registry {
         g.detach_link(link_id);
     }
 
-    /// End every session led by `owner_email` and revoke their guest
-    /// grants — the member-disable/remove hook so a re-enable can never
+    /// End every session led by `owner_email`, revoke their guest grants
+    /// AND drop the member's own sockets — the member-disable/remove hook.
+    /// Membership is only checked at handshake time, so without the link
+    /// close a disabled member could keep operating on an existing socket
+    /// (CREATE → mint fresh guest invites). A re-enable can never
     /// resurrect a live bearer grant.
     pub async fn end_owner_sessions(&self, owner_email: &str) -> usize {
         let mut g = self.inner.lock().await;
@@ -627,8 +638,28 @@ impl Registry {
             .map(|s| s.id.clone())
             .collect();
         let n = sids.len();
+        // END frames queue first — the member's own sockets close behind
+        // them (ordered), not via the bypassing watch close that would
+        // truncate END before it flushes.
         for sid in sids {
             g.end_session(&sid, END_OWNER_DISABLED);
+        }
+        let owner_links: Vec<String> = g
+            .links
+            .iter()
+            .filter(|(_, l)| {
+                l.user
+                    .as_ref()
+                    .and_then(|u| u.get("email"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(owner_email))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for lid in owner_links {
+            if let Some(mut link) = g.detach_link(&lid) {
+                link.queue_transport_close(WS_CLOSE_POLICY, "owner_disabled");
+            }
         }
         n
     }
@@ -2526,7 +2557,7 @@ impl Inner {
             let Some(link) = self.links.get_mut(&lid) else {
                 continue;
             };
-            if !link.alive {
+            if !link.alive || link.close_queued {
                 continue;
             }
             if now.duration_since(link.last_rx) >= self.no_response_timeout {
@@ -2875,7 +2906,7 @@ mod tests {
         let reg = reg_for_test();
         let mut inner = reg.inner.lock().await;
         // Unknown bearer → not Valid → the next tick closes the socket.
-        let (lg, mut rg, mut gclose) =
+        let (_lg, mut rg, mut gclose) =
             mk_link_full(&mut inner, Some(Value::Null), true, Some("stale".into()));
         let _ = next_json(&mut rg); // HELLO
         // A normal link is untouched.
@@ -2912,6 +2943,46 @@ mod tests {
         let _ = next_json(&mut r2); // ACK
         inner.end_session(&sid, END_LEFT);
         let _ = next_json(&mut r2); // END frame reaches the client first
+        match r2.try_recv() {
+            Ok(OutItem::Close(code, _)) => assert_eq!(code, WS_CLOSE_NORMAL),
+            other => panic!("expected queued close after END, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_bypass_a_queued_ordered_close() {
+        // END is queued ahead of the ordered close — a tick racing the
+        // drain must not fire the watch-channel bypass close (that would
+        // truncate the END and leave the guest retrying a dead grant
+        // until its own deadline).
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), false, None);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        let _ = next_json(&mut r1); // STATE
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+        let (l2, mut r2, mut gclose) =
+            mk_link_full(&mut inner, Some(Value::Null), true, Some(gt.clone()));
+        let _ = next_json(&mut r2); // HELLO
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req("JOIN", "", protocol::frame(&[("guestToken", gt.into())])),
+        );
+        let _ = next_json(&mut r2); // ACK
+        inner.end_session(&sid, END_LEFT);
+        // The grant is dead NOW — tick's revalidation must skip the link
+        // (close_queued) instead of firing the bypass watch close.
+        inner.tick();
+        assert!(!gclose.has_changed().unwrap());
+        let _ = next_json(&mut r2); // END flushes ahead of the ordered close
         match r2.try_recv() {
             Ok(OutItem::Close(code, _)) => assert_eq!(code, WS_CLOSE_NORMAL),
             other => panic!("expected queued close after END, got {:?}", other.is_ok()),
