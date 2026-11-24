@@ -268,6 +268,99 @@ describe('applyUrlState (hashchange listener)', () => {
   });
 });
 
+describe('applyUrlState — #/guest/ deep link', () => {
+  function fireHash() {
+    window.dispatchEvent(new Event('hashchange'));
+  }
+  const TOKEN = 'g'.repeat(32);
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  beforeEach(() => {
+    window.treeLoaded = true;
+    window.showErrorToast = vi.fn();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('redeems the token then joinGuest + opens the pair panel', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const joinGuest = vi.fn(() => Promise.resolve());
+    const open = vi.fn();
+    window.PairController = { state: { status: 'idle' }, joinGuest };
+    window.PairUI = { open };
+    setHash('#/guest/' + TOKEN);
+    fireHash();
+    expect(location.hash).toBe('');   // consumed once via replaceState
+    await flush();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/guest/redeem',
+      expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body))
+      .toEqual({ token: TOKEN });
+    expect(joinGuest).toHaveBeenCalledWith(TOKEN);
+    expect(open).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('dead grant → error toast, no join', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    const joinGuest = vi.fn(() => Promise.resolve());
+    window.PairController = { state: { status: 'idle' }, joinGuest };
+    window.PairUI = { open: vi.fn() };
+    setHash('#/guest/' + TOKEN);
+    fireHash();
+    await flush();
+    expect(joinGuest).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('redeem fetch failure → error toast, no join', async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error('net')));
+    vi.stubGlobal('fetch', fetchMock);
+    const joinGuest = vi.fn(() => Promise.resolve());
+    window.PairController = { state: { status: 'idle' }, joinGuest };
+    setHash('#/guest/' + TOKEN);
+    fireHash();
+    await flush();
+    expect(joinGuest).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('active session is never torn down — panel opens instead', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const joinGuest = vi.fn(() => Promise.resolve());
+    const open = vi.fn();
+    window.PairController = {
+      state: { status: 'connected' }, joinGuest,
+    };
+    window.PairUI = { open };
+    setHash('#/guest/' + TOKEN);
+    fireHash();
+    await flush();
+    // redeem still ran (refreshes Max-Age) but join was refused
+    expect(fetchMock).toHaveBeenCalled();
+    expect(joinGuest).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('malformed guest hash falls through — no redeem call', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    window.PairController = { state: { status: 'idle' }, joinGuest: vi.fn() };
+    setHash('#/guest/short');
+    fireHash();
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
 describe('applyUrlState — dead links & guards (UX/risk)', () => {
   function fireHash() {
     window.dispatchEvent(new Event('hashchange'));
