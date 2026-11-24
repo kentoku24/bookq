@@ -352,6 +352,7 @@
     var _member = null;              // bound member {sessionId,memberId,role,resumeToken}
     var _roleIntent = null;          // role shown while an entry op is in flight
     var _code = null;
+    var _guestToken = null;          // CREATE ACK's guest-access token (leader only)
     var _pendingMember = null;       // {memberId,name} awaiting leader approval
     var _approvedMemberId = null;    // memberId an APPROVE was already sent for
     var _link = null;                // {t, open, gone, gen}
@@ -468,6 +469,7 @@
         memberId: _member ? _member.memberId : null,
         sessionId: _member ? _member.sessionId : null,
         code: _code,
+        guestToken: _guestToken,
         joinRequest: !!_pendingMember,
         side: _side(),
         transport: _effPlane(),
@@ -1100,6 +1102,7 @@
       _endReset();
       if (!keepRole) _roleIntent = null;
       _code = null;
+      _guestToken = null;
       _pendingMember = null;
       _approvedMemberId = null;
     }
@@ -1175,6 +1178,24 @@
       _resetSession();
       _roleIntent = 'follower';
       return _startEntry('JOIN', {code: code}, null);
+    }
+
+    /* Guest-access join: the QR's `/#/guest/<token>` deep link resolves
+     * to JOIN{guestToken} — same follower binding as join(code), but the
+     * grant names the session directly (no 6-digit code, no approval
+     * round-trip semantics change: the leader still APPROVEs the pending
+     * member exactly like a code join). Token shape mirrors the server's
+     * valid_token_shape: urlsafe base64, 16..=128 chars. */
+    function joinGuest(token) {
+      if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
+      if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(token)) {
+        return Promise.reject(_err('ERR_MALFORMED', 'guest token malformed'));
+      }
+      _leaveBound();
+      _teardownLink();
+      _resetSession();
+      _roleIntent = 'follower';
+      return _startEntry('JOIN', {guestToken: token}, null);
     }
 
     /* One-tap pairing: the server binds the caller as follower when a
@@ -1550,6 +1571,7 @@
       _member.resumeToken = d.resumeToken || _member.resumeToken;
       _roleIntent = _member.role;
       if (d.code) _code = d.code;
+      if (d.guestToken) _guestToken = d.guestToken;
       _readyFor = null;                              // READY must re-arm
       _store();
       _retry = 0;
@@ -2064,6 +2086,7 @@
       _member = null;
       _roleIntent = null;
       _code = null;
+      _guestToken = null;
       _pendingMember = null;
       _clearCreds();
       if (_sig) { _sig = null; }
@@ -2123,6 +2146,7 @@
     var api = {
       create: create,
       join: join,
+      joinGuest: joinGuest,
       match: match,
       approve: approve,
       reject: reject,

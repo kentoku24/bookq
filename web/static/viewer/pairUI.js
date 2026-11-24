@@ -439,7 +439,7 @@
 
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
-      drawQR(s.code);
+      drawQR(s);
       // Past the match window nobody can find this session via 🔗 —
       // say so instead of promising a join that can no longer happen.
       if (!leaderSince) leaderSince = Date.now();
@@ -624,22 +624,40 @@
     ctl.join(v);
   }
 
+  /* A member scanning the guest QR joins via the same grant token —
+   * joinGuest binds them as follower under THEIR OWN identity (the
+   * "ゲスト" name only applies to uncredentialed bookq_guest callers). */
+  function submitGuestJoin(token) {
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(token) || !ctl || joinPending) return;
+    joinPending = true;
+    lastJoinError = null;
+    joinNoticeShown = false;
+    joinError('');
+    ctl.joinGuest(token);
+  }
+
   // ── QR display (leader) ──
 
-  function drawQR(code) {
+  function drawQR(s) {
     if (!els.qr) return;
-    if (!code || typeof window.qrcode !== 'function') {
+    // Guest-access link wins: an unlogged-in device scanning this QR
+    // redeems `/#/guest/<token>` and pairs without an account. The 6-digit
+    // code stays visible next to it for member-to-member pairing.
+    const url = (s && s.guestToken)
+      ? location.origin + '/#/guest/' + s.guestToken
+      : (s && s.code ? location.origin + '/#/join/' + s.code : null);
+    if (!url || typeof window.qrcode !== 'function') {
       els.qr.hidden = true;
       qrDrawnFor = null;
       return;
     }
-    if (qrDrawnFor === code) { els.qr.hidden = false; return; }
+    if (qrDrawnFor === url) { els.qr.hidden = false; return; }
     // 'L' keeps module count low for the longer URL payload so cells
     // stay scannable on a ~170px canvas.
     const qr = window.qrcode(0, 'L');
-    // URL-QR: any camera app deep-links straight into join — the code is
+    // URL-QR: any camera app deep-links straight into join — the token is
     // in the fragment so it never reaches access logs or cache keys.
-    qr.addData(location.origin + '/#/join/' + code);
+    qr.addData(url);
     qr.make();
     const n = qr.getModuleCount();
     const cell = Math.max(1, Math.floor(els.qr.width / (n + 8)));  // +quiet zone
@@ -656,7 +674,7 @@
       }
     }
     els.qr.hidden = false;
-    qrDrawnFor = code;
+    qrDrawnFor = url;
   }
 
   // ── QR scan (follower) ──
@@ -705,9 +723,16 @@
         const img = cx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
         const res = window.jsQR(img.data, img.width, img.height);
         if (res) {
-          // accept both a bare 6-digit code and the #/join/ deep-link URL
+          // accept a bare 6-digit code, the #/join/ deep-link URL, and
+          // the #/guest/ guest-access deep-link (the QR now prefers it)
+          const g = res.data.match(/#\/guest\/([A-Za-z0-9_-]{16,128})/);
           const code = /^\d{6}$/.test(res.data) ? res.data
             : (res.data.match(/#\/join\/(\d{6})/) || [])[1];
+          if (g) {
+            stopScan();
+            submitGuestJoin(g[1]);
+            return;
+          }
           if (code) {
             stopScan();
             els.codeInput.value = code;
