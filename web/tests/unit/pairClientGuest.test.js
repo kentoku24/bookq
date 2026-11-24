@@ -146,7 +146,7 @@ describe('pairClient guest access', () => {
 describe('PairClient.peekActivePair / supportsGuest', () => {
   const REC = {
     sessionId: 's1', memberId: 'm1', role: 'leader',
-    resumeToken: 'rt', guestToken: TOKEN, hb: 1000, tabId: 'tabA',
+    resumeToken: 'rt', hb: 1000, tabId: 'tabA',
   };
   const store = (val) => ({
     getItem: (k) => (k === 'bookq.readerSync.persist.v1' ? val : null),
@@ -176,5 +176,50 @@ describe('PairClient.peekActivePair / supportsGuest', () => {
       .toBeNull();
     expect(globalThis.PairClient.peekActivePair(
       store(rec({ hb: 'x' })), () => 0, 4000)).toBeNull();
+  });
+});
+
+describe('guestToken storage hygiene', () => {
+  const memStore = () => {
+    const m = {};
+    return {
+      m,
+      getItem: (k) => (k in m ? m[k] : null),
+      setItem: (k, v) => { m[k] = v; },
+      removeItem: (k) => { delete m[k]; },
+    };
+  };
+
+  it('CREATE ACK stores guestToken in sessionStorage creds, NOT the persist record', async () => {
+    const session = memStore(), persist = memStore();
+    const t = fakeTransport();
+    const c = globalThis.PairClient.createClient({
+      url: 'ws://test/ws/reader-sync',
+      transportFactory: () => t,
+      storage: session,
+      persistStorage: persist,
+      events: null,
+    });
+    const p = c.create();
+    helloThen(t);
+    const create = t.sent.find((f) => f.type === 'CREATE');
+    t.emit({
+      v: 1, type: 'ACK', request: 'CREATE', requestId: create.requestId,
+      data: {
+        sessionId: 's9', memberId: 'm9', role: 'leader',
+        code: '123456', guestToken: TOKEN, resumeToken: 'rt9',
+      },
+    });
+    await p;
+    // Tab-scoped creds keep the grant: a same-tab RESUME re-arms the
+    // composite `?gt=` QR.
+    const creds = JSON.parse(session.m['bookq.readerSync.v1']);
+    expect(creds.guestToken).toBe(TOKEN);
+    // The cross-tab localStorage record must NOT carry the bearer — it is
+    // shared across tabs, survives the browser, and is XSS-readable. A
+    // foreign tab's adoption degrades to the code-only QR instead.
+    const rec = JSON.parse(persist.m['bookq.readerSync.persist.v1']);
+    expect(rec).toBeTruthy();
+    expect(rec.guestToken).toBeUndefined();
   });
 });

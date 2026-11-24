@@ -546,7 +546,12 @@
       _persistClear();
     }
 
-    /* ── cross-tab persist record (localStorage) ── */
+    /* ── cross-tab persist record (localStorage) ──
+     * guestToken stays OUT of this record on purpose: it is bearer material
+     * for an origin-wide cookie, and localStorage is shared across tabs and
+     * survives the browser — only the tab-scoped sessionStorage creds carry
+     * it, so a same-tab RESUME keeps the composite `?gt=` QR while a foreign
+     * tab's adoption degrades to the code-only QR. */
 
     function _persistRec() {
       if (!_persist) return null;
@@ -564,7 +569,6 @@
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
-          guestToken: _guestToken,
           hb: _now(), tabId: _tabId,
         }));
       } catch (e) { /* best-effort */ }
@@ -602,13 +606,12 @@
       try {
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: d.sessionId, memberId: d.memberId, role: d.role,
-          resumeToken: d.resumeToken, guestToken: d.guestToken || null,
+          resumeToken: d.resumeToken,
           hb: _now(), tabId: _tabId,
         }));
       } catch (e) {}
       return {sessionId: d.sessionId, memberId: d.memberId,
-              role: d.role, resumeToken: d.resumeToken,
-              guestToken: d.guestToken || null};
+              role: d.role, resumeToken: d.resumeToken};
     }
 
     /* The persist record names another tab with a fresh heartbeat — that
