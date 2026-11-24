@@ -45,6 +45,36 @@ MATCH (別経路): origin='match' のオープン待ち受け。payload.pick の
 マッチング。コード共有ペアとは別系（drive-by join を防ぐため 'create' には join 不可）
 ```
 
+### ゲストアクセス（guestToken JOIN）
+
+アカウントを持たない端末向けの QR 経路。`CREATE` ACK の `data.guestToken`
+（owner email が解決できるときのみ発行、urlsafe base64 16..=128 文字）が
+bearer になる。
+
+```
+CREATE ACK{…, guestToken}  →  クライアントが QR `/#/guest/<token>` を表示
+未ログイン端末: GET / → login page → POST /api/v1/guest/redeem{token}
+  → 200 + Set-Cookie: bookq_guest=<token> → viewer shell
+  → hash `#/guest/<token>` → redeem 再検証 → JOIN{guestToken}
+ログイン済み端末: redeem は {"ok":true} のみ（cookie 無し・identity 保持）
+→ 同じく JOIN{guestToken} で follower 参加
+```
+
+- `JOIN{guestToken}` は `JOIN{code}` と同じ pending→APPROVE 経路に合流する
+  （`code_consumed` も共通 — ペアに入れるのは常に1台）。grant は発行時の
+  sessionId に束縛されるため、code の `by_code` ルックアップを経由しない
+- grant のライフサイクル: `end_session`（LEAVE/REJECT/期限切れ/end_all/
+  shutdown の全経路）で `revoke_session` — **リーダーがペアを解消した時点で
+  guest の閲覧も即失効**。発行から 8 時間の TTL がバックストップ
+- `bookq_guest` cookie での認証解決は **read-only**: リーダー identity の
+  GET 系は全て有効だが、非 GET/HEAD/OPTIONS と `/admin*` は HTTP 403
+  （`guest_write_guard`）。ペア同期は WebSocket のため影響なし — follower
+  として TURN/GOTO/SET_OFFSET 等は通常 follower と同一に受理される
+- follower の表示名は `ゲスト`（WS の `resolve_ws_user` が供給）。
+  member 名は grant ではなく接続 identity から来る
+- `POST /api/v1/guest/redeem` 自体は per-IP レート制限（60 秒 30 回）+
+  same-site initiation 検査付き。トークンは 192bit で推測不能
+
 ### メンバー状態
 `active | suspended | offline | pending`。`presence` は link id → member info の map。
 メンバーが missing/suspended なら phase は `paused` に落ちる。

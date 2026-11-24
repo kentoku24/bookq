@@ -1546,6 +1546,131 @@
         ]
       }
     },
+    "/api/v1/guest/redeem": {
+      "post": {
+        "description": "dual-reader のペアリング QR (`/#/guest/<token>`) を未ログイン端末が\n開いたときの入口。`token` はペア `CREATE` ACK の `data.guestToken`\n（または QR URL フラグメント）で、妥当なら `bookq_guest` cookie\n（HttpOnly・SameSite=Lax）を発行し、以後のリクエストはリーダーの\nidentity で**読み取り専用**に解決される。grant はペアセッション終了\n（リーダー切断）または発行から 8 時間の TTL で失効する。\n\n既に session / Bearer で認証済みの呼び出しには cookie を発行せず\n`{\"ok\":true}` のみ返す（ログイン済みユーザーが QR を読んでも\n自分の identity を保持する）。guest cookie 保持者の再 redeem は\nlast-wins で cookie を更新する。\n\n`bookq_guest` で解決される identity は read-only: 非\nGET/HEAD/OPTIONS と `/admin*` は 403。`reader-sync-protocol.md`\nの guest 節を参照。\n",
+        "operationId": "redeemGuestToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "examples": {
+                "default": {
+                  "summary": "正常系",
+                  "value": {
+                    "token": "SWuCjt2yraxPVXZxtVDzmQR4E-BimTF4"
+                  }
+                }
+              },
+              "schema": {
+                "properties": {
+                  "token": {
+                    "description": "CREATE ACK の guestToken（urlsafe base64）",
+                    "maxLength": 128,
+                    "minLength": 16,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "token"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "authed": {
+                    "summary": "認証済み呼び出し（cookie 無し）",
+                    "value": {
+                      "ok": true
+                    }
+                  },
+                  "guest": {
+                    "summary": "ゲスト cookie 発行",
+                    "value": {
+                      "expiresInSec": 28799,
+                      "ok": true
+                    }
+                  }
+                },
+                "schema": {
+                  "properties": {
+                    "expiresInSec": {
+                      "description": "grant 残 TTL 秒（cookie 発行時のみ）",
+                      "type": "integer"
+                    },
+                    "ok": {
+                      "const": true,
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "交換成功。grant が有効な場合は `Set-Cookie: bookq_guest=…` と\n`expiresInSec`（残 TTL 秒）を返す。認証済み呼び出しには\ncookie 無し・`expiresInSec` 無しの `{\"ok\":true}`。\n",
+            "headers": {
+              "Set-Cookie": {
+                "description": "bookq_guest=<token>; Path=/; Max-Age=<残秒>; HttpOnly; SameSite=Lax; Secure（grant 時のみ）",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "expired": {
+                    "summary": "TTL 失効",
+                    "value": {
+                      "detail": "guest link expired"
+                    }
+                  },
+                  "unknown": {
+                    "summary": "未知 token",
+                    "value": {
+                      "detail": "guest link invalid"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "token が未知または TTL 失効（`{\"detail\":\"guest link invalid|expired\"}`）"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "description": "POST 以外のメソッド"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "security": [],
+        "summary": "ゲストアクセストークンを bookq_guest cookie に交換",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/v1/health": {
       "get": {
         "operationId": "getHealth",

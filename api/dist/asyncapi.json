@@ -61,6 +61,14 @@
       "Ack": {
         "payload": {
           "properties": {
+            "data": {
+              "description": "リクエスト種別ごとの結果。CREATE は\n`{sessionId, code, memberId, role, resumeToken, expiresInSec,\nguestToken?}` — `guestToken` は owner email が解決できる\nときのみ発行されるゲストアクセストークン\n（`/#/guest/<token>` QR / `JOIN{guestToken}` / `bookq_guest`\ncookie の bearer。read-only・セッション連動失効）。\n",
+              "type": "object"
+            },
+            "request": {
+              "description": "応答したリクエスト type",
+              "type": "string"
+            },
             "requestId": {
               "type": "string"
             },
@@ -524,14 +532,34 @@
           {
             "properties": {
               "payload": {
-                "properties": {
-                  "code": {
-                    "pattern": "^\\d{6}$",
-                    "type": "string"
+                "description": "2 経路のどちらか一方: `code`（6桁数字・member ペアリング）\nまたは `guestToken`（ゲストアクセス — CREATE ACK の\n`data.guestToken`。未ログイン端末の `/#/guest/<token>`\nQR リンクが解決する bearer で、grant はペアセッション\n終了または発行から 8 時間で失効）。\n",
+                "oneOf": [
+                  {
+                    "properties": {
+                      "code": {
+                        "pattern": "^\\d{6}$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "code"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "properties": {
+                      "guestToken": {
+                        "maxLength": 128,
+                        "minLength": 16,
+                        "pattern": "^[A-Za-z0-9_-]+$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "guestToken"
+                    ],
+                    "type": "object"
                   }
-                },
-                "required": [
-                  "code"
                 ],
                 "type": "object"
               },

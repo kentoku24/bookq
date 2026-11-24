@@ -97,7 +97,17 @@ components:
           v: {type: integer, const: 1}
           type: {type: string, const: ACK}
           requestId: {type: string}
+          request: {type: string, description: 応答したリクエスト type}
           sessionId: {type: [string, "null"]}
+          data:
+            type: object
+            description: |
+              リクエスト種別ごとの結果。CREATE は
+              `{sessionId, code, memberId, role, resumeToken, expiresInSec,
+              guestToken?}` — `guestToken` は owner email が解決できる
+              ときのみ発行されるゲストアクセストークン
+              （`/#/guest/<token>` QR / `JOIN{guestToken}` / `bookq_guest`
+              cookie の bearer。read-only・セッション連動失効）。
     Reject:
       payload:
         type: object
@@ -271,9 +281,21 @@ components:
             type: {const: JOIN}
             payload:
               type: object
-              required: [code]
-              properties:
-                code: {type: string, pattern: '^\d{6}$'}
+              description: |
+                2 経路のどちらか一方: `code`（6桁数字・member ペアリング）
+                または `guestToken`（ゲストアクセス — CREATE ACK の
+                `data.guestToken`。未ログイン端末の `/#/guest/<token>`
+                QR リンクが解決する bearer で、grant はペアセッション
+                終了または発行から 8 時間で失効）。
+              oneOf:
+                - type: object
+                  required: [code]
+                  properties:
+                    code: {type: string, pattern: '^\d{6}$'}
+                - type: object
+                  required: [guestToken]
+                  properties:
+                    guestToken: {type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
         - type: object
           properties:
             type: {const: MATCH}

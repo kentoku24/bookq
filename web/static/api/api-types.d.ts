@@ -277,6 +277,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/guest/redeem": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * ゲストアクセストークンを bookq_guest cookie に交換
+         * @description dual-reader のペアリング QR (`/#/guest/<token>`) を未ログイン端末が
+         *     開いたときの入口。`token` はペア `CREATE` ACK の `data.guestToken`
+         *     （または QR URL フラグメント）で、妥当なら `bookq_guest` cookie
+         *     （HttpOnly・SameSite=Lax）を発行し、以後のリクエストはリーダーの
+         *     identity で**読み取り専用**に解決される。grant はペアセッション終了
+         *     （リーダー切断）または発行から 8 時間の TTL で失効する。
+         *
+         *     既に session / Bearer で認証済みの呼び出しには cookie を発行せず
+         *     `{"ok":true}` のみ返す（ログイン済みユーザーが QR を読んでも
+         *     自分の identity を保持する）。guest cookie 保持者の再 redeem は
+         *     last-wins で cookie を更新する。
+         *
+         *     `bookq_guest` で解決される identity は read-only: 非
+         *     GET/HEAD/OPTIONS と `/admin*` は 403。`reader-sync-protocol.md`
+         *     の guest 節を参照。
+         */
+        post: operations["redeemGuestToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/library/files": {
         parameters: {
             query?: never;
@@ -1470,6 +1504,63 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             /** @description コード / verifier / refresh token 不正 */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    redeemGuestToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description CREATE ACK の guestToken（urlsafe base64） */
+                    token: string;
+                };
+            };
+        };
+        responses: {
+            /**
+             * @description 交換成功。grant が有効な場合は `Set-Cookie: bookq_guest=…` と
+             *     `expiresInSec`（残 TTL 秒）を返す。認証済み呼び出しには
+             *     cookie 無し・`expiresInSec` 無しの `{"ok":true}`。
+             */
+            200: {
+                headers: {
+                    /** @description bookq_guest=<token>; Path=/; Max-Age=<残秒>; HttpOnly; SameSite=Lax; Secure（grant 時のみ） */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @constant */
+                        ok: true;
+                        /** @description grant 残 TTL 秒（cookie 発行時のみ） */
+                        expiresInSec?: number;
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description token が未知または TTL 失効（`{"detail":"guest link invalid|expired"}`） */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description POST 以外のメソッド */
+            405: {
                 headers: {
                     [name: string]: unknown;
                 };
