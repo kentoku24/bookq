@@ -294,6 +294,14 @@
   }
 
   async function downloadWork(folder, deps){
+    // Guest-grant responses are never persisted (sw.js / cacheLeaf skip
+    // the put) — a guest "download" would count unsaved pages as saved
+    // and leave a "complete" record that opens nothing offline. Refuse
+    // at the single entry gate; the button is hidden for guests anyway.
+    if (window.__BOOKQ_GUEST__ === "true"){
+      try { if (window.showErrorToast) window.showErrorToast("ゲストはオフラインダウンロードを利用できません"); } catch(e){ console.warn(e); }
+      return;
+    }
     // spec §6 機能ゲート: オフライン/接続中はダウンロードを開始しない
     // (全入口 — IDLE タップ・popover 続き・else 分岐 — の単一関門)。
     // 削除はローカル操作なので deleteWork 側は許可のまま。
@@ -377,11 +385,13 @@
           // Guest-grant content must not outlive the grant in Cache API —
           // the marker mirrors sw.js's guestMarked() gate. The response is
           // still counted/fine to read; it is only persistence that stops.
+          // Unsaved pages must not count into bytes/cachedCount either —
+          // the work record would otherwise claim a "complete" download
+          // that opens nothing offline.
           var guestMarked = r.headers.get('X-Bookq-Guest') === '1';
           if(!guestMarked) { try{ await cache.put(url, cacheClone); putSucceeded=true; } catch(putErr){ throw putErr; } }
           var len2 = await responseBytes(sizeClone);
-          bytes += len2;
-          cachedCount++;
+          if(!guestMarked) { bytes += len2; cachedCount++; }
           if(onFile) onFile(i, len2);
         }catch(e){
           if(e && e.name==='AbortError'){
@@ -536,6 +546,9 @@
   window.deleteWork = deleteWork;
 
   function offlineControlsHtmlCtx(path, ctx){
+    // Guests read through a grant that can die mid-session — nothing they
+    // "download" is persisted, so the control would be a lie. Hide it.
+    if (window.__BOOKQ_GUEST__ === "true") return "";
     var state = getOfflineBtnStateCtx(path, ctx);
     var labels = {};
     labels[OfflineBtnState.IDLE] = "ダウンロード";

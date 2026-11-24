@@ -148,12 +148,14 @@ async function cacheFirst(req) {
   }
   if (!fresh) return hit;
   if (fresh.status === 304) return hit;
-  // A 401/403 means the grant/session is gone — the cached copy is now
-  // unauthorized content, not a fallback. Evict it (wherever caches.match
-  // found it) and surface the real status so pages don't keep showing a
-  // dead grant's bytes.
+  // A guest-marked 401/403 means the grant is gone — the cached copy is
+  // now unauthorized content, not a fallback. Evict it (wherever
+  // caches.match found it) and surface the real status so pages don't
+  // keep showing a dead grant's bytes. An UNMARKED 401/403 is a member's
+  // expired login — return it as-is but keep the cached copy: explicit
+  // offline downloads must survive a re-login cycle.
   if (fresh.status === 401 || fresh.status === 403) {
-    await evictEverywhere(req);
+    if (guestMarked(fresh)) await evictEverywhere(req);
     return fresh;
   }
   if (fresh.ok && fresh.status !== 206) {

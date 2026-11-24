@@ -221,6 +221,12 @@ async fn guest_write_guard(
 /// own caches. `Cache-Control: private, no-store` closes the other half
 /// of the hole: the browser's HTTP cache ignores the custom header and
 /// would happily re-serve 200/206/304 content past revocation.
+///
+/// A dead grant resolves to anonymous, not Guest — so 401/403s to a
+/// request that carried ONLY a `bookq_guest` cookie (no `session`
+/// cookie) get the marker too: that is exactly the revoked-guest case
+/// the SW evicts on, while a member's expired-session 401 (no guest
+/// cookie presented) stays unmarked and keeps downloaded pages.
 async fn guest_response_marker(
     State(st): State<AppState>,
     req: Request<Body>,
@@ -237,14 +243,28 @@ async fn guest_response_marker(
         ),
         auth::Caller::Guest(_)
     );
+    // Pure-guest authentication context: the grant cookie was presented
+    // but resolved to nothing, and no member session cookie muddies the
+    // picture — a 401/403 here is a dead grant, not an expired login.
+    let dead_guest_only = !is_guest
+        && auth::cookie_value(req.headers(), "bookq_guest").is_some()
+        && auth::cookie_value(req.headers(), "session").is_none();
     let mut res = next.run(req).await;
-    if is_guest {
+    let mark = is_guest
+        || (dead_guest_only
+            && matches!(
+                res.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ));
+    if mark {
         let h = res.headers_mut();
         h.insert(
             HeaderName::from_static("x-bookq-guest"),
             HeaderValue::from_static("1"),
         );
-        h.insert(
+    }
+    if is_guest {
+        res.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("private, no-store"),
         );
@@ -1417,11 +1437,25 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
         .map(|q| q.0)
         .unwrap_or_default();
     let mut res = oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await;
-    // A completed real login supersedes any stale guest grant cookie —
+    // A completed WEB login supersedes any stale guest grant cookie —
     // `Vary`/marker plumbing would keep tagging this browser's responses
     // as guest-served (and the cache-exclusion would degrade caching)
-    // until the cookie died on its own.
-    if res.status().is_redirection() {
+    // until the cookie died on its own. Only the browser-success branch
+    // mints a `session` cookie: native (bookq://) redirects and denied
+    // logins issue no web session, so clearing there would silently kill
+    // in-browser guest browsing — e.g. an Android Custom-Tabs app login
+    // sharing the browser the guest reads in.
+    let has_web_session = res
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.starts_with("session=")
+                && !v.starts_with("session=null")
+                && !v.starts_with("session=;")
+        });
+    if has_web_session {
         clear_guest_cookie(&mut res);
     }
     res
