@@ -1803,10 +1803,15 @@ async fn reader_sync_drain(
         }
     }
 
+    // The close watch's sender dies when the registry detaches the link —
+    // that is NOT a close request: queued outq frames (e.g. END + an
+    // ordered Close from end_owner_sessions) must still be delivered, so a
+    // dead watch stops polling instead of abandoning the queue.
+    let mut close_dead = false;
     loop {
         tokio::select! {
             biased;
-            changed = close.changed() => {
+            changed = close.changed(), if !close_dead => {
                 match changed {
                     Ok(()) => {
                         let val = close.borrow().clone();
@@ -1820,7 +1825,10 @@ async fn reader_sync_drain(
                         }
                         break;
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        close_dead = true;
+                        continue;
+                    }
                 }
             }
             item = outq.recv() => {
