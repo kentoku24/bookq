@@ -1550,12 +1550,21 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
-            /** @description token が未知または TTL 失効（`{"detail":"guest link invalid|expired"}`） */
+            /**
+             * @description token が未知・TTL 失効・または owner が無効化済み。応答は
+             *     常に `{"detail":"guest link invalid"}` — 失効と未知を区別
+             *     すると token 状態の oracle になるため実装は区別しない。
+             */
             401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
+                    /**
+                     * @example {
+                     *       "detail": "guest link invalid"
+                     *     }
+                     */
                     "application/json": components["schemas"]["Error"];
                 };
             };

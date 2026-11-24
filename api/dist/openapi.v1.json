@@ -1633,26 +1633,15 @@
           "401": {
             "content": {
               "application/json": {
-                "examples": {
-                  "expired": {
-                    "summary": "TTL 失効",
-                    "value": {
-                      "detail": "guest link expired"
-                    }
-                  },
-                  "unknown": {
-                    "summary": "未知 token",
-                    "value": {
-                      "detail": "guest link invalid"
-                    }
-                  }
+                "example": {
+                  "detail": "guest link invalid"
                 },
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
               }
             },
-            "description": "token が未知または TTL 失効（`{\"detail\":\"guest link invalid|expired\"}`）"
+            "description": "token が未知・TTL 失効・または owner が無効化済み。応答は\n常に `{\"detail\":\"guest link invalid\"}` — 失効と未知を区別\nすると token 状態の oracle になるため実装は区別しない。\n"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"

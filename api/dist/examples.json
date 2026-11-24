@@ -1370,23 +1370,10 @@
       "status": "401",
       "section": "response",
       "media": "application/json",
-      "name": "unknown",
-      "summary": "未知 token",
+      "name": "default",
+      "summary": "",
       "value": {
         "detail": "guest link invalid"
-      }
-    },
-    {
-      "operationId": "redeemGuestToken",
-      "method": "post",
-      "path": "/api/v1/guest/redeem",
-      "status": "401",
-      "section": "response",
-      "media": "application/json",
-      "name": "expired",
-      "summary": "TTL 失効",
-      "value": {
-        "detail": "guest link expired"
       }
     },
     {
