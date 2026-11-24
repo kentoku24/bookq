@@ -414,37 +414,47 @@
   function applyUrlState() {
     // #/join/<code>?gt=<token> — guest-access deep link (unlogged-in QR):
     // the plain code rides along so native apps/member scans still parse
-    // it. Consumed ONCE via replaceState like #/join/. Reaching this shell
-    // already means a bookq_guest cookie (or a full login) exists — the
-    // redeem POST refreshes the grant's Max-Age and re-validates it is
-    // still live, then joinGuest binds the follower pair. A dead link
-    // toasts instead of joining.
+    // it. Consumed ONCE via replaceState like #/join/ — but only after
+    // every bail path below has passed, so a reload nudge or a dead
+    // invite keeps the same URL retryable. Reaching this shell already
+    // means a bookq_guest cookie (or a full login) exists — the redeem
+    // POST refreshes the grant's Max-Age and re-validates it is still
+    // live, then joinGuest binds the follower pair. A dead link toasts
+    // instead of joining.
     var gm = (location.hash || '').match(/^#\/join\/\d{6}\?gt=([A-Za-z0-9_-]{16,128})$/);
     if (gm) {
       var gtoken = gm[1];
-      try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
-      try { urlStackReplace(location.pathname + location.search); } catch (e) {}
       var pc = window.PairController;
-      var pst = (pc && pc.state) || null;
-      // Same guard as #/join — checked BEFORE redeem: swapping the guest
-      // cookie for a different invite must not starve the running pair of
-      // its auth (revoking the new invite's session would kill it).
-      if (pst && pst.status && pst.status !== 'idle' &&
-          pst.status !== 'ended' && pst.status !== 'error') {
-        if (window.PairUI && typeof window.PairUI.open === 'function') {
-          window.PairUI.open();
-        }
-        return;
-      }
-      // Stale-shell skew: an older script set can pass the shell-version
-      // watchdog yet lack joinGuest — redeeming anyway would swap the
-      // cookie and strand the link, so bail with a reload nudge.
-      if (!pc || typeof pc.joinGuest !== 'function') {
+      // Capability gate FIRST — a script set can pass the shell-version
+      // watchdog while still missing pieces of the guest path: an old
+      // controller lacks joinGuest/pairActive, and a cached old
+      // PairClient produces clients without joinGuest (controller joins
+      // through it). Redeeming anyway would swap the cookie, then fail —
+      // so the token must survive for the reload we nudge.
+      var guestCapable = !!(pc && typeof pc.joinGuest === 'function' &&
+                            typeof pc.pairActive === 'function' &&
+                            window.PairClient &&
+                            window.PairClient.supportsGuest === true);
+      if (!guestCapable) {
         if (typeof window.showErrorToast === 'function') {
           window.showErrorToast('ページを再読み込みしてください');
         }
         return;
       }
+      // Live-or-pending pair check — BEFORE redeem: swapping the guest
+      // cookie for a different invite must not starve a running pair of
+      // its auth. pairActive covers the bound member (an 'error' surface
+      // can still hold it), a saved-creds boot rejoin still in flight,
+      // and a foreign tab heartbeating the pair — the cookie is
+      // origin-wide, so a sibling's invite would re-auth us silently.
+      if (pc.pairActive()) {
+        if (window.PairUI && typeof window.PairUI.open === 'function') {
+          window.PairUI.open();
+        }
+        return;
+      }
+      try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+      try { urlStackReplace(location.pathname + location.search); } catch (e) {}
       fetch(globalThis.BookqApiEndpoints.guestRedeem, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -478,13 +488,20 @@
       try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
       try { urlStackReplace(location.pathname + location.search); } catch (e) {}
       var pc = window.PairController;
-      var pst = (pc && pc.state) || null;
       // Already in a session: joining here would tear the link down
       // without a LEAVE, leaving the partner in 'peer-away' for the whole
       // resume window. Just surface the current session panel instead —
       // leaving an active pair is an explicit gesture, never a link click.
-      if (pst && pst.status && pst.status !== 'idle' &&
-          pst.status !== 'ended' && pst.status !== 'error') {
+      // pairActive also covers the boot-resume window and a foreign live
+      // tab; a stale controller lacking it falls back to the status check.
+      var occupied = !!(pc && (typeof pc.pairActive === 'function'
+        ? pc.pairActive()
+        : (function () {
+            var pst = pc.state || null;
+            return pst && pst.status && pst.status !== 'idle' &&
+                   pst.status !== 'ended' && pst.status !== 'error';
+          })()));
+      if (occupied) {
         if (window.PairUI && typeof window.PairUI.open === 'function') {
           window.PairUI.open();
         }

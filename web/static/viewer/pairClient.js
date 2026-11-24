@@ -2198,6 +2198,26 @@
     } catch (e) { return null; }
   }
 
+  /* Cheap guard probe (hash.js's guest-redeem gate): is the persist record
+   * owned by a LIVE tab right now? peekPersistedResume only reports a
+   * record whose heartbeat went stale (dead owner awaiting adoption) —
+   * this reports a FRESH heartbeat regardless of which tab owns it, so a
+   * second tab can refuse to swap the origin-shared bookq_guest cookie
+   * out from under a running pair. Same key/format, no socket. */
+  function peekActivePair(storage, now, staleMs) {
+    try {
+      var p = storage !== undefined ? storage : _defaultLocalStorage();
+      if (!p) return null;
+      var d = JSON.parse(p.getItem(PERSIST_KEY) || 'null');
+      if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
+          typeof d.hb !== 'number') return null;
+      var t = typeof now === 'function' ? now() : Date.now();
+      var stale = typeof staleMs === 'number' ? staleMs : RESUME_HB_STALE_MS;
+      if (t - d.hb > stale) return null;
+      return d;
+    } catch (e) { return null; }
+  }
+
   /* Cheap boot check (pairController): is a leave tombstone waiting for a
    * flush? Same window rule as _tombstoneRead — the pair controller creates
    * a client for the flush only while one is still worth sending (#157).
@@ -2236,5 +2256,10 @@
     manifestDigestHex: manifestDigestHex,
     peekPersistedResume: peekPersistedResume,
     peekLeaveTombstone: peekLeaveTombstone,
+    peekActivePair: peekActivePair,
+    /* Capability marker: created clients expose joinGuest(). A stale-shell
+     * skew (new controller + cached old pairClient) is what cannot be
+     * probed on the instance pre-construction, so the module declares it. */
+    supportsGuest: true,
   };
 })();

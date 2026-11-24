@@ -142,3 +142,39 @@ describe('pairClient guest access', () => {
     await p2;
   });
 });
+
+describe('PairClient.peekActivePair / supportsGuest', () => {
+  const REC = {
+    sessionId: 's1', memberId: 'm1', role: 'leader',
+    resumeToken: 'rt', guestToken: TOKEN, hb: 1000, tabId: 'tabA',
+  };
+  const store = (val) => ({
+    getItem: (k) => (k === 'bookq.readerSync.persist.v1' ? val : null),
+  });
+  const rec = (over) => JSON.stringify(Object.assign({}, REC, over));
+
+  it('module declares the guest capability marker', () => {
+    expect(globalThis.PairClient.supportsGuest).toBe(true);
+  });
+
+  it('fresh heartbeat → live record regardless of owner tab', () => {
+    const d = globalThis.PairClient.peekActivePair(
+      store(rec()), () => 1000 + 3999, 4000);
+    expect(d).toBeTruthy();
+    expect(d.sessionId).toBe('s1');
+  });
+
+  it('stale heartbeat → null (dead owner is peekPersistedResume territory)', () => {
+    expect(globalThis.PairClient.peekActivePair(
+      store(rec()), () => 1000 + 4001, 4000)).toBeNull();
+  });
+
+  it('missing/malformed/absent store → null, never throws', () => {
+    expect(globalThis.PairClient.peekActivePair(store(null), () => 0, 4000))
+      .toBeNull();
+    expect(globalThis.PairClient.peekActivePair(store('{bad'), () => 0, 4000))
+      .toBeNull();
+    expect(globalThis.PairClient.peekActivePair(
+      store(rec({ hb: 'x' })), () => 0, 4000)).toBeNull();
+  });
+});
