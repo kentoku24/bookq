@@ -62,6 +62,12 @@ pub const REASON_BAD_RESUME: &str = "bad_resume";
 pub const REASON_RESUME_EXPIRED: &str = "resume_expired";
 pub const REASON_RESUME_IN_USE: &str = "resume_in_use";
 pub const REASON_PEER_OFFLINE: &str = "peer_offline";
+/// The op is well-formed but not permitted for this link — e.g. a
+/// guest-authenticated link trying the 6-digit-code JOIN path.
+pub const REASON_FORBIDDEN: &str = "forbidden";
+/// Generic server-side failure (e.g. entropy source unavailable) — the op
+/// is rejected rather than run with degraded security properties.
+pub const REASON_INTERNAL: &str = "internal_error";
 
 // ── END reasons ────────────────────────────────────────────────────────────
 
@@ -74,18 +80,36 @@ pub const END_RESUME_EXPIRED: &str = "resume_expired";
 pub const END_RESET: &str = "reset";
 #[allow(dead_code)]
 pub const END_SHUTDOWN: &str = "shutdown";
+/// The session's leader was disabled/removed — their guest grants and the
+/// pair session itself die together.
+pub const END_OWNER_DISABLED: &str = "owner_disabled";
 
 // dedup retention: full outcomes for the last DEDUP_WINDOW keys, evicted
 // keys remembered as tombstones for the workEpoch's whole lifetime.
 pub const DEDUP_WINDOW: usize = 256;
 pub const DEDUP_TOMBSTONE_MAX: usize = 8192;
 
+/// Failed-JOIN throttle per link: past `JOIN_FAIL_MAX` rejects inside the
+/// window the transport is closed (6-digit codes are brute-forceable —
+/// a persistent socket must not get unlimited guesses).
+pub const JOIN_FAIL_MAX: u32 = 8;
+pub const JOIN_FAIL_WINDOW_SEC: f64 = 60.0;
+
 /// UI_SYNC rate cap per member — excess frames drop silently so a buggy
 /// sender can't fill the peer's bounded outq.
 pub const UI_SYNC_WINDOW_SEC: f64 = 1.0;
 pub const UI_SYNC_RATE_MAX: u32 = 50;
 
-// ── opaque ids / tokens / codes (CSPRNG via /dev/urandom) ─────────────────
+// ── opaque ids / tokens / codes ──────────────────────────────────────────
+//
+// Two entropy grades on purpose:
+// - `rand_bytes` (non-bearer ids): /dev/urandom, falling back to time+PID
+//   when the device is missing. Member/session ids are never secrets —
+//   they're always paired with a resume_token or match_token.
+// - `secure_bytes` (bearer material): /dev/urandom or NOTHING. Tokens and
+//   join codes are secrets; the ~32-bit-guessable fallback must never feed
+//   them (a guest token minted from it would be brute-forceable), so every
+//   caller gets `Option` and must fail closed.
 
 fn rand_bytes(n: usize) -> Vec<u8> {
     use std::io::Read;
@@ -110,34 +134,66 @@ fn rand_bytes(n: usize) -> Vec<u8> {
     b
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only fault injection — flips `secure_bytes` to its failure
+    /// branch so callers' fail-closed paths are exercised.
+    static ENTROPY_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_entropy_failure<R>(f: impl FnOnce() -> R) -> R {
+    ENTROPY_FAIL.with(|c| c.set(true));
+    let r = f();
+    ENTROPY_FAIL.with(|c| c.set(false));
+    r
+}
+
+fn secure_bytes(n: usize) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    if ENTROPY_FAIL.with(|f| f.get()) {
+        return None;
+    }
+    use std::io::Read;
+    let mut b = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .ok()?;
+    Some(b)
+}
+
 fn new_id() -> String {
     rand_bytes(8).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub(crate) fn new_token() -> String {
+pub(crate) fn new_token() -> Option<String> {
     use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand_bytes(24))
+    Some(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secure_bytes(24)?),
+    )
 }
 
-fn new_code() -> String {
+fn new_code() -> Option<String> {
     // secrets.randbelow(1_000_000) — rejection sampling, no modulo bias.
     loop {
-        let b = rand_bytes(4);
+        let b = secure_bytes(4)?;
         let v = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
         if v < u32::MAX - u32::MAX % 1_000_000 {
-            return format!("{:0width$}", v % 1_000_000, width = CODE_DIGITS);
+            return Some(format!("{:0width$}", v % 1_000_000, width = CODE_DIGITS));
         }
     }
 }
 
 // ── outbound plumbing ──────────────────────────────────────────────────────
 
-/// Items the drain task pulls: control frames and the bulk-block sentinel.
-/// Transport-close bypasses the queue entirely (the watch channel), like
-/// Python's drain-cancel + socket-close path.
+/// Items the drain task pulls: control frames, the bulk-block sentinel and
+/// an ordered transport-close. `Close` rides the queue (frames ahead of it
+/// — e.g. END — reach the client first); the watch-channel close remains
+/// the bypassing path for policy closes.
 pub enum OutItem {
     Text(String),
     Bulk,
+    Close(u16, String),
 }
 
 pub struct BulkQ {
@@ -179,6 +235,15 @@ pub struct Link {
     /// (leading would mint a fresh guest grant bound to their own
     /// session, surviving the leader's disconnect).
     pub guest: bool,
+    /// The `bookq_guest` bearer this link authenticated with — re-validated
+    /// every `tick` so a revoked/expired grant drops its socket instead of
+    /// coasting on the handshake-time snapshot.
+    pub guest_token: Option<String>,
+    /// Failed-JOIN throttle: brute-forcing 6-digit codes (or fishing for
+    /// live grants) rides through reject frames, so a link that keeps
+    /// missing gets its transport closed.
+    join_fails: u32,
+    join_fails_since: Instant,
     close: watch::Sender<Option<(u16, String)>>,
 }
 
@@ -188,6 +253,7 @@ impl Link {
         close: watch::Sender<Option<(u16, String)>>,
         user: Option<Value>,
         guest: bool,
+        guest_token: Option<String>,
         now: Instant,
         heartbeat: Duration,
     ) -> Self {
@@ -206,6 +272,9 @@ impl Link {
             ping_seq: 0,
             user,
             guest,
+            guest_token,
+            join_fails: 0,
+            join_fails_since: now,
             close,
         }
     }
@@ -284,6 +353,19 @@ impl Link {
             let _ = self.close.send_replace(Some((code, reason.to_string())));
         }
     }
+
+    /// Ordered close — queued behind frames already enqueued (END reaches
+    /// the client before the socket dies). A full queue falls back to the
+    /// bypassing watch close: whatever couldn't be queued was lost anyway.
+    fn queue_transport_close(&mut self, code: u16, reason: &str) {
+        if self
+            .outq
+            .try_send(OutItem::Close(code, reason.to_string()))
+            .is_err()
+        {
+            self.request_transport_close(code, reason);
+        }
+    }
 }
 
 // ── members / sessions ─────────────────────────────────────────────────────
@@ -305,12 +387,14 @@ pub struct Member {
 }
 
 impl Member {
-    fn new(role: &str, name: String, session_id: &str, link_id: &str, status: &str) -> Self {
-        Self {
+    /// `None` when the entropy source is gone — the resume_token is bearer
+    /// material and must never come out degraded.
+    fn new(role: &str, name: String, session_id: &str, link_id: &str, status: &str) -> Option<Self> {
+        Some(Self {
             id: new_id(),
             role: role.to_string(),
             name,
-            resume_token: new_token(),
+            resume_token: new_token()?,
             session_id: Some(session_id.to_string()),
             link_id: Some(link_id.to_string()),
             status: status.to_string(),
@@ -323,7 +407,7 @@ impl Member {
                 .checked_sub(Duration::from_secs_f64(UI_SYNC_WINDOW_SEC + 1.0))
                 .unwrap_or_else(Instant::now),
             ui_sync_count: 0,
-        }
+        })
     }
 }
 
@@ -376,15 +460,17 @@ pub struct PairSession {
 }
 
 impl PairSession {
-    fn new(origin: &str, code_ttl: Duration) -> Self {
+    /// `None` when the entropy source is gone — match_token is bearer
+    /// material and must never come out degraded.
+    fn new(origin: &str, code_ttl: Duration) -> Option<Self> {
         let now = Instant::now();
-        Self {
+        Some(Self {
             id: new_id(),
             code: String::new(),
             code_expires_at: now + code_ttl,
             created_at: now,
             origin: origin.to_string(),
-            match_token: new_token(),
+            match_token: new_token()?,
             code_consumed: false,
             members: Vec::new(),
             pending: None,
@@ -408,7 +494,7 @@ impl PairSession {
             selecting: false,
             apply_seq: 0,
             apply_log: Vec::new(),
-        }
+        })
     }
 
     pub fn paired(&self) -> bool {
@@ -516,6 +602,35 @@ impl Registry {
     pub async fn detach_link(&self, link_id: &str) {
         let mut g = self.inner.lock().await;
         g.detach_link(link_id);
+    }
+
+    /// End every session led by `owner_email` and revoke their guest
+    /// grants — the member-disable/remove hook so a re-enable can never
+    /// resurrect a live bearer grant.
+    pub async fn end_owner_sessions(&self, owner_email: &str) -> usize {
+        let mut g = self.inner.lock().await;
+        g.guest.revoke_owner(owner_email);
+        let sids: Vec<String> = g
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.members
+                    .iter()
+                    .find(|m| m.role == "leader")
+                    .and_then(|m| m.link_id.as_ref())
+                    .and_then(|lid| g.links.get(lid))
+                    .and_then(|l| l.user.as_ref())
+                    .and_then(|u| u.get("email"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(owner_email))
+            })
+            .map(|s| s.id.clone())
+            .collect();
+        let n = sids.len();
+        for sid in sids {
+            g.end_session(&sid, END_OWNER_DISABLED);
+        }
+        n
     }
 
     /// End every live session with `reason`, returning the count — the
@@ -1045,11 +1160,28 @@ impl Inner {
         req: &Map<String, Value>,
         origin: &str,
     ) {
-        let mut code = new_code();
+        // Every mint below is bearer material — entropy failure rejects the
+        // request instead of landing a weak secret on the wire.
+        let mut code = match new_code() {
+            Some(c) => c,
+            None => {
+                self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
+                return;
+            }
+        };
         while self.by_code.contains_key(&code) {
-            code = new_code();
+            code = match new_code() {
+                Some(c) => c,
+                None => {
+                    self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
+                    return;
+                }
+            };
         }
-        let mut session = PairSession::new(origin, reg.code_ttl);
+        let Some(mut session) = PairSession::new(origin, reg.code_ttl) else {
+            self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
+            return;
+        };
         session.code = code.clone();
         let sid = session.id.clone();
         let name = self
@@ -1068,21 +1200,36 @@ impl Inner {
             .and_then(|v| v.as_str())
             .map(|e| e.trim().to_lowercase())
             .filter(|e| !e.is_empty());
-        let member = Member::new("leader", name, &sid, link_id, "active");
+        let Some(member) = Member::new("leader", name, &sid, link_id, "active") else {
+            self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
+            return;
+        };
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
         session.members.push(member);
+        // Guest-access grant for the QR link — bound to this session so
+        // `end_session` revokes it no matter which teardown path fires.
+        // `match`-origin sessions never asked for a QR (one-tap auto-pair
+        // is their whole point), so minting a live bearer grant for them
+        // would only widen the attack surface — `create` sessions only.
+        let guest_token = match (origin, owner_email) {
+            ("create", Some(email)) => match self
+                .guest
+                .issue(&email, &sid, Duration::from_secs(GUEST_TTL_SECONDS))
+            {
+                Some(t) => Some(t),
+                None => {
+                    self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
+                    return;
+                }
+            },
+            _ => None,
+        };
         self.sessions.push(session);
         self.by_code.insert(code.clone(), sid.clone());
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
         }
-        // Guest-access grant for the QR link — bound to this session so
-        // `end_session` revokes it no matter which teardown path fires.
-        let guest_token = owner_email.map(|email| {
-            self.guest
-                .issue(&email, &sid, Duration::from_secs(GUEST_TTL_SECONDS))
-        });
         let mut data = vec![
             ("sessionId", Value::String(sid.clone())),
             ("code", Value::String(code)),
@@ -1106,6 +1253,28 @@ impl Inner {
         self.wake.notify_one();
     }
 
+    /// JOIN-path rejection: the frame itself, then the per-link throttle —
+    /// a link fishing for codes/grants accumulates failures and gets its
+    /// transport closed instead of unlimited guesses.
+    fn reject_join(&mut self, link_id: &str, req: &Map<String, Value>, reason: &str, sid: Option<&str>) {
+        self.reject(link_id, req_id(req), Some("JOIN"), reason, sid);
+        let now = Instant::now();
+        let mut flood = false;
+        if let Some(l) = self.links.get_mut(link_id) {
+            if now.duration_since(l.join_fails_since)
+                >= Duration::from_secs_f64(JOIN_FAIL_WINDOW_SEC)
+            {
+                l.join_fails = 0;
+                l.join_fails_since = now;
+            }
+            l.join_fails += 1;
+            flood = l.join_fails > JOIN_FAIL_MAX;
+        }
+        if flood {
+            self.close_link(link_id, "join_flood", WS_CLOSE_POLICY);
+        }
+    }
+
     fn join(&mut self, link_id: &str, req: &Map<String, Value>) {
         if req["payload"]["guestToken"]
             .as_str()
@@ -1113,30 +1282,25 @@ impl Inner {
         {
             return self.join_guest(link_id, req);
         }
+        // A guest-authenticated link may only ride its own grant — the code
+        // path would let it brute-force 6-digit codes into foreign sessions
+        // (leader auto-approvals land the hit instantly).
+        if self.links.get(link_id).is_some_and(|l| l.guest) {
+            self.reject_join(link_id, req, REASON_FORBIDDEN, None);
+            return;
+        }
         let code = req["payload"]["code"].as_str().unwrap_or("").to_string();
         let Some(sid) = self.by_code.get(&code).cloned() else {
-            self.reject(link_id, req_id(req), Some("JOIN"), REASON_BAD_CODE, None);
+            self.reject_join(link_id, req, REASON_BAD_CODE, None);
             return;
         };
         let s = self.session(&sid).unwrap();
         if s.code_consumed {
-            self.reject(
-                link_id,
-                req_id(req),
-                Some("JOIN"),
-                REASON_CODE_CONSUMED,
-                Some(&sid),
-            );
+            self.reject_join(link_id, req, REASON_CODE_CONSUMED, Some(&sid));
             return;
         }
         if Instant::now() >= s.code_expires_at {
-            self.reject(
-                link_id,
-                req_id(req),
-                Some("JOIN"),
-                REASON_CODE_EXPIRED,
-                Some(&sid),
-            );
+            self.reject_join(link_id, req, REASON_CODE_EXPIRED, Some(&sid));
             return;
         }
         self.bind_follower(link_id, req, &sid);
@@ -1151,39 +1315,21 @@ impl Inner {
         let grant = match self.guest.status(token) {
             GrantStatus::Valid(g) => g,
             GrantStatus::Expired => {
-                self.reject(
-                    link_id,
-                    req_id(req),
-                    Some("JOIN"),
-                    REASON_CODE_EXPIRED,
-                    None,
-                );
+                self.reject_join(link_id, req, REASON_CODE_EXPIRED, None);
                 return;
             }
             GrantStatus::Unknown => {
-                self.reject(link_id, req_id(req), Some("JOIN"), REASON_BAD_CODE, None);
+                self.reject_join(link_id, req, REASON_BAD_CODE, None);
                 return;
             }
         };
         let sid = grant.session_id;
         match self.session(&sid).map(|s| s.code_consumed) {
             None => {
-                self.reject(
-                    link_id,
-                    req_id(req),
-                    Some("JOIN"),
-                    REASON_NO_SESSION,
-                    Some(&sid),
-                );
+                self.reject_join(link_id, req, REASON_NO_SESSION, Some(&sid));
             }
             Some(true) => {
-                self.reject(
-                    link_id,
-                    req_id(req),
-                    Some("JOIN"),
-                    REASON_CODE_CONSUMED,
-                    Some(&sid),
-                );
+                self.reject_join(link_id, req, REASON_CODE_CONSUMED, Some(&sid));
             }
             Some(false) => self.bind_follower(link_id, req, &sid),
         }
@@ -1198,7 +1344,16 @@ impl Inner {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let member = Member::new("follower", name, sid, link_id, "pending");
+        let Some(member) = Member::new("follower", name, sid, link_id, "pending") else {
+            self.reject(
+                link_id,
+                req_id(req),
+                Some("JOIN"),
+                REASON_INTERNAL,
+                Some(sid),
+            );
+            return;
+        };
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
         let Some(s) = self.session_mut(sid) else {
@@ -2346,6 +2501,14 @@ impl Inner {
                 self.send_obj(lid, &frame);
                 if let Some(l) = self.links.get_mut(lid) {
                     l.member_id = None;
+                    // A guest's grant died with this session — its socket is
+                    // now an unauthenticated transport, so close it instead
+                    // of leaving a live link that only ping/pong can see.
+                    // Queued (not the watch bypass): the END frame just sent
+                    // must reach the client first.
+                    if l.guest {
+                        l.queue_transport_close(WS_CLOSE_NORMAL, "session_end");
+                    }
                 }
             }
         }
@@ -2369,6 +2532,19 @@ impl Inner {
             if now.duration_since(link.last_rx) >= self.no_response_timeout {
                 self.close_link(&lid, "no_response", WS_CLOSE_POLICY);
                 continue;
+            }
+            // Guest links re-validate their grant every tick — WS auth was
+            // a handshake-time snapshot, so a revoked/expired grant must
+            // drop the socket rather than coast until disconnect.
+            if link.guest {
+                let valid = link
+                    .guest_token
+                    .as_deref()
+                    .is_some_and(|t| matches!(self.guest.status(t), GrantStatus::Valid(_)));
+                if !valid {
+                    self.close_link(&lid, "guest_revoked", WS_CLOSE_POLICY);
+                    continue;
+                }
             }
             if now >= link.next_ping_due {
                 link.ping_seq += 1;
@@ -2443,18 +2619,35 @@ mod tests {
     use super::*;
 
     fn mk_link(inner: &mut Inner) -> (String, mpsc::Receiver<OutItem>) {
+        let (id, rx, _) = mk_link_full(inner, Some(Value::Null), false, None);
+        (id, rx)
+    }
+
+    /// Full-handle variant: carries the close-watch receiver so tests can
+    /// observe transport-close signals (guest revocation, join flood).
+    fn mk_link_full(
+        inner: &mut Inner,
+        user: Option<Value>,
+        guest: bool,
+        guest_token: Option<String>,
+    ) -> (
+        String,
+        mpsc::Receiver<OutItem>,
+        watch::Receiver<Option<(u16, String)>>,
+    ) {
         let (tx, rx) = mpsc::channel(SEND_QUEUE_MAX);
-        let (close_tx, _close_rx) = watch::channel(None);
+        let (close_tx, close_rx) = watch::channel(None);
         let link = Link::new(
             tx,
             close_tx,
-            Some(Value::Null),
-            false,
+            user,
+            guest,
+            guest_token,
             Instant::now(),
             Duration::from_secs_f64(HEARTBEAT_INTERVAL),
         );
         let id = inner.register_link(link, Duration::from_secs_f64(HEARTBEAT_INTERVAL));
-        (id, rx)
+        (id, rx, close_rx)
     }
 
     fn next_json(rx: &mut mpsc::Receiver<OutItem>) -> Value {
@@ -2606,6 +2799,177 @@ mod tests {
         assert!(reg.inner.lock().await.sessions.is_empty());
         // Nothing left to end.
         assert_eq!(reg.end_all(END_RESET).await, 0);
+    }
+
+    #[tokio::test]
+    async fn guest_link_cannot_join_by_code() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), false, None);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        let _ = next_json(&mut r1); // STATE
+        let code = ack["data"]["code"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+
+        let (l2, mut r2, _) = mk_link_full(&mut inner, Some(Value::Null), true, Some(gt.clone()));
+        let _ = next_json(&mut r2); // HELLO
+        // A guest link JOINing a 6-digit code is refused — the code path is
+        // members-only; the grant is the only ticket a guest holds.
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req("JOIN", "", protocol::frame(&[("code", code.into())])),
+        );
+        let rej = next_json(&mut r2);
+        assert_eq!(rej["type"], "REJECT");
+        assert_eq!(rej["reason"], REASON_FORBIDDEN);
+        assert!(inner.links.get(&l2).is_some_and(|l| l.alive));
+
+        // Its own grant still joins normally.
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req("JOIN", "", protocol::frame(&[("guestToken", gt.into())])),
+        );
+        let ack = next_json(&mut r2);
+        assert_eq!(ack["type"], "ACK");
+        assert_eq!(ack["data"]["role"], "follower");
+    }
+
+    #[tokio::test]
+    async fn join_flood_closes_link() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1, mut close_rx) = mk_link_full(&mut inner, Some(Value::Null), false, None);
+        let _ = next_json(&mut r1); // HELLO
+        for _ in 0..JOIN_FAIL_MAX {
+            inner.dispatch(
+                &reg,
+                &l1,
+                &req("JOIN", "", protocol::frame(&[("code", "000000".into())])),
+            );
+            let rej = next_json(&mut r1);
+            assert_eq!(rej["reason"], REASON_BAD_CODE);
+        }
+        assert!(inner.links.get(&l1).is_some_and(|l| l.alive));
+        // One guess past the cap: rejected and the transport is closed.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req("JOIN", "", protocol::frame(&[("code", "000000".into())])),
+        );
+        let _ = next_json(&mut r1);
+        close_rx.changed().await.unwrap();
+        assert_eq!(close_rx.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);
+        assert!(!inner.links.get(&l1).is_some_and(|l| l.alive));
+    }
+
+    #[tokio::test]
+    async fn tick_closes_link_when_guest_grant_dies() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        // Unknown bearer → not Valid → the next tick closes the socket.
+        let (lg, mut rg, mut gclose) =
+            mk_link_full(&mut inner, Some(Value::Null), true, Some("stale".into()));
+        let _ = next_json(&mut rg); // HELLO
+        // A normal link is untouched.
+        let (l1, _r1) = mk_link(&mut inner);
+        inner.tick();
+        gclose.changed().await.unwrap();
+        assert_eq!(gclose.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);
+        assert!(inner.links.get(&l1).is_some_and(|l| l.alive));
+    }
+
+    #[tokio::test]
+    async fn end_session_closes_guest_socket() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), false, None);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        let _ = next_json(&mut r1); // STATE
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+        let (l2, mut r2, _gclose) =
+            mk_link_full(&mut inner, Some(Value::Null), true, Some(gt.clone()));
+        let _ = next_json(&mut r2); // HELLO
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req("JOIN", "", protocol::frame(&[("guestToken", gt.into())])),
+        );
+        let _ = next_json(&mut r2); // ACK
+        inner.end_session(&sid, END_LEFT);
+        let _ = next_json(&mut r2); // END frame reaches the client first
+        match r2.try_recv() {
+            Ok(OutItem::Close(code, _)) => assert_eq!(code, WS_CLOSE_NORMAL),
+            other => panic!("expected queued close after END, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn match_origin_session_mints_no_guest_token() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("MATCH", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        assert_eq!(ack["type"], "ACK");
+        assert!(ack["data"]["guestToken"].is_null());
+        assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn entropy_failure_fails_closed() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1); // HELLO
+        with_entropy_failure(|| {
+            inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        });
+        let rej = next_json(&mut r1);
+        assert_eq!(rej["type"], "REJECT");
+        assert_eq!(rej["reason"], REASON_INTERNAL);
+        assert!(inner.sessions.is_empty());
+        assert!(inner.by_code.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabling_owner_ends_their_sessions_and_grants() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let user = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "owner@example.com".into()),
+        ]);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(user), false, None);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
+        let ack = next_json(&mut r1);
+        let _ = next_json(&mut r1); // STATE
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+        drop(inner);
+        let n = reg.end_owner_sessions("OWNER@example.com").await;
+        assert_eq!(n, 1);
+        let end = next_json(&mut r1);
+        assert_eq!(end["type"], "END");
+        assert_eq!(end["reason"], END_OWNER_DISABLED);
+        let inner = reg.inner.lock().await;
+        assert!(inner.sessions.is_empty());
+        assert!(matches!(inner.guest.status(&gt), GrantStatus::Unknown));
     }
 }
 

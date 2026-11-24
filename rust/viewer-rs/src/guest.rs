@@ -51,9 +51,9 @@ impl Grant {
     }
 }
 
-/// `status` distinguishes expired from unknown so redeem can answer
-/// "expired" vs "invalid"; `resolve` collapses both to `None` for the
-/// auth paths.
+/// `status` distinguishes expired from unknown, but redeem answers both
+/// with the same 401 — telling them apart would be a token-state oracle.
+/// `resolve` collapses both to `None` for the auth paths.
 pub enum GrantStatus {
     Valid(Grant),
     Expired,
@@ -74,9 +74,10 @@ impl GuestStore {
 
     /// Mint a grant bound to `session_id` for `owner_email`; returns the
     /// bearer token (also the `bookq_guest` cookie value and the
-    /// `JOIN{guestToken}` payload).
-    pub fn issue(&self, owner_email: &str, session_id: &str, ttl: Duration) -> String {
-        let token = new_token();
+    /// `JOIN{guestToken}` payload). `None` when the entropy source is
+    /// unavailable — a grant must never mint from degraded randomness.
+    pub fn issue(&self, owner_email: &str, session_id: &str, ttl: Duration) -> Option<String> {
+        let token = new_token()?;
         let mut g = self.inner.lock().unwrap();
         let now = Instant::now();
         g.retain(|_, v| v.expires_at > now);
@@ -97,7 +98,7 @@ impl GuestStore {
                 expires_at: now + ttl,
             },
         );
-        token
+        Some(token)
     }
 
     pub fn status(&self, token: &str) -> GrantStatus {
@@ -126,30 +127,73 @@ impl GuestStore {
         let mut g = self.inner.lock().unwrap();
         g.retain(|_, v| v.session_id != session_id);
     }
+
+    /// Drop every grant owned by `owner_email` (member disable/remove) —
+    /// disabling and re-enabling must never resurrect a bearer grant.
+    pub fn revoke_owner(&self, owner_email: &str) {
+        let mut g = self.inner.lock().unwrap();
+        g.retain(|_, v| !v.owner_email.eq_ignore_ascii_case(owner_email));
+    }
+
+    /// Drop one grant by token — `/auth/logout` calls this so the
+    /// explicit sign-out gesture kills a live bearer, not just the
+    /// cookie copy in this browser.
+    pub fn revoke_token(&self, token: &str) {
+        self.inner.lock().unwrap().remove(token);
+    }
 }
 
-/// Per-IP fixed-window limiter for `POST /api/v1/guest/redeem` — token
-/// guessing is already infeasible at 192 bits, this just keeps the
-/// endpoint from being used as a free oracle/probe surface.
+/// Fixed-window limiter for `POST /api/v1/guest/redeem` — token guessing
+/// is already infeasible at 192 bits, this just keeps the endpoint from
+/// being used as a free oracle/probe surface. The per-IP budget alone is
+/// bypassable when the client-IP key is rotatable (spoofed forwarding
+/// headers on a directly-exposed deploy), so a global window bounds the
+/// total; the map is lazily purged past `MAX_TRACKED_IPS` so rotating
+/// keys can't grow it unboundedly either.
 #[derive(Clone, Default)]
 pub struct RedeemRateLimit {
-    inner: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
+    inner: Arc<Mutex<RedeemRateState>>,
+}
+
+#[derive(Default)]
+struct RedeemRateState {
+    per_ip: HashMap<String, (Instant, u32)>,
+    global_start: Option<Instant>,
+    global_count: u32,
 }
 
 impl RedeemRateLimit {
     const MAX_ATTEMPTS: u32 = 30;
     const WINDOW: Duration = Duration::from_secs(60);
+    /// 10x the per-IP budget — ample for a household's guests re-redeeming
+    /// while still capping header-rotation abuse.
+    const MAX_GLOBAL_ATTEMPTS: u32 = 300;
+    /// Past this many tracked IPs, expired windows are purged on check.
+    const MAX_TRACKED_IPS: usize = 4096;
 
     /// `true` when the attempt is allowed (and counted).
     pub fn check(&self, ip: &str) -> bool {
-        let mut m = self.inner.lock().unwrap();
+        let mut s = self.inner.lock().unwrap();
         let now = Instant::now();
-        let e = m.entry(ip.to_string()).or_insert((now, 0));
+        if s.per_ip.len() >= Self::MAX_TRACKED_IPS {
+            s.per_ip
+                .retain(|_, (start, _)| now.duration_since(*start) < Self::WINDOW);
+        }
+        let g_start = *s.global_start.get_or_insert(now);
+        if now.duration_since(g_start) >= Self::WINDOW {
+            s.global_start = Some(now);
+            s.global_count = 0;
+        }
+        let e = s.per_ip.entry(ip.to_string()).or_insert((now, 0));
         if now.duration_since(e.0) >= Self::WINDOW {
             *e = (now, 0);
         }
         e.1 += 1;
-        e.1 <= Self::MAX_ATTEMPTS
+        let ok = e.1 <= Self::MAX_ATTEMPTS && s.global_count < Self::MAX_GLOBAL_ATTEMPTS;
+        if ok {
+            s.global_count += 1;
+        }
+        ok
     }
 }
 
@@ -160,7 +204,7 @@ mod tests {
     #[test]
     fn issue_resolve_roundtrip() {
         let store = GuestStore::new();
-        let token = store.issue("a@example.com", "s1", Duration::from_secs(60));
+        let token = store.issue("a@example.com", "s1", Duration::from_secs(60)).unwrap();
         assert!(valid_token_shape(&token));
         let g = store.resolve(&token).expect("valid grant");
         assert_eq!(g.owner_email, "a@example.com");
@@ -171,7 +215,7 @@ mod tests {
     fn unknown_and_expired_status() {
         let store = GuestStore::new();
         assert!(matches!(store.status("nope"), GrantStatus::Unknown));
-        let token = store.issue("a@example.com", "s1", Duration::from_millis(1));
+        let token = store.issue("a@example.com", "s1", Duration::from_millis(1)).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert!(matches!(store.status(&token), GrantStatus::Expired));
         assert!(store.resolve(&token).is_none());
@@ -180,9 +224,19 @@ mod tests {
     #[test]
     fn revoke_session_drops_only_that_session() {
         let store = GuestStore::new();
-        let t1 = store.issue("a@example.com", "s1", Duration::from_secs(60));
-        let t2 = store.issue("b@example.com", "s2", Duration::from_secs(60));
+        let t1 = store.issue("a@example.com", "s1", Duration::from_secs(60)).unwrap();
+        let t2 = store.issue("b@example.com", "s2", Duration::from_secs(60)).unwrap();
         store.revoke_session("s1");
+        assert!(store.resolve(&t1).is_none());
+        assert!(store.resolve(&t2).is_some());
+    }
+
+    #[test]
+    fn revoke_token_drops_single_grant() {
+        let store = GuestStore::new();
+        let t1 = store.issue("a@example.com", "s1", Duration::from_secs(60)).unwrap();
+        let t2 = store.issue("b@example.com", "s2", Duration::from_secs(60)).unwrap();
+        store.revoke_token(&t1);
         assert!(store.resolve(&t1).is_none());
         assert!(store.resolve(&t2).is_some());
     }
@@ -195,5 +249,15 @@ mod tests {
         }
         assert!(!rl.check("1.2.3.4"));
         assert!(rl.check("5.6.7.8")); // other IP unaffected
+    }
+
+    #[test]
+    fn rate_limit_global_cap() {
+        let rl = RedeemRateLimit::default();
+        // Rotating the per-IP key can't exceed the shared window budget.
+        for i in 0..RedeemRateLimit::MAX_GLOBAL_ATTEMPTS {
+            assert!(rl.check(&format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256)));
+        }
+        assert!(!rl.check("192.168.1.1"));
     }
 }

@@ -42,16 +42,28 @@ FIRST_PAGE = {"folder": WORK, "name": "1.png"}
 GUEST_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
+ADMIN = {"email": "admin@example.com", "name": "Admin", "picture": ""}
+
+
 @pytest.fixture(scope="module")
-def guest_server(library_tree, tmp_path_factory):
-    """Live server WITHOUT test-mode: real signed-cookie + guest auth."""
+def guest_state_dir(tmp_path_factory):
+    """Users DB for the real-auth server — exposed so tests can drive
+    `users` CLI / `/admin` transitions against the live directory."""
     from rs_spawn import users_cli
 
     state_dir = tmp_path_factory.mktemp("reader-guest-state")
     for user in (ALICE, BOB):
         cp = users_cli(state_dir, "add", user["email"])
         assert cp.returncode == 0, cp.stderr
-    proc, base_url = _spawn_server(library_tree, state_dir)
+    cp = users_cli(state_dir, "add", ADMIN["email"], "--role", "admin")
+    assert cp.returncode == 0, cp.stderr
+    return state_dir
+
+
+@pytest.fixture(scope="module")
+def guest_server(library_tree, guest_state_dir):
+    """Live server WITHOUT test-mode: real signed-cookie + guest auth."""
+    proc, base_url = _spawn_server(library_tree, guest_state_dir)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)
@@ -637,3 +649,156 @@ def test_guest_qr_url_revoked_to_login(browser, guest_server):
         if ctx_g is not None:
             ctx_g.close()
         ctx_l.close()
+
+
+# ── second-wave hardening ────────────────────────────────────────────
+
+
+def test_guest_redeem_missing_token_400(guest_server):
+    """Body validation precedes the authed {"ok":true} shortcut — a
+    member's malformed redeem is a 400, not a silent pass."""
+    sess = {"Cookie": f"session={_session_cookie(ALICE)}"}
+    r = httpx.post(guest_server + "/api/v1/guest/redeem",
+                   json={}, headers=sess, timeout=10)
+    assert r.status_code == 400
+    r = httpx.post(guest_server + "/api/v1/guest/redeem",
+                   json={"token": "short"}, headers=sess, timeout=10)
+    assert r.status_code == 400
+    # Same for an unauthenticated caller.
+    r = httpx.post(guest_server + "/api/v1/guest/redeem",
+                   json={}, timeout=10)
+    assert r.status_code == 400
+
+
+def test_guest_join_code_forbidden(guest_server):
+    """A guest-authenticated link can only ride its own grant — the
+    6-digit-code JOIN path is members-only (`forbidden`), so a redeemed
+    guest can't brute-force into foreign sessions."""
+    with _minted(guest_server) as (_ws, data, token):
+        g = _ws_guest(guest_server, token)
+        try:
+            assert _recv(g)["type"] == "HELLO"
+            g.send(_req("JOIN", {"code": data["code"]}, rid="j1"))
+            rej = _expect(g, "REJECT")
+            assert rej["reason"] == "forbidden"
+            # The link stays usable — its own grant still joins.
+            g.send(_req("JOIN", {"guestToken": token}, rid="j2"))
+            assert _expect(g, "ACK")["data"]["role"] == "follower"
+            g.send(_req("LEAVE", rid="lv"))
+        finally:
+            g.close()
+
+
+def test_match_session_mints_no_guest_token(guest_server):
+    """MATCH auto-pair never asked for a QR — no bearer grant is minted
+    for an origin='match' session."""
+    ws = _ws_user(guest_server, BOB)
+    try:
+        assert _recv(ws)["type"] == "HELLO"
+        ws.send(_req("MATCH", rid="m"))
+        data = _expect(ws, "ACK")["data"]
+        assert data["role"] == "leader"
+        assert not data.get("guestToken")
+        ws.send(_req("LEAVE", sid=data["sessionId"], rid="lv"))
+    finally:
+        ws.close()
+
+
+def test_guest_library_surface_denied(guest_server):
+    """`/api/v1/library/*` GETs carry side effects (upload slots /
+    finalize state) — the read-only guard denies the whole subtree."""
+    with _minted(guest_server) as (_ws, _data, token):
+        cookie = f"bookq_guest={token}"
+        assert _get(guest_server, "/api/v1/library/files",
+                    cookie=cookie).status_code == 403
+        assert _get(guest_server, "/api/v1/library/uploads/x",
+                    cookie=cookie).status_code == 403
+        # Members are unaffected.
+        sess = f"session={_session_cookie(ALICE)}"
+        assert _get(guest_server, "/api/v1/library/files",
+                    cookie=sess).status_code != 403
+
+
+def test_guest_responses_marked_no_store(guest_server):
+    """Every guest response carries the SW/page-cache exclusion marker
+    AND `Cache-Control: private, no-store` — the browser HTTP cache
+    ignores the custom header and would otherwise re-serve content past
+    grant revocation."""
+    with _minted(guest_server) as (_ws, _data, token):
+        cookie = f"bookq_guest={token}"
+        r = _get(guest_server, "/api/v1/tree?depth=1", cookie=cookie)
+        assert r.status_code == 200
+        assert r.headers.get("x-bookq-guest") == "1"
+        cc = r.headers.get("cache-control", "")
+        assert "no-store" in cc and "private" in cc
+
+
+def test_logout_clears_guest_cookie(guest_server):
+    """Logout drops bookq_guest on every processed path (incl. the
+    unconfigured-auth and corrupt-session responses)."""
+    cookie = f"bookq_guest={'g' * 32}"
+    r = httpx.get(
+        guest_server + "/auth/logout",
+        headers={
+            "Cookie": cookie,
+            "Origin": guest_server,
+            "Sec-Fetch-Site": "same-origin",
+        },
+        timeout=10,
+        follow_redirects=False,
+    )
+    cleared = any(
+        sc.startswith("bookq_guest=") and "Max-Age=0" in sc
+        for sc in r.headers.get_list("set-cookie")
+    )
+    assert cleared, f"no bookq_guest clear in {r.headers.get_list('set-cookie')}"
+
+
+def test_owner_disable_revokes_grant_and_ends_session(guest_server):
+    """Disabling a member must revoke their guest grants outright — a
+    disable→re-enable cycle can never resurrect a live bearer. The pair
+    session they led ends too (guests' whole surface is the session)."""
+    host = guest_server.split("://", 1)[1]
+    admin_headers = {
+        "Cookie": f"session={_session_cookie(ADMIN)}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": f"http://{host}",
+        "Sec-Fetch-Site": "same-origin",
+    }
+    leader_ws, ldata, token, guest_ws, _gdata, _sa, _sb = _guest_pair(
+        guest_server)
+    cookie = f"bookq_guest={token}"
+    try:
+        r = httpx.post(
+            guest_server + "/admin/users/disable",
+            headers=admin_headers,
+            content=b"email=" + ALICE["email"].encode(),
+            timeout=10,
+            follow_redirects=False,
+        )
+        assert r.status_code in (303, 200), r.status_code
+        assert _expect(guest_ws, "END")["reason"] == "owner_disabled"
+        assert _expect(leader_ws, "END")["reason"] == "owner_disabled"
+        assert _get(guest_server, "/api/v1/tree?depth=1",
+                    cookie=cookie).status_code == 401
+        assert _redeem(guest_server, token).status_code == 401
+        with pytest.raises(InvalidHandshake):
+            _ws_guest(guest_server, token)
+    finally:
+        try:
+            guest_ws.close()
+        except Exception:
+            pass
+        try:
+            leader_ws.close()
+        except Exception:
+            pass
+        # Shared fixture — leave ALICE active for the remaining tests.
+        r = httpx.post(
+            guest_server + "/admin/users/add",
+            headers=admin_headers,
+            content=b"email=" + ALICE["email"].encode(),
+            timeout=10,
+            follow_redirects=False,
+        )
+        assert r.status_code in (303, 200), r.status_code
