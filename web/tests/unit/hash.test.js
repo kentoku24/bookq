@@ -279,12 +279,12 @@ describe('applyUrlState — #/join/<code>?gt=<token> deep link', () => {
   beforeEach(() => {
     window.treeLoaded = true;
     window.showErrorToast = vi.fn();
-    globalThis.BookqApi = { endpoints: { guestRedeem: '/api/v1/guest/redeem' } };
+    globalThis.BookqApiEndpoints = { guestRedeem: '/api/v1/guest/redeem' };
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    delete globalThis.BookqApi;
+    delete globalThis.BookqApiEndpoints;
   });
 
   it('redeems the token then joinGuest + opens the pair panel', async () => {
