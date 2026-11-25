@@ -43,6 +43,7 @@ GUEST_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
 ADMIN = {"email": "admin@example.com", "name": "Admin", "picture": ""}
+CAROL = {"email": "carol@example.com", "name": "Carol", "picture": ""}
 
 
 @pytest.fixture(scope="module")
@@ -52,7 +53,7 @@ def guest_state_dir(tmp_path_factory):
     from rs_spawn import users_cli
 
     state_dir = tmp_path_factory.mktemp("reader-guest-state")
-    for user in (ALICE, BOB):
+    for user in (ALICE, BOB, CAROL):
         cp = users_cli(state_dir, "add", user["email"])
         assert cp.returncode == 0, cp.stderr
     cp = users_cli(state_dir, "add", ADMIN["email"], "--role", "admin")
@@ -901,3 +902,33 @@ def test_owner_disable_revokes_grant_and_ends_session(guest_server):
             follow_redirects=False,
         )
         assert r.status_code in (303, 200), r.status_code
+
+
+def test_cli_remove_member_closes_socket(guest_server, guest_state_dir):
+    """#656: the `viewer-rs users remove` CLI path can't reach
+    end_owner_sessions — the tick's membership re-check must close the
+    removed member's own (non-guest) socket with a policy close instead
+    of leaving it live until disconnect. CAROL is dedicated to this test
+    (she stays removed; no other test uses her)."""
+    from rs_spawn import users_cli
+
+    with _ws_user(guest_server, CAROL) as ws:
+        _recv(ws)
+        cp = users_cli(guest_state_dir, "remove", CAROL["email"])
+        assert cp.returncode == 0, cp.stderr
+        # Directory refresh (~1s) + next heartbeat tick — generous window.
+        # Keep the link's last_rx fresh with client PINGs so ONLY the
+        # membership re-check can close it (never the no-response sweep).
+        deadline = time.time() + 20
+        err = None
+        n = 0
+        while time.time() < deadline:
+            n += 1
+            try:
+                ws.send(_req("PING", rid=f"k{n}"))
+                ws.recv(timeout=3)
+            except Exception as e:  # noqa: BLE001 — ConnectionClosed 1008
+                err = e
+                break
+        assert err is not None, "removed member's socket never closed"
+        assert "1008" in str(err)

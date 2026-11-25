@@ -1626,8 +1626,15 @@ async fn main() {
     };
 
     let index = std::sync::Arc::new(folders::IndexState::new());
-    let registry =
-        reader_sync::Registry::new(index.clone(), library.clone(), Some(directory.clone()));
+    // TEST_MODE never enrolls its mock user in the users store, so wiring
+    // the directory there would make the tick's membership re-check kill
+    // every socket in dev/test. Real membership semantics don't exist in
+    // test mode anyway — the security posture lives in real-auth deploys.
+    let registry = reader_sync::Registry::new(
+        index.clone(),
+        library.clone(),
+        if test_mode { None } else { Some(directory.clone()) },
+    );
     {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
