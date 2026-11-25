@@ -170,12 +170,12 @@ async function cacheFirst(req) {
 // fallback bucket, not necessarily `cacheName`).
 async function evictEverywhere(req) {
   try {
-    for (const name of await caches.keys()) {
-      try { await (await caches.open(name)).delete(req); } catch { /* next */ }
-    }
-    for (const alt of thumbWidthFallbacks(req.url)) {
-      for (const name of await caches.keys()) {
-        try { await (await caches.open(name)).delete(alt); } catch { /* next */ }
+    const names = await caches.keys();
+    const urls = [req, ...thumbWidthFallbacks(req.url)];
+    for (const name of names) {
+      const c = await caches.open(name);
+      for (const target of urls) {
+        try { await c.delete(target); } catch { /* next */ }
       }
     }
   } catch { /* best-effort */ }

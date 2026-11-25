@@ -181,6 +181,18 @@ pub(crate) fn guest_email(headers: &HeaderMap, store: &GuestStore) -> Option<Str
     (!email.is_empty()).then_some(email)
 }
 
+/// `guest_email` ∩ active membership — the single membership re-check
+/// every guest-identity path shares (`resolve`, `resolve_ws_user`,
+/// `index_caller`): a removed owner invalidates every outstanding grant.
+pub(crate) fn guest_member(
+    headers: &HeaderMap,
+    store: &GuestStore,
+    directory: &UserDirectory,
+) -> Option<String> {
+    let email = guest_email(headers, store)?;
+    directory.is_member(&email).then_some(email)
+}
+
 /// Resolve the caller for a native handler. `test_mode` returns the mock
 /// user; a verifiable `session` cookie identifies the caller natively
 /// (Python prefers it over Bearer); `Bearer` validates locally; a valid
@@ -226,12 +238,8 @@ pub fn resolve(
     }
     match bearer_token(headers).and_then(|t| validate_bearer(t, secret, directory)) {
         Some(id) => Caller::User(id),
-        None => match guest_email(headers, guest) {
-            // Same membership re-evaluation as session/Bearer — a removed
-            // owner invalidates every outstanding guest grant.
-            Some(email) if directory.is_member(&email) => {
-                Caller::Guest(Identity { email })
-            }
+        None => match guest_member(headers, guest, directory) {
+            Some(email) => Caller::Guest(Identity { email }),
             _ => Caller::Delegate,
         },
     }
@@ -511,14 +519,12 @@ pub fn resolve_ws_user(
     // Guest-link fallback — the grant's owner email becomes the identity
     // (membership re-checked like every other path); the display name is
     // fixed so the leader sees "ゲスト" in presence/JOIN_REQUEST.
-    if let Some(email) = guest_email(headers, guest) {
-        if directory.is_member(&email) {
-            let mut u = serde_json::Map::new();
-            u.insert("email".into(), Value::String(email));
-            u.insert("name".into(), Value::String("ゲスト".into()));
-            u.insert("picture".into(), Value::String("".into()));
-            return Some(Value::Object(u));
-        }
+    if let Some(email) = guest_member(headers, guest, directory) {
+        let mut u = serde_json::Map::new();
+        u.insert("email".into(), Value::String(email));
+        u.insert("name".into(), Value::String("ゲスト".into()));
+        u.insert("picture".into(), Value::String("".into()));
+        return Some(Value::Object(u));
     }
     None
 }
@@ -946,6 +952,107 @@ mod tests {
             Caller::Delegate => panic!("test mode delegated"),
             Caller::Guest(_) => panic!("test mode resolved as guest"),
         }
+    }
+
+    #[test]
+    fn resolve_guest_cookie_yields_caller_guest() {
+        let store = GuestStore::new();
+        let token = store
+            .issue("a@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        let h = headers_with(Some(&format!("bookq_guest={token}")), None);
+        match resolve(
+            &h,
+            false,
+            SECRET,
+            session_key(SECRET).as_ref(),
+            &allowlist(),
+            &store,
+        ) {
+            Caller::Guest(u) => assert_eq!(u.email, "a@example.com"),
+            _ => panic!("expected Caller::Guest"),
+        }
+    }
+
+    #[test]
+    fn resolve_guest_cookie_from_non_member_owner_delegates() {
+        // Owner removed via CLI → grant still in store but membership
+        // gone → must NOT resolve (the grant itself stays dead anyway
+        // once the WS tick runs revoke_owner).
+        let store = GuestStore::new();
+        let token = store
+            .issue("stranger@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        let h = headers_with(Some(&format!("bookq_guest={token}")), None);
+        assert!(matches!(
+            resolve(
+                &h,
+                false,
+                SECRET,
+                session_key(SECRET).as_ref(),
+                &allowlist(),
+                &store
+            ),
+            Caller::Delegate
+        ));
+    }
+
+    #[test]
+    fn resolve_guest_cookie_revoked_or_unknown_delegates() {
+        let store = GuestStore::new();
+        let token = store
+            .issue("a@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        store.revoke_token(&token);
+        for t in [token, "bogus-token".to_string()] {
+            let h = headers_with(Some(&format!("bookq_guest={t}")), None);
+            assert!(matches!(
+                resolve(
+                    &h,
+                    false,
+                    SECRET,
+                    session_key(SECRET).as_ref(),
+                    &allowlist(),
+                    &store
+                ),
+                Caller::Delegate
+            ));
+        }
+    }
+
+    #[test]
+    fn resolve_ws_user_guest_fallback_names_guest() {
+        let store = GuestStore::new();
+        let token = store
+            .issue("a@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        let h = headers_with(Some(&format!("bookq_guest={token}")), None);
+        let u = resolve_ws_user(
+            &h,
+            false,
+            SECRET,
+            session_key(SECRET).as_ref(),
+            &allowlist(),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(u["email"], "a@example.com");
+        assert_eq!(u["name"], "ゲスト");
+        // Non-member owner → no fallback identity.
+        let store2 = GuestStore::new();
+        let token2 = store2
+            .issue("stranger@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        let h2 = headers_with(Some(&format!("bookq_guest={token2}")), None);
+        assert!(resolve_ws_user(
+            &h2,
+            false,
+            SECRET,
+            session_key(SECRET).as_ref(),
+            &allowlist(),
+            &store2,
+        )
+        .is_none());
     }
 }
 

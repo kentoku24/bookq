@@ -231,14 +231,13 @@ pub struct Link {
     pub next_ping_due: Instant,
     pub ping_seq: u64,
     pub user: Option<Value>,
-    /// `bookq_guest` grant link — read-only follower only: CREATE/MATCH
-    /// are rejected in `dispatch` so a guest can never lead a session
-    /// (leading would mint a fresh guest grant bound to their own
-    /// session, surviving the leader's disconnect).
-    pub guest: bool,
-    /// The `bookq_guest` bearer this link authenticated with — re-validated
-    /// every `tick` so a revoked/expired grant drops its socket instead of
-    /// coasting on the handshake-time snapshot.
+    /// The `bookq_guest` bearer this link authenticated with — `Some` iff
+    /// the link is a guest (read-only follower only: CREATE/MATCH are
+    /// rejected in `dispatch` so a guest can never lead a session, since
+    /// leading would mint a fresh guest grant bound to their own session,
+    /// surviving the leader's disconnect). Re-validated every `tick` so a
+    /// revoked/expired grant drops its socket instead of coasting on the
+    /// handshake-time snapshot.
     pub guest_token: Option<String>,
     /// Failed-JOIN throttle: brute-forcing 6-digit codes (or fishing for
     /// live grants) rides through reject frames, so a link that keeps
@@ -258,7 +257,6 @@ impl Link {
         outq: mpsc::Sender<OutItem>,
         close: watch::Sender<Option<(u16, String)>>,
         user: Option<Value>,
-        guest: bool,
         guest_token: Option<String>,
         now: Instant,
         heartbeat: Duration,
@@ -277,13 +275,24 @@ impl Link {
             next_ping_due: now + heartbeat,
             ping_seq: 0,
             user,
-            guest,
             guest_token,
             join_fails: 0,
             join_fails_since: now,
             close_queued: false,
             close,
         }
+    }
+
+    /// Guest link ⇔ carrying a `bookq_guest` bearer — one field, no
+    /// second truth to keep in step.
+    pub fn is_guest(&self) -> bool {
+        self.guest_token.is_some()
+    }
+
+    /// `user` JSON field as `&str` — the ws handshake payload's shape
+    /// ({email,name,picture}) is a wire contract, not a typed struct.
+    pub fn user_str(&self, key: &str) -> Option<&str> {
+        self.user.as_ref()?.get(key)?.as_str()
     }
 
     /// Queue one frame; overflow means the caller must close the link.
@@ -364,7 +373,12 @@ impl Link {
     /// Ordered close — queued behind frames already enqueued (END reaches
     /// the client before the socket dies). A full queue falls back to the
     /// bypassing watch close: whatever couldn't be queued was lost anyway.
+    /// First close wins like `request_transport_close` — a second Close on
+    /// the wire can only contradict the first's code/reason.
     fn queue_transport_close(&mut self, code: u16, reason: &str) {
+        if self.close_queued {
+            return;
+        }
         if self
             .outq
             .try_send(OutItem::Close(code, reason.to_string()))
@@ -639,9 +653,7 @@ impl Registry {
                     .find(|m| m.role == "leader")
                     .and_then(|m| m.link_id.as_ref())
                     .and_then(|lid| g.links.get(lid))
-                    .and_then(|l| l.user.as_ref())
-                    .and_then(|u| u.get("email"))
-                    .and_then(|v| v.as_str())
+                    .and_then(|l| l.user_str("email"))
                     .is_some_and(|e| e.eq_ignore_ascii_case(owner_email))
             })
             .map(|s| s.id.clone())
@@ -649,7 +661,11 @@ impl Registry {
         let n = sids.len();
         // END frames queue first — the member's own sockets close behind
         // them (ordered), not via the bypassing watch close that would
-        // truncate END before it flushes.
+        // truncate END before it flushes. A session whose leader link is
+        // already detached (offline inside the resume window) doesn't
+        // match the filter — safe anyway: `revoke_owner` above already
+        // killed its grants, and the tick's owner-membership re-check
+        // drops the guest sockets regardless.
         for sid in sids {
             g.end_session(&sid, END_OWNER_DISABLED);
         }
@@ -657,10 +673,7 @@ impl Registry {
             .links
             .iter()
             .filter(|(_, l)| {
-                l.user
-                    .as_ref()
-                    .and_then(|u| u.get("email"))
-                    .and_then(|v| v.as_str())
+                l.user_str("email")
                     .is_some_and(|e| e.eq_ignore_ascii_case(owner_email))
             })
             .map(|(id, _)| id.clone())
@@ -1050,9 +1063,9 @@ impl Inner {
             // fallback) would mint a guest grant bound to the guest's
             // own session — surviving the leader's disconnect.
             if matches!(t.as_str(), "CREATE" | "MATCH")
-                && self.links.get(link_id).is_some_and(|l| l.guest)
+                && self.links.get(link_id).is_some_and(|l| l.is_guest())
             {
-                self.reject(link_id, req_id(req), Some(&t), REASON_NOT_LEADER, None);
+                self.reject(link_id, req_id(req), Some(&t), REASON_FORBIDDEN, None);
                 return;
             }
             if !matches!(bind, Bind::Unbound) {
@@ -1227,17 +1240,13 @@ impl Inner {
         let name = self
             .links
             .get(link_id)
-            .and_then(|l| l.user.as_ref())
-            .and_then(|u| u.get("name"))
-            .and_then(|v| v.as_str())
+            .and_then(|l| l.user_str("name"))
             .unwrap_or("")
             .to_string();
         let owner_email = self
             .links
             .get(link_id)
-            .and_then(|l| l.user.as_ref())
-            .and_then(|u| u.get("email"))
-            .and_then(|v| v.as_str())
+            .and_then(|l| l.user_str("email"))
             .map(|e| e.trim().to_lowercase())
             .filter(|e| !e.is_empty());
         let Some(member) = Member::new("leader", name, &sid, link_id, "active") else {
@@ -1325,7 +1334,7 @@ impl Inner {
         // A guest-authenticated link may only ride its own grant — the code
         // path would let it brute-force 6-digit codes into foreign sessions
         // (leader auto-approvals land the hit instantly).
-        if self.links.get(link_id).is_some_and(|l| l.guest) {
+        if self.links.get(link_id).is_some_and(|l| l.is_guest()) {
             self.reject_join(link_id, req, REASON_FORBIDDEN, None);
             return;
         }
@@ -1352,6 +1361,10 @@ impl Inner {
     /// (`code_consumed` is set by `bind_follower` for both paths).
     fn join_guest(&mut self, link_id: &str, req: &Map<String, Value>) {
         let token = req["payload"]["guestToken"].as_str().unwrap_or("");
+        // Expired vs unknown IS distinguished here — unlike HTTP redeem
+        // (see guest_redeem's oracle comment): join_fails already
+        // throttles this oracle, and code_expired tells the client the
+        // invite needs re-issue rather than retyping.
         let grant = match self.guest.status(token) {
             GrantStatus::Valid(g) => g,
             GrantStatus::Expired => {
@@ -1379,9 +1392,7 @@ impl Inner {
         let name = self
             .links
             .get(link_id)
-            .and_then(|l| l.user.as_ref())
-            .and_then(|u| u.get("name"))
-            .and_then(|v| v.as_str())
+            .and_then(|l| l.user_str("name"))
             .unwrap_or("")
             .to_string();
         let Some(member) = Member::new("follower", name, sid, link_id, "pending") else {
@@ -2549,7 +2560,7 @@ impl Inner {
                     // of leaving a live link that only ping/pong can see.
                     // Queued (not the watch bypass): the END frame just sent
                     // must reach the client first.
-                    if l.guest {
+                    if l.is_guest() {
                         l.queue_transport_close(WS_CLOSE_NORMAL, "session_end");
                     }
                 }
@@ -2562,11 +2573,37 @@ impl Inner {
     // ── clock-driven transitions ─────────────────────────────────────
 
     /// All time-based transitions.
+    /// Whether a guest link's grant still holds — WS auth was a
+    /// handshake-time snapshot, so a revoked/expired grant must drop the
+    /// socket rather than coast until disconnect. When a directory is
+    /// wired the grant OWNER's membership is checked too and permanent-
+    /// revoked on removal, like `end_owner_sessions`' `revoke_owner`:
+    /// the `viewer-rs users remove` CLI path can't reach that call site,
+    /// and closing the socket alone would let a re-enable resurrect the
+    /// bearer grant.
+    fn guest_link_valid(&mut self, lid: &str) -> bool {
+        let Some(token) = self
+            .links
+            .get(lid)
+            .and_then(|l| l.guest_token.as_deref())
+        else {
+            return false;
+        };
+        let GrantStatus::Valid(g) = self.guest.status(token) else {
+            return false;
+        };
+        if matches!(&self.directory, Some(d) if !d.is_member(&g.owner_email)) {
+            self.guest.revoke_owner(&g.owner_email);
+            return false;
+        }
+        true
+    }
+
     pub fn tick(&mut self) {
         let now = Instant::now();
         let link_ids: Vec<String> = self.links.keys().cloned().collect();
         for lid in link_ids {
-            let Some(link) = self.links.get_mut(&lid) else {
+            let Some(link) = self.links.get(&lid) else {
                 continue;
             };
             if !link.alive || link.close_queued {
@@ -2576,41 +2613,13 @@ impl Inner {
                 self.close_link(&lid, "no_response", WS_CLOSE_POLICY);
                 continue;
             }
-            // Guest links re-validate their grant every tick — WS auth was
-            // a handshake-time snapshot, so a revoked/expired grant must
-            // drop the socket rather than coast until disconnect. When a
-            // directory is wired the grant OWNER's membership is checked
-            // too: the `viewer-rs users remove` CLI path can't reach
-            // end_owner_sessions, so without this a removed member's guest
-            // sockets would survive — and their grants resurrect on
-            // re-enable.
-            if link.guest {
-                let grant = link
-                    .guest_token
-                    .as_deref()
-                    .and_then(|t| match self.guest.status(t) {
-                        GrantStatus::Valid(g) => Some(g),
-                        _ => None,
-                    });
-                let valid = match &grant {
-                    Some(g) => match &self.directory {
-                        // Permanent, like end_owner_sessions' revoke_owner —
-                        // closing the socket alone would let a re-enable
-                        // resurrect the bearer grant (the CLI path never
-                        // reaches revoke_owner).
-                        Some(d) if !d.is_member(&g.owner_email) => {
-                            self.guest.revoke_owner(&g.owner_email);
-                            false
-                        }
-                        _ => true,
-                    },
-                    None => false,
-                };
-                if !valid {
-                    self.close_link(&lid, "guest_revoked", WS_CLOSE_POLICY);
-                    continue;
-                }
+            if link.is_guest() && !self.guest_link_valid(&lid) {
+                self.close_link(&lid, "guest_revoked", WS_CLOSE_POLICY);
+                continue;
             }
+            let Some(link) = self.links.get_mut(&lid) else {
+                continue;
+            };
             if now >= link.next_ping_due {
                 link.ping_seq += 1;
                 let seq = link.ping_seq;
@@ -2684,7 +2693,7 @@ mod tests {
     use super::*;
 
     fn mk_link(inner: &mut Inner) -> (String, mpsc::Receiver<OutItem>) {
-        let (id, rx, _) = mk_link_full(inner, Some(Value::Null), false, None);
+        let (id, rx, _) = mk_link_full(inner, Some(Value::Null), None);
         (id, rx)
     }
 
@@ -2693,7 +2702,6 @@ mod tests {
     fn mk_link_full(
         inner: &mut Inner,
         user: Option<Value>,
-        guest: bool,
         guest_token: Option<String>,
     ) -> (
         String,
@@ -2706,7 +2714,6 @@ mod tests {
             tx,
             close_tx,
             user,
-            guest,
             guest_token,
             Instant::now(),
             Duration::from_secs_f64(HEARTBEAT_INTERVAL),
@@ -2878,7 +2885,7 @@ mod tests {
             ("name", "Leader".into()),
             ("email", "leader@example.com".into()),
         ]);
-        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), false, None);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), None);
         let _ = next_json(&mut r1); // HELLO
         inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
         let ack = next_json(&mut r1);
@@ -2886,7 +2893,7 @@ mod tests {
         let code = ack["data"]["code"].as_str().unwrap().to_string();
         let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
 
-        let (l2, mut r2, _) = mk_link_full(&mut inner, Some(Value::Null), true, Some(gt.clone()));
+        let (l2, mut r2, _) = mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
         let _ = next_json(&mut r2); // HELLO
         // A guest link JOINing a 6-digit code is refused — the code path is
         // members-only; the grant is the only ticket a guest holds.
@@ -2915,7 +2922,7 @@ mod tests {
     async fn join_flood_closes_link() {
         let reg = reg_for_test();
         let mut inner = reg.inner.lock().await;
-        let (l1, mut r1, mut close_rx) = mk_link_full(&mut inner, Some(Value::Null), false, None);
+        let (l1, mut r1, mut close_rx) = mk_link_full(&mut inner, Some(Value::Null), None);
         let _ = next_json(&mut r1); // HELLO
         for _ in 0..JOIN_FAIL_MAX {
             inner.dispatch(
@@ -2945,7 +2952,7 @@ mod tests {
         let mut inner = reg.inner.lock().await;
         // Unknown bearer → not Valid → the next tick closes the socket.
         let (_lg, mut rg, mut gclose) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some("stale".into()));
+            mk_link_full(&mut inner, Some(Value::Null), Some("stale".into()));
         let _ = next_json(&mut rg); // HELLO
         // A normal link is untouched.
         let (l1, _r1) = mk_link(&mut inner);
@@ -2983,7 +2990,7 @@ mod tests {
             .issue("ghost@example.com", "s1", Duration::from_secs(3600))
             .unwrap();
         let (_lg, mut rg, mut gclose) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some(ghost.clone()));
+            mk_link_full(&mut inner, Some(Value::Null), Some(ghost.clone()));
         let _ = next_json(&mut rg); // HELLO
         // A member-owned grant survives the same tick.
         let member = reg
@@ -2991,7 +2998,7 @@ mod tests {
             .issue("member@example.com", "s1", Duration::from_secs(3600))
             .unwrap();
         let (l1, _r1, _c1) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some(member.clone()));
+            mk_link_full(&mut inner, Some(Value::Null), Some(member.clone()));
         inner.tick();
         gclose.changed().await.unwrap();
         assert_eq!(gclose.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);
@@ -3019,7 +3026,7 @@ mod tests {
             ("name", "Leader".into()),
             ("email", "leader@example.com".into()),
         ]);
-        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), false, None);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), None);
         let _ = next_json(&mut r1); // HELLO
         inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
         let ack = next_json(&mut r1);
@@ -3027,7 +3034,7 @@ mod tests {
         let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
         let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
         let (l2, mut r2, _gclose) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some(gt.clone()));
+            mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
         let _ = next_json(&mut r2); // HELLO
         inner.dispatch(
             &reg,
@@ -3055,7 +3062,7 @@ mod tests {
             ("name", "Leader".into()),
             ("email", "leader@example.com".into()),
         ]);
-        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), false, None);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(leader), None);
         let _ = next_json(&mut r1); // HELLO
         inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
         let ack = next_json(&mut r1);
@@ -3063,7 +3070,7 @@ mod tests {
         let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
         let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
         let (l2, mut r2, mut gclose) =
-            mk_link_full(&mut inner, Some(Value::Null), true, Some(gt.clone()));
+            mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
         let _ = next_json(&mut r2); // HELLO
         inner.dispatch(
             &reg,
@@ -3087,7 +3094,12 @@ mod tests {
     async fn match_origin_session_mints_no_guest_token() {
         let reg = reg_for_test();
         let mut inner = reg.inner.lock().await;
-        let (l1, mut r1) = mk_link(&mut inner);
+        // Email-bearing user — a Null-user link could never mint a token,
+        // which would make this assertion vacuous.
+        let mut u = Map::new();
+        u.insert("email".into(), Value::String("owner@example.com".into()));
+        u.insert("name".into(), Value::String("Owner".into()));
+        let (l1, mut r1, _close) = mk_link_full(&mut inner, Some(Value::Object(u)), None);
         let _ = next_json(&mut r1); // HELLO
         inner.dispatch(&reg, &l1, &req("MATCH", "", Value::Object(Map::new())));
         let ack = next_json(&mut r1);
@@ -3120,7 +3132,7 @@ mod tests {
             ("name", "Leader".into()),
             ("email", "owner@example.com".into()),
         ]);
-        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(user), false, None);
+        let (l1, mut r1, _c) = mk_link_full(&mut inner, Some(user), None);
         let _ = next_json(&mut r1); // HELLO
         inner.dispatch(&reg, &l1, &req("CREATE", "", Value::Object(Map::new())));
         let ack = next_json(&mut r1);

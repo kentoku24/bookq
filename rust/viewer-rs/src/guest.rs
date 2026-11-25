@@ -150,9 +150,21 @@ impl GuestStore {
 /// headers on a directly-exposed deploy), so a global window bounds the
 /// total; the map is lazily purged past `MAX_TRACKED_IPS` so rotating
 /// keys can't grow it unboundedly either.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RedeemRateLimit {
     inner: Arc<Mutex<RedeemRateState>>,
+    max_attempts: u32,
+    max_global_attempts: u32,
+}
+
+impl Default for RedeemRateLimit {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RedeemRateState::default())),
+            max_attempts: Self::MAX_ATTEMPTS,
+            max_global_attempts: Self::MAX_GLOBAL_ATTEMPTS,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -170,6 +182,23 @@ impl RedeemRateLimit {
     const MAX_GLOBAL_ATTEMPTS: u32 = 300;
     /// Past this many tracked IPs, expired windows are purged on check.
     const MAX_TRACKED_IPS: usize = 4096;
+
+    /// Production constructor — `BOOKQ_GUEST_REDEEM_MAX` /
+    /// `BOOKQ_GUEST_REDEEM_GLOBAL_MAX` raise the ceilings for test
+    /// deploys; absent env keeps the compiled-in defaults.
+    pub fn from_env() -> Self {
+        let env_u32 = |key: &str, def: u32| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(def)
+        };
+        Self {
+            inner: Arc::new(Mutex::new(RedeemRateState::default())),
+            max_attempts: env_u32("BOOKQ_GUEST_REDEEM_MAX", Self::MAX_ATTEMPTS),
+            max_global_attempts: env_u32("BOOKQ_GUEST_REDEEM_GLOBAL_MAX", Self::MAX_GLOBAL_ATTEMPTS),
+        }
+    }
 
     /// `true` when the attempt is allowed (and counted).
     pub fn check(&self, ip: &str) -> bool {
@@ -196,11 +225,11 @@ impl RedeemRateLimit {
                     *e = (now, 0);
                 }
                 e.1 += 1;
-                e.1 <= Self::MAX_ATTEMPTS
+                e.1 <= self.max_attempts
             }
             None => true,
         };
-        let ok = per_ip_ok && s.global_count < Self::MAX_GLOBAL_ATTEMPTS;
+        let ok = per_ip_ok && s.global_count < self.max_global_attempts;
         if ok {
             s.global_count += 1;
         }

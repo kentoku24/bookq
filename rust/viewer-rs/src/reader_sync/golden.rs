@@ -174,7 +174,7 @@ impl LinkDriver {
     async fn attach(reg: &Arc<Registry>, user: Option<Value>) -> Self {
         let (tx, rx) = mpsc::channel(reg.send_queue_max());
         let (close_tx, close_rx) = watch::channel(None);
-        let link = Link::new(tx, close_tx, user, false, None, Instant::now(),
+        let link = Link::new(tx, close_tx, user, None, Instant::now(),
                              reg.heartbeat_interval());
         let bulk = link.bulk.clone();
         let link_id = reg

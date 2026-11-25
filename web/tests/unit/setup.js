@@ -5,6 +5,7 @@
 import './stubs.js';
 import '../../static/offline-core.js';
 import '../../static/api/endpoints.js';
+import '../../static/guest.js';
 import '../../static/api/v1.js';
 import '../../static/thumbs/resolveCover.js';
 import '../../static/viewer/pairModel.js';

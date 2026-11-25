@@ -50,7 +50,7 @@
   // Guest sessions are read-only by grant — the show-all swipe and the
   // hidden-entry toggles are member affordances (their writes would 403
   // anyway), so the whole mode stays unreachable for guests.
-  var _guest = (typeof window !== "undefined" && window.__BOOKQ_GUEST__ === "true");
+  var _guest = !!(globalThis.BookqGuest && globalThis.BookqGuest.isGuest());
   var _refreshQueued = false;
   var _coalesceTimer = 0;
   var _readyResolve = null;

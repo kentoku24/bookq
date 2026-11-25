@@ -87,8 +87,8 @@ pub(crate) fn index_caller(
                 guest: false,
             }
         }
-        None => match auth::guest_email(headers, guest) {
-            Some(email) if directory.is_member(&email) => ShellUser::Viewer {
+        None => match auth::guest_member(headers, guest, directory) {
+            Some(email) => ShellUser::Viewer {
                 user_key: Some(format!("guest:{email}")),
                 guest: true,
             },

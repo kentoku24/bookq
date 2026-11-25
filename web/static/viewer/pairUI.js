@@ -400,12 +400,12 @@
      * client offers 「近くの相手とつながる / コードで参加」; a legacy
      * client — or one whose connect() answered {unsupported} — keeps the
      * classic 開始/参加 pair. A guest caller can never lead — CREATE and
-     * MATCH are rejected `not_leader` on a guest link — and their JOIN
+     * MATCH are rejected `forbidden` on a guest link — and their JOIN
      * path is the invite URL, never a 6-digit code (the server rejects
      * guest JOIN{code} outright), so every code surface hides for them:
      * leader button, join form entry, and the guest-invite action itself.
      * Only the explanatory note remains. */
-    const isGuest = window.__BOOKQ_GUEST__ === 'true';
+    const isGuest = !!(globalThis.BookqGuest && globalThis.BookqGuest.isGuest());
     const matchable = !isGuest &&
                       !!(ctl && typeof ctl.connect === 'function' &&
                          !connectUnsupported);
@@ -645,7 +645,7 @@
     // Guests join via the invite URL only — the server rejects guest
     // JOIN{code}, so don't even offer the attempt.
     if (!/^\d{6}$/.test(v) || !ctl || joinPending ||
-        window.__BOOKQ_GUEST__ === 'true') return;
+        globalThis.BookqGuest && globalThis.BookqGuest.isGuest()) return;
     joinPending = true;   // cleared when the join view re-opens
     // A fresh attempt retires the carried-over failure notice (#158).
     lastJoinError = null;

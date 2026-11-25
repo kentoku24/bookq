@@ -2192,7 +2192,10 @@
    * resume record sit inside the resume window? Same staleness rule as
    * _adoptPersist — kept here so the key/format stay single-sourced and
    * no socket needs to open for the answer. */
-  function peekPersistedResume(storage, now, resumeWindowMs) {
+  /* Shared probe for peekPersistedResume/peekActivePair — parses the
+   * persist record and reports {record, age} so each caller applies its
+   * own heartbeat-window predicate. */
+  function _peekRecord(storage, now) {
     try {
       var p = storage !== undefined ? storage : _defaultLocalStorage();
       if (!p) return null;
@@ -2200,11 +2203,16 @@
       if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
           typeof d.hb !== 'number') return null;
       var t = typeof now === 'function' ? now() : Date.now();
-      var w = resumeWindowMs || RESUME_WINDOW_MS;
-      var age = t - d.hb;
-      if (age <= RESUME_HB_STALE_MS || age > w) return null;
-      return d;
+      return {record: d, age: t - d.hb};
     } catch (e) { return null; }
+  }
+
+  function peekPersistedResume(storage, now, resumeWindowMs) {
+    var p = _peekRecord(storage, now);
+    if (!p) return null;
+    var w = resumeWindowMs || RESUME_WINDOW_MS;
+    if (p.age <= RESUME_HB_STALE_MS || p.age > w) return null;
+    return p.record;
   }
 
   /* Cheap guard probe (hash.js's guest-redeem gate): is the persist record
@@ -2214,17 +2222,11 @@
    * second tab can refuse to swap the origin-shared bookq_guest cookie
    * out from under a running pair. Same key/format, no socket. */
   function peekActivePair(storage, now, staleMs) {
-    try {
-      var p = storage !== undefined ? storage : _defaultLocalStorage();
-      if (!p) return null;
-      var d = JSON.parse(p.getItem(PERSIST_KEY) || 'null');
-      if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
-          typeof d.hb !== 'number') return null;
-      var t = typeof now === 'function' ? now() : Date.now();
-      var stale = typeof staleMs === 'number' ? staleMs : RESUME_HB_STALE_MS;
-      if (t - d.hb > stale) return null;
-      return d;
-    } catch (e) { return null; }
+    var p = _peekRecord(storage, now);
+    if (!p) return null;
+    var stale = typeof staleMs === 'number' ? staleMs : RESUME_HB_STALE_MS;
+    if (p.age > stale) return null;
+    return p.record;
   }
 
   /* Cheap boot check (pairController): is a leave tombstone waiting for a

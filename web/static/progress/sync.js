@@ -56,7 +56,7 @@
   // PUTs are 403'd by the write guard (a dropped-4xx retry loop at best) and
   // a pull would merge the leader's progress into the guest's namespaced
   // local store. Reads/writes stay purely local under `guest:<email>`.
-  var _guest = typeof window !== "undefined" && window.__BOOKQ_GUEST__ === "true";
+  var _guest = !!(globalThis.BookqGuest && globalThis.BookqGuest.isGuest());
   var DEBOUNCE_MS = 2000;
   var RETRY_MAX_MS = 60000;
   var _timer = null;          // send timer (debounce or retry backoff)

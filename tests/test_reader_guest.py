@@ -407,7 +407,7 @@ def test_guest_cannot_create_or_match(guest_server):
             assert _recv(g)["type"] == "HELLO"
             for rtype in ("CREATE", "MATCH"):
                 g.send(_req(rtype, rid="x"))
-                assert _expect(g, "REJECT")["reason"] == "not_leader"
+                assert _expect(g, "REJECT")["reason"] == "forbidden"
             # The link is unharmed — a normal JOIN{guestToken} still works.
             g.send(_req("JOIN", {"guestToken": token}, rid="jg"))
             assert _expect(g, "ACK")["data"]["role"] == "follower"

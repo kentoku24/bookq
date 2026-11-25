@@ -298,7 +298,7 @@
     // the put) — a guest "download" would count unsaved pages as saved
     // and leave a "complete" record that opens nothing offline. Refuse
     // at the single entry gate; the button is hidden for guests anyway.
-    if (window.__BOOKQ_GUEST__ === "true"){
+    if (globalThis.BookqGuest && globalThis.BookqGuest.isGuest()){
       try { if (window.showErrorToast) window.showErrorToast("ゲストはオフラインダウンロードを利用できません"); } catch(e){ console.warn(e); }
       return;
     }
@@ -548,7 +548,7 @@
   function offlineControlsHtmlCtx(path, ctx){
     // Guests read through a grant that can die mid-session — nothing they
     // "download" is persisted, so the control would be a lie. Hide it.
-    if (window.__BOOKQ_GUEST__ === "true") return "";
+    if (globalThis.BookqGuest && globalThis.BookqGuest.isGuest()) return "";
     var state = getOfflineBtnStateCtx(path, ctx);
     var labels = {};
     labels[OfflineBtnState.IDLE] = "ダウンロード";

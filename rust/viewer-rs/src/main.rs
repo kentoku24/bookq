@@ -110,23 +110,49 @@ pub(crate) fn method_not_allowed(allow: &'static str) -> Response {
     r
 }
 
+/// Public, per-user-free asset paths — exempt from both `Vary: Cookie`
+/// (starlette parity: these routes never touch `request.session`) and
+/// the guest `no-store`/`x-bookq-guest` marking.
+fn session_free_path(p: &str) -> bool {
+    p == "/sw.js" || p == "/favicon.ico" || p == "/static" || p.starts_with("/static/")
+}
+
 /// Unverifiable caller (no session, no/invalid Bearer) answers 401 locally.
 fn unauthenticated() -> Response {
     state::detail(StatusCode::UNAUTHORIZED, "authentication required")
+}
+
+impl AppState {
+    /// The full caller-resolution chain (session → Bearer → guest) with
+    /// this app's auth inputs — one place the seven call sites share.
+    fn resolve(&self, headers: &axum::http::HeaderMap) -> auth::Caller {
+        auth::resolve(
+            headers,
+            self.test_mode,
+            &self.secret_key,
+            self.session_key.as_ref(),
+            &self.directory,
+            self.registry.guest(),
+        )
+    }
+
+    fn resolve_ws_user(&self, headers: &axum::http::HeaderMap) -> Option<serde_json::Value> {
+        auth::resolve_ws_user(
+            headers,
+            self.test_mode,
+            &self.secret_key,
+            self.session_key.as_ref(),
+            &self.directory,
+            self.registry.guest(),
+        )
+    }
 }
 
 /// Resolve the caller for a route: `None` means unauthenticated. A guest
 /// grant resolves to the leader's identity for reads — writes are stopped
 /// earlier by `guest_write_guard`.
 fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
-    match auth::resolve(
-        headers,
-        st.test_mode,
-        &st.secret_key,
-        st.session_key.as_ref(),
-        &st.directory,
-        st.registry.guest(),
-    ) {
+    match st.resolve(headers) {
         auth::Caller::User(u) | auth::Caller::Guest(u) => Some(u),
         auth::Caller::Delegate => None,
     }
@@ -161,11 +187,7 @@ async fn vary_session_cookie(
     // `request.session`. The public static/shell assets never do, so a
     // signed-in browser's static fetches carry no Vary —
     // mirror that or every such response would wrongly advertise one.
-    let path = req.uri().path();
-    let session_free = path == "/sw.js"
-        || path == "/favicon.ico"
-        || path == "/static"
-        || path.starts_with("/static/");
+    let session_free = session_free_path(req.uri().path());
     let mut res = next.run(req).await;
     if signed && !session_free && !vary_lists_cookie(res.headers()) {
         res.headers_mut()
@@ -205,14 +227,7 @@ async fn guest_write_guard(
         return next.run(req).await;
     }
     if matches!(
-        auth::resolve(
-            req.headers(),
-            st.test_mode,
-            &st.secret_key,
-            st.session_key.as_ref(),
-            &st.directory,
-            st.registry.guest(),
-        ),
+        st.resolve(req.headers()),
         auth::Caller::Guest(_)
     ) {
         return state::detail(StatusCode::FORBIDDEN, "guest access is read-only");
@@ -237,14 +252,7 @@ async fn guest_response_marker(
     req: Request<Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    let (is_guest, dead_guest_only) = match auth::resolve(
-        req.headers(),
-        st.test_mode,
-        &st.secret_key,
-        st.session_key.as_ref(),
-        &st.directory,
-        st.registry.guest(),
-    ) {
+    let (is_guest, dead_guest_only) = match st.resolve(req.headers()) {
         auth::Caller::Guest(_) => (true, false),
         auth::Caller::User(_) => (false, false),
         // A guest cookie that resolved to anonymous is a dead grant —
@@ -257,10 +265,7 @@ async fn guest_response_marker(
     };
     // Public, per-user-free assets stay cacheable for guests — same set
     // `vary_session_cookie` exempts. Everything else gets no-store.
-    let session_free = {
-        let p = req.uri().path();
-        p == "/sw.js" || p == "/favicon.ico" || p == "/static" || p.starts_with("/static/")
-    };
+    let session_free = session_free_path(req.uri().path());
     let mut res = next.run(req).await;
     let mark = is_guest
         || (dead_guest_only
@@ -952,14 +957,7 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
     // re-checked), not from the shell's viewer branch. Guests resolve to
     // the leader's identity for reads — the menu must not leak to them
     // (`/admin` itself is already 403 via guest_write_guard).
-    let admin_email = match auth::resolve(
-        &headers,
-        st.test_mode,
-        &st.secret_key,
-        st.session_key.as_ref(),
-        &st.directory,
-        st.registry.guest(),
-    ) {
+    let admin_email = match st.resolve(&headers) {
         auth::Caller::User(u) => Some(u.email),
         _ => None,
     };
@@ -1555,6 +1553,12 @@ async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// Bearer → `Caller::User`) get `{"ok":true}` without a cookie so a logged-in
 /// user scanning the QR keeps their own identity; guest-cookie holders
 /// re-redeeming get last-wins refresh.
+/// `POST /api/v1/guest/redeem` body — the invite token to exchange.
+#[derive(serde::Deserialize)]
+struct GuestRedeemBody {
+    token: String,
+}
+
 async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Response {
     if *req.method() != axum::http::Method::POST {
         return method_not_allowed("POST");
@@ -1573,6 +1577,7 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
     if !st.guest_redeem_limit.check(&oauth::client_ip(req.headers())) {
         return state::detail(StatusCode::TOO_MANY_REQUESTS, "too many requests");
     }
+
     let headers = req.headers().clone();
     // `Bytes::from_request` honors the route-layer DefaultBodyLimit — an
     // unauthenticated endpoint must not slurp an unbounded body.
@@ -1583,25 +1588,14 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
     // Validate the body BEFORE the authed short-circuit — the OpenAPI
     // contract declares requestBody required, and schema-violating
     // requests must get 400s no matter who is calling.
-    let token = serde_json::from_slice::<serde_json::Value>(&body)
+    let token = serde_json::from_slice::<GuestRedeemBody>(&body)
         .ok()
-        .and_then(|v| {
-            v.get("token")
-                .and_then(|t| t.as_str())
-                .map(str::to_string)
-        });
+        .map(|b| b.token);
     let Some(token) = token.filter(|t| guest::valid_token_shape(t)) else {
         return state::detail(StatusCode::BAD_REQUEST, "invalid token");
     };
     if matches!(
-        auth::resolve(
-            &headers,
-            st.test_mode,
-            &st.secret_key,
-            st.session_key.as_ref(),
-            &st.directory,
-            st.registry.guest(),
-        ),
+        st.resolve(&headers),
         auth::Caller::User(_)
     ) {
         let mut res = Response::builder()
@@ -1647,7 +1641,10 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
             serve::maybe_gzip(&headers, res, true).await
         }
         // Expired and unknown answer identically — distinguishing them
-        // would be a token-state oracle.
+        // would be a token-state oracle. (The WS side's join_guest DOES
+        // split code_expired/bad_code: that path is throttled by
+        // join_fails so the oracle is bounded, and expired-vs-wrong tells
+        // the user to request a fresh invite rather than retype.)
         guest::GrantStatus::Expired | guest::GrantStatus::Unknown => {
             state::detail(StatusCode::UNAUTHORIZED, "guest link invalid")
         }
@@ -1661,14 +1658,7 @@ async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Respons
 /// answer HTTP 403.
 async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Response {
     let is_guest = matches!(
-        auth::resolve(
-            req.headers(),
-            st.test_mode,
-            &st.secret_key,
-            st.session_key.as_ref(),
-            &st.directory,
-            st.registry.guest(),
-        ),
+        st.resolve(req.headers()),
         auth::Caller::Guest(_)
     );
     // The grant bearer rides on the link so `tick` can re-validate it —
@@ -1679,14 +1669,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
     } else {
         None
     };
-    let Some(user) = auth::resolve_ws_user(
-        req.headers(),
-        st.test_mode,
-        &st.secret_key,
-        st.session_key.as_ref(),
-        &st.directory,
-        st.registry.guest(),
-    ) else {
+    let Some(user) = st.resolve_ws_user(req.headers()) else {
         return StatusCode::FORBIDDEN.into_response();
     };
     let (mut parts, _body) = req.into_parts();
@@ -1694,7 +1677,7 @@ async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Respo
         Ok(wsu) => {
             let st2 = st.clone();
             wsu.on_upgrade(move |socket| {
-                reader_sync_conn(socket, st2, user, is_guest, guest_token)
+                reader_sync_conn(socket, st2, user, guest_token)
             })
         }
         Err(rej) => rej.into_response(),
@@ -1707,7 +1690,6 @@ async fn reader_sync_conn(
     socket: axum::extract::ws::WebSocket,
     st: AppState,
     user: serde_json::Value,
-    is_guest: bool,
     guest_token: Option<String>,
 ) {
     use axum::extract::ws::Message;
@@ -1720,7 +1702,6 @@ async fn reader_sync_conn(
         outq_tx,
         close_tx,
         Some(user),
-        is_guest,
         guest_token,
         std::time::Instant::now(),
         reg.heartbeat_interval(),
@@ -2005,7 +1986,7 @@ async fn main() {
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         csp_extra,
-        guest_redeem_limit: guest::RedeemRateLimit::default(),
+        guest_redeem_limit: guest::RedeemRateLimit::from_env(),
     };
     // #608: TEST_MODE trusts every caller as the mock user. An admin role in
     // that posture makes `/admin` reachable by anyone who can hit the URL, so
@@ -2546,7 +2527,6 @@ mod handler_tests {
             tx,
             close_tx,
             None,
-            false,
             None,
             std::time::Instant::now(),
             st.registry.heartbeat_interval(),
