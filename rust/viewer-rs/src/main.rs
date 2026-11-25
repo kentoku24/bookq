@@ -224,7 +224,11 @@ async fn guest_write_guard(
     let library_path = path == "/api/v1/library" || path.starts_with("/api/v1/library/");
     // Reading positions resolve to the leader's identity for a guest —
     // denying even safe methods keeps their private history off the wire.
-    let positions_path = path == "/api/v1/reading-positions";
+    // `== x || starts_with(x + "/")` like the neighbors: any future
+    // sub-route (per-work position, history) is private for the same
+    // reason and must not slip past the guard unmarked.
+    let positions_path = path == "/api/v1/reading-positions"
+        || path.starts_with("/api/v1/reading-positions/");
     if (safe_method && !admin_path && !library_path && !positions_path)
         || path == "/api/v1/guest/redeem"
     {
