@@ -402,13 +402,49 @@ jobs:
           TEMPLATE
           printf '\nIssue number: %s\n\nIssue title:\n%s\n\nIssue body:\n%s\n' "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY" >> prompt.txt
 
+      # GitHub App installation token — the only credential allowed to push
+      # .github/workflows/ changes ("workflows" permission is App-only;
+      # GITHUB_TOKEN has no such scope, #657). Minted only when the
+      # GH_APP_CLIENT_ID/GH_APP_PRIVATE_KEY secrets exist; otherwise git
+      # falls back to GITHUB_TOKEN and workflow-touching pushes keep
+      # failing exactly as before (no behavior change until secrets set).
+      - name: Check GitHub App token secrets
+        id: app-secrets
+        env:
+          GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$GH_APP_CLIENT_ID" ] && [ -n "$GH_APP_PRIVATE_KEY" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GH_APP_CLIENT_ID/GH_APP_PRIVATE_KEY secrets not set — git push falls back to GITHUB_TOKEN (cannot push .github/workflows/ changes)"
+          fi
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        if: steps.app-secrets.outputs.configured == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          # owner/repositories omitted — defaults to the current repository,
+          # which also keeps this correct for repository_dispatch events.
+          permission-contents: write
+          permission-workflows: write
+
       - name: Configure git auth (GH_TOKEN)
         env:
           GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git config user.name "opencode-bot"
           git config user.email "bot@users.noreply.github.com"
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          # Prefer the App installation token when minted: it is the only
+          # credential that can push .github/workflows/ changes (#657).
+          # Falls back to GITHUB_TOKEN while GH_APP_* secrets are unset.
+          git_token="${APP_TOKEN:-$GH_TOKEN}"
+          git config --global url."https://x-access-token:${git_token}@github.com/".insteadOf "https://github.com/"
 
       # Cheap sanity before any step that shells out: branch cleanup uses
       # git/gh, CLI install + sign-in use curl/jq, the agent and delivery

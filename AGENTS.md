@@ -129,6 +129,10 @@ uv run --with pytest --with playwright --with-requirements requirements-dev.txt 
 - 起票 Issue には `ai/*` ラベルが**付いていない** — 人間がトリアージして初めて bot パイプラインに乗る。bot 側から `ai/implement` / `ai/research` を自発的に付与しないこと。
 - 実行ログは `[meta] improvement-scan 実行ログ` Issue に積まれる。
 
+### opencode-auto の git 認証
+
+- `implement-direct` の git push は GitHub App installation token 優先（`GH_APP_CLIENT_ID`/`GH_APP_PRIVATE_KEY` secrets 設定時のみ mint、未設定は GITHUB_TOKEN フォールバック）。App token がないと `.github/workflows/` 変更を含む push は構造的に拒否される (#657)。セットアップ・ロールバックは `docs/github-app-token.md`。
+
 ## 8. 並行作業の隔離
 
 - 書き込みを伴う作業は単発でも必ず別 worktree (`ai/<N>-<slug> OR ai/<slug>` ごとに1つ、`.worktrees/` 内)。1 issue/plan = 1 worktree を維持する (2026-10-05 以降、単発作業の除外なし)。
