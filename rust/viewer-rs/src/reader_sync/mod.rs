@@ -2664,8 +2664,25 @@ impl Inner {
                 self.close_link(&lid, "no_response", WS_CLOSE_POLICY);
                 continue;
             }
+            // Member links re-validate membership too when a directory is
+            // wired — the `viewer-rs users remove` CLI path can't reach
+            // end_owner_sessions, so without this a removed member keeps
+            // operating their socket (CREATE, sequenced ops) until
+            // disconnect. Links without a user email can't be checked and
+            // are left to the other revalidation gates. Computed up-front:
+            // the grant check below takes &mut self, so the decision must
+            // be a plain bool by then.
+            let member_removed = !link.is_guest()
+                && matches!(
+                    (self.directory.as_ref(), link.user_str("email")),
+                    (Some(d), Some(email)) if !d.is_member(email)
+                );
             if link.is_guest() && !self.guest_link_valid(&lid) {
                 self.close_link(&lid, "guest_revoked", WS_CLOSE_POLICY);
+                continue;
+            }
+            if member_removed {
+                self.close_link(&lid, "member_removed", WS_CLOSE_POLICY);
                 continue;
             }
             let Some(link) = self.links.get_mut(&lid) else {
@@ -3067,6 +3084,44 @@ mod tests {
             reg.guest().status(&member),
             GrantStatus::Valid(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn tick_closes_member_link_when_user_not_member() {
+        // #656: the `viewer-rs users remove` CLI path can't reach
+        // end_owner_sessions, so a removed member's own (non-guest) socket
+        // must die on the tick's membership re-check instead of operating
+        // until disconnect. Member links carry no grant — the check keys
+        // on the handshake user email.
+        let directory = Arc::new(crate::users::UserDirectory::test_with(&[(
+            "member@example.com",
+            crate::users::Role::Member,
+        )]));
+        let reg = Registry::new(
+            Arc::new(IndexState::new()),
+            PathBuf::from("/nonexistent"),
+            Some(directory),
+        );
+        let mut inner = reg.inner.lock().await;
+        let user = |email: &str| {
+            protocol::frame(&[
+                ("name", "N".into()),
+                ("email", email.into()),
+            ])
+        };
+        // Non-member user → dies on tick.
+        let (_lg, _rg, mut gclose) =
+            mk_link_full(&mut inner, Some(user("ghost@example.com")), None);
+        // Enrolled member → survives; a user-less link can't be checked
+        // and is also left alone.
+        let (l1, _r1, _c1) =
+            mk_link_full(&mut inner, Some(user("member@example.com")), None);
+        let (l2, _r2, _c2) = mk_link_full(&mut inner, Some(Value::Null), None);
+        inner.tick();
+        gclose.changed().await.unwrap();
+        assert_eq!(gclose.borrow().as_ref().unwrap().0, WS_CLOSE_POLICY);
+        assert!(inner.links.get(&l1).is_some_and(|l| l.alive));
+        assert!(inner.links.get(&l2).is_some_and(|l| l.alive));
     }
 
     #[tokio::test]
