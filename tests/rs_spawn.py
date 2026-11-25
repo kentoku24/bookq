@@ -219,7 +219,7 @@ def spawn_backend(
     return proc, base_url
 
 
-def wait_tree_settled(proc, base_url: str) -> None:
+def wait_tree_settled(proc, base_url: str, cookie: str | None = None) -> None:
     """Wait out the post-health 202 window on /api/v1/tree.
 
     Health answers before the metadata index finishes building — the tree
@@ -229,13 +229,22 @@ def wait_tree_settled(proc, base_url: str) -> None:
     test_startup_fetches_folders_exactly_twice_and_seeds_etag). Wait for
     the first non-202 so session-scoped fixtures hand tests a settled
     backend. Bounded: a wedged build degrades to the old behavior rather
-    than hanging the whole suite."""
+    than hanging the whole suite.
+
+    `cookie` (e.g. `session=<signed>`) is REQUIRED against a real-auth
+    server — the tree endpoint authenticates before checking the index,
+    so an unauthenticated probe breaks on the first 401 and settles
+    nothing."""
     tree_deadline = time.time() + 30
     while time.time() < tree_deadline:
         if proc.poll() is not None:
             raise RuntimeError("test backend exited early")
+        req = urllib.request.Request(
+            base_url + "/api/v1/tree",
+            headers={"Cookie": cookie} if cookie else {},
+        )
         try:
-            resp = urllib.request.urlopen(base_url + "/api/v1/tree", timeout=2)
+            resp = urllib.request.urlopen(req, timeout=2)
             resp.close()
             if resp.status != 202:
                 break

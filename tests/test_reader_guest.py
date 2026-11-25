@@ -63,7 +63,8 @@ def guest_state_dir(tmp_path_factory):
 @pytest.fixture(scope="module")
 def guest_server(library_tree, guest_state_dir):
     """Live server WITHOUT test-mode: real signed-cookie + guest auth."""
-    proc, base_url = _spawn_server(library_tree, guest_state_dir)
+    proc, base_url = _spawn_server(
+        library_tree, guest_state_dir, probe_user=ALICE)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)
