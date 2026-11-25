@@ -249,6 +249,11 @@ pub struct Link {
     /// first. `tick` must not let a bypassing watch close race ahead and
     /// truncate them.
     close_queued: bool,
+    /// A close that could not be queued yet (queue full) — parked intent
+    /// retried by `tick` as the queue drains. It must NEVER fall back to
+    /// the bypassing watch close: the bypass truncates exactly the
+    /// frames (e.g. END) this ordering exists to protect.
+    pending_close: Option<(u16, String, Instant)>,
     close: watch::Sender<Option<(u16, String)>>,
 }
 
@@ -279,6 +284,7 @@ impl Link {
             join_fails: 0,
             join_fails_since: now,
             close_queued: false,
+            pending_close: None,
             close,
         }
     }
@@ -309,7 +315,10 @@ impl Link {
         };
         match self.outq.try_send(OutItem::Text(raw)) {
             Ok(()) => SendOutcome::Sent,
-            Err(_) => SendOutcome::Full,
+            Err(mpsc::error::TrySendError::Full(_)) => SendOutcome::Full,
+            // Receiver gone → drain ended → the transport is already
+            // dead; nothing to deliver and nothing to close.
+            Err(mpsc::error::TrySendError::Closed(_)) => SendOutcome::Inactive,
         }
     }
 
@@ -349,7 +358,7 @@ impl Link {
                 self.bulk.lock().unwrap().pending = true;
                 SendOutcome::Sent
             }
-            Err(_) => {
+            Err(e) => {
                 // Marker failed — roll back only the just-enqueued block.
                 let mut b = self.bulk.lock().unwrap();
                 for _ in 0..n {
@@ -357,7 +366,12 @@ impl Link {
                         b.bytes -= r.len();
                     }
                 }
-                SendOutcome::Full
+                match e {
+                    mpsc::error::TrySendError::Full(_) => SendOutcome::Full,
+                    mpsc::error::TrySendError::Closed(_) => {
+                        SendOutcome::Inactive
+                    }
+                }
             }
         }
     }
@@ -371,22 +385,29 @@ impl Link {
     }
 
     /// Ordered close — queued behind frames already enqueued (END reaches
-    /// the client before the socket dies). A full queue falls back to the
-    /// bypassing watch close: whatever couldn't be queued was lost anyway.
-    /// First close wins like `request_transport_close` — a second Close on
-    /// the wire can only contradict the first's code/reason.
+    /// the client before the socket dies). A full queue must NOT fall
+    /// back to the bypassing watch close: the bypass truncates exactly
+    /// the frames this ordering exists to protect. The intent is parked
+    /// in `pending_close` and retried by `tick` until it lands or the
+    /// queue proves wedged; `Closed` means the drain (and with it the
+    /// transport) is already gone, so nothing needs doing.
+    /// First close wins like `request_transport_close` — a second Close
+    /// on the wire can only contradict the first's code/reason.
     fn queue_transport_close(&mut self, code: u16, reason: &str) {
         if self.close_queued {
             return;
         }
-        if self
+        match self
             .outq
             .try_send(OutItem::Close(code, reason.to_string()))
-            .is_ok()
         {
-            self.close_queued = true;
-        } else {
-            self.request_transport_close(code, reason);
+            Ok(()) => self.close_queued = true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.close_queued = true;
+                self.pending_close =
+                    Some((code, reason.to_string(), Instant::now()));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 }
@@ -2606,7 +2627,37 @@ impl Inner {
             let Some(link) = self.links.get(&lid) else {
                 continue;
             };
-            if !link.alive || link.close_queued {
+            if !link.alive {
+                continue;
+            }
+            if link.close_queued {
+                // A parked ordered close retries as the queue drains —
+                // the bypassing watch close is the last resort because it
+                // truncates the frames the ordering exists to protect. A
+                // queue that stays full past the no-response budget means
+                // a wedged transport; give up and bypass.
+                if let Some((code, reason, since)) = link.pending_close.clone() {
+                    let wedged =
+                        now.duration_since(since) >= self.no_response_timeout;
+                    match link
+                        .outq
+                        .try_send(OutItem::Close(code, reason.clone()))
+                    {
+                        Ok(())
+                        | Err(mpsc::error::TrySendError::Closed(_)) => {
+                            if let Some(l) = self.links.get_mut(&lid) {
+                                l.pending_close = None;
+                            }
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) if wedged => {
+                            link.request_transport_close(code, &reason);
+                            if let Some(l) = self.links.get_mut(&lid) {
+                                l.pending_close = None;
+                            }
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {}
+                    }
+                }
                 continue;
             }
             if now.duration_since(link.last_rx) >= self.no_response_timeout {
@@ -3088,6 +3139,79 @@ mod tests {
             Ok(OutItem::Close(code, _)) => assert_eq!(code, WS_CLOSE_NORMAL),
             other => panic!("expected queued close after END, got {:?}", other.is_ok()),
         }
+    }
+
+    #[tokio::test]
+    async fn parked_ordered_close_retries_without_truncating() {
+        // A full outq must park the ordered close — the watch-channel
+        // bypass would truncate the frames it is ordered behind (the
+        // owner_disabled END flake). Once the drain frees a slot the
+        // parked close lands at the queue tail.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (lid, mut rx, close_rx) =
+            mk_link_full(&mut inner, Some(Value::Null), None);
+        let _ = next_json(&mut rx); // HELLO
+        {
+            let l = inner.links.get_mut(&lid).unwrap();
+            while l
+                .outq
+                .try_send(OutItem::Text("x".to_string()))
+                .is_ok()
+            {}
+            l.queue_transport_close(WS_CLOSE_NORMAL, "session_end");
+            assert!(l.close_queued && l.pending_close.is_some());
+        }
+        // Full → no Close item and NO watch-channel bypass.
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok()); // one slot drained below
+        assert!(!close_rx.has_changed().unwrap());
+        // First freed slot must be taken by the retried Close, not by a
+        // bypass (the watch stays silent until the Close item delivers).
+        inner.tick();
+        let mut saw_close = false;
+        while let Ok(item) = rx.try_recv() {
+            if matches!(item, OutItem::Close(..)) {
+                saw_close = true;
+            }
+        }
+        assert!(saw_close);
+        let l = inner.links.get(&lid).unwrap();
+        assert!(l.pending_close.is_none());
+        assert!(!close_rx.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn wedged_ordered_close_eventually_bypasses() {
+        // If the queue never drains past the no-response budget the
+        // transport is dead — the parked close gives up and fires the
+        // bypass (nothing left to protect).
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (lid, _rx, close_rx) =
+            mk_link_full(&mut inner, Some(Value::Null), None);
+        {
+            let l = inner.links.get_mut(&lid).unwrap();
+            // The retry must still see a FULL queue — only then does the
+            // grace-expired park give up and fire the bypass.
+            while l
+                .outq
+                .try_send(OutItem::Text("x".to_string()))
+                .is_ok()
+            {}
+            l.pending_close = Some((
+                WS_CLOSE_NORMAL,
+                "session_end".to_string(),
+                Instant::now()
+                    - Duration::from_secs_f64(NO_RESPONSE_TIMEOUT + 1.0),
+            ));
+            l.close_queued = true;
+        }
+        inner.tick();
+        assert_eq!(
+            close_rx.borrow().as_ref().map(|(c, _)| *c),
+            Some(WS_CLOSE_NORMAL)
+        );
     }
 
     #[tokio::test]
