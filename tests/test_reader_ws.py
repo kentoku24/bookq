@@ -68,6 +68,10 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
         "BASE_URL": f"http://127.0.0.1:{port}",
         "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
         "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
+        # A full file of redeem tests from one IP would otherwise exhaust
+        # the production 30/60s per-IP budget (429 mid-suite flake).
+        "BOOKQ_GUEST_REDEEM_MAX": "10000",
+        "BOOKQ_GUEST_REDEEM_GLOBAL_MAX": "100000",
     })
     cmd = [str(_viewer_rs_binary())]
     # #139: watchdog spawn — pytest death can't orphan the backend.
@@ -91,6 +95,11 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     else:
         proc.terminate()
         raise RuntimeError("auth test server did not become healthy in 30s")
+    # Same 202-settle wait as rs_spawn — the guest fixtures' first WS/HTTP
+    # steps must not race the metadata index build.
+    import rs_spawn
+
+    rs_spawn.wait_tree_settled(proc, base_url)
     return proc, base_url
 
 

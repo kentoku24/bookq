@@ -176,6 +176,11 @@ def spawn_backend(
             "SECRET_KEY": "ci-not-a-secret",
             "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
             "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
+            # A full file of redeem tests from one IP would otherwise
+            # exhaust the production 30/60s per-IP budget (429 mid-suite
+            # flake); rate-limit behavior itself has dedicated unit tests.
+            "BOOKQ_GUEST_REDEEM_MAX": "10000",
+            "BOOKQ_GUEST_REDEEM_GLOBAL_MAX": "100000",
         }
     )
     if env_extra:
@@ -210,14 +215,21 @@ def spawn_backend(
     else:
         proc.terminate()
         raise RuntimeError("test backend did not become healthy within 30s")
-    # Health answers before the metadata index finishes building — the tree
-    # endpoint keeps returning 202 + Retry-After until then, and a browser
-    # test that loads inside that window makes the client's own 202-retry
-    # loop emit an extra bare /api/v1/tree fetch (flaked
-    # test_startup_fetches_folders_exactly_twice_and_seeds_etag). Wait for
-    # the first non-202 so session-scoped fixtures hand tests a settled
-    # backend. Bounded: a wedged build degrades to the old behavior rather
-    # than hanging the whole suite.
+    wait_tree_settled(proc, base_url)
+    return proc, base_url
+
+
+def wait_tree_settled(proc, base_url: str) -> None:
+    """Wait out the post-health 202 window on /api/v1/tree.
+
+    Health answers before the metadata index finishes building — the tree
+    endpoint keeps returning 202 + Retry-After until then, and a browser
+    test that loads inside that window makes the client's own 202-retry
+    loop emit an extra bare /api/v1/tree fetch (flaked
+    test_startup_fetches_folders_exactly_twice_and_seeds_etag). Wait for
+    the first non-202 so session-scoped fixtures hand tests a settled
+    backend. Bounded: a wedged build degrades to the old behavior rather
+    than hanging the whole suite."""
     tree_deadline = time.time() + 30
     while time.time() < tree_deadline:
         if proc.poll() is not None:
@@ -233,7 +245,6 @@ def spawn_backend(
         except OSError:
             pass
         time.sleep(0.25)
-    return proc, base_url
 
 
 def users_cli(

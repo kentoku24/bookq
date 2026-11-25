@@ -89,11 +89,26 @@ pub(crate) fn index_caller(
         }
         None => match auth::guest_member(headers, guest, directory) {
             Some(email) => ShellUser::Viewer {
-                user_key: Some(format!("guest:{email}")),
+                user_key: Some(format!("{GUEST_KEY_PREFIX}{email}")),
                 guest: true,
             },
             _ => ShellUser::Login,
         },
+    }
+}
+
+/// The `guest:` user_key prefix — positions namespace under
+/// `guest:<owner>` so a guest's progress can't collide with the owner's
+/// own key; the visibility-owner HMAC strips it back off.
+const GUEST_KEY_PREFIX: &str = "guest:";
+
+/// The email the visibility-owner HMAC keys on — for a guest that's the
+/// grant OWNER (the `guest:` prefix stripped off the namespaced position
+/// key), not the guest key itself.
+fn owner_email_for(user_key: Option<&str>, is_guest: bool) -> Option<&str> {
+    match (user_key, is_guest) {
+        (Some(k), true) => Some(k.strip_prefix(GUEST_KEY_PREFIX).unwrap_or(k)),
+        (k, _) => k,
     }
 }
 
@@ -439,14 +454,7 @@ pub(crate) fn index(
     // `guest:`-prefixed position key — `GET /api/v1/folder-visibility`
     // computes it from `caller()`'s resolved identity (the owner), so a
     // prefixed key here would never match the server's owner value.
-    let owner_key = if is_guest {
-        user_key
-            .as_deref()
-            .and_then(|k| k.strip_prefix("guest:"))
-            .or(user_key.as_deref())
-    } else {
-        user_key.as_deref()
-    };
+    let owner_key = owner_email_for(user_key.as_deref(), is_guest);
     let owner = owner_key.map(|k| state::visibility_owner(k, secret));
     let snapshot = owner
         .as_ref()
@@ -1035,6 +1043,73 @@ mod tests {
         }
     }
 
+    // ── index_caller guest plumbing ──
+
+    fn member_dir() -> UserDirectory {
+        UserDirectory::test_with(&[("alice@example.com", crate::users::Role::Member)])
+    }
+
+    #[test]
+    fn index_caller_guest_grant_renders_guest_viewer() {
+        let store = crate::guest::GuestStore::new();
+        let token = store
+            .issue("alice@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        let h = hdrs(&[("cookie", &format!("bookq_guest={token}"))]);
+        match index_caller(false, "s", None, &member_dir(), &h, &store) {
+            ShellUser::Viewer { user_key, guest } => {
+                assert!(guest);
+                assert_eq!(user_key.as_deref(), Some("guest:alice@example.com"));
+            }
+            _ => panic!("guest grant must render the viewer shell as guest"),
+        }
+    }
+
+    #[test]
+    fn index_caller_guest_from_non_member_owner_is_login() {
+        // Grant owner removed from the directory → no guest surface, not
+        // even the read-only shell.
+        let store = crate::guest::GuestStore::new();
+        let token = store
+            .issue("stranger@example.com", "s1", std::time::Duration::from_secs(60))
+            .unwrap();
+        let h = hdrs(&[("cookie", &format!("bookq_guest={token}"))]);
+        assert!(matches!(
+            index_caller(false, "s", None, &member_dir(), &h, &store),
+            ShellUser::Login
+        ));
+    }
+
+    #[test]
+    fn index_caller_unknown_guest_token_is_login() {
+        let store = crate::guest::GuestStore::new();
+        let h = hdrs(&[("cookie", "bookq_guest=bogus")]);
+        assert!(matches!(
+            index_caller(false, "s", None, &member_dir(), &h, &store),
+            ShellUser::Login
+        ));
+    }
+
+    #[test]
+    fn owner_email_for_strips_guest_prefix() {
+        assert_eq!(
+            owner_email_for(Some("guest:alice@example.com"), true),
+            Some("alice@example.com")
+        );
+        // No prefix (defensive) → the key as-is.
+        assert_eq!(
+            owner_email_for(Some("alice@example.com"), true),
+            Some("alice@example.com")
+        );
+        // Members are never stripped — a "guest:"-looking member key is
+        // kept verbatim.
+        assert_eq!(
+            owner_email_for(Some("guest:x@y.z"), false),
+            Some("guest:x@y.z")
+        );
+        assert_eq!(owner_email_for(None, true), None);
+    }
+
     // ── template render ──
 
     const TEMPLATE: &str = include_str!("../../../web/templates/index.html");
@@ -1075,11 +1150,27 @@ mod tests {
             "window.__BOOKQ_VISIBILITY_SNAPSHOT__ = {\"hiddenRoots\": [\"x\"], \"owner\": \"deadbeef\", \"revision\": 7};"
         ));
         assert!(out.contains("window.__BOOKQ_PROGRESS_USER__ = \"alice@example.com\";"));
+        assert!(out.contains("window.__BOOKQ_GUEST__ = \"false\";"));
         assert!(!out.contains("thumbnail-perf-panel"));
         // Non-admin: the server-side block is dropped entirely.
         assert!(!out.contains("id=\"admin-link\""));
         assert!(!out.contains("{% if is_admin %}"));
         assert!(out.ends_with("</html>\n"));
+    }
+
+    #[test]
+    fn guest_ctx_renders_guest_flag() {
+        let mut c = ctx();
+        c.is_guest = true;
+        let out = render_index(TEMPLATE, &c).unwrap();
+        assert!(out.contains("window.__BOOKQ_GUEST__ = \"true\";"));
+        // And the guest's progress key namespaces under guest:<owner> —
+        // the JS side reads this verbatim for position reads.
+        c.user_key = Some("guest:alice@example.com".into());
+        let out = render_index(TEMPLATE, &c).unwrap();
+        assert!(out.contains(
+            "window.__BOOKQ_PROGRESS_USER__ = \"guest:alice@example.com\";"
+        ));
     }
 
     #[test]

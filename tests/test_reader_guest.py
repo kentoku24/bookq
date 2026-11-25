@@ -579,6 +579,10 @@ def test_guest_qr_url_pairs_and_turns(browser, guest_server):
             "() => window.PairController.state.role") == "leader"
         assert pg.evaluate(
             "() => window.PairController.state.role") == "follower"
+        # The shell marker the read-only/offline JS keys on — rendered
+        # server-side from the grant, pinned end-to-end here.
+        assert pg.evaluate("() => window.__BOOKQ_GUEST__") == "true"
+        assert pl.evaluate("() => window.__BOOKQ_GUEST__") == "false"
         # leader opens a work → shared spread reaches 'reading' on both
         _open(pl, "long")
         for p in (pl, pg):
@@ -790,32 +794,49 @@ def test_guest_responses_marked_no_store(guest_server):
     grant revocation."""
     with _minted(guest_server) as (_ws, _data, token):
         cookie = f"bookq_guest={token}"
-        r = _get(guest_server, "/api/v1/tree?depth=1", cookie=cookie)
-        assert r.status_code == 200
-        assert r.headers.get("x-bookq-guest") == "1"
-        cc = r.headers.get("cache-control", "")
-        assert "no-store" in cc and "private" in cc
+        for path in ("/api/v1/tree?depth=1", "/"):
+            r = _get(guest_server, path, cookie=cookie)
+            assert r.status_code == 200, (path, r.status_code)
+            assert r.headers.get("x-bookq-guest") == "1", path
+            cc = r.headers.get("cache-control", "")
+            assert "no-store" in cc and "private" in cc, (path, cc)
 
 
 def test_logout_clears_guest_cookie(guest_server):
-    """Logout drops bookq_guest on every processed path (incl. the
-    unconfigured-auth and corrupt-session responses)."""
-    cookie = f"bookq_guest={'g' * 32}"
-    r = httpx.get(
-        guest_server + "/auth/logout",
-        headers={
-            "Cookie": cookie,
-            "Origin": guest_server,
-            "Sec-Fetch-Site": "same-origin",
-        },
-        timeout=10,
-        follow_redirects=False,
-    )
-    cleared = any(
-        sc.startswith("bookq_guest=") and "Max-Age=0" in sc
-        for sc in r.headers.get_list("set-cookie")
-    )
-    assert cleared, f"no bookq_guest clear in {r.headers.get_list('set-cookie')}"
+    """Logout drops bookq_guest AND kills the grant server-side — a
+    fake-cookie clear can't prove the bearer is dead, so this mints a real
+    grant and asserts it stops redeeming/serving after logout."""
+    with _minted(guest_server) as (_ws, _data, token):
+        cookie = f"bookq_guest={token}"
+        assert _redeem(guest_server, token).status_code == 200
+        assert (
+            _get(guest_server, "/api/v1/tree?depth=1", cookie=cookie)
+            .status_code == 200
+        )
+        r = httpx.get(
+            guest_server + "/auth/logout",
+            headers={
+                "Cookie": cookie,
+                "Origin": guest_server,
+                "Sec-Fetch-Site": "same-origin",
+            },
+            timeout=10,
+            follow_redirects=False,
+        )
+        cleared = any(
+            sc.startswith("bookq_guest=") and "Max-Age=0" in sc
+            for sc in r.headers.get_list("set-cookie")
+        )
+        assert cleared, (
+            f"no bookq_guest clear in {r.headers.get_list('set-cookie')}"
+        )
+        # The grant itself is revoked — a lifted token must not outlive
+        # the sign-out even with the cookie value still in hand.
+        assert _redeem(guest_server, token).status_code == 401
+        assert (
+            _get(guest_server, "/api/v1/tree?depth=1", cookie=cookie)
+            .status_code == 401
+        )
 
 
 def test_owner_disable_revokes_grant_and_ends_session(guest_server):

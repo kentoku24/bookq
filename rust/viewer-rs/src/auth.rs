@@ -465,6 +465,9 @@ pub(crate) fn session_lookup(headers: &HeaderMap, key: Option<&SessionKey>) -> S
 /// `user_from_connection` for the WS handshake: TEST_MODE mock → signed
 /// session cookie's `user` → Bearer (returning the py-shaped
 /// {email,name,picture} dict — member names come from `name`).
+/// `(user, is_guest)` — the guest flag lets the WS handler key grant
+/// handling off the SAME resolution instead of running a second
+/// `resolve()` chain.
 pub fn resolve_ws_user(
     headers: &HeaderMap,
     test_mode: bool,
@@ -472,13 +475,13 @@ pub fn resolve_ws_user(
     session_key: Option<&SessionKey>,
     directory: &UserDirectory,
     guest: &GuestStore,
-) -> Option<Value> {
+) -> Option<(Value, bool)> {
     if test_mode {
         let mut u = serde_json::Map::new();
         u.insert("email".into(), Value::String(TEST_USER_EMAIL.into()));
         u.insert("name".into(), Value::String("Test User".into()));
         u.insert("picture".into(), Value::String("".into()));
-        return Some(Value::Object(u));
+        return Some((Value::Object(u), false));
     }
     match session_lookup(headers, session_key) {
         SessionLookup::User(u) => {
@@ -489,7 +492,7 @@ pub fn resolve_ws_user(
                 Some(e) if !directory.is_member(&e.to_lowercase()) => {}
                 // Any other non-null `user` is the caller upstream —
                 // return it whole.
-                _ => return Some(u),
+                _ => return Some((u, false)),
             }
         }
         // Signed but not a session object — starlette raises on load and
@@ -514,7 +517,7 @@ pub fn resolve_ws_user(
         );
         let picture = claims.get("picture").and_then(|v| v.as_str()).unwrap_or("");
         u.insert("picture".into(), Value::String(picture.to_string()));
-        return Some(Value::Object(u));
+        return Some((Value::Object(u), false));
     }
     // Guest-link fallback — the grant's owner email becomes the identity
     // (membership re-checked like every other path); the display name is
@@ -524,7 +527,7 @@ pub fn resolve_ws_user(
         u.insert("email".into(), Value::String(email));
         u.insert("name".into(), Value::String("ゲスト".into()));
         u.insert("picture".into(), Value::String("".into()));
-        return Some(Value::Object(u));
+        return Some((Value::Object(u), true));
     }
     None
 }
@@ -1027,7 +1030,7 @@ mod tests {
             .issue("a@example.com", "s1", std::time::Duration::from_secs(60))
             .unwrap();
         let h = headers_with(Some(&format!("bookq_guest={token}")), None);
-        let u = resolve_ws_user(
+        let (u, is_guest) = resolve_ws_user(
             &h,
             false,
             SECRET,
@@ -1036,6 +1039,7 @@ mod tests {
             &store,
         )
         .unwrap();
+        assert!(is_guest);
         assert_eq!(u["email"], "a@example.com");
         assert_eq!(u["name"], "ゲスト");
         // Non-member owner → no fallback identity.
