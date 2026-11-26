@@ -151,6 +151,109 @@ PY
   DEVNAME="$DEVICE_NAME ($DEVNAME)"
 fi
 
+# XCUITest `typeText` can only target a field whose keyboard focus is
+# visible to XCTest. Hardware-keyboard mode suppresses the software
+# keyboard; iOS 27's bottom `.searchable` can then show a caret while
+# XCTest still reports no focused input (#621). Parallel test clones do
+# not inherit per-device DevicePreferences, so the legacy global key is
+# still the only public mechanism that covers them.
+#
+# The key is shared by every simulator for this macOS user. Keep a small
+# reference count while cooperating test runs overlap: the first run
+# captures the host value, every run forces software keyboards, and only
+# the last run restores the captured value. `shlock` protects the state
+# file and removes locks left by dead processes.
+SIM_PREF_DOMAIN="com.apple.iphonesimulator"
+KEYBOARD_PREF_DIR="$HOME/Library/Caches/bookq-ios-ui-test"
+KEYBOARD_PREF_LOCK="$KEYBOARD_PREF_DIR/keyboard.lock"
+KEYBOARD_PREF_STATE_FILE="$KEYBOARD_PREF_DIR/keyboard.state"
+if ! mkdir -p "$KEYBOARD_PREF_DIR"; then
+  echo "ERROR: cannot create simulator keyboard state dir: $KEYBOARD_PREF_DIR"
+  exit 1
+fi
+if ! command -v shlock >/dev/null 2>&1; then
+  echo "ERROR: shlock is required to coordinate simulator keyboard prefs"
+  exit 1
+fi
+KEYBOARD_PREF_STATE="__missing__"
+
+keyboard_pref_lock() {
+  local attempts=0
+  while ! shlock -f "$KEYBOARD_PREF_LOCK" -p $$ 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 300 ]; then
+      echo "ERROR: timed out acquiring simulator keyboard lock: $KEYBOARD_PREF_LOCK"
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+keyboard_pref_unlock() {
+  rm -f "$KEYBOARD_PREF_LOCK"
+}
+
+keyboard_pref_write_state() {
+  local tmp="$KEYBOARD_PREF_STATE_FILE.$$"
+  {
+    printf '%s' "$KEYBOARD_PREF_STATE"
+    for pid in $1; do
+      printf ' %s' "$pid"
+    done
+    printf '\n'
+  } > "$tmp"
+  mv "$tmp" "$KEYBOARD_PREF_STATE_FILE"
+}
+
+keyboard_pref_lock || exit 1
+if [ -f "$KEYBOARD_PREF_STATE_FILE" ]; then
+  read -r KEYBOARD_PREF_STATE active_pids < "$KEYBOARD_PREF_STATE_FILE"
+else
+  KEYBOARD_PREF_STATE="$(defaults read "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard 2>/dev/null || printf '__missing__')"
+  active_pids=""
+fi
+live_pids=""
+for pid in $active_pids; do
+  if kill -0 "$pid" 2>/dev/null; then
+    live_pids="$live_pids $pid"
+  fi
+done
+keyboard_pref_write_state "$live_pids $$"
+keyboard_pref_unlock
+defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool false
+
+release_keyboard_pref() {
+  if ! keyboard_pref_lock; then
+    echo "WARN: simulator keyboard state was not updated"
+    return 1
+  fi
+  active_pids=""
+  if [ -f "$KEYBOARD_PREF_STATE_FILE" ]; then
+    read -r KEYBOARD_PREF_STATE active_pids < "$KEYBOARD_PREF_STATE_FILE"
+  fi
+  live_pids=""
+  for pid in $active_pids; do
+    [ "$pid" = "$$" ] && continue
+    if kill -0 "$pid" 2>/dev/null; then
+      live_pids="$live_pids $pid"
+    fi
+  done
+  if [ -n "$live_pids" ]; then
+    keyboard_pref_write_state "$live_pids"
+  else
+    rm -f "$KEYBOARD_PREF_STATE_FILE"
+    if [ "$KEYBOARD_PREF_STATE" = "__missing__" ]; then
+      defaults delete "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard >/dev/null 2>&1 || true
+    else
+      defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool "$KEYBOARD_PREF_STATE" >/dev/null 2>&1 || true
+    fi
+  fi
+  keyboard_pref_unlock
+}
+# The main cleanup trap replaces this one below, so cleanup() calls the
+# same release function. The early trap covers the narrow boot/erase path.
+trap release_keyboard_pref EXIT
+
 xcrun simctl shutdown "$UDID" 2>/dev/null || true
 # Isolation without a full erase: `simctl erase` pays a cold first boot
 # (~3min) every run. Uninstalling the app + test bundles below removes
@@ -204,6 +307,10 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
       rm -rf "$xctd/$cu" 2>/dev/null || true
     done
   done
+  if ! release_keyboard_pref; then
+    echo "ERROR: simulator keyboard preference restore could not be coordinated"
+    rc=1
+  fi
   if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
     if pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
       scripts/sim-teardown.sh --udid "$UDID" --audit-only \
@@ -314,9 +421,10 @@ fi
 # Retry ONCE, and only when the failure looks infrastructural — real
 # assertion failures must never get a second chance to pass. Console
 # signatures cover transport/clone errors; app.launch() flakes such as
-# "does not have a process ID" are recorded only inside the xcresult,
-# so failure messages there are inspected as a second signal: retry
-# only when EVERY recorded failure is launch/transport-class.
+# "does not have a process ID" / "Failed to terminate" are recorded
+# only inside the xcresult, so failure messages there are inspected as
+# a second signal: retry only when EVERY recorded failure is
+# launch/transport-class.
 BUNDLE="$RESULTS/tests.xcresult"
 
 infra_failure() {
@@ -327,8 +435,8 @@ infra_failure() {
 import json, re, sys
 INFRA = re.compile(
     r"does not have a process ID|[Ff]ailed to launch|[Uu]nable to launch|"
-    r"[Ll]ost connection|[Ff]ailed to install|testmanagerd|"
-    r"process exited", re.I)
+    r"[Ff]ailed to terminate|[Ll]ost connection|[Ff]ailed to install|"
+    r"testmanagerd|process exited", re.I)
 try:
     root = json.load(sys.stdin)
 except Exception:

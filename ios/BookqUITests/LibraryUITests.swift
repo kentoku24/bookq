@@ -63,8 +63,7 @@ final class LibraryUITests: XCTestCase {
     func testSearchModeToggles() throws {
         app.assertExists(tile("Series"), within: 60)
         let field = openSearchField()
-        field.tap()
-        field.typeText("Series")
+        app.typeTextReliably("Series", into: field)
 
         // Fixture folders carry no comic metadata, so the global index
         // returns zero hits — the important UX signal is that the browse
@@ -78,19 +77,7 @@ final class LibraryUITests: XCTestCase {
 
         // Exit search mode by emptying the query — SearchModel's
         // empty-query path sets active=false and the browse grid returns.
-        // The clear-text button label is localized, so fall back to the
-        // locale-independent keyboard delete key.
-        var cleared = false
-        for label in ["テキストを消去", "Clear text"] {
-            let b = app.buttons[label]
-            if b.exists, b.isHittable { b.tap(); cleared = true; break }
-        }
-        if !cleared {
-            field.tap()
-            for _ in 0..<40 where app.keyboards.keys["delete"].exists {
-                app.keyboards.keys["delete"].tap()
-            }
-        }
+        app.clearTextInput(field)
         app.assertExists(tile("Series"), within: 30,
                          "browse grid did not return after search exit")
     }
