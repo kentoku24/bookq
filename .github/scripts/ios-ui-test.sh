@@ -155,21 +155,92 @@ fi
 # visible to XCTest. Hardware-keyboard mode suppresses the software
 # keyboard; iOS 27's bottom `.searchable` can then show a caret while
 # XCTest still reports no focused input (#621). Parallel test clones do
-# not inherit per-device DevicePreferences, so use the legacy global key
-# while this script owns the simulator and restore the host value on exit.
+# not inherit per-device DevicePreferences, so the legacy global key is
+# still the only public mechanism that covers them.
+#
+# The key is shared by every simulator for this macOS user. Keep a small
+# reference count while cooperating test runs overlap: the first run
+# captures the host value, every run forces software keyboards, and only
+# the last run restores the captured value. `shlock` protects the state
+# file and removes locks left by dead processes.
 SIM_PREF_DOMAIN="com.apple.iphonesimulator"
-KEYBOARD_PREF_STATE="$(defaults read "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard 2>/dev/null || printf '__missing__')"
-restore_keyboard_pref() {
-  if [ "$KEYBOARD_PREF_STATE" = "__missing__" ]; then
-    defaults delete "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard >/dev/null 2>&1 || true
-  else
-    defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool "$KEYBOARD_PREF_STATE" >/dev/null 2>&1 || true
+KEYBOARD_PREF_DIR="$HOME/Library/Caches/bookq-ios-ui-test"
+KEYBOARD_PREF_LOCK="$KEYBOARD_PREF_DIR/keyboard.lock"
+KEYBOARD_PREF_STATE_FILE="$KEYBOARD_PREF_DIR/keyboard.state"
+mkdir -p "$KEYBOARD_PREF_DIR"
+if ! command -v shlock >/dev/null 2>&1; then
+  echo "ERROR: shlock is required to coordinate simulator keyboard prefs"
+  exit 1
+fi
+KEYBOARD_PREF_STATE="__missing__"
+
+keyboard_pref_lock() {
+  while ! shlock -f "$KEYBOARD_PREF_LOCK" -p $$ 2>/dev/null; do
+    sleep 0.1
+  done
+}
+
+keyboard_pref_unlock() {
+  rm -f "$KEYBOARD_PREF_LOCK"
+}
+
+keyboard_pref_write_state() {
+  local tmp="$KEYBOARD_PREF_STATE_FILE.$$"
+  {
+    printf '%s' "$KEYBOARD_PREF_STATE"
+    for pid in $1; do
+      printf ' %s' "$pid"
+    done
+    printf '\n'
+  } > "$tmp"
+  mv "$tmp" "$KEYBOARD_PREF_STATE_FILE"
+}
+
+keyboard_pref_lock
+if [ -f "$KEYBOARD_PREF_STATE_FILE" ]; then
+  read -r KEYBOARD_PREF_STATE active_pids < "$KEYBOARD_PREF_STATE_FILE"
+else
+  KEYBOARD_PREF_STATE="$(defaults read "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard 2>/dev/null || printf '__missing__')"
+  active_pids=""
+fi
+live_pids=""
+for pid in $active_pids; do
+  if kill -0 "$pid" 2>/dev/null; then
+    live_pids="$live_pids $pid"
   fi
+done
+keyboard_pref_write_state "$live_pids $$"
+keyboard_pref_unlock
+defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool false
+
+release_keyboard_pref() {
+  keyboard_pref_lock
+  active_pids=""
+  if [ -f "$KEYBOARD_PREF_STATE_FILE" ]; then
+    read -r KEYBOARD_PREF_STATE active_pids < "$KEYBOARD_PREF_STATE_FILE"
+  fi
+  live_pids=""
+  for pid in $active_pids; do
+    [ "$pid" = "$$" ] && continue
+    if kill -0 "$pid" 2>/dev/null; then
+      live_pids="$live_pids $pid"
+    fi
+  done
+  if [ -n "$live_pids" ]; then
+    keyboard_pref_write_state "$live_pids"
+  else
+    rm -f "$KEYBOARD_PREF_STATE_FILE"
+    if [ "$KEYBOARD_PREF_STATE" = "__missing__" ]; then
+      defaults delete "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard >/dev/null 2>&1 || true
+    else
+      defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool "$KEYBOARD_PREF_STATE" >/dev/null 2>&1 || true
+    fi
+  fi
+  keyboard_pref_unlock
 }
 # The main cleanup trap replaces this one below, so cleanup() calls the
-# same restore function. The early trap covers the narrow boot/erase path.
-trap restore_keyboard_pref EXIT
-defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool false
+# same release function. The early trap covers the narrow boot/erase path.
+trap release_keyboard_pref EXIT
 
 xcrun simctl shutdown "$UDID" 2>/dev/null || true
 # Isolation without a full erase: `simctl erase` pays a cold first boot
@@ -224,7 +295,7 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
       rm -rf "$xctd/$cu" 2>/dev/null || true
     done
   done
-  restore_keyboard_pref
+  release_keyboard_pref
   if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
     if pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
       scripts/sim-teardown.sh --udid "$UDID" --audit-only \
