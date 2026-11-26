@@ -151,6 +151,26 @@ PY
   DEVNAME="$DEVICE_NAME ($DEVNAME)"
 fi
 
+# XCUITest `typeText` can only target a field whose keyboard focus is
+# visible to XCTest. Hardware-keyboard mode suppresses the software
+# keyboard; iOS 27's bottom `.searchable` can then show a caret while
+# XCTest still reports no focused input (#621). Parallel test clones do
+# not inherit per-device DevicePreferences, so use the legacy global key
+# while this script owns the simulator and restore the host value on exit.
+SIM_PREF_DOMAIN="com.apple.iphonesimulator"
+KEYBOARD_PREF_STATE="$(defaults read "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard 2>/dev/null || printf '__missing__')"
+restore_keyboard_pref() {
+  if [ "$KEYBOARD_PREF_STATE" = "__missing__" ]; then
+    defaults delete "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard >/dev/null 2>&1 || true
+  else
+    defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool "$KEYBOARD_PREF_STATE" >/dev/null 2>&1 || true
+  fi
+}
+# The main cleanup trap replaces this one below, so cleanup() calls the
+# same restore function. The early trap covers the narrow boot/erase path.
+trap restore_keyboard_pref EXIT
+defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool false
+
 xcrun simctl shutdown "$UDID" 2>/dev/null || true
 # Isolation without a full erase: `simctl erase` pays a cold first boot
 # (~3min) every run. Uninstalling the app + test bundles below removes
@@ -204,6 +224,7 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
       rm -rf "$xctd/$cu" 2>/dev/null || true
     done
   done
+  restore_keyboard_pref
   if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
     if pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
       scripts/sim-teardown.sh --udid "$UDID" --audit-only \
@@ -314,9 +335,10 @@ fi
 # Retry ONCE, and only when the failure looks infrastructural — real
 # assertion failures must never get a second chance to pass. Console
 # signatures cover transport/clone errors; app.launch() flakes such as
-# "does not have a process ID" are recorded only inside the xcresult,
-# so failure messages there are inspected as a second signal: retry
-# only when EVERY recorded failure is launch/transport-class.
+# "does not have a process ID" / "Failed to terminate" are recorded
+# only inside the xcresult, so failure messages there are inspected as
+# a second signal: retry only when EVERY recorded failure is
+# launch/transport-class.
 BUNDLE="$RESULTS/tests.xcresult"
 
 infra_failure() {
@@ -327,8 +349,8 @@ infra_failure() {
 import json, re, sys
 INFRA = re.compile(
     r"does not have a process ID|[Ff]ailed to launch|[Uu]nable to launch|"
-    r"[Ll]ost connection|[Ff]ailed to install|testmanagerd|"
-    r"process exited", re.I)
+    r"[Ff]ailed to terminate|[Ll]ost connection|[Ff]ailed to install|"
+    r"testmanagerd|process exited", re.I)
 try:
     root = json.load(sys.stdin)
 except Exception:
