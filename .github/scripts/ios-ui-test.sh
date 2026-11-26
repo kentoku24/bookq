@@ -307,7 +307,10 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
       rm -rf "$xctd/$cu" 2>/dev/null || true
     done
   done
-  release_keyboard_pref
+  if ! release_keyboard_pref; then
+    echo "ERROR: simulator keyboard preference restore could not be coordinated"
+    rc=1
+  fi
   if [ -z "${CI:-}" ] && [ -x scripts/sim-teardown.sh ]; then
     if pgrep -f "xcodebuild|idb_companion|simctl diagnose" >/dev/null 2>&1; then
       scripts/sim-teardown.sh --udid "$UDID" --audit-only \
