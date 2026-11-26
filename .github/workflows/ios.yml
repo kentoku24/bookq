@@ -52,8 +52,10 @@ jobs:
   ios-test:
     needs: changes-ios
     if: github.event_name == 'workflow_dispatch' || needs.changes-ios.outputs.run == 'true'
-    # xcode-27 image (public preview): the only hosted arm64 image that
-    # ships Xcode 27 / iOS 27 SDK — macos-latest (macos-26) is 26.x-only.
+    # xcode-27 image (GA since 2026-10-15, base OS is macOS 27): the only
+    # hosted arm64 image that ships Xcode 27 / iOS 27 SDK — macos-26 is
+    # 26.x-only, and no macos-27 image is planned under GitHub's
+    # per-Xcode-major image model.
     runs-on: xcode-27
     timeout-minutes: 60
     env:
@@ -97,8 +99,8 @@ jobs:
       # (ExternalNonInteractiveAccessory / sceneAccessory in
       # ios/Bookq/External/) — `if #available(iOS 27)` only guards
       # runtime; the SDK itself must be 27+. The xcode-27 image ships
-      # it, but it is a public preview so the gate stays as a safety
-      # net: skip cleanly rather than fail if the image ever regresses.
+      # it; the gate stays as a safety net regardless — skip cleanly
+      # rather than fail if the image is ever re-pointed or regresses.
       - name: Check iOS SDK >= 27
         id: sdk
         run: |
