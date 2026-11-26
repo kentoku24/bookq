@@ -352,6 +352,7 @@
     var _member = null;              // bound member {sessionId,memberId,role,resumeToken}
     var _roleIntent = null;          // role shown while an entry op is in flight
     var _code = null;
+    var _guestToken = null;          // CREATE ACK's guest-access token (leader only)
     var _pendingMember = null;       // {memberId,name} awaiting leader approval
     var _approvedMemberId = null;    // memberId an APPROVE was already sent for
     var _link = null;                // {t, open, gone, gen}
@@ -468,6 +469,7 @@
         memberId: _member ? _member.memberId : null,
         sessionId: _member ? _member.sessionId : null,
         code: _code,
+        guestToken: _guestToken,
         joinRequest: !!_pendingMember,
         side: _side(),
         transport: _effPlane(),
@@ -520,6 +522,7 @@
         _storage.setItem(STORAGE_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
+          guestToken: _guestToken, code: _code,
         }));
       } catch (e) { /* storage is best-effort */ }
       _persistWrite();
@@ -543,7 +546,12 @@
       _persistClear();
     }
 
-    /* ── cross-tab persist record (localStorage) ── */
+    /* ── cross-tab persist record (localStorage) ──
+     * guestToken stays OUT of this record on purpose: it is bearer material
+     * for an origin-wide cookie, and localStorage is shared across tabs and
+     * survives the browser — only the tab-scoped sessionStorage creds carry
+     * it, so a same-tab RESUME keeps the composite `?gt=` QR while a foreign
+     * tab's adoption degrades to the code-only QR. */
 
     function _persistRec() {
       if (!_persist) return null;
@@ -561,6 +569,7 @@
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: _member.sessionId, memberId: _member.memberId,
           role: _member.role, resumeToken: _member.resumeToken,
+          code: _code,
           hb: _now(), tabId: _tabId,
         }));
       } catch (e) { /* best-effort */ }
@@ -598,11 +607,12 @@
       try {
         _persist.setItem(PERSIST_KEY, JSON.stringify({
           sessionId: d.sessionId, memberId: d.memberId, role: d.role,
-          resumeToken: d.resumeToken, hb: _now(), tabId: _tabId,
+          resumeToken: d.resumeToken, code: d.code,
+          hb: _now(), tabId: _tabId,
         }));
       } catch (e) {}
       return {sessionId: d.sessionId, memberId: d.memberId,
-              role: d.role, resumeToken: d.resumeToken};
+              role: d.role, resumeToken: d.resumeToken, code: d.code};
     }
 
     /* The persist record names another tab with a fresh heartbeat — that
@@ -1100,6 +1110,7 @@
       _endReset();
       if (!keepRole) _roleIntent = null;
       _code = null;
+      _guestToken = null;
       _pendingMember = null;
       _approvedMemberId = null;
     }
@@ -1177,6 +1188,24 @@
       return _startEntry('JOIN', {code: code}, null);
     }
 
+    /* Guest-access join: the QR's `/#/join/<code>?gt=<token>` deep link resolves
+     * to JOIN{guestToken} — same follower binding as join(code), but the
+     * grant names the session directly (no 6-digit code, no approval
+     * round-trip semantics change: the leader still APPROVEs the pending
+     * member exactly like a code join). Token shape mirrors the server's
+     * valid_token_shape: urlsafe base64, 16..=128 chars. */
+    function joinGuest(token) {
+      if (_destroyed) return Promise.reject(_err('ERR_STATE', 'destroyed'));
+      if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(token)) {
+        return Promise.reject(_err('ERR_MALFORMED', 'guest token malformed'));
+      }
+      _leaveBound();
+      _teardownLink();
+      _resetSession();
+      _roleIntent = 'follower';
+      return _startEntry('JOIN', {guestToken: token}, null);
+    }
+
     /* One-tap pairing: the server binds the caller as follower when a
      * fresh waiting session exists, else as a waiting leader. Resolves
      * {ambiguous, candidates} when several sessions wait — the caller
@@ -1207,6 +1236,14 @@
         _resetSession();
         _member = {sessionId: creds.sessionId, memberId: creds.memberId,
                    role: creds.role || null, resumeToken: creds.resumeToken};
+        // The leader's QR guest token + join code ride with the stored
+        // creds — a RESUME ACK carries neither, so without this restore a
+        // reload degrades the leader panel to '------' and no QR. A
+        // same-tab resume keeps the composite `?gt=` QR; a foreign tab's
+        // adoption (persist record) has the code but no guestToken —
+        // code-only QR, exactly the documented degradation.
+        _guestToken = creds.guestToken || null;
+        _code = creds.code || null;
         _roleIntent = _member.role;
       }
       if (_offlineSince === null) _offlineSince = _now();
@@ -1550,6 +1587,7 @@
       _member.resumeToken = d.resumeToken || _member.resumeToken;
       _roleIntent = _member.role;
       if (d.code) _code = d.code;
+      if (d.guestToken) _guestToken = d.guestToken;
       _readyFor = null;                              // READY must re-arm
       _store();
       _retry = 0;
@@ -2064,6 +2102,7 @@
       _member = null;
       _roleIntent = null;
       _code = null;
+      _guestToken = null;
       _pendingMember = null;
       _clearCreds();
       if (_sig) { _sig = null; }
@@ -2123,6 +2162,7 @@
     var api = {
       create: create,
       join: join,
+      joinGuest: joinGuest,
       match: match,
       approve: approve,
       reject: reject,
@@ -2152,7 +2192,10 @@
    * resume record sit inside the resume window? Same staleness rule as
    * _adoptPersist — kept here so the key/format stay single-sourced and
    * no socket needs to open for the answer. */
-  function peekPersistedResume(storage, now, resumeWindowMs) {
+  /* Shared probe for peekPersistedResume/peekActivePair — parses the
+   * persist record and reports {record, age} so each caller applies its
+   * own heartbeat-window predicate. */
+  function _peekRecord(storage, now) {
     try {
       var p = storage !== undefined ? storage : _defaultLocalStorage();
       if (!p) return null;
@@ -2160,11 +2203,30 @@
       if (!d || !d.sessionId || !d.memberId || !d.resumeToken ||
           typeof d.hb !== 'number') return null;
       var t = typeof now === 'function' ? now() : Date.now();
-      var w = resumeWindowMs || RESUME_WINDOW_MS;
-      var age = t - d.hb;
-      if (age <= RESUME_HB_STALE_MS || age > w) return null;
-      return d;
+      return {record: d, age: t - d.hb};
     } catch (e) { return null; }
+  }
+
+  function peekPersistedResume(storage, now, resumeWindowMs) {
+    var p = _peekRecord(storage, now);
+    if (!p) return null;
+    var w = resumeWindowMs || RESUME_WINDOW_MS;
+    if (p.age <= RESUME_HB_STALE_MS || p.age > w) return null;
+    return p.record;
+  }
+
+  /* Cheap guard probe (hash.js's guest-redeem gate): is the persist record
+   * owned by a LIVE tab right now? peekPersistedResume only reports a
+   * record whose heartbeat went stale (dead owner awaiting adoption) —
+   * this reports a FRESH heartbeat regardless of which tab owns it, so a
+   * second tab can refuse to swap the origin-shared bookq_guest cookie
+   * out from under a running pair. Same key/format, no socket. */
+  function peekActivePair(storage, now, staleMs) {
+    var p = _peekRecord(storage, now);
+    if (!p) return null;
+    var stale = typeof staleMs === 'number' ? staleMs : RESUME_HB_STALE_MS;
+    if (p.age > stale) return null;
+    return p.record;
   }
 
   /* Cheap boot check (pairController): is a leave tombstone waiting for a
@@ -2205,5 +2267,10 @@
     manifestDigestHex: manifestDigestHex,
     peekPersistedResume: peekPersistedResume,
     peekLeaveTombstone: peekLeaveTombstone,
+    peekActivePair: peekActivePair,
+    /* Capability marker: created clients expose joinGuest(). A stale-shell
+     * skew (new controller + cached old pairClient) is what cannot be
+     * probed on the instance pre-construction, so the module declares it. */
+    supportsGuest: true,
   };
 })();

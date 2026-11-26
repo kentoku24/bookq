@@ -45,6 +45,54 @@ MATCH (別経路): origin='match' のオープン待ち受け。payload.pick の
 マッチング。コード共有ペアとは別系（drive-by join を防ぐため 'create' には join 不可）
 ```
 
+### ゲストアクセス（guestToken JOIN）
+
+アカウントを持たない端末向けの QR 経路。`CREATE` ACK の `data.guestToken`
+（owner email が解決できるときのみ発行、urlsafe base64 16..=128 文字）が
+bearer になる。
+
+```
+CREATE ACK{…, guestToken}  →  クライアントが QR
+  `/#/join/<code>?gt=<token>` を表示（native・メンバーは code をそのまま解釈）
+未ログイン端末: GET / → login page → POST /api/v1/guest/redeem{token}
+  → 200 + Set-Cookie: bookq_guest=<token> → viewer shell
+  → hash `?gt=<token>` → redeem 再検証 → JOIN{guestToken}
+ログイン済み端末: redeem は {"ok":true} のみ（cookie 無し・identity 保持）
+→ 同じく JOIN{guestToken} で follower 参加
+```
+
+- `JOIN{guestToken}` は `JOIN{code}` と同じ pending→APPROVE 経路に合流する
+  （`code_consumed` も共通 — ペアに入れるのは常に1台）。grant は発行時の
+  sessionId に束縛されるため、code の `by_code` ルックアップを経由しない
+- guestToken は **origin='create' のセッションにのみ発行** — `match` の
+  ワンタップ自動ペアは QR を要求しないため、bearer grant を生やさない
+- guest 認証済み link は `JOIN{code}` を `forbidden` で拒否 — code 経路は
+  member 専用。link 単位の失敗 JOIN スロットルあり（60 秒で 8 回超 →
+  transport close 1008）
+- grant のライフサイクル: `end_session`（LEAVE/REJECT/期限切れ/end_all/
+  shutdown/owner 無効化の全経路）で `revoke_session` — **リーダーがペアを
+  解消した時点で guest の閲覧も即失効**。END 送信後に guest link の
+  transport も close される。発行から 8 時間の TTL がバックストップ
+- guest link の WS は tick 毎に grant を再検証 — ハンドシェイク時点の
+  スナップショットではなく、失効すれば socket close（`guest_revoked`）
+- owner の member 無効化（`/admin` UI）でその owner が発行した grant を
+  `revoke_owner` + リード中のセッションを `owner_disabled` で終了 —
+  disable→re-enable で grant が蘇らない
+- `bookq_guest` cookie での認証解決は **read-only**: リーダー identity の
+  GET 系は全て有効だが、非 GET/HEAD/OPTIONS、`/admin*`、`/api/v1/library/*`
+  は HTTP 403（`guest_write_guard` — library GET は副作用を持つため）。
+  ペア同期は WebSocket のため影響なし — follower として TURN/GOTO/
+  SET_OFFSET 等は通常 follower と同一に受理される
+- guest 応答には `X-Bookq-Guest: 1` + `Cache-Control: private, no-store`
+  — SW・ページ側キャッシュとブラウザ HTTP キャッシュの双方が失効後に
+  再提供しない
+- follower の表示名は `ゲスト`（WS の `resolve_ws_user` が供給）。
+  member 名は grant ではなく接続 identity から来る
+- `POST /api/v1/guest/redeem` 自体は per-IP レート制限（60 秒 30 回）+
+  same-site initiation 検査付き。トークンは 192bit で推測不能
+- entropy 源（/dev/urandom）不在時は token/code の mint が失敗し
+  `internal_error` で reject — 弱化した乱数で bearer を発行しない
+
 ### メンバー状態
 `active | suspended | offline | pending`。`presence` は link id → member info の map。
 メンバーが missing/suspended なら phase は `paused` に落ちる。
@@ -124,7 +172,8 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 | `code_consumed` | code 使用済み |
 | `code_expired` | code TTL 切れ |
 | `empty_work` | 作品にページ無し |
-| `forbidden` | 権限なし |
+| `forbidden` | 権限なし（guest link の `JOIN{code}` 等、この link 種別では不可の op） |
+| `internal_error` | サーバ側失敗（entropy 源不在等）— 弱化した状態で op を実行しない |
 | `malformed` | フレーム/ペイロード検査失敗 |
 | `no_initial_page` | 初期ページ解決不可 |
 | `no_pending` | pending member 不在で APPROVE/REJECT |

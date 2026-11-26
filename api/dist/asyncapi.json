@@ -61,6 +61,14 @@
       "Ack": {
         "payload": {
           "properties": {
+            "data": {
+              "description": "リクエスト種別ごとの結果。CREATE は\n`{sessionId, code, memberId, role, resumeToken, expiresInSec,\nguestToken?}` — `guestToken` は owner email が解決できる\nときのみ発行されるゲストアクセストークン\n（QR の `/#/join/<code>?gt=<token>` リンク /\n`JOIN{guestToken}` / `bookq_guest` cookie の bearer。\nread-only・セッション連動失効）。\n",
+              "type": "object"
+            },
+            "request": {
+              "description": "応答したリクエスト type",
+              "type": "string"
+            },
             "requestId": {
               "type": "string"
             },
@@ -524,15 +532,31 @@
           {
             "properties": {
               "payload": {
+                "description": "`code`（6桁数字・member ペアリング）または\n`guestToken`（ゲストアクセス — CREATE ACK の\n`data.guestToken`。未ログイン端末が QR の\n`/#/join/<code>?gt=<token>` リンク経由で解決する\nbearer で、grant はペアセッション終了または発行から\n8 時間で失効）のどちらか一方を必須とする\n（キー存在の XOR — 両方あり・両方なしは malformed）。\n",
+                "oneOf": [
+                  {
+                    "required": [
+                      "code"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "guestToken"
+                    ]
+                  }
+                ],
                 "properties": {
                   "code": {
                     "pattern": "^\\d{6}$",
                     "type": "string"
+                  },
+                  "guestToken": {
+                    "maxLength": 128,
+                    "minLength": 16,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "type": "string"
                   }
                 },
-                "required": [
-                  "code"
-                ],
                 "type": "object"
               },
               "type": {

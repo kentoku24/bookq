@@ -13,6 +13,7 @@
     authToken: "/api/v1/auth/token",
     facets: "/api/v1/facets",
     folderVisibility: "/api/v1/folder-visibility",
+    guestRedeem: "/api/v1/guest/redeem",
     health: "/api/v1/health",
     images: "/api/v1/images",
     indexRefresh: "/api/v1/index/refresh",

@@ -245,6 +245,9 @@
   const etagByKey = new Map();
   function _foldersEtagKey(depth){ return ":" + (depth ? "shallow" + depth : "full"); }
   const _rawFoldersText = new WeakMap();
+  // Trees fetched under a `bookq_guest` grant must never persist past the
+  // grant — `X-Bookq-Guest` marked responses get read but not snapshotted.
+  const _guestMarkedTrees = new WeakSet();
   // ETags parsed from a response are staged here, NOT committed to etagByKey.
   // The caller commits via _commitFolderEtag only once it decides to apply
   // the payload — a stale (superseded) response must never rewrite the warm
@@ -288,6 +291,9 @@
     } else return;
     if(!Array.isArray(data)) return;
     if (!_cur()) return;
+    try {
+      if (res.headers && res.headers.get("X-Bookq-Guest") === "1") _guestMarkedTrees.add(data);
+    } catch(e) {}
     // Stage the ETag on the payload; the caller commits it only when the
     // payload is actually applied (see _commitFolderEtag).
     try {
@@ -379,8 +385,10 @@
         currentBrowsePath = resolveAliveAncestor(currentBrowsePath);
       }
       try{
-        const c = await (_d.caches || caches).open("bookq-api-v2");
-        await c.put(globalThis.BookqApi.endpoints.tree, new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
+        if (!_guestMarkedTrees.has(data)) {
+          const c = await (_d.caches || caches).open("bookq-api-v2");
+          await c.put(globalThis.BookqApi.endpoints.tree, new Response(JSON.stringify(data), {headers:{"Content-Type":"application/json"}})).catch(()=>{});
+        }
       } catch(e) { console.warn(e); }
       if (!_isRevalidateCurrent(loadGen, connGen)) return;
       try{ await refreshOfflineMap(); } catch(e) { console.warn(e); }
@@ -1586,6 +1594,11 @@
   }
   try { window.fvGuardPath = _fvGuard; } catch(e) { console.warn(e); }
   function navigateToFolder(path){
+    // Folder navigation supersedes any in-flight URL restore/load — claim
+    // a new restore generation so a pending guest-redeem .catch (hash.js)
+    // can't restore the stale invite hash over the browsed URL. (pushState
+    // fires no hashchange, so nothing else bumps the token on this path.)
+    try { urlRestoreGen++; } catch(e) { console.warn(e); }
     var FV = window.FolderVisibility;
     if (FV){
       // guardPath: 判定不能（idle/loading / error 無snapshot）はキューだけ、
@@ -1700,6 +1713,7 @@
   }
 
   function _persistTreeSnapshot(data, opts){
+    try { if (data && _guestMarkedTrees.has(data)) return; } catch(e){}
     try {
       const _raw = _rawFoldersText.get(data);
       try { _rawFoldersText.delete(data); } catch(e){}
@@ -1889,6 +1903,7 @@
         var _fillPollEtag = null;
         try { _fillPollEtag = (res.headers && res.headers.get) ? res.headers.get("ETag") : null; } catch(_fillPollEtagErr) {}
         if (window.FillPoll) window.FillPoll.noteFullLoad({etag: _fillPollEtag, onTree: function(t, rawText, rawOpts){
+          if (rawOpts && rawOpts.guestMarked){ try { _guestMarkedTrees.add(t); } catch(_gmErr) {} }
           if (typeof rawText === "string"){ try { _rawFoldersText.set(t, {text: rawText, treeEnvelope: !!(rawOpts && rawOpts.treeEnvelope)}); } catch(_fillPollSetErr) {} }
           restoreTree(t, {shallow:false}).then(function(ok){
             if (ok) _persistTreeSnapshot(t);

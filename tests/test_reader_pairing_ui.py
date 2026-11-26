@@ -1054,6 +1054,41 @@ def test_idle_tap_opens_choice_then_connect_fires_on_pick(page, server):
     _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
     _only_section_visible(page, "#pair-sec-leader")
     expect(page.locator("#pair-code-value")).to_have_text("042917")
+    # match-origin wait: another device's connect() CAN find it, so the
+    # auto-join guidance is honest here
+    expect(page.locator("#pair-leader-note")).to_contain_text("接続ボタン")
+
+
+def test_create_wait_guides_to_code_not_autoconnect(page, server):
+    """A CREATE-origin wait (ゲストを招待 / legacy 開始) can NEVER be found
+    by another device's connect() — matchable() excludes it — so the
+    leader note must point at the code/QR, not an auto-join that will
+    never happen."""
+    _with_mock(page, js=CONNECT_JS)
+    _open_ui(page)
+    page.click("#pair-guest-invite")
+    assert page.evaluate("window.__pairCalls") == ["create"]
+    _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
+    _only_section_visible(page, "#pair-sec-leader")
+    expect(page.locator("#pair-leader-note")).to_contain_text(
+        "コードまたはQR")
+    expect(page.locator("#pair-leader-note")).not_to_contain_text(
+        "接続ボタン")
+
+
+def test_legacy_create_wait_guides_to_code_not_autoconnect(page, server):
+    """The legacy 開始 path (no connect() on the controller) is also a
+    CREATE-origin wait — same code/QR-only guidance."""
+    _with_mock(page)                      # MOCK_JS has no connect()
+    _open_ui(page)
+    page.click("#pair-create")
+    assert page.evaluate("window.__pairCalls") == ["create"]
+    _emit(page, "{status:'connecting', role:'leader', code:'042917'}")
+    _only_section_visible(page, "#pair-sec-leader")
+    expect(page.locator("#pair-leader-note")).to_contain_text(
+        "コードまたはQR")
+    expect(page.locator("#pair-leader-note")).not_to_contain_text(
+        "接続ボタン")
 
 
 def test_idle_choice_offers_direct_code_join(page, server):

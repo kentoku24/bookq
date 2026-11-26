@@ -583,6 +583,45 @@
     join: function (code) {
       return _visReady().then(function () { return _ensureClient().join(code); });
     },
+    /* Guest-access join (`/#/join/<code>?gt=<token>` deep link): same follower
+     * binding as join(code) but keyed by the grant token instead of the
+     * 6-digit code. Stale-shell skew: a cached old PairClient produces a
+     * client without joinGuest — surface a clean rejection instead of a
+     * TypeError after the caller already redeemed the invite. */
+    joinGuest: function (token) {
+      return _visReady().then(function () {
+        var c = _ensureClient();
+        if (typeof c.joinGuest !== 'function') {
+          return Promise.reject(new Error('pairClient lacks joinGuest'));
+        }
+        return c.joinGuest(token);
+      });
+    },
+    /* Live-or-pending pair in THIS tab — the member bind (even on an
+     * 'error' surface, where _errorSt can outlive the last STATE), and
+     * saved creds / a dead-owner record meaning this tab's boot rejoin
+     * is still in flight. The #/join/<code> gate uses this view: a code
+     * join swaps no shared cookie, so a foreign tab's heartbeat must
+     * not block it — a closed tab's persist record reads 'live' for
+     * RESUME_HB_STALE_MS after pagehide and would eat the link. */
+    pairActiveLocal: function () {
+      var st = _client ? _client.state : null;
+      if (st && (st.sessionId || st.memberId)) return true;
+      if (st && st.status && st.status !== 'idle' &&
+          st.status !== 'ended' && st.status !== 'error') return true;
+      return !!(_readCreds() || _hasPersistedResume());
+    },
+    /* Live-or-pending pair anywhere the origin's auth could depend on —
+     * hash.js's guest-redeem gate consults it BEFORE swapping the
+     * bookq_guest cookie: pairActiveLocal plus a foreign tab currently
+     * heartbeating the pair (the cookie is origin-wide — another tab's
+     * redeem would silently re-auth ours). */
+    pairActive: function () {
+      if (api.pairActiveLocal()) return true;
+      var PC = window.PairClient;
+      return !!(PC && typeof PC.peekActivePair === 'function' &&
+                PC.peekActivePair());
+    },
     /* One-tap connect: server-side MATCH — follower if a fresh session is
      * waiting, waiting leader otherwise. connect(pickId) binds a chosen
      * ambiguous candidate. Resolves {ambiguous|candidates} or

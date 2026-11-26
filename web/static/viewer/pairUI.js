@@ -134,6 +134,10 @@
                                   // the choice falls back to 開始/参加
   let connectPending = false;   // a connect() call is in flight — the
                                 // つながる pick must not double-fire
+  let awaitingAutoMatch = false; // the waiting leader came from connect()
+                                 // (match-origin): only then can another
+                                 // device's connect() actually find it —
+                                 // matchable() excludes CREATE sessions
   /* A rapid second launcher tap lands on the freshly-shown overlay as a
    * backdrop click and instantly closes the panel while the session keeps
    * connecting (#160-A). Swallow backdrop dismissals for a short grace —
@@ -159,10 +163,15 @@
             '<span id="pair-create-label">開始</span>' +
             '<span class="pair-sub" id="pair-create-sub">' +
               'この端末が leader になりコードを発行</span></button>' +
+          '<button id="pair-guest-invite" type="button" class="pair-action">' +
+            '<span>ゲストを招待</span>' +
+            '<span class="pair-sub">QR で未ログイン端末を招待（この端末が leader）</span></button>' +
           '<button id="pair-join-open" type="button" class="pair-action">' +
             '<span id="pair-join-open-label">参加</span>' +
             '<span class="pair-sub" id="pair-join-open-sub">' +
               '相手のコードを入力</span></button>' +
+          '<p id="pair-guest-note" class="pair-note" hidden>' +
+            'ゲストは招待リンク（QR の URL）からのみ参加できます</p>' +
         '</div>' +
         '<div id="pair-sec-join" class="pair-sec" hidden>' +
           '<video id="pair-scan-video" playsinline muted autoplay hidden></video>' +
@@ -270,6 +279,8 @@
       createSub: _el('pair-create-sub'),
       joinOpenLabel: _el('pair-join-open-label'),
       joinOpenSub: _el('pair-join-open-sub'),
+      guestInvite: _el('pair-guest-invite'),
+      guestNote: _el('pair-guest-note'),
       secJoin: _el('pair-sec-join'),
       secLeader: _el('pair-sec-leader'),
       secWaiting: _el('pair-sec-waiting'),
@@ -388,9 +399,20 @@
     /* The idle choice follows controller capability (#160): a MATCH-aware
      * client offers 「近くの相手とつながる / コードで参加」; a legacy
      * client — or one whose connect() answered {unsupported} — keeps the
-     * classic 開始/参加 pair. */
-    const matchable = !!(ctl && typeof ctl.connect === 'function' &&
+     * classic 開始/参加 pair. A guest caller can never lead — CREATE and
+     * MATCH are rejected `forbidden` on a guest link — and their JOIN
+     * path is the invite URL, never a 6-digit code (the server rejects
+     * guest JOIN{code} outright), so every code surface hides for them:
+     * leader button, join form entry, and the guest-invite action itself.
+     * Only the explanatory note remains. */
+    const isGuest = !!(globalThis.BookqGuest && globalThis.BookqGuest.isGuest());
+    const matchable = !isGuest &&
+                      !!(ctl && typeof ctl.connect === 'function' &&
                          !connectUnsupported);
+    if (els.create) show(els.create, !isGuest);
+    if (els.joinOpen) show(els.joinOpen, !isGuest);
+    if (els.guestInvite) show(els.guestInvite, !isGuest);
+    if (els.guestNote) show(els.guestNote, isGuest);
     els.createLabel.textContent = matchable ? '近くの相手とつながる' : '開始';
     els.createSub.textContent = matchable
       ? '自動でマッチング（なければ待機開始）'
@@ -439,14 +461,19 @@
 
     if (sec === els.secLeader) {
       els.codeValue.textContent = s.code || '------';
-      drawQR(s.code);
-      // Past the match window nobody can find this session via 🔗 —
-      // say so instead of promising a join that can no longer happen.
+      drawQR(s);
+      // Only a MATCH-origin wait (つながる) is discoverable by another
+      // device's connect() — matchable() excludes CREATE sessions, so a
+      // guest invite or legacy create can ONLY be joined via the code or
+      // QR. Don't promise an auto-join that can never happen; past the
+      // match window the same fallback applies to a match-origin wait.
       if (!leaderSince) leaderSince = Date.now();
-      const left = MATCH_WINDOW_MS - (Date.now() - leaderSince);
+      const left = awaitingAutoMatch
+        ? MATCH_WINDOW_MS - (Date.now() - leaderSince) : 0;
       els.leaderNote.textContent = left > 0
         ? 'もう1台が接続ボタンを押すと自動でつながります'
-        : '自動接続の受付は終了しました。コードまたはQRで参加できます';
+        : (awaitingAutoMatch ? '自動接続の受付は終了しました。' : '') +
+          'コードまたはQRで参加できます';
       if (leaderNoteTimer) { clearTimeout(leaderNoteTimer); leaderNoteTimer = null; }
       if (left > 0) {
         leaderNoteTimer = setTimeout(() => {
@@ -615,7 +642,10 @@
 
   function submitJoin() {
     const v = els.codeInput.value;
-    if (!/^\d{6}$/.test(v) || !ctl || joinPending) return;
+    // Guests join via the invite URL only — the server rejects guest
+    // JOIN{code}, so don't even offer the attempt.
+    if (!/^\d{6}$/.test(v) || !ctl || joinPending ||
+        globalThis.BookqGuest && globalThis.BookqGuest.isGuest()) return;
     joinPending = true;   // cleared when the join view re-opens
     // A fresh attempt retires the carried-over failure notice (#158).
     lastJoinError = null;
@@ -626,20 +656,32 @@
 
   // ── QR display (leader) ──
 
-  function drawQR(code) {
+  function drawQR(s) {
     if (!els.qr) return;
-    if (!code || typeof window.qrcode !== 'function') {
+    // One QR serves both readers: the `?gt=` guest token rides the
+    // `/#/join/<code>` deep link, so an unlogged-in browser redeems the
+    // guest grant while native apps and member scans still extract the
+    // plain 6-digit code (they can't use — and don't need — the grant).
+    const url = (s && s.code && s.guestToken)
+      ? location.origin + '/#/join/' + s.code + '?gt=' + s.guestToken
+      : (s && s.code ? location.origin + '/#/join/' + s.code : null);
+    if (!url || typeof window.qrcode !== 'function') {
       els.qr.hidden = true;
+      els.qr.dataset.qrUrl = '';
       qrDrawnFor = null;
       return;
     }
-    if (qrDrawnFor === code) { els.qr.hidden = false; return; }
+    // Expose the encoded URL on the canvas: the browser e2e drives the
+    // real 「ゲストを招待」 button and needs the actual link a scanner
+    // would read — re-deriving it in the test would miss format drift.
+    els.qr.dataset.qrUrl = url;
+    if (qrDrawnFor === url) { els.qr.hidden = false; return; }
     // 'L' keeps module count low for the longer URL payload so cells
     // stay scannable on a ~170px canvas.
     const qr = window.qrcode(0, 'L');
-    // URL-QR: any camera app deep-links straight into join — the code is
+    // URL-QR: any camera app deep-links straight into join — the token is
     // in the fragment so it never reaches access logs or cache keys.
-    qr.addData(location.origin + '/#/join/' + code);
+    qr.addData(url);
     qr.make();
     const n = qr.getModuleCount();
     const cell = Math.max(1, Math.floor(els.qr.width / (n + 8)));  // +quiet zone
@@ -656,7 +698,7 @@
       }
     }
     els.qr.hidden = false;
-    qrDrawnFor = code;
+    qrDrawnFor = url;
   }
 
   // ── QR scan (follower) ──
@@ -705,7 +747,9 @@
         const img = cx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
         const res = window.jsQR(img.data, img.width, img.height);
         if (res) {
-          // accept both a bare 6-digit code and the #/join/ deep-link URL
+          // accept a bare 6-digit code and the #/join/<code> deep-link
+          // (the QR's `?gt=` guest token is for unlogged-in browsers —
+          // a logged-in member always joins via the code itself)
           const code = /^\d{6}$/.test(res.data) ? res.data
             : (res.data.match(/#\/join\/(\d{6})/) || [])[1];
           if (code) {
@@ -790,6 +834,7 @@
       if (!ctl || typeof ctl.connect !== 'function' || connectPending) {
         return;
       }
+      awaitingAutoMatch = true;
       let res;
       try { res = ctl.connect(); } catch (err) { res = null; }
       if (res && typeof res.then === 'function') {
@@ -811,8 +856,16 @@
       if (ctl && typeof ctl.connect === 'function' && !connectUnsupported) {
         fireConnect();
       } else if (ctl) {
+        awaitingAutoMatch = false;
         ctl.create();
       }
+    });
+    /* 「ゲストを招待」 — explicit CREATE (never MATCH): only a CREATE ACK
+     * mints the guestToken the composite `/#/join/<code>?gt=` QR needs,
+     * so the invite action must not go through connect()'s match path. */
+    els.guestInvite.addEventListener('click', () => {
+      awaitingAutoMatch = false;
+      if (ctl && typeof ctl.create === 'function') ctl.create();
     });
     els.joinOpen.addEventListener('click', () => {
       joinView = true;

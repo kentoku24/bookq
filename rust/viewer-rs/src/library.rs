@@ -230,6 +230,13 @@ pub(crate) struct UploadSession {
     pub size: u64,
     pub offset: u64,
     pub created: u64,
+    /// Creator's email — a session id alone must not let another member
+    /// probe, append to, cancel, or finalize someone else's upload.
+    /// `default` keeps pre-owner meta.json loadable; an empty owner then
+    /// fails every `session_owned` check (fail closed) until the TTL
+    /// sweep drops the session.
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// Opaque ids are server-generated hex — anything else is simply "not found".
@@ -269,6 +276,13 @@ fn load_session(
         f.set_len(sess.offset).ok()?;
     }
     Some((sess, dir, blob))
+}
+
+/// Owner binding for every session op — the 128-bit id is bearer material
+/// only to its creator; anyone else gets the same 404 as a missing
+/// session so the endpoint isn't an existence oracle either.
+fn session_owned(sess: &UploadSession, owner: &str) -> bool {
+    !sess.owner.is_empty() && sess.owner.eq_ignore_ascii_case(owner)
 }
 
 fn save_session(dir: &Path, sess: &UploadSession) -> std::io::Result<()> {
@@ -615,7 +629,7 @@ struct InitBody {
 }
 
 /// POST /api/v1/library/uploads — `{dir,name,size}` → 201 `{upload_id,offset}`.
-pub(crate) async fn uploads_init(st: &AppState, body: &[u8]) -> Response {
+pub(crate) async fn uploads_init(st: &AppState, body: &[u8], owner: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
@@ -661,6 +675,7 @@ pub(crate) async fn uploads_init(st: &AppState, body: &[u8]) -> Response {
         size: init.size,
         offset: 0,
         created: now_secs(),
+        owner: owner.to_string(),
     };
     let created = tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&dir)?;
@@ -681,7 +696,7 @@ pub(crate) async fn uploads_init(st: &AppState, body: &[u8]) -> Response {
 }
 
 /// GET /api/v1/library/uploads/{id} — resume probe.
-pub(crate) async fn upload_get(st: &AppState, id: &str) -> Response {
+pub(crate) async fn upload_get(st: &AppState, id: &str, owner: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
@@ -693,6 +708,9 @@ pub(crate) async fn upload_get(st: &AppState, id: &str) -> Response {
     let Some((sess, _, _)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
+    if !session_owned(&sess, owner) {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
     json(
         StatusCode::OK,
         serde_json::json!({
@@ -706,16 +724,19 @@ pub(crate) async fn upload_get(st: &AppState, id: &str) -> Response {
 }
 
 /// DELETE /api/v1/library/uploads/{id} — discard the session.
-pub(crate) async fn upload_cancel(st: &AppState, id: &str) -> Response {
+pub(crate) async fn upload_cancel(st: &AppState, id: &str, owner: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
     // Serialize against an in-flight append — deleting the dir mid-append
     // would orphan a half-written blob.
     let _sess_guard = st.session_lock.lock().await;
-    let Some((_, dir, _)) = load_session(&root, id) else {
+    let Some((sess, dir, _)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
+    if !session_owned(&sess, owner) {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
     let gone = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&dir)).await;
     match gone {
         Ok(Ok(())) => Response::builder()
@@ -733,6 +754,7 @@ pub(crate) async fn upload_cancel(st: &AppState, id: &str) -> Response {
 pub(crate) async fn upload_append(
     st: &AppState,
     id: &str,
+    owner: &str,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -747,6 +769,9 @@ pub(crate) async fn upload_append(
     let Some((mut sess, dir, blob)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
+    if !session_owned(&sess, owner) {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
     let off = headers
         .get("upload-offset")
         .and_then(|v| v.to_str().ok())
@@ -846,7 +871,7 @@ pub(crate) async fn upload_append(
 
 /// POST /api/v1/library/uploads/{id}/finalize — `offset == size` required;
 /// fsync → auto-rename → atomic rename → session cleanup.
-pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
+pub(crate) async fn upload_finalize(st: &AppState, id: &str, owner: &str) -> Response {
     let Some(root) = st.upload_root.clone() else {
         return uploads_disabled();
     };
@@ -856,6 +881,9 @@ pub(crate) async fn upload_finalize(st: &AppState, id: &str) -> Response {
     let Some((sess, dir, blob)) = load_session(&root, id) else {
         return state::detail(StatusCode::NOT_FOUND, "not found");
     };
+    if !session_owned(&sess, owner) {
+        return state::detail(StatusCode::NOT_FOUND, "not found");
+    }
     // The blob is the authority, not the meta counter — load_session already
     // reconciles them (shorter = corrupt → None, longer = truncate), so
     // agreeing here means the file really holds `size` bytes.
@@ -1064,6 +1092,7 @@ mod tests {
             size: 10,
             offset: 4,
             created: now_secs(),
+            owner: "a@example.com".into(),
         };
         save_session(&sdir, &sess).unwrap();
         // reconcile: blob must reach at least the acked offset.
@@ -1076,6 +1105,24 @@ mod tests {
         assert!(load_session(&d, "short").is_none());
         assert!(load_session(&d, &"x".repeat(32)).is_none()); // no meta.json
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn session_owned_binds_creator() {
+        let sess = UploadSession {
+            dir: String::new(),
+            name: "a.rar".into(),
+            size: 1,
+            offset: 0,
+            created: now_secs(),
+            owner: "Alice@Example.com".into(),
+        };
+        assert!(session_owned(&sess, "alice@example.com"));
+        assert!(!session_owned(&sess, "bob@example.com"));
+        // Legacy meta without an owner fails closed.
+        let mut legacy = sess.clone();
+        legacy.owner = String::new();
+        assert!(!session_owned(&legacy, "alice@example.com"));
     }
 
     #[test]
@@ -1100,6 +1147,7 @@ mod tests {
                     size: 1,
                     offset: 0,
                     created,
+                    owner: "a@example.com".into(),
                 },
             )
             .unwrap();
@@ -1137,6 +1185,7 @@ mod tests {
             size: 10,
             offset: 4,
             created: now_secs(),
+            owner: "a@example.com".into(),
         };
         save_session(&sdir, &sess).unwrap();
         // Unconfirmed tail: the append landed but the offset persist died —

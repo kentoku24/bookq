@@ -46,6 +46,7 @@ PATH_TO_KEY = {
     # Native-client only (the PWA never calls it) — listed so the
     # unmapped-path gate stays exact.
     "/api/v1/auth/token": "authToken",
+    "/api/v1/guest/redeem": "guestRedeem",
 }
 
 # Deliberately outside the OpenAPI schema (include_in_schema=False).

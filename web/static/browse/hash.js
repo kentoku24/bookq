@@ -411,7 +411,93 @@
     writeBrowseState();
   }
 
+  /* `#/join/<code>?gt=<token>` — guest-access deep link (unlogged-in QR):
+   * the plain code rides along so native apps/member scans still parse
+   * it. Consumed ONCE via replaceState like #/join/ — but only after
+   * every bail path below has passed, so a reload nudge or a dead
+   * invite keeps the same URL retryable. Reaching this shell already
+   * means a bookq_guest cookie (or a full login) exists — the redeem
+   * POST refreshes the grant's Max-Age and re-validates it is still
+   * live, then joinGuest binds the follower pair. A dead link toasts
+   * instead of joining. Returns true when the hash was a guest link. */
+  function _handleGuestJoin() {
+    var gtoken = globalThis.BookqGuest ? BookqGuest.parseHash(location.hash) : null;
+    if (!gtoken) return false;
+    var guestHash = location.hash;
+    var pc = window.PairController;
+    // Capability gate FIRST — a script set can pass the shell-version
+    // watchdog while still missing pieces of the guest path: an old
+    // controller lacks joinGuest/pairActive, and a cached old
+    // PairClient produces clients without joinGuest (controller joins
+    // through it). Redeeming anyway would swap the cookie, then fail —
+    // so the token must survive for the reload we nudge.
+    var guestCapable = !!(pc && typeof pc.joinGuest === 'function' &&
+                          typeof pc.pairActive === 'function' &&
+                          window.PairClient &&
+                          window.PairClient.supportsGuest === true);
+    if (!guestCapable) {
+      if (typeof window.showErrorToast === 'function') {
+        window.showErrorToast('ページを再読み込みしてください');
+      }
+      return true;
+    }
+    // Live-or-pending pair check — BEFORE redeem: swapping the guest
+    // cookie for a different invite must not starve a running pair of
+    // its auth. pairActive covers the bound member (an 'error' surface
+    // can still hold it), a saved-creds boot rejoin still in flight,
+    // and a foreign tab heartbeating the pair — the cookie is
+    // origin-wide, so a sibling's invite would re-auth us silently.
+    if (pc.pairActive()) {
+      if (window.PairUI && typeof window.PairUI.open === 'function') {
+        window.PairUI.open();
+      }
+      return true;
+    }
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+    try { urlStackReplace(location.pathname + location.search); } catch (e) {}
+    // Generation token for the .catch URL restore: loadImages claims a
+    // new urlRestoreGen on every navigation, so a redeem that fails
+    // AFTER the user already opened another work must not clobber the
+    // new view URL with the stale invite hash.
+    var navGen = window.urlRestoreGen;
+    BookqGuest.redeem(gtoken).then(function (res) {
+      if (!res.ok) {
+        if (typeof window.showErrorToast === 'function') {
+          window.showErrorToast('ゲストリンクが無効か期限切れです');
+        }
+        return;
+      }
+      try {
+        var jr = pc.joinGuest(gtoken);
+        if (jr && typeof jr.catch === 'function') jr.catch(function () {});
+        if (window.PairUI && typeof window.PairUI.open === 'function') {
+          window.PairUI.open();
+        }
+      } catch (e) {}
+    }).catch(function () {
+      // Transient failure — the invite itself may be fine. Put the deep
+      // link back via replaceState (fires no hashchange, so no
+      // auto-retry loop) so a manual reload can retry the redeem —
+      // unless the user navigated meanwhile (a bumped urlRestoreGen
+      // means this hash no longer owns the address bar) — and mirror
+      // the urlStack entry the consume path replaced, and say it was
+      // the network, not the link.
+      if (typeof window.urlRestoreGen !== 'number' ||
+          window.urlRestoreGen === navGen) {
+        try { history.replaceState(null, "", guestHash); } catch (e) {}
+        try { urlStackReplace(location.pathname + location.search + location.hash); } catch (e) {}
+      }
+      if (typeof window.showErrorToast === 'function') {
+        window.showErrorToast('ネットワークエラーです。もう一度お試しください');
+      }
+    });
+    return true;
+  }
+
   function applyUrlState() {
+    // Guest-access deep link — handled by _handleGuestJoin so the redeem/
+    // capability/pair gates live outside the routing body.
+    if (_handleGuestJoin()) return;
     // #/join/<6桁> — pairing deep link (URL-QR): consumed ONCE via
     // replaceState. It is a join input, never a view/browse state, so it
     // must not reach the parsers below or pollute the url stack.
@@ -420,13 +506,23 @@
       try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
       try { urlStackReplace(location.pathname + location.search); } catch (e) {}
       var pc = window.PairController;
-      var pst = (pc && pc.state) || null;
-      // Already in a session: joining here would tear the link down
-      // without a LEAVE, leaving the partner in 'peer-away' for the whole
-      // resume window. Just surface the current session panel instead —
-      // leaving an active pair is an explicit gesture, never a link click.
-      if (pst && pst.status && pst.status !== 'idle' &&
-          pst.status !== 'ended' && pst.status !== 'error') {
+      // Already in a session IN THIS TAB: joining here would tear the
+      // link down without a LEAVE, leaving the partner in 'peer-away'
+      // for the whole resume window. Just surface the current session
+      // panel instead — leaving an active pair is an explicit gesture,
+      // never a link click. pairActiveLocal also covers the boot-resume
+      // window; a FOREIGN tab's pair is irrelevant here (no shared
+      // cookie rides a code join — only the guest gate consults it), so
+      // a closed tab's still-fresh heartbeat can't eat the link. A stale
+      // controller lacking it falls back to the status check.
+      var occupied = !!(pc && (typeof pc.pairActiveLocal === 'function'
+        ? pc.pairActiveLocal()
+        : (function () {
+            var pst = pc.state || null;
+            return pst && pst.status && pst.status !== 'idle' &&
+                   pst.status !== 'ended' && pst.status !== 'error';
+          })()));
+      if (occupied) {
         if (window.PairUI && typeof window.PairUI.open === 'function') {
           window.PairUI.open();
         }

@@ -113,6 +113,12 @@ function thumbWidthFallbacks(reqUrl) {
   } catch { return []; }
 }
 
+// Responses carrying `X-Bookq-Guest` are read-only guest-grant content —
+// never Cache-API them, so a revoked link can't be re-served offline.
+function guestMarked(res) {
+  try { return res.headers.get('X-Bookq-Guest') === '1'; } catch { return false; }
+}
+
 async function cacheFirst(req) {
   const cacheName = perWorkCacheName(req) || "bookq-images-fallback";
   const c = await caches.open(cacheName);
@@ -126,7 +132,7 @@ async function cacheFirst(req) {
   if (!hit) {
     try {
       const res = await fetch(req, {cache: "no-store"});
-      if (!res.ok || res.status===206) return res;
+      if (!res.ok || res.status===206 || guestMarked(res)) return res;
       await c.put(req, res.clone()).catch(() => {});
       return res;
     } catch {
@@ -142,11 +148,37 @@ async function cacheFirst(req) {
   }
   if (!fresh) return hit;
   if (fresh.status === 304) return hit;
+  // A guest-marked 401/403 means the grant is gone — the cached copy is
+  // now unauthorized content, not a fallback. Evict it (wherever
+  // caches.match found it) and surface the real status so pages don't
+  // keep showing a dead grant's bytes. An UNMARKED 401/403 is a member's
+  // expired login — return it as-is but keep the cached copy: explicit
+  // offline downloads must survive a re-login cycle.
+  if (fresh.status === 401 || fresh.status === 403) {
+    if (guestMarked(fresh)) await evictEverywhere(req);
+    return fresh;
+  }
   if (fresh.ok && fresh.status !== 206) {
-    await c.put(req, fresh.clone()).catch(() => {});
+    if (!guestMarked(fresh)) await c.put(req, fresh.clone()).catch(() => {});
     return fresh;
   }
   return hit;
+}
+
+// `caches.match` answers from ANY Cache-API bucket, so a revoke-time evict
+// has to sweep them all (the copy may sit in a per-work cache or the
+// fallback bucket, not necessarily `cacheName`).
+async function evictEverywhere(req) {
+  try {
+    const names = await caches.keys();
+    const urls = [req, ...thumbWidthFallbacks(req.url)];
+    for (const name of names) {
+      const c = await caches.open(name);
+      for (const target of urls) {
+        try { await c.delete(target); } catch { /* next */ }
+      }
+    }
+  } catch { /* best-effort */ }
 }
 
 // A cache-fallback response means the network leg itself failed — mark it so
@@ -173,7 +205,7 @@ async function networkFirst(req, cacheName) {
     }
     // 202 (index building) is res.ok but a status payload, not data —
     // caching it would serve {detail:"..."} as the offline fallback body.
-    if (res.ok && res.status !== 202) {
+    if (res.ok && res.status !== 202 && !guestMarked(res)) {
       const clone = res.clone();
       const cache = await caches.open(cacheName);
       if (cacheEpoch === apiCacheEpoch) await cache.put(req, clone).catch(() => {});

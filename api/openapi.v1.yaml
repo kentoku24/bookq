@@ -871,6 +871,86 @@ paths:
         "401": {description: コード / verifier / refresh token 不正}
         "429": {$ref: "#/components/responses/TooManyRequests"}
 
+  /api/v1/guest/redeem:
+    post:
+      tags: [auth]
+      operationId: redeemGuestToken
+      summary: ゲストアクセストークンを bookq_guest cookie に交換
+      description: |
+        dual-reader のペアリング QR (`/#/join/<code>?gt=<token>`) を
+        未ログイン端末が開いたときの入口。`token` はペア `CREATE` ACK の
+        `data.guestToken`
+        （または QR URL フラグメント）で、妥当なら `bookq_guest` cookie
+        （HttpOnly・SameSite=Lax）を発行し、以後のリクエストはリーダーの
+        identity で**読み取り専用**に解決される。grant はペアセッション終了
+        （リーダー切断）または発行から 8 時間の TTL で失効する。
+
+        既に session / Bearer で認証済みの呼び出しには cookie を発行せず
+        `{"ok":true}` のみ返す（ログイン済みユーザーが QR を読んでも
+        自分の identity を保持する）。guest cookie 保持者の再 redeem は
+        last-wins で cookie を更新する。
+
+        `bookq_guest` で解決される identity は read-only: 非
+        GET/HEAD/OPTIONS と `/admin*` は 403。`reader-sync-protocol.md`
+        の guest 節を参照。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  minLength: 16
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  description: CREATE ACK の guestToken（urlsafe base64）
+            examples:
+              default:
+                summary: 正常系
+                value: {token: "SWuCjt2yraxPVXZxtVDzmQR4E-BimTF4"}
+      responses:
+        "200":
+          description: |
+            交換成功。grant が有効な場合は `Set-Cookie: bookq_guest=…` と
+            `expiresInSec`（残 TTL 秒）を返す。認証済み呼び出しには
+            cookie 無し・`expiresInSec` 無しの `{"ok":true}`。
+          headers:
+            Set-Cookie:
+              schema: {type: string}
+              description: "bookq_guest=<token>; Path=/; Max-Age=<残秒>; HttpOnly; SameSite=Lax; Secure（grant 時のみ）"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: {type: boolean, const: true}
+                  expiresInSec: {type: integer, description: grant 残 TTL 秒（cookie 発行時のみ）}
+              examples:
+                guest:
+                  summary: ゲスト cookie 発行
+                  value: {ok: true, expiresInSec: 28799}
+                authed:
+                  summary: 認証済み呼び出し（cookie 無し）
+                  value: {ok: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401":
+          description: |
+            token が未知・TTL 失効・または owner が無効化済み。応答は
+            常に `{"detail":"guest link invalid"}` — 失効と未知を区別
+            すると token 状態の oracle になるため実装は区別しない。
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+              example: {detail: "guest link invalid"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "405": {description: POST 以外のメソッド}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+
   # ── library edit ────────────────────────────────────────────────────
   # ライブラリへの書き込み面。対応形式は .zip .cbz .rar .cbr .epub .pdf
   # (serve.rs::ARCHIVE_EXTENSIONS + PDF_EXTENSIONS)。衝突は `name (1).ext`

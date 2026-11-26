@@ -8,7 +8,7 @@
 use axum::{
     body::Body,
     extract::{FromRequest, FromRequestParts, Path as AxumPath, Query, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{any, get},
     Router,
@@ -21,11 +21,13 @@ use std::path::PathBuf;
 // serve/tree/folders hold the contract-independent core (archive listing,
 // path containment, tree assembly, index cache) that the v1 envelopes
 // are wired onto. v0 routes are deprecated and answer 501 via the fallback.
-mod auth;
+mod admin;
 mod admin_ui;
+mod auth;
 #[cfg(test)]
 mod conformance_vectors;
 mod folders;
+mod guest;
 // #573: `--healthcheck` — the image has no shell for a compose probe.
 mod healthcheck;
 mod library;
@@ -96,6 +98,8 @@ pub(crate) struct AppState {
     /// appended to `img-src`/`connect-src` on HTML responses — exists for
     /// the `?api_base=` mock-dev flow (#237). Empty in production.
     pub(crate) csp_extra: Vec<String>,
+    /// Per-IP fixed-window limiter for `POST /api/v1/guest/redeem`.
+    pub(crate) guest_redeem_limit: guest::RedeemRateLimit,
 }
 
 /// A local 405 carries the RFC 9110 `Allow` header.
@@ -107,21 +111,53 @@ pub(crate) fn method_not_allowed(allow: &'static str) -> Response {
     r
 }
 
+/// Public, per-user-free asset paths — exempt from both `Vary: Cookie`
+/// (starlette parity: these routes never touch `request.session`) and
+/// the guest `no-store`/`x-bookq-guest` marking.
+fn session_free_path(p: &str) -> bool {
+    p == "/sw.js" || p == "/favicon.ico" || p == "/static" || p.starts_with("/static/")
+}
+
 /// Unverifiable caller (no session, no/invalid Bearer) answers 401 locally.
 fn unauthenticated() -> Response {
     state::detail(StatusCode::UNAUTHORIZED, "authentication required")
 }
 
-/// Resolve the caller for a route: `None` means unauthenticated.
-fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
-    match auth::resolve(
-        headers,
-        st.test_mode,
-        &st.secret_key,
-        st.session_key.as_ref(),
-        &st.directory,
-    ) {
-        auth::Caller::User(u) => Some(u),
+impl AppState {
+    /// The full caller-resolution chain (session → Bearer → guest) with
+    /// this app's auth inputs — one place the seven call sites share.
+    fn resolve(&self, headers: &axum::http::HeaderMap) -> auth::Caller {
+        auth::resolve(
+            headers,
+            self.test_mode,
+            &self.secret_key,
+            self.session_key.as_ref(),
+            &self.directory,
+            self.registry.guest(),
+        )
+    }
+
+    fn resolve_ws_user(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Option<(serde_json::Value, bool)> {
+        auth::resolve_ws_user(
+            headers,
+            self.test_mode,
+            &self.secret_key,
+            self.session_key.as_ref(),
+            &self.directory,
+            self.registry.guest(),
+        )
+    }
+}
+
+/// Resolve the caller for a route: `None` means unauthenticated. A guest
+/// grant resolves to the leader's identity for reads — writes are stopped
+/// earlier by `guest_write_guard`.
+pub(crate) fn caller(st: &AppState, headers: &axum::http::HeaderMap) -> Option<auth::Identity> {
+    match st.resolve(headers) {
+        auth::Caller::User(u) | auth::Caller::Guest(u) => Some(u),
         auth::Caller::Delegate => None,
     }
 }
@@ -150,20 +186,113 @@ async fn vary_session_cookie(
     let signed = !matches!(
         auth::session_lookup(req.headers(), st.session_key.as_ref()),
         auth::SessionLookup::Absent
-    );
+    ) || auth::cookie_value(req.headers(), "bookq_guest").is_some();
     // starlette only emits `Vary: Cookie` when the route touches
     // `request.session`. The public static/shell assets never do, so a
     // signed-in browser's static fetches carry no Vary —
     // mirror that or every such response would wrongly advertise one.
-    let path = req.uri().path();
-    let session_free = path == "/sw.js"
-        || path == "/favicon.ico"
-        || path == "/static"
-        || path.starts_with("/static/");
+    let session_free = session_free_path(req.uri().path());
     let mut res = next.run(req).await;
     if signed && !session_free && !vary_lists_cookie(res.headers()) {
         res.headers_mut()
             .append(header::VARY, HeaderValue::from_static("Cookie"));
+    }
+    res
+}
+
+/// Read-only enforcement for `bookq_guest` callers. A guest grant resolves
+/// to the pair leader's identity so every read works, but writes, the
+/// whole `/admin` surface, and `/api/v1/library/*` answer 403 before the
+/// handler runs — pair sync is WebSocket and unaffected. The library
+/// surface is denied outright (not just its writes): its GETs have side
+/// effects (upload slots/finalize state) a read-only caller must not
+/// trigger. `/api/v1/guest/redeem` is exempt: it is how the cookie is
+/// minted and refreshed. Resolution goes through `auth::resolve` itself
+/// so session→Bearer→guest precedence (including the expired-session-
+/// cookie edge) can't drift from the handlers'.
+async fn guest_write_guard(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    let safe_method = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let admin_path = path == "/admin" || path.starts_with("/admin/");
+    let library_path = path == "/api/v1/library" || path.starts_with("/api/v1/library/");
+    // Reading positions resolve to the leader's identity for a guest —
+    // denying even safe methods keeps their private history off the wire.
+    // `== x || starts_with(x + "/")` like the neighbors: any future
+    // sub-route (per-work position, history) is private for the same
+    // reason and must not slip past the guard unmarked.
+    let positions_path = path == "/api/v1/reading-positions"
+        || path.starts_with("/api/v1/reading-positions/");
+    if (safe_method && !admin_path && !library_path && !positions_path)
+        || path == "/api/v1/guest/redeem"
+    {
+        return next.run(req).await;
+    }
+    if matches!(
+        st.resolve(req.headers()),
+        auth::Caller::Guest(_)
+    ) {
+        return state::detail(StatusCode::FORBIDDEN, "guest access is read-only");
+    }
+    next.run(req).await
+}
+
+/// `x-bookq-guest: 1` on every response a `bookq_guest` caller receives —
+/// the Service Worker and page-side writers refuse to persist marked
+/// responses, so a revoked grant can't be re-served out of the device's
+/// own caches. `Cache-Control: private, no-store` closes the other half
+/// of the hole: the browser's HTTP cache ignores the custom header and
+/// would happily re-serve 200/206/304 content past revocation.
+///
+/// A dead grant resolves to anonymous, not Guest — so 401/403s to a
+/// request that carried ONLY a `bookq_guest` cookie (no `session`
+/// cookie) get the marker too: that is exactly the revoked-guest case
+/// the SW evicts on, while a member's expired-session 401 (no guest
+/// cookie presented) stays unmarked and keeps downloaded pages.
+async fn guest_response_marker(
+    State(st): State<AppState>,
+    req: Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let (is_guest, dead_guest_only) = match st.resolve(req.headers()) {
+        auth::Caller::Guest(_) => (true, false),
+        auth::Caller::User(_) => (false, false),
+        // A guest cookie that resolved to anonymous is a dead grant —
+        // base this on the resolution outcome, not cookie presence, so a
+        // stale `session` cookie can't mask the revoked-guest eviction.
+        auth::Caller::Delegate => (
+            false,
+            auth::cookie_value(req.headers(), "bookq_guest").is_some(),
+        ),
+    };
+    // Public, per-user-free assets stay cacheable for guests — same set
+    // `vary_session_cookie` exempts. Everything else gets no-store.
+    let session_free = session_free_path(req.uri().path());
+    let mut res = next.run(req).await;
+    let mark = is_guest
+        || (dead_guest_only
+            && matches!(
+                res.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ));
+    if mark {
+        let h = res.headers_mut();
+        h.insert(
+            HeaderName::from_static("x-bookq-guest"),
+            HeaderValue::from_static("1"),
+        );
+    }
+    if is_guest && !session_free {
+        res.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-store"),
+        );
     }
     res
 }
@@ -481,319 +610,13 @@ async fn api_facets(State(st): State<AppState>, req: Request<Body>) -> Response 
 /// A signed session cookie whose payload is not a session dict — Python's
 /// SessionMiddleware raises on `json.loads` (500) before any route runs,
 /// so corrupt sessions answer 500 locally.
-fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
+pub(crate) fn corrupt_session(st: &AppState, headers: &axum::http::HeaderMap) -> bool {
     matches!(
         auth::session_lookup(headers, st.session_key.as_ref()),
         auth::SessionLookup::Corrupt
     )
 }
 
-// ── #608: /admin ───────────────────────────────────────────────────────────
-
-/// Headers shared by every `/admin` response: keep per-user HTML out of
-/// shared/private caches, and stop MIME sniffing / referrer leakage even on
-/// the 404 path.
-fn admin_private_headers(res: &mut Response) {
-    // `no-transform` also stops Cloudflare Email Obfuscation from replacing
-    // the user list's addresses with "[email protected]" (#625). The CSP keeps
-    // Cloudflare's decode script disabled, so the obfuscated text would stick.
-    res.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, no-transform"),
-    );
-    res.headers_mut()
-        .insert(header::VARY, HeaderValue::from_static("Cookie"));
-    res.headers_mut().insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    res.headers_mut()
-        .insert("referrer-policy", HeaderValue::from_static("same-origin"));
-}
-
-/// Unauthenticated browser navigation → the login page at `/`.
-/// `/admin` is a page, not an API: a 401 JSON would be a dead end.
-fn admin_redirect_login() -> Response {
-    let mut res = Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/")
-        .body(Body::empty())
-        .unwrap();
-    admin_private_headers(&mut res);
-    res
-}
-
-/// A non-admin gets the same generic 404 shape as a missing page — the
-/// admin surface is not advertised. The store error path uses this too
-/// (fail closed) and only the server log records the cause.
-fn admin_not_found() -> Response {
-    let mut res = state::detail(StatusCode::NOT_FOUND, "Not Found");
-    admin_private_headers(&mut res);
-    res
-}
-
-/// Per-request admin lookup. Any failure (store error, blocking-task join
-/// error) denies; the caller never sees the difference from "not an admin".
-///
-/// Role lookup only: `admin_actor` below composes `caller()` + this check and
-/// is the shared gate for the `/admin` page and every mutation route.
-async fn admin_check(st: &AppState, email: &str) -> bool {
-    let email = email.trim().to_lowercase();
-    if email.is_empty() {
-        return false;
-    }
-    let store = st.users.clone();
-    match tokio::task::spawn_blocking(move || store.is_admin(&email)).await {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "admin store unavailable — denying admin access");
-            false
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "admin check task failed — denying admin access");
-            false
-        }
-    }
-}
-
-/// Shared admin gate for the page and every mutation handler. Returns the
-/// acting identity on success; any failure is already a complete response.
-async fn admin_actor(
-    st: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<auth::Identity, Response> {
-    if corrupt_session(st, headers) {
-        let mut res = corrupt_session_response();
-        admin_private_headers(&mut res);
-        return Err(res);
-    }
-    let Some(user) = caller(st, headers) else {
-        return Err(admin_redirect_login());
-    };
-    if !admin_check(st, &user.email).await {
-        return Err(admin_not_found());
-    }
-    Ok(user)
-}
-
-fn admin_internal_error(msg: &'static str) -> Response {
-    let mut res = state::detail(StatusCode::INTERNAL_SERVER_ERROR, msg);
-    admin_private_headers(&mut res);
-    res
-}
-
-/// `GET|HEAD /admin` — user list + add form (#613).
-async fn admin_page(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if !matches!(
-        *req.method(),
-        axum::http::Method::GET | axum::http::Method::HEAD
-    ) {
-        return admin_method_not_allowed("GET, HEAD");
-    }
-    let head = *req.method() == axum::http::Method::HEAD;
-    let headers = req.headers().clone();
-    if let Err(res) = admin_actor(&st, &headers).await {
-        return res;
-    }
-    let status = Query::<HashMap<String, String>>::try_from_uri(req.uri())
-        .ok()
-        .and_then(|q| q.0.get("status").cloned());
-
-    let store = st.users.clone();
-    let users = match tokio::task::spawn_blocking(move || store.list()).await {
-        Ok(Ok(users)) => users,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "admin user list unavailable");
-            return admin_internal_error("admin store unavailable");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "admin user list task failed");
-            return admin_internal_error("admin store unavailable");
-        }
-    };
-
-    let web_dir = st.web_dir.clone();
-    let template = match tokio::task::spawn_blocking(move || {
-        std::fs::read_to_string(web_dir.join("templates").join("admin.html"))
-    })
-    .await
-    {
-        Ok(Ok(template)) => template,
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "admin template unavailable");
-            return admin_internal_error("admin template unavailable");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "admin template task failed");
-            return admin_internal_error("admin template unavailable");
-        }
-    };
-
-    let body = admin_ui::render(&template, &users, status.as_deref());
-    let mut res = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(if head { Body::empty() } else { Body::from(body) })
-        .unwrap();
-    admin_private_headers(&mut res);
-    res.headers_mut()
-        .insert("x-frame-options", HeaderValue::from_static("DENY"));
-    // Forms post to this same origin; scripts and inline styles stay off.
-    res.headers_mut().insert(
-        "content-security-policy",
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'none'; style-src 'self'; \
-             img-src 'self'; object-src 'none'; base-uri 'none'; \
-             form-action 'self'; frame-ancestors 'none'",
-        ),
-    );
-    res.headers_mut()
-        .insert("x-robots-tag", HeaderValue::from_static("noindex"));
-    res
-}
-
-/// The only field the three mutation forms carry.
-#[derive(serde::Deserialize)]
-struct AdminEmailForm {
-    email: String,
-}
-
-/// The three member mutations. Admins are never targets (the store layer
-/// refuses them with `Change::AdminProtected`) — they stay CLI-only.
-#[derive(Clone, Copy)]
-enum MemberAction {
-    Add,
-    Disable,
-    Enable,
-}
-
-fn admin_forbidden() -> Response {
-    let mut res = state::detail(StatusCode::FORBIDDEN, "Forbidden");
-    admin_private_headers(&mut res);
-    res
-}
-
-fn admin_bad_request() -> Response {
-    let mut res = state::detail(StatusCode::BAD_REQUEST, "invalid form");
-    admin_private_headers(&mut res);
-    res
-}
-
-fn admin_method_not_allowed(allow: &'static str) -> Response {
-    let mut res = method_not_allowed(allow);
-    admin_private_headers(&mut res);
-    res
-}
-
-fn admin_payload_too_large() -> Response {
-    let mut res = state::detail(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
-    admin_private_headers(&mut res);
-    res
-}
-
-/// 303 back to the list with a flash code (`admin_ui::flash_message` renders
-/// it; unknown codes are silently ignored). POST-redirect-GET keeps reloads
-/// from re-submitting the mutation.
-fn admin_redirect_status(status: &'static str) -> Response {
-    let mut res = Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, format!("/admin?status={status}"))
-        .body(Body::empty())
-        .unwrap();
-    admin_private_headers(&mut res);
-    res
-}
-
-async fn admin_users_add(State(st): State<AppState>, req: Request<Body>) -> Response {
-    admin_member_action(st, req, MemberAction::Add).await
-}
-
-async fn admin_users_disable(State(st): State<AppState>, req: Request<Body>) -> Response {
-    admin_member_action(st, req, MemberAction::Disable).await
-}
-
-async fn admin_users_enable(State(st): State<AppState>, req: Request<Body>) -> Response {
-    admin_member_action(st, req, MemberAction::Enable).await
-}
-
-async fn admin_member_action(
-    st: AppState,
-    req: Request<Body>,
-    action: MemberAction,
-) -> Response {
-    // Gate order matters: identity → role → CSRF → body. Nothing is read
-    // (or written) for a caller who is not an admin on this same origin.
-    if *req.method() != axum::http::Method::POST {
-        return admin_method_not_allowed("POST");
-    }
-    let headers = req.headers().clone();
-    let actor = match admin_actor(&st, &headers).await {
-        Ok(actor) => actor,
-        Err(res) => return res,
-    };
-    if !admin_ui::same_origin_post(&headers) {
-        return admin_forbidden();
-    }
-    let form = match axum::extract::Form::<AdminEmailForm>::from_request(req, &()).await {
-        Ok(form) => form.0,
-        Err(rejection) => {
-            if rejection.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
-                return admin_payload_too_large();
-            }
-            return admin_bad_request();
-        }
-    };
-
-    let store = st.users.clone();
-    let email = form.email;
-    let actor_email = actor.email;
-    let result = tokio::task::spawn_blocking(move || match action {
-        MemberAction::Add | MemberAction::Enable => {
-            store.add_member(&email, &actor_email)
-        }
-        MemberAction::Disable => store.disable_member(&email, &actor_email),
-    })
-    .await;
-
-    let change = match result {
-        Ok(Ok(change)) => change,
-        Ok(Err(users::UserError::InvalidEmail)) => return admin_redirect_status("invalid"),
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "admin user update failed");
-            return admin_internal_error("user update failed");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "admin user update task failed");
-            return admin_internal_error("user update failed");
-        }
-    };
-
-    let status = match (action, change) {
-        (MemberAction::Add | MemberAction::Enable, users::Change::Added) => "added",
-        (MemberAction::Add | MemberAction::Enable, users::Change::Activated) => {
-            "reactivated"
-        }
-        (MemberAction::Add | MemberAction::Enable, users::Change::AlreadyPresent) => {
-            "exists"
-        }
-        (MemberAction::Add | MemberAction::Enable, users::Change::AdminProtected) => {
-            "admin-readonly"
-        }
-        (MemberAction::Disable, users::Change::Disabled) => "disabled",
-        (MemberAction::Disable, users::Change::AlreadyDisabled) => "already-disabled",
-        (MemberAction::Disable, users::Change::NotFound) => "not-found",
-        (MemberAction::Disable, users::Change::AdminProtected) => "admin-readonly",
-        // The actor was demoted/disabled after the page was rendered (the
-        // store re-checks inside the write transaction): fail closed with the
-        // same generic 404 a non-admin gets, so the surface stays hidden.
-        (_, users::Change::NotAuthorized) => return admin_not_found(),
-        (_, other) => {
-            tracing::error!(?other, "unexpected admin store result");
-            return admin_internal_error("user update failed");
-        }
-    };
-    admin_redirect_status(status)
-}
 
 /// `GET /` — the Jinja shell: viewer page for identified callers, the
 /// login page for everyone else (200, not a redirect).
@@ -815,11 +638,17 @@ async fn shell_index(State(st): State<AppState>, req: Request<Body>) -> Response
         st.session_key.as_ref(),
         &st.directory,
         &headers,
+        st.registry.guest(),
     );
     // #608: the admin menu entry is cosmetic, but derive it from the same
     // strict identity path the `/admin` gate uses (active membership
-    // re-checked), not from the shell's viewer branch.
-    let admin_email = caller(&st, &headers).map(|u| u.email);
+    // re-checked), not from the shell's viewer branch. Guests resolve to
+    // the leader's identity for reads — the menu must not leak to them
+    // (`/admin` itself is already 403 via guest_write_guard).
+    let admin_email = match st.resolve(&headers) {
+        auth::Caller::User(u) => Some(u.email),
+        _ => None,
+    };
     // '/' is outside the gzip prefixes.
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || {
@@ -1023,7 +852,7 @@ async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Respon
             library::post_files(&st, &dir, mp).await
         }
         axum::http::Method::DELETE => {
-            if !admin_check(&st, &user.email).await {
+            if !admin::admin_check(&st, &user.email).await {
                 return state::detail(StatusCode::FORBIDDEN, "Forbidden");
             }
             let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
@@ -1045,9 +874,9 @@ async fn library_files(State(st): State<AppState>, req: Request<Body>) -> Respon
 const LIBRARY_INIT_BODY_MAX: usize = 64 * 1024;
 
 async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     if *req.method() != axum::http::Method::POST {
         return method_not_allowed("POST");
     }
@@ -1059,7 +888,7 @@ async fn library_uploads(State(st): State<AppState>, req: Request<Body>) -> Resp
             return state::detail(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
         }
     };
-    library::uploads_init(&st, &body).await
+    library::uploads_init(&st, &body, &user.email).await
 }
 
 /// `/api/v1/library/uploads/{id}` — GET state / PUT chunk / DELETE cancel.
@@ -1068,17 +897,17 @@ async fn library_upload(
     AxumPath(id): AxumPath<String>,
     req: Request<Body>,
 ) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     match *req.method() {
-        axum::http::Method::GET => library::upload_get(&st, &id).await,
+        axum::http::Method::GET => library::upload_get(&st, &id, &user.email).await,
         axum::http::Method::PUT => {
             let headers = req.headers().clone();
             let (_parts, body) = req.into_parts();
-            library::upload_append(&st, &id, &headers, body).await
+            library::upload_append(&st, &id, &user.email, &headers, body).await
         }
-        axum::http::Method::DELETE => library::upload_cancel(&st, &id).await,
+        axum::http::Method::DELETE => library::upload_cancel(&st, &id, &user.email).await,
         _ => method_not_allowed("GET, PUT, DELETE"),
     }
 }
@@ -1089,13 +918,13 @@ async fn library_upload_finalize(
     AxumPath(id): AxumPath<String>,
     req: Request<Body>,
 ) -> Response {
-    if caller(&st, req.headers()).is_none() {
+    let Some(user) = caller(&st, req.headers()) else {
         return unauthenticated();
-    }
+    };
     if *req.method() != axum::http::Method::POST {
         return method_not_allowed("POST");
     }
-    library::upload_finalize(&st, &id).await
+    library::upload_finalize(&st, &id, &user.email).await
 }
 
 /// `/api/v1/index/refresh` — authed POST; synchronous rebuild under the
@@ -1266,7 +1095,7 @@ fn auth_unconfigured() -> Response {
 }
 
 /// A corrupt session cookie answers 500 like starlette's middleware.
-fn corrupt_session_response() -> Response {
+pub(crate) fn corrupt_session_response() -> Response {
     state::detail(StatusCode::INTERNAL_SERVER_ERROR, "invalid session")
 }
 
@@ -1308,7 +1137,40 @@ async fn auth_callback(State(st): State<AppState>, req: Request<Body>) -> Respon
     let q = Query::<HashMap<String, String>>::try_from_uri(req.uri())
         .map(|q| q.0)
         .unwrap_or_default();
-    oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await
+    let mut res = oauth::callback(&flow, req.method(), req.headers(), &q, &lookup).await;
+    // A completed WEB login supersedes any stale guest grant cookie —
+    // `Vary`/marker plumbing would keep tagging this browser's responses
+    // as guest-served (and the cache-exclusion would degrade caching)
+    // until the cookie died on its own. Only the browser-success branch
+    // mints a `session` cookie: native (bookq://) redirects and denied
+    // logins issue no web session, so clearing there would silently kill
+    // in-browser guest browsing — e.g. an Android Custom-Tabs app login
+    // sharing the browser the guest reads in.
+    let has_web_session = res
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.starts_with("session=")
+                && !v.starts_with("session=null")
+                && !v.starts_with("session=;")
+        });
+    if has_web_session {
+        clear_guest_cookie(&mut res);
+    }
+    res
+}
+
+/// `bookq_guest=; Max-Age=0` — drop the guest grant cookie. Shared by the
+/// logout paths (every one of them) and the post-login stale-cookie sweep.
+fn clear_guest_cookie(res: &mut Response) {
+    res.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "bookq_guest=; path=/; Max-Age=0; httponly; samesite=lax; secure",
+        ),
+    );
 }
 
 async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1316,18 +1178,34 @@ async fn auth_logout(State(st): State<AppState>, req: Request<Body>) -> Response
         return method_not_allowed("GET, HEAD");
     }
     // #373: logout is a state-changing GET — refuse cross-site
-    // initiations (forced logout CSRF).
+    // initiations (forced logout CSRF). The guest cookie is NOT cleared
+    // on this path: honoring a forged navigation's Set-Cookie would be a
+    // forced guest-logout primitive — the same thing this gate exists to
+    // prevent.
     if !oauth::same_site_initiation(req.headers()) {
         return state::detail(StatusCode::FORBIDDEN, "Forbidden");
     }
+    // The grant is server-side state — kill it, not just the cookie copy
+    // in this browser, so a lifted token can't outlive the sign-out.
+    if let Some(token) = auth::cookie_value(req.headers(), "bookq_guest") {
+        st.registry.guest().revoke_token(&token);
+    }
     let Some(flow) = st.auth_flow.clone() else {
-        return auth_unconfigured();
+        let mut res = auth_unconfigured();
+        clear_guest_cookie(&mut res);
+        return res;
     };
     let lookup = auth::session_lookup(req.headers(), st.session_key.as_ref());
     if matches!(lookup, auth::SessionLookup::Corrupt) {
-        return corrupt_session_response();
+        let mut res = corrupt_session_response();
+        clear_guest_cookie(&mut res);
+        return res;
     }
-    oauth::logout(&flow, &lookup)
+    let mut res = oauth::logout(&flow, &lookup);
+    // Also drop any guest grant cookie — logout is the explicit
+    // "I'm done here" gesture and shouldn't leave a live bearer behind.
+    clear_guest_cookie(&mut res);
+    res
 }
 
 async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response {
@@ -1358,26 +1236,133 @@ async fn auth_token(State(st): State<AppState>, req: Request<Body>) -> Response 
     serve::maybe_gzip(&headers, res, true).await
 }
 
+/// `POST /api/v1/guest/redeem` — exchange a pair-session guest token for
+/// the `bookq_guest` cookie. Already-authenticated callers (session or
+/// Bearer → `Caller::User`) get `{"ok":true}` without a cookie so a logged-in
+/// user scanning the QR keeps their own identity; guest-cookie holders
+/// re-redeeming get last-wins refresh.
+/// `POST /api/v1/guest/redeem` body — the invite token to exchange.
+#[derive(serde::Deserialize)]
+struct GuestRedeemBody {
+    token: String,
+}
+
+async fn guest_redeem(State(st): State<AppState>, req: Request<Body>) -> Response {
+    if *req.method() != axum::http::Method::POST {
+        return method_not_allowed("POST");
+    }
+    // Same cross-site gate as the OAuth initiation endpoints — a foreign
+    // page must not mint a guest cookie into this browser.
+    if !oauth::same_site_initiation(req.headers()) {
+        return state::detail(StatusCode::FORBIDDEN, "Forbidden");
+    }
+    if matches!(
+        auth::session_lookup(req.headers(), st.session_key.as_ref()),
+        auth::SessionLookup::Corrupt
+    ) {
+        return corrupt_session_response();
+    }
+    if !st.guest_redeem_limit.check(&oauth::client_ip(req.headers())) {
+        return state::detail(StatusCode::TOO_MANY_REQUESTS, "too many requests");
+    }
+
+    let headers = req.headers().clone();
+    // `Bytes::from_request` honors the route-layer DefaultBodyLimit — an
+    // unauthenticated endpoint must not slurp an unbounded body.
+    let body = match axum::body::Bytes::from_request(req, &st).await {
+        Ok(b) => b,
+        Err(rej) => return rej.into_response(),
+    };
+    // Validate the body BEFORE the authed short-circuit — the OpenAPI
+    // contract declares requestBody required, and schema-violating
+    // requests must get 400s no matter who is calling.
+    let token = serde_json::from_slice::<GuestRedeemBody>(&body)
+        .ok()
+        .map(|b| b.token);
+    let Some(token) = token.filter(|t| guest::valid_token_shape(t)) else {
+        return state::detail(StatusCode::BAD_REQUEST, "invalid token");
+    };
+    if matches!(
+        st.resolve(&headers),
+        auth::Caller::User(_)
+    ) {
+        let mut res = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("{\"ok\":true}"))
+            .unwrap();
+        res.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        return serve::maybe_gzip(&headers, res, true).await;
+    }
+    match st.registry.guest().status(&token) {
+        guest::GrantStatus::Valid(grant) => {
+            // Same membership re-check the auth paths run — a grant whose
+            // owner was since disabled must not mint a cookie (the shell
+            // would reject it anyway and login.js would loop redeeming).
+            if !st.directory.is_member(&grant.owner_email) {
+                return state::detail(StatusCode::UNAUTHORIZED, "guest link invalid");
+            }
+            let max_age = grant.remaining_secs();
+            let mut res = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(format!(
+                    "{{\"ok\":true,\"expiresInSec\":{max_age}}}"
+                )))
+                .unwrap();
+            res.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            // The response carries a credential (Set-Cookie) — never let
+            // a shared cache store it, matching `/api/v1/auth/token`.
+            res.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&format!(
+                "bookq_guest={token}; path=/; Max-Age={max_age}; httponly; samesite=lax; secure"
+            )) {
+                res.headers_mut().append(header::SET_COOKIE, v);
+            }
+            serve::maybe_gzip(&headers, res, true).await
+        }
+        // Expired and unknown answer identically — distinguishing them
+        // would be a token-state oracle. (The WS side's join_guest DOES
+        // split code_expired/bad_code: that path is throttled by
+        // join_fails so the oracle is bounded, and expired-vs-wrong tells
+        // the user to request a fresh invite rather than retype.)
+        guest::GrantStatus::Expired | guest::GrantStatus::Unknown => {
+            state::detail(StatusCode::UNAUTHORIZED, "guest link invalid")
+        }
+    }
+}
+
 // ── M8: /ws/reader-sync ────────────────────────────────────────────────────
 
 /// `/ws/reader-sync` — non-upgrade requests fall through to the
 /// `WebSocketUpgrade` extractor's rejection; unauthenticated handshakes
 /// answer HTTP 403.
 async fn reader_sync_ws(State(st): State<AppState>, req: Request<Body>) -> Response {
-    let Some(user) = auth::resolve_ws_user(
-        req.headers(),
-        st.test_mode,
-        &st.secret_key,
-        st.session_key.as_ref(),
-        &st.directory,
-    ) else {
+    let Some((user, is_guest)) = st.resolve_ws_user(req.headers()) else {
         return StatusCode::FORBIDDEN.into_response();
+    };
+    // The grant bearer rides on the link so `tick` can re-validate it —
+    // a revoked/expired grant drops the socket rather than coasting on
+    // the handshake-time snapshot.
+    let guest_token = if is_guest {
+        auth::cookie_value(req.headers(), "bookq_guest")
+    } else {
+        None
     };
     let (mut parts, _body) = req.into_parts();
     match axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &st).await {
         Ok(wsu) => {
             let st2 = st.clone();
-            wsu.on_upgrade(move |socket| reader_sync_conn(socket, st2, user))
+            wsu.on_upgrade(move |socket| {
+                reader_sync_conn(socket, st2, user, guest_token)
+            })
         }
         Err(rej) => rej.into_response(),
     }
@@ -1389,6 +1374,7 @@ async fn reader_sync_conn(
     socket: axum::extract::ws::WebSocket,
     st: AppState,
     user: serde_json::Value,
+    guest_token: Option<String>,
 ) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
@@ -1400,6 +1386,7 @@ async fn reader_sync_conn(
         outq_tx,
         close_tx,
         Some(user),
+        guest_token,
         std::time::Instant::now(),
         reg.heartbeat_interval(),
     );
@@ -1469,13 +1456,27 @@ async fn reader_sync_drain(
                 }
                 true
             }
+            reader_sync::OutItem::Close(code, reason) => {
+                let _ = ws_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code,
+                        reason: reason.into(),
+                    })))
+                    .await;
+                false
+            }
         }
     }
 
+    // The close watch's sender dies when the registry detaches the link —
+    // that is NOT a close request: queued outq frames (e.g. END + an
+    // ordered Close from end_owner_sessions) must still be delivered, so a
+    // dead watch stops polling instead of abandoning the queue.
+    let mut close_dead = false;
     loop {
         tokio::select! {
             biased;
-            changed = close.changed() => {
+            changed = close.changed(), if !close_dead => {
                 match changed {
                     Ok(()) => {
                         let val = close.borrow().clone();
@@ -1489,7 +1490,10 @@ async fn reader_sync_drain(
                         }
                         break;
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        close_dead = true;
+                        continue;
+                    }
                 }
             }
             item = outq.recv() => {
@@ -1622,7 +1626,8 @@ async fn main() {
     };
 
     let index = std::sync::Arc::new(folders::IndexState::new());
-    let registry = reader_sync::Registry::new(index.clone(), library.clone());
+    let registry =
+        reader_sync::Registry::new(index.clone(), library.clone(), Some(directory.clone()));
     {
         let reg_ticker = registry.clone();
         tokio::spawn(async move { reg_ticker.run_ticker().await });
@@ -1665,6 +1670,7 @@ async fn main() {
         place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
         session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         csp_extra,
+        guest_redeem_limit: guest::RedeemRateLimit::from_env(),
     };
     // #608: TEST_MODE trusts every caller as the mock user. An admin role in
     // that posture makes `/admin` reachable by anyone who can hit the URL, so
@@ -1721,15 +1727,15 @@ async fn main() {
         .route("/", any(shell_index))
         // #608: admin-only page. Both spellings map to the same gate so
         // `/admin/` does not fall through to the 501 fallback.
-        .route("/admin", any(admin_page))
-        .route("/admin/", any(admin_page))
+        .route("/admin", any(admin::admin_page))
+        .route("/admin/", any(admin::admin_page))
         // #613: member-only mutations. The body limit is scoped here so the
         // three tiny form posts cannot be used as a memory sink.
         .merge(
             Router::new()
-                .route("/admin/users/add", any(admin_users_add))
-                .route("/admin/users/disable", any(admin_users_disable))
-                .route("/admin/users/enable", any(admin_users_enable))
+                .route("/admin/users/add", any(admin::admin_users_add))
+                .route("/admin/users/disable", any(admin::admin_users_disable))
+                .route("/admin/users/enable", any(admin::admin_users_enable))
                 .route_layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
         )
         .route("/sw.js", any(serve_sw))
@@ -1757,6 +1763,13 @@ async fn main() {
         .route("/auth/callback", any(auth_callback))
         .route("/auth/logout", any(auth_logout))
         .route("/api/v1/auth/token", any(auth_token))
+        // Unauthenticated endpoint: cap the body well under the 2MiB
+        // default so redeem can't be a memory sink.
+        .merge(
+            Router::new()
+                .route("/api/v1/guest/redeem", any(guest_redeem))
+                .route_layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
         // TEST_MODE-only dual-reader verification hooks (#405) — always
         // 404 outside test mode, never part of the OpenAPI contract.
         .route("/api/v1/pair-report", any(pair_report::handle_report))
@@ -1786,6 +1799,18 @@ async fn main() {
             tracing::warn!(path = %req.uri().path(), "unknown route: answered 501");
             state::detail(StatusCode::NOT_IMPLEMENTED, "not found")
         }))
+        // Innermost: runs after vary_session_cookie so its 403s still get
+        // `Vary: Cookie`, and before every handler.
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            guest_write_guard,
+        ))
+        // Marks guest responses for the SW cache policy — must wrap every
+        // route, so it sits between the guard and vary layers.
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            guest_response_marker,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             st.clone(),
             vary_session_cookie,
@@ -2030,7 +2055,7 @@ mod handler_tests {
                 .as_nanos()
         ));
         let index = std::sync::Arc::new(folders::IndexState::new());
-        let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"));
+        let registry = reader_sync::Registry::new(index.clone(), dir.join("dl"), None);
         let users_store = std::sync::Arc::new(users::UserStore::new(&dir));
         let directory = std::sync::Arc::new(users::UserDirectory::new(users_store.clone()));
         AppState {
@@ -2056,6 +2081,7 @@ mod handler_tests {
             place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             csp_extra: Vec::new(),
+            guest_redeem_limit: guest::RedeemRateLimit::default(),
         }
     }
 
@@ -2184,6 +2210,7 @@ mod handler_tests {
         let link = reader_sync::Link::new(
             tx,
             close_tx,
+            None,
             None,
             std::time::Instant::now(),
             st.registry.heartbeat_interval(),

@@ -232,13 +232,36 @@ fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError
         }
         "JOIN" => {
             // str.isdigit() is Unicode-aware (Arabic-Indic digits etc. pass)
-            // and len() counts chars, not bytes.
-            let ok = p
-                .get("code")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.chars().count() == 6 && s.chars().all(|c| c.is_numeric()));
-            if !ok {
-                return fail(ERR_MALFORMED, "JOIN.code must be a 6-digit str");
+            // and len() counts chars, not bytes. The payload is a union:
+            // the 6-digit member code OR the guest-access grant token a
+            // CREATE ACK hands out for the QR's `?gt=<token>` links —
+            // exactly one KEY must be present. Presence is XOR'd first:
+            // a validity-XOR would let {code:"bad", guestToken:<valid>}
+            // through with both keys set (join() prefers guestToken),
+            // silently rerouting the join.
+            let code_present = p.get("code").is_some();
+            let guest_present = p.get("guestToken").is_some();
+            if code_present == guest_present {
+                return fail(ERR_MALFORMED, "JOIN needs exactly one of code/guestToken");
+            }
+            if code_present {
+                let ok = p
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| {
+                        s.chars().count() == 6 && s.chars().all(|c| c.is_numeric())
+                    });
+                if !ok {
+                    return fail(ERR_MALFORMED, "JOIN.code must be a 6-digit str");
+                }
+            } else {
+                let ok = p
+                    .get("guestToken")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(crate::guest::valid_token_shape);
+                if !ok {
+                    return fail(ERR_MALFORMED, "JOIN.guestToken must be a token str");
+                }
             }
         }
         "OPEN_WORK" => {
@@ -402,6 +425,52 @@ mod tests {
             parse_request(bad.as_object().unwrap()).unwrap_err().code,
             ERR_TYPE
         );
+    }
+
+    #[test]
+    fn join_requires_exactly_one_key_present() {
+        // Key-presence XOR, not validity-XOR: a bad `code` riding beside a
+        // valid `guestToken` is still both keys set — malformed, never a
+        // silent guestToken join.
+        let valid_token = "g".repeat(32);
+        for payload in [
+            // neither key → malformed
+            frame(&[]),
+            // both keys, both valid → malformed
+            frame(&[
+                ("code", Value::String("123456".into())),
+                ("guestToken", Value::String(valid_token.clone())),
+            ]),
+            // both keys, code invalid → still malformed (presence first)
+            frame(&[
+                ("code", Value::String("bad".into())),
+                ("guestToken", Value::String(valid_token.clone())),
+            ]),
+            // present-but-null still counts as present
+            frame(&[
+                ("code", Value::Null),
+                ("guestToken", Value::String(valid_token.clone())),
+            ]),
+            // lone key, wrong shape → malformed
+            frame(&[("code", Value::String("12345".into()))]),
+            frame(&[("code", Value::from(123456))]),
+            frame(&[("guestToken", Value::String("short".into()))]),
+        ] {
+            let r = req("JOIN", payload);
+            assert_eq!(
+                parse_request(r.as_object().unwrap()).unwrap_err().code,
+                ERR_MALFORMED,
+                "{r}"
+            );
+        }
+        // each key alone in valid shape → accepted
+        for payload in [
+            frame(&[("code", Value::String("123456".into()))]),
+            frame(&[("guestToken", Value::String(valid_token))]),
+        ] {
+            let r = req("JOIN", payload);
+            parse_request(r.as_object().unwrap()).unwrap();
+        }
     }
 
     #[test]

@@ -24,7 +24,7 @@ beforeEach(() => {
     'chapterBoundaries', 'currentIdx', 'currentBrowsePath', 'viewMode', 'urlRestoring',
     'urlRestoreGen', 'loadImages', 'renderView', 'updateBrowseHeader',
     'navigateToFolder', 'redirectHiddenToTop', 'fvGuardPath', 'FolderVisibility',
-    'PairedView', 'PairController', 'PairUI', 'BrowseScroll', 'getNodeAt',
+    'PairedView', 'PairController', 'PairUI', 'PairClient', 'BrowseScroll', 'getNodeAt',
     'getParentPath', 'getScrollKey', 'scrollPositions', 'resetStrip', 'teardownViewer',
     'updateFooterBtn', 'getCurrentChapterInfo']) delete window[k];
   window.urlStack = [];
@@ -220,6 +220,53 @@ describe('applyUrlState (hashchange listener)', () => {
     expect(location.hash).toBe('');   // consumed — never reaches parsers
   });
 
+  it('#/join/<code> joins despite a foreign tab pair — no shared cookie at stake', () => {
+    // Regression: a closed tab's persist record reports a FRESH heartbeat
+    // for RESUME_HB_STALE_MS after pagehide. pairActive() would see that
+    // foreign 'live' pair and refuse, eating the consumed link — the
+    // 6-digit gate must consult only THIS tab (pairActiveLocal), so a
+    // sibling's pair or a dead tab's leftover never blocks a code join.
+    window.treeLoaded = true;
+    const join = vi.fn(() => Promise.resolve());
+    window.PairController = {
+      state: { status: 'idle' },
+      join,
+      pairActiveLocal: vi.fn(() => false),   // this tab is free…
+      pairActive: vi.fn(() => true),         // …a sibling owns the record
+    };
+    setHash('#/join/314159');
+    fireHash();
+    expect(join).toHaveBeenCalledWith('314159');
+  });
+
+  it('#/join/<code> blocked while THIS tab is occupied — panel, no join', () => {
+    window.treeLoaded = true;
+    const join = vi.fn(() => Promise.resolve());
+    const open = vi.fn();
+    window.PairController = {
+      state: { status: 'idle' },
+      join,
+      pairActiveLocal: vi.fn(() => true),    // own pair or boot resume
+    };
+    window.PairUI = { open };
+    setHash('#/join/314159');
+    fireHash();
+    expect(join).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalled();
+  });
+
+  it('#/join/<code> stale controller falls back to status check', () => {
+    window.treeLoaded = true;
+    const join = vi.fn(() => Promise.resolve());
+    const open = vi.fn();
+    window.PairController = { state: { status: 'connected' }, join };
+    window.PairUI = { open };
+    setHash('#/join/314159');
+    fireHash();
+    expect(join).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalled();
+  });
+
   it('browse hash restores browse path; bare hash resets to top', () => {
     window.treeLoaded = true;
     window.viewMode = 'tile';
@@ -265,6 +312,209 @@ describe('applyUrlState (hashchange listener)', () => {
     setHash('#/browse/series?v=list');
     fireHash();
     expect(window.viewMode).toBe('list');
+  });
+});
+
+describe('applyUrlState — #/join/<code>?gt=<token> deep link', () => {
+  function fireHash() {
+    window.dispatchEvent(new Event('hashchange'));
+  }
+  const TOKEN = 'g'.repeat(32);
+  const GH = '#/join/123456?gt=' + TOKEN;
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  // No endpoint stubbing — setup.js loads the generated api/endpoints.js,
+  // so these tests redeem against the REAL BookqApiEndpoints.guestRedeem
+  // constant (a drift between the generator and this URL fails here, not
+  // in prod). The capability gate needs BOTH halves of the pair stack:
+  // a controller exposing joinGuest+pairActive, and a PairClient module
+  // declaring supportsGuest — the stubs mirror the live surface.
+  function capablePair(extra) {
+    window.PairClient = { supportsGuest: true };
+    window.PairController = Object.assign({
+      state: { status: 'idle' },
+      joinGuest: vi.fn(() => Promise.resolve()),
+      pairActive: vi.fn(() => false),
+    }, extra);
+  }
+
+  beforeEach(() => {
+    window.treeLoaded = true;
+    window.showErrorToast = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('redeems the token then joinGuest + opens the pair panel', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const open = vi.fn();
+    capablePair();
+    const joinGuest = window.PairController.joinGuest;
+    window.PairUI = { open };
+    setHash(GH);
+    fireHash();
+    expect(location.hash).toBe('');   // consumed once via replaceState
+    await flush();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/guest/redeem',
+      expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body))
+      .toEqual({ token: TOKEN });
+    expect(joinGuest).toHaveBeenCalledWith(TOKEN);
+    expect(open).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('dead grant → error toast, no join', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    const joinGuest = window.PairController.joinGuest;
+    window.PairUI = { open: vi.fn() };
+    setHash(GH);
+    fireHash();
+    await flush();
+    expect(joinGuest).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('redeem fetch failure → error toast, no join', async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error('net')));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    const joinGuest = window.PairController.joinGuest;
+    setHash(GH);
+    fireHash();
+    await flush();
+    expect(joinGuest).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('redeem failure with no navigation restores the invite hash', async () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error('net')));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    window.urlRestoreGen = 7;
+    setHash(GH);
+    fireHash();
+    await flush();
+    // Same urlRestoreGen → the invite still owns the bar; restore it so a
+    // manual reload can retry the redeem.
+    expect(location.hash).toBe(GH);
+    delete window.urlRestoreGen;
+    vi.unstubAllGlobals();
+  });
+
+  it('redeem failure after navigation does NOT clobber the new view URL', async () => {
+    let rejectFetch;
+    const fetchMock = vi.fn(
+      () => new Promise((_, rej) => { rejectFetch = rej; }));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    window.urlRestoreGen = 7;
+    setHash(GH);
+    fireHash();
+    expect(location.hash).toBe('');            // invite consumed
+    // User opens a work while the redeem is still in flight — loadImages
+    // claims a new generation.
+    window.urlRestoreGen = 8;
+    setHash('#/view/works%2Fw1?p=0');
+    rejectFetch(new Error('net'));
+    await flush();
+    // The stale invite must not overwrite the work's URL.
+    expect(location.hash).toBe('#/view/works%2Fw1?p=0');
+    expect(window.showErrorToast).toHaveBeenCalled();
+    delete window.urlRestoreGen;
+    vi.unstubAllGlobals();
+  });
+
+  it('active session is never torn down — panel opens, NO redeem', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const open = vi.fn();
+    // pairActive() true — covers a bound pair in ANY surface (incl. an
+    // 'error' state still holding sessionId), a saved-creds boot rejoin
+    // in flight, and a foreign tab heartbeating the pair.
+    capablePair({ pairActive: vi.fn(() => true) });
+    const joinGuest = window.PairController.joinGuest;
+    window.PairUI = { open };
+    setHash(GH);
+    fireHash();
+    await flush();
+    // The guard runs BEFORE redeem: clicking another invite must not swap
+    // the guest cookie out from under the running pair. The token stays
+    // in the URL — after the pair ends a reload can still take it.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(joinGuest).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalled();
+    expect(location.hash).toBe(GH);
+    vi.unstubAllGlobals();
+  });
+
+  it('stale shell without joinGuest — no redeem, reload toast, URL kept', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    window.PairClient = { supportsGuest: true };
+    window.PairController = {
+      state: { status: 'idle' }, pairActive: vi.fn(() => false),
+    };                                                      // no joinGuest
+    setHash(GH);
+    fireHash();
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    // The invite is NOT consumed — the reload we nudge can retry it.
+    expect(location.hash).toBe(GH);
+    vi.unstubAllGlobals();
+  });
+
+  it('new controller + stale PairClient — no redeem, reload toast, URL kept', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    // joinGuest/pairActive exist on the controller but the cached old
+    // pairClient module can't produce a joinGuest-capable client — the
+    // supportsGuest marker is absent, so redeem must not run.
+    capablePair();
+    window.PairClient = {};
+    setHash(GH);
+    fireHash();
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    expect(location.hash).toBe(GH);
+    vi.unstubAllGlobals();
+  });
+
+  it('controller without pairActive (partial skew) — no redeem', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    window.PairClient = { supportsGuest: true };
+    window.PairController = {
+      state: { status: 'idle' }, joinGuest: vi.fn(),
+    };                                                      // no pairActive
+    setHash(GH);
+    fireHash();
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(window.showErrorToast).toHaveBeenCalled();
+    expect(location.hash).toBe(GH);
+    vi.unstubAllGlobals();
+  });
+
+  it('malformed guest hash falls through — no redeem call', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    capablePair();
+    setHash('#/join/123456?gt=short');
+    fireHash();
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });
 

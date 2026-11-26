@@ -52,6 +52,11 @@
   /**
    * @typedef {import('../api/bookq-api').FetchOpts} FetchOpts
    */
+  // Guest sessions must never touch the owner's server-side position record:
+  // PUTs are 403'd by the write guard (a dropped-4xx retry loop at best) and
+  // a pull would merge the leader's progress into the guest's namespaced
+  // local store. Reads/writes stay purely local under `guest:<email>`.
+  var _guest = !!(globalThis.BookqGuest && globalThis.BookqGuest.isGuest());
   var DEBOUNCE_MS = 2000;
   var RETRY_MAX_MS = 60000;
   var _timer = null;          // send timer (debounce or retry backoff)
@@ -118,6 +123,7 @@
   }
 
   function push(rec) {
+    if (_guest) return;
     if (!rec || typeof rec.folder !== "string") return;
     if (_pending && _key(_pending) === _key(rec)) {
       // Same position re-saved while a send is already queued (a hide-event
@@ -134,9 +140,10 @@
     _armTimer(DEBOUNCE_MS);
   }
 
-  function flush() { _sendNow(); }
+  function flush() { if (!_guest) _sendNow(); }
 
   async function pull() {
+    if (_guest) return { ok: true, position: null };
     try {
       var positions = await window.BookqApi.getPositions();
       var pos = (positions && positions[0]) || null;
@@ -148,6 +155,7 @@
   }
 
   async function remove() {
+    if (_guest) return true;
     // Drop everything that could still write back AFTER the DELETE lands:
     // the queued record, the retry timer, the dedup key and the in-flight
     // PUT (abort + epoch bump so its completion requeues nothing).

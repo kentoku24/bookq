@@ -116,6 +116,9 @@ fn harvest(b: &mut HashMap<String, Value>, linkname: &str, frame: &Value,
                 if let Some(tok) = data["resumeToken"].as_str() {
                     b.insert(format!("{sender}.token"), tok.into());
                 }
+                if let Some(tok) = data["guestToken"].as_str() {
+                    b.insert(format!("{sender}.guestToken"), tok.into());
+                }
             }
         }
         if let Some(c) = frame["data"]["code"].as_str() {
@@ -171,7 +174,7 @@ impl LinkDriver {
     async fn attach(reg: &Arc<Registry>, user: Option<Value>) -> Self {
         let (tx, rx) = mpsc::channel(reg.send_queue_max());
         let (close_tx, close_rx) = watch::channel(None);
-        let link = Link::new(tx, close_tx, user, Instant::now(),
+        let link = Link::new(tx, close_tx, user, None, Instant::now(),
                              reg.heartbeat_interval());
         let bulk = link.bulk.clone();
         let link_id = reg
@@ -196,6 +199,8 @@ impl LinkDriver {
                         out.push(serde_json::from_str(&raw).unwrap());
                     }
                 }
+                // Ordered transport close — nothing frames after it.
+                OutItem::Close(..) => {}
             }
         }
         out
@@ -284,7 +289,11 @@ async fn run_case(doc: &Value, case: &Value) {
         );
     }
 
-    let reg = Registry::new(Arc::new(IndexState::new()), PathBuf::from("/nonexistent"));
+    let reg = Registry::new(
+        Arc::new(IndexState::new()),
+        PathBuf::from("/nonexistent"),
+        None,
+    );
     if rkey.is_some() {
         let specs_c = specs.clone();
         let b = bindings.clone();

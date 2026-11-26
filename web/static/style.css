@@ -8,6 +8,7 @@ body.login{display:flex;align-items:center;justify-content:center}
 .login-btn:hover{background:#222;border-color:#555}
 .login-btn:active{transform:scale(0.97);background:#252525;transition:transform 80ms ease-out,background 80ms ease-out}
 .login-btn img{width:20px;height:20px}
+.login-err{color:#e08080;font-size:13px;margin-top:16px}
 @supports ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
   .login-box{background:rgba(30,30,30,0.5);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
 }

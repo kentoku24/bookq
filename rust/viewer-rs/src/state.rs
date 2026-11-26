@@ -1639,7 +1639,8 @@ mod tests {
     fn vis_state(dir: &Path) -> crate::AppState {
         let index = std::sync::Arc::new(crate::folders::IndexState::new());
         let library = dir.join("lib");
-        let registry = crate::reader_sync::Registry::new(index.clone(), library.clone());
+        let registry =
+            crate::reader_sync::Registry::new(index.clone(), library.clone(), None);
         let users_store = std::sync::Arc::new(crate::users::UserStore::new(dir));
         let directory = std::sync::Arc::new(crate::users::UserDirectory::new(users_store.clone()));
         crate::AppState {
@@ -1665,6 +1666,7 @@ mod tests {
             place_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
             session_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             csp_extra: Vec::new(),
+            guest_redeem_limit: crate::guest::RedeemRateLimit::default(),
         }
     }
 

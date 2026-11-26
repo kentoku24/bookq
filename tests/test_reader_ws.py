@@ -46,13 +46,17 @@ def _viewer_rs_binary() -> Path:
     return viewer_rs_binary()
 
 
-def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
+def _spawn_server(
+    library_tree: Path, state_dir: Path, probe_user: dict | None = None
+) -> tuple:
     """Live viewer-rs WITHOUT test-mode: real signed-cookie session auth.
 
     Same shape as conftest's server fixture but with a custom env — spawns
     viewer-rs with the same SECRET_KEY contract. The health probe
-    is the public v1 endpoint.
-    """
+    is the public v1 endpoint. `probe_user` must be an already-registered
+    member — the post-health 202-settle poll hits /api/v1/tree, which
+    authenticates BEFORE checking the index (an unauthenticated probe
+    would exit on the first 401 and settle nothing)."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -68,6 +72,10 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
         "BASE_URL": f"http://127.0.0.1:{port}",
         "BOOKQ_WEB_DIR": str(REPO_ROOT / "web"),
         "BOOKQ_THUMB_CACHE_DIR": str(Path(state_dir) / "thumbs"),
+        # A full file of redeem tests from one IP would otherwise exhaust
+        # the production 30/60s per-IP budget (429 mid-suite flake).
+        "BOOKQ_GUEST_REDEEM_MAX": "10000",
+        "BOOKQ_GUEST_REDEEM_GLOBAL_MAX": "100000",
     })
     cmd = [str(_viewer_rs_binary())]
     # #139: watchdog spawn — pytest death can't orphan the backend.
@@ -91,6 +99,14 @@ def _spawn_server(library_tree: Path, state_dir: Path) -> tuple:
     else:
         proc.terminate()
         raise RuntimeError("auth test server did not become healthy in 30s")
+    # Same 202-settle wait as rs_spawn — the guest fixtures' first WS/HTTP
+    # steps must not race the metadata index build. Real auth means the
+    # probe needs a signed member cookie (users are CLI-registered before
+    # this spawn by every caller fixture).
+    import rs_spawn
+
+    probe = f"session={_session_cookie(probe_user)}" if probe_user else None
+    rs_spawn.wait_tree_settled(proc, base_url, cookie=probe)
     return proc, base_url
 
 
@@ -103,7 +119,7 @@ def auth_server(library_tree, tmp_path_factory):
     for user in (ALICE, BOB):
         cp = users_cli(state_dir, "add", user["email"])
         assert cp.returncode == 0, cp.stderr
-    proc, base_url = _spawn_server(library_tree, state_dir)
+    proc, base_url = _spawn_server(library_tree, state_dir, probe_user=ALICE)
     yield base_url
     proc.terminate()
     proc.wait(timeout=5)
