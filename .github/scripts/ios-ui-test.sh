@@ -167,7 +167,10 @@ SIM_PREF_DOMAIN="com.apple.iphonesimulator"
 KEYBOARD_PREF_DIR="$HOME/Library/Caches/bookq-ios-ui-test"
 KEYBOARD_PREF_LOCK="$KEYBOARD_PREF_DIR/keyboard.lock"
 KEYBOARD_PREF_STATE_FILE="$KEYBOARD_PREF_DIR/keyboard.state"
-mkdir -p "$KEYBOARD_PREF_DIR"
+if ! mkdir -p "$KEYBOARD_PREF_DIR"; then
+  echo "ERROR: cannot create simulator keyboard state dir: $KEYBOARD_PREF_DIR"
+  exit 1
+fi
 if ! command -v shlock >/dev/null 2>&1; then
   echo "ERROR: shlock is required to coordinate simulator keyboard prefs"
   exit 1
@@ -175,7 +178,13 @@ fi
 KEYBOARD_PREF_STATE="__missing__"
 
 keyboard_pref_lock() {
+  local attempts=0
   while ! shlock -f "$KEYBOARD_PREF_LOCK" -p $$ 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 300 ]; then
+      echo "ERROR: timed out acquiring simulator keyboard lock: $KEYBOARD_PREF_LOCK"
+      return 1
+    fi
     sleep 0.1
   done
 }
@@ -196,7 +205,7 @@ keyboard_pref_write_state() {
   mv "$tmp" "$KEYBOARD_PREF_STATE_FILE"
 }
 
-keyboard_pref_lock
+keyboard_pref_lock || exit 1
 if [ -f "$KEYBOARD_PREF_STATE_FILE" ]; then
   read -r KEYBOARD_PREF_STATE active_pids < "$KEYBOARD_PREF_STATE_FILE"
 else
@@ -214,7 +223,10 @@ keyboard_pref_unlock
 defaults write "$SIM_PREF_DOMAIN" ConnectHardwareKeyboard -bool false
 
 release_keyboard_pref() {
-  keyboard_pref_lock
+  if ! keyboard_pref_lock; then
+    echo "WARN: simulator keyboard state was not updated"
+    return 1
+  fi
   active_pids=""
   if [ -f "$KEYBOARD_PREF_STATE_FILE" ]; then
     read -r KEYBOARD_PREF_STATE active_pids < "$KEYBOARD_PREF_STATE_FILE"
