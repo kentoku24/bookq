@@ -51,6 +51,94 @@ enum UITestSupport {
 }
 
 extension XCUIApplication {
+    /// Type into a text input only after the software keyboard proves the
+    /// tap actually focused it, then validate what landed. `.searchable`
+    /// on iOS 27 can otherwise accept a tap visually while XCUITest sees
+    /// no keyboard focus; typeText then fails before its own retry ever
+    /// taps the field again (#621). Validation also turns a silently
+    /// dropped character into a retry instead of a downstream 30s timeout.
+    func typeTextReliably(_ text: String, into element: XCUIElement,
+                          file: StaticString = #filePath, line: UInt = #line) {
+        for _ in 0..<3 {
+            focusTextInput(element, file: file, line: line)
+            element.typeText(text)
+            if waitForTextInputValue(element, text, timeout: 2) { return }
+            clearTextInput(element, file: file, line: line)
+        }
+        attachUIState()
+        XCTFail("text input never accepted '\(text)' "
+                    + "(current value: '\(textInputValue(of: element))')",
+                file: file, line: line)
+    }
+
+    /// Clear a text input and verify the empty state. SearchField exposes
+    /// the placeholder as `value` while empty, so a bare string comparison
+    /// cannot tell empty from the prompt text.
+    func clearTextInput(_ element: XCUIElement,
+                        file: StaticString = #filePath, line: UInt = #line) {
+        if textInputValue(of: element).isEmpty { return }
+        for label in ["テキストを消去", "Clear text"] {
+            for button in [element.buttons[label], buttons[label]] {
+                guard button.exists, button.isHittable else { continue }
+                button.tap()
+                if waitForTextInputValue(element, "", timeout: 1.5) { return }
+            }
+        }
+
+        focusTextInput(element, file: file, line: line)
+        let delete = keyboards.keys["delete"]
+        let count = textInputValue(of: element).count
+        if delete.exists {
+            for _ in 0..<max(count + 1, 8) {
+                if textInputValue(of: element).isEmpty { break }
+                delete.tap()
+            }
+        }
+        if waitForTextInputValue(element, "", timeout: 1.5) { return }
+        attachUIState()
+        XCTFail("text input did not clear "
+                    + "(current value: '\(textInputValue(of: element))')",
+                file: file, line: line)
+    }
+
+    /// Tap until the software keyboard appears. Hardware-keyboard mode is
+    /// disabled by ios-ui-test.sh; without that keyboard signal, typing is
+    /// not attempted because XCTest cannot direct text into the field.
+    private func focusTextInput(_ element: XCUIElement,
+                                timeout: TimeInterval = 8,
+                                file: StaticString = #filePath,
+                                line: UInt = #line) {
+        let keyboard = keyboards.firstMatch
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if keyboard.exists { return }
+            element.tap()
+            if keyboard.waitForExistence(timeout: 1.5) { return }
+        }
+        attachUIState()
+        XCTFail("text input never presented the software keyboard",
+                file: file, line: line)
+    }
+
+    private func textInputValue(of element: XCUIElement) -> String {
+        let value = element.value as? String ?? ""
+        if let placeholder = element.placeholderValue, value == placeholder {
+            return ""
+        }
+        return value
+    }
+
+    private func waitForTextInputValue(_ element: XCUIElement,
+                                       _ expected: String,
+                                       timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if textInputValue(of: element) == expected { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return textInputValue(of: element) == expected
+    }
+
     /// Wait for `element` to appear; on timeout attach a screenshot and
     /// the full accessibility tree to the test activity, then fail. A
     /// bare "did not appear" cannot distinguish cover-stuck / login /
