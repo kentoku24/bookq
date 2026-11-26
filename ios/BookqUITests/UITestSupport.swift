@@ -101,23 +101,55 @@ extension XCUIApplication {
                 file: file, line: line)
     }
 
-    /// Tap until the software keyboard appears. Hardware-keyboard mode is
-    /// disabled by ios-ui-test.sh; without that keyboard signal, typing is
-    /// not attempted because XCTest cannot direct text into the field.
+    /// Tap until this field owns keyboard input. Hardware-keyboard mode is
+    /// disabled by ios-ui-test.sh; without both the software keyboard and
+    /// target-specific focus, typing is not attempted because XCTest cannot
+    /// reliably direct text into the field.
     private func focusTextInput(_ element: XCUIElement,
-                                timeout: TimeInterval = 8,
                                 file: StaticString = #filePath,
                                 line: UInt = #line) {
+        for _ in 0..<3 {
+            // Always tap the target: an already-visible keyboard can belong
+            // to another input. Then require both target-specific keyboard
+            // focus and the software keyboard before typeText is allowed to
+            // run. XCUIElement.hasFocus is the focus-engine state and stays
+            // false for this iOS search field even while it is the keyboard
+            // first responder; the XCTest snapshot marks keyboard focus in
+            // debugDescription instead.
+            element.tap()
+            if waitForKeyboardFocus(element, timeout: 2) { return }
+        }
+        attachUIState()
+        XCTFail("text input never gained keyboard focus",
+                file: file, line: line)
+    }
+
+    private func waitForKeyboardFocus(_ element: XCUIElement,
+                                      timeout: TimeInterval) -> Bool {
         let keyboard = keyboards.firstMatch
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if keyboard.exists { return }
-            element.tap()
-            if keyboard.waitForExistence(timeout: 1.5) { return }
+            if keyboard.exists, reportsKeyboardFocus(element) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
-        attachUIState()
-        XCTFail("text input never presented the software keyboard",
-                file: file, line: line)
+        return false
+    }
+
+    /// XCTest does not expose keyboard focus in XCUIElementAttributes.
+    /// Treat the private property as a positive-only signal when this Xcode
+    /// provides it, then fall back to the snapshot rendering. The fallback
+    /// was verified against the iOS 27 search field while its public
+    /// hasFocus property remained false.
+    private func reportsKeyboardFocus(_ element: XCUIElement) -> Bool {
+        let selector = Selector("hasKeyboardFocus")
+        if element.responds(to: selector),
+           let focused = element.value(forKey: "hasKeyboardFocus") as? Bool,
+           focused {
+            return true
+        }
+        return element.debugDescription.contains("Keyboard Focused")
     }
 
     private func textInputValue(of element: XCUIElement) -> String {
