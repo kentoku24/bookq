@@ -504,6 +504,10 @@ pub struct LoadJob {
     /// Bootstrap-generated load. An automatic load is best-effort only and
     /// must never displace a deliberate (non-auto) pick.
     pub auto: bool,
+    /// The ACK captured when this load was accepted. The dedup window may
+    /// evict its copy while the asynchronous resolver is still running, but
+    /// the epoch commit must remain able to carry the trigger outcome.
+    pub ack_frame: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -2633,11 +2637,26 @@ impl Inner {
                 request_id: req["requestId"].as_str().unwrap_or("").to_string(),
                 role: role.to_string(),
                 auto,
+                ack_frame: None,
             };
             s.pending_load = Some(job.clone());
             job
         };
         self.commit_op(resp_link, req, sid, role);
+        // The resolver may outlive the trigger ACK's occupancy in the fixed
+        // dedup window. Retain the exact accepted outcome on the pending job
+        // so the eventual epoch commit can carry it independent of eviction
+        // timing. This is not a second response path — it is the same frame
+        // commit_op just stored and sent.
+        let dkey = Self::dedup_key(req, role);
+        if let Some(s) = self.session_mut(sid) {
+            if s.pending_load.as_ref().is_some_and(|j| j.seq == job.seq) {
+                let frame = s.dedup.get(&dkey).cloned();
+                if let (Some(pending), Some(frame)) = (s.pending_load.as_mut(), frame) {
+                    pending.ack_frame = Some(frame);
+                }
+            }
+        }
         let reg2 = reg.clone();
         let sid2 = sid.to_string();
         let load_timeout = reg.load_timeout;
@@ -2684,9 +2703,16 @@ impl Inner {
                 return;
             }
         }
-        if let Some(s) = self.session_mut(sid) {
+        let trigger_ack = if let Some(s) = self.session_mut(sid) {
+            let ack = s
+                .pending_load
+                .as_ref()
+                .and_then(|j| j.ack_frame.clone());
             s.pending_load = None;
-        }
+            ack
+        } else {
+            None
+        };
         let manifest = match result {
             Err(e) => {
                 self.load_failed(sid, &e);
@@ -2743,23 +2769,32 @@ impl Inner {
             // keys instead. Ordinary epoch-gated op entries still reset with
             // the epoch; pre-existing tombstones never do.
             let carry_key = format!("{}:{}", job.role, job.request_id);
-            let mut carried: Option<(String, Value)> = None;
+            // The job-retained ACK is authoritative: unlike the fixed dedup
+            // window, it cannot be evicted by unrelated traffic while the
+            // resolver is in flight. Keep a cache scan only as a defensive
+            // fallback for internally constructed sessions that predate the
+            // retention field being populated.
+            let valid_trigger = |frame: &Value| {
+                dedup_frame_is_load(frame)
+                    && frame.get("type").and_then(|v| v.as_str()) == Some("ACK")
+                    && frame.get("requestId").and_then(|v| v.as_str())
+                        == Some(job.request_id.as_str())
+            };
+            let mut carried: Option<(String, Value)> = trigger_ack
+                .as_ref()
+                .filter(|frame| valid_trigger(frame))
+                .map(|frame| (carry_key.clone(), frame.clone()));
             let mut new_tombstones: Vec<String> = Vec::new();
             for key in &s.dedup_order {
                 let Some(frame) = s.dedup.get(key) else {
                     continue;
                 };
-                let is_load = matches!(
-                    frame.get("request").and_then(|v| v.as_str()),
-                    Some("OPEN_WORK" | "SET_OFFSET")
-                );
-                let is_trigger_ack = *key == carry_key
-                    && is_load
-                    && frame.get("type").and_then(|v| v.as_str()) == Some("ACK")
-                    && frame.get("requestId").and_then(|v| v.as_str())
-                        == Some(job.request_id.as_str());
+                let is_load = dedup_frame_is_load(frame);
+                let is_trigger_ack = *key == carry_key && is_load && valid_trigger(frame);
                 if is_trigger_ack {
-                    carried = Some((key.clone(), frame.clone()));
+                    if carried.is_none() {
+                        carried = Some((key.clone(), frame.clone()));
+                    }
                 } else if is_load {
                     new_tombstones.push(key.clone());
                 }
@@ -2772,6 +2807,11 @@ impl Inner {
             if let Some((key, frame)) = carried {
                 s.dedup.insert(key.clone(), frame);
                 s.dedup_order.push_back(key);
+            } else {
+                // Losing the trigger outcome must never make its retransmission
+                // executable again. This should be unreachable now that the job
+                // retains the ACK, but fail closed if the invariant is broken.
+                dedup_tombstone(s, carry_key);
             }
             // A successful OPEN_WORK commit is the authoritative end of the
             // shared browse regardless of which member opened it.
@@ -3164,6 +3204,13 @@ impl Inner {
     }
 }
 
+fn dedup_frame_is_load(frame: &Value) -> bool {
+    matches!(
+        frame.get("request").and_then(|v| v.as_str()),
+        Some("OPEN_WORK" | "SET_OFFSET")
+    )
+}
+
 /// Remember an evicted dedup key without storing its outcome. Tombstones are
 /// deliberately epoch-independent: OPEN_WORK skips the epoch gate, so losing
 /// one at a manifest commit would make an old pick executable again.
@@ -3187,6 +3234,7 @@ fn req_id<'a>(req: &'a Map<String, Value>) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn mk_link(inner: &mut Inner) -> (String, mpsc::Receiver<OutItem>) {
         let (id, rx, _) = mk_link_full(inner, Some(Value::Null), None);
@@ -3268,6 +3316,57 @@ mod tests {
         let mut r = req(t, sid, payload);
         r.insert("requestId".into(), Value::String(rid.into()));
         r
+    }
+
+    fn drain_texts(rx: &mut mpsc::Receiver<OutItem>) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            if let OutItem::Text(s) = item {
+                out.push(serde_json::from_str(&s).unwrap());
+            }
+        }
+        out
+    }
+
+    /// Small but fully valid resolver output — digest, spread table and the
+    /// resolver-added initial ref all pass finish_load's validation.
+    fn test_manifest() -> Value {
+        let pages = vec![
+            json!({"folder": "work", "name": "p001.png"}),
+            json!({"folder": "work", "name": "p002.png"}),
+        ];
+        let chapters = json!([{
+            "name": "c0",
+            "folder": "work",
+            "pages": pages.clone(),
+        }]);
+        let plan_chapters = json!([{
+            "folder": "work",
+            "pages": ["p001.png", "p002.png"],
+        }]);
+        let plan = model::build_spread_plan(plan_chapters.as_array().unwrap(), 0).unwrap();
+        let spread_table: Vec<Value> = plan.iter().map(model::serialize_spread).collect();
+        let mut manifest = json!({
+            "v": protocol::PROTOCOL_VERSION,
+            "folder": "work",
+            "offset": 0,
+            "chapters": chapters,
+            "pageRefs": pages,
+            "spreadTable": spread_table,
+        });
+        let digest = catalog::manifest_digest(&manifest).unwrap();
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .insert("digest".into(), Value::String(digest));
+        catalog::finish_resolve(
+            manifest,
+            &model::PageRef {
+                folder: "work".into(),
+                name: "p001.png".into(),
+            },
+        )
+        .unwrap()
     }
 
     /// Paired two-member session whose admission-time capability lists are
@@ -4076,6 +4175,95 @@ mod tests {
             "capability-loss close must stay explicit after the intersection is gone: {state:?}");
         assert_eq!(state.get("browseGeneration"), Some(&Value::from(1)));
         assert_eq!(state["presence"][mid2]["features"], Value::Array(vec![]));
+    }
+
+    #[tokio::test]
+    async fn trigger_ack_retained_on_job_survives_dedup_eviction_until_commit() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let payload = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+        ]);
+        let open = req_named("OPEN_WORK", &sid, payload, "trigger-open");
+        inner.dispatch(&reg, &l1, &open);
+        let job = inner
+            .session(&sid)
+            .and_then(|s| s.pending_load.clone())
+            .expect("accepted OPEN_WORK leaves a pending load");
+        assert!(
+            job.ack_frame.is_some(),
+            "the accepted trigger outcome must be retained outside the cache"
+        );
+
+        // unrelated sequenced outcomes fill the fixed window while the load is
+        // still unresolved. The trigger ACK leaves `dedup` and becomes only a
+        // tombstone there; the job copy is the sole replayable outcome.
+        for i in 0..DEDUP_WINDOW {
+            let rid = format!("filler-{i}");
+            let frame = protocol::frame(&[
+                ("v", Value::from(protocol::PROTOCOL_VERSION)),
+                ("type", Value::String("ACK".into())),
+                ("requestId", Value::String(rid.clone())),
+                ("request", Value::String("TURN".into())),
+                ("sessionId", Value::String(sid.clone())),
+                ("data", Value::Object(Map::new())),
+            ]);
+            let key = format!("leader:{rid}");
+            inner.dedup_store(&sid, &key, frame);
+        }
+        let trigger_key = "leader:trigger-open";
+        {
+            let s = inner.session(&sid).unwrap();
+            assert!(!s.dedup.contains_key(trigger_key));
+            assert!(s.dedup_seen.contains(trigger_key));
+        }
+
+        inner.finish_load(&sid, &job, Ok(test_manifest()));
+        {
+            let s = inner.session(&sid).unwrap();
+            assert_eq!(s.work_epoch, 1);
+            let carried = s
+                .dedup
+                .get(trigger_key)
+                .expect("trigger ACK must carry across the epoch commit");
+            assert_eq!(carried["type"], "ACK");
+            assert_eq!(carried["requestId"], "trigger-open");
+        }
+
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+        inner.dispatch(&reg, &l1, &open);
+        let frames = drain_texts(&mut r1);
+        assert_eq!(
+            frames.len(),
+            1,
+            "a replay must be the cached ACK alone, never a second commit: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "ACK");
+        assert_eq!(frames[0]["requestId"], "trigger-open");
+        assert!(inner.session(&sid).unwrap().pending_load.is_none());
     }
 
     #[tokio::test]
