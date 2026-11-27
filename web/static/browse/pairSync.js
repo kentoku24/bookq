@@ -96,7 +96,8 @@
   var _pointerActive = false;
   var _lastLocalMove = -1e9;
   var _lastLocalIntent = -1e9;
-  var _browseOpenerId = null; // server-serialized first opener for this arm
+  var _browseOpenerId = null; // server-serialized first opener for this generation
+  var _browseGeneration = null; // last consumed shared-browse generation
   var _sndHist = [];
   var _trace = null;
 
@@ -179,7 +180,44 @@
 
   /* ── arm / disarm ── */
 
+  function _resetGenerationRuntime() {
+    _unlocked = false;
+    _lastSentSig = null;
+    _appliedHold = null;
+    _pendingMsg = null;
+    _userClosed = false;
+    _suppressUntil = 0;
+    _lastRemoteMsg = null;
+    _resetFollow();
+    _releaseInput();
+    _lastLocalMove = -1e9;
+    _lastLocalIntent = -1e9;
+    if (_trailT) { clearTimeout(_trailT); _trailT = null; }
+  }
+
+  function _seedGeneration(st) {
+    // Only the server-serialized opener seeds a member-drive generation.
+    // Every non-opener remains locked until it applies that opener's first
+    // remote frame; inferring initiation from the local DOM can elect both
+    // sides after simultaneous opens and makes an offline close→reopen keep
+    // a stale seed. Legacy pairs have no opener field and remain fixed-role.
+    _browseOpenerId = st.browseOpener || null;
+    var initiator = st.memberDrive === true
+      ? (_browseOpenerId !== null && _browseOpenerId === st.memberId)
+      : st.role === 'leader';
+    if (initiator) {
+      _unlocked = true;
+      _lastSentSig = null;
+      _requestSend();
+    }
+  }
+
   function _onCtlState(st) {
+    var gen = (st && typeof st.browseGeneration === 'number' &&
+               isFinite(st.browseGeneration)) ? st.browseGeneration : null;
+    var generationChanged = gen !== null && _browseGeneration !== null &&
+      gen !== _browseGeneration;
+    if (gen !== null) _browseGeneration = gen;
     var armed = _armEligible(st);
     if (armed && !_armed) {
       _armed = true;
@@ -189,25 +227,17 @@
       // 永久に開かない。TTL 切れの stash は捨てる。
       var pm = _takePending();
       if (pm) _applyRemote(pm.msg, pm.at);
-      // The server-serialized first opener is the sending seed. Legacy pairs
-      // are fixed-role (leader opens, follower waits); member-drive pairs use
-      // the additive opener memberId rather than local DOM inference, so two
-      // simultaneous opens converge on one first frame instead of both ends
-      // seeding competing paths. Older member-drive servers predate the
-      // additive field; there the previous local-open inference is only a
-      // compatibility fallback.
-      _browseOpenerId = st.browseOpener || null;
-      var initiator = st.memberDrive === true
-        ? (_browseOpenerId
-            ? _browseOpenerId === st.memberId
-            : (_sidebarOpen() && st.browse === true))
-        : st.role === 'leader';
-      if (initiator) {
-        _unlocked = true;
-        _lastSentSig = null;
-        _requestSend();
-      }
+      _seedGeneration(st);
       return;
+    }
+    if (armed && _armed && generationChanged) {
+      // A close→reopen that happened while this link was offline never
+      // produces a disarm/arm pair: both states are open. The generation is
+      // therefore the only trustworthy boundary. Drop every seed/unlock and
+      // pending position inherited from the old generation before electing
+      // the new opener.
+      _resetGenerationRuntime();
+      _seedGeneration(st);
     }
     if (!armed && _armed) {
       _armed = false;
@@ -223,6 +253,7 @@
       _lastLocalMove = -1e9;
       _lastLocalIntent = -1e9;
       _browseOpenerId = null;
+      _browseGeneration = null;
       if (_trailT) { clearTimeout(_trailT); _trailT = null; }
       // 自分が開いたミラー用サイドバーだけ畳む — role を見ると 'ended' で
       // null 化した後に leader の手動 sidebar まで畳んでしまう。
