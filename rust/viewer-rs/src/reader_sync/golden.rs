@@ -1,15 +1,15 @@
 //! #210 — golden-frame conformance: executes the canonical cases in
 //! `api/reader-sync-cases.json` against the in-process `Registry` and
-//! asserts the exact wire frames each link emits. The same case file
-//! drives `tests/test_reader_sync_golden.py` on the Python side, so a
-//! protocol change must move both implementations in lockstep — drift
-//! fails one side's harness.
+//! asserts the exact wire frames each link emits. The Python backend
+//! harness has been retired with the Python implementation; this Rust
+//! harness is the live executor, while the case file remains
+//! implementation-neutral for any future adapter.
 //!
 //! Dynamic server values (session/member/link ids, codes, resume
 //! tokens, digests) are bound at runtime: "@L1.member" resolves to the
 //! memberId issued to link L1's CREATE/JOIN ACK, "@session" to the
-//! latest session id, and so on — identical semantics to the Python
-//! adapter.
+//! latest session id, and so on — the binding semantics documented in
+//! the case-file header.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -141,7 +141,7 @@ fn harvest(b: &mut HashMap<String, Value>, linkname: &str, frame: &Value,
     }
 }
 
-/// Frame equality — Python semantics: dicts compare by key/value,
+/// Frame equality — golden-case semantics: objects compare by key/value,
 /// numbers numerically (1 == 1.0), everything else exact.
 fn json_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -337,7 +337,7 @@ async fn run_case(doc: &Value, case: &Value) {
         senders: HashMap::new(),
     };
 
-    // Canonical shared setup — identical to the Python adapter's.
+    // Canonical shared setup for cases that start from an established pair.
     if let Some(setup) = case.get("setup").and_then(|v| v.as_str()) {
         let users = case.get("users").cloned().unwrap_or(json!({}));
         drv.attach("L1", user_json(&users["L1"]).or_else(|| {
