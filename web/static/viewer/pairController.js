@@ -556,6 +556,14 @@
     _notify();
   }
 
+  function _pairSyncSupportsMemberDrive() {
+    try {
+      return window.BOOKQ_BROWSE_SYNC_API >= 2;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function _ensureClient() {
     if (_client) return _client;
     if (!globalThis.PairClient ||
@@ -563,10 +571,15 @@
       throw new Error('pairClient unavailable');
     }
     _client = globalThis.PairClient.createClient({
-      // This controller implements explicit member-drive close/endBrowse;
-      // advertise the capability only in this composition, never merely
-      // because a newer low-level pairClient module was cached by SWR.
-      features: [globalThis.PairClient.CAP_MEMBER_DRIVE || 'member-drive-v1'],
+      // This controller implements explicit member-drive close/endBrowse,
+      // but that is only half of the composition: pairSync must also
+      // understand generation/open-close semantics. A stale SWR-cached
+      // pairSync cannot be detected by the old boolean marker, so opt in
+      // only when its versioned API marker is present. Mixed shells fail
+      // closed into legacy leader-drive semantics.
+      features: _pairSyncSupportsMemberDrive()
+        ? [globalThis.PairClient.CAP_MEMBER_DRIVE || 'member-drive-v1']
+        : [],
       webrtc: {},                 // enable the webrtc-dc upgrade path
       applyState: _applyCommitted,
       onEvent: _onClientEvent,
@@ -798,7 +811,11 @@
         document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', _boot);
     } else if (typeof document !== 'undefined') {
-      _boot();
+      /* Defer-script execution is already after parsing, but pairSync is
+       * still a later sibling script. Boot-time credential resume must not
+       * compose the client before that script has had a chance to publish
+       * its versioned API marker. */
+      setTimeout(_boot, 0);
     }
   }
 })();

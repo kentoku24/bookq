@@ -720,6 +720,12 @@ def test_shell_watchdog_marks_healthy_and_stale(browser, server):
             "        window.BOOKQ_BROWSE_SYNC = b; return r; }"
         ) is True
         assert pg.evaluate(
+            "() => { const b = window.BOOKQ_BROWSE_SYNC_API;"
+            "        window.BOOKQ_BROWSE_SYNC_API = undefined;"
+            "        const r = window.__shellStale();"
+            "        window.BOOKQ_BROWSE_SYNC_API = b; return r; }"
+        ) is True
+        assert pg.evaluate(
             "() => { const f = window.PairController.sendUiSync;"
             "        window.PairController.sendUiSync = undefined;"
             "        const r = window.__shellStale();"

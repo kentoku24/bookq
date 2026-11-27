@@ -1001,7 +1001,13 @@
       // 機能チェーンが揃っているか」を見る。旧 pairController には onEvent が
       // 無いので、その混在では flag は立たず watchdog が修復に入る。
       // _onCtlState より先に立てる — 中の例外でマーカー未設定誤診を防ぐ。
-      try { window.BOOKQ_BROWSE_SYNC = true; } catch (e) {}
+      try {
+        window.BOOKQ_BROWSE_SYNC = true;
+        // Versioned composition marker: generation/member-drive aware
+        // browse sync. The capability advertiser and shell watchdog key on
+        // this value; the boolean above remains the pre-generation marker.
+        window.BOOKQ_BROWSE_SYNC_API = 2;
+      } catch (e) {}
     }
     // subscribe は即時通知しない — 起動時点の状態で arm 判定する
     // （ペア中のリロードが selecting の途中で戻るケース）。
