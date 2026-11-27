@@ -198,10 +198,11 @@ capability intersection 成立時:
 - STATE は member-drive intersection 成立中の open に限り `browse:true` を載せる（open の
   true-only encoding。browse metadata に限り、legacy/mixed-pair の open frame の形を変えない）。
   `paused` は `selecting` を mask するため、client の close/reconcile は派生 phase ではなくこの直交状態を使う
-- `browse:true` と同じ frame に限り、additive metadata として `browseOpener`（member id）、
-  `browseOpenerRole`、`browseGeneration` を送る。`browseGeneration` は session-scoped で、
-  初期値は 0、closed→open transition だけが increment する。close・work commit・capability
-  downgrade では reset されず、RESUME/reconnect を跨いでも session 終了まで reset しない。
+- open STATE では `browse:true` と同じ frame に限り、additive metadata として
+  `browseOpener`（member id）と `browseOpenerRole` を送る。`browseGeneration` は open
+  frame にも入る session-scoped な値で、初期値は 0、closed→open transition だけが
+  increment する。close・work commit・capability downgrade では reset されず、
+  RESUME/reconnect を跨いでも session 終了まで reset しない。
   duplicate open でも増えない。client mirror seed は自分の DOM 状態ではなく
   opener member id で決める。opener だけが初期 seed を送り、非 opener は最初の remote frame を
   適用してから送信 unlock する。generation は open 中だけでなく close 後の STATE でも継続消費し、
