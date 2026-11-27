@@ -3111,6 +3111,15 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn disabled_member_drive_is_not_advertised() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        inner.member_drive_enabled = false;
+        assert!(inner.server_features().is_empty());
+        assert_eq!(inner.server_features_json(), Value::Array(Vec::new()));
+    }
+
     fn feature_payload(caps: &[&str]) -> Value {
         protocol::frame(&[(
             "features",
