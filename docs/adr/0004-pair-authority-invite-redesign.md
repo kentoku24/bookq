@@ -1,7 +1,7 @@
 # ADR 0004: ペア読書の権限を信頼軸に剥がし、招待 UX を統一 QR に一本化する
 
-- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v7）
-- **日付:** 2026-11-26（v7 改訂: 2026-11-27）
+- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v8）
+- **日付:** 2026-11-26（v8 改訂: 2026-11-27）
 - **決定者:** bookq-maintainers
 - **Baseline:** `6af0250`（#652 guest access link・#661 iOS flake hardened 着陸済みの main）
 - **関連:** #652 (guest access link) / 実装追跡: #662
@@ -145,7 +145,7 @@ Hyrum's law 観点の構造的修正: v2 の `features` は server→client 単�
 - follower/guest の LEAVE が session 全体を殺す現行仕様は、少なくとも leader が再招待可能な状態にする（完全な member-scoped teardown は別 issue でもよいが、方向を明記）
 - **再招待の更新意味論を定義する**（Devin Review 指摘 — v3 は未定義だった）: 現行の code TTL はセッション作成時に固定で、未ペアに戻った瞬間に期限切れなら tick が session ごと殺す。つまり成立から数分後に KICK/LEAVE でコードを解放しても再招待は成立しない。設計: paired member の脱落（KICK/LEAVE/REJECT）でセッションが 1 人の待機に戻った時、server は **新しい code + 新しい TTL + 新しい grant を rotate/mint** し、leader の client は新しい composite QR を表示する。期限後の再招待テストを Phase 0 の行列に含める
   - **待機タイマは全て refresh する**（Devin Review 指摘）: `matchable` の候補判定は code 期限とは別に `created_at` からの経過（match window 120s）を見るため、code だけ rotate しても member 自動接続は復活しない。rotation は waiting 状態への再突入として扱い、match window の anchor も更新する — これで KICK された member の再ペア（chain-tap MATCH）と guest 再招待の両方が機能する。**ただし origin 意味論は不変**（Devin Review 指摘）: `matchable` は match-origin のみを候補にする現行を維持し、create-origin（旧 client の手動開始）は rotation 後も QR/code 参加のみで自動接続の対象にしない — 旧 client の意味論を変えない保守的な選択。新 UX では chain-tap が全て match-origin で発行するため、end state ではこの区別は実質消滅する
-  - **新しい参加者への作品引き継ぎ**（Devin Review 指摘）: 現行の承認は STATE を配信するが commit 済み manifest 本体は配信しない — late-join が存在しなかった（LEAVE でセッションが死んだ）ため再配布経路がない。再招待設計ではこれが初めて発生する。仕様: **作品は引き継ぐ**（選択やり直しではない）。server は commit 済み manifest を保持または再解決し、新規承認 member に MANIFEST chunk 群を再配布する。同期は READY ゲートに自然に乗る — 新 member は未 READY なので phase は loading に落ち、manifest 受信・検証・適用で READY して reading に復帰する。**READY の意味論を明記する**（Devin Review 指摘）: 現行 web は manifest のメタデータ検証直後（deferred STATE 適用・描画より前）に READY を送る — READY は「メタデータを保持し state に適用した」であり**描画完了を保証しない**。画像は progressive に load されるストリーミング配信なので描画完了は定義不能であり、この意味論を再利用する。KICK で mid-reading 中断した leader の意図（同じ本の続きを正しい相手と読む）と整合する
+  - **新しい参加者への作品引き継ぎ**（Devin Review 指摘）: 現行の承認は STATE を配信するが commit 済み manifest 本体は配信しない — late-join が存在しなかった（LEAVE でセッションが死んだ）ため再配布経路がない。再招待設計ではこれが初めて発生する。仕様: **作品は引き継ぐ**（選択やり直しではない）。server は commit 済み manifest を保持または再解決し、新規承認 member に MANIFEST chunk 群を再配布する。同期は READY ゲートに自然に乗る — 新 member は未 READY なので phase は loading に落ち、manifest 受信・検証・適用で READY して reading に復帰する。**READY の意味論を明記する**（Devin Review 指摘）: 現行 web は manifest のメタデータ検証直後（deferred STATE 適用・描画より前）に READY を送る — READY は「検証済み manifest のメタデータを保持した」時点で送信され、**deferred STATE の適用は送信条件に含まない**（実装は `_finishManifest` で manifest 保持直後に `_sendReady()` を呼び、保留 STATE の適用はその後 — Devin Review 指摘を受け送信条件をこの意味に確定する）。もちろん**描画完了も保証しない**。画像は progressive に load されるストリーミング配信なので描画完了は定義不能であり、この意味論を再利用する。KICK で mid-reading 中断した leader の意図（同じ本の続きを正しい相手と読む）と整合する
 
 **credential invariant**（実装済みのものも設計として固定）:
 
