@@ -555,6 +555,10 @@
       throw new Error('pairClient unavailable');
     }
     _client = globalThis.PairClient.createClient({
+      // This controller implements explicit member-drive close/endBrowse;
+      // advertise the capability only in this composition, never merely
+      // because a newer low-level pairClient module was cached by SWR.
+      features: [globalThis.PairClient.CAP_MEMBER_DRIVE || 'member-drive-v1'],
       webrtc: {},                 // enable the webrtc-dc upgrade path
       applyState: _applyCommitted,
       onEvent: _onClientEvent,

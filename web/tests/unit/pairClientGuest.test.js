@@ -27,6 +27,7 @@ function makeClient(t, onEvent) {
     persistStorage: null,
     events: null,
     onEvent: onEvent || null,
+    features: [globalThis.PairClient.CAP_MEMBER_DRIVE],
   });
 }
 
@@ -67,6 +68,28 @@ describe('pairClient guest access', () => {
     expect(d.role).toBe('follower');
     expect(client.state.role).toBe('follower');
     expect(client.state.sessionId).toBe('s1');
+  });
+
+
+  it('does not advertise member-drive unless the composition opts in', async () => {
+    const bare = globalThis.PairClient.createClient({
+      url: 'ws://test/ws/reader-sync',
+      transportFactory: () => t,
+      storage: null,
+      persistStorage: null,
+      events: null,
+    });
+    const p = bare.joinGuest(TOKEN);
+    helloThen(t);
+    const join = t.sent.find((f) => f.type === 'JOIN');
+    expect(join).toBeTruthy();
+    expect(join.payload).toEqual({guestToken: TOKEN});
+    t.emit({
+      v: 1, type: 'ACK', request: 'JOIN', requestId: join.requestId,
+      data: {sessionId: 's0', memberId: 'm0', role: 'follower'},
+    });
+    await p;
+    bare.destroy();
   });
 
   it('joinGuest rejects malformed tokens without opening a link', async () => {

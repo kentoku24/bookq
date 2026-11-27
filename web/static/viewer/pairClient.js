@@ -50,7 +50,6 @@
    * additive within wire v1; absence on either member means the server and
    * this client must both preserve the legacy leader-only browse model. */
   var CAP_MEMBER_DRIVE = 'member-drive-v1';
-  var CLIENT_FEATURES = [CAP_MEMBER_DRIVE];
   var DEFAULT_PATH = '/ws/reader-sync';
   var STORAGE_KEY = 'bookq.readerSync.v1';
   /* Cross-tab persist record (localStorage): lets a member rejoin after its
@@ -356,6 +355,17 @@
     // four missed PINGs + slack; the check reads _lastRx at fire time.
     var _livenessMs = opts.livenessTimeoutMs || 20000;
     var _webrtc = opts.webrtc || null;   // {pcFactory?} — enables the DC upgrade
+    // Capability advertisement is composition opt-in: a low-level client
+    // must not claim member-drive when the shell composed around it is an
+    // older controller that cannot emit the mode's explicit close semantics.
+    var _features = [];
+    if (Array.isArray(opts.features)) {
+      opts.features.forEach(function (f) {
+        if (typeof f === 'string' && f && _features.indexOf(f) < 0) {
+          _features.push(f);
+        }
+      });
+    }
 
     /* ── state ── */
     var _member = null;              // bound member {sessionId,memberId,role,resumeToken}
@@ -1155,7 +1165,7 @@
 
     function _withFeatures(payload) {
       payload = payload || {};
-      payload.features = CLIENT_FEATURES.slice();
+      if (_features.length) payload.features = _features.slice();
       return payload;
     }
 
@@ -2344,6 +2354,7 @@
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     STATUS: STATUS,
     END_REASON: END_REASON,
+    CAP_MEMBER_DRIVE: CAP_MEMBER_DRIVE,
     createClient: createClient,
     domEventTarget: domEventTarget,
     canonicalJson: canonicalJson,
