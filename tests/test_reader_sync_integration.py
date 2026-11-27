@@ -6,7 +6,7 @@ test server, no protocol fakes.
 Covers the #84 machine-checkable criteria: shared-spread establishment from
 the leader's current PageRef, exactly one wire request per user input on
 every input path, leader/follower convergence, leader browse→selecting→
-cancel→work-change phases, follower work change = LEAVE + solo, shared-anchor
+cancel→work-change phases, member-drive follower work changes, shared-anchor
 URL/progress writes (blank side never saves null), one hashchange listener,
 swipe/remote races converging on the latest commit, transport fallback, and
 zero sockets in solo mode.
@@ -499,8 +499,8 @@ def test_peer_away_leader_browse_stays_on_tile_list(devs):
 
 
 def test_peer_away_follower_browse_opens_tile_list(devs):
-    """相手不在 on the follower: ☰ opens the tile list locally (browse never
-    touches the wire for followers) and a pick LEAVEs into a solo open."""
+    """相手不在 on the follower: member-drive semantics survive the leader's
+    temporary absence — the shared tile list opens and a pick commits in-pair."""
     pl, pf = devs
     _open(pl, "long", "p005.png")
     _open(pf, "series/vol1")
@@ -521,11 +521,12 @@ def test_peer_away_follower_browse_opens_tile_list(devs):
     pf.eval_on_selector(
         ".tile[data-path='simple_manga']", "el => el.click()")
     pf.wait_for_function(
-        "() => window.PairController.state.status === 'ended'"
-        " || window.PairController.state.status === 'idle'",
+        "() => window.currentFolder === 'simple_manga'"
+        " && window.PairController.state.status === 'connected'",
         timeout=15000)
-    pf.wait_for_function(
-        "() => window.currentFolder === 'simple_manga'", timeout=15000)
+    assert pf.evaluate(
+        "() => !!(window.PairedView && window.PairedView.state"
+        " && window.PairedView.state().active)")
 
 
 def test_offline_leave_flushes_leave_and_frees_peer(devs):

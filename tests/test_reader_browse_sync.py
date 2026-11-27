@@ -463,9 +463,10 @@ def test_apply_echo_does_not_reemit(browser, server):
         ctx_l.close(); ctx_f.close()
 
 
-def test_follower_work_pick_leaves_pair_as_solo(browser, server):
-    """Follower tile taps stay fully enabled: picking a work keeps the
-    existing semantics — LEAVE the pair, open solo."""
+def test_follower_work_pick_commits_shared_work(browser, server):
+    """member-drive: a follower tile tap is a shared OPEN_WORK commit — the
+    pair stays bound, both readers open the picked work, and the shared list
+    closes on both sides."""
     ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
     try:
         _open(pl, "long", "p005.png")
@@ -477,19 +478,19 @@ def test_follower_work_pick_leaves_pair_as_solo(browser, server):
             "#tile-grid .tile[data-path='simple_manga']", "el => el.click()")
         for p in (pl, pf):
             p.wait_for_function(
-                "() => window.PairController.state.status === 'ended'",
+                "() => window.currentFolder === 'simple_manga'"
+                " && window.PairController.state.phase === 'reading'"
+                " && window.PairController.state.status === 'connected'"
+                " && window.PairController.state.browse === false",
                 timeout=15000)
-        pf.wait_for_function(
-            "() => window.currentFolder === 'simple_manga'", timeout=10000)
-        assert pf.evaluate("() => window.images.length") == 5
-        # The leader had already torn its reader down for 'selecting', so an
-        # end-from-browse leaves it on the list — no solo restore (existing
-        # semantics; the mirror adds nothing here).
-        assert pl.evaluate("() => window.currentFolder") is None
-        assert _sidebar_open(pl)
-        assert pl.evaluate(
-            "() => !(window.PairedView && window.PairedView.state"
-            " && window.PairedView.state().active)")
+            p.wait_for_function(
+                "() => !document.getElementById('sidebar')"
+                ".classList.contains('open')",
+                timeout=10000)
+            assert p.evaluate(
+                "() => !!(window.PairedView && window.PairedView.state"
+                " && window.PairedView.state().active)")
+            assert p.evaluate("() => window.images.length") == 5
     finally:
         ctx_l.close(); ctx_f.close()
 
