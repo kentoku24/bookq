@@ -1840,6 +1840,9 @@ impl Inner {
         }
         let mid = member_id.unwrap();
         let capabilities = payload_features(payload);
+        let intersected_before = self
+            .session(&sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
         let (role, tok, trust) = {
             let Some(m) = self.member_mut(&sid, &mid) else {
                 return;
@@ -1852,6 +1855,25 @@ impl Inner {
             m.capabilities = capabilities;
             (m.role.clone(), m.resume_token.clone(), m.trust.clone())
         };
+        // Capabilities are current runtime facts. If this RESUME downgrades
+        // the pair out of member-drive while a shared browse is open, the
+        // server must close that browse explicitly: in legacy semantics a
+        // follower close is a no-op, so otherwise neither side may have an
+        // effective close path and the pre-commit selecting phase wedges.
+        let intersected_after = self
+            .session(&sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        if intersected_before && !intersected_after {
+            if let Some(s) = self.session_mut(&sid) {
+                if s.selecting {
+                    s.selecting = false;
+                    tracing::info!(
+                        "reader-sync session={} shared browse closed on capability downgrade",
+                        sid
+                    );
+                }
+            }
+        }
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
         }
@@ -3783,6 +3805,62 @@ mod tests {
             ),
         );
         assert!(!inner.session(&sid).unwrap().selecting);
+    }
+
+    #[tokio::test]
+    async fn resume_capability_downgrade_closes_shared_browse() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, mid2) = paired_session(
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2,
+            &[CAP_MEMBER_DRIVE], &[CAP_MEMBER_DRIVE],
+        );
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "downgrade-open",
+            ),
+        );
+        assert!(inner.session(&sid).unwrap().selecting);
+
+        let token = inner
+            .session(&sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid2))
+            .map(|m| m.resume_token.clone())
+            .unwrap();
+        inner.detach_link(&l2);
+        let (l3, mut r3) = mk_link(&mut inner);
+        let _ = next_json(&mut r3); // HELLO
+        inner.dispatch(
+            &reg,
+            &l3,
+            &req_named(
+                "RESUME",
+                &sid,
+                protocol::frame(&[
+                    ("memberId", Value::String(mid2.clone())),
+                    ("resumeToken", Value::String(token)),
+                    ("features", Value::Array(vec![])),
+                ]),
+                "downgrade-resume",
+            ),
+        );
+        let ack = next_json(&mut r3);
+        assert_eq!(ack["type"], "ACK");
+        let state = next_json(&mut r3);
+        assert_eq!(state["type"], "STATE");
+        assert!(!inner.session(&sid).unwrap().selecting);
+        assert!(state.get("browse").is_none(),
+            "capability loss closes shared browse before the RESUME STATE: {state:?}");
+        assert_eq!(state["presence"][mid2]["features"], Value::Array(vec![]));
     }
 
     #[tokio::test]
