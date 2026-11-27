@@ -1,7 +1,7 @@
 # ADR 0004: ペア読書の権限を信頼軸に剥がし、招待 UX を統一 QR に一本化する
 
-- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v4）
-- **日付:** 2026-11-26（v4 改訂: 2026-11-27）
+- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v5）
+- **日付:** 2026-11-26（v5 改訂: 2026-11-27）
 - **決定者:** bookq-maintainers
 - **Baseline:** `6af0250`（#652 guest access link・#661 iOS flake hardened 着陸済みの main）
 - **関連:** #652 (guest access link) / 実装追跡: #662
@@ -74,7 +74,14 @@ v2 の per-member 導出モデルは**棄却** — browse mirror は論理的に
 
 従って派生仕様として以下を protocol doc に明記する:
 
-- **導出 cascade の完全な優先順位**: waiting → paused（対象 member 条件）→ loading → selecting → reading。各行で「どの member が導出にカウントされるか」を明記。現行は manifest 不在時も phase=selecting であり bootstrap がこれに依存している事実を織り込む
+- **導出 cascade — 優先順位と初回状態を以下に固定する**（protocol doc への先送りではなく本 ADR の仕様とする — Devin Review 指摘）:
+  1. `waiting` — pair 未成立（承認済み member が 2 人未満。pending は数えない）
+  2. `paused` — pair のいずれかの member が active でない（suspended/offline）
+  3. `loading` — commit 前の load が in-flight
+  4. `selecting` — 共有 browse が開いている、**または manifest が未 commit（初回状態）**
+  5. `reading` — 上記以外
+
+  初回状態の invariant: **manifest 未 commit の間は browse の有無に関わらず selecting** — leader bootstrap はこの位相で発火する現行仕様を維持する。初回の作品 commit 後は、selecting は共有 browse が開いている時だけになる。paused が selecting に優先するのは現行維持とし、suspend 中は mirror は disarm するが browse 状態自体は生きているため復帰時に re-arm する（閉じるのではなく一時停止 — browse が suspend で終了しない規則と整合）
 - offline/resume を跨ぐ挙動: suspend は browse を終了**しない**（activity scalar と browse 状態は直交 — 片方が suspend しても他方は mirror を見続けられる）。resume 時に client は自己状態を reconcile する手順を定める
 - close 操作の wire: **終了は visibility 由来の activity 報告と区別される明示シグナルでなければならない**。現行 client はタブ復帰（visibilitychange）でも `SET_ACTIVITY active` を送るため、「active = browse 終了」の意味論では相手が browse 中にタブへ戻っただけで共有 browse が閉じる（v3 の記述はこの意味で壊れていた — Devin Review 指摘）。設計: browse 終了は sidebar の open→closed 遷移（ユーザ操作または明示的な close）でのみ生成される独立の wire シグナルとする（additive な payload フィールド例: `SET_ACTIVITY{state:"active", endBrowse:true}` または専用 op — 実装時に protocol doc で確定）。visibility 復帰の active には終了意味を持たせない。契約テストに両方を入れる: (a) タブ復帰では共有 browse が閉じない、(b) 明示 close では閉じる。旧 client（leader の active で session flag をクリアする現行サーバ意味論）との整合は B-5 の capability intersection で制御する — 混在ペアでは新意味論を使わない
 
@@ -106,7 +113,7 @@ Hyrum's law 観点の構造的修正: v2 の `features` は server→client 単�
 | server | client | 期待動作 |
 |---|---|---|
 | old | new web | capability 未広告 → member follower の駆動 UI は出さない |
-| new | old web SW shell | capability intersection で駆動が gate される。pre-#652 shell は composite deep link をパースできず camera deep-link scan は dead end（**退行として正直に記載**、in-app scan と手入力は生きる） |
+| new | old web SW shell | capability intersection で駆動が gate される。QR 経路は shell 世代 × 開き方で分かれる: **in-app scan**（pairUI の unanchored 抽出）は全世代で composite から code を取れる。**外部カメラ→ブラウザ直開き**は、pre-#652 shell（bare 用 anchored regex `/^#\/join\/(\d{6})$/` のみ）では composite に一致せず **dead end — 退行として正直に記載**（post-#652 shell は `_handleGuestJoin` が先に処理するため機能）。手入力は全世代で生きる |
 | new | old iOS/Android | 同上 + native leader QR は bare のまま（表示側更新は Phase 2）。scan は composite から code 抽出可能 |
 | new | mixed pair | intersection gate により旧 client 側で reading が中断される事態を防ぐ |
 
