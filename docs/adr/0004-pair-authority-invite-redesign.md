@@ -1,7 +1,7 @@
 # ADR 0004: ペア読書の権限を信頼軸に剥がし、招待 UX を統一 QR に一本化する
 
-- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v5）
-- **日付:** 2026-11-26（v5 改訂: 2026-11-27）
+- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v6）
+- **日付:** 2026-11-26（v6 改訂: 2026-11-27）
 - **決定者:** bookq-maintainers
 - **Baseline:** `6af0250`（#652 guest access link・#661 iOS flake hardened 着陸済みの main）
 - **関連:** #652 (guest access link) / 実装追跡: #662
@@ -77,13 +77,13 @@ v2 の per-member 導出モデルは**棄却** — browse mirror は論理的に
 - **導出 cascade — 優先順位と初回状態を以下に固定する**（protocol doc への先送りではなく本 ADR の仕様とする — Devin Review 指摘）:
   1. `waiting` — pair 未成立（承認済み member が 2 人未満。pending は数えない）
   2. `paused` — pair のいずれかの member が active でない（suspended/offline）
-  3. `loading` — commit 前の load が in-flight
+  3. `loading` — commit 前の load（pending_load）が in-flight、**または manifest commit 後で全 member の READY が揃っていない**（READY ゲート — 現行 `derive_phase` の `all_ready` 分岐と同一。両端末の準備が整うまで reading にしない）
   4. `selecting` — 共有 browse が開いている、**または manifest が未 commit（初回状態）**
   5. `reading` — 上記以外
 
   初回状態の invariant: **manifest 未 commit の間は browse の有無に関わらず selecting** — leader bootstrap はこの位相で発火する現行仕様を維持する。初回の作品 commit 後は、selecting は共有 browse が開いている時だけになる。paused が selecting に優先するのは現行維持とし、suspend 中は mirror は disarm するが browse 状態自体は生きているため復帰時に re-arm する（閉じるのではなく一時停止 — browse が suspend で終了しない規則と整合）
 - offline/resume を跨ぐ挙動: suspend は browse を終了**しない**（activity scalar と browse 状態は直交 — 片方が suspend しても他方は mirror を見続けられる）。resume 時に client は自己状態を reconcile する手順を定める
-- close 操作の wire: **終了は visibility 由来の activity 報告と区別される明示シグナルでなければならない**。現行 client はタブ復帰（visibilitychange）でも `SET_ACTIVITY active` を送るため、「active = browse 終了」の意味論では相手が browse 中にタブへ戻っただけで共有 browse が閉じる（v3 の記述はこの意味で壊れていた — Devin Review 指摘）。設計: browse 終了は sidebar の open→closed 遷移（ユーザ操作または明示的な close）でのみ生成される独立の wire シグナルとする（additive な payload フィールド例: `SET_ACTIVITY{state:"active", endBrowse:true}` または専用 op — 実装時に protocol doc で確定）。visibility 復帰の active には終了意味を持たせない。契約テストに両方を入れる: (a) タブ復帰では共有 browse が閉じない、(b) 明示 close では閉じる。旧 client（leader の active で session flag をクリアする現行サーバ意味論）との整合は B-5 の capability intersection で制御する — 混在ペアでは新意味論を使わない
+- close 操作の wire: **終了は visibility 由来の activity 報告と区別される明示シグナルでなければならない**。現行 client はタブ復帰（visibilitychange）でも `SET_ACTIVITY active` を送るため、「active = browse 終了」の意味論では相手が browse 中にタブへ戻っただけで共有 browse が閉じる（v3 の記述はこの意味で壊れていた — Devin Review 指摘）。設計: browse 終了は独立の wire シグナルとし（additive な payload フィールド例: `SET_ACTIVITY{state:"active", endBrowse:true}` または専用 op — 実装時に protocol doc で確定）、**生成はユーザの明示 close ジェスチャ（close ボタン・swipe での明示 close）に限定する**。sidebar の open→closed 遷移を raw に監視してはならない — mirror disarm は suspend 時に sidebar を**プログラム的に閉じ**（pairSync の disarm 経路）、MutationObserver はユーザ操作と区別できないため、遷移ベースの生成では片方の離席で共有 browse が殺される（Devin Review 指摘）。プログラム的 close（disarm・redirect）はシグナルを生成しない。visibility 復帰の active にも終了意味を持たせない。契約テストに入れる: (a) タブ復帰では共有 browse が閉じない、(b) 明示 close では閉じる、(c) **片方が suspend→復帰しても共有 browse は閉じず mirror が re-arm する**。旧 client（leader の active で session flag をクリアする現行サーバ意味論）との整合は B-5 の capability intersection で制御する — 混在ペアでは新意味論を使わない
 
 #### B-3. OPEN_WORK の競合意味論
 
@@ -141,6 +141,8 @@ Hyrum's law 観点の構造的修正: v2 の `features` は server→client 単�
 - REJECT/KICK は member-scoped にし session を殺さない。rejected/dropped candidate は code を解放する（`drop_pending` の `code_consumed` リセットで部分実装済み）
 - follower/guest の LEAVE が session 全体を殺す現行仕様は、少なくとも leader が再招待可能な状態にする（完全な member-scoped teardown は別 issue でもよいが、方向を明記）
 - **再招待の更新意味論を定義する**（Devin Review 指摘 — v3 は未定義だった）: 現行の code TTL はセッション作成時に固定で、未ペアに戻った瞬間に期限切れなら tick が session ごと殺す。つまり成立から数分後に KICK/LEAVE でコードを解放しても再招待は成立しない。設計: paired member の脱落（KICK/LEAVE/REJECT）でセッションが 1 人の待機に戻った時、server は **新しい code + 新しい TTL + 新しい grant を rotate/mint** し、leader の client は新しい composite QR を表示する。期限後の再招待テストを Phase 0 の行列に含める
+  - **待機タイマは全て refresh する**（Devin Review 指摘）: `matchable` の候補判定は code 期限とは別に `created_at` からの経過（match window 120s）を見るため、code だけ rotate しても member 自動接続は復活しない。rotation は waiting 状態への再突入として扱い、match window の anchor も更新する — これで KICK された member の再ペア（chain-tap MATCH）と guest 再招待の両方が機能する
+  - **新しい参加者への作品引き継ぎ**（Devin Review 指摘）: 現行の承認は STATE を配信するが commit 済み manifest 本体は配信しない — late-join が存在しなかった（LEAVE でセッションが死んだ）ため再配布経路がない。再招待設計ではこれが初めて発生する。仕様: **作品は引き継ぐ**（選択やり直しではない）。server は commit 済み manifest を保持または再解決し、新規承認 member に MANIFEST chunk 群を再配布する。同期は READY ゲートに自然に乗る — 新 member は未 READY なので phase は loading に落ち、受信・描画完了で READY して reading に復帰する。KICK で mid-reading 中断した leader の意図（同じ本の続きを正しい相手と読む）と整合する
 
 **credential invariant**（実装済みのものも設計として固定）:
 
