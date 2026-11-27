@@ -31,6 +31,16 @@ function makeClient(t, onEvent) {
   });
 }
 
+function makeBareClient(t, storage) {
+  return globalThis.PairClient.createClient({
+    url: 'ws://test/ws/reader-sync',
+    transportFactory: () => t,
+    storage: storage || null,
+    persistStorage: null,
+    events: null,
+  });
+}
+
 function helloThen(t, client) {
   // The server speaks first: HELLO releases the queued entry frame.
   t.emit({ v: 1, type: 'HELLO' });
@@ -90,6 +100,67 @@ describe('pairClient guest access', () => {
     });
     await p;
     bare.destroy();
+  });
+
+  it('does not advertise member-drive on CREATE/JOIN/MATCH/RESUME without composition opt-in', async () => {
+    const creds = {
+      sessionId: 's-resume', memberId: 'm-resume', role: 'leader',
+      resumeToken: 'rt-resume',
+    };
+    const cases = [
+      {
+        name: 'CREATE',
+        start: (c) => c.create(),
+        payload: {},
+      },
+      {
+        name: 'JOIN',
+        start: (c) => c.join('123456'),
+        payload: {code: '123456'},
+      },
+      {
+        name: 'MATCH',
+        start: (c) => c.match(),
+        payload: {},
+      },
+      {
+        name: 'MATCH pick',
+        start: (c) => c.match('candidate-token'),
+        payload: {pick: 'candidate-token'},
+      },
+      {
+        name: 'RESUME',
+        start: (c) => c.resume(),
+        payload: {memberId: 'm-resume', resumeToken: 'rt-resume'},
+        storage: {
+          getItem: (k) => k === 'bookq.readerSync.v1'
+            ? JSON.stringify(creds) : null,
+          setItem() {}, removeItem() {},
+        },
+      },
+    ];
+
+    for (const tc of cases) {
+      const transport = fakeTransport();
+      const bare = makeBareClient(transport, tc.storage);
+      const p = tc.start(bare);
+      helloThen(transport);
+      const frame = transport.sent.find((f) => f.type === tc.name.split(' ')[0]);
+      expect(frame, tc.name).toBeTruthy();
+      expect(frame.payload, tc.name).toEqual(tc.payload);
+      expect(Object.prototype.hasOwnProperty.call(frame.payload, 'features'),
+        tc.name).toBe(false);
+      transport.emit({
+        v: 1, type: 'ACK', request: frame.type, requestId: frame.requestId,
+        data: {
+          sessionId: 's-' + tc.name, memberId: 'm-' + tc.name,
+          role: tc.name === 'CREATE' || tc.name === 'RESUME' ? 'leader' : 'follower',
+          trust: 'member', resumeToken: 'rt-new',
+        },
+      });
+      await p;
+      bare.destroy();
+    }
   });
 
   it('joinGuest rejects malformed tokens without opening a link', async () => {
