@@ -375,7 +375,7 @@ web クライアントと相互運用するために iOS 側が実装すべき�
 4. derive_phase と同じルールでの UI ゲーティング（paused/loading/selecting で入力抑止）
 5. workEpoch/baseRevision のトラッキング（STATE snapshot が唯一の真実）
 6. SIGNAL/UI_SYNC/webrtc-dc は**後回し可** — server-ws のみで機能完結
-7. manifest パース + digest 検証 + chunk 再構築（§4 MANIFEST の shape 参照）
+7. manifest パース + digest 検証 + chunk 再構築（§5 MANIFEST の shape 参照）
 
 ---
 
