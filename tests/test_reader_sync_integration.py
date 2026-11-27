@@ -573,7 +573,7 @@ def test_peer_away_follower_browse_opens_tile_list(devs):
         ".tile[data-path='simple_manga']", "el => el.click()")
     pf.wait_for_function(
         "() => window.currentFolder === 'simple_manga'"
-        " && window.PairController.state.status === 'connected'",
+        " && window.PairController.state.status === 'peer-away'",
         timeout=15000)
     assert pf.evaluate(
         "() => !!(window.PairedView && window.PairedView.state"
