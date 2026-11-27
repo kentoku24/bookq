@@ -1139,3 +1139,45 @@ def test_simultaneous_member_opens_use_server_serialized_opener(browser, server)
         assert _browse_path(loser_page) == expected
     finally:
         ctx_l.close(); ctx_f.close()
+
+
+def test_programmatic_close_and_visibility_return_do_not_end_browse(browser, server):
+    """A6 negative browser coverage: a non-explicit sidebar close and a
+    suspend/active visibility round-trip are liveness/UI events only — neither
+    may synthesize endBrowse nor close the server-side shared browse."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        pf.evaluate("() => window.closeSidebar()")  # programmatic: no explicit flag
+        pf.wait_for_timeout(300)
+        assert not any(
+            f.get("type") == "SET_ACTIVITY"
+            and (f.get("payload") or {}).get("endBrowse") is True
+            for f in _sent(pf, {"SET_ACTIVITY"})
+        ), "programmatic close must not synthesize endBrowse"
+        for p in (pl, pf):
+            assert p.evaluate("() => window.PairController.state.browse") is True
+
+        pf.evaluate("() => window.PairController.client.setActivity('suspended')")
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'paused'"
+                " && window.PairController.state.browse === true",
+                timeout=15000)
+        pf.evaluate("() => window.PairController.client.setActivity('active')")
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'selecting'"
+                " && window.PairController.state.browse === true",
+                timeout=15000)
+        assert not any(
+            f.get("type") == "SET_ACTIVITY"
+            and (f.get("payload") or {}).get("endBrowse") is True
+            for f in _sent(pf, {"SET_ACTIVITY"})
+        ), "visibility return must remain liveness-only"
+    finally:
+        ctx_l.close(); ctx_f.close()

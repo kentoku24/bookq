@@ -3762,6 +3762,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_member_cannot_resume_with_member_credential() {
+        // Reverse direction of the trust-mismatch matrix: admission fixed the
+        // follower's trust as guest, so presenting a member session cookie on
+        // RESUME must still fail closed rather than upgrading the bearer.
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader_user = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c1) = mk_link_full(&mut inner, Some(leader_user.clone()), None);
+        let _ = next_json(&mut r1);
+        inner.dispatch(&reg, &l1, &req_named("CREATE", "", feature_payload(&[]), "tm-create"));
+        let ack = next_json(&mut r1);
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+
+        let (lg, mut rg, _cg) = mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
+        let _ = next_json(&mut rg);
+        inner.dispatch(
+            &reg,
+            &lg,
+            &req_named(
+                "JOIN",
+                "",
+                protocol::frame(&[("guestToken", Value::String(gt))]),
+                "tm-join",
+            ),
+        );
+        let join_ack = next_json(&mut rg);
+        let mid = join_ack["data"]["memberId"].as_str().unwrap().to_string();
+        let token = join_ack["data"]["resumeToken"].as_str().unwrap().to_string();
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "APPROVE",
+                &sid,
+                protocol::frame(&[("memberId", Value::String(mid.clone()))]),
+                "tm-approve",
+            ),
+        );
+        inner.detach_link(&lg);
+
+        let (lm, mut rm, _cm) = mk_link_full(&mut inner, Some(leader_user), None);
+        let _ = next_json(&mut rm);
+        inner.dispatch(
+            &reg,
+            &lm,
+            &req_named(
+                "RESUME",
+                &sid,
+                protocol::frame(&[
+                    ("memberId", Value::String(mid)),
+                    ("resumeToken", Value::String(token)),
+                ]),
+                "tm-resume",
+            ),
+        );
+        let mut rej = Value::Null;
+        while let Ok(OutItem::Text(raw)) = rm.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            if f["type"] == "REJECT" && f["requestId"] == "tm-resume" {
+                rej = f;
+                break;
+            }
+        }
+        assert_eq!(rej["reason"], REASON_TRUST_MISMATCH);
+    }
+
+    #[tokio::test]
     async fn mixed_capability_pair_keeps_leader_only_browse_close() {
         let reg = reg_for_test();
         let mut inner = reg.inner.lock().await;
