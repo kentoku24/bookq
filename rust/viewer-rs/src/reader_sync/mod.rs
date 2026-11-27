@@ -2742,10 +2742,39 @@ impl Inner {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             s.ready.clear();
+            // The epoch reset must not erase the outcome of the load request
+            // that caused it: OPEN_WORK/SET_OFFSET deliberately skip the
+            // epoch gate (they are epoch-changing operations), so losing that
+            // entry would make a post-commit resend execute again as a fresh
+            // pick. Carry the triggering response in the new window. Every
+            // other evicted key becomes a tombstone, keeping exact resends
+            // stale instead of re-executable across the epoch boundary.
+            let load_dkey = format!("{}:{}", job.role, job.request_id);
+            let carried = s.dedup.get(&load_dkey).cloned();
+            let evicted: Vec<String> = s
+                .dedup_order
+                .iter()
+                .filter(|k| *k != &load_dkey)
+                .cloned()
+                .collect();
             s.dedup.clear();
             s.dedup_order.clear();
-            s.dedup_seen.clear();
-            s.dedup_seen_order.clear();
+            for key in evicted {
+                if s.dedup_seen.insert(key.clone()) {
+                    s.dedup_seen_order.push_back(key);
+                }
+            }
+            while s.dedup_seen.len() > DEDUP_TOMBSTONE_MAX {
+                if let Some(oldest) = s.dedup_seen_order.pop_front() {
+                    s.dedup_seen.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+            if let Some(frame) = carried {
+                s.dedup.insert(load_dkey.clone(), frame);
+                s.dedup_order.push_back(load_dkey);
+            }
             // A successful OPEN_WORK commit is the authoritative end of the
             // shared browse regardless of which member opened it.
             s.browse_open = false;

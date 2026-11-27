@@ -4117,6 +4117,53 @@
           "link": "L1"
         }
       ]
+    },
+    {
+      "id": "open_work_replay_after_manifest_commit_replays_ack",
+      "title": "post-commit resend of the triggering OPEN_WORK replays its ACK without re-loading",
+      "setup": "reading",
+      "resolver": "work",
+      "steps": [
+        {
+          "op": "send",
+          "link": "L1",
+          "frame": {
+            "v": 1,
+            "requestId": "o1",
+            "sessionId": "@session",
+            "workEpoch": 0,
+            "baseRevision": 2,
+            "type": "OPEN_WORK",
+            "payload": {
+              "folder": "work",
+              "page": {
+                "folder": "work",
+                "name": "p001.png"
+              },
+              "offset": 0
+            }
+          }
+        },
+        {
+          "op": "expect",
+          "link": "L1",
+          "frames": [
+            {
+              "v": 1,
+              "type": "ACK",
+              "requestId": "o1",
+              "request": "OPEN_WORK",
+              "sessionId": "@session",
+              "data": {}
+            }
+          ]
+        },
+        {
+          "op": "expect",
+          "link": "L2",
+          "frames": []
+        }
+      ]
     }
   ]
 }
