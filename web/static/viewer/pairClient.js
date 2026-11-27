@@ -2019,17 +2019,23 @@
       // the DC are relayed verbatim + payload.origin through the leader's
       // control channel. Everything else is a normal inbound frame.
       if (f && typeof f === 'object' && _member &&
-          _member.role === 'leader' && _plane === 'webrtc-dc' &&
-          typeof f.requestId === 'string' && typeof f.type === 'string' &&
-          _RELAYABLE[f.type] === 1 &&
-          f.payload && typeof f.payload === 'object') {
-        var fwd = {};
-        for (var k in f) fwd[k] = f[k];
-        var p = {};
-        for (var k2 in f.payload) p[k2] = f.payload[k2];
-        p.origin = 'follower';
-        fwd.payload = p;
-        _ctlSend(fwd);
+          _member.role === 'leader' && _plane === 'webrtc-dc') {
+        // On the leader's DC every inbound frame is follower-originated:
+        // server-originated frames already arrive on the leader's own WS.
+        // Relay exactly the sequenced-op whitelist and drop the rest. In
+        // particular, request-shaped control frames must not fall through
+        // into _dispatch as though the server had sent them.
+        if (typeof f.requestId === 'string' && typeof f.type === 'string' &&
+            _RELAYABLE[f.type] === 1 &&
+            f.payload && typeof f.payload === 'object') {
+          var fwd = {};
+          for (var k in f) fwd[k] = f[k];
+          var p = {};
+          for (var k2 in f.payload) p[k2] = f.payload[k2];
+          p.origin = 'follower';
+          fwd.payload = p;
+          _ctlSend(fwd);
+        }
         return;
       }
       _dispatch(f, _gen);
