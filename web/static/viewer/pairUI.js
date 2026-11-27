@@ -496,7 +496,7 @@
         // 作品変更 is leader-only in legacy mixed pairs. When the server's
         // member-drive capability intersection is present, either member
         // trust=member may drive; guests never see an enabled control.
-        var canDriveWork = role === 'leader' || s.canDrive === true;
+        var canDriveWork = s.canDrive === true;
         els.changeWork.hidden = !canDriveWork;
         els.changeWork.disabled = !canDriveWork;
       } else if (sec === els.secError) {

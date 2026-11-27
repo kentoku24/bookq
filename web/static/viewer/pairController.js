@@ -172,7 +172,7 @@
       var st = _client ? _client.state : null;
       if (!_memberBound(st) || !_paired(st)) return;
       if (open) {
-        var mayOpen = st.role === 'leader' || st.canDrive === true;
+        var mayOpen = st.canDrive === true;
         var wireOpen = st.memberDrive === true
           ? st.browse === true
           : st.phase === 'selecting';
@@ -387,12 +387,12 @@
           _denyHiddenWork();
           return true;
         }
-        if (st.role === 'leader' || st.canDrive === true) {
+        if (st.canDrive === true) {
           return _leaderOpenWork(intent);
         }
         return _bailToSolo(intent);
       case 'browse':
-        if (st.role === 'leader' || st.canDrive === true) {
+        if (st.canDrive === true) {
           return _leaderBrowse(intent.via);
         }
         // Legacy follower browsing is a local look at the list — the pair
@@ -707,7 +707,7 @@
     changeWork: function () {
       var st = _client ? _client.state : null;
       if (!_memberBound(st) ||
-          !(st.role === 'leader' || st.canDrive === true)) return false;
+          !(st.canDrive === true)) return false;
       return _leaderBrowse('change-work');
     },
     sendIntent: function (intent) {

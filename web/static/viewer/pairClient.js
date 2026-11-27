@@ -496,8 +496,13 @@
       return (own && own.trust) || (_member && _member.trust) || null;
     }
 
+    /* Public drive authority is the union of the two mode-specific rules:
+     * legacy leader-drive OR member-drive capability intersection. Guests are
+     * never drivers in either mode. Consumers that need the mode itself read
+     * memberDrive; they must not re-copy this union at every call site. */
     function _canDrive() {
-      return _memberDrive() && _ownTrust() === 'member';
+      return _ownTrust() === 'member' &&
+        ((_member && _member.role === 'leader') || _memberDrive());
     }
 
     function _public() {
@@ -1463,7 +1468,7 @@
           break;
         case 'openWork':
           if (!_paired()) return false;
-          if (!(_member.role === 'leader' || _canDrive())) return false;
+          if (!_canDrive()) return false;
           if (typeof intent.folder !== 'string') return false;
           f = _req('OPEN_WORK', {
             folder: intent.folder,
@@ -1478,7 +1483,7 @@
           // Legacy pairs keep leader-only browse entry; member-drive pairs
           // allow either member (but never guest trust) to open shared browse.
           if (!_paired()) return false;
-          if (!(_member.role === 'leader' || _canDrive())) return false;
+          if (!_canDrive()) return false;
           return _ctlSend(_req('SET_ACTIVITY', {state: 'selecting'}));
         default:
           return false;

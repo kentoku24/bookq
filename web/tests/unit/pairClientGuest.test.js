@@ -461,6 +461,30 @@ describe('pairClient member-drive capability gate', () => {
     client.destroy();
   });
 
+  it('public canDrive is legacy-leader or member-drive, never guest', async () => {
+    const t = fakeTransport();
+    const client = makeClient(t);
+    const p = client.create();
+    helloThen(t);
+    const create = t.sent.find((f) => f.type === 'CREATE');
+    t.emit({
+      v: 1, type: 'ACK', request: 'CREATE', requestId: create.requestId,
+      data: {
+        sessionId: 's1', memberId: 'm-leader', role: 'leader',
+        trust: 'member', resumeToken: 'rt1', features: ['member-drive-v1'],
+      },
+    });
+    await p;
+    const legacy = stateWith([]);
+    legacy.presence['m-follower'].features = [];
+    t.emit(legacy);
+    // The legacy leader remains a driver even with no capability intersection;
+    // mode-specific consumers use memberDrive to tell which rule supplied it.
+    expect(client.state.memberDrive).toBe(false);
+    expect(client.state.canDrive).toBe(true);
+    client.destroy();
+  });
+
   it('guest trust cannot drive even when both runtimes advertise the feature', async () => {
     const { t, client, p } = boundFollower('guest');
     await p;
