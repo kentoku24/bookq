@@ -97,7 +97,8 @@
   var _lastLocalMove = -1e9;
   var _lastLocalIntent = -1e9;
   var _browseOpenerId = null; // server-serialized first opener for this generation
-  var _browseGeneration = null; // last consumed shared-browse generation
+  var _browseGeneration = null; // last consumed positive shared-browse generation
+  var _memberDriveActive = false; // last observed member-drive capability intersection
   var _sndHist = [];
   var _trace = null;
 
@@ -220,11 +221,30 @@
   }
 
   function _onCtlState(st) {
-    var gen = (st && typeof st.browseGeneration === 'number' &&
-               isFinite(st.browseGeneration)) ? st.browseGeneration : null;
+    var rawGen = (st && typeof st.browseGeneration === 'number' &&
+                  isFinite(st.browseGeneration)) ? st.browseGeneration : null;
+    // PairClient normalizes absent wire metadata to 0, so only a positive
+    // value is evidence of a real generation. A legacy/mixed open after an
+    // offline close→reopen can therefore arrive as "generation missing"
+    // even though the server-internal generation advanced.
+    var gen = rawGen !== null && rawGen > 0 ? rawGen : null;
+    var memberDrive = !!(st && st.memberDrive === true);
     var generationChanged = gen !== null && _browseGeneration !== null &&
       gen !== _browseGeneration;
+    var generationEmerged = gen !== null && _browseGeneration === null;
+    var generationVanished = gen === null && _browseGeneration !== null;
+    var memberDriveLost = _memberDriveActive === true && !memberDrive;
+    // Numeric changes are not the only close→reopen boundary. If this
+    // client consumed member-drive generation metadata and a later open
+    // state loses that encoding (or the capability intersection itself),
+    // legacy fallback cannot inherit the old opener/unlock/seed state.
+    // Generation appearance while continuously armed is also a mode
+    // boundary (a legacy-open generation becoming visible after upgrade).
+    var generationBoundary = generationChanged || generationVanished ||
+      memberDriveLost || (_armed && generationEmerged);
     if (gen !== null) _browseGeneration = gen;
+    else if (generationVanished) _browseGeneration = null;
+    _memberDriveActive = memberDrive;
     var armed = _armEligible(st);
     if (armed && !_armed) {
       _armed = true;
@@ -237,12 +257,13 @@
       _seedGeneration(st);
       return;
     }
-    if (armed && _armed && generationChanged) {
+    if (armed && _armed && generationBoundary) {
       // A close→reopen that happened while this link was offline never
-      // produces a disarm/arm pair: both states are open. The generation is
-      // therefore the only trustworthy boundary. Drop every seed/unlock and
-      // pending position inherited from the old generation before electing
-      // the new opener.
+      // produces a disarm/arm pair: both states are open. The generation —
+      // including its disappearance under legacy fallback — is therefore the
+      // only trustworthy boundary. Drop every seed/unlock and pending
+      // position inherited from the old generation before electing the seed
+      // rule that applies to the current mode.
       _resetGenerationRuntime();
       _seedGeneration(st);
     }
@@ -261,6 +282,7 @@
       _lastLocalIntent = -1e9;
       _browseOpenerId = null;
       _browseGeneration = null;
+      _memberDriveActive = false;
       if (_trailT) { clearTimeout(_trailT); _trailT = null; }
       // 自分が開いたミラー用サイドバーだけ畳む — role を見ると 'ended' で
       // null 化した後に leader の手動 sidebar まで畳んでしまう。
@@ -1032,6 +1054,21 @@
         if (pm) _applyRemote(pm.msg, pm.at);
         _lastSendTs = -1e9;
         _sendNow();
+      },
+      /* Unit tests drive several independent state machines through this
+       * singleton. Reset runtime state without touching the DOM or the
+       * subscriptions installed at module init. */
+      reset: function () {
+        _armed = false;
+        _resetGenerationRuntime();
+        _browseOpenerId = null;
+        _browseGeneration = null;
+        _memberDriveActive = false;
+        _prevPresenceSig = '';
+        _mirrorOpened = false;
+        _lastSendTs = -1e9;
+        _sndHist = [];
+        if (_trace) _trace.length = 0;
       },
       applyRemote: _applyRemote,
       onState: _onCtlState,
