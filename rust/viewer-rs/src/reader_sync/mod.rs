@@ -103,7 +103,9 @@ pub const END_SHUTDOWN: &str = "shutdown";
 pub const END_OWNER_DISABLED: &str = "owner_disabled";
 
 // dedup retention: full outcomes for the last DEDUP_WINDOW keys, evicted
-// keys remembered as tombstones for the workEpoch's whole lifetime.
+// keys remembered as tombstones. Ordinary tombstones are FIFO-capped;
+// load-op tombstones are not — OPEN_WORK/SET_OFFSET skip the epoch gate,
+// so losing one would make a replay executable again.
 pub const DEDUP_WINDOW: usize = 256;
 pub const DEDUP_TOMBSTONE_MAX: usize = 8192;
 
@@ -538,6 +540,10 @@ pub struct PairSession {
     dedup_order: VecDeque<String>,
     pub dedup_seen: HashSet<String>,
     dedup_seen_order: VecDeque<String>,
+    /// Tombstones for OPEN_WORK/SET_OFFSET outcomes. These are deliberately
+    /// outside dedup_seen's FIFO cap: load ops skip the epoch gate, so a
+    /// forgotten load tombstone turns a replay into executable state again.
+    pub dedup_load_seen: HashSet<String>,
     pub load_seq: i64,
     pub pending_load: Option<LoadJob>,
     /// Whether the currently committed work load came from bootstrap. Once a
@@ -584,6 +590,7 @@ impl PairSession {
             dedup_order: VecDeque::new(),
             dedup_seen: HashSet::new(),
             dedup_seen_order: VecDeque::new(),
+            dedup_load_seen: HashSet::new(),
             load_seq: 0,
             pending_load: None,
             committed_load_auto: None,
@@ -2228,8 +2235,12 @@ impl Inner {
                 break; // the just-stored entry is never evicted in-place
             }
             s.dedup_order.pop_front();
+            let load_op = s
+                .dedup
+                .get(&oldest)
+                .is_some_and(dedup_frame_is_load);
             s.dedup.remove(&oldest);
-            dedup_tombstone(s, oldest);
+            dedup_tombstone(s, oldest, load_op);
         }
     }
 
@@ -2340,7 +2351,7 @@ impl Inner {
         }
         if self
             .session(sid)
-            .is_some_and(|s| s.dedup_seen.contains(&dkey))
+            .is_some_and(|s| dedup_has_tombstone(s, &dkey))
         {
             self.reject_snapshot(&resp_link, req, sid, &role, state::REASON_STALE_REQUEST);
             return;
@@ -2800,7 +2811,7 @@ impl Inner {
                 }
             }
             for key in new_tombstones {
-                dedup_tombstone(s, key);
+                dedup_tombstone(s, key, true);
             }
             s.dedup.clear();
             s.dedup_order.clear();
@@ -2811,7 +2822,7 @@ impl Inner {
                 // Losing the trigger outcome must never make its retransmission
                 // executable again. This should be unreachable now that the job
                 // retains the ACK, but fail closed if the invariant is broken.
-                dedup_tombstone(s, carry_key);
+                dedup_tombstone(s, carry_key, true);
             }
             // A successful OPEN_WORK commit is the authoritative end of the
             // shared browse regardless of which member opened it.
@@ -3211,10 +3222,16 @@ fn dedup_frame_is_load(frame: &Value) -> bool {
     )
 }
 
-/// Remember an evicted dedup key without storing its outcome. Tombstones are
-/// deliberately epoch-independent: OPEN_WORK skips the epoch gate, so losing
-/// one at a manifest commit would make an old pick executable again.
-fn dedup_tombstone(s: &mut PairSession, key: String) {
+/// Remember an evicted dedup key without storing its outcome. Ordinary
+/// tombstones are FIFO-capped; load-op tombstones are kept in a separate
+/// session-lifetime set because OPEN_WORK/SET_OFFSET skip the epoch gate.
+/// Letting one silently age out would turn a replay back into executable
+/// state, so fail-closed retention wins over the ordinary memory bound here.
+fn dedup_tombstone(s: &mut PairSession, key: String, load_op: bool) {
+    if load_op {
+        s.dedup_load_seen.insert(key);
+        return;
+    }
     if s.dedup_seen.insert(key.clone()) {
         s.dedup_seen_order.push_back(key);
     }
@@ -3225,6 +3242,10 @@ fn dedup_tombstone(s: &mut PairSession, key: String) {
             break;
         }
     }
+}
+
+fn dedup_has_tombstone(s: &PairSession, key: &str) -> bool {
+    s.dedup_seen.contains(key) || s.dedup_load_seen.contains(key)
 }
 
 fn req_id<'a>(req: &'a Map<String, Value>) -> Option<&'a str> {
@@ -3367,6 +3388,17 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn sequenced_ack(request: &str, request_id: &str, sid: &str) -> Value {
+        protocol::frame(&[
+            ("v", Value::from(protocol::PROTOCOL_VERSION)),
+            ("type", Value::String("ACK".into())),
+            ("requestId", Value::String(request_id.into())),
+            ("request", Value::String(request.into())),
+            ("sessionId", Value::String(sid.into())),
+            ("data", Value::Object(Map::new())),
+        ])
     }
 
     /// Paired two-member session whose admission-time capability lists are
@@ -4222,14 +4254,7 @@ mod tests {
         // tombstone there; the job copy is the sole replayable outcome.
         for i in 0..DEDUP_WINDOW {
             let rid = format!("filler-{i}");
-            let frame = protocol::frame(&[
-                ("v", Value::from(protocol::PROTOCOL_VERSION)),
-                ("type", Value::String("ACK".into())),
-                ("requestId", Value::String(rid.clone())),
-                ("request", Value::String("TURN".into())),
-                ("sessionId", Value::String(sid.clone())),
-                ("data", Value::Object(Map::new())),
-            ]);
+            let frame = sequenced_ack("TURN", &rid, &sid);
             let key = format!("leader:{rid}");
             inner.dedup_store(&sid, &key, frame);
         }
@@ -4237,7 +4262,7 @@ mod tests {
         {
             let s = inner.session(&sid).unwrap();
             assert!(!s.dedup.contains_key(trigger_key));
-            assert!(s.dedup_seen.contains(trigger_key));
+            assert!(dedup_has_tombstone(s, trigger_key));
         }
 
         inner.finish_load(&sid, &job, Ok(test_manifest()));
@@ -4263,6 +4288,77 @@ mod tests {
         );
         assert_eq!(frames[0]["type"], "ACK");
         assert_eq!(frames[0]["requestId"], "trigger-open");
+        assert!(inner.session(&sid).unwrap().pending_load.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_tombstone_survives_overflow_and_replay_fails_closed() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        drain_texts(&mut r1);
+        drain_texts(&mut r2);
+
+        let load_key = "leader:evicted-load";
+        inner.dedup_store(
+            &sid,
+            load_key,
+            sequenced_ack("OPEN_WORK", "evicted-load", &sid),
+        );
+        // Evict the full load outcome through the real fixed-window path.
+        // Classification at this edge — not a test-only backdoor — is what
+        // places the key in the dedicated load tombstone area.
+        for i in 0..DEDUP_WINDOW {
+            let rid = format!("evict-filler-{i}");
+            let frame = sequenced_ack("TURN", &rid, &sid);
+            inner.dedup_store(&sid, &format!("leader:{rid}"), frame);
+        }
+        {
+            let s = inner.session_mut(&sid).unwrap();
+            assert!(!s.dedup.contains_key(load_key));
+            assert!(s.dedup_load_seen.contains(load_key));
+            s.dedup_seen.clear();
+            s.dedup_seen_order.clear();
+            for i in 0..=DEDUP_TOMBSTONE_MAX {
+                dedup_tombstone(s, format!("leader:filler-{i}"), false);
+            }
+            assert!(
+                dedup_has_tombstone(s, load_key),
+                "ordinary tombstone FIFO overflow must not erase a load key"
+            );
+            assert!(
+                !s.dedup_seen.contains("leader:filler-0"),
+                "the ordinary FIFO really overflowed"
+            );
+        }
+
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let payload = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+        ]);
+        let resend = req_named("OPEN_WORK", &sid, payload, "evicted-load");
+        inner.dispatch(&reg, &l1, &resend);
+        let frames = drain_texts(&mut r1);
+        assert_eq!(frames.len(), 1, "unexpected frames: {frames:?}");
+        assert_eq!(frames[0]["type"], "REJECT");
+        assert_eq!(frames[0]["reason"], state::REASON_STALE_REQUEST);
         assert!(inner.session(&sid).unwrap().pending_load.is_none());
     }
 

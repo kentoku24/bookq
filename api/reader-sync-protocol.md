@@ -268,6 +268,7 @@ TURN/GOTO は `reading` でのみ受理:
   trigger ACK は pending load と共に保持され、dedup window eviction のタイミングに依存しない。
   この epoch rollover で tombstone 化する対象は、trigger ではない load op（`OPEN_WORK`/`SET_OFFSET`）
   outcome のみである。非 load op は新しい epoch の gate で止まるため rollover 専用 tombstone を必要としない。
+  load op tombstone は通常 tombstone の FIFO cap で黙って evict せず session 終了まで保持する。
   load op は epoch gate を skip する仕様と組み合わさっても、古い再送が最新 pick として再実行されないようにする
 
 ### REJECT snapshot
