@@ -22,6 +22,13 @@ iOS ネイティブが web クライアントと相互運用するために必�
   webrtc-dc では **leader が逐次化**（同tick到着は role-deterministic タイブレーク）。
   どちらでも `revision` は厳密単調増加
 
+- **frame trust は到着 transport で決まり、data_plane 値は認証境界ではない**。
+  server-originated frame（STATE/END/UI_SYNC/TRANSPORT_STATE 等）は常に自分の
+  server-ws からのみ正当に到着する。webrtc-dc 上の inbound は peer input であり、
+  follower は全て drop する。leader は sequenced-op whitelist（TURN/GOTO/SET_OFFSET/
+  SWAP_SIDES/OPEN_WORK/READY/APPLIED）だけを plane に関係なく relay-or-drop し、
+  server-originated/control frame を `_dispatch` や server-ws へ注入してはならない
+
 ---
 
 ## 2. セッションライフサイクル
@@ -84,10 +91,10 @@ CREATE ACK{…, guestToken}  →  クライアントが QR
   ペア同期は WebSocket のため影響なし — follower として TURN/GOTO/
   SET_OFFSET 等は通常 follower と同一に受理される。ただし作品選択の drive
   （OPEN_WORK）と shared browse open/close は trust=member のみで、guest は
-  direct/relay のどちらでも `forbidden`。UI_SYNC は ephemeral だが shared
-  browse が開いていない間に guest が送ると受信側の一覧を開き得るため、
-  closed browse での guest UI_SYNC も `forbidden` で拒否する（member が既に
-  開いた mirror への参加は拒否しない）
+  direct/relay のどちらでも `forbidden`。UI_SYNC は ephemeral だが closed
+  browse で送ると受信側の一覧を開き得るため、**member/guest を問わず**
+  shared browse が開いていない間の UI_SYNC は `forbidden` で拒否する
+  （member が既に開いた mirror への参加は trust に関係なく拒否しない）
 - guest 応答には `X-Bookq-Guest: 1` + `Cache-Control: private, no-store`
   — SW・ページ側キャッシュとブラウザ HTTP キャッシュの双方が失効後に
   再提供しない
@@ -148,6 +155,11 @@ RESUME 毎に現在値へ更新される。
 非 selecting activity で browse close）を厳密に維持する。offline の間は最後に広告した
 capability を保持し、一時切断だけでは downgrade しない。
 
+RESUME は capability を現在 runtime の値で上書きする。intersection が成立していた pair が
+RESUME によって intersection を失い、その時点で shared browse が開いていた場合、server は
+STATE 配布前に browse を明示的に close する。legacy 意味論では follower close が効かず、
+opener によっては leader close 経路も UI 上存在しないため、selecting wedge を許容しない。
+
 ### effective actor と relay whitelist
 
 `payload.origin` は sequenced data-plane op（TURN/GOTO/SET_OFFSET/SWAP_SIDES/OPEN_WORK/
@@ -168,10 +180,13 @@ control frame を relay してはならない。
 capability intersection 成立時:
 
 - `member` trust なら leader/follower どちらも OPEN_WORK を受理できる。`guest` は `forbidden`
-- shared browse open は `SET_ACTIVITY{state:"selecting"}`、close は
-  `SET_ACTIVITY{state:"active", endBrowse:true}`。どちらも member なら role に関係なく可。
-  guest は open/close とも `forbidden`
-- 同時/重複 open は冪等（boolean flag を同じく true にするだけでエラーにしない）
+- shared browse open は `SET_ACTIVITY{state:"selecting"}`、close は non-selecting
+  activity（`active` または `suspended`）に載せた直交シグナル `endBrowse:true`
+  （例: `SET_ACTIVITY{state:"active", endBrowse:true}`）。`endBrowse` は visibility/liveness
+  activity ではなく close gesture の検査対象として独立して解釈され、どの non-selecting
+  state でも受理される。open/close とも member なら role に関係なく可。guest は両方 `forbidden`
+- 同時/重複 open は server の直列化順で deterministic に解決する。closed→open の先着だけが
+  opener/generation を確定し、後着 open は冪等で opener を上書きしない（エラーにもしない）
 - opener が offline でも peer member は close できる
 - OPEN_WORK manifest commit は shared browse を必ず終了する（明示 close 不要）
 - `active`/`suspended` 単体は liveness 更新だけであり shared browse を終了しない。tab visibility
@@ -180,6 +195,12 @@ capability intersection 成立時:
 - STATE は shared browse が開いている間 `browse:true` を載せる（true-only encoding。省略/false は
   closed）。`paused` は `selecting` を mask するため、client の close/reconcile は派生 phase ではなく
   この直交状態を使う。混在 pair では新意味論を使わず、従来どおり phase/leader activity だけを見る
+- `browse:true` と同じ frame に限り、additive metadata として `browseOpener`（member id）、
+  `browseOpenerRole`、`browseGeneration` を送る。client mirror seed は自分の DOM 状態ではなく
+  opener member id で決める。理想的には `browse:{open,opener,generation}` の構造型が欲しいが、
+  `browse` は既に true-only boolean として出荷済みで、legacy client が boolean として読むため、
+  現行 wire は boolean を保ったまま隣接 field を追加する additive 形に留める。closed ではこれらを
+  省略し、legacy/mixed-pair frame をビット一致で変えない
 
 intersection 非成立時は旧挙動: OPEN_WORK/selecting open は leader のみ、leader の非 selecting
 activity が browse flag をクリアする。
@@ -192,14 +213,21 @@ in-flight の非 auto load が既にあれば auto load は `stale_request` で�
 
 ## 4. フェーズ機械（derive_phase — 常に導出値、独立した真実ではない）
 
-```
-waiting   pair 未成立（leader 単独 or join 承認待ち）
-selecting paired だが work 未コミット、または leader が作品リスト閲覧中
-loading   manifest コミット済み/in-flight だが全員 READY 前
-reading   全メンバー READY（ページ操作が合法な唯一の状態）
-paused    メンバー欠落（link 死）or 非 active
-ended     終了
-```
+優先順位は固定（ADR 0004 の導出 cascade）:
+
+1. `waiting` — pair 未成立（承認済み member が 2 人未満。pending は数えない）
+2. `paused` — pair のいずれかの member が active でない（suspended/offline/link dead）
+3. `loading`（pre-commit）— commit 前の load（pending_load）が in-flight
+4. `selecting` — shared browse が開いている、**または manifest が未 commit（初回状態）**
+5. `loading`（post-commit READY ゲート）— manifest は commit 済みだが全 member READY 前
+6. `reading` — 上記以外（ページ操作が合法な唯一の状態）
+7. `ended` — 終了（session 自体は終了理由とともに破棄される）
+
+したがって READY 待ちと shared browse が重なった時は `selecting` が優先される。pre-commit load
+だけは `selecting` に優先する。manifest 未 commit の間は browse 開閉に関わらず初回状態として
+`selecting` になるが、これは shared browse open を意味しない — open/close の真実は直交状態
+`browse` のみが持つ。`paused` は `selecting` を mask するが browse を終了せず、復帰時に mirror が
+re-arm する。
 
 TURN/GOTO は `reading` でのみ受理:
 `paused`→`peer_offline`、`loading`→`not_ready`、work 無し→`no_work`、その他→`bad_phase`
@@ -222,7 +250,19 @@ TURN/GOTO は `reading` でのみ受理:
 - `workEpoch` 不一致 → `stale_epoch`（work 切替時に epoch が進み、旧 work に向けた op を無効化）
 - `payload.manifestVersion` が指定され現行と不一致 → `stale_manifest`
 - **拒否されたリクエストはコミット済み snapshot を一切変更しない**（validate → mutate の順）
-- **冪等**: `dedup` が `role:requestId` → 応答を記録。再送の重複適用を防ぐ（dedup_seen tombstone 付き）
+- **冪等**: `dedup` が `role:requestId` → 応答を記録。再送の重複適用を防ぐ（dedup_seen tombstone 付き）。
+  work manifest commit で epoch が進む時、epoch-changing load を起こした request 本人の ACK は新しい
+  dedup window へ carry forward され、post-commit resend は再実行ではなく同一 ACK replay になる。
+  それ以外の evicted key は tombstone 化し、OPEN_WORK が epoch gate を skip する仕様と組み合わさっても
+  古い再送が最新 pick として再実行されないようにする
+
+### REJECT snapshot
+
+sequenced op の rejection は最新 committed snapshot を `snapshot` に載せる。snapshot は STATE から
+`v/type` を除いた complete な観測状態で、`presence`（各 member の role/status/trust/features/name/ready）
+と server `features` を必ず含む。client は rejection 処理で capability intersection を再評価できる必要があり、
+presence/features を欠いた snapshot で前回 STATE を合成してはならない（shared browse close 権限が一時的に
+flap する）。`browse` additive metadata も open 中は同じ encoding で入る。
 
 ### READY ゲート
 manifest コミット後、全メンバーが READY するまで `loading`。
@@ -301,7 +341,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 | type | 用途 | 規則 |
 |---|---|---|
 | SIGNAL | WebRTC offer/answer/ice 中継 | シーケンスしない。dc ネゴシエーション専用 |
-| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。1s レート窓でリレー |
+| UI_SYNC | browse 画面ミラー (scroll progress 等) | ephemeral。reader state 混入禁止。shared browse open 中のみ relay。1s レート窓 |
 | PING/PONG | keepalive | シーケンスしない |
 | TRANSPORT_STATE | dc up/down 報告 | メンバー dc_state の更新 |
 
