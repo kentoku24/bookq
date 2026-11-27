@@ -2192,7 +2192,10 @@ impl Inner {
         role: &str,
         reason: &'static str,
     ) {
-        let snap = state::snapshot(self.session(sid).unwrap(), &self.links);
+        let browse_visible = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
+        let snap = state::snapshot(self.session(sid).unwrap(), &self.links, browse_visible);
         let resp = protocol::frame(&[
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("REJECT".into())),
@@ -2776,6 +2779,9 @@ impl Inner {
     /// `_state_frame` — bumps revision, derives phase, emits STATE.
     fn state_frame_for(&mut self, sid: &str) -> Option<Value> {
         let server_features = self.server_features_json();
+        let browse_visible = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
         let Inner {
             sessions, links, ..
         } = self;
@@ -2802,7 +2808,7 @@ impl Inner {
             p.insert("ready".into(), Value::Bool(s.ready.contains(&m.id)));
             presence.insert(m.id.clone(), Value::Object(p));
         }
-        Some(protocol::frame(&[
+        let mut frame = protocol::frame(&[
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("STATE".into())),
             ("sessionId", Value::String(s.id.clone())),
@@ -2822,7 +2828,17 @@ impl Inner {
             ("presence", Value::Object(presence)),
             ("dataPlane", Value::String(s.data_plane.clone())),
             ("features", server_features),
-        ]))
+        ]);
+        if browse_visible && s.selecting {
+            // `paused` outranks selecting in the derived phase, so the
+            // phase alone cannot represent a still-open shared browse. In
+            // member-drive semantics expose the orthogonal boolean; the
+            // true-only encoding keeps legacy/mixed-pair frames unchanged.
+            if let Value::Object(ref mut obj) = frame {
+                obj.insert("browse".into(), Value::Bool(true));
+            }
+        }
+        Some(frame)
     }
 
     fn broadcast(&mut self, sid: &str, frame: &Value) {

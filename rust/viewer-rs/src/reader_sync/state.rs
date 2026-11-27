@@ -128,7 +128,11 @@ pub fn derive_phase(session: &PairSession, links: &HashMap<String, Link>) -> &'s
 }
 
 /// The committed snapshot — embedded verbatim in REJECT frames.
-pub fn snapshot(session: &PairSession, links: &HashMap<String, Link>) -> Value {
+pub fn snapshot(
+    session: &PairSession,
+    links: &HashMap<String, Link>,
+    browse_visible: bool,
+) -> Value {
     let mut m = Map::new();
     m.insert("sessionId".into(), Value::String(session.id.clone()));
     m.insert("revision".into(), Value::from(session.revision));
@@ -158,6 +162,12 @@ pub fn snapshot(session: &PairSession, links: &HashMap<String, Link>) -> Value {
         "dataPlane".into(),
         Value::String(session.data_plane.clone()),
     );
+    if browse_visible && session.selecting {
+        // Shared browse is orthogonal to the derived phase (paused masks it),
+        // so new-capability clients receive the authoritative boolean. The
+        // field is true-only on the wire: absence remains the legacy false.
+        m.insert("browse".into(), Value::Bool(true));
+    }
     Value::Object(m)
 }
 

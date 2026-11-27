@@ -174,6 +174,9 @@ capability intersection 成立時:
 - `active`/`suspended` 単体は liveness 更新だけであり shared browse を終了しない。tab visibility
   復帰や mirror sidebar の programmatic close は endBrowse を生成してはならない。endBrowse は
   ユーザー明示 close gesture だけが生成する
+- STATE は shared browse が開いている間 `browse:true` を載せる（true-only encoding。省略/false は
+  closed）。`paused` は `selecting` を mask するため、client の close/reconcile は派生 phase ではなく
+  この直交状態を使う。混在 pair では新意味論を使わず、従来どおり phase/leader activity だけを見る
 
 intersection 非成立時は旧挙動: OPEN_WORK/selecting open は leader のみ、leader の非 selecting
 activity が browse flag をクリアする。

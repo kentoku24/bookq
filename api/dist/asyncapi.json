@@ -508,14 +508,17 @@
     },
     "schemas": {
       "FeatureList": {
-        "description": "client/server capability feature tokens。未知 token は無視してよい",
+        "description": "client/server capability feature tokens。未知 token は無視してよい。null は未広告（空配列と同じ）として扱う",
         "items": {
           "maxLength": 64,
           "minLength": 1,
           "type": "string"
         },
         "maxItems": 32,
-        "type": "array"
+        "type": [
+          "array",
+          "null"
+        ]
       },
       "PageRef": {
         "properties": {
@@ -939,6 +942,10 @@
       },
       "StateFrame": {
         "properties": {
+          "browse": {
+            "description": "shared browse が開いている時だけ true を送る session スコープの状態。\npaused が selecting を mask するため phase だけでは判別できない。\nmember-drive capability intersection が成立する pair でのみ意味を持ち、\n省略/false は closed。混在 pair の wire 互換のため true-only encoding。\n",
+            "type": "boolean"
+          },
           "features": {
             "$ref": "#/components/schemas/FeatureList"
           },

@@ -244,10 +244,10 @@ components:
 
   schemas:
     FeatureList:
-      type: array
+      type: [array, "null"]
       maxItems: 32
       items: {type: string, minLength: 1, maxLength: 64}
-      description: client/server capability feature tokens。未知 token は無視してよい
+      description: client/server capability feature tokens。未知 token は無視してよい。null は未広告（空配列と同じ）として扱う
 
     RequestFrame:
       type: object
@@ -464,6 +464,13 @@ components:
         spreadId: {type: [string, "null"]}
         offset: {type: integer, enum: [0, 1]}
         leaderSide: {type: string, enum: [right, left]}
+        browse:
+          type: boolean
+          description: |
+            shared browse が開いている時だけ true を送る session スコープの状態。
+            paused が selecting を mask するため phase だけでは判別できない。
+            member-drive capability intersection が成立する pair でのみ意味を持ち、
+            省略/false は closed。混在 pair の wire 互換のため true-only encoding。
         presence:
           type: object
           description: "member id → {role, status, trust: member|guest, features: string[], name, ready}"

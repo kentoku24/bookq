@@ -2682,6 +2682,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -2825,6 +2826,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -2983,6 +2985,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -3021,6 +3024,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -3065,6 +3069,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -3111,6 +3116,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -3178,6 +3184,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
@@ -3249,6 +3256,7 @@
               "offset": 0,
               "leaderSide": "left",
               "dataPlane": "server-ws",
+              "browse": true,
               "presence": {
                 "@L1.member": {
                   "role": "leader",
