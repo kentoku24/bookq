@@ -265,8 +265,9 @@ TURN/GOTO は `reading` でのみ受理:
 - **冪等**: `dedup` が `role:requestId` → 応答を記録。再送の重複適用を防ぐ（dedup_seen tombstone 付き）。
   work manifest commit で epoch が進む時、epoch-changing load を起こした request 本人の ACK は新しい
   dedup window へ carry forward され、post-commit resend は再実行ではなく同一 ACK replay になる。
-  それ以外の evicted key は tombstone 化し、OPEN_WORK が epoch gate を skip する仕様と組み合わさっても
-  古い再送が最新 pick として再実行されないようにする
+  この epoch rollover で tombstone 化する対象は、trigger ではない load op（`OPEN_WORK`/`SET_OFFSET`）
+  outcome のみである。非 load op は新しい epoch の gate で止まるため rollover 専用 tombstone を必要としない。
+  load op は epoch gate を skip する仕様と組み合わさっても、古い再送が最新 pick として再実行されないようにする
 
 ### REJECT snapshot
 
