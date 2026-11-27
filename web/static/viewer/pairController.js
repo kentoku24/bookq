@@ -139,7 +139,11 @@
     var leader = !!(o && o.role === 'leader');
     var stNow = _client ? _client.state : null;
     var sharedDrive = !!(stNow && stNow.memberDrive === true);
-    if ((leader || sharedDrive) && _sidebarOpen() &&
+    // Does this commit come through a mode where a member may be driving
+    // the shared browse list? In legacy mode that is only a leader commit;
+    // in member-drive mode either member may be the driver.
+    var sharedDriveCommit = leader || sharedDrive;
+    if (sharedDriveCommit && _sidebarOpen() &&
         _displayKey(snap) === _appliedKey) {
       // A member is browsing the shared-work list: an echo that changes
       // nothing on screen must not rip the grid away — hold it; the
@@ -244,8 +248,8 @@
     return _VN().request(intent);   // re-enters the default (solo) handler
   }
 
-  /* The one non-data intent for the leader: browsing the work list. */
-  function _leaderBrowse(via) {
+  /* The one non-data drive intent: browsing the work list. */
+  function _driveBrowse(via) {
     var ok = _client ? _client.sendIntent({type: 'browse'}) : false;
     _record({type: 'browse', via: via}, ok);
     _selIssued = _selIssued || ok;
@@ -324,7 +328,7 @@
       .catch(function () { done(null); });
   }
 
-  function _leaderOpenWork(intent) {
+  function _driveOpenWork(intent) {
     var gen = ++_resolveGen;
     function emit(page) {
       // A leader pick of a hidden work (incl. one whose root was hidden
@@ -382,18 +386,18 @@
       }
       case 'openWork':
         // 通常モードでの禁止作品 pick — wire に出さず同期を解除してトップへ。
-        // (_leaderOpenWork re-checks at emit time for the async resolve.)
+        // (_driveOpenWork re-checks at emit time for the async resolve.)
         if (_visBlocksFolder(intent.folder)) {
           _denyHiddenWork();
           return true;
         }
         if (st.canDrive === true) {
-          return _leaderOpenWork(intent);
+          return _driveOpenWork(intent);
         }
         return _bailToSolo(intent);
       case 'browse':
         if (st.canDrive === true) {
-          return _leaderBrowse(intent.via);
+          return _driveBrowse(intent.via);
         }
         // Legacy follower browsing is a local look at the list — the pair
         // stays (a work PICK is what releases it); the next commit pulls the
@@ -716,7 +720,7 @@
       var st = _client ? _client.state : null;
       if (!_memberBound(st) ||
           !(st.canDrive === true)) return false;
-      return _leaderBrowse('change-work');
+      return _driveBrowse('change-work');
     },
     sendIntent: function (intent) {
       return _client ? _client.sendIntent(intent) : false;
