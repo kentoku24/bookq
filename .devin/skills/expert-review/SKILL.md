@@ -20,7 +20,7 @@ description: Use when red-teaming a design document, ADR, protocol redesign, mig
 
 ## Hard Rules（実事故由来。省略禁止）
 
-1. **レビュー対象を動く repo から取らせない。** 対象本文は各 subagent prompt に全文 inline 埋め込みするか、固定 temp path（例: `/tmp/review-target.md`）へ書いて exact path を渡す。branch 上だけに存在するファイルを「探して読め」と指示してはいけない。実際に subagent が対象 branch を発見できず全滅した。
+1. **レビュー対象を動く repo から取らせない。** 対象本文は各 subagent prompt に全文 inline 埋め込みするか、review/round ごとに一意な固定 temp path へ書いて exact path を渡す。branch 上だけに存在するファイルを「探して読め」と指示してはいけない。実際に subagent が対象 branch を発見できず全滅した。
 2. **verification ref を明示に固定する。** working tree は無関係な branch にいる前提で、`git show <ref>:<path>` / `git grep <pattern> <ref>` を使わせる。レビュー開始時に `<ref>` は `git rev-parse origin/main` などで SHA 解決する。実際に全 reviewer が stale branch を分析し、false findings を後で除去する羽目になった。
 3. **load-bearing claim は orchestrator が独立検証する。** 「feature X が未実装」「この前提は code に存在しない」など verdict を左右する主張は、1〜2本の targeted command で自分が確認してから採用する。wrong-branch artifact は捨て、confirmed claim だけを残す。
 4. **収斂は signal。** 2+ personas が独立に同じ欠陥へ到達したら confirmed-priority として扱い、synthesis で必ず追跡する。ただし critical claim の検証責任は残る。
@@ -59,15 +59,18 @@ description: Use when red-teaming a design document, ADR, protocol redesign, mig
 ### 1. Target と verification base を freeze する
 
 ```bash
-# repo root で実行。対象が大きい場合は固定 path へコピーする。
-cp <target-doc> /tmp/review-target.md
+# repo root で実行。対象が大きい場合は review/round ごとに一意な固定 path へコピーする。
+REVIEW_DIR=$(mktemp -d /tmp/expert-review.XXXXXX)
+TARGET_FIXED_PATH="$REVIEW_DIR/review-target.md"
+cp <target-doc> "$TARGET_FIXED_PATH"
 VERIFY_REF=$(git rev-parse origin/main)
-printf '%s\n' "$VERIFY_REF"
-shasum -a 256 /tmp/review-target.md
+printf 'VERIFY_REF=%s\n' "$VERIFY_REF"
+printf 'TARGET_FIXED_PATH=%s\n' "$TARGET_FIXED_PATH"
+shasum -a 256 "$TARGET_FIXED_PATH"
 ```
 
 - inline にする場合は**全文**を各 prompt に入れる。抜粋だけを渡さない。
-- 固定 path にする場合は exact path を渡す。レビュー中にファイルを更新しない。
+- 固定 path にする場合は review/round ごとに `mktemp -d` で一意な directory を作り、生成済みの exact absolute path を全 subagent に渡す。`/tmp/review-target.md` のような固定名は並行レビューで上書きされるため使わない。レビュー中にファイルを更新しない。
 - `VERIFY_REF` は moving ref 名だけでなく SHA を記録する。prompt には `origin/main = <sha>` のように両方書く。
 - 必要な context path（関連 module、API spec、既存 migration doc）を列挙してよいが、target の取得先を repo にしてはいけない。
 
@@ -148,8 +151,8 @@ git -C <repo> show <verify-sha>:<path> | sed -n '<start>,<end>p'
 ### 5. Synthesis する
 
 1. 重複 finding を正規化し、persona 名をすべて保持する。
-2. 2+ personas が独立に同じ defect に到達したものを **convergent / confirmed-priority** として最上位に置く。
-3. severity 順に並べ、confirmed / rejected-artifact / uncertain を分離する。
+2. confirmed findings は **severity を第一キー**に並べる。同一 severity 内では、2+ personas が独立に同じ defect に到達した **convergent / confirmed-priority** を先に置く。convergence は severity を上書きしない。
+3. confirmed / rejected-artifact / uncertain を分離する。
 4. 設計者が直すべき内容と、product owner が決めるべき内容を分ける。trade-off を勝手に1つへ潰さない。
 5. Round 2 では、Round 1 finding ごとに `fixed / partially fixed / unfixed / rejected` を追跡する。
 
@@ -169,7 +172,7 @@ Suggested severity ladder:
 
 <ship / fix-first / no-go> — <2〜4文の根拠>
 
-## Confirmed findings（severity順）
+## Confirmed findings（severity順。同一severity内ではconvergent優先）
 
 | Severity | Finding | Personas | Evidence | Required action |
 |---|---|---|---|---|
