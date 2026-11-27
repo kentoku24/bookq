@@ -3432,6 +3432,81 @@
         {
           "op": "drain",
           "link": "L2"
+        },
+        {
+          "op": "send",
+          "link": "L1",
+          "frame": {
+            "v": 1,
+            "requestId": "bg1",
+            "sessionId": "@session",
+            "workEpoch": 1,
+            "baseRevision": 0,
+            "type": "GOTO",
+            "payload": {
+              "page": {
+                "folder": "work",
+                "name": "p003.png"
+              }
+            }
+          }
+        },
+        {
+          "op": "expect",
+          "link": "L1",
+          "frames": [
+            {
+              "v": 1,
+              "type": "REJECT",
+              "requestId": "bg1",
+              "request": "GOTO",
+              "reason": "stale_revision",
+              "sessionId": "@session",
+              "snapshot": {
+                "sessionId": "@session",
+                "revision": 15,
+                "workEpoch": 1,
+                "manifestVersion": 1,
+                "phase": "reading",
+                "spreadId": "c0:s0",
+                "offset": 0,
+                "leaderSide": "left",
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": true,
+                    "trust": "member",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  },
+                  "@L2.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "Bob",
+                    "ready": true,
+                    "trust": "member",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  }
+                },
+                "browse": false,
+                "browseGeneration": 3
+              }
+            }
+          ]
+        },
+        {
+          "op": "expect",
+          "link": "L2",
+          "frames": []
         }
       ]
     },

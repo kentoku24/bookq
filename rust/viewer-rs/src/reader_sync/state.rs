@@ -188,9 +188,9 @@ pub fn snapshot(
     m.insert("features".into(), server_features);
     if browse_visible && session.browse_open {
         // Shared browse is orthogonal to the derived phase (paused masks it),
-        // so new-capability clients receive the authoritative boolean. The
-        // field is true-only on the wire: absence remains the legacy false.
-        // Opener/generation metadata is additive next to that boolean.
+        // so new-capability clients receive the authoritative boolean. Open
+        // frames keep the legacy-compatible true-only encoding; opener and
+        // generation metadata are additive next to that boolean.
         m.insert("browse".into(), Value::Bool(true));
         m.insert(
             "browseGeneration".into(),
@@ -207,6 +207,16 @@ pub fn snapshot(
                 m.insert("browseOpenerRole".into(), Value::String(role));
             }
         }
+    } else if !session.browse_open && session.browse_generation > 0 {
+        // Rejection snapshots are complete state snapshots, so they use the
+        // same close encoding as STATE. Keeping the additive false/generation
+        // here prevents capability close rights from flapping when a client
+        // adopts a snapshot after a downgrade close.
+        m.insert("browse".into(), Value::Bool(false));
+        m.insert(
+            "browseGeneration".into(),
+            Value::from(session.browse_generation),
+        );
     }
     Value::Object(m)
 }
