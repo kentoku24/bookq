@@ -2217,7 +2217,13 @@ impl Inner {
         let browse_visible = self
             .session(sid)
             .is_some_and(|s| self.member_drive_intersection(s));
-        let snap = state::snapshot(self.session(sid).unwrap(), &self.links, browse_visible);
+        let server_features = self.server_features_json();
+        let snap = state::snapshot(
+            self.session(sid).unwrap(),
+            &self.links,
+            browse_visible,
+            server_features,
+        );
         let resp = protocol::frame(&[
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("REJECT".into())),

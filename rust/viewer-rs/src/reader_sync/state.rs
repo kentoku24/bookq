@@ -132,6 +132,7 @@ pub fn snapshot(
     session: &PairSession,
     links: &HashMap<String, Link>,
     browse_visible: bool,
+    server_features: Value,
 ) -> Value {
     let mut m = Map::new();
     m.insert("sessionId".into(), Value::String(session.id.clone()));
@@ -162,6 +163,29 @@ pub fn snapshot(
         "dataPlane".into(),
         Value::String(session.data_plane.clone()),
     );
+    let mut presence = Map::new();
+    for member in &session.members {
+        let mut p = Map::new();
+        p.insert("role".into(), Value::String(member.role.clone()));
+        p.insert("status".into(), Value::String(member.status.clone()));
+        p.insert("trust".into(), Value::String(member.trust.clone()));
+        p.insert(
+            "features".into(),
+            Value::Array(
+                member
+                    .capabilities
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        p.insert("name".into(), Value::String(member.name.clone()));
+        p.insert("ready".into(), Value::Bool(session.ready.contains(&member.id)));
+        presence.insert(member.id.clone(), Value::Object(p));
+    }
+    m.insert("presence".into(), Value::Object(presence));
+    m.insert("features".into(), server_features);
     if browse_visible && session.selecting {
         // Shared browse is orthogonal to the derived phase (paused masks it),
         // so new-capability clients receive the authoritative boolean. The

@@ -1046,3 +1046,58 @@ def test_mirror_needs_tree_level_scrollable(browser, server):
             "root tile list is not scrollable at 390x460 — fixture changed?"
     finally:
         ctx.close()
+
+
+def test_follower_explicit_close_survives_stale_reject_snapshot(browser, server):
+    """A2 regression: a REJECT snapshot is a complete STATE-shaped snapshot.
+    After the follower receives one, capability detection must not flap off —
+    its explicit close still reaches the wire as endBrowse."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        # Observe the protocol-level REJECT before racing the explicit close.
+        pf.evaluate("""() => {
+          const ws = window.__wsConns[0];
+          const old = ws.onmessage;
+          window.__staleRejectSeen = false;
+          ws.onmessage = (ev) => {
+            try {
+              const f = JSON.parse(ev.data);
+              if (f.type === 'REJECT' && f.reason === 'stale_revision') {
+                window.__staleRejectSeen = true;
+              }
+            } catch (e) {}
+            return old.call(ws, ev);
+          };
+        }""")
+        st = pf.evaluate("() => window.PairController.state")
+        sid = st["sessionId"]
+        pf.evaluate(
+            "([sid, epoch]) => window.__wsConns[0].send(JSON.stringify({"
+            "v:1, requestId:'stale-goto', sessionId:sid, workEpoch:epoch,"
+            "baseRevision:0, type:'GOTO', payload:{page:{folder:'long',name:'p001.png'}}"
+            "}))",
+            [sid, st["workEpoch"]],
+        )
+        pf.wait_for_function("() => window.__staleRejectSeen === true", timeout=10000)
+
+        pf.evaluate("() => window.closeSidebar({explicit: true})")
+        pf.wait_for_function(
+            "() => window.PairController.state.browse === false",
+            timeout=15000)
+        assert any(
+            f.get("type") == "SET_ACTIVITY"
+            and (f.get("payload") or {}).get("endBrowse") is True
+            for f in _sent(pf, {"SET_ACTIVITY"})
+        ), "explicit close after a stale-reject snapshot must still send endBrowse"
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'reading'"
+                " && window.PairController.state.browse === false",
+                timeout=15000)
+    finally:
+        ctx_l.close(); ctx_f.close()

@@ -1190,7 +1190,28 @@
                 "spreadId": "c0:s1",
                 "offset": 0,
                 "leaderSide": "left",
-                "dataPlane": "server-ws"
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": true,
+                    "trust": "member",
+                    "features": []
+                  },
+                  "@L2.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "Bob",
+                    "ready": true,
+                    "trust": "member",
+                    "features": []
+                  }
+                }
               }
             }
           ]
@@ -1238,7 +1259,28 @@
                 "spreadId": "c0:s1",
                 "offset": 0,
                 "leaderSide": "left",
-                "dataPlane": "server-ws"
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": true,
+                    "trust": "member",
+                    "features": []
+                  },
+                  "@L2.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "Bob",
+                    "ready": true,
+                    "trust": "member",
+                    "features": []
+                  }
+                }
               }
             }
           ]
@@ -2490,7 +2532,32 @@
                 "spreadId": null,
                 "offset": 0,
                 "leaderSide": "left",
-                "dataPlane": "server-ws"
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": false,
+                    "trust": "member",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  },
+                  "@G.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "ゲスト",
+                    "ready": false,
+                    "trust": "guest",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  }
+                }
               }
             }
           ]
@@ -2540,7 +2607,32 @@
                 "spreadId": null,
                 "offset": 0,
                 "leaderSide": "left",
-                "dataPlane": "server-ws"
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": false,
+                    "trust": "member",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  },
+                  "@G.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "ゲスト",
+                    "ready": false,
+                    "trust": "guest",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  }
+                }
               }
             }
           ]
@@ -3715,7 +3807,32 @@
                 "spreadId": "c0:s0",
                 "offset": 0,
                 "leaderSide": "left",
-                "dataPlane": "server-ws"
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": true,
+                    "trust": "member",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  },
+                  "@L2.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "Bob",
+                    "ready": true,
+                    "trust": "member",
+                    "features": [
+                      "member-drive-v1"
+                    ]
+                  }
+                }
               }
             }
           ]

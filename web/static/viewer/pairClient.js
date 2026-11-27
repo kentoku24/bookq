@@ -1776,7 +1776,12 @@
         spreadId: snap.spreadId, offset: snap.offset,
         leaderSide: snap.leaderSide,
         browse: snap.browse === true,
-        presence: _lastState ? _lastState.presence : {},
+        presence: (snap.presence && typeof snap.presence === 'object')
+          ? snap.presence
+          : (_lastState ? _lastState.presence : {}),
+        features: Array.isArray(snap.features)
+          ? snap.features
+          : (_lastState ? _lastState.features : undefined),
         dataPlane: snap.dataPlane || 'server-ws',
       };
       _onState(pseudo);
