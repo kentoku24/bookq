@@ -362,12 +362,6 @@ def test_guest_follower_ops_converge(guest_server):
         # non-sequenced relays identical to a normal follower
         guest_ws.send(_req("PING", {"seq": 5}, sid=sid, rid="gp"))
         assert _expect(guest_ws, "PONG")["seq"] == 5
-        guest_ws.send(_req(
-            "UI_SYNC",
-            {"view": "browse", "path": "x", "top": 1,
-             "viewH": 100, "scrollH": 500, "mode": "tile"},
-            sid=sid, rid="gu"))
-        assert _expect(leader_ws, "UI_SYNC")["from"] == "follower"
         guest_ws.send(_req("SIGNAL", {"kind": "offer", "data": {"sdp": "g"}},
                            sid=sid, rid="gsg"))
         sig = _expect(leader_ws, "SIGNAL")
@@ -390,10 +384,41 @@ def test_guest_cannot_leader_ops(guest_server):
         guest_ws.send(_req("OPEN_WORK",
                            {"folder": WORK, "page": FIRST_PAGE},
                            sid=sid, rid="go", epoch=0))
-        assert _expect(guest_ws, "REJECT")["reason"] == "not_leader"
+        assert _expect(guest_ws, "REJECT")["reason"] == "forbidden"
         guest_ws.send(_req("APPROVE", {"memberId": gdata["memberId"]},
                            sid=sid, rid="gap"))
         assert _expect(guest_ws, "REJECT")["reason"] == "not_leader"
+    finally:
+        _close_pair(leader_ws, sid, guest_ws)
+
+
+def test_guest_ui_sync_closed_forbidden_open_relayed(guest_server):
+    """Browse mirror is scope-bound for guests: while the shared browse is
+    closed a guest UI_SYNC is forbidden; after a member opens it, the same
+    frame relays like a normal follower's."""
+    leader_ws, ldata, _token, guest_ws, _gdata, _sa, _sb = _guest_pair(
+        guest_server)
+    sid = ldata["sessionId"]
+    payload = {"view": "browse", "path": "x", "top": 1,
+               "viewH": 100, "scrollH": 500, "mode": "tile"}
+    try:
+        guest_ws.send(_req("UI_SYNC", payload, sid=sid, rid="gu-closed"))
+        rej = _expect(guest_ws, "REJECT")
+        assert rej["reason"] == "forbidden"
+        assert rej["request"] == "UI_SYNC"
+
+        leader_ws.send(_req("SET_ACTIVITY", {"state": "selecting"},
+                            sid=sid, rid="lbrowse"))
+        ack, _ = _drain_until(
+            leader_ws, lambda f: f.get("type") == "ACK"
+            and f.get("requestId") == "lbrowse")
+        assert ack["request"] == "SET_ACTIVITY"
+        _drain_until(
+            guest_ws, lambda f: f.get("type") == "STATE"
+            and f.get("phase") == "selecting")
+
+        guest_ws.send(_req("UI_SYNC", payload, sid=sid, rid="gu-open"))
+        assert _expect(leader_ws, "UI_SYNC")["from"] == "follower"
     finally:
         _close_pair(leader_ws, sid, guest_ws)
 
