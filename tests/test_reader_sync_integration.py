@@ -388,31 +388,43 @@ def test_leader_browse_selecting_cancel_then_change_work(devs):
     assert _pv(pl)["spreadId"] == _pv(pf)["spreadId"]
 
 
-def test_follower_work_change_leaves_pair(devs):
-    """followerの作品変更はLEAVE後の単独操作: the session ends for both and
-    the leader's solo book/position are untouched by the work pick itself."""
+def test_follower_work_change_relays_over_real_datachannel(devs):
+    """member-drive: a follower OPEN_WORK stays in the pair and, once the
+    real browser WebRTC upgrade is up, rides the follower→leader DataChannel.
+    The follower's control WS must not carry the sequenced op; the leader's
+    relayed copy must carry payload.origin='follower'."""
     pl, pf = devs
     _open(pl, "long", "p005.png")
     _open(pf, "series/vol1")
     _pair_now(pl, pf)
     assert _pv(pl)["active"] is True
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.transport === 'webrtc-dc'",
+            timeout=15000)
 
+    f0 = len(_sent(pf, {"OPEN_WORK"}))
+    l0 = len(_sent(pl, {"OPEN_WORK"}))
     pf.evaluate(
         "() => window.ViewerNavigation.request("
         "{type:'openWork', folder:'simple_manga', via:'tile'})")
     for p in (pl, pf):
         p.wait_for_function(
-            "() => window.PairController.state.status === 'ended'",
+            "() => window.currentFolder === 'simple_manga'"
+            " && window.PairController.state.phase === 'reading'"
+            " && window.PairController.state.status === 'connected'",
             timeout=15000)
-        p.wait_for_function(
-            "() => !(window.PairedView && window.PairedView.state"
+        assert p.evaluate(
+            "() => !!(window.PairedView && window.PairedView.state"
             " && window.PairedView.state().active)")
-    # follower's pick became a solo open; leader fell back to its own book.
-    pf.wait_for_function("() => window.currentFolder === 'simple_manga'")
-    assert pf.evaluate("() => window.images.length") == 5
-    pl.wait_for_function("() => window.currentFolder === 'long'")
-    assert pl.evaluate("() => window.images.length") == 30
-    assert pl.evaluate("() => window.images[window.currentIdx].name") == "p005.png"
+
+    follower_wire = _sent(pf, {"OPEN_WORK"})[f0:]
+    leader_wire = _sent(pl, {"OPEN_WORK"})[l0:]
+    assert not follower_wire,         "follower sequenced ops must leave on the DataChannel, not its control WS"
+    relayed = [f for f in leader_wire
+               if (f.get("payload") or {}).get("origin") == "follower"]
+    assert relayed, "leader must relay the follower's DataChannel OPEN_WORK"
+    assert relayed[-1]["payload"]["folder"] == "simple_manga"
 
 
 def _kill_ws(pg):
