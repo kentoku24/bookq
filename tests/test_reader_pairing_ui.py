@@ -360,11 +360,11 @@ def test_swap_sides_operable_from_both_roles(page, server):
 def test_work_change_hidden_for_follower(page, server):
     _with_mock(page)
     _open_ui(page)
-    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws'}")
+    _emit(page, "{status:'connected', role:'leader', side:'right', transport:'server-ws', canDrive:true}")
     cw = page.locator("#pair-change-work")
     expect(cw).to_be_visible()
     assert cw.is_enabled()
-    _emit(page, "{status:'connected', role:'follower', side:'left', transport:'server-ws'}")
+    _emit(page, "{status:'connected', role:'follower', side:'left', transport:'server-ws', canDrive:false}")
     # hidden or disabled are both acceptable per spec; ours hides it
     assert (
         not page.locator("#pair-change-work").is_visible()
