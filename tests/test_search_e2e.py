@@ -114,6 +114,72 @@ def test_reload_keeps_active_sort_query(page):
         page.unroute("**/api/v1/**")
 
 
+def test_reload_keeps_query_at_deep_level(page):
+    """⋯再読み込み while searching DEEPER than root's direct children:
+    the shallow depth=1 tree can't resolve the current path, so the reload
+    must not flash the root listing — the query and sorted order survive
+    until the full tree re-applies the same level."""
+    # Wait out the initial shallow window — the fix only skips the reload's
+    # shallow stage once a full tree is already displayed (treeLoaded).
+    page.wait_for_function("window.treeLoaded === true")
+    # group/episodes is depth-2 — invisible to the depth=1 shallow tree.
+    page.locator('.tile[data-path="group"]').click()
+    page.wait_for_selector('.tile[data-path="group/episodes"]')
+    page.locator('.tile[data-path="group/episodes"]').click()
+    page.wait_for_selector('.tile[data-path="group/episodes/ch-1"]')
+
+    page.locator("#search-input").fill("ch-1")
+    page.wait_for_timeout(500)
+
+    # Natural tree order is ch-1, ch-2, ch-10, ch-11 — the query must yield
+    # a DIFFERENT order (ch-1 exact > ch-10/ch-11 prefix > ch-2) or the
+    # assertion can't distinguish sorting from the untouched listing.
+    want_order = [
+        "group/episodes/ch-1",
+        "group/episodes/ch-10",
+        "group/episodes/ch-11",
+        "group/episodes/ch-2",
+    ]
+
+    def _assert_sorted():
+        tiles = page.locator("#tile-grid .tile")
+        assert tiles.count() == 4, "sort keeps every child — no filtering"
+        assert [t.get_attribute("data-path") for t in tiles.all()] == want_order
+
+    _assert_sorted()
+
+    # Prove the reload's full-tree stage actually completed instead of
+    # sleeping fixed time: __cc_fullTreeApplied bumps only after a full
+    # (non-shallow) tree is applied, so this waits through the index/refresh
+    # 202 → backoff-retry window on every adapter — SafariPage has no
+    # network events (page.on("response") raises SafariUnsupported → skip).
+    applied_before = page.evaluate("() => window.__cc_fullTreeApplied || 0")
+    # The guard must skip the depth=1 FETCH itself, not just its apply —
+    # DOM asserts alone can't see a wasted request that never lands. Resource
+    # timing (same buffer test_perf_budget.py uses) is evaluate-based so it
+    # works on the Safari adapter; startTime filtering survives buffer
+    # eviction and excludes the initial load's own depth=1 entry.
+    page.evaluate("window.__rtT0 = performance.now()")
+    open_header_menu(page)
+    page.locator("#menu-reload").click()
+    page.wait_for_function(
+        f"window.__cc_fullTreeApplied > {applied_before}", timeout=20000
+    )
+    tree_urls = page.evaluate(
+        "() => performance.getEntriesByType('resource')"
+        ".filter(e => e.startTime >= window.__rtT0)"
+        ".map(e => e.name).filter(u => u.includes('/api/v1/tree'))"
+    )
+    assert tree_urls, "reload did not fetch /api/v1/tree at all"
+    assert not any("depth=" in u for u in tree_urls), (
+        "preservePath reload must skip the depth=1 shallow fetch"
+    )
+    page.wait_for_timeout(300)  # render settle
+
+    assert page.locator("#search-input").input_value() == "ch-1"
+    _assert_sorted()
+
+
 # ── filter bottom sheet ─────────────────────────────────────────────────────────
 
 

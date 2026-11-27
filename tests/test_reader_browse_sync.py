@@ -620,6 +620,14 @@ def test_shell_watchdog_marks_healthy_and_stale(browser, server):
             "        const r = window.__shellStale();"
             "        window.BOOKQ_UI_SYNC_V2 = b; return r; }"
         ) is True
+        # 新 app.js はローカル検索 (matchSort) 前提 — 旧 app.js が SWR で
+        # 残ると SearchFacets.doSearch 不在で検索が死ぬので検出対象。
+        assert pg.evaluate(
+            "() => { const b = window.BOOKQ_LOCAL_SEARCH;"
+            "        window.BOOKQ_LOCAL_SEARCH = false;"
+            "        const r = window.__shellStale();"
+            "        window.BOOKQ_LOCAL_SEARCH = b; return r; }"
+        ) is True
         # spread.js is SWR like the rest of the shell — a stale copy under
         # new app.js lacks padChapterSpacers and loadImages would throw on
         # any cross-chapter open (#441 review).
