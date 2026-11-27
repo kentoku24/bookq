@@ -4,7 +4,8 @@
 本書は**振る舞い**（ライフサイクル・逐次化・並行性制御・拒否理由）を定義する。
 iOS ネイティブが web クライアントと相互運用するために必要な契約はこの2つで完結する。
 
-実装根拠: `rust/viewer-rs/src/reader_sync/{protocol,mod,state,transport}.rs`（拒否理由文字列・フェーズ・
+実装根拠: `rust/viewer-rs/src/reader_sync/{protocol,mod,state,catalog,model}.rs` と
+WS bind/drain の `rust/viewer-rs/src/main.rs`（拒否理由文字列・フェーズ・
 列挙値はワイヤ安定 = 変更すると新旧クライアント混在で壊れる）。
 
 ---
