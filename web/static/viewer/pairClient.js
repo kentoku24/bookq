@@ -516,6 +516,9 @@
         transport: _effPlane(),
         phase: _lastState ? _lastState.phase : null,
         browse: !!(_lastState && _lastState.browse === true),
+        browseOpener: _lastState ? _lastState.browseOpener || null : null,
+        browseOpenerRole: _lastState ? _lastState.browseOpenerRole || null : null,
+        browseGeneration: _lastState ? _lastState.browseGeneration || 0 : 0,
         spreadId: _lastState ? _lastState.spreadId : null,
         revision: _seen.rev < 0 ? 0 : _seen.rev,
         workEpoch: _seen.epoch < 0 ? 0 : _seen.epoch,
@@ -1776,6 +1779,9 @@
         spreadId: snap.spreadId, offset: snap.offset,
         leaderSide: snap.leaderSide,
         browse: snap.browse === true,
+        browseOpener: snap.browseOpener || null,
+        browseOpenerRole: snap.browseOpenerRole || null,
+        browseGeneration: snap.browseGeneration || 0,
         presence: (snap.presence && typeof snap.presence === 'object')
           ? snap.presence
           : (_lastState ? _lastState.presence : {}),

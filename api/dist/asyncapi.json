@@ -946,6 +946,23 @@
             "description": "shared browse が開いている時だけ true を送る session スコープの状態。\npaused が selecting を mask するため phase だけでは判別できない。\nmember-drive capability intersection が成立する pair でのみ意味を持ち、\n省略/false は closed。混在 pair の wire 互換のため true-only encoding。\n",
             "type": "boolean"
           },
+          "browseGeneration": {
+            "description": "closed→open 毎に increment する additive generation。browse:true の時だけ送る",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "browseOpener": {
+            "description": "shared browse open 時のみ付く additive metadata: server serialization で最初に open を受理した member id",
+            "type": "string"
+          },
+          "browseOpenerRole": {
+            "description": "browseOpener の現在 role。同時 open の deterministic tie-break 用 additive metadata",
+            "enum": [
+              "leader",
+              "follower"
+            ],
+            "type": "string"
+          },
           "features": {
             "$ref": "#/components/schemas/FeatureList"
           },

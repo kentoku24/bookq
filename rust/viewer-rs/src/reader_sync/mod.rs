@@ -541,6 +541,11 @@ pub struct PairSession {
     /// loads are stale by definition and must be rejected.
     pub committed_load_auto: Option<bool>,
     pub selecting: bool,
+    /// First opener of the current shared-browse generation. Simultaneous
+    /// opens are serialized by the server; only a closed-to-open transition may
+    /// set this, so duplicate opens never overwrite the winner.
+    pub browse_opener_id: Option<String>,
+    pub browse_generation: i64,
     pub apply_seq: i64,
     pub apply_log: Vec<Value>,
 }
@@ -579,6 +584,8 @@ impl PairSession {
             pending_load: None,
             committed_load_auto: None,
             selecting: false,
+            browse_opener_id: None,
+            browse_generation: 0,
             apply_seq: 0,
             apply_log: Vec::new(),
         })
@@ -1867,6 +1874,7 @@ impl Inner {
             if let Some(s) = self.session_mut(&sid) {
                 if s.selecting {
                     s.selecting = false;
+                    s.browse_opener_id = None;
                     tracing::info!(
                         "reader-sync session={} shared browse closed on capability downgrade",
                         sid
@@ -1955,8 +1963,13 @@ impl Inner {
                 return;
             }
             if let Some(s) = self.session_mut(sid) {
-                // A concurrent duplicate open is deliberately idempotent:
-                // the flag is boolean, not per-member ownership.
+                // Simultaneous opens are ordered by server serialization. The
+                // first closed→open transition owns the generation; duplicate
+                // opens remain idempotent and must not overwrite the winner.
+                if !s.selecting {
+                    s.browse_generation += 1;
+                    s.browse_opener_id = Some(mid.to_string());
+                }
                 s.selecting = true;
             }
         } else {
@@ -1987,6 +2000,7 @@ impl Inner {
                 if end_browse {
                     if let Some(s) = self.session_mut(sid) {
                         s.selecting = false;
+                        s.browse_opener_id = None;
                     }
                 }
             } else if is_leader {
@@ -1995,6 +2009,7 @@ impl Inner {
                 // flag. (Capability-unaware clients depend on this close.)
                 if let Some(s) = self.session_mut(sid) {
                     s.selecting = false;
+                    s.browse_opener_id = None;
                 }
             }
         }
@@ -2884,8 +2899,25 @@ impl Inner {
             // phase alone cannot represent a still-open shared browse. In
             // member-drive semantics expose the orthogonal boolean; the
             // true-only encoding keeps legacy/mixed-pair frames unchanged.
+            // Opener metadata is additive alongside `browse:true` — the wire
+            // boolean itself remains the legacy-compatible encoding.
             if let Value::Object(ref mut obj) = frame {
                 obj.insert("browse".into(), Value::Bool(true));
+                obj.insert(
+                    "browseGeneration".into(),
+                    Value::from(s.browse_generation),
+                );
+                if let Some(opener) = &s.browse_opener_id {
+                    obj.insert("browseOpener".into(), Value::String(opener.clone()));
+                    if let Some(role) = s
+                        .members
+                        .iter()
+                        .find(|m| &m.id == opener)
+                        .map(|m| m.role.clone())
+                    {
+                        obj.insert("browseOpenerRole".into(), Value::String(role));
+                    }
+                }
             }
         }
         Some(frame)

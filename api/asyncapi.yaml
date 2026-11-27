@@ -471,6 +471,17 @@ components:
             paused が selecting を mask するため phase だけでは判別できない。
             member-drive capability intersection が成立する pair でのみ意味を持ち、
             省略/false は closed。混在 pair の wire 互換のため true-only encoding。
+        browseOpener:
+          type: string
+          description: "shared browse open 時のみ付く additive metadata: server serialization で最初に open を受理した member id"
+        browseOpenerRole:
+          type: string
+          enum: [leader, follower]
+          description: "browseOpener の現在 role。同時 open の deterministic tie-break 用 additive metadata"
+        browseGeneration:
+          type: integer
+          minimum: 0
+          description: "closed→open 毎に increment する additive generation。browse:true の時だけ送る"
         presence:
           type: object
           description: "member id → {role, status, trust: member|guest, features: string[], name, ready}"

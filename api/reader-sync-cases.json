@@ -2799,7 +2799,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 1,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             }
           ]
         },
@@ -2943,7 +2946,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 2,
+              "browseOpener": "@L1.member",
+              "browseOpenerRole": "leader"
             }
           ]
         },
@@ -3102,7 +3108,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 3,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             },
             {
               "v": 1,
@@ -3141,7 +3150,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 3,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             }
           ]
         },
@@ -3186,7 +3198,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 3,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             },
             {
               "v": 1,
@@ -3233,7 +3248,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 3,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             }
           ]
         },
@@ -3301,7 +3319,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 3,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             }
           ]
         },
@@ -3373,7 +3394,10 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browseGeneration": 3,
+              "browseOpener": "@L2.member",
+              "browseOpenerRole": "follower"
             }
           ]
         },

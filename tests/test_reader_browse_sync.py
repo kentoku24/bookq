@@ -1101,3 +1101,41 @@ def test_follower_explicit_close_survives_stale_reject_snapshot(browser, server)
                 timeout=15000)
     finally:
         ctx_l.close(); ctx_f.close()
+
+
+def test_simultaneous_member_opens_use_server_serialized_opener(browser, server):
+    """A5 contract: both members may open on different local paths at once;
+    the first SET_ACTIVITY serialized by the server owns the browse generation
+    and its path seeds the shared mirror."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+
+        pl.evaluate("() => { window.currentBrowsePath = 'group'; window.openSidebar(); }")
+        pf.evaluate("() => { window.currentBrowsePath = 'series'; window.openSidebar(); }")
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'selecting'"
+                " && window.PairController.state.browse === true"
+                " && !!window.PairController.state.browseOpener",
+                timeout=15000)
+
+        sl = pl.evaluate("() => window.PairController.state")
+        sf = pf.evaluate("() => window.PairController.state")
+        assert sl["browseOpener"] == sf["browseOpener"]
+        assert sl["browseGeneration"] == sf["browseGeneration"] >= 1
+        opener_page, winner_path = (
+            (pl, "group") if sl["browseOpener"] == sl["memberId"] else (pf, "series")
+        )
+        loser_page = pf if opener_page is pl else pl
+        assert _ui_syncs(opener_page), "server-elected opener must seed the mirror"
+
+        expected = winner_path
+        for p in (pl, pf):
+            p.wait_for_function(
+                "(path) => window.currentBrowsePath === path",
+                arg=expected, timeout=15000)
+        assert _browse_path(loser_page) == expected
+    finally:
+        ctx_l.close(); ctx_f.close()

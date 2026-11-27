@@ -190,7 +190,23 @@ pub fn snapshot(
         // Shared browse is orthogonal to the derived phase (paused masks it),
         // so new-capability clients receive the authoritative boolean. The
         // field is true-only on the wire: absence remains the legacy false.
+        // Opener/generation metadata is additive next to that boolean.
         m.insert("browse".into(), Value::Bool(true));
+        m.insert(
+            "browseGeneration".into(),
+            Value::from(session.browse_generation),
+        );
+        if let Some(opener) = &session.browse_opener_id {
+            m.insert("browseOpener".into(), Value::String(opener.clone()));
+            if let Some(role) = session
+                .members
+                .iter()
+                .find(|member| &member.id == opener)
+                .map(|member| member.role.clone())
+            {
+                m.insert("browseOpenerRole".into(), Value::String(role));
+            }
+        }
     }
     Value::Object(m)
 }

@@ -96,6 +96,7 @@
   var _pointerActive = false;
   var _lastLocalMove = -1e9;
   var _lastLocalIntent = -1e9;
+  var _browseOpenerId = null; // server-serialized first opener for this arm
   var _sndHist = [];
   var _trace = null;
 
@@ -188,12 +189,18 @@
       // 永久に開かない。TTL 切れの stash は捨てる。
       var pm = _takePending();
       if (pm) _applyRemote(pm.msg, pm.at);
-      // The browse opener is the sending seed. Legacy pairs are fixed-role
-      // (leader opens, follower waits); member-drive pairs are role-independent
-      // — whichever end already has the shared list open owns the first frame,
-      // and the other end unlocks after applying it.
+      // The server-serialized first opener is the sending seed. Legacy pairs
+      // are fixed-role (leader opens, follower waits); member-drive pairs use
+      // the additive opener memberId rather than local DOM inference, so two
+      // simultaneous opens converge on one first frame instead of both ends
+      // seeding competing paths. Older member-drive servers predate the
+      // additive field; there the previous local-open inference is only a
+      // compatibility fallback.
+      _browseOpenerId = st.browseOpener || null;
       var initiator = st.memberDrive === true
-        ? (_sidebarOpen() && st.browse === true)
+        ? (_browseOpenerId
+            ? _browseOpenerId === st.memberId
+            : (_sidebarOpen() && st.browse === true))
         : st.role === 'leader';
       if (initiator) {
         _unlocked = true;
@@ -215,6 +222,7 @@
       _releaseInput();
       _lastLocalMove = -1e9;
       _lastLocalIntent = -1e9;
+      _browseOpenerId = null;
       if (_trailT) { clearTimeout(_trailT); _trailT = null; }
       // 自分が開いたミラー用サイドバーだけ畳む — role を見ると 'ended' で
       // null 化した後に leader の手動 sidebar まで畳んでしまう。
