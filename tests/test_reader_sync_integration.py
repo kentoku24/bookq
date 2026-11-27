@@ -363,7 +363,7 @@ def test_leader_browse_selecting_cancel_then_change_work(devs):
             timeout=15000)
 
     # Cancel: closing the sidebar returns the leader to the shared spread.
-    pl.evaluate("() => window.closeSidebar()")
+    pl.evaluate("() => window.closeSidebar({explicit: true})")
     for p in (pl, pf):
         p.wait_for_function(
             "() => window.PairController.state.phase === 'reading'",

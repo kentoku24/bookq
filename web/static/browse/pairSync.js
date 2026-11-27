@@ -177,9 +177,14 @@
       // 永久に開かない。TTL 切れの stash は捨てる。
       var pm = _takePending();
       if (pm) _applyRemote(pm.msg, pm.at);
-      // leader は開いている側 — すぐ共有を始める。follower は remote を待つ
-      // （まだ stale 位置を送ると leader を巻き込む）。
-      if (st.role === 'leader') {
+      // The browse opener is the sending seed. Legacy pairs are fixed-role
+      // (leader opens, follower waits); member-drive pairs are role-independent
+      // — whichever end already has the shared list open owns the first frame,
+      // and the other end unlocks after applying it.
+      var initiator = st.memberDrive === true
+        ? (_sidebarOpen() && st.browse === true)
+        : st.role === 'leader';
+      if (initiator) {
         _unlocked = true;
         _lastSentSig = null;
         _requestSend();
@@ -640,7 +645,10 @@
   }
 
   function _ensureSidebarOpen() {
-    if (_userClosed || _role() === 'leader' || _sidebarOpen()) return;
+    var st = _pc() && _pc().state;
+    var fixedRoles = !(st && st.memberDrive === true);
+    if (_userClosed || (fixedRoles && _role() === 'leader') ||
+        _sidebarOpen()) return;
     try {
       // 正規の open 経路（app.js toggleSidebar と同じ visual open）を共有 —
       // 手書き class 付与だと tile-full 等のレイアウトが欠けて scrollHeight
@@ -746,7 +754,7 @@
                       top: msg.top, viewH: msg.viewH, scrollH: msg.scrollH};
     // 未解禁 follower の初回 frame はローカル操作中でも適用する — 捨てると
     // _unlocked が立たず、leader が動くまで自分の操作も共有されない。
-    var firstApply = _role() === 'follower' && !_unlocked;
+    var firstApply = !_unlocked;
     if (navNeeded || modeNeeded) {
       _applyImmediate(sc, target, ctx);
     } else if (!firstApply && ctx.mode === 'tile' && _sidebarOpen() &&
@@ -762,7 +770,7 @@
       _suppressUntil = Date.now() + SUPPRESS_MS;
       _followSample(target, predT);
     }
-    if (_role() === 'follower' && !_unlocked) _unlocked = true;
+    if (!_unlocked) _unlocked = true;
   }
 
   /* tile-grid の childList 変化 = renderView 系の全再描画（潜り/戻る/

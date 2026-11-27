@@ -275,7 +275,7 @@ def test_leader_close_disarms_and_follower_returns_to_reader(browser, server):
         _start_browse(pl, pf)
         _wait_follower_offset(pl, pf)
 
-        pl.evaluate("() => window.closeSidebar()")
+        pl.evaluate("() => window.closeSidebar({explicit: true})")
         for p in (pl, pf):
             p.wait_for_function(
                 "() => window.PairController.state.phase === 'reading'",
@@ -287,6 +287,116 @@ def test_leader_close_disarms_and_follower_returns_to_reader(browser, server):
         # the shared spread is back in front on both devices
         assert _pv(pl)["active"] is True and _pv(pf)["active"] is True
         assert _pv(pl)["spreadId"] == _pv(pf)["spreadId"]
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_follower_browse_open_seeds_mirror_to_leader(browser, server):
+    """member-drive: the follower can be the browse opener — the leader's
+    list mirrors open even though the fixed legacy seed was leader-only."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+
+        pf.keyboard.press("f")
+        pf.wait_for_function(
+            "() => document.getElementById('sidebar').classList.contains('open')",
+            timeout=10000)
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'selecting'"
+                " && window.PairController.state.browse === true",
+                timeout=15000)
+        pl.wait_for_function(
+            "() => document.getElementById('sidebar').classList.contains('open')",
+            timeout=10000)
+        assert _ui_syncs(pf), "follower opener must seed the first mirror frame"
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_follower_change_work_survives_state_echo(browser, server):
+    """Regression: the selecting echo for the follower's own 作品変更 is a
+    same-display no-op and must not rebuild the reader over the open list."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+
+        assert pf.evaluate("() => window.PairController.changeWork()") is True
+        pf.wait_for_function(
+            "() => document.getElementById('sidebar').classList.contains('open')",
+            timeout=10000)
+        pf.wait_for_function(
+            "() => window.PairController.state.phase === 'selecting'"
+            " && window.PairController.state.browse === true",
+            timeout=15000)
+        pf.wait_for_timeout(500)   # let the echo/apply microtasks land
+        assert _sidebar_open(pf)
+        assert pf.locator("#tile-grid .tile").count() > 0
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_follower_close_ends_shared_browse_on_both_sides(browser, server):
+    """Either member can close the single shared browse: the follower's
+    explicit close also closes the leader opener's list and restores reading."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        pf.evaluate("() => window.closeSidebar({explicit: true})")
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'reading'"
+                " && window.PairController.state.browse === false",
+                timeout=15000)
+            p.wait_for_function(
+                "() => !document.getElementById('sidebar')"
+                ".classList.contains('open')",
+                timeout=10000)
+        assert _pv(pl)["active"] is True and _pv(pf)["active"] is True
+    finally:
+        ctx_l.close(); ctx_f.close()
+
+
+def test_explicit_close_while_peer_suspended_still_ends_browse(browser, server):
+    """paused masks selecting in the derived phase, but the orthogonal browse
+    flag still lets the active member end shared browse while the peer is away."""
+    ctx_l, pl, ctx_f, pf = _devs_diff_heights(browser, server)
+    try:
+        _open(pl, "long", "p005.png")
+        _pair_now(pl, pf)
+        _start_browse(pl, pf)
+        _wait_follower_offset(pl, pf)
+
+        pf.evaluate("() => window.PairController.client.setActivity('suspended')")
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'paused'"
+                " && window.PairController.state.browse === true",
+                timeout=15000)
+
+        pl.evaluate("() => window.closeSidebar({explicit: true})")
+        pl.wait_for_function(
+            "() => window.PairController.state.browse === false",
+            timeout=15000)
+        assert any(
+            f.get("type") == "SET_ACTIVITY"
+            and (f.get("payload") or {}).get("endBrowse") is True
+            for f in _sent(pl, {"SET_ACTIVITY"})
+        ), "explicit close must reach the wire even while phase=paused"
+
+        pf.evaluate("() => window.PairController.client.setActivity('active')")
+        for p in (pl, pf):
+            p.wait_for_function(
+                "() => window.PairController.state.phase === 'reading'"
+                " && window.PairController.state.browse === false",
+                timeout=15000)
     finally:
         ctx_l.close(); ctx_f.close()
 

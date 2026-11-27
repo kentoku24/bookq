@@ -35,6 +35,7 @@
   var _sideOpen = null;      // last observed .open state
   var _openWorkSent = false; // leader bootstrap OPEN_WORK already dispatched
   var _selIssued = false;    // a SET_ACTIVITY selecting is outstanding
+  var _wireBrowse = null;    // last authoritative shared-browse bool (member-drive)
   var _sawJoinReq = false;   // joinRequest edge — auto-approve (#114)
   var _heldCommit = null;    // newest suppressed commit while leader browses
   var _pendingCommit = null; // newest commit held while visibility is pending
@@ -136,12 +137,15 @@
     }
     _lastApply = {snap: snap, manifest: manifest, o: o};
     var leader = !!(o && o.role === 'leader');
-    if (leader && _sidebarOpen() && _displayKey(snap) === _appliedKey) {
-      // Leader is browsing the shared-work list: an echo that changes
+    var stNow = _client ? _client.state : null;
+    var sharedDrive = !!(stNow && stNow.memberDrive === true);
+    if ((leader || sharedDrive) && _sidebarOpen() &&
+        _displayKey(snap) === _appliedKey) {
+      // A member is browsing the shared-work list: an echo that changes
       // nothing on screen must not rip the grid away — hold it; the
       // newest held commit replays on close. This has to key on display
       // state, not phase: a dead member pins the derived phase at
-      // 'paused' even while the leader selects, so a peer-away STATE
+      // 'paused' even while the member selects, so a peer-away STATE
       // would otherwise apply, re-enter the torn-down pair strip and
       // slam the sidebar shut. Real display moves (work pick, remote
       // turn) still apply immediately and close the list.
@@ -169,15 +173,29 @@
       if (!_memberBound(st) || !_paired(st)) return;
       if (open) {
         var mayOpen = st.role === 'leader' || st.canDrive === true;
-        if (mayOpen && !_selIssued && st.phase !== 'selecting') {
-          _selIssued = true;
-          _client.setActivity('selecting');
+        var wireOpen = st.memberDrive === true
+          ? st.browse === true
+          : st.phase === 'selecting';
+        var precommit = st.phase === 'selecting' && !st.spreadId;
+        if (mayOpen && !_selIssued && !wireOpen && !precommit) {
+          // Only a real wire send counts as outstanding — a socket-drop
+          // local look must not make a later close emit endBrowse. The
+          // pre-pair launcher is not shared browse either: before the first
+          // committed work the derived phase is already selecting, and both
+          // tabs can still have their local folder list open.
+          _selIssued = _client.setActivity('selecting') === true;
         }
         return;
       }
-      // Close: re-arm the shared display first, then resume the session —
-      // covers cancel-after-browse on the leader and any member whose local
-      // browse tore the paired strip down without a commit landing.
+      // Close: capture the user's close intent BEFORE re-arming the shared
+      // display. enterPairStrip() programmatically calls closeSidebar()
+      // while restoring the reader; reading the marker only after that
+      // replay would overwrite an explicit cancel with explicit:false.
+      var closeIntent = window.__bookqSidebarCloseIntent;
+      var explicitClose = !!(closeIntent && closeIntent.explicit);
+      // Re-arm the shared display first, then resume the session — covers
+      // cancel-after-browse on the leader and any member whose local browse
+      // tore the paired strip down without a commit landing.
       var pv = _PV();
       if (_heldCommit) {
         var c = _heldCommit;
@@ -194,14 +212,12 @@
           _appliedKey = _displayKey(d.snap);
         } catch (e2) { /* idem */ }
       }
-      var closeIntent = window.__bookqSidebarCloseIntent;
-      var explicitClose = !!(closeIntent && closeIntent.explicit);
       if (st.memberDrive === true) {
         // New close semantics: active/suspended alone never end shared
         // browse. Only an explicit local close gesture carries endBrowse;
         // programmatic closes (mirror disarm, work pick, navigation) do not.
         if (explicitClose && st.canDrive === true &&
-            (_selIssued || st.phase === 'selecting')) {
+            (_selIssued || st.browse === true)) {
           _selIssued = false;
           _client.setActivity('active', {endBrowse: true});
         } else {
@@ -441,6 +457,7 @@
     _uninstallNav();
     _openWorkSent = false;
     _selIssued = false;
+    _wireBrowse = null;
     _heldCommit = null;
     _pendingCommit = null;
     _lastApply = null;
@@ -455,7 +472,25 @@
   }
 
   function _onClientState(st) {
-    if (st && st.phase !== 'selecting') _selIssued = false;
+    if (st && st.memberDrive === true) {
+      // Track the authoritative shared-browse boolean independently of the
+      // derived phase. A true→false edge is an explicit end/commit, not a
+      // suspend: close even the opener's manually opened list so the held
+      // commit can restore the reader. The closeSidebar call is deliberately
+      // programmatic (no explicit marker), so it cannot echo endBrowse.
+      var browseNow = st.browse === true;
+      if (_wireBrowse === true && !browseNow) {
+        _selIssued = false;
+        if (_sidebarOpen() && typeof window.closeSidebar === 'function') {
+          try { window.closeSidebar(); } catch (e) { /* best-effort */ }
+        }
+      }
+      _wireBrowse = browseNow;
+    } else {
+      _wireBrowse = null;
+      // Legacy mixed-pair fallback keeps the old phase-derived meaning.
+      if (st && st.phase !== 'selecting') _selIssued = false;
+    }
     // Auto-approve (#114): a JOIN reaching the leader is answered at once —
     // there is no manual approve step in the UI. Edge-triggered so a pending
     // request yields exactly one APPROVE; client.approve() is idempotent for
@@ -479,6 +514,7 @@
       _heldCommit = null;
       _pendingCommit = null;
       _appliedKey = null;
+      _wireBrowse = null;
     }
     if (bound) _maybeBootstrapWork(st);
     _notify();
