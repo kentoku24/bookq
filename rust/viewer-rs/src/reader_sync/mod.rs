@@ -540,7 +540,7 @@ pub struct PairSession {
     /// deliberate (non-auto) load has committed, later automatic bootstrap
     /// loads are stale by definition and must be rejected.
     pub committed_load_auto: Option<bool>,
-    pub selecting: bool,
+    pub browse_open: bool,
     /// First opener of the current shared-browse generation. Simultaneous
     /// opens are serialized by the server; only a closed-to-open transition may
     /// set this, so duplicate opens never overwrite the winner.
@@ -583,7 +583,7 @@ impl PairSession {
             load_seq: 0,
             pending_load: None,
             committed_load_auto: None,
-            selecting: false,
+            browse_open: false,
             browse_opener_id: None,
             browse_generation: 0,
             apply_seq: 0,
@@ -1872,8 +1872,8 @@ impl Inner {
             .is_some_and(|s| self.member_drive_intersection(s));
         if intersected_before && !intersected_after {
             if let Some(s) = self.session_mut(&sid) {
-                if s.selecting {
-                    s.selecting = false;
+                if s.browse_open {
+                    s.browse_open = false;
                     s.browse_opener_id = None;
                     tracing::info!(
                         "reader-sync session={} shared browse closed on capability downgrade",
@@ -1966,11 +1966,11 @@ impl Inner {
                 // Simultaneous opens are ordered by server serialization. The
                 // first closed→open transition owns the generation; duplicate
                 // opens remain idempotent and must not overwrite the winner.
-                if !s.selecting {
+                if !s.browse_open {
                     s.browse_generation += 1;
                     s.browse_opener_id = Some(mid.to_string());
                 }
-                s.selecting = true;
+                s.browse_open = true;
             }
         } else {
             // Validate the close authority before mutating activity: a
@@ -1999,7 +1999,7 @@ impl Inner {
                 // member may send it. Suspend/visibility restoration never do.
                 if end_browse {
                     if let Some(s) = self.session_mut(sid) {
-                        s.selecting = false;
+                        s.browse_open = false;
                         s.browse_opener_id = None;
                     }
                 }
@@ -2008,7 +2008,7 @@ impl Inner {
                 // leader leaving the selecting activity clears the browse
                 // flag. (Capability-unaware clients depend on this close.)
                 if let Some(s) = self.session_mut(sid) {
-                    s.selecting = false;
+                    s.browse_open = false;
                     s.browse_opener_id = None;
                 }
             }
@@ -2088,7 +2088,7 @@ impl Inner {
         // opened it through SET_ACTIVITY. The initial pre-commit phase is
         // `selecting` without the shared browse flag being open, so the
         // boolean (not the derived phase) is the authority here.
-        let starting_closed_browse = !self.session(sid).is_some_and(|s| s.selecting);
+        let starting_closed_browse = !self.session(sid).is_some_and(|s| s.browse_open);
         if starting_closed_browse {
             self.reject(
                 link_id,
@@ -2748,7 +2748,7 @@ impl Inner {
             s.dedup_seen_order.clear();
             // A successful OPEN_WORK commit is the authoritative end of the
             // shared browse regardless of which member opened it.
-            s.selecting = false;
+            s.browse_open = false;
             s.committed_load_auto = Some(job.auto);
             s.apply_seq += 1;
         }
@@ -2890,7 +2890,7 @@ impl Inner {
             ("dataPlane", Value::String(s.data_plane.clone())),
             ("features", server_features),
         ]);
-        if browse_visible && s.selecting {
+        if browse_visible && s.browse_open {
             // `paused` outranks selecting in the derived phase, so the
             // phase alone cannot represent a still-open shared browse. In
             // member-drive semantics expose the orthogonal boolean; the
@@ -3922,7 +3922,7 @@ mod tests {
         }
         assert_eq!(rej["type"], "REJECT");
         assert_eq!(rej["reason"], REASON_NOT_LEADER);
-        assert!(!inner.session(&sid).unwrap().selecting);
+        assert!(!inner.session(&sid).unwrap().browse_open);
         // Leader opens; follower close is inert; leader non-selecting activity closes.
         inner.dispatch(
             &reg,
@@ -3934,7 +3934,7 @@ mod tests {
                 "leader-open",
             ),
         );
-        assert!(inner.session(&sid).unwrap().selecting);
+        assert!(inner.session(&sid).unwrap().browse_open);
         inner.dispatch(
             &reg,
             &l2,
@@ -3948,7 +3948,7 @@ mod tests {
                 "follower-close",
             ),
         );
-        assert!(inner.session(&sid).unwrap().selecting);
+        assert!(inner.session(&sid).unwrap().browse_open);
         inner.dispatch(
             &reg,
             &l1,
@@ -3959,7 +3959,7 @@ mod tests {
                 "leader-close",
             ),
         );
-        assert!(!inner.session(&sid).unwrap().selecting);
+        assert!(!inner.session(&sid).unwrap().browse_open);
     }
 
     #[tokio::test]
@@ -3984,7 +3984,7 @@ mod tests {
                 "downgrade-open",
             ),
         );
-        assert!(inner.session(&sid).unwrap().selecting);
+        assert!(inner.session(&sid).unwrap().browse_open);
 
         let token = inner
             .session(&sid)
@@ -4012,7 +4012,7 @@ mod tests {
         assert_eq!(ack["type"], "ACK");
         let state = next_json(&mut r3);
         assert_eq!(state["type"], "STATE");
-        assert!(!inner.session(&sid).unwrap().selecting);
+        assert!(!inner.session(&sid).unwrap().browse_open);
         assert!(state.get("browse").is_none(),
             "capability loss closes shared browse before the RESUME STATE: {state:?}");
         assert_eq!(state["presence"][mid2]["features"], Value::Array(vec![]));

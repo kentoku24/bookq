@@ -118,7 +118,7 @@ pub fn derive_phase(session: &PairSession, links: &HashMap<String, Link>) -> &'s
     if session.pending_load.is_some() {
         return "loading";
     }
-    if session.selecting || session.manifest.is_none() {
+    if session.browse_open || session.manifest.is_none() {
         return "selecting";
     }
     if !all_ready(session) {
@@ -186,7 +186,7 @@ pub fn snapshot(
     }
     m.insert("presence".into(), Value::Object(presence));
     m.insert("features".into(), server_features);
-    if browse_visible && session.selecting {
+    if browse_visible && session.browse_open {
         // Shared browse is orthogonal to the derived phase (paused masks it),
         // so new-capability clients receive the authoritative boolean. The
         // field is true-only on the wire: absence remains the legacy false.
