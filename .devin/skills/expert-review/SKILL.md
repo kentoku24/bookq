@@ -71,6 +71,7 @@ shasum -a 256 "$TARGET_FIXED_PATH"
 
 - inline にする場合は**全文**を各 prompt に入れる。抜粋だけを渡さない。
 - 固定 path にする場合は review/round ごとに `mktemp -d` で一意な directory を作り、生成済みの exact absolute path を全 subagent に渡す。`/tmp/review-target.md` のような固定名は並行レビューで上書きされるため使わない。レビュー中にファイルを更新しない。
+- 固定 path を使った場合、round の全 subagent 完了と orchestrator verification / synthesis 終了後に `rm "$TARGET_FIXED_PATH" && rmdir "$REVIEW_DIR"` でその round の copy だけを削除する。reviewer 起動前や synthesis 前に消さない。Round 2 では cleanup 済みかどうかに関わらず新しい `REVIEW_DIR` を作る。
 - `VERIFY_REF` は moving ref 名だけでなく SHA を記録する。prompt には `origin/main = <sha>` のように両方書く。
 - 必要な context path（関連 module、API spec、既存 migration doc）を列挙してよいが、target の取得先を repo にしてはいけない。
 
