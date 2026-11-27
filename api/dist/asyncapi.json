@@ -376,6 +376,10 @@
                 "null"
               ]
             },
+            "snapshot": {
+              "description": "sequenced op の rejection に付く最新 committed snapshot（optional）。\nSTATE から `v`/`type` を除いた complete な観測状態で、\n`presence`（role/status/trust/features/name/ready）と server `features`、\n現行 encoding の browse additive metadata を含む。member-drive 対応\nclient は presence/features の欠けた snapshot を前回 STATE と合成せず\nfail-closed に capability intersection を落とす。lifecycle/control\nrejection では省略され得る。\n",
+              "type": "object"
+            },
             "type": {
               "const": "REJECT",
               "type": "string"
