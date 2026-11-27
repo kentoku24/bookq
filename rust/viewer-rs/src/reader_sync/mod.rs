@@ -2742,38 +2742,32 @@ impl Inner {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             s.ready.clear();
-            // The epoch reset must not erase the outcome of the load request
-            // that caused it: OPEN_WORK/SET_OFFSET deliberately skip the
-            // epoch gate (they are epoch-changing operations), so losing that
-            // entry would make a post-commit resend execute again as a fresh
-            // pick. Carry the triggering response in the new window. Every
-            // other evicted key becomes a tombstone, keeping exact resends
-            // stale instead of re-executable across the epoch boundary.
-            let load_dkey = format!("{}:{}", job.role, job.request_id);
-            let carried = s.dedup.get(&load_dkey).cloned();
-            let evicted: Vec<String> = s
+            // The epoch reset must not erase outcomes of epoch-changing load
+            // requests: OPEN_WORK/SET_OFFSET deliberately skip or cross the
+            // epoch gate, so losing those entries would make a post-commit
+            // resend execute again as a fresh pick. Carry every load-request
+            // response into the new window. Ordinary op entries still reset
+            // with the epoch — clients may reuse their request ids there.
+            let carried: Vec<(String, Value)> = s
                 .dedup_order
                 .iter()
-                .filter(|k| *k != &load_dkey)
-                .cloned()
+                .filter_map(|key| {
+                    s.dedup.get(key).and_then(|frame| {
+                        matches!(
+                            frame.get("request").and_then(|v| v.as_str()),
+                            Some("OPEN_WORK" | "SET_OFFSET")
+                        )
+                        .then(|| (key.clone(), frame.clone()))
+                    })
+                })
                 .collect();
             s.dedup.clear();
             s.dedup_order.clear();
-            for key in evicted {
-                if s.dedup_seen.insert(key.clone()) {
-                    s.dedup_seen_order.push_back(key);
-                }
-            }
-            while s.dedup_seen.len() > DEDUP_TOMBSTONE_MAX {
-                if let Some(oldest) = s.dedup_seen_order.pop_front() {
-                    s.dedup_seen.remove(&oldest);
-                } else {
-                    break;
-                }
-            }
-            if let Some(frame) = carried {
-                s.dedup.insert(load_dkey.clone(), frame);
-                s.dedup_order.push_back(load_dkey);
+            s.dedup_seen.clear();
+            s.dedup_seen_order.clear();
+            for (key, frame) in carried {
+                s.dedup.insert(key.clone(), frame);
+                s.dedup_order.push_back(key);
             }
             // A successful OPEN_WORK commit is the authoritative end of the
             // shared browse regardless of which member opened it.

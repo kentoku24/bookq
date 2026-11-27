@@ -254,6 +254,11 @@ def test_ui_sync_relayed_between_paired_members(server):
     with _ws(server) as ws_a, _ws(server) as ws_b:
         _recv(ws_a); _recv(ws_b)
         sid, _, _ = _pair(ws_a, ws_b)
+        ws_a.send(_req("UI_SYNC", _ui_payload(), sid=sid, rid="u0"))
+        assert _expect(ws_a, "REJECT")["reason"] == "forbidden"
+        ws_a.send(_req("SET_ACTIVITY", {"state": "selecting"},
+                       sid=sid, rid="bo"))
+        assert _expect(ws_a, "ACK")["request"] == "SET_ACTIVITY"
         ws_a.send(_req("UI_SYNC", _ui_payload(), sid=sid, rid="u1"))
         ui = _expect(ws_b, "UI_SYNC")
         assert ui["from"] == "leader"
@@ -276,6 +281,9 @@ def test_ui_sync_optional_fields_and_root_path(server):
     with _ws(server) as ws_a, _ws(server) as ws_b:
         _recv(ws_a); _recv(ws_b)
         sid, _, _ = _pair(ws_a, ws_b)
+        ws_a.send(_req("SET_ACTIVITY", {"state": "selecting"},
+                       sid=sid, rid="bo"))
+        assert _expect(ws_a, "ACK")["request"] == "SET_ACTIVITY"
         ws_a.send(_req("UI_SYNC",
                        {"view": "browse", "path": None, "top": 0, "viewH": 800},
                        sid=sid, rid="u"))
