@@ -2082,18 +2082,14 @@ impl Inner {
             return;
         }
         // UI_SYNC is ephemeral, but on a closed browse it is also the frame
-        // that would make the receiver open its list. Guests may participate
-        // in a mirror a member already opened, yet they must never START the
-        // shared browse — the same trust boundary as SET_ACTIVITY selecting.
-        // The initial pre-commit phase is `selecting` without the shared
-        // browse flag being open, so the boolean (not the derived phase) is
-        // the authority here.
-        let guest_starting_closed_browse = self
-            .session(sid)
-            .and_then(|s| s.members.iter().find(|m| m.id == mid))
-            .is_some_and(|m| m.trust == TRUST_GUEST)
-            && !self.session(sid).is_some_and(|s| s.selecting);
-        if guest_starting_closed_browse {
+        // that would make the receiver open its list. Nobody — member or
+        // guest — may start the shared browse merely by emitting mirror
+        // traffic. Participants may relay only after an authorized member
+        // opened it through SET_ACTIVITY. The initial pre-commit phase is
+        // `selecting` without the shared browse flag being open, so the
+        // boolean (not the derived phase) is the authority here.
+        let starting_closed_browse = !self.session(sid).is_some_and(|s| s.selecting);
+        if starting_closed_browse {
             self.reject(
                 link_id,
                 req_id(req),
@@ -3759,6 +3755,62 @@ mod tests {
             }
         }
         assert!(forwarded, "open shared browse must still relay guest mirror frames");
+    }
+
+    #[tokio::test]
+    async fn member_ui_sync_cannot_start_closed_shared_browse() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2,
+            &[CAP_MEMBER_DRIVE], &[CAP_MEMBER_DRIVE],
+        );
+        let ui = || {
+            protocol::frame(&[
+                ("view", "browse".into()),
+                ("path", Value::Null),
+                ("top", Value::from(0)),
+                ("viewH", Value::from(600)),
+            ])
+        };
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "member-ui-closed"));
+        let frames: Vec<Value> = std::iter::from_fn(|| match r2.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        }).collect();
+        assert!(frames.iter().any(|f| f["type"] == "REJECT"
+            && f["requestId"] == "member-ui-closed"
+            && f["reason"] == REASON_FORBIDDEN));
+        let leader_frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        }).collect();
+        assert!(!leader_frames.iter().any(|f| f["type"] == "UI_SYNC"));
+
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "member-open-ui",
+            ),
+        );
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "member-ui-open"));
+        let mut forwarded = false;
+        while let Ok(OutItem::Text(raw)) = r1.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            if f["type"] == "UI_SYNC" {
+                forwarded = true;
+                break;
+            }
+        }
+        assert!(forwarded);
     }
 
     #[tokio::test]
