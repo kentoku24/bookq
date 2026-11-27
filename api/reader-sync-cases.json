@@ -4312,6 +4312,172 @@
           "frames": []
         }
       ]
+    },
+    {
+      "id": "superseded_open_work_replay_after_commit_stale",
+      "title": "post-commit resend of a superseded OPEN_WORK is tombstoned, not replayed as accepted",
+      "setup": "reading",
+      "resolver": "work",
+      "steps": [
+        {
+          "op": "send",
+          "link": "L1",
+          "frame": {
+            "v": 1,
+            "requestId": "sup1",
+            "sessionId": "@session",
+            "workEpoch": 1,
+            "baseRevision": 6,
+            "type": "OPEN_WORK",
+            "payload": {
+              "folder": "work",
+              "page": {
+                "folder": "work",
+                "name": "p001.png"
+              },
+              "offset": 0
+            }
+          }
+        },
+        {
+          "op": "send",
+          "link": "L1",
+          "frame": {
+            "v": 1,
+            "requestId": "sup2",
+            "sessionId": "@session",
+            "workEpoch": 1,
+            "baseRevision": 6,
+            "type": "OPEN_WORK",
+            "payload": {
+              "folder": "work",
+              "page": {
+                "folder": "work",
+                "name": "p001.png"
+              },
+              "offset": 0
+            }
+          }
+        },
+        {
+          "op": "drain",
+          "link": "L1"
+        },
+        {
+          "op": "drain",
+          "link": "L2"
+        },
+        {
+          "op": "send",
+          "link": "L1",
+          "frame": {
+            "v": 1,
+            "requestId": "sup1",
+            "sessionId": "@session",
+            "workEpoch": 1,
+            "baseRevision": 6,
+            "type": "OPEN_WORK",
+            "payload": {
+              "folder": "work",
+              "page": {
+                "folder": "work",
+                "name": "p001.png"
+              },
+              "offset": 0
+            }
+          }
+        },
+        {
+          "op": "expect",
+          "link": "L1",
+          "frames": [
+            {
+              "v": 1,
+              "type": "REJECT",
+              "requestId": "sup1",
+              "request": "OPEN_WORK",
+              "reason": "stale_request",
+              "sessionId": "@session",
+              "snapshot": {
+                "sessionId": "@session",
+                "revision": 9,
+                "workEpoch": 2,
+                "manifestVersion": 2,
+                "phase": "loading",
+                "spreadId": "c0:s0",
+                "offset": 0,
+                "leaderSide": "left",
+                "dataPlane": "server-ws",
+                "features": [
+                  "member-drive-v1"
+                ],
+                "presence": {
+                  "@L1.member": {
+                    "role": "leader",
+                    "status": "active",
+                    "name": "Alice",
+                    "ready": false,
+                    "trust": "member",
+                    "features": []
+                  },
+                  "@L2.member": {
+                    "role": "follower",
+                    "status": "active",
+                    "name": "Bob",
+                    "ready": false,
+                    "trust": "member",
+                    "features": []
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "op": "expect",
+          "link": "L2",
+          "frames": []
+        },
+        {
+          "op": "send",
+          "link": "L1",
+          "frame": {
+            "v": 1,
+            "requestId": "sup2",
+            "sessionId": "@session",
+            "workEpoch": 1,
+            "baseRevision": 6,
+            "type": "OPEN_WORK",
+            "payload": {
+              "folder": "work",
+              "page": {
+                "folder": "work",
+                "name": "p001.png"
+              },
+              "offset": 0
+            }
+          }
+        },
+        {
+          "op": "expect",
+          "link": "L1",
+          "frames": [
+            {
+              "v": 1,
+              "type": "ACK",
+              "requestId": "sup2",
+              "request": "OPEN_WORK",
+              "sessionId": "@session",
+              "data": {}
+            }
+          ]
+        },
+        {
+          "op": "expect",
+          "link": "L2",
+          "frames": []
+        }
+      ]
     }
   ]
 }

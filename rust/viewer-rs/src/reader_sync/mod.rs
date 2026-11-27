@@ -2225,15 +2225,7 @@ impl Inner {
             }
             s.dedup_order.pop_front();
             s.dedup.remove(&oldest);
-            s.dedup_seen.insert(oldest.clone());
-            s.dedup_seen_order.push_back(oldest);
-            while s.dedup_seen.len() > DEDUP_TOMBSTONE_MAX {
-                if let Some(o) = s.dedup_seen_order.pop_front() {
-                    s.dedup_seen.remove(&o);
-                } else {
-                    break;
-                }
-            }
+            dedup_tombstone(s, oldest);
         }
     }
 
@@ -2742,30 +2734,42 @@ impl Inner {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
             s.ready.clear();
-            // The epoch reset must not erase outcomes of epoch-changing load
-            // requests: OPEN_WORK/SET_OFFSET deliberately skip or cross the
-            // epoch gate, so losing those entries would make a post-commit
-            // resend execute again as a fresh pick. Carry every load-request
-            // response into the new window. Ordinary op entries still reset
-            // with the epoch — clients may reuse their request ids there.
-            let carried: Vec<(String, Value)> = s
-                .dedup_order
-                .iter()
-                .filter_map(|key| {
-                    s.dedup.get(key).and_then(|frame| {
-                        matches!(
-                            frame.get("request").and_then(|v| v.as_str()),
-                            Some("OPEN_WORK" | "SET_OFFSET")
-                        )
-                        .then(|| (key.clone(), frame.clone()))
-                    })
-                })
-                .collect();
+            // The epoch reset carries exactly one outcome: the ACK of the
+            // load request whose resolver generation actually committed.
+            // Other load-request outcomes do not cross as replayable ACKs —
+            // OPEN_WORK skips the epoch gate, so a replayable stale ACK would
+            // make a superseded pick look accepted, and dropping the key
+            // entirely would make its resend execute again. Tombstone those
+            // keys instead. Ordinary epoch-gated op entries still reset with
+            // the epoch; pre-existing tombstones never do.
+            let carry_key = format!("{}:{}", job.role, job.request_id);
+            let mut carried: Option<(String, Value)> = None;
+            let mut new_tombstones: Vec<String> = Vec::new();
+            for key in &s.dedup_order {
+                let Some(frame) = s.dedup.get(key) else {
+                    continue;
+                };
+                let is_load = matches!(
+                    frame.get("request").and_then(|v| v.as_str()),
+                    Some("OPEN_WORK" | "SET_OFFSET")
+                );
+                let is_trigger_ack = *key == carry_key
+                    && is_load
+                    && frame.get("type").and_then(|v| v.as_str()) == Some("ACK")
+                    && frame.get("requestId").and_then(|v| v.as_str())
+                        == Some(job.request_id.as_str());
+                if is_trigger_ack {
+                    carried = Some((key.clone(), frame.clone()));
+                } else if is_load {
+                    new_tombstones.push(key.clone());
+                }
+            }
+            for key in new_tombstones {
+                dedup_tombstone(s, key);
+            }
             s.dedup.clear();
             s.dedup_order.clear();
-            s.dedup_seen.clear();
-            s.dedup_seen_order.clear();
-            for (key, frame) in carried {
+            if let Some((key, frame)) = carried {
                 s.dedup.insert(key.clone(), frame);
                 s.dedup_order.push_back(key);
             }
@@ -3140,6 +3144,22 @@ impl Inner {
                 let rem = d.saturating_duration_since(now);
                 std::cmp::max(rem, Duration::from_millis(50))
             }
+        }
+    }
+}
+
+/// Remember an evicted dedup key without storing its outcome. Tombstones are
+/// deliberately epoch-independent: OPEN_WORK skips the epoch gate, so losing
+/// one at a manifest commit would make an old pick executable again.
+fn dedup_tombstone(s: &mut PairSession, key: String) {
+    if s.dedup_seen.insert(key.clone()) {
+        s.dedup_seen_order.push_back(key);
+    }
+    while s.dedup_seen.len() > DEDUP_TOMBSTONE_MAX {
+        if let Some(o) = s.dedup_seen_order.pop_front() {
+            s.dedup_seen.remove(&o);
+        } else {
+            break;
         }
     }
 }
