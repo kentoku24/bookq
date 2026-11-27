@@ -69,6 +69,23 @@ pub const REASON_FORBIDDEN: &str = "forbidden";
 /// Generic server-side failure (e.g. entropy source unavailable) — the op
 /// is rejected rather than run with degraded security properties.
 pub const REASON_INTERNAL: &str = "internal_error";
+/// A resume token was presented on a link whose authentication class no
+/// longer matches the trust class fixed when the member was admitted
+/// (guest bearer vs member session/bearer). This is terminal for that
+/// credential on that link: retrying the same RESUME cannot succeed.
+pub const REASON_TRUST_MISMATCH: &str = "trust_mismatch";
+/// `payload.origin` appeared on a frame outside the sequenced data-plane
+/// relay whitelist, or did not resolve to a session member role.
+pub const REASON_BAD_ORIGIN: &str = "bad_origin";
+
+// ── member trust / capabilities ────────────────────────────────────────────
+
+pub const TRUST_MEMBER: &str = "member";
+pub const TRUST_GUEST: &str = "guest";
+/// Phase-1 member-drive capability. The exact string is wire-visible; it is
+/// deliberately versioned independently of the transport PROTOCOL_VERSION
+/// (which remains v1 because unknown fields are additive).
+pub const CAP_MEMBER_DRIVE: &str = "member-drive-v1";
 
 // ── END reasons ────────────────────────────────────────────────────────────
 
@@ -423,6 +440,14 @@ pub struct Member {
     pub session_id: Option<String>,
     pub link_id: Option<String>,
     pub status: String, // active | suspended | offline | pending
+    /// Trust class fixed at admission. Unlike `role` this never changes for
+    /// the lifetime of the member credential; RESUME re-checks the link's
+    /// authentication class against it instead of re-deriving it.
+    pub trust: String, // member | guest
+    /// Feature tokens advertised by the client runtime that most recently
+    /// admitted/resumed this member. Capabilities are runtime state (not
+    /// part of trust) and may change across RESUME.
+    pub capabilities: Vec<String>,
     pub offline_since: Option<Instant>,
     pub dc_state: String, // up | down
     pub last_applied: Option<Value>,
@@ -433,7 +458,15 @@ pub struct Member {
 impl Member {
     /// `None` when the entropy source is gone — the resume_token is bearer
     /// material and must never come out degraded.
-    fn new(role: &str, name: String, session_id: &str, link_id: &str, status: &str) -> Option<Self> {
+    fn new(
+        role: &str,
+        name: String,
+        session_id: &str,
+        link_id: &str,
+        status: &str,
+        trust: &str,
+        capabilities: Vec<String>,
+    ) -> Option<Self> {
         Some(Self {
             id: new_id(),
             role: role.to_string(),
@@ -442,6 +475,8 @@ impl Member {
             session_id: Some(session_id.to_string()),
             link_id: Some(link_id.to_string()),
             status: status.to_string(),
+            trust: trust.to_string(),
+            capabilities,
             offline_since: None,
             dc_state: "down".into(),
             last_applied: None,
@@ -466,6 +501,9 @@ pub struct LoadJob {
     pub request_id: String,
     #[allow(dead_code)]
     pub role: String,
+    /// Bootstrap-generated load. An automatic load is best-effort only and
+    /// must never displace a deliberate (non-auto) pick.
+    pub auto: bool,
 }
 
 #[derive(Debug)]
@@ -498,6 +536,10 @@ pub struct PairSession {
     dedup_seen_order: VecDeque<String>,
     pub load_seq: i64,
     pub pending_load: Option<LoadJob>,
+    /// Whether the currently committed work load came from bootstrap. Once a
+    /// deliberate (non-auto) load has committed, later automatic bootstrap
+    /// loads are stale by definition and must be rejected.
+    pub committed_load_auto: Option<bool>,
     pub selecting: bool,
     pub apply_seq: i64,
     pub apply_log: Vec<Value>,
@@ -535,6 +577,7 @@ impl PairSession {
             dedup_seen_order: VecDeque::new(),
             load_seq: 0,
             pending_load: None,
+            committed_load_auto: None,
             selecting: false,
             apply_seq: 0,
             apply_log: Vec::new(),
@@ -589,7 +632,21 @@ pub struct Inner {
     bulk_max: usize,
     no_response_timeout: Duration,
     resume_window: Duration,
+    /// Operator kill switch for Phase-1 member-drive semantics. Capability
+    /// intersection is still reflected, but the server never treats it as
+    /// enabled when this is false.
+    member_drive_enabled: bool,
     wake: Arc<Notify>,
+}
+
+fn member_drive_enabled_from_env() -> bool {
+    !matches!(
+        std::env::var("BOOKQ_PAIR_MEMBER_DRIVE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "no"
+    )
 }
 
 impl Registry {
@@ -610,6 +667,7 @@ impl Registry {
                 bulk_max: SEND_BULK_MAX_BYTES,
                 no_response_timeout: Duration::from_secs_f64(NO_RESPONSE_TIMEOUT),
                 resume_window: Duration::from_secs_f64(RESUME_WINDOW_SECONDS),
+                member_drive_enabled: member_drive_enabled_from_env(),
                 wake: wake.clone(),
             }),
             wake,
@@ -821,7 +879,63 @@ impl Registry {
 
 // ── Inner: all dispatch is synchronous under the registry lock ─────────────
 
+/// Capability advertisement parser for admission/resume payloads. Validation
+/// has already bounded the shape; unknown feature tokens are deliberately
+/// preserved so a newer peer can be reflected verbatim.
+fn payload_features(payload: &Value) -> Vec<String> {
+    let mut out: Vec<String> = payload
+        .get("features")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn link_trust(link: &Link) -> &'static str {
+    if link.is_guest() {
+        TRUST_GUEST
+    } else {
+        TRUST_MEMBER
+    }
+}
+
 impl Inner {
+    fn server_features(&self) -> Vec<String> {
+        if self.member_drive_enabled {
+            vec![CAP_MEMBER_DRIVE.to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn server_features_json(&self) -> Value {
+        Value::Array(
+            self.server_features()
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        )
+    }
+
+    /// Phase-1 member-drive semantics apply only when the deployment allows
+    /// them AND both admitted members currently advertise the capability.
+    /// Pending/offline members keep their last advertised runtime capability:
+    /// a temporary disconnect must not silently downgrade pair semantics.
+    fn member_drive_intersection(&self, s: &PairSession) -> bool {
+        self.member_drive_enabled
+            && s.members.len() == 2
+            && s.members
+                .iter()
+                .all(|m| m.capabilities.iter().any(|f| f == CAP_MEMBER_DRIVE))
+    }
+
     fn session_mut(&mut self, sid: &str) -> Option<&mut PairSession> {
         self.sessions.iter_mut().find(|s| s.id == sid)
     }
@@ -875,6 +989,7 @@ impl Inner {
             ("v", Value::from(protocol::PROTOCOL_VERSION)),
             ("type", Value::String("HELLO".into())),
             ("link", Value::String(id.clone())),
+            ("features", self.server_features_json()),
         ]);
         self.send_obj(&id, &hello);
         self.wake.notify_one();
@@ -1145,6 +1260,18 @@ impl Inner {
             return;
         }
 
+        // Relay type whitelist: `payload.origin` is meaningful only on the
+        // sequenced data-plane ops handled by `sequenced_op`. A relayed
+        // control frame must never inherit leader authority — reject it at
+        // the boundary rather than silently treating it as a direct frame.
+        let has_origin = req["payload"]
+            .get("origin")
+            .is_some_and(|v| !v.is_null());
+        if has_origin && !state::SEQUENCED_TYPES.contains(&t.as_str()) {
+            self.reject(link_id, req_id(req), Some(&t), REASON_BAD_ORIGIN, Some(&sid));
+            return;
+        }
+
         match t.as_str() {
             "LEAVE" => self.end_session(&sid, END_LEFT),
             "APPROVE" | "REJECT" => {
@@ -1270,12 +1397,27 @@ impl Inner {
             .and_then(|l| l.user_str("email"))
             .map(|e| e.trim().to_lowercase())
             .filter(|e| !e.is_empty());
-        let Some(member) = Member::new("leader", name, &sid, link_id, "active") else {
+        let trust = self
+            .links
+            .get(link_id)
+            .map(link_trust)
+            .unwrap_or(TRUST_MEMBER);
+        let capabilities = payload_features(&req["payload"]);
+        let Some(member) = Member::new(
+            "leader",
+            name,
+            &sid,
+            link_id,
+            "active",
+            trust,
+            capabilities,
+        ) else {
             self.reject(link_id, req_id(req), Some("CREATE"), REASON_INTERNAL, None);
             return;
         };
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
+        let member_trust = member.trust.clone();
         session.members.push(member);
         // Guest-access grant for the QR link — bound to this session so
         // `end_session` revokes it no matter which teardown path fires.
@@ -1305,8 +1447,10 @@ impl Inner {
             ("code", Value::String(code)),
             ("memberId", Value::String(mid.clone())),
             ("role", Value::String("leader".into())),
+            ("trust", Value::String(member_trust)),
             ("resumeToken", Value::String(resume_token)),
             ("expiresInSec", Value::from(reg.code_ttl.as_secs() as i64)),
+            ("features", self.server_features_json()),
         ];
         if let Some(gt) = guest_token {
             data.push(("guestToken", Value::String(gt)));
@@ -1416,7 +1560,21 @@ impl Inner {
             .and_then(|l| l.user_str("name"))
             .unwrap_or("")
             .to_string();
-        let Some(member) = Member::new("follower", name, sid, link_id, "pending") else {
+        let trust = self
+            .links
+            .get(link_id)
+            .map(link_trust)
+            .unwrap_or(TRUST_MEMBER);
+        let capabilities = payload_features(&req["payload"]);
+        let Some(member) = Member::new(
+            "follower",
+            name,
+            sid,
+            link_id,
+            "pending",
+            trust,
+            capabilities,
+        ) else {
             self.reject(
                 link_id,
                 req_id(req),
@@ -1428,6 +1586,7 @@ impl Inner {
         };
         let mid = member.id.clone();
         let resume_token = member.resume_token.clone();
+        let member_trust = member.trust.clone();
         let Some(s) = self.session_mut(sid) else {
             return;
         };
@@ -1442,21 +1601,19 @@ impl Inner {
         let leader = self
             .session(sid)
             .and_then(|s| s.leader().map(|m| (m.name.clone(), m.link_id.clone())));
-        self.ack(
-            link_id,
-            req,
-            Some(protocol::frame(&[
-                ("sessionId", Value::String(sid.into())),
-                ("memberId", Value::String(mid.clone())),
-                ("role", Value::String("follower".into())),
-                ("resumeToken", Value::String(resume_token)),
-                (
-                    "leaderName",
-                    Value::String(leader.clone().map(|x| x.0).unwrap_or_default()),
-                ),
-            ])),
-            Some(sid),
-        );
+        let join_data = protocol::frame(&[
+            ("sessionId", Value::String(sid.into())),
+            ("memberId", Value::String(mid.clone())),
+            ("role", Value::String("follower".into())),
+            ("trust", Value::String(member_trust)),
+            ("resumeToken", Value::String(resume_token)),
+            (
+                "leaderName",
+                Value::String(leader.clone().map(|x| x.0).unwrap_or_default()),
+            ),
+            ("features", self.server_features_json()),
+        ]);
+        self.ack(link_id, req, Some(join_data), Some(sid));
         if let Some((_, Some(lid))) = leader {
             let frame = protocol::frame(&[
                 ("v", Value::from(protocol::PROTOCOL_VERSION)),
@@ -1613,10 +1770,17 @@ impl Inner {
         let member_exists = self
             .session(&sid)
             .and_then(|s| s.members.iter().find(|m| Some(&m.id) == member_id.as_ref()))
-            .map(|m| (m.resume_token.clone(), m.link_id.clone(), m.offline_since));
+            .map(|m| {
+                (
+                    m.resume_token.clone(),
+                    m.link_id.clone(),
+                    m.offline_since,
+                    m.trust.clone(),
+                )
+            });
         let bad = match &member_exists {
             None => true,
-            Some((tok, _, _)) => !matches!(token, Some(t) if t == tok),
+            Some((tok, _, _, _)) => !matches!(token, Some(t) if t == tok),
         };
         if bad {
             self.reject(
@@ -1628,7 +1792,27 @@ impl Inner {
             );
             return;
         }
-        let (_, mlink, offline_since) = member_exists.unwrap();
+        let (_, mlink, offline_since, stored_trust) = member_exists.unwrap();
+        // Trust is fixed at admission and is not re-negotiated. The link's
+        // current authentication class must match it exactly: a member
+        // session/bearer resumes member trust; a valid `bookq_guest` bearer
+        // resumes guest trust. A mismatch is terminal for this credential on
+        // this link (the same RESUME can never become valid by retrying).
+        let current_trust = self
+            .links
+            .get(link_id)
+            .map(link_trust)
+            .unwrap_or(TRUST_MEMBER);
+        if current_trust != stored_trust {
+            self.reject(
+                link_id,
+                req_id(req),
+                Some("RESUME"),
+                REASON_TRUST_MISMATCH,
+                Some(&sid),
+            );
+            return;
+        }
         if mlink
             .as_ref()
             .is_some_and(|lid| self.links.get(lid).is_some_and(|l| l.alive))
@@ -1655,29 +1839,31 @@ impl Inner {
             }
         }
         let mid = member_id.unwrap();
-        let (role, tok) = {
+        let capabilities = payload_features(payload);
+        let (role, tok, trust) = {
             let Some(m) = self.member_mut(&sid, &mid) else {
                 return;
             };
             m.link_id = Some(link_id.to_string());
             m.status = "active".into();
             m.offline_since = None;
-            (m.role.clone(), m.resume_token.clone())
+            // Trust itself is immutable; capabilities describe the current
+            // runtime and are refreshed by every successful RESUME.
+            m.capabilities = capabilities;
+            (m.role.clone(), m.resume_token.clone(), m.trust.clone())
         };
         if let Some(l) = self.links.get_mut(link_id) {
             l.member_id = Some(mid.clone());
         }
-        self.ack(
-            link_id,
-            req,
-            Some(protocol::frame(&[
-                ("sessionId", Value::String(sid.clone())),
-                ("memberId", Value::String(mid.clone())),
-                ("role", Value::String(role)),
-                ("resumeToken", Value::String(tok)),
-            ])),
-            Some(&sid),
-        );
+        let resume_data = protocol::frame(&[
+            ("sessionId", Value::String(sid.clone())),
+            ("memberId", Value::String(mid.clone())),
+            ("role", Value::String(role)),
+            ("trust", Value::String(trust)),
+            ("resumeToken", Value::String(tok)),
+            ("features", self.server_features_json()),
+        ]);
+        self.ack(link_id, req, Some(resume_data), Some(&sid));
         self.broadcast_state(&sid);
         // §3.3: the manifest is re-delivered on resume.
         if self.session(&sid).is_some_and(|s| s.manifest.is_some()) {
@@ -1710,13 +1896,33 @@ impl Inner {
             return;
         }
         let st = st.unwrap();
+        let end_browse = req["payload"]
+            .get("endBrowse")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let (role, trust) = self
+            .session(sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid))
+            .map(|m| (m.role.clone(), m.trust.clone()))
+            .unwrap_or_else(|| (String::new(), TRUST_MEMBER.to_string()));
+        let member_drive = self
+            .session(sid)
+            .is_some_and(|s| self.member_drive_intersection(s));
         if st == "selecting" {
-            // Session phase control — only the leader's browse flag drives it.
-            let role = self
-                .session(sid)
-                .and_then(|s| s.members.iter().find(|m| m.id == mid))
-                .map(|m| m.role.clone());
-            if role.as_deref() != Some("leader") {
+            // Shared browse open. In legacy pairs only the leader may drive;
+            // once both members advertise member-drive-v1 either member may
+            // open. Guests are never browse drivers in either mode.
+            if trust == TRUST_GUEST {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("SET_ACTIVITY"),
+                    REASON_FORBIDDEN,
+                    Some(sid),
+                );
+                return;
+            }
+            if !member_drive && role != "leader" {
                 self.reject(
                     link_id,
                     req_id(req),
@@ -1727,9 +1933,23 @@ impl Inner {
                 return;
             }
             if let Some(s) = self.session_mut(sid) {
+                // A concurrent duplicate open is deliberately idempotent:
+                // the flag is boolean, not per-member ownership.
                 s.selecting = true;
             }
         } else {
+            // Validate the close authority before mutating activity: a
+            // rejected explicit close must not become a plain liveness ping.
+            if end_browse && trust == TRUST_GUEST {
+                self.reject(
+                    link_id,
+                    req_id(req),
+                    Some("SET_ACTIVITY"),
+                    REASON_FORBIDDEN,
+                    Some(sid),
+                );
+                return;
+            }
             let is_leader = if let Some(m) = self.member_mut(sid, mid) {
                 if m.status != "offline" {
                     m.status = st.clone();
@@ -1738,7 +1958,19 @@ impl Inner {
             } else {
                 false
             };
-            if is_leader {
+            if member_drive {
+                // New semantics: active/suspended are liveness only. Only an
+                // explicit endBrowse signal closes the shared browse; either
+                // member may send it. Suspend/visibility restoration never do.
+                if end_browse {
+                    if let Some(s) = self.session_mut(sid) {
+                        s.selecting = false;
+                    }
+                }
+            } else if is_leader {
+                // Legacy mixed-pair semantics are preserved exactly: the
+                // leader leaving the selecting activity clears the browse
+                // flag. (Capability-unaware clients depend on this close.)
                 if let Some(s) = self.session_mut(sid) {
                     s.selecting = false;
                 }
@@ -1994,13 +2226,14 @@ impl Inner {
         };
 
         // Effective role / member for relayed (payload.origin) requests.
-        let member_role = self
+        let (member_role, sender_trust) = self
             .session(sid)
             .and_then(|s| s.members.iter().find(|m| m.id == mid))
-            .map(|m| m.role.clone())
-            .unwrap_or_default();
+            .map(|m| (m.role.clone(), m.trust.clone()))
+            .unwrap_or_else(|| (String::new(), TRUST_MEMBER.to_string()));
         let mut role = member_role.clone();
         let mut eff_id = mid.to_string();
+        let mut eff_trust = sender_trust;
         // `origin is not None` — any non-null value is checked; a non-str
         // or non-role value is bad_origin even for a leader (py `in ROLES`).
         let origin = payload.get("origin").filter(|v| !v.is_null());
@@ -2012,11 +2245,17 @@ impl Inner {
             }
             role = o.unwrap().to_string();
             if role != member_role {
-                eff_id = self
-                    .session(sid)
-                    .and_then(|s| s.members.iter().find(|m| m.role == role))
-                    .map(|m| m.id.clone())
-                    .unwrap_or_else(|| mid.to_string());
+                if let Some((target_id, target_trust)) = self.session(sid).and_then(|s| {
+                    s.members
+                        .iter()
+                        .find(|m| m.role == role)
+                        .map(|m| (m.id.clone(), m.trust.clone()))
+                }) {
+                    eff_id = target_id;
+                    eff_trust = target_trust;
+                } else {
+                    eff_id = mid.to_string();
+                }
             }
         }
 
@@ -2056,7 +2295,7 @@ impl Inner {
                     state::check_base(self.session(sid).unwrap(), req)?;
                 }
             }
-            self.apply_op(reg, &resp_link, req, sid, mid, &eff_id, &role)
+            self.apply_op(reg, &resp_link, req, sid, mid, &eff_id, &role, &eff_trust)
         })();
         if let Err(r) = result {
             self.reject_snapshot(&resp_link, req, sid, &role, r.reason);
@@ -2073,15 +2312,50 @@ impl Inner {
         _mid: &str,
         eff_id: &str,
         role: &str,
+        eff_trust: &str,
     ) -> Result<(), state::Reject> {
         let t = req["type"].as_str().unwrap().to_string();
         let payload = req["payload"].as_object().cloned().unwrap_or_default();
         match t.as_str() {
             "OPEN_WORK" => {
-                if role != "leader" {
+                // Authorization is against the effective actor resolved from
+                // payload.origin — never against the relay transport. A guest
+                // is not a work-selection driver even when a member leader
+                // relays the frame.
+                if eff_trust == TRUST_GUEST {
+                    return Err(state::Reject {
+                        reason: REASON_FORBIDDEN,
+                    });
+                }
+                let member_drive = self
+                    .session(sid)
+                    .is_some_and(|s| self.member_drive_intersection(s));
+                if !member_drive && role != "leader" {
                     return Err(state::Reject {
                         reason: state::REASON_NOT_LEADER,
                     });
+                }
+                let auto = payload
+                    .get("auto")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if auto {
+                    let deliberate_in_flight = self
+                        .session(sid)
+                        .and_then(|s| s.pending_load.as_ref())
+                        .is_some_and(|job| !job.auto);
+                    let deliberate_committed = self
+                        .session(sid)
+                        .and_then(|s| s.committed_load_auto)
+                        == Some(false);
+                    if deliberate_in_flight || deliberate_committed {
+                        // Bootstrap is best-effort: once a deliberate pick is
+                        // committed or merely in flight, an automatic load is
+                        // stale by definition and must not overwrite it.
+                        return Err(state::Reject {
+                            reason: state::REASON_STALE_REQUEST,
+                        });
+                    }
                 }
                 let page = match payload.get("page") {
                     Some(p) if !p.is_null() => p.clone(),
@@ -2106,7 +2380,7 @@ impl Inner {
                     });
                 }
                 let folder = payload["folder"].as_str().unwrap_or("").to_string();
-                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset);
+                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset, auto);
                 Ok(())
             }
             "TURN" | "GOTO" => {
@@ -2149,7 +2423,7 @@ impl Inner {
                     .to_string();
                 let page = model::ref_json(&anchor);
                 // raw offset (may be bool — resolve_work rejects it like py)
-                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset);
+                self.begin_load(reg, resp_link, req, sid, role, folder, page, offset, false);
                 Ok(())
             }
             "SWAP_SIDES" => {
@@ -2287,6 +2561,7 @@ impl Inner {
         folder: String,
         page: Value,
         offset: Value,
+        auto: bool,
     ) {
         let job = {
             let Some(s) = self.session_mut(sid) else {
@@ -2301,6 +2576,7 @@ impl Inner {
                 offset: offset.clone(),
                 request_id: req["requestId"].as_str().unwrap_or("").to_string(),
                 role: role.to_string(),
+                auto,
             };
             s.pending_load = Some(job.clone());
             job
@@ -2406,7 +2682,10 @@ impl Inner {
             s.dedup_order.clear();
             s.dedup_seen.clear();
             s.dedup_seen_order.clear();
+            // A successful OPEN_WORK commit is the authoritative end of the
+            // shared browse regardless of which member opened it.
             s.selecting = false;
+            s.committed_load_auto = Some(job.auto);
             s.apply_seq += 1;
         }
         let Some(frame) = self.state_frame_for(sid) else {
@@ -2496,6 +2775,7 @@ impl Inner {
 
     /// `_state_frame` — bumps revision, derives phase, emits STATE.
     fn state_frame_for(&mut self, sid: &str) -> Option<Value> {
+        let server_features = self.server_features_json();
         let Inner {
             sessions, links, ..
         } = self;
@@ -2507,6 +2787,17 @@ impl Inner {
             let mut p = Map::new();
             p.insert("role".into(), Value::String(m.role.clone()));
             p.insert("status".into(), Value::String(m.status.clone()));
+            p.insert("trust".into(), Value::String(m.trust.clone()));
+            p.insert(
+                "features".into(),
+                Value::Array(
+                    m.capabilities
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
             p.insert("name".into(), Value::String(m.name.clone()));
             p.insert("ready".into(), Value::Bool(s.ready.contains(&m.id)));
             presence.insert(m.id.clone(), Value::Object(p));
@@ -2530,6 +2821,7 @@ impl Inner {
             ("leaderSide", Value::String(s.leader_side.clone())),
             ("presence", Value::Object(presence)),
             ("dataPlane", Value::String(s.data_plane.clone())),
+            ("features", server_features),
         ]))
     }
 
@@ -2801,6 +3093,48 @@ mod tests {
             PathBuf::from("/nonexistent"),
             None,
         )
+    }
+
+    fn feature_payload(caps: &[&str]) -> Value {
+        protocol::frame(&[(
+            "features",
+            Value::Array(caps.iter().map(|c| Value::String((*c).into())).collect()),
+        )])
+    }
+
+    fn req_named(t: &str, sid: &str, payload: Value, rid: &str) -> Map<String, Value> {
+        let mut r = req(t, sid, payload);
+        r.insert("requestId".into(), Value::String(rid.into()));
+        r
+    }
+
+    /// Paired two-member session whose admission-time capability lists are
+    /// controlled by the test. Returns (session, leader link, follower link,
+    /// follower member).
+    fn paired_session(
+        inner: &mut Inner,
+        reg: &Arc<Registry>,
+        l1: &str,
+        r1: &mut mpsc::Receiver<OutItem>,
+        l2: &str,
+        r2: &mut mpsc::Receiver<OutItem>,
+        leader_caps: &[&str],
+        follower_caps: &[&str],
+    ) -> (String, String) {
+        inner.dispatch(reg, l1, &req_named("CREATE", "", feature_payload(leader_caps), "pc-create"));
+        let ack1 = next_json(r1);
+        let sid = ack1["data"]["sessionId"].as_str().unwrap().to_string();
+        let code = ack1["data"]["code"].as_str().unwrap().to_string();
+        let join_payload = protocol::frame(&[
+            ("code", Value::String(code)),
+            ("features", feature_payload(follower_caps)["features"].clone()),
+        ]);
+        inner.dispatch(reg, l2, &req_named("JOIN", "", join_payload, "pc-join"));
+        let ack2 = next_json(r2);
+        let mid2 = ack2["data"]["memberId"].as_str().unwrap().to_string();
+        let approve = protocol::frame(&[("memberId", Value::String(mid2.clone()))]);
+        inner.dispatch(reg, l1, &req_named("APPROVE", &sid, approve, "pc-approve"));
+        (sid, mid2)
     }
 
     #[tokio::test]
@@ -3230,6 +3564,137 @@ mod tests {
         assert_eq!(ack["type"], "ACK");
         assert!(ack["data"]["guestToken"].is_null());
         assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn legacy_capability_pair_keeps_leader_only_browse_close() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2, &[], &[],
+        );
+        // follower open is still leader-only without the intersection.
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "legacy-open",
+            ),
+        );
+        let mut rej = Value::Null;
+        for _ in 0..8 {
+            match r2.try_recv() {
+                Ok(OutItem::Text(raw)) => {
+                    let f: Value = serde_json::from_str(&raw).unwrap();
+                    if f["type"] == "REJECT" && f["requestId"] == "legacy-open" {
+                        rej = f;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(rej["type"], "REJECT");
+        assert_eq!(rej["reason"], REASON_NOT_LEADER);
+        assert!(!inner.session(&sid).unwrap().selecting);
+        // Leader opens; follower close is inert; leader non-selecting activity closes.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "leader-open",
+            ),
+        );
+        assert!(inner.session(&sid).unwrap().selecting);
+        inner.dispatch(
+            &reg,
+            &l2,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[
+                    ("state", "active".into()),
+                    ("endBrowse", Value::Bool(true)),
+                ]),
+                "follower-close",
+            ),
+        );
+        assert!(inner.session(&sid).unwrap().selecting);
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "active".into())]),
+                "leader-close",
+            ),
+        );
+        assert!(!inner.session(&sid).unwrap().selecting);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_auto_rejects_while_deliberate_load_in_flight() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let (l1, mut r1) = mk_link(&mut inner);
+        let _ = next_json(&mut r1);
+        let (l2, mut r2) = mk_link(&mut inner);
+        let _ = next_json(&mut r2);
+        let (sid, _mid2) = paired_session(
+            &mut inner,
+            &reg,
+            &l1,
+            &mut r1,
+            &l2,
+            &mut r2,
+            &[CAP_MEMBER_DRIVE],
+            &[CAP_MEMBER_DRIVE],
+        );
+        let page = protocol::frame(&[
+            ("folder", "work".into()),
+            ("name", "p001.png".into()),
+        ]);
+        let manual = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page.clone()),
+        ]);
+        inner.dispatch(&reg, &l1, &req_named("OPEN_WORK", &sid, manual, "manual-open"));
+        assert_eq!(
+            inner.session(&sid).unwrap().pending_load.as_ref().map(|j| j.request_id.as_str()),
+            Some("manual-open")
+        );
+        let auto = protocol::frame(&[
+            ("folder", "work".into()),
+            ("page", page),
+            ("auto", Value::Bool(true)),
+        ]);
+        inner.dispatch(&reg, &l1, &req_named("OPEN_WORK", &sid, auto, "auto-open"));
+        let frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
+            Ok(OutItem::Text(s)) => serde_json::from_str(&s).ok(),
+            _ => None,
+        })
+        .collect();
+        assert!(frames.iter().any(|f| {
+            f["type"] == "REJECT"
+                && f["requestId"] == "auto-open"
+                && f["reason"] == state::REASON_STALE_REQUEST
+        }));
+        // The deliberate load remains the live generation.
+        assert_eq!(
+            inner.session(&sid).unwrap().pending_load.as_ref().map(|j| j.request_id.as_str()),
+            Some("manual-open")
+        );
     }
 
     #[tokio::test]

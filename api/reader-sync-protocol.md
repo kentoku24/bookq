@@ -82,7 +82,9 @@ CREATE ACK{…, guestToken}  →  クライアントが QR
   GET 系は全て有効だが、非 GET/HEAD/OPTIONS、`/admin*`、`/api/v1/library/*`
   は HTTP 403（`guest_write_guard` — library GET は副作用を持つため）。
   ペア同期は WebSocket のため影響なし — follower として TURN/GOTO/
-  SET_OFFSET 等は通常 follower と同一に受理される
+  SET_OFFSET 等は通常 follower と同一に受理される。ただし作品選択の drive
+  （OPEN_WORK）と shared browse open/close は trust=member のみで、guest は
+  direct/relay のどちらでも `forbidden`
 - guest 応答には `X-Bookq-Guest: 1` + `Cache-Control: private, no-store`
   — SW・ページ側キャッシュとブラウザ HTTP キャッシュの双方が失効後に
   再提供しない
@@ -92,14 +94,97 @@ CREATE ACK{…, guestToken}  →  クライアントが QR
   same-site initiation 検査付き。トークンは 192bit で推測不能
 - entropy 源（/dev/urandom）不在時は token/code の mint が失敗し
   `internal_error` で reject — 弱化した乱数で bearer を発行しない
+- hidden roots はアクセス制御ではなく UI 利便性機能である。server は tree/image を
+  hidden roots でフィルタしないが、guest クライアント面に show-all trigger を
+  bind しない invariant は regression test で固定する
 
-### メンバー状態
-`active | suspended | offline | pending`。`presence` は link id → member info の map。
+### メンバー状態と trust
+
+`active | suspended | offline | pending`。`presence` は member id → member info の map。
 メンバーが missing/suspended なら phase は `paused` に落ちる。
+
+各 member は admission 時に immutable な `trust` を持つ:
+
+| trust | 固定条件 |
+|---|---|
+| `member` | member session/Bearer として認証された link で CREATE/JOIN/MATCH した端末 |
+| `guest` | 有効な `bookq_guest` bearer として認証された link で JOIN した端末 |
+
+`trust` は presence の各 member entry と CREATE/JOIN/RESUME ACK の `data.trust` に現れる。
+role（leader/follower）とは独立で、admission 後に変更されない。ログイン済み member が
+`JOIN{guestToken}` を使っても link 認証 class は member のままなので trust は `member` になる。
+逆に guest bearer 上の表示名や grant owner email は trust を member に引き上げない。
+
+RESUME は stored member trust と現在の link 認証 class の完全一致を要求する。不一致は
+`trust_mismatch` で拒否する。これは同じ link 上で retry しても成功し得ない terminal error であり、
+クライアントは resume_in_use のような transient retry をせず、当該 link では session_lost 相当に
+扱う（LEAVE tombstone flush でも無限再試行しない）。
 
 ---
 
-## 3. フェーズ機械（derive_phase — 常に導出値、独立した真実ではない）
+## 3. capability 広告と effective-actor 認可
+
+### capability 広告
+
+クライアントは CREATE/JOIN/MATCH/RESUME payload に任意で `features`（string array,
+最大32件・各64文字）を広告する。未知 token は保持されてよい。server は自身の feature set を
+HELLO・admission/resume ACK `data.features`・STATE `features` に載せ、各 member の最新広告を
+STATE `presence.<memberId>.features` に反射する。広告は trust ではなく runtime capability なので、
+RESUME 毎に現在値へ更新される。
+
+現行の意味を持つ feature:
+
+| feature | 意味 |
+|---|---|
+| `member-drive-v1` | member trust を持つ follower も OPEN_WORK と shared browse open/close を drive できる。明示 endBrowse close 意味論を理解する |
+
+`member-drive-v1` の intersection が成立する条件は、server deployment flag
+`BOOKQ_PAIR_MEMBER_DRIVE`（既定 enabled。`0|false|off|no` で無効）が有効で、paired な
+2 member 双方の最新広告が同 feature を含むことである。intersection 非成立の混在ペアでは
+新旧混在を壊さないため、legacy 意味論（leader-only OPEN_WORK/shared browse、leader の
+非 selecting activity で browse close）を厳密に維持する。offline の間は最後に広告した
+capability を保持し、一時切断だけでは downgrade しない。
+
+### effective actor と relay whitelist
+
+`payload.origin` は sequenced data-plane op（TURN/GOTO/SET_OFFSET/SWAP_SIDES/OPEN_WORK/
+READY/APPLIED）にのみ存在できる。webrtc-dc 昇格中、follower の data-plane request は leader が
+verbatim に中継し、leader が `payload.origin:"follower"` を付ける。dedup namespace・APPLIED.by・
+レスポンス宛先は origin role に紐付く。
+
+認可は常に **origin で解決した member の stored trust** に対して行う。relay した transport
+（leader link）の trust で判定してはならない。したがって guest follower の OPEN_WORK は direct でも
+member leader 経由 relay でも `forbidden` で拒否される（confused deputy 防止）。
+
+control frame（SET_ACTIVITY/SIGNAL/UI_SYNC/TRANSPORT_STATE/LEAVE/APPROVE/REJECT 等）に非-null
+`payload.origin` があれば server は `bad_origin` で拒否する。leader client も data channel から
+control frame を relay してはならない。
+
+### OPEN_WORK・shared browse・bootstrap
+
+capability intersection 成立時:
+
+- `member` trust なら leader/follower どちらも OPEN_WORK を受理できる。`guest` は `forbidden`
+- shared browse open は `SET_ACTIVITY{state:"selecting"}`、close は
+  `SET_ACTIVITY{state:"active", endBrowse:true}`。どちらも member なら role に関係なく可。
+  guest は open/close とも `forbidden`
+- 同時/重複 open は冪等（boolean flag を同じく true にするだけでエラーにしない）
+- opener が offline でも peer member は close できる
+- OPEN_WORK manifest commit は shared browse を必ず終了する（明示 close 不要）
+- `active`/`suspended` 単体は liveness 更新だけであり shared browse を終了しない。tab visibility
+  復帰や mirror sidebar の programmatic close は endBrowse を生成してはならない。endBrowse は
+  ユーザー明示 close gesture だけが生成する
+
+intersection 非成立時は旧挙動: OPEN_WORK/selecting open は leader のみ、leader の非 selecting
+activity が browse flag をクリアする。
+
+`OPEN_WORK payload.auto:true` は pairing bootstrap の自動初期 load を示す。committed または
+in-flight の非 auto load が既にあれば auto load は `stale_request` で拒否され、故意 pick を
+上書きしない。逆に auto load の後に届いた非 auto pick は通常どおり latest pick wins で勝つ。
+
+---
+
+## 4. フェーズ機械（derive_phase — 常に導出値、独立した真実ではない）
 
 ```
 waiting   pair 未成立（leader 単独 or join 承認待ち）
@@ -115,7 +200,7 @@ TURN/GOTO は `reading` でのみ受理:
 
 ---
 
-## 4. リクエストの逐次化と並行性制御
+## 5. リクエストの逐次化と並行性制御
 
 クライアント→サーバは統一リクエストフレーム
 `{v:1, requestId, sessionId, workEpoch, baseRevision, type, payload}`。
@@ -157,7 +242,7 @@ manifest 本体の shape:
 
 ---
 
-## 5. 拒否理由一覧（ワイヤ安定文字列）
+## 6. 拒否理由一覧（ワイヤ安定文字列）
 
 REJECT フレームの `reason` は以下の enum。実装間で文字列一致が契約:
 
@@ -165,7 +250,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 |---|---|
 | `already_bound` | link が別セッションに既バインド |
 | `bad_code` | JOIN の code 不一致 |
-| `bad_origin` | 'create' セッションへの不正経路 join |
+| `bad_origin` | relay origin が role として不正、または sequenced data-plane 以外の control frame に付与された |
 | `bad_phase` | フェーズ不適合の op |
 | `bad_resume` | resume_token 不正 |
 | `broken_archive` | 書庫破損 |
@@ -192,9 +277,10 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 | `stale_chapter` | fromChapter 不一致の chapter 限定 TURN |
 | `stale_epoch` | workEpoch 不一致 |
 | `stale_manifest` | manifestVersion 不一致 |
-| `stale_request` | 古いリクエスト再送 |
+| `stale_request` | 古いリクエスト再送、または deliberate load 存在下の bootstrap auto OPEN_WORK |
 | `stale_revision` | baseRevision 不一致（絶対 op） |
 | `timeout` | manifest 解決タイムアウト |
+| `trust_mismatch` | RESUME 時の link 認証 class が member admission 時の stored trust と不一致（同 link で retry 不可能な terminal） |
 | `type` | 未知の request type |
 | `unavailable` | 一時的不可 |
 | `wrong_session` | リクエスト先セッション不一致 |
@@ -204,7 +290,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 
 ---
 
-## 6. 非逐次フレーム
+## 7. 非逐次フレーム
 
 | type | 用途 | 規則 |
 |---|---|---|
@@ -215,7 +301,7 @@ REJECT フレームの `reason` は以下の enum。実装間で文字列一致�
 
 ---
 
-## 7. iOS 実装の最小要件
+## 8. iOS 実装の最小要件
 
 web クライアントと相互運用するために iOS 側が実装すべき範囲:
 
@@ -229,7 +315,7 @@ web クライアントと相互運用するために iOS 側が実装すべき�
 
 ---
 
-## 8. 変更管理
+## 9. 変更管理
 
 - `v` フィールドでフレームバージョン管理（現行 1）。新 type/payload 追加は
   後方互換（未知 type は `type` 拒否で安全側）か `v` bump で扱う

@@ -89,6 +89,10 @@ components:
           v: {type: integer, const: 1}
           type: {type: string, const: HELLO}
           link: {type: string, description: link id}
+          features:
+            type: array
+            items: {type: string}
+            description: server-supported feature tokens（現行 member-drive-v1）
     Ack:
       payload:
         type: object
@@ -103,8 +107,10 @@ components:
             type: object
             description: |
               リクエスト種別ごとの結果。CREATE は
-              `{sessionId, code, memberId, role, resumeToken, expiresInSec,
-              guestToken?}` — `guestToken` は owner email が解決できる
+              `{sessionId, code, memberId, role, trust, resumeToken,
+              expiresInSec, features, guestToken?}` — `trust` は admission
+              時に固定される member|guest、`features` は server-supported
+              feature tokens。`guestToken` は owner email が解決できる
               ときのみ発行されるゲストアクセストークン
               （QR の `/#/join/<code>?gt=<token>` リンク /
               `JOIN{guestToken}` / `bookq_guest` cookie の bearer。
@@ -237,6 +243,12 @@ components:
           message: {type: string}
 
   schemas:
+    FeatureList:
+      type: array
+      maxItems: 32
+      items: {type: string, minLength: 1, maxLength: 64}
+      description: client/server capability feature tokens。未知 token は無視してよい
+
     RequestFrame:
       type: object
       required: [v, requestId, sessionId, workEpoch, baseRevision, type, payload]
@@ -276,7 +288,10 @@ components:
         - type: object
           properties:
             type: {const: CREATE}
-            payload: {type: object}
+            payload:
+              type: object
+              properties:
+                features: {$ref: "#/components/schemas/FeatureList"}
         - type: object
           properties:
             type: {const: JOIN}
@@ -293,6 +308,7 @@ components:
               properties:
                 code: {type: string, pattern: '^\d{6}$'}
                 guestToken: {type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$'}
+                features: {$ref: "#/components/schemas/FeatureList"}
               oneOf:
                 - required: [code]
                 - required: [guestToken]
@@ -303,6 +319,7 @@ components:
               type: object
               properties:
                 pick: {type: string, minLength: 1, maxLength: 64}
+                features: {$ref: "#/components/schemas/FeatureList"}
         - type: object
           properties:
             type: {const: TURN}
@@ -346,6 +363,9 @@ components:
               properties:
                 folder: {type: string}
                 page: {$ref: "#/components/schemas/PageRef"}
+                auto:
+                  type: boolean
+                  description: pairing bootstrap の自動 load。committed/in-flight の非 auto load を上書きしない
         - type: object
           properties:
             type: {const: SIGNAL}
@@ -368,13 +388,32 @@ components:
             payload: {$ref: "#/components/schemas/UiSyncPayload"}
         - type: object
           properties:
+            type: {const: RESUME}
+            payload:
+              type: object
+              required: [memberId, resumeToken]
+              properties:
+                memberId: {type: string}
+                resumeToken: {type: string}
+                features: {$ref: "#/components/schemas/FeatureList"}
+        - type: object
+          properties:
+            type: {const: SET_ACTIVITY}
+            payload:
+              type: object
+              required: [state]
+              properties:
+                state: {type: string, enum: [active, suspended, selecting]}
+                endBrowse:
+                  type: boolean
+                  description: 明示 close gesture のみ true。member-drive capability intersection 下で shared browse を閉じる
+        - type: object
+          properties:
             type:
               enum:
                 - APPROVE
                 - REJECT
-                - RESUME
                 - LEAVE
-                - SET_ACTIVITY
                 - READY
                 - PING
                 - TRANSPORT_STATE
@@ -417,4 +456,6 @@ components:
         leaderSide: {type: string, enum: [right, left]}
         presence:
           type: object
-          description: "link id → {role: leader|follower, ...}"
+          description: "member id → {role, status, trust: member|guest, features: string[], name, ready}"
+        features:
+          $ref: "#/components/schemas/FeatureList"

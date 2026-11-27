@@ -62,7 +62,7 @@
         "payload": {
           "properties": {
             "data": {
-              "description": "リクエスト種別ごとの結果。CREATE は\n`{sessionId, code, memberId, role, resumeToken, expiresInSec,\nguestToken?}` — `guestToken` は owner email が解決できる\nときのみ発行されるゲストアクセストークン\n（QR の `/#/join/<code>?gt=<token>` リンク /\n`JOIN{guestToken}` / `bookq_guest` cookie の bearer。\nread-only・セッション連動失効）。\n",
+              "description": "リクエスト種別ごとの結果。CREATE は\n`{sessionId, code, memberId, role, trust, resumeToken,\nexpiresInSec, features, guestToken?}` — `trust` は admission\n時に固定される member|guest、`features` は server-supported\nfeature tokens。`guestToken` は owner email が解決できる\nときのみ発行されるゲストアクセストークン\n（QR の `/#/join/<code>?gt=<token>` リンク /\n`JOIN{guestToken}` / `bookq_guest` cookie の bearer。\nread-only・セッション連動失効）。\n",
               "type": "object"
             },
             "request": {
@@ -194,6 +194,13 @@
       "Hello": {
         "payload": {
           "properties": {
+            "features": {
+              "description": "server-supported feature tokens（現行 member-drive-v1）",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "link": {
               "description": "link id",
               "type": "string"
@@ -500,6 +507,16 @@
       }
     },
     "schemas": {
+      "FeatureList": {
+        "description": "client/server capability feature tokens。未知 token は無視してよい",
+        "items": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 32,
+        "type": "array"
+      },
       "PageRef": {
         "properties": {
           "folder": {
@@ -521,6 +538,11 @@
           {
             "properties": {
               "payload": {
+                "properties": {
+                  "features": {
+                    "$ref": "#/components/schemas/FeatureList"
+                  }
+                },
                 "type": "object"
               },
               "type": {
@@ -550,6 +572,9 @@
                     "pattern": "^\\d{6}$",
                     "type": "string"
                   },
+                  "features": {
+                    "$ref": "#/components/schemas/FeatureList"
+                  },
                   "guestToken": {
                     "maxLength": 128,
                     "minLength": 16,
@@ -569,6 +594,9 @@
             "properties": {
               "payload": {
                 "properties": {
+                  "features": {
+                    "$ref": "#/components/schemas/FeatureList"
+                  },
                   "pick": {
                     "maxLength": 64,
                     "minLength": 1,
@@ -685,6 +713,10 @@
             "properties": {
               "payload": {
                 "properties": {
+                  "auto": {
+                    "description": "pairing bootstrap の自動 load。committed/in-flight の非 auto load を上書きしない",
+                    "type": "boolean"
+                  },
                   "folder": {
                     "type": "string"
                   },
@@ -760,15 +792,67 @@
           {
             "properties": {
               "payload": {
+                "properties": {
+                  "features": {
+                    "$ref": "#/components/schemas/FeatureList"
+                  },
+                  "memberId": {
+                    "type": "string"
+                  },
+                  "resumeToken": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "memberId",
+                  "resumeToken"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "RESUME"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "endBrowse": {
+                    "description": "明示 close gesture のみ true。member-drive capability intersection 下で shared browse を閉じる",
+                    "type": "boolean"
+                  },
+                  "state": {
+                    "enum": [
+                      "active",
+                      "suspended",
+                      "selecting"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "SET_ACTIVITY"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "properties": {
+              "payload": {
                 "type": "object"
               },
               "type": {
                 "enum": [
                   "APPROVE",
                   "REJECT",
-                  "RESUME",
                   "LEAVE",
-                  "SET_ACTIVITY",
                   "READY",
                   "PING",
                   "TRANSPORT_STATE"
@@ -843,6 +927,9 @@
       },
       "StateFrame": {
         "properties": {
+          "features": {
+            "$ref": "#/components/schemas/FeatureList"
+          },
           "leaderSide": {
             "enum": [
               "right",
@@ -873,7 +960,7 @@
             "type": "string"
           },
           "presence": {
-            "description": "link id → {role: leader|follower, ...}",
+            "description": "member id → {role, status, trust: member|guest, features: string[], name, ready}",
             "type": "object"
           },
           "revision": {

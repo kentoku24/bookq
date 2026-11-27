@@ -49,6 +49,11 @@ pub const SIGNAL_KINDS: &[&str] = &["offer", "answer", "ice"];
 pub const UI_VIEWS: &[&str] = &["browse"];
 pub const UI_MODES: &[&str] = &["tile", "list", "card"];
 pub const MAX_UI_PATH_CHARS: usize = 4096;
+/// Capability advertisements are short feature tokens. Unknown tokens are
+/// preserved (a newer peer may speak a feature this build does not know);
+/// only the envelope shape is bounded here.
+pub const MAX_FEATURES: usize = 32;
+pub const MAX_FEATURE_CHARS: usize = 64;
 
 const REQUEST_KEYS: &[&str] = &[
     "requestId",
@@ -171,7 +176,37 @@ pub fn parse_request(raw: &Map<String, Value>) -> Result<(), ProtocolError> {
     validate_payload(t, &payload)
 }
 
+fn validate_features(p: &Map<String, Value>) -> Result<(), ProtocolError> {
+    let Some(features) = p.get("features") else {
+        return Ok(());
+    };
+    if features.is_null() {
+        return Ok(());
+    }
+    let Some(items) = features.as_array() else {
+        return fail(ERR_MALFORMED, "features must be an array of str");
+    };
+    if items.len() > MAX_FEATURES {
+        return fail(ERR_RANGE, "features has too many entries");
+    }
+    for item in items {
+        let ok = item
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && s.chars().count() <= MAX_FEATURE_CHARS);
+        if !ok {
+            return fail(ERR_MALFORMED, "features entries must be non-empty str");
+        }
+    }
+    Ok(())
+}
+
 fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError> {
+    // Session admission / resume frames carry the client's capability
+    // advertisement. This is additive in v1: absent or null means no
+    // advertised capabilities; when present it must be a bounded string list.
+    if matches!(t, "CREATE" | "JOIN" | "MATCH" | "RESUME") {
+        validate_features(p)?;
+    }
     match t {
         "TURN" => {
             // `delta not in (1,-1)` — Python `True == 1` lets `true` and
@@ -271,6 +306,25 @@ fn validate_payload(t: &str, p: &Map<String, Value>) -> Result<(), ProtocolError
             if let Some(page) = p.get("page") {
                 if !page.is_null() {
                     parse_page_ref(page)?;
+                }
+            }
+            if let Some(auto) = p.get("auto") {
+                if !auto.is_boolean() {
+                    return fail(ERR_MALFORMED, "OPEN_WORK.auto must be bool");
+                }
+            }
+        }
+        "SET_ACTIVITY" => {
+            if !p
+                .get("state")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| matches!(s, "active" | "suspended" | "selecting"))
+            {
+                return fail(ERR_TYPE, "SET_ACTIVITY.state must be active|suspended|selecting");
+            }
+            if let Some(end_browse) = p.get("endBrowse") {
+                if !end_browse.is_boolean() {
+                    return fail(ERR_MALFORMED, "SET_ACTIVITY.endBrowse must be bool");
                 }
             }
         }
