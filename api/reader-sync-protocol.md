@@ -196,8 +196,8 @@ capability intersection 成立時:
   復帰や mirror sidebar の programmatic close は endBrowse を生成してはならない。endBrowse は
   ユーザー明示 close gesture だけが生成する
 - STATE は member-drive intersection 成立中の open に限り `browse:true` を載せる（open の
-  true-only encoding。legacy/mixed-pair の open frame をビット一致で変えない）。`paused` は
-  `selecting` を mask するため、client の close/reconcile は派生 phase ではなくこの直交状態を使う
+  true-only encoding。browse metadata に限り、legacy/mixed-pair の open frame の形を変えない）。
+  `paused` は `selecting` を mask するため、client の close/reconcile は派生 phase ではなくこの直交状態を使う
 - `browse:true` と同じ frame に限り、additive metadata として `browseOpener`（member id）、
   `browseOpenerRole`、`browseGeneration` を送る。`browseGeneration` は session-scoped で、
   初期値は 0、closed→open transition だけが increment する。close・work commit・capability

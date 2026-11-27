@@ -2948,7 +2948,9 @@ impl Inner {
             // offline. Once a generation has existed, closed states therefore
             // carry an additive explicit false plus the monotonically
             // increasing generation. Capability-unaware clients ignore both
-            // fields; pre-first-open frames remain byte-for-byte legacy.
+            // fields; pre-first-open frames carry no browse metadata, preserving
+            // the legacy browse encoding (the STATE as a whole still has other
+            // additive fields such as features/trust).
             if let Value::Object(ref mut obj) = frame {
                 obj.insert("browse".into(), Value::Bool(false));
                 obj.insert(
