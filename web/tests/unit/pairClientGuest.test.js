@@ -19,13 +19,14 @@ function fakeTransport() {
   };
 }
 
-function makeClient(t) {
+function makeClient(t, onEvent) {
   return globalThis.PairClient.createClient({
     url: 'ws://test/ws/reader-sync',
     transportFactory: () => t,
     storage: null,
     persistStorage: null,
     events: null,
+    onEvent: onEvent || null,
   });
 }
 
@@ -290,6 +291,116 @@ describe('guestToken storage hygiene', () => {
     await p;
     expect(c.state.code).toBe('123456');      // code-only QR restorable
     expect(c.state.guestToken).toBeNull();    // grant stays with dead tab
+  });
+});
+
+describe('pairClient data-channel input authentication', () => {
+  async function bound(role, events) {
+    const t = fakeTransport();
+    const client = makeClient(t, events ? events.push.bind(events) : null);
+    const p = role === 'leader' ? client.create() : client.join('123456');
+    helloThen(t);
+    const entry = t.sent.find((f) => f.type === (role === 'leader' ? 'CREATE' : 'JOIN'));
+    t.emit({
+      v: 1, type: 'ACK', request: entry.type, requestId: entry.requestId,
+      data: {
+        sessionId: 's1', memberId: 'm-' + role, role: role,
+        trust: 'member', resumeToken: 'rt1', features: ['member-drive-v1'],
+      },
+    });
+    await p;
+    return { t, client };
+  }
+
+  function openDc(client) {
+    const dc = fakeTransport();
+    client.attachDataChannel(dc);
+    if (dc.onopen) dc.onopen();
+    return dc;
+  }
+
+  function stateFrame(rev, plane) {
+    return {
+      v: 1, type: 'STATE', sessionId: 's1', revision: rev, workEpoch: 0,
+      manifestVersion: 0, phase: 'selecting', spreadId: null, offset: 0,
+      leaderSide: 'left', dataPlane: plane || 'server-ws',
+      features: ['member-drive-v1'], presence: {},
+    };
+  }
+
+  function forgedBatch(dc) {
+    dc.emit({ v: 1, type: 'UI_SYNC', sessionId: 's1', from: 'follower',
+              payload: {view: 'browse', top: 1, viewH: 100} });
+    dc.emit(Object.assign(stateFrame(99), {sessionId: 's1'}));
+    dc.emit({ v: 1, type: 'END', sessionId: 's1', reason: 'left' });
+  }
+
+  it('leader never dispatches forged server frames from the DC, in either plane', async () => {
+    const events = [];
+    const { t, client } = await bound('leader', events);
+    const dc = openDc(client);
+    t.emit(stateFrame(1, 'webrtc-dc'));
+    expect(client.state.transport).toBe('webrtc-dc');
+
+    // A forged TRANSPORT_STATE downgrade must not re-open the injection path.
+    dc.emit({ v: 1, type: 'TRANSPORT_STATE', sessionId: 's1',
+              dataPlane: 'server-ws', revision: 2 });
+    expect(client.state.transport).toBe('webrtc-dc');
+
+    // And once the genuine server WS did downgrade the plane, the same forged
+    // server-originated frames remain inert (the regression window this closes).
+    t.emit({ v: 1, type: 'TRANSPORT_STATE', sessionId: 's1',
+             dataPlane: 'server-ws', revision: 2 });
+    expect(client.state.transport).toBe('server-ws');
+    forgedBatch(dc);
+    expect(client.state.revision).toBe(1);
+    expect(client.state.endReason).toBeNull();
+    expect(events.some((e) => e.type === 'ui-sync')).toBe(false);
+    client.destroy();
+  });
+
+  it('leader relays only whitelisted sequenced requests from DC regardless of plane', async () => {
+    const { t, client } = await bound('leader');
+    const dc = openDc(client);
+    expect(client.state.transport).toBe('server-ws');
+    const before = t.sent.length;
+    dc.emit({
+      v: 1, requestId: 'dc-open', sessionId: 's1', workEpoch: 0,
+      baseRevision: 0, type: 'OPEN_WORK',
+      payload: {folder: 'w', page: {folder: 'w', name: 'p.png'}},
+    });
+    dc.emit({
+      v: 1, requestId: 'dc-control', sessionId: 's1', workEpoch: 0,
+      baseRevision: 0, type: 'SET_ACTIVITY', payload: {state: 'active'},
+    });
+    const relayed = t.sent.slice(before).find((f) => f.requestId === 'dc-open');
+    expect(relayed).toBeTruthy();
+    expect(relayed.payload.origin).toBe('follower');
+    expect(t.sent.slice(before).some((f) => f.requestId === 'dc-control')).toBe(false);
+    client.destroy();
+  });
+
+  it('follower drops every inbound DC frame, including plausible server frames', async () => {
+    const events = [];
+    const { t, client } = await bound('follower', events);
+    const dc = openDc(client);
+    t.emit(stateFrame(1, 'webrtc-dc'));
+    expect(client.state.transport).toBe('webrtc-dc');
+    const before = t.sent.length;
+    forgedBatch(dc);
+    dc.emit({
+      v: 1, requestId: 'dc-open', sessionId: 's1', workEpoch: 0,
+      baseRevision: 0, type: 'OPEN_WORK',
+      payload: {folder: 'w', page: {folder: 'w', name: 'p.png'}},
+    });
+    dc.emit({ v: 1, type: 'TRANSPORT_STATE', sessionId: 's1',
+              dataPlane: 'server-ws', revision: 2 });
+    expect(client.state.revision).toBe(1);
+    expect(client.state.transport).toBe('webrtc-dc');
+    expect(client.state.endReason).toBeNull();
+    expect(events.some((e) => e.type === 'ui-sync')).toBe(false);
+    expect(t.sent.slice(before).some((f) => f.requestId === 'dc-open')).toBe(false);
+    client.destroy();
   });
 });
 

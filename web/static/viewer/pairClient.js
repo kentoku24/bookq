@@ -2016,17 +2016,18 @@
     }
 
     function _onDcFrame(f) {
-      if (_destroyed) return;
-      // leader-sequenced plane (§3.4): follower-ordered requests arriving on
-      // the DC are relayed verbatim + payload.origin through the leader's
-      // control channel. Everything else is a normal inbound frame.
-      if (f && typeof f === 'object' && _member &&
-          _member.role === 'leader' && _plane === 'webrtc-dc') {
-        // On the leader's DC every inbound frame is follower-originated:
-        // server-originated frames already arrive on the leader's own WS.
-        // Relay exactly the sequenced-op whitelist and drop the rest. In
-        // particular, request-shaped control frames must not fall through
-        // into _dispatch as though the server had sent them.
+      if (_destroyed || !f || typeof f !== 'object') return;
+      // The DC is peer-to-peer input, never a server channel. Server-originated
+      // frames (STATE/END/UI_SYNC/TRANSPORT_STATE/...) legitimately arrive only
+      // on this client's authenticated server WS, so they must never enter
+      // _dispatch from the DC — the plane bit is itself attacker-influenceable
+      // during downgrade transitions and is not an authentication boundary.
+      if (_member && _member.role === 'leader') {
+        // On the leader's DC every inbound frame is follower-originated.
+        // Relay exactly the sequenced-op whitelist, independent of the
+        // currently advertised plane, and drop everything else. Followers
+        // have no legitimate inbound DC traffic at all: their requests go
+        // leader-ward, while responses/commits arrive on their own server WS.
         if (typeof f.requestId === 'string' && typeof f.type === 'string' &&
             _RELAYABLE[f.type] === 1 &&
             f.payload && typeof f.payload === 'object') {
@@ -2038,9 +2039,7 @@
           fwd.payload = p;
           _ctlSend(fwd);
         }
-        return;
       }
-      _dispatch(f, _gen);
     }
 
     function _onDcDown() {
