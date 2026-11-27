@@ -1,7 +1,7 @@
 # ADR 0004: ペア読書の権限を信頼軸に剥がし、招待 UX を統一 QR に一本化する
 
-- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド反映済み v3）
-- **日付:** 2026-11-26（v3 改訂: 同日）
+- **ステータス:** 提案中（レッドチームレビュー 2 ラウンド + Devin Review 反映済み v4）
+- **日付:** 2026-11-26（v4 改訂: 2026-11-27）
 - **決定者:** bookq-maintainers
 - **Baseline:** `6af0250`（#652 guest access link・#661 iOS flake hardened 着陸済みの main）
 - **関連:** #652 (guest access link) / 実装追跡: #662
@@ -43,6 +43,7 @@
    - コード保持者は待機画面内の「コードで参加する」リンクを escape hatch とする。#160 系の既存 UI テストは**意図的な仕様変更として書き換え**、変更一覧を実装 PR に明記
    - wrong-match リスクは受容（match window 120 秒・複数待機時は picker・誤接続時の離脱は 1 操作）
    - 誤タップで bearer 入り QR が一瞬表示され得るが、露出窓は小さく（セキュリティ節）、受容する
+   - **MATCH による seat 先取りを受容する**: 待機中に誰かが chain tap で MATCH 接続すると follower seat は消費され、QR を見ていた guest は join できない。また自分が招待したい時に別の待機者がいると、chain tap は待機 leader になるのではなくその相手に接続する — 「接続せず自分の招待 QR を出す」経路は設けない。2 台セッションの seat が 1 つである以上これは構造的であり、解決は社会的調整 + 再招待（C 節の再招待更新）に委ねる（Devin Review 指摘の受容判断）
 2. **match origin の待機セッションでも grant を mint** — QR は常に composite
 3. **3 択パネルの入口を解体** — パネルの他責務（waiting QR・コード入力・カメラ scan・picker・error 表示・focus/inert 管理）は残る
 
@@ -75,7 +76,7 @@ v2 の per-member 導出モデルは**棄却** — browse mirror は論理的に
 
 - **導出 cascade の完全な優先順位**: waiting → paused（対象 member 条件）→ loading → selecting → reading。各行で「どの member が導出にカウントされるか」を明記。現行は manifest 不在時も phase=selecting であり bootstrap がこれに依存している事実を織り込む
 - offline/resume を跨ぐ挙動: suspend は browse を終了**しない**（activity scalar と browse 状態は直交 — 片方が suspend しても他方は mirror を見続けられる）。resume 時に client は自己状態を reconcile する手順を定める
-- close 操作の wire: どちらかが送る SET_ACTIVITY active は「共有 browse を閉じる」意味となり、自分だけでなく session の browse を終了させる。旧 client（leader の active で session flag をクリアする現行サーバ意味論）との整合は B-5 の capability で制御する
+- close 操作の wire: **終了は visibility 由来の activity 報告と区別される明示シグナルでなければならない**。現行 client はタブ復帰（visibilitychange）でも `SET_ACTIVITY active` を送るため、「active = browse 終了」の意味論では相手が browse 中にタブへ戻っただけで共有 browse が閉じる（v3 の記述はこの意味で壊れていた — Devin Review 指摘）。設計: browse 終了は sidebar の open→closed 遷移（ユーザ操作または明示的な close）でのみ生成される独立の wire シグナルとする（additive な payload フィールド例: `SET_ACTIVITY{state:"active", endBrowse:true}` または専用 op — 実装時に protocol doc で確定）。visibility 復帰の active には終了意味を持たせない。契約テストに両方を入れる: (a) タブ復帰では共有 browse が閉じない、(b) 明示 close では閉じる。旧 client（leader の active で session flag をクリアする現行サーバ意味論）との整合は B-5 の capability intersection で制御する — 混在ペアでは新意味論を使わない
 
 #### B-3. OPEN_WORK の競合意味論
 
@@ -130,13 +131,14 @@ Hyrum's law 観点の構造的修正: v2 の `features` は server→client 単�
 
 **availability 修正を scope に入れる**（attacker set が拡大する以上、既知 issue でも本 ADR の受容条件とする）:
 
-- REJECT/KICK は member-scoped にし session を殺さない。rejected/dropped candidate は code を解放する
+- REJECT/KICK は member-scoped にし session を殺さない。rejected/dropped candidate は code を解放する（`drop_pending` の `code_consumed` リセットで部分実装済み）
 - follower/guest の LEAVE が session 全体を殺す現行仕様は、少なくとも leader が再招待可能な状態にする（完全な member-scoped teardown は別 issue でもよいが、方向を明記）
+- **再招待の更新意味論を定義する**（Devin Review 指摘 — v3 は未定義だった）: 現行の code TTL はセッション作成時に固定で、未ペアに戻った瞬間に期限切れなら tick が session ごと殺す。つまり成立から数分後に KICK/LEAVE でコードを解放しても再招待は成立しない。設計: paired member の脱落（KICK/LEAVE/REJECT）でセッションが 1 人の待機に戻った時、server は **新しい code + 新しい TTL + 新しい grant を rotate/mint** し、leader の client は新しい composite QR を表示する。期限後の再招待テストを Phase 0 の行列に含める
 
 **credential invariant**（実装済みのものも設計として固定）:
 
 1. invite secret は CSPRNG 生成の少なくとも 128 bit（現行 192 bit）
-2. `gt` は one-time invite、初回 redeem で server-side consume
+2. **single-use が効くのは redeem ではなく seat（bind）である** — v3 の「初回 redeem で server-side consume」は現行実装ともフローとも矛盾する誤り（Devin Review 指摘）。現行の guest 参加フローは login.js と hash.js で **二度 redeem する**（login shell で cookie を得て reload → fragment が生き残り viewer 側で再度 redeem してから join）ため、redeem で consume すると通常フロー自体が壊れる。正しい invariant: `gt` は失効まで何度でも redeem できる bearer であり、消費されるのは follower seat（bind 時の `code_consumed`、drop_pending で解放済み）。二度目の redeem を不要にする画面遷移の整理（cookie 済みなら skip）は Phase 2 の polish として扱う
 3. invite/credential は session id に bind し、session end / owner disable / expiry / KICK で atomic に失効
 4. token 値は log/analytics/pair-report/persist record に出さない
 5. QR host と public host の関係: token が host-independent なら tailnet QR の写真でも cloudflared host に付け替えて使えることを脅威モデルに明記
@@ -191,7 +193,7 @@ wire 上は保持し、member-member では auto-approve を既定のままと�
   - 共有 browse の状態機械行列: member どちらが開いても閉じられる / opener が offline でも peer が閉じられる / commit で終了 / suspend では終了しない / 同時 open は冪等 / bootstrap auto は故意 pick を上書きない
   - resume の trust 一致、hidden roots が guest 画面に出ない regression
 - **Phase 1（trust モデル + 権限解放 + 共有 browse）**: `Member.trust`、effective-actor 認可、relay whitelist、共有 browse（開放・close 意味論）、bootstrap `auto` flag、capability 広告（双方向 + peer 反射）+ intersection gate。exit: 上記 green + capability 非対応で旧挙動 fallback
-- **Phase 2（UX 統一）**: match origin mint、chain-tap connect、パネル入口解体、常時 composite QR。**member の composite QR code-join フォールバック（grant 切れでも code で join）を含める**（これがないと中間状態で member の QR join が退行）。native の表示側（ACK の guestToken を保持し composite QR を描画）をこのフェーズに明記。presence trust バッジ + member-scoped KICK/REJECT + LEAVE 再招待可能化もここ
+- **Phase 2（UX 統一）**: match origin mint、chain-tap connect、パネル入口解体、常時 composite QR。**member の composite QR code-join フォールバック（grant 切れでも code で join）を含める**（これがないと中間状態で member の QR join が退行）。native の表示側（ACK の guestToken を保持し composite QR を描画）をこのフェーズに明記。presence trust バッジ + member-scoped KICK/REJECT + LEAVE 再招待可能化 + 再招待 rotate（code/TTL/grant）もここ。**RESUME 応答に live grant token を含める** — 別タブへの引き継ぎでは token が復元されず（#652 で cross-tab persist に入れない判断済み）、引き継いだタブの待機画面は code-only QR になって 2 モード trap が再発するため、server が session の live grant を RESUME ACK で返し composite QR を再描画できるようにする（完了条件に含める — Devin Review 指摘）
 - **Phase 3（コピー掃除のみ）**: UI コピーの leader 語整理（「開始者」への置換）
 
 ## レッドチームレビューの記録
@@ -210,3 +212,12 @@ wire 上は保持し、member-member では auto-approve を既定のままと�
 6. **pre-#652 stale shell で composite deep link が dead end**（Hyrum）→ 移行行列に正直に記載
 7. bootstrap が故意の pick を上書きする経路（Lamport）→ `auto` flag の不変式
 8. relay type confusion（Schneier）→ relay whitelist
+
+**Round 3（Devin Review bot — PR #663 inline）**: v3 に対する指摘と対応:
+
+1. **タブ復帰で共有 browse が閉じる** — v3 の「SET_ACTIVITY active = close」は visibility 復帰の active と区別がつかず壊れていた → B-2 の close wire を明示シグナルに再設計
+2. **redeem の二重実行** — v3 の invariant「初回 redeem で consume」は現行フロー（login.js → reload → hash.js の二度 redeem）と矛盾 → invariant を「single-use は seat の bind」に修正
+3. **招待期限後の再招待が未定義** — code TTL が作成時固定で、KICK 後に解放しても session ごと死ぬ → 再招待時の code/TTL/grant rotate を定義
+4. **RESUME で composite QR を復元できない** — token が cross-tab persist に入らない設計のため、RESUME ACK に live grant を含めることを Phase 2 完了条件に追加
+5. **MATCH の seat 先取り・待機者への接続で招待 QR が出ない** — 2 台セッションの構造的制約として受容、社会的調整 + 再招待に委ねる旨を明記
+
