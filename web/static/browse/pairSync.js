@@ -75,7 +75,7 @@
   var EST_MAX_MS = 200;
   var LOCAL_SETTLE_MS = 400;
 
-  var _armed = false;        // ミラー有効（live pair && phase==='selecting'）
+  var _armed = false;        // ミラー有効（live pair && browse 対象フェーズ）
   var _unlocked = false;     // 送信解禁 — leader は arm 即時、follower は初適用後
   var _lastSendTs = -1e9;
   var _lastSentSig = null;
@@ -128,6 +128,17 @@
     return !!st && !!st.sessionId && st.status !== 'idle' &&
       st.status !== 'ended' && st.status !== 'error';
   }
+  /* Mirror eligibility is the shared-browse activity, not merely the derived
+   * phase. In a member-drive pair with no committed work the phase is
+   * 'selecting' even while browse is still closed (作品未選択の初期状態) —
+   * arming there would both accept frames for a closed browse and consume
+   * the arm edge before the real open. Legacy/mixed pairs have no orthogonal
+   * browse flag, so they keep the phase-only behavior. */
+  function _armEligible(st) {
+    if (!_live(st) || !_paired(st) || st.phase !== 'selecting') return false;
+    if (st.memberDrive === true) return st.browse === true;
+    return true;
+  }
   function _presenceSig(st) {
     var p = st && st.presence;
     if (!p) return '';
@@ -168,7 +179,7 @@
   /* ── arm / disarm ── */
 
   function _onCtlState(st) {
-    var armed = _live(st) && _paired(st) && st.phase === 'selecting';
+    var armed = _armEligible(st);
     if (armed && !_armed) {
       _armed = true;
       _prevPresenceSig = _presenceSig(st);
@@ -581,7 +592,7 @@
     var c = _followCtx;
     var st = _pc() && _pc().state;
     return !!(f.sc && c && f.sc === _scroller() && _armed && st &&
-      st.phase === 'selecting' && st.sessionId === c.sid &&
+      _armEligible(st) && st.sessionId === c.sid &&
       _role() === c.role && !_queryActive() &&
       !document.hidden && _sidebarOpen() && !_reducedMotion() &&
       (_w().viewMode || 'tile') === c.mode &&

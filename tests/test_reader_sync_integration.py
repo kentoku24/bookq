@@ -120,6 +120,27 @@ def _pair_now(pl, pf, timeout=15000):
             timeout=timeout)
 
 
+def _pair_without_work(pl, pf, timeout=15000):
+    """Pair two top-screen devices with no current reader work.
+
+    The initial no-manifest state is intentionally phase='selecting' even
+    though shared browse is still closed (ADR 0004), so this is the state
+    machine edge that a plain phase-only mirror arm cannot distinguish.
+    """
+    pl.evaluate("() => window.PairController.create()")
+    pl.wait_for_function("() => !!window.PairController.state.code",
+                         timeout=timeout)
+    code = pl.evaluate("() => window.PairController.state.code")
+    pf.evaluate("(c) => window.PairController.join(c)", code)
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.phase === 'selecting'"
+            " && window.PairController.state.memberDrive === true"
+            " && window.PairController.state.spreadId === null"
+            " && Object.keys(window.PairController.state.presence || {}).length >= 2",
+            timeout=timeout)
+
+
 def _cstate(pg):
     return pg.evaluate("() => window.PairController.state")
 
@@ -346,6 +367,36 @@ def test_follower_initiated_turn_converges(devs):
 
 
 # ── leader browse / work change ───────────────────────────────────────────
+
+def test_initial_shared_work_selection_syncs_list(devs):
+    """member-drive regression: pair two devices before either has opened a
+    work, close one side's local launcher list, then open shared browse from
+    the other side. Because the no-work phase is already 'selecting', browse
+    opening does NOT produce a phase edge — the mirror must arm on the
+    orthogonal browse edge, send the first frame, auto-open the peer list,
+    and mirror the first folder navigation."""
+    pl, pf = devs
+    pl.evaluate("() => window.closeSidebar()")
+    _pair_without_work(pl, pf)
+
+    assert pf.evaluate("() => window.PairController.changeWork()") is True
+    for p in (pl, pf):
+        p.wait_for_function(
+            "() => window.PairController.state.browse === true"
+            " && window.PairController.state.phase === 'selecting'",
+            timeout=15000)
+        p.wait_for_function(
+            "() => document.getElementById('sidebar').classList.contains('open')",
+            timeout=10000)
+
+    pf.eval_on_selector(
+        "#tile-grid .tile[data-path='series']", "el => el.click()")
+    for p in (pl, pf):
+        p.wait_for_function("() => window.currentBrowsePath === 'series'",
+                            timeout=15000)
+    assert any(f.get("type") == "UI_SYNC" for f in _sent(pf)), \
+        "the member opening shared browse must put mirror frames on the wire"
+
 
 def test_leader_browse_selecting_cancel_then_change_work(devs):
     pl, pf = devs
