@@ -2044,6 +2044,28 @@ impl Inner {
             );
             return;
         }
+        // UI_SYNC is ephemeral, but on a closed browse it is also the frame
+        // that would make the receiver open its list. Guests may participate
+        // in a mirror a member already opened, yet they must never START the
+        // shared browse — the same trust boundary as SET_ACTIVITY selecting.
+        // The initial pre-commit phase is `selecting` without the shared
+        // browse flag being open, so the boolean (not the derived phase) is
+        // the authority here.
+        let guest_starting_closed_browse = self
+            .session(sid)
+            .and_then(|s| s.members.iter().find(|m| m.id == mid))
+            .is_some_and(|m| m.trust == TRUST_GUEST)
+            && !self.session(sid).is_some_and(|s| s.selecting);
+        if guest_starting_closed_browse {
+            self.reject(
+                link_id,
+                req_id(req),
+                Some("UI_SYNC"),
+                REASON_FORBIDDEN,
+                Some(sid),
+            );
+            return;
+        }
         let other_link = self.session(sid).and_then(|s| {
             s.members
                 .iter()
@@ -3589,6 +3611,94 @@ mod tests {
         assert_eq!(ack["type"], "ACK");
         assert!(ack["data"]["guestToken"].is_null());
         assert_eq!(ack["data"]["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn guest_ui_sync_cannot_start_closed_shared_browse() {
+        let reg = reg_for_test();
+        let mut inner = reg.inner.lock().await;
+        let leader_user = protocol::frame(&[
+            ("name", "Leader".into()),
+            ("email", "leader@example.com".into()),
+        ]);
+        let (l1, mut r1, _c1) = mk_link_full(&mut inner, Some(leader_user), None);
+        let _ = next_json(&mut r1); // HELLO
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named("CREATE", "", feature_payload(&[CAP_MEMBER_DRIVE]), "gus-create"),
+        );
+        let ack = next_json(&mut r1);
+        let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
+        let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
+        let _ = next_json(&mut r1); // waiting STATE
+
+        let (l2, mut r2, _c2) =
+            mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
+        let _ = next_json(&mut r2); // HELLO
+        let join_payload = protocol::frame(&[
+            ("guestToken", Value::String(gt)),
+            ("features", feature_payload(&[CAP_MEMBER_DRIVE])["features"].clone()),
+        ]);
+        inner.dispatch(&reg, &l2, &req_named("JOIN", "", join_payload, "gus-join"));
+        let ack2 = next_json(&mut r2);
+        let mid2 = ack2["data"]["memberId"].as_str().unwrap().to_string();
+        let approve = protocol::frame(&[("memberId", Value::String(mid2))]);
+        inner.dispatch(&reg, &l1, &req_named("APPROVE", &sid, approve, "gus-approve"));
+
+        let ui = || {
+            protocol::frame(&[
+                ("view", "browse".into()),
+                ("path", Value::Null),
+                ("top", Value::from(0)),
+                ("viewH", Value::from(600)),
+            ])
+        };
+        // No member has opened shared browse yet (the initial pre-commit
+        // selecting phase is not itself an open browse). A guest UI_SYNC must
+        // not become a de facto open on the host.
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "guest-ui-closed"));
+        let frames: Vec<Value> = std::iter::from_fn(|| match r2.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        })
+        .collect();
+        assert!(frames.iter().any(|f| {
+            f["type"] == "REJECT"
+                && f["requestId"] == "guest-ui-closed"
+                && f["reason"] == REASON_FORBIDDEN
+        }), "guest UI_SYNC while browse is closed must be forbidden: {frames:?}");
+        let leader_frames: Vec<Value> = std::iter::from_fn(|| match r1.try_recv() {
+            Ok(OutItem::Text(raw)) => serde_json::from_str(&raw).ok(),
+            _ => None,
+        })
+        .collect();
+        assert!(!leader_frames.iter().any(|f| f["type"] == "UI_SYNC"),
+            "closed-browse guest frame must not reach the host: {leader_frames:?}");
+
+        // Once a member really opens shared browse, ordinary ephemeral mirror
+        // frames remain relayable — the prohibition is on STARTING it, not on
+        // participating in an already-open mirror.
+        inner.dispatch(
+            &reg,
+            &l1,
+            &req_named(
+                "SET_ACTIVITY",
+                &sid,
+                protocol::frame(&[("state", "selecting".into())]),
+                "member-open",
+            ),
+        );
+        inner.dispatch(&reg, &l2, &req_named("UI_SYNC", &sid, ui(), "guest-ui-open"));
+        let mut forwarded = false;
+        while let Ok(OutItem::Text(raw)) = r1.try_recv() {
+            let f: Value = serde_json::from_str(&raw).unwrap();
+            if f["type"] == "UI_SYNC" {
+                forwarded = true;
+                break;
+            }
+        }
+        assert!(forwarded, "open shared browse must still relay guest mirror frames");
     }
 
     #[tokio::test]
