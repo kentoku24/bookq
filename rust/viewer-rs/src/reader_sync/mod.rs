@@ -3454,7 +3454,7 @@ mod tests {
         let _ = next_json(&mut r1); // STATE
         let sid = ack["data"]["sessionId"].as_str().unwrap().to_string();
         let gt = ack["data"]["guestToken"].as_str().unwrap().to_string();
-        let (l2, mut r2, mut gclose) =
+        let (l2, mut r2, gclose) =
             mk_link_full(&mut inner, Some(Value::Null), Some(gt.clone()));
         let _ = next_json(&mut r2); // HELLO
         inner.dispatch(
@@ -3567,7 +3567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_capability_pair_keeps_leader_only_browse_close() {
+    async fn mixed_capability_pair_keeps_leader_only_browse_close() {
         let reg = reg_for_test();
         let mut inner = reg.inner.lock().await;
         let (l1, mut r1) = mk_link(&mut inner);
@@ -3575,9 +3575,10 @@ mod tests {
         let (l2, mut r2) = mk_link(&mut inner);
         let _ = next_json(&mut r2);
         let (sid, _mid2) = paired_session(
-            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2, &[], &[],
+            &mut inner, &reg, &l1, &mut r1, &l2, &mut r2, &[CAP_MEMBER_DRIVE], &[],
         );
-        // follower open is still leader-only without the intersection.
+        // A one-sided advertisement is not an intersection: follower open is
+        // still leader-only even though the new-capable leader is present.
         inner.dispatch(
             &reg,
             &l2,
