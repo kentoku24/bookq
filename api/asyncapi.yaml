@@ -467,10 +467,11 @@ components:
         browse:
           type: boolean
           description: |
-            shared browse が開いている時だけ true を送る session スコープの状態。
-            paused が selecting を mask するため phase だけでは判別できない。
-            member-drive capability intersection が成立する pair でのみ意味を持ち、
-            省略/false は closed。混在 pair の wire 互換のため true-only encoding。
+            shared browse の session スコープ状態。member-drive intersection 成立中の
+            open では true を送る。一度 generation が存在した後の closed state では
+            intersection の有無に関係なく additive な false を送り、offline 中に起きた
+            close や capability downgrade close を resume 後も観測できるようにする。
+            初回 open 前は省略する。paused が selecting を mask するため phase だけでは判別できない。
         browseOpener:
           type: string
           description: "shared browse open 時のみ付く additive metadata: server serialization で最初に open を受理した member id"
@@ -481,7 +482,7 @@ components:
         browseGeneration:
           type: integer
           minimum: 0
-          description: "closed→open 毎に increment する additive generation。browse:true の時だけ送る"
+          description: "closed→open 毎に increment する additive generation。open では browse:true と共に、generation 成立後の closed では browse:false と共に送る。close/work commit/downgrade で reset しない"
         presence:
           type: object
           description: "member id → {role, status, trust: member|guest, features: string[], name, ready}"

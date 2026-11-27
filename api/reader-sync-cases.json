@@ -2874,7 +2874,9 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browse": false,
+              "browseGeneration": 1
             }
           ]
         },
@@ -3021,7 +3023,9 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browse": false,
+              "browseGeneration": 2
             }
           ]
         },
@@ -3585,7 +3589,9 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browse": false,
+              "browseGeneration": 1
             },
             {
               "v": 1,
@@ -3766,7 +3772,9 @@
               },
               "features": [
                 "member-drive-v1"
-              ]
+              ],
+              "browse": false,
+              "browseGeneration": 1
             }
           ]
         },

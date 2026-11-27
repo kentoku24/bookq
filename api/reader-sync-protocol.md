@@ -4,7 +4,7 @@
 本書は**振る舞い**（ライフサイクル・逐次化・並行性制御・拒否理由）を定義する。
 iOS ネイティブが web クライアントと相互運用するために必要な契約はこの2つで完結する。
 
-実装根拠: `app/reader_sync/{protocol,sessions,state,transport}.py`（拒否理由文字列・フェーズ・
+実装根拠: `rust/viewer-rs/src/reader_sync/{protocol,mod,state,transport}.rs`（拒否理由文字列・フェーズ・
 列挙値はワイヤ安定 = 変更すると新旧クライアント混在で壊れる）。
 
 ---
@@ -150,7 +150,9 @@ RESUME 毎に現在値へ更新される。
 
 `member-drive-v1` の intersection が成立する条件は、server deployment flag
 `BOOKQ_PAIR_MEMBER_DRIVE`（既定 enabled。`0|false|off|no` で無効）が有効で、paired な
-2 member 双方の最新広告が同 feature を含むことである。intersection 非成立の混在ペアでは
+2 member 双方の最新広告が同 feature を含むことである。intersection 自体に trust は含めない
+（trust は immutable authority であり capability のように runtime 更新されない）。guest の操作は
+intersection 成立後も個別の認可ゲートで拒否する。intersection 非成立の混在ペアでは
 新旧混在を壊さないため、legacy 意味論（leader-only OPEN_WORK/shared browse、leader の
 非 selecting activity で browse close）を厳密に維持する。offline の間は最後に広告した
 capability を保持し、一時切断だけでは downgrade しない。
@@ -192,15 +194,23 @@ capability intersection 成立時:
 - `active`/`suspended` 単体は liveness 更新だけであり shared browse を終了しない。tab visibility
   復帰や mirror sidebar の programmatic close は endBrowse を生成してはならない。endBrowse は
   ユーザー明示 close gesture だけが生成する
-- STATE は shared browse が開いている間 `browse:true` を載せる（true-only encoding。省略/false は
-  closed）。`paused` は `selecting` を mask するため、client の close/reconcile は派生 phase ではなく
-  この直交状態を使う。混在 pair では新意味論を使わず、従来どおり phase/leader activity だけを見る
+- STATE は member-drive intersection 成立中の open に限り `browse:true` を載せる（open の
+  true-only encoding。legacy/mixed-pair の open frame をビット一致で変えない）。`paused` は
+  `selecting` を mask するため、client の close/reconcile は派生 phase ではなくこの直交状態を使う
 - `browse:true` と同じ frame に限り、additive metadata として `browseOpener`（member id）、
-  `browseOpenerRole`、`browseGeneration` を送る。client mirror seed は自分の DOM 状態ではなく
-  opener member id で決める。理想的には `browse:{open,opener,generation}` の構造型が欲しいが、
-  `browse` は既に true-only boolean として出荷済みで、legacy client が boolean として読むため、
-  現行 wire は boolean を保ったまま隣接 field を追加する additive 形に留める。closed ではこれらを
-  省略し、legacy/mixed-pair frame をビット一致で変えない
+  `browseOpenerRole`、`browseGeneration` を送る。`browseGeneration` の初期値は 0 で、
+  closed→open transition だけが increment する。close・work commit・capability downgrade では
+  reset されず、duplicate open でも増えない。client mirror seed は自分の DOM 状態ではなく
+  opener member id で決める。opener だけが初期 seed を送り、非 opener は最初の remote frame を
+  適用してから送信 unlock する。generation は open 中だけでなく close 後の STATE でも継続消費し、
+  変化した時は opener/unlock/seed/pending mirror state を新 generation 用に再初期化する
+- 一度 generation が存在した後の closed STATE では、capability intersection の有無に関係なく
+  additive な `browse:false` と `browseGeneration` を送る。これは close を commit した STATE
+  だけの one-shot ではなく、offline 中の close を resume 後にも観測できるよう closed の間保持する。
+  特に RESUME capability downgrade は close と intersection 喪失を同じ STATE に原子化するため、
+  この explicit false がなければ close を観測できない。`browseOpener*` は close 時に省略する。
+  未知 field を無視する legacy client には影響せず、mixed pair でも server の browse 真実は同じなので
+  additive false を送ってよい。初回 open 前（generation 0）の frame には browse metadata を載せない
 
 intersection 非成立時は旧挙動: OPEN_WORK/selecting open は leader のみ、leader の非 selecting
 activity が browse flag をクリアする。
@@ -262,7 +272,7 @@ sequenced op の rejection は最新 committed snapshot を `snapshot` に載せ
 `v/type` を除いた complete な観測状態で、`presence`（各 member の role/status/trust/features/name/ready）
 と server `features` を必ず含む。client は rejection 処理で capability intersection を再評価できる必要があり、
 presence/features を欠いた snapshot で前回 STATE を合成してはならない（shared browse close 権限が一時的に
-flap する）。`browse` additive metadata も open 中は同じ encoding で入る。
+flap する）。`browse` additive metadata も open/closed の現行 encoding で入る。
 
 ### READY ゲート
 manifest コミット後、全メンバーが READY するまで `loading`。

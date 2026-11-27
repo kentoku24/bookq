@@ -472,12 +472,16 @@
   }
 
   function _onClientState(st) {
-    if (st && st.memberDrive === true) {
+    var browseExplicit = !!(st && (st.memberDrive === true ||
+        st.browse === true || (st.browseGeneration || 0) > 0));
+    if (browseExplicit) {
       // Track the authoritative shared-browse boolean independently of the
-      // derived phase. A true→false edge is an explicit end/commit, not a
-      // suspend: close even the opener's manually opened list so the held
-      // commit can restore the reader. The closeSidebar call is deliberately
-      // programmatic (no explicit marker), so it cannot echo endBrowse.
+      // derived phase and independently of the current capability
+      // intersection. A RESUME downgrade closes browse and loses memberDrive
+      // in the same STATE; the additive browse:false+generation encoding is
+      // what lets that close reach this handler. The closeSidebar call is
+      // deliberately programmatic (no explicit marker), so it cannot echo
+      // endBrowse.
       var browseNow = st.browse === true;
       if (_wireBrowse === true && !browseNow) {
         _selIssued = false;

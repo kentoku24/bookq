@@ -138,7 +138,14 @@
    * browse flag, so they keep the phase-only behavior. */
   function _armEligible(st) {
     if (!_live(st) || !_paired(st) || st.phase !== 'selecting') return false;
-    if (st.memberDrive === true) return st.browse === true;
+    // The explicit browse encoding is authoritative whenever this client can
+    // see it: in member-drive mode from the first open, and in any pair once
+    // a closed generation is being advertised. Mixed/legacy open frames still
+    // omit it, so those pairs keep the phase-only fallback exactly.
+    if (st.memberDrive === true || st.browse === true ||
+        (st.browseGeneration || 0) > 0) {
+      return st.browse === true;
+    }
     return true;
   }
   function _presenceSig(st) {

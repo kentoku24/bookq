@@ -2921,9 +2921,8 @@ impl Inner {
             // `paused` outranks selecting in the derived phase, so the
             // phase alone cannot represent a still-open shared browse. In
             // member-drive semantics expose the orthogonal boolean; the
-            // true-only encoding keeps legacy/mixed-pair frames unchanged.
-            // Opener metadata is additive alongside `browse:true` — the wire
-            // boolean itself remains the legacy-compatible encoding.
+            // true-only open encoding keeps legacy/mixed-pair open frames
+            // unchanged. Opener metadata is additive alongside `browse:true`.
             if let Value::Object(ref mut obj) = frame {
                 obj.insert("browse".into(), Value::Bool(true));
                 obj.insert(
@@ -2941,6 +2940,21 @@ impl Inner {
                         obj.insert("browseOpenerRole".into(), Value::String(role));
                     }
                 }
+            }
+        } else if !s.browse_open && s.browse_generation > 0 {
+            // A close must remain observable even when the same transition
+            // removed the member-drive intersection (a RESUME capability
+            // downgrade), and even to a client that missed the close while
+            // offline. Once a generation has existed, closed states therefore
+            // carry an additive explicit false plus the monotonically
+            // increasing generation. Capability-unaware clients ignore both
+            // fields; pre-first-open frames remain byte-for-byte legacy.
+            if let Value::Object(ref mut obj) = frame {
+                obj.insert("browse".into(), Value::Bool(false));
+                obj.insert(
+                    "browseGeneration".into(),
+                    Value::from(s.browse_generation),
+                );
             }
         }
         Some(frame)
@@ -4056,8 +4070,9 @@ mod tests {
         let state = next_json(&mut r3);
         assert_eq!(state["type"], "STATE");
         assert!(!inner.session(&sid).unwrap().browse_open);
-        assert!(state.get("browse").is_none(),
-            "capability loss closes shared browse before the RESUME STATE: {state:?}");
+        assert_eq!(state.get("browse"), Some(&Value::Bool(false)),
+            "capability-loss close must stay explicit after the intersection is gone: {state:?}");
+        assert_eq!(state.get("browseGeneration"), Some(&Value::from(1)));
         assert_eq!(state["presence"][mid2]["features"], Value::Array(vec![]));
     }
 
