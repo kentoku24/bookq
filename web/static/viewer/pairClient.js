@@ -515,6 +515,7 @@
         side: _side(),
         transport: _effPlane(),
         phase: _lastState ? _lastState.phase : null,
+        browse: !!(_lastState && _lastState.browse === true),
         spreadId: _lastState ? _lastState.spreadId : null,
         revision: _seen.rev < 0 ? 0 : _seen.rev,
         workEpoch: _seen.epoch < 0 ? 0 : _seen.epoch,
@@ -1774,6 +1775,7 @@
         manifestVersion: snap.manifestVersion, phase: snap.phase,
         spreadId: snap.spreadId, offset: snap.offset,
         leaderSide: snap.leaderSide,
+        browse: snap.browse === true,
         presence: _lastState ? _lastState.presence : {},
         dataPlane: snap.dataPlane || 'server-ws',
       };
