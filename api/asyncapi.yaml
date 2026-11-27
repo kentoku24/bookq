@@ -408,12 +408,22 @@ components:
                   type: boolean
                   description: 明示 close gesture のみ true。member-drive capability intersection 下で shared browse を閉じる
         - type: object
+          # RESUME/SET_ACTIVITY keep their historical enum entries here for
+          # wire-compatibility diffing, but the `not` below makes this
+          # fallback disjoint from their precise payload variants so the
+          # outer oneOf still means exactly-one.
+          not:
+            properties:
+              type:
+                enum: [RESUME, SET_ACTIVITY]
           properties:
             type:
               enum:
                 - APPROVE
                 - REJECT
+                - RESUME
                 - LEAVE
+                - SET_ACTIVITY
                 - READY
                 - PING
                 - TRANSPORT_STATE

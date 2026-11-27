@@ -844,6 +844,16 @@
             "type": "object"
           },
           {
+            "not": {
+              "properties": {
+                "type": {
+                  "enum": [
+                    "RESUME",
+                    "SET_ACTIVITY"
+                  ]
+                }
+              }
+            },
             "properties": {
               "payload": {
                 "type": "object"
@@ -852,7 +862,9 @@
                 "enum": [
                   "APPROVE",
                   "REJECT",
+                  "RESUME",
                   "LEAVE",
+                  "SET_ACTIVITY",
                   "READY",
                   "PING",
                   "TRANSPORT_STATE"
