@@ -276,6 +276,11 @@ sequenced op の rejection は最新 committed snapshot を `snapshot` に載せ
 presence/features を欠いた snapshot で前回 STATE を合成してはならない（shared browse close 権限が一時的に
 flap する）。`browse` additive metadata も open/closed の現行 encoding で入る。
 
+この fail-closed 要件は `member-drive-v1` を実装・広告する runtime に適用する。member-drive を
+実装しない legacy runtime（現行 iOS/Android の PairStore を含む）には pre-existing の presence
+合成動作が残っているが、その align は別 issue で行う。legacy runtime はこの合成動作のまま
+`member-drive-v1` を広告してはならない。
+
 ### READY ゲート
 manifest コミット後、全メンバーが READY するまで `loading`。
 全員 READY で `reading` へ。
