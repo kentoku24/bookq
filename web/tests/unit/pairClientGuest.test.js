@@ -484,6 +484,27 @@ describe('pairClient member-drive capability gate', () => {
     client.destroy();
   });
 
+
+  it('a REJECT snapshot without presence/features fails closed instead of reusing STATE', async () => {
+    const { t, client, p } = boundFollower('member');
+    await p;
+    t.emit(stateWith(['member-drive-v1']));
+    expect(client.state.memberDrive).toBe(true);
+    t.emit({
+      v: 1, type: 'REJECT', requestId: 'x1', request: 'TURN',
+      reason: 'stale_revision', sessionId: 's1',
+      snapshot: {
+        sessionId: 's1', revision: 3, workEpoch: 0, manifestVersion: 0,
+        phase: 'selecting', spreadId: null, offset: 0,
+        leaderSide: 'left', dataPlane: 'server-ws',
+      },
+    });
+    expect(client.state.revision).toBe(3);
+    expect(client.state.memberDrive).toBe(false);
+    expect(client.state.canDrive).toBe(false);
+    client.destroy();
+  });
+
   it('public canDrive is legacy-leader or member-drive, never guest', async () => {
     const t = fakeTransport();
     const client = makeClient(t);

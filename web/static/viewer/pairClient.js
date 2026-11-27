@@ -1797,12 +1797,15 @@
         browseOpener: snap.browseOpener || null,
         browseOpenerRole: snap.browseOpenerRole || null,
         browseGeneration: snap.browseGeneration || 0,
+        // Protocol contract: a REJECT snapshot is complete STATE-shaped
+        // data. If a malformed/older peer omits presence or features, fail
+        // closed on the missing capability facts instead of synthesizing
+        // them from a prior STATE (which can resurrect close/drive rights
+        // across the very transition the snapshot is reporting).
         presence: (snap.presence && typeof snap.presence === 'object')
           ? snap.presence
-          : (_lastState ? _lastState.presence : {}),
-        features: Array.isArray(snap.features)
-          ? snap.features
-          : (_lastState ? _lastState.features : undefined),
+          : {},
+        features: Array.isArray(snap.features) ? snap.features : undefined,
         dataPlane: snap.dataPlane || 'server-ws',
       };
       _onState(pseudo);
