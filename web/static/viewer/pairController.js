@@ -168,7 +168,8 @@
       var st = _client ? _client.state : null;
       if (!_memberBound(st) || !_paired(st)) return;
       if (open) {
-        if (st.role === 'leader' && !_selIssued && st.phase !== 'selecting') {
+        var mayOpen = st.role === 'leader' || st.canDrive === true;
+        if (mayOpen && !_selIssued && st.phase !== 'selecting') {
           _selIssued = true;
           _client.setActivity('selecting');
         }
@@ -193,7 +194,22 @@
           _appliedKey = _displayKey(d.snap);
         } catch (e2) { /* idem */ }
       }
-      if (st.role === 'leader' && (_selIssued || st.phase === 'selecting')) {
+      var closeIntent = window.__bookqSidebarCloseIntent;
+      var explicitClose = !!(closeIntent && closeIntent.explicit);
+      if (st.memberDrive === true) {
+        // New close semantics: active/suspended alone never end shared
+        // browse. Only an explicit local close gesture carries endBrowse;
+        // programmatic closes (mirror disarm, work pick, navigation) do not.
+        if (explicitClose && st.canDrive === true &&
+            (_selIssued || st.phase === 'selecting')) {
+          _selIssued = false;
+          _client.setActivity('active', {endBrowse: true});
+        } else {
+          _selIssued = false;
+        }
+      } else if (st.role === 'leader' && (_selIssued || st.phase === 'selecting')) {
+        // Mixed-capability fallback: preserve the legacy leader-close
+        // meaning exactly, because the old peer has no endBrowse concept.
         _selIssued = false;
         _client.setActivity('active');
       }
@@ -355,12 +371,16 @@
           _denyHiddenWork();
           return true;
         }
-        return st.role === 'leader' ? _leaderOpenWork(intent)
-                                    : _bailToSolo(intent);
+        if (st.role === 'leader' || st.canDrive === true) {
+          return _leaderOpenWork(intent);
+        }
+        return _bailToSolo(intent);
       case 'browse':
-        if (st.role === 'leader') return _leaderBrowse(intent.via);
-        // Follower browsing is a local look at the list — the pair stays
-        // (a work PICK is what releases it); the next commit pulls the
+        if (st.role === 'leader' || st.canDrive === true) {
+          return _leaderBrowse(intent.via);
+        }
+        // Legacy follower browsing is a local look at the list — the pair
+        // stays (a work PICK is what releases it); the next commit pulls the
         // shared display back in front. Mirrors the solo browse case.
         _record({type: 'browse', via: intent.via, local: true}, true);
         if (typeof window.returnToBrowse === 'function') {
@@ -409,7 +429,8 @@
     // The open book is a hidden root in normal mode — never send it as the
     // shared work; deny like a solo open of the same folder.
     if (_visBlocksFolder(folder)) { _denyHiddenWork(); return; }
-    var ok = _client.sendIntent({type: 'openWork', folder: folder, page: page});
+    var ok = _client.sendIntent({type: 'openWork', folder: folder, page: page,
+                                 auto: true});
     _record({type: 'openWork', via: 'pair-bootstrap', folder: folder,
              page: page}, ok);
     // A dropped send (transient link loss) retries on the next state notify.
@@ -644,11 +665,13 @@
     swapSides: function () {
       return _client ? _client.swapSides() : false;
     },
-    /* Leader "作品変更": pause the session at 'selecting' and open the
-     * shared-work list locally; the next tile pick goes out as OPEN_WORK. */
+    /* Member "作品変更": legacy pairs keep this leader-only; when the
+     * member-drive capability intersects, either member may enter shared
+     * browse. Guests remain excluded through canDrive. */
     changeWork: function () {
       var st = _client ? _client.state : null;
-      if (!_memberBound(st) || st.role !== 'leader') return false;
+      if (!_memberBound(st) ||
+          !(st.role === 'leader' || st.canDrive === true)) return false;
       return _leaderBrowse('change-work');
     },
     sendIntent: function (intent) {

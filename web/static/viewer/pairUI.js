@@ -493,10 +493,12 @@
         if (sideText) bits.push(sideText);
         if (trText) bits.push(trText);
         els.sessionInfo.textContent = bits.join(' · ');
-        // 作品変更 is a leader privilege (#75 §3.3: OPEN_WORK is leader-only);
-        // followers never see an enabled control for it.
-        els.changeWork.hidden = role !== 'leader';
-        els.changeWork.disabled = role !== 'leader';
+        // 作品変更 is leader-only in legacy mixed pairs. When the server's
+        // member-drive capability intersection is present, either member
+        // trust=member may drive; guests never see an enabled control.
+        var canDriveWork = role === 'leader' || s.canDrive === true;
+        els.changeWork.hidden = !canDriveWork;
+        els.changeWork.disabled = !canDriveWork;
       } else if (sec === els.secError) {
         const msg = errorTextFor(s.error);
         els.errorText.textContent = msg;

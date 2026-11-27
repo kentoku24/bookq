@@ -46,6 +46,11 @@
   'use strict';
 
   var PROTOCOL_VERSION = 1;
+  /* Phase-1 capability advertisement (ADR 0004). Feature strings are
+   * additive within wire v1; absence on either member means the server and
+   * this client must both preserve the legacy leader-only browse model. */
+  var CAP_MEMBER_DRIVE = 'member-drive-v1';
+  var CLIENT_FEATURES = [CAP_MEMBER_DRIVE];
   var DEFAULT_PATH = '/ws/reader-sync';
   var STORAGE_KEY = 'bookq.readerSync.v1';
   /* Cross-tab persist record (localStorage): lets a member rejoin after its
@@ -104,6 +109,10 @@
   var RESUME_REJECT_END = {
     resume_expired: 'resume_expired',
     bad_resume: 'session_lost',
+    // The credential is valid but belongs to the other authentication class
+    // (guest bearer vs member login). Retrying on this same link can never
+    // succeed, so this is terminal exactly like a lost session.
+    trust_mismatch: 'session_lost',
     resume_in_use: null,
   };
   // END.reason -> endReason ('shutdown' means the server went away — the
@@ -462,11 +471,43 @@
       }, _livenessMs + 1);             // +1: fire strictly past the deadline
     }
 
+    function _presenceEntry(memberId) {
+      var p = _lastState && _lastState.presence;
+      return p && memberId ? p[memberId] || null : null;
+    }
+
+    function _hasCap(obj) {
+      return !!(obj && Array.isArray(obj.features) &&
+                obj.features.indexOf(CAP_MEMBER_DRIVE) !== -1);
+    }
+
+    /* Pair-level capability intersection. The server reflects each member's
+     * last advertised runtime features in STATE.presence and its own feature
+     * set at STATE.features. Empty/absent arrays mean a legacy client. */
+    function _memberDrive() {
+      if (!_lastState || !_hasCap(_lastState)) return false;
+      var p = _lastState.presence || {};
+      var ids = Object.keys(p);
+      return ids.length >= 2 && ids.every(function (id) { return _hasCap(p[id]); });
+    }
+
+    function _ownTrust() {
+      var own = _presenceEntry(_member && _member.memberId);
+      return (own && own.trust) || (_member && _member.trust) || null;
+    }
+
+    function _canDrive() {
+      return _memberDrive() && _ownTrust() === 'member';
+    }
+
     function _public() {
       return {
         status: _deriveStatus(),
         role: _member ? _member.role : _roleIntent,
         memberId: _member ? _member.memberId : null,
+        trust: _ownTrust(),
+        memberDrive: _memberDrive(),
+        canDrive: _canDrive(),
         sessionId: _member ? _member.sessionId : null,
         code: _code,
         guestToken: _guestToken,
@@ -755,7 +796,7 @@
       var resumeF = {
         v: PROTOCOL_VERSION, requestId: _rid(), sessionId: d.sessionId,
         workEpoch: 0, baseRevision: 0, type: 'RESUME',
-        payload: {memberId: d.memberId, resumeToken: d.resumeToken},
+        payload: _withFeatures({memberId: d.memberId, resumeToken: d.resumeToken}),
       };
       var leaveF = {
         v: PROTOCOL_VERSION, requestId: _rid(), sessionId: d.sessionId,
@@ -1086,7 +1127,7 @@
       }
       _entry = {
         type: 'RESUME',
-        payload: {memberId: _member.memberId, resumeToken: _member.resumeToken},
+        payload: _withFeatures({memberId: _member.memberId, resumeToken: _member.resumeToken}),
         sessionId: _member.sessionId,
         res: function () {}, rej: function () {},
         rid: null, sent: false,
@@ -1102,6 +1143,12 @@
     }
 
     /* ── session entry ops ── */
+
+    function _withFeatures(payload) {
+      payload = payload || {};
+      payload.features = CLIENT_FEATURES.slice();
+      return payload;
+    }
 
     function _resetSession(keepRole) {
       _term = null;
@@ -1173,7 +1220,7 @@
       _teardownLink();
       _resetSession();
       _roleIntent = 'leader';
-      return _startEntry('CREATE', {}, null);
+      return _startEntry('CREATE', _withFeatures({}), null);
     }
 
     function join(code) {
@@ -1185,7 +1232,7 @@
       _teardownLink();
       _resetSession();
       _roleIntent = 'follower';
-      return _startEntry('JOIN', {code: code}, null);
+      return _startEntry('JOIN', _withFeatures({code: code}), null);
     }
 
     /* Guest-access join: the QR's `/#/join/<code>?gt=<token>` deep link resolves
@@ -1203,7 +1250,7 @@
       _teardownLink();
       _resetSession();
       _roleIntent = 'follower';
-      return _startEntry('JOIN', {guestToken: token}, null);
+      return _startEntry('JOIN', _withFeatures({guestToken: token}), null);
     }
 
     /* One-tap pairing: the server binds the caller as follower when a
@@ -1218,7 +1265,7 @@
       _teardownLink();
       _resetSession();
       // role decided by the server — no _roleIntent yet
-      return _startEntry('MATCH', pick ? {pick: pick} : {}, null);
+      return _startEntry('MATCH', _withFeatures(pick ? {pick: pick} : {}), null);
     }
 
     function resume() {
@@ -1247,9 +1294,9 @@
         _roleIntent = _member.role;
       }
       if (_offlineSince === null) _offlineSince = _now();
-      return _startEntry('RESUME', {
+      return _startEntry('RESUME', _withFeatures({
         memberId: creds.memberId, resumeToken: creds.resumeToken,
-      }, creds.sessionId);
+      }), creds.sessionId);
     }
 
     function approve() {
@@ -1371,6 +1418,11 @@
     /* ── intents -> wire frames (data plane) ── */
 
     var _READING_GATED = {TURN: 1, GOTO: 1, SET_OFFSET: 1, SWAP_SIDES: 1};
+    // Relay whitelist is exactly the sequenced data-plane set. Control
+    // frames (SET_ACTIVITY/SIGNAL/UI_SYNC/TRANSPORT_STATE/lifecycle) must
+    // never gain relayed authority through payload.origin.
+    var _RELAYABLE = {TURN: 1, GOTO: 1, SET_OFFSET: 1, SWAP_SIDES: 1,
+                      OPEN_WORK: 1, READY: 1, APPLIED: 1};
 
     function _sendIntentInternal(intent) {
       if (_destroyed || _term || _left || !_member || !_linkOpen()) return false;
@@ -1406,7 +1458,8 @@
                                   manifestVersion: _seenMv()});
           break;
         case 'openWork':
-          if (_member.role !== 'leader' || !_paired()) return false;
+          if (!_paired()) return false;
+          if (!(_member.role === 'leader' || _canDrive())) return false;
           if (typeof intent.folder !== 'string') return false;
           f = _req('OPEN_WORK', {
             folder: intent.folder,
@@ -1415,10 +1468,13 @@
             manifestVersion: _seenMv(),
           });
           if (f.payload.offset === undefined) delete f.payload.offset;
+          if (intent.auto === true) f.payload.auto = true;
           break;
         case 'browse':
-          // leader browsing the work list pauses the session at 'selecting'
-          if (_member.role !== 'leader' || !_paired()) return false;
+          // Legacy pairs keep leader-only browse entry; member-drive pairs
+          // allow either member (but never guest trust) to open shared browse.
+          if (!_paired()) return false;
+          if (!(_member.role === 'leader' || _canDrive())) return false;
           return _ctlSend(_req('SET_ACTIVITY', {state: 'selecting'}));
         default:
           return false;
@@ -1448,13 +1504,15 @@
      * leader's sidebar open/close pauses/resumes the shared session without
      * routing through an intent. 'browse' intents already map onto the same
      * wire frame via _sendIntentInternal. */
-    function setActivity(state) {
+    function setActivity(state, opts) {
       if (state !== 'active' && state !== 'suspended' &&
           state !== 'selecting') return false;
       if (_destroyed || _term || _left || !_member || !_linkOpen()) {
         return false;
       }
-      return _ctlSend(_req('SET_ACTIVITY', {state: state}));
+      var payload = {state: state};
+      if (opts && opts.endBrowse === true) payload.endBrowse = true;
+      return _ctlSend(_req('SET_ACTIVITY', payload));
     }
 
     /* Ephemeral mirrored-UI relay (browse scroll/position). Fire-and-forget
@@ -1584,6 +1642,7 @@
       _member.sessionId = d.sessionId || _member.sessionId;
       _member.memberId = d.memberId || _member.memberId;
       _member.role = d.role || _member.role;
+      _member.trust = d.trust || _member.trust || null;
       _member.resumeToken = d.resumeToken || _member.resumeToken;
       _roleIntent = _member.role;
       if (d.code) _code = d.code;
@@ -1962,6 +2021,7 @@
       if (f && typeof f === 'object' && _member &&
           _member.role === 'leader' && _plane === 'webrtc-dc' &&
           typeof f.requestId === 'string' && typeof f.type === 'string' &&
+          _RELAYABLE[f.type] === 1 &&
           f.payload && typeof f.payload === 'object') {
         var fwd = {};
         for (var k in f) fwd[k] = f[k];

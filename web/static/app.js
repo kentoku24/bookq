@@ -1158,7 +1158,18 @@
   }
   function hideResumeBtn(){ resumeBtn.classList.add("hidden"); setInert(resumeBtn, true); sidebar.classList.remove("has-resume"); }
   function showResumeBtn(){ resumeBtn.classList.remove("hidden"); setInert(resumeBtn, false); sidebar.classList.add("has-resume"); }
-  function closeSidebar(){ sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); closeHeaderMenu({focus:false}); syncSidebarA11y(); }
+  function closeSidebar(opts){
+    // Pair sync distinguishes an explicit user close gesture from the many
+    // programmatic closes (work pick, navigation, mirror disarm). The marker
+    // survives into the MutationObserver microtask and is cleared at the next
+    // macrotask so a no-op close cannot leak intent into a later transition.
+    var token = {explicit: !!(opts && opts.explicit), at: Date.now()};
+    window.__bookqSidebarCloseIntent = token;
+    setTimeout(function(){
+      if (window.__bookqSidebarCloseIntent === token) delete window.__bookqSidebarCloseIntent;
+    }, 0);
+    sidebar.classList.remove("open"); viewer.classList.remove("sidebar-open"); hideResumeBtn(); closeHeaderMenu({focus:false}); syncSidebarA11y();
+  }
   try { window.closeSidebar = closeSidebar; window.setInert = setInert; window.syncSidebarA11y = syncSidebarA11y; } catch(e) { console.warn(e); }
   // The visual side of opening the drawer — shared with browse/pairSync.js
   // (paired scroll-mirror opens the follower's sidebar without a nav intent).
@@ -1170,7 +1181,7 @@
   }
   try { window.openSidebar = openSidebar; } catch(e) { console.warn(e); }
   function toggleSidebar(){
-    if (sidebar.classList.contains("open")) { closeSidebar(); return; }
+    if (sidebar.classList.contains("open")) { closeSidebar({explicit:true}); return; }
     openSidebar();
     if (currentFolder) {
       // Opening the sidebar over a reader is a "back to the folder list"
@@ -1187,7 +1198,7 @@
   folderName.addEventListener("click", toggleSidebar);
   document.getElementById("sidebar-header").addEventListener("click", e => {
     if (e.target.tagName === "INPUT") return; // don't close when typing in search
-    closeSidebar();
+    closeSidebar({explicit:true});
   });
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape") return;
@@ -1198,7 +1209,7 @@
     // now — Escape must dismiss IT first, not the sidebar behind it.
     if (bottomSheet.classList.contains("open")) { closeFilterSheet(); return; }
     if (document.querySelector(".ux-pop")) { closeAllPartialPops(); return; }
-    closeSidebar(); hideResumeBtn();
+    closeSidebar({explicit:true}); hideResumeBtn();
   });
 
   // ── load folders ──
@@ -3993,7 +4004,7 @@
       case "ArrowLeft": if (images.length) navTurn(1, false, "key"); break;
       case "f": case "F":
   if (sidebar.classList.contains("open")) {
-    closeSidebar();
+    closeSidebar({explicit:true});
   } else {
     openSidebar();
     if (viewMode === 'tile') window.BrowseRender.renderTiles();

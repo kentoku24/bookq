@@ -47,7 +47,11 @@ describe('pairClient guest access', () => {
     helloThen(t);
     const join = t.sent.find((f) => f.type === 'JOIN');
     expect(join).toBeTruthy();
-    expect(join.payload).toEqual({ guestToken: TOKEN });
+    expect(join.payload).toEqual({
+      guestToken: TOKEN,
+      // ADR 0004 capability advertisement rides every admission payload.
+      features: ['member-drive-v1'],
+    });
     expect(join.sessionId).toBeNull();
     const ack = {
       v: 1, type: 'ACK', request: 'JOIN', requestId: join.requestId,
@@ -286,5 +290,78 @@ describe('guestToken storage hygiene', () => {
     await p;
     expect(c.state.code).toBe('123456');      // code-only QR restorable
     expect(c.state.guestToken).toBeNull();    // grant stays with dead tab
+  });
+});
+
+describe('pairClient member-drive capability gate', () => {
+  function boundFollower(trust) {
+    const t = fakeTransport();
+    const client = makeClient(t);
+    const p = client.join('123456');
+    helloThen(t);
+    const join = t.sent.find((f) => f.type === 'JOIN');
+    t.emit({
+      v: 1, type: 'ACK', request: 'JOIN', requestId: join.requestId,
+      data: {
+        sessionId: 's1', memberId: 'm-follower', role: 'follower',
+        trust: trust, resumeToken: 'rt1', features: ['member-drive-v1'],
+      },
+    });
+    return { t, client, p };
+  }
+
+  function stateWith(peerFeatures) {
+    return {
+      v: 1, type: 'STATE', sessionId: 's1', revision: 2, workEpoch: 0,
+      manifestVersion: 0, phase: 'selecting', spreadId: null, offset: 0,
+      leaderSide: 'left', dataPlane: 'server-ws', features: ['member-drive-v1'],
+      presence: {
+        'm-leader': {
+          role: 'leader', status: 'active', trust: 'member', ready: false,
+          features: peerFeatures,
+        },
+        'm-follower': {
+          role: 'follower', status: 'active', trust: 'member', ready: false,
+          features: ['member-drive-v1'],
+        },
+      },
+    };
+  }
+
+  it('member follower may OPEN_WORK only when the capability intersection exists', async () => {
+    const { t, client, p } = boundFollower('member');
+    await p;
+    const intent = {
+      type: 'openWork', folder: 'work',
+      page: { folder: 'work', name: 'p001.png' },
+    };
+    expect(client.sendIntent(intent)).toBe(false);   // no STATE yet
+    t.emit(stateWith(['member-drive-v1']));
+    expect(client.state.memberDrive).toBe(true);
+    expect(client.state.canDrive).toBe(true);
+    expect(client.sendIntent(intent)).toBe(true);
+    const open = t.sent.find((f) => f.type === 'OPEN_WORK');
+    expect(open).toBeTruthy();
+    const downgraded = stateWith([]);
+    downgraded.revision = 3;
+    t.emit(downgraded);
+    expect(client.state.memberDrive).toBe(false);
+    expect(client.sendIntent(intent)).toBe(false);
+    client.destroy();
+  });
+
+  it('guest trust cannot drive even when both runtimes advertise the feature', async () => {
+    const { t, client, p } = boundFollower('guest');
+    await p;
+    const st = stateWith(['member-drive-v1']);
+    st.presence['m-follower'].trust = 'guest';
+    t.emit(st);
+    expect(client.state.memberDrive).toBe(true);
+    expect(client.state.canDrive).toBe(false);
+    expect(client.sendIntent({
+      type: 'openWork', folder: 'work',
+      page: { folder: 'work', name: 'p001.png' },
+    })).toBe(false);
+    client.destroy();
   });
 });
