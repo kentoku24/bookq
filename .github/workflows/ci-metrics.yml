@@ -22,7 +22,9 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # ~2.5k runs/14d × per-run jobs fetch (parallel, --workers 8) + heavy
+    # step fetches — 15m was sized for the old 1k-run cap (#651).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:

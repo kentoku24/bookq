@@ -208,9 +208,13 @@ jobs:
 
   # Keeps the `pytest-rs` check name stable for PRs — not a required
   # check, but the aggregate preserves the single pass/fail signal.
+  # `!cancelled()` not `always()`: when a newer push supersedes this run
+  # the lanes conclude `cancelled`, and this gate must stay silent —
+  # reporting `failure` there fakes a red X on the PR's required checks
+  # and inflates ci-metrics failure rates (#651).
   pytest-rs:
     needs: [changes-workflow-smoke, pytest-rs-unit, pytest-rs-browser]
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -226,9 +230,10 @@ jobs:
   # Required-check anchor: branch protection names `uv-gate`, so this
   # aggregate keeps reporting that context — now backed by the rs lanes
   # (#503: the Python uv-gate-unit/browser lanes are retired).
+  # `!cancelled()` — same superseded-run silence as pytest-rs (#651).
   uv-gate:
     needs: [changes-workflow-smoke, pytest-rs-unit, pytest-rs-browser]
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -303,10 +308,10 @@ jobs:
   # `safari-gate (N)` when they run but a single bare `safari-gate` when the
   # job is skipped, so no one context name covers both shapes — this gate
   # reports a stable name backed by needs.safari-gate.result, same pattern
-  # as uv-gate above.
+  # as uv-gate above. `!cancelled()` — same superseded-run silence (#651).
   safari-gate-all:
     needs: [changes-workflow-smoke, safari-gate]
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes-workflow-smoke.outputs.run-rs == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

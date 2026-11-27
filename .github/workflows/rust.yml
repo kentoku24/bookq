@@ -320,9 +320,12 @@ jobs:
   # image-build now (one image build instead of two). This job keeps the
   # `gateway-contract` check name reporting — it fails unless image-build
   # succeeded, so a contract failure still blocks merge via both contexts.
+  # `!cancelled()` not `always()`: a superseded run's needs conclude
+  # `cancelled` — stay silent instead of faking a required-check failure
+  # (#651).
   gateway-contract:
     needs: [changes-rust, image-build]
-    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true')
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.changes-rust.outputs.run == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
