@@ -114,6 +114,17 @@
             snap.leaderSide].join('|');
   }
 
+  /* May this client/mode be holding a shared-browse echo behind the open
+   * list? `localRole` is the role of THIS member (never the commit's
+   * origin): legacy mode lets only the leader drive that list. In
+   * member-drive mode the snapshot's explicit browse bit is the authority
+   * that the list is a shared surface. Guests never hold that echo. */
+  function _mayHoldSharedBrowseEcho(localRole, memberDrive, trust, browseOpen) {
+    if (trust !== 'member') return false;
+    if (memberDrive === true) return browseOpen === true;
+    return localRole === 'leader';
+  }
+
   function _applyCommitted(snap, manifest, o) {
     // A committed work whose root is hidden in normal mode is never
     // applied — the pair is released before any image renders, and the
@@ -136,14 +147,12 @@
       return;
     }
     _lastApply = {snap: snap, manifest: manifest, o: o};
-    var leader = !!(o && o.role === 'leader');
     var stNow = _client ? _client.state : null;
-    var sharedDrive = !!(stNow && stNow.memberDrive === true);
-    // Does this commit come through a mode where a member may be driving
-    // the shared browse list? In legacy mode that is only a leader commit;
-    // in member-drive mode either member may be the driver.
-    var sharedDriveCommit = leader || sharedDrive;
-    if (sharedDriveCommit && _sidebarOpen() &&
+    var memberDrive = !!(stNow && stNow.memberDrive === true);
+    var mayHoldSharedBrowseEcho = _mayHoldSharedBrowseEcho(
+      o && o.role, memberDrive, stNow && stNow.trust,
+      !!(snap && snap.browse === true));
+    if (mayHoldSharedBrowseEcho && _sidebarOpen() &&
         _displayKey(snap) === _appliedKey) {
       // A member is browsing the shared-work list: an echo that changes
       // nothing on screen must not rip the grid away — hold it; the
@@ -162,6 +171,11 @@
   }
 
   /* ── sidebar observer: leader browse pauses/resumes the session ── */
+
+  function _legacyLeaderCloseEndsBrowse(st, selectionIssued) {
+    return !!(st && st.role === 'leader' &&
+              (selectionIssued || st.phase === 'selecting'));
+  }
 
   function _ensureSidebarObs() {
     if (_sideObs || typeof document === 'undefined' ||
@@ -227,7 +241,7 @@
         } else {
           _selIssued = false;
         }
-      } else if (st.role === 'leader' && (_selIssued || st.phase === 'selecting')) {
+      } else if (_legacyLeaderCloseEndsBrowse(st, _selIssued)) {
         // Mixed-capability fallback: preserve the legacy leader-close
         // meaning exactly, because the old peer has no endBrowse concept.
         _selIssued = false;
