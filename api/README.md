@@ -28,7 +28,7 @@ CI (`api-spec-lint.yml` の codegen-drift job) が再生成後の
 - **v0 → v1**: `/api/*` (v0) は deprecated。新規クライアントは `/api/v1/*` のみ使う。
   v1 で意味が変わる箇所 (envelope 統一、Bearer 認証、per-folder reading-positions) は
   各 operation の description を参照。
-- **wire-stable 文字列**: `reader-sync-protocol.md` §5 の拒否理由・enum 値は
+- **wire-stable 文字列**: `reader-sync-protocol.md` §6 の拒否理由・enum 値は
   iOS/web が文字列一致で処理する契約面。リネーム禁止、追加のみ可。
 - **CI**: Spectral lint が PR で両 spec を検査し、Schemathesis が
   `openapi.v1.yaml` の実装適合を property-based で検証する
