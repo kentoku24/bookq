@@ -503,7 +503,16 @@
 
     function _ownTrust() {
       var own = _presenceEntry(_member && _member.memberId);
-      return (own && own.trust) || (_member && _member.trust) || null;
+      var t = (own && own.trust) || (_member && _member.trust);
+      if (t) return t;
+      // A server that never emits trust predates the guest feature itself:
+      // every member in such a deployment is a full member. Trust-aware
+      // servers always carry trust in the admission/resume ACK (and in
+      // presence), so absence is unambiguous evidence of a legacy/rolled-back
+      // server — inferring member preserves legacy drive semantics there.
+      // Client-side trust only gates what this client attempts; the server
+      // re-authorizes every op, so a wrong inference cannot escalate.
+      return 'member';
     }
 
     /* Public drive authority is the union of the two mode-specific rules:
@@ -1570,6 +1579,13 @@
       var pr = payload.pred;
       if (typeof pr === 'number' && isFinite(pr) && pr >= 0 && pr <= 1e8)
         p.pred = pr;
+      // browseGeneration も任意フィールド — member-drive の世代タグ。削ると
+      // server/receiver 双方の世代 drop が untagged 扱いで無力化されるので、
+      // 正の整数だけをそのまま通す（legacy/mixed ではそもそも付かない）。
+      var bg = payload.browseGeneration;
+      if (typeof bg === 'number' && isFinite(bg) && bg >= 1 &&
+          Math.floor(bg) === bg)
+        p.browseGeneration = bg;
       return _ctlSend(_req('UI_SYNC', p));
     }
 
