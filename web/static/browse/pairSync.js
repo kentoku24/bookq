@@ -208,39 +208,46 @@
     _browseOpenerId = st.browseOpener || null;
     // The opener rule is keyed on the explicit shared-browse open: whenever
     // a member-drive pair has shared browse open, the server serializes an
-    // opener and a generation, and only that opener seeds. Everything else —
-    // legacy/mixed pairs, and all tile browsing with no explicit open
-    // (initial picking and post-commit browsing alike, since tile browsing
-    // is always shared) — is casual mirror traffic that falls back to the
-    // legacy role rule. Keying on the commit boundary instead mis-elected
+    // opener and a generation, and only that opener seeds. Everything else is
+    // casual mirror traffic, with two regimes: member-drive casual picking is
+    // symmetric in initiation (either member shares when it browses — the
+    // product decision) with only the arm-edge auto-seed tie-broken to the
+    // leader, while legacy/mixed pairs keep the fixed legacy role rule.
+    // Keying on the commit boundary instead mis-elected
     // the leader by role when the follower had explicitly opened: the opener
     // stayed locked (never seeded) while the role-initiator's sidebar could
     // be closed (never sends) — a deadlock where no mirror frame ever left
     // either side and the peer list never opened.
     var explicitOpen = st.memberDrive === true && st.browse === true;
     var initiator;
+    var autoSeed;
     if (explicitOpen) {
       initiator = _browseOpenerId !== null && _browseOpenerId === st.memberId;
+      autoSeed = initiator;
     } else if (st.memberDrive === true) {
-      // Casual member-drive picking is symmetric: the lock exists for
-      // opener arbitration inside an explicit generation, but casual tile
-      // browsing has no seed to arbitrate — whoever browses first shares,
-      // exactly as the product decision requires. Electing only the leader
-      // here deadlocked follower-initiated picking whenever the leader was
+      // Casual member-drive picking is symmetric in INITIATION — either
+      // member's own browsing must be able to share (the product decision),
+      // which requires both sides unlocked. Electing only the leader here
+      // deadlocked follower-initiated picking whenever the leader was
       // inactive: the follower stayed locked, the only unlock path being a
-      // remote frame the inactive leader never emitted. Initial seeds
-      // cannot fight because both launchers start at the same position,
-      // and echo suppression settles later crossings last-writer-wins.
+      // remote frame the inactive leader never emitted. But the arm-edge
+      // AUTO-seed is not symmetric: members can join a pair while viewing
+      // different folders, and if both ends seed before receiving, each
+      // applies the other's folder and the lists never converge — echo
+      // suppression then pins the swapped positions. The deterministic
+      // tie-break is the leader, exactly as legacy pairs elect.
       initiator = true;
+      autoSeed = st.role === 'leader';
     } else {
       // Legacy/mixed pairs keep the fixed-role asymmetry: the leader drives,
       // the follower watches — including the leader not auto-opening.
       initiator = st.role === 'leader';
+      autoSeed = initiator;
     }
     if (initiator) {
       _unlocked = true;
       _lastSentSig = null;
-      _requestSend();
+      if (autoSeed) _requestSend();
     }
   }
 

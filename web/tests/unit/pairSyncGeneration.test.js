@@ -216,6 +216,33 @@ describe('pairSync browse generations', () => {
     expect(hook.unlocked).toBe(true);
   });
 
+  it('casual member-drive follower: unlocked but does not auto-seed', () => {
+    // Devin Review: members can join a pair while viewing different
+    // folders. If both ends auto-seed at the arm edge, each applies the
+    // other's folder before its own seed arrives and the lists never
+    // converge. Initiation stays symmetric (either member's own browsing
+    // shares) but the arm-edge seed is the deterministic leader tie-break.
+    drive(state({
+      role: 'follower', memberId: 'm-follower', phase: 'selecting',
+      browse: false, browseGeneration: 0,
+      browseOpener: null, browseOpenerRole: null,
+    }));
+    expect(hook.armed).toBe(true);
+    expect(hook.unlocked).toBe(true);            // shares when IT browses
+    expect(sendUiSync).not.toHaveBeenCalled();   // but never auto-seeds
+  });
+
+  it('casual member-drive leader: unlocked and auto-seeds the tie-break', () => {
+    drive(state({
+      role: 'leader', memberId: 'm-leader', phase: 'selecting',
+      browse: false, browseGeneration: 0,
+      browseOpener: null, browseOpenerRole: null,
+    }));
+    expect(hook.armed).toBe(true);
+    expect(hook.unlocked).toBe(true);
+    expect(sendUiSync).toHaveBeenCalled();       // deterministic auto-seed
+  });
+
   it('point-of-effect: applyRemote itself refuses foreign-tagged frames', () => {
     // Mutation-killing coverage for the guard at the top of _applyRemote:
     // bypass the receipt-time check entirely by driving the apply seam

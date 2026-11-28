@@ -505,7 +505,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -614,7 +616,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       },
       {
        "v": 1,
@@ -656,7 +660,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -712,7 +718,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -783,7 +791,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -831,7 +841,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     }
@@ -911,7 +923,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -959,7 +973,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -1033,7 +1049,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -1081,7 +1099,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     }
@@ -1211,7 +1231,9 @@
           "trust": "member",
           "features": []
          }
-        }
+        },
+        "browse": false,
+        "browseGeneration": 1
        }
       }
      ]
@@ -1280,7 +1302,9 @@
           "trust": "member",
           "features": []
          }
-        }
+        },
+        "browse": false,
+        "browseGeneration": 1
        }
       }
      ]
@@ -1386,7 +1410,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       },
       {
        "v": 1,
@@ -1433,7 +1459,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       },
       {
        "v": 1,
@@ -1503,7 +1531,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       },
       {
        "v": 1,
@@ -1550,7 +1580,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       },
       {
        "v": 1,
@@ -1609,7 +1641,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -1705,7 +1739,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       },
       {
        "v": 1,
@@ -1757,7 +1793,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -1828,7 +1866,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -1876,7 +1916,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     }
@@ -2229,7 +2271,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -2380,7 +2424,9 @@
        },
        "features": [
         "member-drive-v1"
-       ]
+       ],
+       "browse": false,
+       "browseGeneration": 1
       }
      ]
     },
@@ -2800,7 +2846,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 1,
+       "browseGeneration": 2,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       }
@@ -2876,7 +2922,7 @@
         "member-drive-v1"
        ],
        "browse": false,
-       "browseGeneration": 2
+       "browseGeneration": 3
       }
      ]
     },
@@ -2949,7 +2995,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 3,
+       "browseGeneration": 4,
        "browseOpener": "@L1.member",
        "browseOpenerRole": "leader"
       }
@@ -3025,7 +3071,7 @@
         "member-drive-v1"
        ],
        "browse": false,
-       "browseGeneration": 4
+       "browseGeneration": 5
       }
      ]
     },
@@ -3113,7 +3159,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 5,
+       "browseGeneration": 6,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       },
@@ -3155,7 +3201,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 5,
+       "browseGeneration": 6,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       }
@@ -3203,7 +3249,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 5,
+       "browseGeneration": 6,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       },
@@ -3253,7 +3299,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 5,
+       "browseGeneration": 6,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       }
@@ -3324,7 +3370,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 5,
+       "browseGeneration": 6,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       }
@@ -3399,7 +3445,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 5,
+       "browseGeneration": 6,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       }
@@ -3498,7 +3544,7 @@
          }
         },
         "browse": false,
-        "browseGeneration": 6
+        "browseGeneration": 7
        }
       }
      ]
@@ -3666,7 +3712,7 @@
         "member-drive-v1"
        ],
        "browse": false,
-       "browseGeneration": 2
+       "browseGeneration": 3
       },
       {
        "v": 1,
@@ -3849,7 +3895,7 @@
         "member-drive-v1"
        ],
        "browse": false,
-       "browseGeneration": 2
+       "browseGeneration": 3
       }
      ]
     },
@@ -3939,7 +3985,9 @@
            "member-drive-v1"
           ]
          }
-        }
+        },
+        "browse": false,
+        "browseGeneration": 1
        }
       }
      ]
@@ -4312,7 +4360,9 @@
           "trust": "member",
           "features": []
          }
-        }
+        },
+        "browse": false,
+        "browseGeneration": 1
        }
       }
      ]
@@ -4384,7 +4434,9 @@
           "trust": "member",
           "features": []
          }
-        }
+        },
+        "browse": false,
+        "browseGeneration": 1
        }
       }
      ]
@@ -4511,7 +4563,9 @@
           "trust": "member",
           "features": []
          }
-        }
+        },
+        "browse": false,
+        "browseGeneration": 2
        }
       }
      ]
@@ -4564,7 +4618,7 @@
   },
   {
    "id": "ui_sync_browse_gate_and_generation_relay",
-   "title": "UI_SYNC: tile browsing relays for members even on a closed browse (always-shared picking); untagged drops once the member-drive intersection is established with browse open; matching generation relays; mismatch drops; malformed/null tags are malformed",
+   "title": "UI_SYNC: post-commit casual frames are generation-tagged — untagged frames drop once a generation exists (pre-commit straggler protection); matching generation relays in closed and open browse alike; mismatch drops; malformed/null tags are malformed",
    "setup": "reading",
    "resolver": "work",
    "features": {
@@ -4603,6 +4657,35 @@
     {
      "op": "expect",
      "link": "L2",
+     "frames": []
+    },
+    {
+     "op": "send",
+     "link": "L1",
+     "frame": {
+      "v": 1,
+      "requestId": "uc2",
+      "sessionId": "@session",
+      "workEpoch": 1,
+      "baseRevision": 7,
+      "type": "UI_SYNC",
+      "payload": {
+       "view": "browse",
+       "path": null,
+       "top": 9,
+       "viewH": 100,
+       "mode": "tile",
+       "browseGeneration": 1
+      }
+     }
+    },
+    {
+     "op": "expect",
+     "frames": [],
+     "link": "L1"
+    },
+    {
+     "op": "expect",
      "frames": [
       {
        "v": 1,
@@ -4612,12 +4695,14 @@
        "payload": {
         "view": "browse",
         "path": null,
-        "top": 5,
+        "top": 9,
         "viewH": 100,
-        "mode": "tile"
+        "mode": "tile",
+        "browseGeneration": 1
        }
       }
-     ]
+     ],
+     "link": "L2"
     },
     {
      "op": "send",
@@ -4684,7 +4769,7 @@
        "features": [
         "member-drive-v1"
        ],
-       "browseGeneration": 1,
+       "browseGeneration": 2,
        "browseOpener": "@L2.member",
        "browseOpenerRole": "follower"
       }
@@ -4739,7 +4824,7 @@
        "top": 77,
        "viewH": 100,
        "mode": "tile",
-       "browseGeneration": 1
+       "browseGeneration": 2
       }
      }
     },
@@ -4763,7 +4848,7 @@
         "top": 77,
         "viewH": 100,
         "mode": "tile",
-        "browseGeneration": 1
+        "browseGeneration": 2
        }
       }
      ]

@@ -2927,11 +2927,18 @@ impl Inner {
                 dedup_tombstone(s, carry_key, true);
             }
             // A successful OPEN_WORK commit is the authoritative end of the
-            // shared browse regardless of which member opened it. The close
-            // is a causal epoch transition: mirror frames emitted before the
-            // commit carry the pre-close generation and must not be relayed
-            // into the committed work's aftermath.
-            close_browse_epoch(s);
+            // shared browse regardless of which member opened it — and a
+            // causal epoch boundary even when browse was never open. Casual
+            // first-pick traffic is untagged (generation 0), so only
+            // advancing the epoch here lets the untagged-straggler drop
+            // distinguish pre-commit mirror frames from post-commit ones;
+            // without it a frame emitted before the first commit could
+            // cross the load and surface over the reading screen. The
+            // increment happens exactly once per commit whether or not it
+            // also closes an open browse.
+            s.browse_generation += 1;
+            s.browse_open = false;
+            s.browse_opener_id = None;
             s.committed_load_auto = Some(job.auto);
             s.apply_seq += 1;
         }

@@ -205,8 +205,12 @@ capability intersection 成立時:
   `browseOpener`（member id）と `browseOpenerRole` を送る。`browseGeneration` は open
   frame にも入る session-scoped な値で、初期値は 0、**真の遷移（closed→open と
   open→closed の双方）ごとに increment する** — close も因果 epoch 境界であり、
-  explicit endBrowse・work commit・capability downgrade・legacy leader close の
-  全てで進む。これにより commit 前の因果知識で生成された frame と commit を
+  explicit endBrowse・capability downgrade・legacy leader close の全てで進む。
+  さらに **OPEN_WORK commit は browse open の有無に関わらず常に epoch を 1 進める**:
+  casual picking（browse を一度も開かない初回作品選び）の mirror traffic は
+  untagged で、commit 後の traffic と区別する手段が世代以外にないため。
+  これにより commit 前に発生した in-flight frame が読書画面に sidebar を
+  重ねるのを untagged-straggler drop が防ぐ。これにより commit 前の因果知識で生成された frame と commit を
   観測した後の frame を区別できる。冪等 close（既に closed）では進まず、
   RESUME/reconnect を跨いでも session 終了まで reset しない。
   duplicate open でも増えない。client mirror seed は自分の DOM 状態ではなく
